@@ -121,8 +121,11 @@ async fn inbox_delivers_a_review_request_and_mention_to_the_current_member() {
         .split("repository_id=")
         .nth(1)
         .unwrap();
-    let mark = format!("/api/notifications/{}/read", review["id"].as_str().unwrap());
-    let read = json!({"repository_id":id,"expected":review["updated"],"read":true});
+    let mark = format!(
+        "/api/notifications/{}/state",
+        review["id"].as_str().unwrap()
+    );
+    let read = json!({"repository_id":id,"expected":review["updated"],"action":{"read":true}});
     assert_eq!(
         h.write(Method::PUT, &mark, &alice, read.clone())
             .await
@@ -164,7 +167,7 @@ async fn inbox_delivers_a_review_request_and_mention_to_the_current_member() {
         Method::PUT,
         &mark,
         &bob,
-        json!({"repository_id":id,"expected":review["updated"],"read":false}),
+        json!({"repository_id":id,"expected":review["updated"],"action":{"read":false}}),
     )
     .await
     .error_for_status()

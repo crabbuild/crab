@@ -317,11 +317,17 @@ explicit grants from being displaced by pending SSO group notices. The
 Directory retains 100 conversations per collection. It folds existing event
 rows per repository and typed subject, selecting the latest contribution and
 strongest reason before applying pagination. A replay of the current activity
-preserves read state across both collections. A read mutation compares the
-latest activity before updating the conversation in both collections. The inbox rechecks the current signed-in account and
-repository access before disclosing unread state, titles, or links. Team
-bindings, queued events, and inbox entries use native document records and
-require no SQL preparation.
+preserves read state across both collections. Triage compares the latest
+activity before changing read, saved, or completed state. Saved and Done
+records use per-account documents keyed by conversation plus activity-order
+indexes for each view. The indexes, recent read flags, and triage document
+update in the same native transaction. Completed rows stay out of the recent inbox. The
+Done view covers 90 days. Expired completion records can still suppress
+older copies in recent retention. Saving keeps a row beyond recent retention. A newer
+delivery reopens it while preserving any bookmark. The inbox walks private
+archive pages and emits cursors from visible rows after account, grant, and mute
+checks. These native document records require no SQL preparation. Drain and
+upgrade peers together for the notification query and mutation contract.
 
 Repository watch preferences are private native documents keyed by a digest
 of the actor's issuer and subject. A sparse index tracks actors watching

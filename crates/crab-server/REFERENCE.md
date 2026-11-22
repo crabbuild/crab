@@ -1848,7 +1848,7 @@ owner label does not acquire ownership.
 | Milestone search choices | `GET /api/repos/{owner}/{name}/discussion-search/milestones` |
 | Markdown suggestions | `GET /api/repos/{owner}/{name}/discussion-search/{mentions,team-mentions,references}` |
 | Team mention settings | `GET/PUT /api/repos/{owner}/{name}/mention-settings` |
-| Account notification inbox | `GET /api/notifications`, `GET /api/notifications/unread`, `PUT /api/notifications/{id}/read` |
+| Account notification inbox | `GET /api/notifications`, `GET /api/notifications/unread`, `PUT /api/notifications/{id}/state` |
 | Repository notification preference | `GET /api/repos/{owner}/{name}/subscription`, `PUT /api/repos/{owner}/{name}/subscription` |
 | Discussion notification preference | `GET` and `PUT /api/repos/{owner}/{name}/issues/{number}/subscription` or `/pulls/{number}/subscription` |
 | Stable discussion links | `GET /api/discussion-references/{repository_id}/{kind}/{number}` |
@@ -1970,13 +1970,12 @@ for accounts without explicit access are retained separately. An offline
 recipient sees a retained notice when their signed-in session proves current
 repository read access.
 
-The account inbox returns up to 20 visible notices by default. Supply
-`limit` (1–50) and a returned `next` value as `before` for pagination.
-Each account retains up to 100 explicit-grant notices and up to 100 addressed
-notices for group-backed repositories. Source titles, links, and the unread
-indicator require current repository read access. The unread endpoint returns
-`{"unread":true}` when any accessible entry is unread. Mark a notice read
-with its `created_at_ms`. The request is idempotent.
+The account inbox returns up to 20 visible conversations by default.
+Each account retains up to 100 recent conversations for explicit grants and
+100 for addressed notices in group-backed repositories. Saved conversations
+are retained independently. Source titles, links, and the unread indicator
+require current repository access. See [Read the notification inbox](#read-the-notification-inbox)
+for the view, cursor, and mutation contracts.
 
 Reference lookups can resolve an independently authorized repository by name.
 The response supplies its UUID. With `exact=true`, only exact issue and pull
@@ -2548,12 +2547,19 @@ and its source path. Missing file paths and inaccessible repositories return
 
 ### Read the notification inbox
 
-Signed-in users open **Notifications** from the global header. The inbox has
-Unread and All views with repository and reason filters. Each issue or pull
+Signed-in users open **Notifications** from the global header. Unread, All,
+Saved, and Done support repository and reason filters. Each issue or pull
 request has one row, ordered by its latest activity. The link opens the latest
 contribution and the strongest retained notification reason stays visible.
 A personal mention takes precedence over a team mention, review request,
 assignment, or watch update.
+
+**Save** keeps a conversation beyond rolling inbox history and through later
+activity. **Mark as done** reads the current activity and removes it from
+Unread and All. Done shows activity completed in the last 90 days. Saved
+conversations stay in Saved until you unsave them. A newer contribution
+reopens the conversation as unread and keeps any bookmark. **Move to inbox**
+restores the current activity with its read state.
 
 Assignments, individual and team review requests, Markdown `@handle` mentions,
 and configured closed-team mentions enqueue a notification with the source
@@ -2566,18 +2572,21 @@ notification. Creation, individual edits, and bulk edits use the same rule.
 Unchanged assignees, removals, and self-assignment produce no new assignment
 reason. Subscribers can still receive discussion updates.
 
-`GET /api/notifications` accepts `repository` (repository UUID), `unread`
-(default false), `reason` (`assigned`, `review_requested`, `mention`,
-`team_mention`, or `subscribed`), `limit` (1–50, default 20), and the `before`
-cursor from `next`. The row has a stable `id` and an `updated` activity
-stamp with `id` and `created_at_ms`. Issue and pull request numbers address
-distinct conversations.
+`GET /api/notifications` accepts `view` (`inbox`, `saved`, or `done`),
+`repository` (repository UUID), `unread` (default false), `reason` (`assigned`,
+`review_requested`, `mention`, `team_mention`, or `subscribed`), `limit`
+(1–50, default 20), and the `before` cursor from `next`. The default inbox
+view excludes completed conversations. Rows have a stable `id`, an `updated`
+stamp with `id` and `created_at_ms`, and `read`, `saved`, and `done` flags.
+Issue and pull request numbers address distinct conversations. The unread
+endpoint reports accessible unread activity in the inbox view.
 
-`PUT /api/notifications/{id}/read` accepts the row's `repository_id` and its
-`updated` stamp as `expected`, with optional `read:false` to mark it unread.
-The CSRF-protected write can be retried after a lost response. A missing or
-changed row returns 409 so the client can refresh. A newer contribution remains
-unread. Reads and writes require current repository access.
+`PUT /api/notifications/{id}/state` accepts the row's `repository_id`, its
+`updated` stamp as `expected`, and one `action` such as `{"done":true}`.
+Actions set a desired `read`, `save`, or `done` flag and return the
+confirmed state. The write requires CSRF protection. A missing or changed row
+returns 409 so the client can refresh. Reads and writes check current repository
+access and mute preferences.
 
 Open **Watch** in a repository to choose direct notifications, new issue
 activity, new pull request activity, both kinds, or mute. Watching adds
@@ -3326,7 +3335,7 @@ namespace and immutable asset bodies in backups. Restoring visible records
 without counters, claims, request ledgers,
 control and immutable roots loses numbering, ownership and retry guarantees.
 
-Discussion deletion, moderation, edit history, inbox completion and saved views, broad activity feeds, and
+Discussion deletion, moderation, edit history, bulk inbox triage, broad activity feeds, and
 email delivery remain unimplemented. Native backup restore, cross-provider
 export, and complete product-root restore qualification remain pending.
 
@@ -3631,7 +3640,7 @@ The server is complete only when a real account can perform the workflow and obs
 | GitHub-quality design | Themes, responsive layouts, accessible controls, navigation, and loading/error behavior across workflows | In progress |
 | Team identity and authorization | OIDC, sessions, membership, permissions, isolation, revocation, CSRF, and administration | In progress; browser and CLI membership replacement are audited, and back-channel logout revokes delivered exact-identity sessions |
 | Git hosting | Authenticated fetch and push, exact branch/tag lifecycle, protection, publication, and independent-client proof | In progress; additional crash phases and coexistence qualification remain |
-| Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; moderation, edit history, saved and completed inbox views, release subscriptions, and external notification delivery remain |
+| Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; moderation, edit history, bulk inbox triage, release subscriptions, and external notification delivery remain |
 | Repository management | CLI create/adopt/list, archive, settings, search, import, and audited administration | In progress; browser creation/import and audit history remain |
 | Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Native process restart and owner handoff tested; native metrics and shutdown wiring implemented. Backup restore, crash matrices, upgrades, and provider qualification remain |
 | Quality gates | API, UI, accessibility, realistic repositories, security, package smoke, and measured performance | In progress |

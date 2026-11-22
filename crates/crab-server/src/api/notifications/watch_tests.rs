@@ -547,9 +547,9 @@ async fn a_reply_waits_for_the_mention_that_subscribes_its_recipient() {
         .unwrap();
     h.write(
         Method::PUT,
-        &format!("/api/notifications/{}/read", notice.thread_id()),
+        &format!("/api/notifications/{}/state", notice.thread_id()),
         &bob,
-        json!({"repository_id":repo.id,"expected":notice.position()}),
+        json!({"repository_id":repo.id,"expected":notice.position(),"action":{"read":true}}),
     )
     .await
     .error_for_status()

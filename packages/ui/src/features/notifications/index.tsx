@@ -54,14 +54,16 @@ function isReason(value: string | null): value is Reason {
   return value !== null && Object.hasOwn(reasons, value);
 }
 
-type Notice = {
+type NoticeState = { read: boolean; saved: boolean; done: boolean };
+type Action = { read: boolean } | { save: boolean } | { done: boolean };
+
+type Notice = NoticeState & {
   id: string;
   repository: Address;
   title: string;
   href: string;
   sender: string;
   reason: Reason;
-  read: boolean;
   updated: { id: string; created_at_ms: number };
 };
 
@@ -114,12 +116,31 @@ export function NotificationLink({ current }: { current: boolean }) {
   );
 }
 
-function inboxHref(unread: boolean, repository: string, reason: Reason | "") {
+const views = {
+  unread: { label: "Unread", empty: "No unread notifications." },
+  all: { label: "All", empty: "No notifications yet." },
+  saved: { label: "Saved", empty: "No saved notifications." },
+  done: { label: "Done", empty: "No completed notifications." },
+} as const;
+
+type View = keyof typeof views;
+
+function isView(value: string | null): value is View {
+  return value !== null && Object.hasOwn(views, value);
+}
+
+function inboxHref(view: View, repository: string, reason: Reason | "") {
   const query = new URLSearchParams();
-  if (!unread) query.set("tab", "all");
+  if (view !== "unread") query.set("tab", view);
   if (repository) query.set("repository", repository);
   if (reason) query.set("reason", reason);
   return `/-/notifications${query.size ? `?${query}` : ""}`;
+}
+
+function visibleIn(view: View, state: NoticeState) {
+  if (view === "saved") return state.saved;
+  if (view === "done") return state.done;
+  return !state.done && (view === "all" || !state.read);
 }
 
 export function Notifications({
@@ -131,7 +152,8 @@ export function Notifications({
   url: URL;
   repositories: Address[];
 }) {
-  const unread = url.searchParams.get("tab") !== "all";
+  const tab = url.searchParams.get("tab");
+  const view = isView(tab) ? tab : "unread";
   const repository = url.searchParams.get("repository") ?? "";
   const selectedReason = url.searchParams.get("reason");
   const reason = isReason(selectedReason) ? selectedReason : "";
@@ -144,32 +166,34 @@ export function Notifications({
         <h1 id="inbox-title" className="text-2xl font-semibold tracking-tight">
           Notifications
         </h1>
-        <nav className="flex gap-1" aria-label="Notification views">
-          {[true, false].map((isUnread) => (
-            <Button
-              key={String(isUnread)}
-              asChild
-              variant={unread === isUnread ? "secondary" : "ghost"}
-            >
-              <Link
-                href={inboxHref(isUnread, repository, reason)}
-                aria-current={unread === isUnread ? "page" : undefined}
+        <nav className="flex flex-wrap gap-1" aria-label="Notification views">
+          {Object.keys(views)
+            .filter(isView)
+            .map((item) => (
+              <Button
+                key={item}
+                asChild
+                variant={view === item ? "secondary" : "ghost"}
               >
-                {isUnread ? "Unread" : "All"}
-              </Link>
-            </Button>
-          ))}
+                <Link
+                  href={inboxHref(item, repository, reason)}
+                  aria-current={view === item ? "page" : undefined}
+                >
+                  {views[item].label}
+                </Link>
+              </Button>
+            ))}
         </nav>
       </div>
       {repository && (
-        <Link className="w-fit underline" href={inboxHref(unread, "", reason)}>
+        <Link className="w-fit underline" href={inboxHref(view, "", reason)}>
           Clear repository filter
         </Link>
       )}
       <NotificationList
-        key={inboxHref(unread, repository, reason)}
+        key={inboxHref(view, repository, reason)}
         csrf={csrf}
-        unread={unread}
+        view={view}
         repository={repository}
         reason={reason}
         repositories={repositories}
@@ -180,22 +204,23 @@ export function Notifications({
 
 function NotificationList({
   csrf,
-  unread,
+  view,
   repository,
   reason,
   repositories,
 }: {
   csrf: string;
-  unread: boolean;
+  view: View;
   repository: string;
   reason: Reason | "";
   repositories: Address[];
 }) {
   const [cursor, setCursor] = useState<string>();
   const [older, setOlder] = useState<Notice[]>([]);
-  const [marked, setMarked] = useState<Record<string, boolean>>({});
+  const [confirmed, setConfirmed] = useState<Record<string, NoticeState>>({});
   const [announcement, setAnnouncement] = useState("");
-  const filters = new URLSearchParams({ unread: String(unread) });
+  const filters = new URLSearchParams({ unread: String(view === "unread") });
+  if (view === "saved" || view === "done") filters.set("view", view);
   if (repository) filters.set("repository", repository);
   if (reason) filters.set("reason", reason);
   const initial = useRequest<InboxPage>(`/api/notifications?${filters}`);
@@ -204,6 +229,13 @@ function NotificationList({
     cursor ? `/api/notifications?${filters}` : null,
   );
   const repositoryFilter = useRef<HTMLSelectElement>(null);
+  const focusAfterRefresh = useRef(false);
+  useEffect(() => {
+    if (focusAfterRefresh.current && !initial.loading && initial.data) {
+      focusAfterRefresh.current = false;
+      repositoryFilter.current?.focus();
+    }
+  }, [initial.data, initial.loading]);
   return (
     <Result state={initial} timingLabel="Notification inbox">
       {(first) => {
@@ -216,9 +248,9 @@ function NotificationList({
           if (!threads.has(item.id)) threads.set(item.id, item);
         }
         const next = (cursor ? page.data : first)?.next;
-        const visible = Array.from(threads.values()).filter(
-          (item) => !unread || !(marked[item.updated.id] ?? item.read),
-        );
+        const visible = Array.from(threads.values())
+          .map((item) => ({ ...item, ...confirmed[item.updated.id] }))
+          .filter((item) => visibleIn(view, item));
         return (
           <div className="grid gap-4">
             <div className="flex flex-wrap items-center gap-2">
@@ -230,7 +262,7 @@ function NotificationList({
                 id="inbox-repository"
                 value={repository}
                 onChange={(event) =>
-                  navigate(inboxHref(unread, event.target.value, reason))
+                  navigate(inboxHref(view, event.target.value, reason))
                 }
               >
                 <NativeSelectOption value="">
@@ -251,7 +283,7 @@ function NotificationList({
                 onChange={(event) => {
                   const value = event.target.value;
                   navigate(
-                    inboxHref(unread, repository, isReason(value) ? value : ""),
+                    inboxHref(view, repository, isReason(value) ? value : ""),
                   );
                 }}
               >
@@ -275,22 +307,21 @@ function NotificationList({
                   <NotificationRow
                     key={item.id}
                     item={item}
-                    read={marked[item.updated.id] ?? item.read}
                     csrf={csrf}
                     onRefresh={() => {
+                      focusAfterRefresh.current = true;
                       setOlder([]);
                       setCursor(undefined);
-                      setMarked({});
+                      setConfirmed({});
                       initial.retry();
                     }}
-                    onMarked={(read) => {
-                      if (unread && read) repositoryFilter.current?.focus();
-                      setAnnouncement(
-                        read ? "Marked as read" : "Marked as unread",
-                      );
-                      setMarked((current) => ({
+                    onChanged={(state, message) => {
+                      if (!visibleIn(view, state))
+                        repositoryFilter.current?.focus();
+                      setAnnouncement(message);
+                      setConfirmed((current) => ({
                         ...current,
-                        [item.updated.id]: read,
+                        [item.updated.id]: state,
                       }));
                     }}
                   />
@@ -298,7 +329,7 @@ function NotificationList({
               </ul>
             ) : (
               <p className="rounded-lg border px-4 py-8 text-center text-muted-foreground">
-                {unread ? "No unread notifications." : "No notifications yet."}
+                {views[view].empty}
               </p>
             )}
             {page.error && (
@@ -331,22 +362,33 @@ function NotificationList({
 
 function NotificationRow({
   item,
-  read,
   csrf,
-  onMarked,
+  onChanged,
   onRefresh,
 }: {
   item: Notice;
-  read: boolean;
   csrf: string;
-  onMarked: (read: boolean) => void;
+  onChanged: (state: NoticeState, message: string) => void;
   onRefresh: () => void;
 }) {
   const mutation = useMutation(csrf, null);
   const { icon: Icon, summary } = reasons[item.reason];
+
+  async function apply(action: Action, message: string) {
+    const result = await mutation.run<NoticeState>(
+      `/api/notifications/${item.id}/state`,
+      "PUT",
+      { repository_id: item.repository.id, expected: item.updated, action },
+    );
+    if (result !== undefined) {
+      onChanged(result, message);
+      refreshNotificationBadge();
+    }
+  }
+
   return (
     <li
-      className={`grid grid-cols-[auto_1fr] items-start gap-3 px-3 py-4 sm:grid-cols-[auto_1fr_auto] sm:px-4${read ? "" : " bg-muted/50"}`}
+      className={`grid grid-cols-[auto_1fr] items-start gap-3 px-3 py-4 sm:grid-cols-[auto_1fr_auto] sm:px-4${item.read ? "" : " bg-muted/50"}`}
     >
       <Icon aria-hidden="true" className="mt-1 size-4 text-muted-foreground" />
       <div className="min-w-0 space-y-1 text-sm">
@@ -366,38 +408,57 @@ function NotificationRow({
         </p>
         {mutation.error && <p role="alert">{mutation.error}</p>}
       </div>
-      <Button
-        className="col-start-2 w-fit sm:col-start-3"
-        variant="outline"
-        size="sm"
-        disabled={mutation.pending}
-        onClick={async () => {
-          if (mutation.status === 409) {
-            mutation.reset();
-            onRefresh();
-            return;
-          }
-          const result = await mutation.run<null>(
-            `/api/notifications/${item.id}/read`,
-            "PUT",
-            {
-              repository_id: item.repository.id,
-              expected: item.updated,
-              read: !read,
-            },
-          );
-          if (result !== undefined) {
-            onMarked(!read);
-            refreshNotificationBadge();
-          }
-        }}
-      >
-        {mutation.status === 409
-          ? "Refresh inbox"
-          : read
-            ? "Mark as unread"
-            : "Mark as read"}
-      </Button>
+      <div className="col-start-2 flex flex-wrap gap-2 sm:col-start-3 sm:justify-end">
+        {mutation.status === 409 ? (
+          <Button variant="outline" size="sm" onClick={onRefresh}>
+            Refresh inbox
+          </Button>
+        ) : (
+          <>
+            {!item.done && (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={mutation.pending}
+                onClick={() =>
+                  apply(
+                    { read: !item.read },
+                    item.read ? "Marked as unread" : "Marked as read",
+                  )
+                }
+              >
+                {item.read ? "Mark as unread" : "Mark as read"}
+              </Button>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={mutation.pending}
+              onClick={() =>
+                apply(
+                  { save: !item.saved },
+                  item.saved ? "Removed from Saved" : "Saved",
+                )
+              }
+            >
+              {item.saved ? "Unsave" : "Save"}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={mutation.pending}
+              onClick={() =>
+                apply(
+                  { done: !item.done },
+                  item.done ? "Restored to inbox" : "Marked as done",
+                )
+              }
+            >
+              {item.done ? "Move to inbox" : "Mark as done"}
+            </Button>
+          </>
+        )}
+      </div>
     </li>
   );
 }

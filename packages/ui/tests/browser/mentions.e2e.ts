@@ -176,6 +176,8 @@ test("the private inbox links to the source and persists read state", async ({
       created_at_ms: Date.now() - 60_000,
     },
     read: false,
+    saved: false,
+    done: false,
   };
   await page.route("**/api/session", (route) =>
     route.fulfill({
@@ -206,16 +208,16 @@ test("the private inbox links to the source and persists read state", async ({
     (url) => url.pathname === "/api/repos/team/project/pulls/2/threads",
     (route) => route.fulfill({ json: { items: [], next: null } }),
   );
-  await page.route(`**/api/notifications/${notice.id}/read`, (route) => {
+  await page.route(`**/api/notifications/${notice.id}/state`, (route) => {
     expect(route.request().method()).toBe("PUT");
     expect(route.request().headers()["x-csrf-token"]).toBe("csrf");
     expect(route.request().postDataJSON()).toEqual({
       repository_id: lifecycle.repositoryId,
       expected: notice.updated,
-      read: true,
+      action: { read: true },
     });
     notice.read = true;
-    return route.fulfill({ json: null });
+    return route.fulfill({ json: { read: true, saved: false, done: false } });
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/");

@@ -20,7 +20,10 @@ use crate::{
         Address,
         directory::{
             IdentityKey,
-            notifications::{Entry, List, ListInput, MarkRead, MarkReadInput, Position, Reason},
+            notifications::{
+                Action, List, ListInput, Position, Reason, SetState, SetStateInput,
+                State as NotificationState, Thread, ThreadPage, View,
+            },
         },
         repository::{
             collaboration::{SubjectKind, Target, watches::Mode},
@@ -37,7 +40,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .route("/api/notifications", get(list))
         .route("/api/notifications/unread", get(unread))
-        .route("/api/notifications/{id}/read", put(mark_read))
+        .route("/api/notifications/{id}/state", put(set_state))
         .route(
             "/api/repos/{owner}/{name}/subscription",
             get(subscriptions::get).put(subscriptions::set),
@@ -58,6 +61,7 @@ struct Parameters {
     repository: Option<Uuid>,
     unread: Option<bool>,
     reason: Option<Reason>,
+    view: Option<View>,
 }
 
 #[derive(Serialize)]
@@ -75,7 +79,8 @@ struct Item {
     href: String,
     sender: String,
     reason: Reason,
-    read: bool,
+    #[serde(flatten)]
+    state: NotificationState,
     updated: Position,
 }
 
@@ -115,7 +120,7 @@ async fn list(
     if !(1..=50).contains(&limit) {
         return Err(Error::Invalid("Notification pages require 1–50 items"));
     }
-    let before = params.before.as_deref().map(cursor).transpose()?;
+    let mut before = params.before.as_deref().map(cursor).transpose()?;
     if let Some(id) = params.repository {
         let repo = server.repositories.by_id(id).ok_or(Error::NotFound)?;
         if !may_read(&server, &principal, &repo).await? {
@@ -123,43 +128,49 @@ async fn list(
         }
     }
     let actor = app::account(&principal)?;
-    let entries = entries(&server, actor.clone(), before).await?;
-    // Read one account's bounded history and authorize by repository, rather
-    // than scanning private repositories or checking the same grant per item.
-    let mut groups = HashMap::<Uuid, Vec<(usize, Entry)>>::new();
-    for (order, entry) in entries.into_iter().enumerate() {
-        if params
-            .repository
-            .is_some_and(|id| id != entry.notice.repository)
-            || (params.unread == Some(true) && entry.read)
-            || params.reason.is_some_and(|reason| reason != entry.reason)
-        {
-            continue;
+    let view = params.view.unwrap_or_default();
+    let mut items = Vec::new();
+    loop {
+        let page = entries(&server, actor.clone(), before, view).await?;
+        // Authorize each repository batch. Cell cursors can cross private
+        // rows, so the HTTP cursor is only made from a visible item.
+        let mut groups = HashMap::<Uuid, Vec<(usize, Thread)>>::new();
+        for (order, thread) in page.threads.into_iter().enumerate() {
+            let entry = &thread.entry;
+            if params
+                .repository
+                .is_some_and(|id| id != entry.notice.repository)
+                || (params.unread == Some(true) && thread.state.read)
+                || params.reason.is_some_and(|reason| reason != entry.reason)
+            {
+                continue;
+            }
+            groups
+                .entry(entry.notice.repository)
+                .or_default()
+                .push((order, thread));
         }
-        groups
-            .entry(entry.notice.repository)
-            .or_default()
-            .push((order, entry));
+        let batches: Vec<Vec<(usize, Item)>> = stream::iter(groups)
+            .map(|(id, entries)| repository_items(&server, &principal, &actor, id, entries))
+            .buffer_unordered(8)
+            .try_collect()
+            .await?;
+        let mut visible: Vec<_> = batches.into_iter().flatten().collect();
+        visible.sort_unstable_by_key(|(order, _)| *order);
+        items.extend(visible.into_iter().map(|(_, item)| item));
+        if items.len() > limit || page.next.is_none() {
+            break;
+        }
+        before = page.next;
     }
-    let batches: Vec<Vec<(usize, Item)>> = stream::iter(groups)
-        .map(|(id, entries)| repository_items(&server, &principal, &actor, id, entries))
-        .buffer_unordered(8)
-        .try_collect()
-        .await?;
     app::account(&principal)?;
-    let mut items: Vec<_> = batches.into_iter().flatten().collect();
-    items.sort_unstable_by_key(|(order, _)| *order);
     // A cursor always points to a returned item. Hidden entries do not reveal
     // timestamps, IDs, counts, or empty pages with private continuations.
     let next = (items.len() > limit).then(|| {
-        let last = &items[limit - 1].1;
+        let last = &items[limit - 1];
         format!("{}:{}", last.updated.created_at_ms, last.updated.id)
     });
-    let items = items
-        .into_iter()
-        .take(limit)
-        .map(|(_, item)| item)
-        .collect();
+    items.truncate(limit);
     Ok(Json(Page { items, next }))
 }
 
@@ -167,11 +178,20 @@ async fn entries(
     server: &Server,
     identity: IdentityKey,
     before: Option<Position>,
-) -> Result<Vec<Entry>> {
+    view: View,
+) -> Result<ThreadPage> {
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     app::query_output(
         cells
-            .query::<List>(Address::Directory, None, ListInput { identity, before })
+            .query::<List>(
+                Address::Directory,
+                None,
+                ListInput {
+                    identity,
+                    before,
+                    view,
+                },
+            )
             .await,
     )
 }
@@ -186,23 +206,33 @@ async fn unread(
     Extension(principal): Extension<Principal>,
 ) -> Result<Json<Unread>> {
     let actor = app::account(&principal)?;
-    let entries = entries(&server, actor.clone(), None).await?;
-    let repositories: HashSet<_> = entries
-        .into_iter()
-        .filter(|entry| !entry.read)
-        .map(|entry| entry.notice.repository)
-        .collect();
-    let mut accessible = stream::iter(repositories)
-        .filter_map(|id| std::future::ready(server.repositories.by_id(id)))
-        .map(|repo| {
-            let (server, principal, actor) = (&server, &principal, &actor);
-            async move { may_notify(server, principal, &repo, actor).await }
-        })
-        .buffer_unordered(8);
-    while let Some(current) = accessible.try_next().await? {
-        if current {
-            app::account(&principal)?;
-            return Ok(Json(Unread { unread: true }));
+    let mut before = None;
+    let mut checked = HashSet::new();
+    loop {
+        let page = entries(&server, actor.clone(), before, View::Inbox).await?;
+        let repositories: Vec<_> = page
+            .threads
+            .into_iter()
+            .filter(|thread| !thread.state.read)
+            .map(|thread| thread.entry.notice.repository)
+            .filter(|id| checked.insert(*id))
+            .collect();
+        let mut accessible = stream::iter(repositories)
+            .filter_map(|id| std::future::ready(server.repositories.by_id(id)))
+            .map(|repo| {
+                let (server, principal, actor) = (&server, &principal, &actor);
+                async move { may_notify(server, principal, &repo, actor).await }
+            })
+            .buffer_unordered(8);
+        while let Some(current) = accessible.try_next().await? {
+            if current {
+                app::account(&principal)?;
+                return Ok(Json(Unread { unread: true }));
+            }
+        }
+        before = page.next;
+        if before.is_none() {
+            break;
         }
     }
     app::account(&principal)?;
@@ -232,7 +262,7 @@ async fn repository_items(
     principal: &Principal,
     actor: &IdentityKey,
     id: Uuid,
-    entries: Vec<(usize, Entry)>,
+    entries: Vec<(usize, Thread)>,
 ) -> Result<Vec<(usize, Item)>> {
     let Some(repo) = server.repositories.by_id(id) else {
         return Ok(Vec::new());
@@ -245,7 +275,8 @@ async fn repository_items(
     let name = &repo.config.name;
     let mut items = Vec::new();
     let mut cache = HashMap::new();
-    for (order, entry) in entries {
+    for (order, thread) in entries {
+        let entry = thread.entry;
         let notice = entry.notice;
         let (kind, number, files, contribution) = location(notice.target);
         let sources = match cache.entry(number) {
@@ -288,7 +319,7 @@ async fn repository_items(
                 ),
                 sender: notice.sender,
                 reason: entry.reason,
-                read: entry.read,
+                state: thread.state,
             },
         ));
     }
@@ -343,18 +374,18 @@ fn location(target: Target) -> (SubjectKind, u64, &'static str, String) {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ReadRequest {
+struct StateRequest {
     repository_id: Uuid,
     expected: Position,
-    read: Option<bool>,
+    action: Action,
 }
 
-async fn mark_read(
+async fn set_state(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path(id): Path<Uuid>,
-    input: std::result::Result<Json<ReadRequest>, JsonRejection>,
-) -> Result<Json<()>> {
+    input: std::result::Result<Json<StateRequest>, JsonRejection>,
+) -> Result<Json<NotificationState>> {
     let identity = app::account(&principal)?;
     let Json(input) = input.map_err(Error::Body)?;
     valid_position(input.expected)?;
@@ -366,26 +397,26 @@ async fn mark_read(
         return Err(Error::NotFound);
     }
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
-    let marked = app::command_output(
+    let state = app::command_output(
         cells
-            .command::<MarkRead>(
+            .command::<SetState>(
                 Address::Directory,
                 app::mutation_identity()?,
-                MarkReadInput {
+                SetStateInput {
                     identity: identity.clone(),
                     thread: id,
                     repository: repo.id,
                     expected: input.expected,
-                    read: input.read.unwrap_or(true),
+                    action: input.action,
                 },
             )
             .await,
     )?;
-    if !may_read(&server, &principal, &repo).await? {
+    if !may_notify(&server, &principal, &repo, &identity).await? {
         return Err(Error::NotFound);
     }
     app::account(&principal)?;
-    marked.then_some(Json(())).ok_or(Error::PageChanged)
+    state.map(Json).ok_or(Error::PageChanged)
 }
 
 #[cfg(test)]
@@ -393,6 +424,9 @@ mod delivery_tests;
 
 #[cfg(test)]
 mod watch_tests;
+
+#[cfg(test)]
+mod triage_tests;
 
 #[cfg(test)]
 mod tests {
@@ -469,8 +503,9 @@ mod tests {
                 access: Access::Direct,
             }],
         };
-        let put_read = format!("/api/notifications/{}/read", notice.thread_id());
-        let expected = json!({"repository_id":repo.id,"expected":notice.position()});
+        let put_read = format!("/api/notifications/{}/state", notice.thread_id());
+        let expected =
+            json!({"repository_id":repo.id,"expected":notice.position(),"action":{"read":true}});
         for (attempt, access) in [Access::Direct, Access::Group, Access::Direct]
             .into_iter()
             .enumerate()
@@ -499,7 +534,7 @@ mod tests {
                     "id": notice.thread_id(), "repository": {"id":repo.id, "owner": "team", "name": "private"},
                     "title": "Issue mentioned",
                     "href": format!("/team/private/issues/1?repository_id={}", repo.id),
-                    "sender": "Alice", "reason": "mention", "read": attempt > 0,
+                    "sender": "Alice", "reason": "mention", "read": attempt > 0, "saved": false, "done": false,
                     "updated": notice.position()
                 }]})
             );
@@ -550,7 +585,7 @@ mod tests {
                 Method::PUT,
                 &put_read,
                 &bob,
-                json!({"repository_id":repo.id,"expected":item["updated"]})
+                json!({"repository_id":repo.id,"expected":item["updated"],"action":{"read":true}})
             )
             .await
             .status(),

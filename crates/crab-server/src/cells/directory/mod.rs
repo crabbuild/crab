@@ -263,7 +263,7 @@ pub(in crate::cells) fn dispatch_mutation(
         CreateProfile::ID => invoke_mutation::<CreateProfile>(context, input),
         EditProfile::ID => invoke_mutation::<EditProfile>(context, input),
         notifications::Deliver::ID => invoke_mutation::<notifications::Deliver>(context, input),
-        notifications::MarkRead::ID => invoke_mutation::<notifications::MarkRead>(context, input),
+        notifications::SetState::ID => invoke_mutation::<notifications::SetState>(context, input),
         saved_replies::PutSavedReply::ID => {
             invoke_mutation::<saved_replies::PutSavedReply>(context, input)
         }

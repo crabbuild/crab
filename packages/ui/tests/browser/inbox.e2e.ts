@@ -26,6 +26,8 @@ test("notifications preserve unread state and open the exact review reply", asyn
       href: "/team/project/pull/2",
       updated: { id: "activity-14", created_at_ms: 1_700_000_100_000 },
       read: false,
+      saved: false,
+      done: false,
       title: "Review the README",
       reason: "review_requested",
     },
@@ -36,6 +38,8 @@ test("notifications preserve unread state and open the exact review reply", asyn
       href: "/team/project/pull/1/files?thread=1&reply=86",
       updated: { id: "activity-13", created_at_ms: 1_700_000_060_000 },
       read: false,
+      saved: false,
+      done: false,
       title: "Reply about the README",
       reason: "mention",
     },
@@ -46,6 +50,8 @@ test("notifications preserve unread state and open the exact review reply", asyn
       href: "/team/library/issues/2#issuecomment-9",
       updated: { id: "activity-3", created_at_ms: 1_700_000_000_000 },
       read: false,
+      saved: false,
+      done: false,
       title: "Library issue",
       reason: "mention",
     },
@@ -56,6 +62,8 @@ test("notifications preserve unread state and open the exact review reply", asyn
       href: "/team/project/issues/3",
       updated: { id: "activity-2", created_at_ms: 1_699_999_900_000 },
       read: false,
+      saved: false,
+      done: false,
       title: "Assigned issue",
       reason: "assigned",
     },
@@ -107,7 +115,7 @@ test("notifications preserve unread state and open the exact review reply", asyn
       });
     },
   );
-  await page.route("**/api/notifications/notice-14/read", (route) => {
+  await page.route("**/api/notifications/notice-14/state", (route) => {
     const request = route.request();
     expect(request.method()).toBe("PUT");
     expect(request.headers()["x-csrf-token"]).toBe("fixture-csrf");
@@ -127,14 +135,16 @@ test("notifications preserve unread state and open the exact review reply", asyn
     expect(body).toEqual({
       repository_id: repository.id,
       expected: notices[0].updated,
-      read: true,
+      action: { read: true },
     });
-    notices[0].read = body.read;
+    notices[0].read = body.action.read;
     if (loseReadReply) {
       loseReadReply = false;
       return route.abort("failed");
     }
-    return route.fulfill({ json: null });
+    return route.fulfill({
+      json: { read: notices[0].read, saved: false, done: false },
+    });
   });
   lifecycle.branchesAvailable = false;
   threads[0].resolved = true;
@@ -202,6 +212,11 @@ test("notifications preserve unread state and open the exact review reply", asyn
   await expect(reviewRow.getByRole("alert")).toContainText("This list changed");
   await reviewRow.getByRole("button", { name: "Refresh inbox" }).click();
   await expect(
+    page
+      .getByRole("region", { name: "Notifications" })
+      .getByLabel("Repository", { exact: true }),
+  ).toBeFocused();
+  await expect(
     reviewRow.getByRole("button", { name: "Mark as read" }),
   ).toBeVisible();
   await reviewRow.getByRole("button", { name: "Mark as read" }).click();
@@ -224,4 +239,111 @@ test("notifications preserve unread state and open the exact review reply", asyn
     page.getByRole("region", { name: "Linked reply" }),
   ).toBeFocused();
   await expect(page.getByText("Consider a clearer opening.")).toBeVisible();
+});
+
+test("saved and done views persist and restore a conversation", async ({
+  page,
+}) => {
+  const { lifecycle } = await mockPullRequest(page);
+  const notice = {
+    repository: { id: lifecycle.repositoryId, owner: "team", name: "project" },
+    id: "triage-thread",
+    href: "/team/project/pull/1",
+    updated: { id: "activity-1", created_at_ms: 1_700_000_100_000 },
+    sender: "Alice",
+    title: "Dependency review",
+    reason: "review_requested",
+  };
+  const state = { read: false, saved: false, done: false };
+  await page.route("**/api/session", (route) =>
+    route.fulfill({
+      json: {
+        authenticated: true,
+        user: { name: "Bob", subject: "bob" },
+        csrf: "triage-csrf",
+      },
+    }),
+  );
+  await page.route("**/api/notifications/unread", (route) =>
+    route.fulfill({ json: { unread: !state.read && !state.done } }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/notifications",
+    (route) => {
+      const query = new URL(route.request().url()).searchParams;
+      const view = query.get("view");
+      const visible =
+        view === "saved"
+          ? state.saved
+          : view === "done"
+            ? state.done
+            : !state.done && (query.get("unread") !== "true" || !state.read);
+      return route.fulfill({
+        json: { items: visible ? [{ ...notice, ...state }] : [], next: null },
+      });
+    },
+  );
+  let loseDoneReply = true;
+  await page.route("**/api/notifications/triage-thread/state", (route) => {
+    const request = route.request();
+    const body = request.postDataJSON();
+    expect(request.method()).toBe("PUT");
+    expect(request.headers()["x-csrf-token"]).toBe("triage-csrf");
+    expect(body.repository_id).toBe(lifecycle.repositoryId);
+    expect(body.expected).toEqual(notice.updated);
+    const { save, done } = body.action;
+    if (typeof save === "boolean") state.saved = save;
+    if (typeof done === "boolean") state.done = done;
+    if (done === true) {
+      state.read = true;
+      if (loseDoneReply) {
+        loseDoneReply = false;
+        return route.abort("failed");
+      }
+    }
+    return route.fulfill({ json: state });
+  });
+
+  await page.goto("/-/notifications");
+  const row = page.getByRole("listitem").filter({ hasText: notice.title });
+  await row.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(row.getByRole("button", { name: "Unsave" })).toBeVisible();
+  const saved = page.getByRole("link", { name: "Saved", exact: true });
+  await saved.click();
+  await page.reload();
+  await expect(saved).toHaveAttribute("aria-current", "page");
+  await expect(row.getByRole("link", { name: notice.title })).toBeVisible();
+  await row.getByRole("button", { name: "Mark as done" }).click();
+  await expect(row.getByRole("alert")).toContainText("The response was lost");
+  await row.getByRole("button", { name: "Mark as done" }).click();
+  await expect(
+    row.getByRole("button", { name: "Move to inbox" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Notifications", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("link", { name: "Done", exact: true }).click();
+  await expect(
+    row.getByRole("button", { name: "Move to inbox" }),
+  ).toBeVisible();
+  await expectNoAccessibilityViolations(page);
+  await row.getByRole("button", { name: "Move to inbox" }).click();
+  await expect(page.getByText("No completed notifications.")).toBeVisible();
+  await expect(
+    page
+      .getByRole("region", { name: "Notifications" })
+      .getByLabel("Repository", { exact: true }),
+  ).toBeFocused();
+
+  await page.getByRole("link", { name: "All", exact: true }).click();
+  await expect(
+    row.getByRole("button", { name: "Mark as unread" }),
+  ).toBeVisible();
+  await saved.click();
+  await row.getByRole("button", { name: "Unsave" }).click();
+  await expect(page.getByText("No saved notifications.")).toBeVisible();
+  await page.getByRole("link", { name: "All", exact: true }).click();
+  await expect(
+    row.getByRole("button", { name: "Save", exact: true }),
+  ).toBeVisible();
 });

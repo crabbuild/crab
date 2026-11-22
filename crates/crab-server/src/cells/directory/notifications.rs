@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
+mod filing;
+use filing::Filed;
+
 pub(crate) const MAX_RECIPIENTS: usize = 32;
 pub(crate) const MAX_HISTORY: usize = 100;
 const MAX_HANDLES: usize = 40;
@@ -268,11 +271,29 @@ impl Mutation for Deliver {
                 .entries
                 .iter()
                 .any(|entry| entry.read && entry.notice.position() == input.notice.position());
-            if inbox.deliver(Entry {
+            let thread = input.notice.thread_id();
+            let previous = filing::load(context, actor, thread)?;
+            let mut incoming = Entry {
                 notice: input.notice.clone(),
                 reason,
                 read,
-            })? {
+            };
+            let now = context.now_ms();
+            if let Some(filed) = previous.as_ref().filter(|filed| filed.retained(now)) {
+                incoming.reason = incoming.reason.max(filed.entry.reason);
+                incoming.read |=
+                    filed.entry.read && filed.entry.notice.position() == incoming.notice.position();
+            }
+            let store_recent = inbox.deliver(incoming.clone())?;
+            if let Some(previous) = previous {
+                let mut filed = previous.clone();
+                let restored_at = (!store_recent && previous.retained(now)).then_some(now);
+                // A delayed newer update can reopen a retained thread even
+                // when the rolling inbox's eviction floor has moved past it.
+                filed.deliver(incoming, restored_at)?;
+                changed |= filing::store(context, actor, Some(&previous), &filed)?;
+            }
+            if store_recent {
                 context.put_document(&key, &inbox)?;
                 changed = true;
             }
@@ -284,10 +305,52 @@ impl Mutation for Deliver {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum View {
+    #[default]
+    Inbox,
+    Saved,
+    Done,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct State {
+    pub read: bool,
+    pub saved: bool,
+    pub done: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct Thread {
+    pub entry: Entry,
+    pub state: State,
+}
+
+impl From<Filed> for Thread {
+    fn from(filed: Filed) -> Self {
+        Self {
+            state: State {
+                read: filed.entry.read,
+                saved: filed.saved,
+                done: filed.done_at.is_some(),
+            },
+            entry: filed.entry,
+        }
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 pub(crate) struct ListInput {
     pub identity: IdentityKey,
     pub before: Option<Position>,
+    pub view: View,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+pub(crate) struct ThreadPage {
+    pub threads: Vec<Thread>,
+    pub next: Option<Position>,
 }
 
 pub(crate) struct List;
@@ -295,85 +358,148 @@ impl Read for List {
     const CLASS: &'static str = CLASS;
     const ID: u32 = 19;
     type Input = ListInput;
-    type Output = Vec<Entry>;
+    type Output = ThreadPage;
 
-    fn execute(context: &mut Transaction<'_>, input: ListInput) -> Result<Vec<Entry>> {
+    fn execute(context: &mut Transaction<'_>, input: ListInput) -> Result<ThreadPage> {
         if let Some(before) = input.before {
             before.validate()?;
         }
         let Some(actor) = active_account(context, input.identity)? else {
-            return Ok(Vec::new());
+            return Ok(ThreadPage::default());
         };
-        let mut entries = Vec::new();
-        for access in Access::CHANNELS {
-            let inbox: Inbox = context.document(&access.inbox(actor))?.unwrap_or_default();
-            entries.extend(inbox.entries);
+        let (filed, next) = filing::page(context, actor, input.before, input.view)?;
+        let now = context.now_ms();
+        let mut threads = BTreeMap::new();
+        for record in filed {
+            if record.visible(input.view, now) {
+                threads.insert(record.entry.notice.thread_id(), Thread::from(record));
+            }
         }
-        // Fold both queues before slicing. Applying the cursor to the raw
-        // events would make the same discussion reappear on older pages.
-        Ok(conversations(entries)
-            .into_iter()
-            .filter(|entry| {
-                input
-                    .before
-                    .is_none_or(|before| entry.notice.position() < before)
-            })
-            .collect())
+        if input.view == View::Inbox {
+            let mut recent = Vec::new();
+            for access in Access::CHANNELS {
+                let inbox: Inbox = context.document(&access.inbox(actor))?.unwrap_or_default();
+                recent.extend(inbox.entries);
+            }
+            // Fold before slicing. A stale copy in the other access channel is
+            // not another discussion, even across an archive page boundary.
+            for entry in conversations(recent) {
+                let position = entry.notice.position();
+                if input.before.is_some_and(|before| position >= before)
+                    || next.is_some_and(|through| position < through)
+                {
+                    continue;
+                }
+                let id = entry.notice.thread_id();
+                if let Some(filed) = filing::load(context, actor, id)? {
+                    if filed.done_at.is_some() || filed.entry.notice.position() != position {
+                        continue;
+                    }
+                }
+                threads
+                    .entry(id)
+                    .or_insert_with(|| Thread::from(Filed::new(entry)));
+            }
+        }
+        let mut threads: Vec<_> = threads.into_values().collect();
+        threads.sort_unstable_by_key(|thread| std::cmp::Reverse(thread.entry.notice.position()));
+        Ok(ThreadPage { threads, next })
     }
 }
 
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Action {
+    Read(bool),
+    Save(bool),
+    Done(bool),
+}
+
 #[derive(Deserialize, Serialize)]
-pub(crate) struct MarkReadInput {
+pub(crate) struct SetStateInput {
     pub identity: IdentityKey,
     pub thread: Uuid,
     pub repository: Uuid,
     pub expected: Position,
-    pub read: bool,
+    pub action: Action,
 }
 
-pub(crate) struct MarkRead;
-impl Mutation for MarkRead {
+pub(crate) struct SetState;
+impl Mutation for SetState {
     const CLASS: &'static str = CLASS;
     const ID: u32 = 20;
-    type Input = MarkReadInput;
-    type Output = bool;
+    type Input = SetStateInput;
+    type Output = Option<State>;
 
     fn execute(
         context: &mut Transaction<'_>,
-        input: MarkReadInput,
-    ) -> Result<MutationResult<bool>> {
+        input: SetStateInput,
+    ) -> Result<MutationResult<Self::Output>> {
         input.expected.validate()?;
         let Some(actor) = active_account(context, input.identity)? else {
-            return Ok(MutationResult::Rejected(false));
+            return Ok(MutationResult::Rejected(None));
         };
+        let matches = |entry: &Entry| {
+            entry.notice.repository == input.repository && entry.notice.thread_id() == input.thread
+        };
+        let previous =
+            filing::load(context, actor, input.thread)?.filter(|item| matches(&item.entry));
+        let mut recent = Vec::new();
         let mut inboxes = Vec::new();
-        let mut latest = None;
         for access in Access::CHANNELS {
             let key = access.inbox(actor);
             let inbox: Inbox = context.document(&key)?.unwrap_or_default();
-            for entry in inbox.entries.iter().filter(|entry| {
-                entry.notice.repository == input.repository
-                    && entry.notice.thread_id() == input.thread
-            }) {
-                latest = latest.max(Some(entry.notice.position()));
-            }
+            recent.extend(inbox.entries.iter().filter(|entry| matches(entry)).cloned());
             inboxes.push((key, inbox));
         }
-        // An old page must not clear activity that arrived after the user
-        // saw the row. Missing and moved rows have the same private outcome.
-        if latest != Some(input.expected) {
-            return Ok(MutationResult::Rejected(false));
+        let in_recent = recent
+            .iter()
+            .any(|entry| entry.notice.position() == input.expected);
+        let current = conversations(
+            recent
+                .into_iter()
+                .chain(previous.iter().map(|item| item.entry.clone())),
+        )
+        .pop();
+        let Some(entry) = current.filter(|entry| entry.notice.position() == input.expected) else {
+            // Only the observed activity can be read, saved or completed.
+            return Ok(MutationResult::Rejected(None));
+        };
+        let now = context.now_ms();
+        let mut filed = previous
+            .clone()
+            .unwrap_or_else(|| Filed::new(entry.clone()));
+        if !filed.retained(now) && (!in_recent || filed.done_at.is_some()) {
+            return Ok(MutationResult::Rejected(None));
         }
-        let mut changed = false;
+        filed.entry = entry;
+        match input.action {
+            Action::Read(read) => filed.entry.read = read,
+            Action::Save(save) => filed.saved = save,
+            Action::Done(true) => {
+                filed.entry.read = true;
+                filed.done_at.get_or_insert(now);
+                filed.restored_at = None;
+            }
+            Action::Done(false) => {
+                if filed.done_at.take().is_some() && !in_recent {
+                    filed.restored_at = Some(now);
+                }
+            }
+        }
+        let mut changed = filing::store(context, actor, previous.as_ref(), &filed)?;
         for (key, mut inbox) in inboxes {
             let mut updates = false;
             for entry in &mut inbox.entries {
-                if entry.notice.repository == input.repository
-                    && entry.notice.thread_id() == input.thread
-                    && entry.read != input.read
-                {
-                    entry.read = input.read;
-                    updates = true;
+                if matches(entry) {
+                    let reason = if entry.notice.position() == input.expected {
+                        entry.reason.max(filed.entry.reason)
+                    } else {
+                        entry.reason
+                    };
+                    updates |= entry.read != filed.entry.read || entry.reason != reason;
+                    entry.read = filed.entry.read;
+                    entry.reason = reason;
                 }
             }
             if updates {
@@ -385,7 +511,7 @@ impl Mutation for MarkRead {
         if changed {
             advance(context)?;
         }
-        Ok(MutationResult::Success(true))
+        Ok(MutationResult::Success(Some(Thread::from(filed).state)))
     }
 }
 

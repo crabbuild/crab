@@ -84,12 +84,12 @@ async fn committed_mentions_deliver_once_and_inbox_hides_revoked_repository() {
         notice["href"],
         format!("/team/private/issues/{number}?repository_id={}", repo.id)
     );
-    let path = format!("{INBOX}/{}/read", notice["id"].as_str().unwrap());
+    let path = format!("{INBOX}/{}/state", notice["id"].as_str().unwrap());
     h.write(
         Method::PUT,
         &path,
         &bob,
-        json!({"repository_id":repo.id,"expected":notice["updated"]}),
+        json!({"repository_id":repo.id,"expected":notice["updated"],"action":{"read":true}}),
     )
     .await
     .error_for_status()
@@ -260,9 +260,9 @@ async fn team_notifications(group_only: bool) {
         let item = &items[0];
         h.write(
             Method::PUT,
-            &format!("{INBOX}/{}/read", item["id"].as_str().unwrap()),
+            &format!("{INBOX}/{}/state", item["id"].as_str().unwrap()),
             &bob,
-            json!({"repository_id":repo.id,"expected":item["updated"]}),
+            json!({"repository_id":repo.id,"expected":item["updated"],"action":{"read":true}}),
         )
         .await
         .error_for_status()
