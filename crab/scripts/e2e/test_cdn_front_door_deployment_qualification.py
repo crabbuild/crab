@@ -73,6 +73,13 @@ class FrontDoorDeploymentQualificationTests(unittest.TestCase):
                                "roleDefinitionId": f"/subscriptions/{SUBSCRIPTION}/providers/Microsoft.Authorization/roleDefinitions/{COLLECTOR.BLOB_READER}"}
             self.list(f"{container_id}/providers/Microsoft.Authorization/roleAssignments", COLLECTOR.RBAC, {"properties": self.assignment})
         else:
+            live_container = self.fixture["source_placement"]["resource"]
+            live_account = live_container.split("/blobservices/", 1)[0]
+            self.live_source = self.add(live_account, COLLECTOR.BLOB, {
+                "primaryEndpoints": {"blob": "https://fixtureacct.blob.core.windows.net/"}, "primaryLocation": "eastus",
+            })
+            self.add(live_container, COLLECTOR.BLOB, {"publicAccess": "None"})
+            self.export_placement = {"resource": container_id.lower(), "location": "westus2"}
             account["tags"] = {"CrabPublicExport": "true", "CrabSourceOrigin": self.fixture["native_origin"],
                                "CrabApprovedInventorySha256": "d" * 64}
             self.add(f"{account_id}/blobServices/default", COLLECTOR.BLOB, {
@@ -156,7 +163,8 @@ class FrontDoorDeploymentQualificationTests(unittest.TestCase):
                 components = observation.bound_components(self.fixture)
                 self.assertEqual(components.keys(), deployment_component_names("front-door", access))
                 if access == "public":
-                    binding = public_export_binding(self.fixture, self.route["id"], "d" * 64)
+                    binding = public_export_binding(self.fixture, self.route["id"], "d" * 64,
+                                                    self.fixture["source_placement"], self.export_placement)
                     self.assertEqual(components["public-export"], deployment_component_digest(binding))
                 else:
                     binding = observation.private_binding.route(self.fixture)

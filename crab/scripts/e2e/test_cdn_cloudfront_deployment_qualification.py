@@ -74,9 +74,15 @@ class CloudFrontDeploymentQualificationTests(unittest.TestCase):
             ))
         self.etags = iter(("deployed", "deployed"))
         self.location = REGION
+        self.source_location = None
         self.public_block = {key: True for key in ("BlockPublicAcls", "IgnorePublicAcls", "BlockPublicPolicy", "RestrictPublicBuckets")}
 
     def aws_response(self, profile, region, service, operation, *arguments):
+        if service == "s3api" and self.bucket == "export-bucket" and arguments[1] == "fixture-bucket":
+            self.assertEqual((profile, region, operation, arguments),
+                             ("crab", "us-east-1", "get-bucket-location",
+                              ("--bucket", "fixture-bucket", "--expected-bucket-owner", "210987654321")))
+            return {"LocationConstraint": self.source_location}
         self.assertEqual((profile, region), ("crab", REGION))
         if service == "s3api":
             self.assertEqual(arguments, ("--bucket", self.bucket, "--expected-bucket-owner", ACCOUNT))
@@ -119,7 +125,10 @@ class CloudFrontDeploymentQualificationTests(unittest.TestCase):
                 observed = snapshot.bound_components(self.fixture)
                 self.assertEqual(observed.keys(), deployment_component_names("cloudfront", access))
                 if access == "public":
-                    binding = public_export_binding(self.fixture, ARN, "a" * 64)
+                    binding = public_export_binding(
+                        self.fixture, ARN, "a" * 64, self.fixture["source_placement"],
+                        {"resource": f"accounts/{ACCOUNT}/buckets/{self.bucket}", "location": REGION},
+                    )
                     self.assertEqual(observed["public-export"], deployment_component_digest(binding))
                 else:
                     binding = snapshot.private_binding.route(self.fixture)
@@ -156,6 +165,12 @@ class CloudFrontDeploymentQualificationTests(unittest.TestCase):
                     self.etags = iter(("deployed", "changed"))
                 with self.assertRaisesRegex(ValueError, reason):
                     self.collect()
+
+    def test_public_source_region_mismatch_cannot_attest(self):
+        self.configure("public")
+        self.source_location = "us-west-1"
+        with self.assertRaisesRegex(ValueError, "live source differs"):
+            self.collect()
 
     def test_cli_rechecks_candidate_digest_against_approved_configuration(self):
         self.configure()

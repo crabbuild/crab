@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cdn_qualification import (  # noqa: E402
     COMMIT, EDGE_ROUTE_QUERY_PROBES, EXPIRY_RANGE_CHECK, EXPIRY_SETTLE_SECONDS, PREFIX, PROVIDERS, PROVIDER_FOR_EDGE, PUBLIC_EXPORT_CHECK,
-    RUN_NUMBER, SHA256, decode, edge_head_denials, edge_route_probe_names, fields, matches, require, scope_parts,
+    RUN_NUMBER, SHA256, checked_placement, decode, edge_head_denials, edge_route_probe_names, fields, matches, require, scope_parts,
     verify_expiry_range_window,
 )
 
@@ -88,7 +88,7 @@ def approved_fixture(path: Path, configuration_sha256: str, *, operator_binding:
     else:
         expected.add("deployment_policy_sha256")
         if access == "public":
-            expected.add("export_origin")
+            expected |= {"export_origin", "source_placement"}
         else:
             expected |= {"unrelated_control", "viewer_issuer"} & fixture.keys()
         expected |= {"deployment"} & fixture.keys()
@@ -107,6 +107,7 @@ def approved_fixture(path: Path, configuration_sha256: str, *, operator_binding:
     if access == "public":
         origin_bucket(fixture["export_origin"], edge)
         require(fixture["export_origin"] != fixture["native_origin"], "public export must use a distinct native origin")
+        checked_placement(fixture["native_origin"], fixture["source_placement"])
     return fixture
 
 

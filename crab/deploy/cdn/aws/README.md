@@ -74,6 +74,10 @@ For example, this inventory approves a three-byte LFS object containing `abc`.
 {
   "schema": "crab.cdn-export.v1",
   "source_origin": "s3://source-models",
+  "source_placement": {
+    "resource": "accounts/123456789012/buckets/source-models",
+    "location": "us-west-2"
+  },
   "repository_prefix": "org/models",
   "objects": [
     {
@@ -93,8 +97,9 @@ For example, this inventory approves a three-byte LFS object containing `abc`.
    policy requires that role, conditional creation, and a separate cleanup
    principal. [S3 conditional writes](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes-enforce.html)
 2. Run the publisher with AWS CLI v2 and Python 3.11 or later. Give the
-   operator profile read access to the stack and its resources. Use an
-   independent source-reader profile and the dedicated export-writer profile.
+   operator profile read access to the stack and the export bucket's location.
+   Use an independent source-reader profile with `s3:GetBucketLocation` and
+   object read access, and use the dedicated export-writer profile.
    Specify private scratch space for one object at a time. This fixture
    accepts objects through 5,000,000,000 bytes using single PUTs.
 
@@ -108,8 +113,9 @@ For example, this inventory approves a three-byte LFS object containing `abc`.
 
    The publisher uses a conditional checksum-protected PUT and reads back
    the body and representation of each destination, including an existing
-   key on retry. It checks the disabled distribution and native destination
-   before and after the copy. It writes the complete publication receipt
+   key on retry. It checks the disabled distribution and both bucket owners
+   and regions before and after the copy. It uses the approved source region
+   and expected owner for every source read. It writes the complete publication receipt
    to a new path and returns that file's SHA-256. The receipt binds the
    approved inventory digest, source, export, prefix, deployment, viewer
    hostname, and every verified object. The inventory and receipt each have

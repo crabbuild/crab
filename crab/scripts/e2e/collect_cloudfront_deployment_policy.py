@@ -25,6 +25,11 @@ RESOURCE_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 PUBLIC_ACCESS_BLOCK = dict.fromkeys(("BlockPublicAcls", "IgnorePublicAcls", "BlockPublicPolicy", "RestrictPublicBuckets"), True)
 
 
+def s3_region(response: dict[str, Any]) -> str:
+    location = response["LocationConstraint"]
+    return "us-east-1" if location is None else "eu-west-1" if location == "EU" else location
+
+
 def aws(profile: str | None, region: str, service: str, operation: str, *arguments: str) -> dict[str, Any]:
     credentials = ["--profile", profile] if profile is not None else []
     try:
@@ -205,6 +210,9 @@ def collect(fixture: dict, distribution_id: str, profile: str | None, region: st
             and s3("get-bucket-policy-status")["PolicyStatus"]["IsPublic"] is False,
             "S3 fixture must block direct public access and disable ACLs")
     bucket_controls = {"public_access_block": public_block, "ownership": ownership}
+    location = s3_region(s3("get-bucket-location"))
+    require(location == region, "S3 native bucket location differs from the approved distribution origin")
+    placement = {"resource": f"accounts/{owner[1]}/buckets/{bucket}", "location": location}
     export_binding = {}
     private_binding = None
     if access == "public":
@@ -213,12 +221,17 @@ def collect(fixture: dict, distribution_id: str, profile: str | None, region: st
         require(tags.get("CrabSourceOrigin") == fixture["native_origin"] and matches(SHA256, inventory),
                 "public S3 bucket tags must identify the approved source and inventory")
         bucket_controls["tags"] = tags
-        export_binding["public-export"] = public_export_binding(fixture, arn, inventory)
+        source = fixture["source_placement"]
+        source_bucket = origin_bucket(fixture["native_origin"], edge)
+        source_location = s3_region(aws(
+            profile, source["location"], "s3api", "get-bucket-location", "--bucket", source_bucket,
+            "--expected-bucket-owner", source["resource"].split("/")[1],
+        ))
+        export_binding["public-export"] = public_export_binding(
+            fixture, arn, inventory, source | {"location": source_location}, placement,
+        )
     else:
-        location = s3("get-bucket-location")["LocationConstraint"]
-        location = "us-east-1" if location is None else "eu-west-1" if location == "EU" else location
-        require(location == region, "S3 native bucket location differs from the approved distribution origin")
-        private_binding = PrivateBinding(arn, f"accounts/{owner[1]}/buckets/{bucket}", location)
+        private_binding = PrivateBinding(arn, placement["resource"], location)
     current = cloudfront("get-distribution", *request)
     require(current["ETag"] == observed["ETag"] and current["Distribution"]["Status"] == "Deployed",
             "CloudFront distribution changed during attestation")

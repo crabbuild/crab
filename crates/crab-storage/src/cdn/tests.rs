@@ -190,6 +190,25 @@ async fn public_export_approval_pins_digest_origin_and_viewer() {
                 .unwrap(),
         );
     assert!(matches!(wrong_source, Err(StorageError::Forbidden { .. })));
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    receipt["source_placement"]["resource"] =
+        serde_json::json!("accounts/123456789012/buckets/other");
+    let bytes = serde_json::to_vec(&receipt).unwrap();
+    std::fs::write(&path, &bytes).unwrap();
+    let repinned = CdnPublicationFile {
+        path: path.clone(),
+        sha256: {
+            use sha2::{Digest as _, Sha256};
+            format!("{:x}", Sha256::digest(&bytes))
+        },
+    };
+    assert!(
+        route(base)
+            .with_publication(&repinned, "s3://export")
+            .await
+            .is_err()
+    );
     std::fs::write(path, b"tampered").unwrap();
     let tampered = route(base).with_publication(&file, "s3://export").await;
     assert!(matches!(

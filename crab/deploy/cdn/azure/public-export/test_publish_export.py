@@ -17,8 +17,12 @@ class ExportTest(unittest.TestCase):
         digest = hashlib.sha256(self.data).hexdigest()
         path = f"lfs/objects/{digest[:2]}/{digest[2:4]}/{digest}"
         self.source_origin = "https://crabfixturelive.blob.core.windows.net/repo"
+        self.source_account = ("/subscriptions/55555555-4444-3333-2222-111111111111/resourcegroups/live/"
+                               "providers/microsoft.storage/storageaccounts/crabfixturelive")
+        self.source_container = self.source_account + "/blobservices/default/containers/repo"
         raw = json.dumps({
             "schema": SCHEMA, "source_origin": self.source_origin,
+            "source_placement": {"resource": self.source_container, "location": "westus2"},
             "repository_prefix": "org/repo",
             "objects": [{"path": path, "size": len(self.data), "sha256": digest}],
         }).encode()
@@ -41,6 +45,7 @@ class ExportTest(unittest.TestCase):
         self.route = edge + "/afdEndpoints/fixture/routes/crab-immutable-export"
         self.endpoint = edge + "/afdEndpoints/fixture"
         self.host = "crabfixtureexport.blob.core.windows.net"
+        self.source_location = "westus2"
         self.edge_host = self.host
         self.viewer_host = "fixture.azurefd.net"
         self.key = f"org/repo/{path}"
@@ -73,7 +78,13 @@ class ExportTest(unittest.TestCase):
             properties = {
                 self.account: {
                     "allowBlobPublicAccess": False, "allowSharedKeyAccess": False, "isHnsEnabled": True,
+                    "primaryLocation": "eastus",
+                    "primaryEndpoints": {"blob": f"https://{self.host}/"},
                 },
+                self.source_account: {"primaryLocation": self.source_location, "primaryEndpoints": {
+                    "blob": "https://crabfixturelive.blob.core.windows.net/",
+                }},
+                self.source_container: {"publicAccess": "None"},
                 self.service: {
                     "deleteRetentionPolicy": {"enabled": False},
                     "containerDeleteRetentionPolicy": {"enabled": False},
@@ -126,6 +137,8 @@ class ExportTest(unittest.TestCase):
         self.assertEqual(receipt["inventory_sha256"], self.inventory_hash)
         self.assertEqual(receipt["base_url"], "https://fixture.azurefd.net")
         self.assertEqual(receipt["deployment"], self.route)
+        self.assertEqual(receipt["source_placement"]["resource"], self.source_container)
+        self.assertEqual(receipt["export_placement"], {"resource": self.container.lower(), "location": "eastus"})
         self.assertEqual(self.export_data, self.data)
         self.assertEqual(self.writes, 1)
         self.metadata = {"unapproved": "fixture"}
@@ -153,6 +166,12 @@ class ExportTest(unittest.TestCase):
     def test_viewer_hostname_mismatch_is_checked_before_any_blob_io(self):
         self.viewer_host = "other.azurefd.net"
         with self.assertRaisesRegex(publisher.ExportError, "does not serve the staged export"):
+            publisher.publish(self.options)
+        self.assertEqual(self.object_operations, 0)
+
+    def test_changed_native_primary_location_is_checked_before_any_blob_io(self):
+        self.source_location = "westus3"
+        with self.assertRaisesRegex(publisher.ExportError, "approved placement"):
             publisher.publish(self.options)
         self.assertEqual(self.object_operations, 0)
 

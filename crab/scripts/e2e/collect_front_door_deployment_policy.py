@@ -316,7 +316,18 @@ def collect(fixture: dict, subscription: str, group: str, profile: str) -> Polic
         private_binding = PrivateBinding(current["id"].lower(), blob["container-id"].lower(), location)
     else:
         inventory = blob["tags"]["CrabApprovedInventorySha256"]
-        export_binding["public-export"] = public_export_binding(fixture, route["route"]["id"], inventory)
+        source_container_id = fixture["source_placement"]["resource"]
+        source_account_id = source_container_id.split("/blobservices/", 1)[0]
+        source = resource(read(source_account_id, BLOB), source_account_id)
+        source_container = resource(read(source_container_id, BLOB), source_container_id)
+        settings = source["properties"]
+        require(settings["primaryEndpoints"]["blob"].rstrip("/") == fixture["native_origin"].rsplit("/", 1)[0],
+                "Azure live source does not match its public cloud endpoint")
+        export_binding["public-export"] = public_export_binding(
+            fixture, route["route"]["id"], inventory,
+            {"resource": source_container["id"].lower(), "location": settings["primaryLocation"]},
+            {"resource": blob["container-id"].lower(), "location": blob["settings"]["primaryLocation"]},
+        )
     components = {name: deployment_component_digest(value) for name, value in {
         "front-door-route": route, "viewer-policy": viewer, "blob-access": blob, "viewer-key-ids": keys, **export_binding,
     }.items()}

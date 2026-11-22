@@ -26,6 +26,11 @@ FIXTURE_PREFIX = "crab-cdn-qualification/run-123-2"
 EXPORT_BODY = b"approved"
 
 
+def azure_resource(account: str) -> str:
+    return ("/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/fixture/"
+            f"providers/microsoft.storage/storageaccounts/{account}/blobservices/default/containers/repo")
+
+
 def expiry_rows(allowed: dict, denied: dict) -> list[dict]:
     expiration = EXPIRY * 1_000_000
     return [
@@ -179,12 +184,17 @@ class CdnQualificationTests(unittest.TestCase):
             self.record_git_product()
 
     def write_public_export(self, provider: str) -> str:
-        source, export, deployment = {
-            "s3": ("s3://source-bucket", "s3://export-bucket", "arn:aws:cloudfront::123456789012:distribution/EDIST"),
-            "gcs": ("gs://source-bucket", "gs://export-bucket", "projects/crab-test/global/backendBuckets/export"),
+        source, export, deployment, source_resource, export_resource, location = {
+            "s3": ("s3://source-bucket", "s3://export-bucket", "arn:aws:cloudfront::123456789012:distribution/EDIST",
+                   "accounts/111111111111/buckets/source-bucket", "accounts/123456789012/buckets/export-bucket", "us-east-1"),
+            "gcs": ("gs://source-bucket", "gs://export-bucket", "projects/crab-test/global/backendBuckets/export",
+                    "projects/111111/buckets/source-bucket", "projects/222222/buckets/export-bucket", "US"),
             "azure": ("https://sourceacct.blob.core.windows.net/repo", "https://exportacct.blob.core.windows.net/repo",
-                      "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Cdn/profiles/fixture/afdEndpoints/export/routes/objects"),
+                      "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Cdn/profiles/fixture/afdEndpoints/export/routes/objects",
+                      azure_resource("sourceacct"), azure_resource("exportacct"), "westus2"),
         }[provider]
+        source_placement = {"resource": source_resource, "location": location}
+        export_placement = {"resource": export_resource, "location": location}
         root = self.directory / CDN.PUBLIC_EXPORT_DIR
         root.mkdir(exist_ok=True)
         self.public_origins = {"native": source, "export": export}
@@ -192,9 +202,11 @@ class CdnQualificationTests(unittest.TestCase):
         self.object_key = hashlib.sha256(f"{FIXTURE_PREFIX}/{entry.path}".encode()).hexdigest()
         inventory = json_file(root / "inventory.json", {
             "schema": INVENTORY_SCHEMA, "source_origin": source, "repository_prefix": FIXTURE_PREFIX,
+            "source_placement": source_placement,
             "objects": [vars(entry)],
         })
-        receipt = publication_receipt(source, export, FIXTURE_PREFIX, "https://export.example.com", deployment, inventory, [entry])
+        receipt = publication_receipt(source, export, source_placement, export_placement, FIXTURE_PREFIX,
+                                      "https://export.example.com", deployment, inventory, [entry])
         self.policy_components["public-export"] = CDN.deployment_component_digest({
             name: receipt[name] for name in PUBLICATION_BINDING_FIELDS
         })
@@ -531,6 +543,16 @@ class CdnQualificationTests(unittest.TestCase):
         receipt["deployment"] += "-other"
         self.registration["publication_sha256"] = json_file(path, receipt)
         self.rejected("publication receipt must match the attested public export")
+
+    def test_public_release_pins_observed_export_owner_and_location_even_with_reapproved_receipt(self) -> None:
+        self.configure("s3", "public", "direct", consumer="sdk")
+        path = self.directory / CDN.PUBLIC_EXPORT_DIR / "publication.json"
+        original = json.loads(path.read_bytes())
+        for changes in ({"resource": "accounts/999999999999/buckets/export-bucket"}, {"location": "us-west-2"}):
+            with self.subTest(changes=changes):
+                receipt = original | {"export_placement": original["export_placement"] | changes}
+                self.registration["publication_sha256"] = json_file(path, receipt)
+                self.rejected("publication receipt must match the attested public export")
 
     def test_public_release_rejects_cleanup_of_another_export(self) -> None:
         self.configure("azure", "public", "direct", consumer="sdk")

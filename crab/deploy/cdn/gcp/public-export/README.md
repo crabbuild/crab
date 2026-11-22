@@ -26,7 +26,11 @@ All other requests are denied. The distribution preserves raw bytes.
    `repository_prefix`, and the SHA-256 of the exact approved inventory.
    Allocate a dedicated viewer hostname and point its A record at `viewer_ip`.
 2. Use the [approved inventory format](../../aws/README.md#public-export-qualification)
-   with the live `gs://` source. Run the publisher with Python 3.11 or later,
+   with the live `gs://` source. Set `source_placement.resource` to
+   `projects/<project-number>/buckets/<bucket>` and `location` to the bucket's
+   Cloud Storage location. The operator needs bucket metadata access on both
+   buckets and project metadata access on the export project.
+   Run the publisher with Python 3.11 or later,
    `google-cloud-storage` 3.17.1, and the Google Cloud CLI. The operator's
    named configuration needs read access to the bucket settings, CDN
    backend and Cloud Armor viewer policy. Use separate Application Default
@@ -41,7 +45,7 @@ All other requests are denied. The distribution preserves raw bytes.
      --scratch-directory /path/to/scratch --receipt /path/to/publication.json
    ```
 
-   The publisher validates the staged bucket, backend and viewer hostname
+   The publisher validates both bucket placements, the staged backend and viewer hostname
    before and after the copy. It hashes each source generation, uses
    `ifGenerationMatch=0` to create the matching export key, and verifies
    the exported bytes and public metadata. Retain the exact receipt and its

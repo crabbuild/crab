@@ -64,6 +64,8 @@ class CloudCdnDeploymentQualificationTests(unittest.TestCase):
             self.bindings = [{"role": "roles/storage.objectViewer", "condition": condition,
                               "members": [f"serviceAccount:service-{NUMBER}@cloud-cdn-fill.iam.gserviceaccount.com"]}]
         else:
+            self.source = {"name": "fixture-bucket", "projectNumber": "123455", "location": "US"}
+            self.documents[(COLLECTOR.STORAGE, "/storage/v1/b/fixture-bucket")] = self.source
             self.metadata |= {"softDeletePolicy": {"retentionDurationSeconds": "0"}, "labels": {
                 "crab_public_export": "true", "crab_inventory_0": "b" * 32, "crab_inventory_1": "c" * 32,
             }}
@@ -113,7 +115,11 @@ class CloudCdnDeploymentQualificationTests(unittest.TestCase):
                 if access == "public":
                     labels = self.metadata["labels"]
                     inventory = labels["crab_inventory_0"] + labels["crab_inventory_1"]
-                    binding = public_export_binding(self.fixture, f"projects/{PROJECT}/global/backendBuckets/bucket", inventory)
+                    binding = public_export_binding(
+                        self.fixture, f"projects/{PROJECT}/global/backendBuckets/bucket", inventory,
+                        self.fixture["source_placement"],
+                        {"resource": f"projects/{NUMBER}/buckets/{self.bucket}", "location": "NAM4"},
+                    )
                     self.assertEqual(snapshot["public-export"], deployment_component_digest(binding))
                 else:
                     binding = observation.private_binding.route(self.fixture)
@@ -128,6 +134,12 @@ class CloudCdnDeploymentQualificationTests(unittest.TestCase):
         self.configure("public")
         self.reader["includedPermissions"].append("storage.objects.list")
         with self.assertRaisesRegex(ValueError, "GCS export IAM permissions differ"):
+            self.collect()
+
+    def test_public_source_project_mismatch_cannot_attest(self):
+        self.configure("public")
+        self.source["projectNumber"] = "54321"
+        with self.assertRaisesRegex(ValueError, "live source differs"):
             self.collect()
 
     def test_private_attestation_requires_provider_reported_location(self):

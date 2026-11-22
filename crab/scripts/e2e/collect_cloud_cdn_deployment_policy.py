@@ -234,7 +234,14 @@ def collect(fixture: dict, project: str, forwarding_rule: str, configuration: st
     if access == "public":
         labels = storage["bucket"]["labels"]
         inventory = labels["crab_inventory_0"] + labels["crab_inventory_1"]
-        export_binding["public-export"] = public_export_binding(fixture, deployment, inventory)
+        source_bucket = origin_bucket(fixture["native_origin"], edge)
+        source = document(STORAGE, f"/storage/v1/b/{source_bucket}", authorization)
+        require(source["name"] == source_bucket, "GCS live source does not match its native bucket name")
+        export_binding["public-export"] = public_export_binding(
+            fixture, deployment, inventory,
+            {"resource": f"projects/{source['projectNumber']}/buckets/{source_bucket}", "location": source["location"]},
+            {"resource": f"projects/{project_number}/buckets/{bucket}", "location": storage["bucket"]["location"]},
+        )
     else:
         location = storage["bucket"].get("location")
         require(matches(re.compile(r"[A-Z0-9-]{1,40}"), location), "GCS native bucket needs an observed location")

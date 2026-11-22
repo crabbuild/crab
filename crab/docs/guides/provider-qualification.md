@@ -525,10 +525,17 @@ inputs. Use the publisher-reported `publication_sha256` in that row's
 benchmark registration. The assembler keeps both files in the release
 artifact. Use the dedicated qualification export's approved public inventory.
 
+Set the public fixture's `source_placement` to the exact object from the
+approved inventory. The canary identity needs native placement metadata
+access on the source as well as the export. Grant source bucket location
+access for S3, source bucket metadata access for GCS, or source storage
+account and container read access in Azure Resource Manager.
+
 Recollect public deployment snapshots before preregistration. They include
 an export component that binds the actual distribution or backend and its
-deployed inventory digest to the source, destination, repository, and viewer
-hostname. The transport collector records `approved_public_export.json`
+deployed inventory digest to the independently observed resource identities
+and locations of the source and destination, repository, and viewer hostname.
+The transport collector records `approved_public_export.json`
 from the same successful full GET as `exact_get.json`, with the observed
 SHA-256 of the body.
 

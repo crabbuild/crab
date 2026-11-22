@@ -63,6 +63,7 @@ class ExportTest(unittest.TestCase):
         inventory = {
             "schema": SCHEMA,
             "source_origin": "gs://crab-live-models",
+            "source_placement": {"resource": "projects/23456789/buckets/crab-live-models", "location": "NAM4"},
             "repository_prefix": "org/repo",
             "objects": [{"path": path, "size": len(self.data), "sha256": digest}],
         }
@@ -95,11 +96,15 @@ class ExportTest(unittest.TestCase):
         self.live_backend_bucket = "crab-public-export"
         self.viewer_host = "export.example.com"
         self.staged_access = "enforced"
+        self.source_project = "23456789"
+        self.destination_project = "12345678"
         self.enterContext(patch.object(publisher, "gcloud", self.gcloud))
         self.enterContext(patch.object(publisher, "storage_client", self.storage_client))
 
     def gcloud(self, configuration, arguments):
         self.assertEqual(configuration, "operator")
+        if arguments == ["projects", "describe", "crab-cdn-test"]:
+            return {"projectId": "crab-cdn-test", "projectNumber": "12345678"}
         if arguments[0] == "compute":
             if arguments[1] == "security-policies":
                 self.assertEqual(arguments[3], "fixture-viewer")
@@ -109,11 +114,15 @@ class ExportTest(unittest.TestCase):
             self.assertEqual(arguments[3], "fixture-backend")
             return {"name": "fixture-backend", "bucketName": self.live_backend_bucket, "enableCdn": True,
                     "edgeSecurityPolicy": "projects/crab-cdn-test/global/securityPolicies/fixture-viewer"}
+        if arguments == ["storage", "buckets", "describe", "gs://crab-live-models", "--raw"]:
+            return {"name": "crab-live-models", "projectNumber": self.source_project, "location": "NAM4"}
         self.assertEqual(arguments, [
             "storage", "buckets", "describe", "gs://crab-public-export", "--raw",
         ])
         return {
             "name": "crab-public-export",
+            "projectNumber": self.destination_project,
+            "location": "US",
             "labels": {
                 "crab_public_export": "true",
                 "crab_inventory_0": self.inventory_hash[:32],
@@ -146,6 +155,8 @@ class ExportTest(unittest.TestCase):
         self.assertEqual(receipt["inventory_sha256"], self.inventory_hash)
         self.assertEqual(receipt["base_url"], "https://export.example.com")
         self.assertEqual(receipt["deployment"], "projects/crab-cdn-test/global/backendBuckets/fixture-backend")
+        self.assertEqual(receipt["source_placement"]["location"], "NAM4")
+        self.assertEqual(receipt["export_placement"]["resource"], "projects/12345678/buckets/crab-public-export")
 
         self.assertEqual(self.export.body, self.data)
         self.assertEqual((self.source.writes, self.export.writes), (0, 1))
@@ -163,6 +174,15 @@ class ExportTest(unittest.TestCase):
     def test_staged_inventory_keeps_bad_source_bytes_out_of_export(self):
         self.source.body = b"x" * len(self.data)
         with self.assertRaisesRegex(publisher.ExportError, "digest mismatch"):
+            publisher.publish(self.options)
+        self.assertEqual(self.export.writes, 0)
+
+    def test_different_source_or_export_project_fails_before_copy(self):
+        self.source_project = "22222222"
+        with self.assertRaisesRegex(publisher.ExportError, "approved GCS placement"):
+            publisher.publish(self.options)
+        self.destination_project = "22222222"
+        with self.assertRaisesRegex(publisher.ExportError, "outside the approved Cloud CDN project"):
             publisher.publish(self.options)
         self.assertEqual(self.export.writes, 0)
 

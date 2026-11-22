@@ -13,7 +13,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "deploy/cdn"))
-from public_inventory import ExportError, read_publication  # noqa: E402
+from public_inventory import ExportError, native_placement, read_publication  # noqa: E402
 
 
 SCHEMA = "crab.cdn-qualification"
@@ -277,10 +277,23 @@ def deployment_policy_digest(edge: str, access: str, components: Any) -> str:
     return deployment_component_digest({"edge": edge, "access": access, "components": components})
 
 
-def public_export_binding(fixture: dict[str, Any], deployment: str, inventory_sha256: str) -> dict[str, str]:
-    return {"source_origin": fixture["native_origin"], "export_origin": fixture["export_origin"],
+def public_export_binding(
+    fixture: dict[str, Any], deployment: str, inventory_sha256: str,
+    source_placement: dict[str, str], export_placement: dict[str, str],
+) -> dict[str, Any]:
+    require(source_placement == fixture["source_placement"], "live source differs from the approved public placement")
+    return {"source_origin": fixture["native_origin"], "source_placement": source_placement,
+            "export_origin": fixture["export_origin"],
+            "export_placement": checked_placement(fixture["export_origin"], export_placement),
             "repository_prefix": fixture["fixture_prefix"], "base_url": fixture["base_url"].rstrip("/"),
             "deployment": deployment, "inventory_sha256": inventory_sha256}
+
+
+def checked_placement(origin: str, placement: Any) -> dict[str, str]:
+    try:
+        return native_placement(origin, placement)
+    except ExportError as error:
+        raise CdnEvidenceError(str(error)) from None
 
 
 def verify_deployment_policy_trace(value: Any, report: dict[str, Any], edge: str, access: str, expected: str) -> None:

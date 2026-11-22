@@ -36,6 +36,7 @@ def bucket(origin):
         raise ExportError("expected a native s3:// bucket")
     return match.group(1)
 
+
 def aws(profile, region, service, operation, *arguments):
     result = subprocess.run(
         ["aws", "--profile", profile, "--region", region, "--no-cli-pager",
@@ -46,6 +47,17 @@ def aws(profile, region, service, operation, *arguments):
     if result.returncode:
         raise AwsError(operation, result.stderr)
     return json.loads(result.stdout)
+
+
+def verify_placement(profile, origin, placement):
+    region = placement["location"]
+    owner = placement["resource"].split("/")[1]
+    response = aws(profile, region, "s3api", "get-bucket-location", "--bucket", bucket(origin),
+                   "--expected-bucket-owner", owner)
+    observed = response["LocationConstraint"]
+    observed = "us-east-1" if observed is None else "eu-west-1" if observed == "EU" else observed
+    if observed != region:
+        raise ExportError("S3 bucket region differs from the approved placement")
 
 
 def find_export(options, source, prefix, digest):
@@ -99,18 +111,24 @@ def download_verified(profile, region, location, obj, path):
 
 
 def publish(options):
-    source, prefix, digest, objects = read_inventory(options.inventory, bucket, MAX_OBJECT)
+    source, source_placement, prefix, digest, objects = read_inventory(options.inventory, bucket, MAX_OBJECT)
     source_bucket = bucket(source)
     staged = find_export(options, source, prefix, digest)
     export, owner, distribution, base_url = staged
+    export_origin = f"s3://{export}"
+    export_placement = {"resource": f"accounts/{owner}/buckets/{export}", "location": options.region}
+    verify_placement(options.source_profile, source, source_placement)
+    verify_placement(options.operator_profile, export_origin, export_placement)
+    source_owner = source_placement["resource"].split("/")[1]
+    source_region = source_placement["location"]
     with tempfile.TemporaryDirectory(
         prefix="crab-cdn-export-", dir=options.scratch_directory
     ) as scratch:
         for obj in objects:
             path = Path(scratch) / "payload"
             key = f"{prefix}/{obj.path}"
-            download_verified(options.source_profile, options.region,
-                              ["--bucket", source_bucket, "--key", key], obj, path)
+            download_verified(options.source_profile, source_region,
+                              ["--bucket", source_bucket, "--key", key, "--expected-bucket-owner", source_owner], obj, path)
             destination = ["--bucket", export, "--key", key, "--expected-bucket-owner", owner]
             checksum = base64.b64encode(bytes.fromhex(obj.sha256)).decode("ascii")
             try:
@@ -136,7 +154,10 @@ def publish(options):
             path.unlink()
     if find_export(options, source, prefix, digest) != staged:
         raise ExportError("export target changed during publication")
-    return publication_receipt(source, f"s3://{export}", prefix, base_url, distribution, digest, objects)
+    verify_placement(options.source_profile, source, source_placement)
+    verify_placement(options.operator_profile, export_origin, export_placement)
+    return publication_receipt(source, export_origin, source_placement, export_placement,
+                               prefix, base_url, distribution, digest, objects)
 
 
 def main():

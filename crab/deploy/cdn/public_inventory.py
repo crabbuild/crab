@@ -12,13 +12,20 @@ from tempfile import TemporaryDirectory
 SCHEMA = "crab.cdn-export.v1"
 PUBLICATION_SCHEMA = "crab.cdn-export-publication.v1"
 PUBLICATION_BINDING_FIELDS = {
-    "source_origin", "export_origin", "repository_prefix", "base_url", "deployment", "inventory_sha256",
+    "source_origin", "source_placement", "export_origin", "export_placement", "repository_prefix",
+    "base_url", "deployment", "inventory_sha256",
 }
 MAX_INVENTORY_BYTES = 8 * 1024 * 1024
 CONTENT_TYPE = "application/octet-stream"
 CACHE_CONTROL = "public, max-age=86400"
 SEGMENT = re.compile(r"[A-Za-z0-9._-]+")
 SHA256 = re.compile(r"[a-f0-9]{64}")
+S3_REGION = re.compile(r"(?!cn-|us-gov-|us-iso|eu-iso|eusc-)[a-z]{2}(?:-[a-z]+)+-[0-9]+")
+AZURE_CONTAINER = re.compile(
+    r"/subscriptions/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/resourcegroups/"
+    r"[a-z0-9_.()-]{1,90}/providers/microsoft\.storage/storageaccounts/([a-z0-9]{3,24})"
+    r"/blobservices/default/containers/([a-z0-9][a-z0-9-]{1,61}[a-z0-9])"
+)
 HTTPS_HOST = re.compile(r"https://[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
 GIT_KEY = re.compile(
     r"v2/(?:capsules|checkpoints|catalogs|pack-layers|history(?:/source-roots)?)/"
@@ -58,8 +65,28 @@ def read_document(path):
     return raw, json.loads(raw, object_pairs_hook=unique_fields)
 
 
+def native_placement(origin, placement):
+    exact_fields(placement, "resource location")
+    resource, location = placement["resource"], placement["location"]
+    if not all(isinstance(value, str) for value in (origin, resource, location)):
+        raise ExportError("invalid native bucket placement")
+    if origin.startswith("s3://"):
+        valid = (S3_REGION.fullmatch(location) and
+                 re.fullmatch(r"accounts/[0-9]{12}/buckets/" + re.escape(origin[5:]), resource))
+    elif origin.startswith("gs://"):
+        valid = (re.fullmatch(r"[A-Z0-9-]{1,40}", location) and
+                 re.fullmatch(r"projects/[1-9][0-9]*/buckets/" + re.escape(origin[5:]), resource))
+    else:
+        arm = AZURE_CONTAINER.fullmatch(resource)
+        valid = (arm and re.fullmatch(r"[a-z0-9]{1,40}", location)
+                 and origin == f"https://{arm[1]}.blob.core.windows.net/{arm[2]}")
+    if not valid:
+        raise ExportError("native placement does not match its origin")
+    return placement
+
+
 def parse_inventory(data, max_object):
-    exact_fields(data, "schema source_origin repository_prefix objects")
+    exact_fields(data, "schema source_origin source_placement repository_prefix objects")
     prefix = data["repository_prefix"]
     if (data["schema"] != SCHEMA or not isinstance(data["source_origin"], str)
             or not data["source_origin"] or not isinstance(prefix, str) or len(prefix) > 255
@@ -85,14 +112,15 @@ def parse_inventory(data, max_object):
         if obj.path in objects:
             raise ExportError("duplicate inventory object path")
         objects[obj.path] = obj
-    return data["source_origin"], prefix, tuple(objects.values())
+    source = data["source_origin"]
+    return source, native_placement(source, data["source_placement"]), prefix, tuple(objects.values())
 
 
 def read_inventory(path, validate_origin, max_object):
     raw, data = read_document(path)
-    source, prefix, objects = parse_inventory(data, max_object)
+    source, placement, prefix, objects = parse_inventory(data, max_object)
     validate_origin(source)
-    return source, prefix, hashlib.sha256(raw).hexdigest(), objects
+    return source, placement, prefix, hashlib.sha256(raw).hexdigest(), objects
 
 
 def viewer_url(value):
@@ -101,11 +129,14 @@ def viewer_url(value):
     return value
 
 
-def publication_receipt(source, export, prefix, base_url, deployment, inventory_sha256, objects):
+def publication_receipt(source, export, source_placement, export_placement, prefix, base_url,
+                        deployment, inventory_sha256, objects):
     return {
         "schema": PUBLICATION_SCHEMA,
         "source_origin": source,
+        "source_placement": native_placement(source, source_placement),
         "export_origin": export,
+        "export_placement": native_placement(export, export_placement),
         "repository_prefix": prefix,
         "base_url": base_url,
         "deployment": deployment,
@@ -120,13 +151,15 @@ def read_publication(directory, approved_sha256):
         raise ExportError("publication receipt differs from the preregistered SHA-256")
     exact_fields(receipt, "schema objects " + " ".join(PUBLICATION_BINDING_FIELDS))
     viewer_url(receipt["base_url"])
-    if (any(not isinstance(receipt[key], str) or not receipt[key] for key in PUBLICATION_BINDING_FIELDS)
+    if (any(not isinstance(receipt[key], str) or not receipt[key]
+            for key in PUBLICATION_BINDING_FIELDS - {"source_placement", "export_placement"})
             or receipt["export_origin"] == receipt["source_origin"]):
         raise ExportError("invalid public export binding")
     inventory_raw, inventory = read_document(directory / "inventory.json")
-    source, prefix, objects = parse_inventory(inventory, 2**64 - 1)
-    expected = publication_receipt(source, receipt["export_origin"], prefix, receipt["base_url"],
-                                   receipt["deployment"], hashlib.sha256(inventory_raw).hexdigest(), objects)
+    source, source_placement, prefix, objects = parse_inventory(inventory, 2**64 - 1)
+    expected = publication_receipt(source, receipt["export_origin"], source_placement, receipt["export_placement"],
+                                   prefix, receipt["base_url"], receipt["deployment"],
+                                   hashlib.sha256(inventory_raw).hexdigest(), objects)
     # Canonical JSON comparison also distinguishes booleans from integer sizes.
     if json.dumps(receipt, sort_keys=True) != json.dumps(expected, sort_keys=True):
         raise ExportError("publication receipt does not match the exact approved inventory")

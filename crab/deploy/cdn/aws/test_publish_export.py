@@ -19,6 +19,7 @@ class ExportTest(unittest.TestCase):
         self.inventory = {
             "schema": SCHEMA,
             "source_origin": "s3://source-models",
+            "source_placement": {"resource": "accounts/210987654321/buckets/source-models", "location": "us-west-2"},
             "repository_prefix": "org/repo",
             "objects": [{"path": self.path, "size": len(self.data), "sha256": digest}],
         }
@@ -38,6 +39,8 @@ class ExportTest(unittest.TestCase):
         self.physical_bucket = "export-models"
         self.viewer_host = "export.cloudfront.net"
         self.destination_host = "export-models.s3.us-east-1.amazonaws.com"
+        self.source_region = "us-west-2"
+        self.source_owner = "210987654321"
         self.corrupt_destination_write = False
         self.enable_during_readback = False
         self.writes = 0
@@ -48,7 +51,7 @@ class ExportTest(unittest.TestCase):
         self.approval = hashlib.sha256(raw).hexdigest()
 
     def aws(self, profile, region, service, operation, *args):
-        self.assertEqual(region, "us-east-1")
+        self.assertEqual(region, "us-west-2" if profile == "source-reader" else "us-east-1")
         if service == "cloudformation":
             self.assertEqual(profile, "operator")
             if operation == "describe-stacks":
@@ -82,15 +85,25 @@ class ExportTest(unittest.TestCase):
                 "DistributionConfig": {"Enabled": False, "Origins": {"Items": [{"DomainName": self.destination_host}]}},
             }}
         self.assertEqual(service, "s3api")
-        self.assertEqual(args[args.index("--key") + 1], f"org/repo/{self.path}")
         target = args[args.index("--bucket") + 1]
+        owner = args[args.index("--expected-bucket-owner") + 1]
+        if operation == "get-bucket-location":
+            if target == "source-models":
+                self.assertEqual(profile, "source-reader")
+                if owner != self.source_owner:
+                    raise publisher.AwsError(operation, "An error occurred (AccessDenied)")
+                return {"LocationConstraint": self.source_region}
+            self.assertEqual((target, profile, owner), ("export-models", "operator", "123456789012"))
+            return {"LocationConstraint": None}
+        self.assertEqual(args[args.index("--key") + 1], f"org/repo/{self.path}")
         if target == "export-models":
             self.assertEqual(profile, "export-writer")
-            self.assertEqual(args[args.index("--expected-bucket-owner") + 1], "123456789012")
+            self.assertEqual(owner, "123456789012")
             data = self.export_data
         else:
             self.assertEqual(target, "source-models")
             self.assertEqual(profile, "source-reader")
+            self.assertEqual(owner, "210987654321")
             data = self.source_data
         if operation == "head-object":
             return {"ContentLength": len(data), "ETag": '"fixture"',
@@ -119,6 +132,9 @@ class ExportTest(unittest.TestCase):
         self.assertEqual(receipt["inventory_sha256"], self.approval)
         self.assertEqual(receipt["schema"], PUBLICATION_SCHEMA)
         self.assertEqual(receipt["base_url"], "https://export.cloudfront.net")
+        self.assertEqual(receipt["source_placement"], self.inventory["source_placement"])
+        self.assertEqual(receipt["export_placement"],
+                         {"resource": "accounts/123456789012/buckets/export-models", "location": "us-east-1"})
         self.assertEqual(receipt["objects"], self.inventory["objects"])
         self.assertEqual(self.export_data, self.data)
         self.assertEqual(self.writes, 1)
@@ -136,6 +152,16 @@ class ExportTest(unittest.TestCase):
             with self.assertRaisesRegex(publisher.ExportError, "digest mismatch"):
                 publisher.publish(self.options)
         self.assertEqual(self.export_data, replacement)
+        self.assertEqual(self.writes, 0)
+
+    def test_same_named_source_in_wrong_account_or_region_fails_before_copy(self):
+        with patch.object(publisher, "aws", self.aws):
+            self.source_region = "eu-west-1"
+            with self.assertRaisesRegex(publisher.ExportError, "region differs"):
+                publisher.publish(self.options)
+            self.source_owner = "999999999999"
+            with self.assertRaisesRegex(publisher.ExportError, "AccessDenied"):
+                publisher.publish(self.options)
         self.assertEqual(self.writes, 0)
 
     def test_successful_put_with_corrupt_destination_cannot_seal_receipt(self):

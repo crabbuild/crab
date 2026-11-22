@@ -24,7 +24,11 @@ misses. [Azure anonymous Blob access](https://learn.microsoft.com/en-us/azure/st
    Supply the live `sourceOrigin`, `repositoryPrefix`, a new export account and
    container, and `approvedInventorySha256` from the exact reviewed inventory.
 2. Use the [approved inventory format](../../aws/README.md#public-export-qualification)
-   with the live Blob origin. Use Python 3.11 or later and the Azure CLI.
+   with the live Blob origin. Set `source_placement.resource` to the lowercase
+   ARM resource ID ending in `/blobservices/default/containers/<container>`
+   and `location` to the source account's primary location. The operator
+   needs ARM read permission for both storage accounts and containers.
+   Use Python 3.11 or later and the Azure CLI.
    The publisher accepts three local Azure CLI configuration directories
    for the deployment operator, source reader and dedicated Entra writer.
    The writer needs read and write data access scoped to the export
@@ -38,8 +42,8 @@ misses. [Azure anonymous Blob access](https://learn.microsoft.com/en-us/azure/st
      --scratch-directory /path/to/scratch --receipt /path/to/publication.json
    ```
 
-   It verifies the disabled Front Door route, viewer hostname and native
-   account before and after copying the approved immutable keys. It uses
+   It verifies the disabled Front Door route, viewer hostname and both native
+   placements before and after copying the approved immutable keys. It uses
    conditional block blob creation and reads back destination bytes and public
    metadata. Retain the exact receipt and its printed SHA-256. Confirm that
    the receipt covers the accelerated objects before activation. The

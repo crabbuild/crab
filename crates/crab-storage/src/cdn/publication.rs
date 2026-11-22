@@ -19,12 +19,96 @@ pub(crate) struct Publication {
 struct Receipt {
     schema: String,
     source_origin: String,
+    source_placement: Placement,
     export_origin: String,
+    export_placement: Placement,
     repository_prefix: String,
     base_url: String,
     deployment: String,
     inventory_sha256: String,
     objects: Vec<Entry>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Placement {
+    resource: String,
+    location: String,
+}
+
+impl Placement {
+    fn matches(&self, origin: &str) -> bool {
+        let parts = self.resource.split('/').collect::<Vec<_>>();
+        match parts.as_slice() {
+            ["accounts", account, "buckets", bucket] => {
+                account.len() == 12
+                    && account.bytes().all(|byte| byte.is_ascii_digit())
+                    && origin.strip_prefix("s3://") == Some(*bucket)
+                    && !["cn-", "us-gov-", "us-iso", "eu-iso", "eusc-"]
+                        .iter()
+                        .any(|prefix| self.location.starts_with(prefix))
+                    && self.location.rsplit_once('-').is_some_and(|(name, zone)| {
+                        !zone.is_empty()
+                            && zone.bytes().all(|byte| byte.is_ascii_digit())
+                            && name.split('-').count() >= 2
+                            && name.split('-').all(|part| {
+                                !part.is_empty()
+                                    && part.bytes().all(|byte| byte.is_ascii_lowercase())
+                            })
+                    })
+            }
+            ["projects", project, "buckets", bucket] => {
+                !project.is_empty()
+                    && !project.starts_with('0')
+                    && project.bytes().all(|byte| byte.is_ascii_digit())
+                    && origin.strip_prefix("gs://") == Some(*bucket)
+                    && (1..=40).contains(&self.location.len())
+                    && self.location.bytes().all(|byte| {
+                        byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'-'
+                    })
+            }
+            [
+                "",
+                "subscriptions",
+                subscription,
+                "resourcegroups",
+                group,
+                "providers",
+                "microsoft.storage",
+                "storageaccounts",
+                account,
+                "blobservices",
+                "default",
+                "containers",
+                container,
+            ] => {
+                matches!(
+                    subscription
+                        .split('-')
+                        .map(str::len)
+                        .collect::<Vec<_>>()
+                        .as_slice(),
+                    [8, 4, 4, 4, 12]
+                ) && subscription
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f' | b'-'))
+                    && !matches!(*group, "." | "..")
+                    && (1..=90).contains(&group.len())
+                    && group.bytes().all(|byte| {
+                        byte.is_ascii_lowercase()
+                            || byte.is_ascii_digit()
+                            || b"_.()-".contains(&byte)
+                    })
+                    && origin == format!("https://{account}.blob.core.windows.net/{container}")
+                    && (1..=40).contains(&self.location.len())
+                    && self
+                        .location
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            }
+            _ => false,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -71,6 +155,8 @@ impl Publication {
         if receipt.schema != "crab.cdn-export-publication.v1"
             || receipt.export_origin != export
             || receipt.source_origin == export
+            || !receipt.source_placement.matches(&receipt.source_origin)
+            || !receipt.export_placement.matches(&receipt.export_origin)
             || receipt.repository_prefix != layout.repo_prefix()
             || receipt.base_url != base
             || receipt.deployment.is_empty()
@@ -132,10 +218,31 @@ pub fn write_publication_fixture(
     relative_key: &str,
     size: u64,
 ) -> Result<CdnPublicationFile> {
+    fn fixture_placement(origin: &str) -> serde_json::Value {
+        let (resource, location) = if let Some(name) = origin.strip_prefix("s3://") {
+            (format!("accounts/123456789012/buckets/{name}"), "us-east-1")
+        } else if let Some(name) = origin.strip_prefix("gs://") {
+            (format!("projects/123456789012/buckets/{name}"), "US")
+        } else {
+            let (account, container) = origin
+                .strip_prefix("https://")
+                .and_then(|url| url.split_once(".blob.core.windows.net/"))
+                .unwrap_or_default();
+            (
+                format!(
+                    "/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/fixture/providers/microsoft.storage/storageaccounts/{account}/blobservices/default/containers/{container}"
+                ),
+                "westus2",
+            )
+        };
+        serde_json::json!({"resource": resource, "location": location})
+    }
     let receipt = serde_json::json!({
         "schema": "crab.cdn-export-publication.v1",
         "source_origin": source,
+        "source_placement": fixture_placement(source),
         "export_origin": export,
+        "export_placement": fixture_placement(export),
         "repository_prefix": prefix,
         "base_url": base,
         "deployment": "fixture",

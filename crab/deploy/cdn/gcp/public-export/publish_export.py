@@ -11,7 +11,7 @@ import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from public_inventory import (
-    CACHE_CONTROL, CONTENT_TYPE, ExportError, publication_receipt, read_inventory, verify_body, viewer_url,
+    CACHE_CONTROL, CONTENT_TYPE, ExportError, native_placement, publication_receipt, read_inventory, verify_body, viewer_url,
     write_publication,
 )
 
@@ -39,7 +39,15 @@ def gcloud(configuration, arguments):
     return json.loads(result.stdout)
 
 
-def find_export(options, source, prefix, digest):
+def bucket_placement(origin, metadata):
+    name = bucket(origin)
+    if metadata.get("name") != name:
+        raise ExportError("observed GCS bucket differs from its native origin")
+    return native_placement(origin, {"resource": f"projects/{metadata.get('projectNumber')}/buckets/{name}",
+                                     "location": metadata.get("location")})
+
+
+def find_export(options, source, source_placement, prefix, digest):
     outputs = json.loads(options.deployment.read_text())
     values = {key: output["value"] for key, output in outputs.items()}
     export = values["export_origin"]
@@ -69,6 +77,11 @@ def find_export(options, source, prefix, digest):
     name = r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?"
     if not re.fullmatch(name, backend) or not re.fullmatch(name, project):
         raise ExportError("invalid Google Cloud export backend or project")
+    identity = gcloud(options.operator_configuration, ["projects", "describe", project])
+    export_placement = bucket_placement(export, meta)
+    if (identity.get("projectId") != project
+            or export_placement["resource"] != f"projects/{identity.get('projectNumber')}/buckets/{export_bucket}"):
+        raise ExportError("export bucket is outside the approved Cloud CDN project")
     settings = gcloud(
         options.operator_configuration,
         ["compute", "backend-buckets", "describe", backend, "--project", project],
@@ -91,7 +104,10 @@ def find_export(options, source, prefix, digest):
         for rule in policy["rules"]
     ):
         raise ExportError("Cloud CDN viewer policy does not match the staged hostname")
-    return export, f"projects/{project}/global/backendBuckets/{backend}", project, base_url
+    source_meta = gcloud(options.operator_configuration, ["storage", "buckets", "describe", source, "--raw"])
+    if bucket_placement(source, source_meta) != source_placement:
+        raise ExportError("source bucket differs from the approved GCS placement")
+    return export, export_placement, f"projects/{project}/global/backendBuckets/{backend}", project, base_url
 
 
 def storage_client(credentials_file, project):
@@ -130,9 +146,9 @@ def create_blob(blob, path):
 
 
 def publish(options):
-    source, prefix, digest, objects = read_inventory(options.inventory, bucket, MAX_OBJECT)
-    staged = find_export(options, source, prefix, digest)
-    export, backend, project, base_url = staged
+    source, source_placement, prefix, digest, objects = read_inventory(options.inventory, bucket, MAX_OBJECT)
+    staged = find_export(options, source, source_placement, prefix, digest)
+    export, export_placement, backend, project, base_url = staged
     reader = storage_client(options.source_adc, project).bucket(bucket(source))
     writer = storage_client(options.writer_adc, project).bucket(bucket(export))
     with tempfile.TemporaryDirectory(
@@ -153,9 +169,10 @@ def publish(options):
                     ))):
                 raise ExportError(f"export metadata differs from the approved profile for {obj.path}")
             path.unlink()
-    if find_export(options, source, prefix, digest) != staged:
+    if find_export(options, source, source_placement, prefix, digest) != staged:
         raise ExportError("export target changed during publication")
-    return publication_receipt(source, export, prefix, base_url, backend, digest, objects)
+    return publication_receipt(source, export, source_placement, export_placement,
+                               prefix, base_url, backend, digest, objects)
 
 
 def main():

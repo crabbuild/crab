@@ -53,6 +53,13 @@ def fixture(edge: str = "cloudfront", access: str = "public") -> dict:
     }
     if access == "public":
         sample["export_origin"] = origin.replace("fixture", "export")
+        sample["source_placement"] = {
+            "cloudfront": {"resource": "accounts/210987654321/buckets/fixture-bucket", "location": "us-east-1"},
+            "cloud-cdn": {"resource": "projects/123455/buckets/fixture-bucket", "location": "US"},
+            "front-door": {"resource": "/subscriptions/12345678-1234-1234-1234-123456789012/resourcegroups/live/"
+                                       "providers/microsoft.storage/storageaccounts/fixtureacct/"
+                                       "blobservices/default/containers/container", "location": "eastus"},
+        }[edge]
     return sample
 
 

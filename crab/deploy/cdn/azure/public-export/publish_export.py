@@ -12,7 +12,7 @@ import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from public_inventory import (
-    CACHE_CONTROL, CONTENT_TYPE, ExportError, publication_receipt, read_inventory, verify_body, viewer_url,
+    CACHE_CONTROL, CONTENT_TYPE, ExportError, native_placement, publication_receipt, read_inventory, verify_body, viewer_url,
     write_publication,
 )
 
@@ -56,7 +56,15 @@ def resource(options, resource_id, api_version):
     )
 
 
-def find_export(options, source, prefix, digest):
+def blob_placement(origin, account, container, account_id, container_id):
+    properties = account["properties"]
+    if (account["id"].lower() != account_id.lower() or container["id"].lower() != container_id.lower()
+            or properties["primaryEndpoints"]["blob"].rstrip("/") != origin.rsplit("/", 1)[0]):
+        raise ExportError("Azure ARM resources differ from the approved Blob origin")
+    return native_placement(origin, {"resource": container["id"].lower(), "location": properties.get("primaryLocation")})
+
+
+def find_export(options, source, source_placement, prefix, digest):
     deployment = az(options.operator_configuration, [
         "deployment", "group", "show", "--resource-group", options.resource_group,
         "--name", options.deployment, "--subscription", options.subscription,
@@ -94,6 +102,7 @@ def find_export(options, source, prefix, digest):
     if (bucket["id"].lower() != container_id.lower()
             or bucket["properties"].get("publicAccess", "None") != "None"):
         raise ExportError("native export container is not private")
+    export_placement = blob_placement(export, storage, bucket, account_id, container_id)
     blob_properties = resource(options, f"{account_id}/blobServices/default", "2025-01-01")["properties"]
     if (blob_properties.get("isVersioningEnabled", False) is not False
             or any(blob_properties[property_name].get("enabled") is not False
@@ -125,7 +134,14 @@ def find_export(options, source, prefix, digest):
             or route_properties["originGroup"]["id"].lower() != origin["id"].rsplit("/origins/", 1)[0].lower()
             or route_properties.get("enabledState") != "Disabled"):
         raise ExportError("Front Door route does not serve the staged export container")
-    return export, route["id"], base_url
+    source_container_id = source_placement["resource"]
+    source_account_id = source_container_id.split("/blobservices/", 1)[0]
+    observed_source = blob_placement(source, resource(options, source_account_id, "2025-01-01"),
+                                     resource(options, source_container_id, "2025-01-01"),
+                                     source_account_id, source_container_id)
+    if observed_source != source_placement:
+        raise ExportError("source Blob container differs from the approved placement")
+    return export, export_placement, route["id"], base_url
 
 
 def object_arguments(origin, key):
@@ -148,7 +164,7 @@ def download_verified(configuration, location, obj, path):
 
 
 def publish(options):
-    source, prefix, digest, objects = read_inventory(options.inventory, account_container, MAX_OBJECT)
+    source, source_placement, prefix, digest, objects = read_inventory(options.inventory, account_container, MAX_OBJECT)
     if len(prefix) > 64:
         raise ExportError("Front Door fixture requires a repository prefix of at most 64 characters")
     for configuration in (
@@ -156,8 +172,8 @@ def publish(options):
     ):
         if az(configuration, ["cloud", "show"]).get("name") != "AzureCloud":
             raise ExportError("export requires Azure public-cloud configurations")
-    staged = find_export(options, source, prefix, digest)
-    export, route, base_url = staged
+    staged = find_export(options, source, source_placement, prefix, digest)
+    export, export_placement, route, base_url = staged
     with tempfile.TemporaryDirectory(
         prefix="crab-cdn-export-", dir=options.scratch_directory
     ) as scratch:
@@ -187,9 +203,10 @@ def publish(options):
                     ))):
                 raise ExportError(f"export representation differs for {obj.path}")
             path.unlink()
-    if find_export(options, source, prefix, digest) != staged:
+    if find_export(options, source, source_placement, prefix, digest) != staged:
         raise ExportError("export target changed during publication")
-    return publication_receipt(source, export, prefix, base_url, route, digest, objects)
+    return publication_receipt(source, export, source_placement, export_placement,
+                               prefix, base_url, route, digest, objects)
 
 
 def main():
