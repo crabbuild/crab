@@ -4,6 +4,7 @@ import { runInNewContext } from 'node:vm';
 
 const template = readFileSync(new URL('./cloudfront.yaml', import.meta.url), 'utf8');
 const publicTemplate = readFileSync(new URL('./public-export.yaml', import.meta.url), 'utf8');
+const logTemplate = readFileSync(new URL('./qualification-logs.yaml', import.meta.url), 'utf8');
 
 const repository = 'org/repo.v2';
 const scope = 'a'.repeat(64);
@@ -75,3 +76,22 @@ assert.match(publicTemplate, /AWS:SourceArn: !Sub 'arn:\$\{AWS::Partition\}:clou
 assert.match(publicTemplate, /aws:PrincipalArn: !Ref ExportWriterRoleArn/);
 assert.match(publicTemplate, /s3:ObjectCreationOperation: 'true'\n              StringNotEquals:\n                s3:if-none-match: '\*'/);
 assert.doesNotMatch(publicTemplate, /TrustedKeyGroups|Action: s3:ListBucket|DomainName:.*SourceOrigin/);
+
+const viewerFields = logTemplate.match(/RecordFields:\n((?: {8}- [^\n]+\n)+)/)?.[1];
+assert.ok(viewerFields, 'CloudFront delivery selects the measured fields explicitly');
+assert.deepEqual(viewerFields.trim().split('\n').map((line) => line.trim().slice(2)), [
+  'date', 'time', 'x-edge-request-id', 'x-host-header', 'cs-method', 'cs-uri-stem',
+  'cs-protocol', 'sc-status', 'sc-bytes', 'x-edge-response-result-type',
+]);
+assert.match(logTemplate, /OutputFormat: w3c/);
+assert.match(logTemplate, /FieldDelimiter: "\\t"/);
+assert.match(logTemplate, /BucketOwnerEnforced/);
+assert.match(logTemplate, /BlockPublicPolicy: true/);
+assert.match(logTemplate, /IgnorePublicAcls: true/);
+assert.match(logTemplate, /RestrictPublicBuckets: true/);
+assert.match(logTemplate, /BlockPublicAcls: true/);
+assert.match(logTemplate, /ExpirationInDays: 14/);
+assert.match(logTemplate, /DependsOn: LogBucketPolicy/);
+assert.match(logTemplate, /aws:SourceArn: !GetAtt ViewerSource\.Arn/);
+assert.match(logTemplate, /Resource: !Sub '\$\{LogBucket\.Arn\}\/AWSLogs\/\$\{AWS::AccountId\}\/CloudFront\/\*'/);
+assert.match(logTemplate, /Service: logging\.s3\.amazonaws\.com[\s\S]+aws:SourceArn: !Sub 'arn:\$\{AWS::Partition\}:s3:::\$\{OriginBucketName\}'/);

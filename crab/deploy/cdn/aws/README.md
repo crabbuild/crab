@@ -57,6 +57,50 @@ to bind the deployed policy to the qualification fixture and release row.
 [Origin Access Control](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html)
 · [CloudFront viewer cookies](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-setting-signed-cookie-custom-policy.html)
 
+## Qualification access logs
+
+Deploy `qualification-logs.yaml` as a companion to either AWS fixture in
+`us-east-1`. Pass the fixture's `DistributionId` and its actual origin bucket
+as `OriginBucketName`. Use the `Bucket` output for the private fixture or
+remove the `s3://` prefix from the public fixture's `ExportOrigin` output.
+The origin and log bucket must belong
+to the same account and Region. The companion sets up CloudFront standard
+logging v2 with the tab-separated W3C fields the evidence collector expects.
+It selects neither cookies nor query strings. Keep CloudFront cookie logging
+disabled at the distribution. [CloudFront logging v2](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/standard-logging.html)
+
+After the companion is ready, check the fixture origin's current server
+access logging configuration. If it has no destination, enable logging to
+the companion's `LogBucket` with target prefix `origin/`. If it already
+has a destination, verify that it matches the companion or use a new
+fixture. Set the expected bucket owner on both API calls. For example,
+after verifying these values against the two stacks' outputs:
+
+```sh
+aws s3api get-bucket-logging --profile crab --region us-east-1 \
+  --bucket "$fixture_origin" --expected-bucket-owner "$fixture_account"
+
+# Run only for the dedicated fixture with an empty logging configuration.
+logging_status=$(jq -n --arg bucket "$fixture_log_bucket" \
+  '{LoggingEnabled: {TargetBucket: $bucket, TargetPrefix: "origin/"}}')
+aws s3api put-bucket-logging --profile crab --region us-east-1 \
+  --bucket "$fixture_origin" --expected-bucket-owner "$fixture_account" \
+  --bucket-logging-status "$logging_status"
+```
+
+Allow time for both CloudFront and S3 delivery. Confirm both feeds arrive
+before collecting benchmark samples. Pass decompressed objects from the
+`ViewerLogPrefix` output as `--log` and plain-text objects from
+`OriginLogPrefix` as `--s3-origin-log` to
+`crab/scripts/e2e/collect_cdn_viewer_requests.py`. Keep these raw files on
+the protected worker. Only the collector's redacted output belongs in the
+bundle. The log bucket expires raw logs after 14 days.
+[S3 access logging](https://docs.aws.amazon.com/AmazonS3/latest/userguide/enable-server-access-logging.html)
+
+To retire a fixture, stop its origin log delivery before removing the
+companion. Retain the redacted report and empty only the dedicated log
+bucket named in the companion's output.
+
 ## Public export qualification
 
 `public-export.yaml` uses a separate stack and creates a new S3 bucket.

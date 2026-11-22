@@ -489,6 +489,13 @@ ordinary build must demonstrate the promoted read and the origin behavior of
 adjacent unpromoted families. Block promotion when required evidence still
 depends on a generic trace or an externally supplied pass flag.
 
+The AWS qualification fixtures can use the companion
+`crab/deploy/cdn/aws/qualification-logs.yaml` stack for viewer and origin
+logs in `us-east-1`. It selects the exact CloudFront fields needed by the
+collector, gives the fixture's S3 origin its own log prefix, and expires
+raw logs after the qualification window. Verify delivery before the first
+benchmark sample.
+
 The scripted Git workload guards the native origin and effective repository
 prefix in both fixture and ordinary builds. The guard runs before repository
 roots and replica readiness, and records origin and prefix digests. Its

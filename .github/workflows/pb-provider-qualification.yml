@@ -226,8 +226,9 @@ jobs:
             crab/scripts/verify-provider-qualification-report.py \
             crab/scripts/e2e/test_verify_provider_qualification_report.py
 
-      - name: Verify public CDN publishers
+      - name: Verify CDN fixture policy and public publishers
         run: |
+          node crab/deploy/cdn/aws/check_fixture.mjs
           python3 -m venv "$RUNNER_TEMP/cdn-publisher-python"
           publisher_python="$RUNNER_TEMP/cdn-publisher-python/bin/python"
           "$publisher_python" -m pip install --disable-pip-version-check 'google-cloud-storage==3.17.1'

@@ -1302,6 +1302,8 @@ header and the request ID, viewer host, URI stem, method, protocol, response
 status, sent bytes and response result type fields. Also supply the approved
 origin bucket's plain-text S3 server access logs with `--s3-origin-log`. Use
 the private repository bucket or the public export bucket as applicable.
+The AWS fixture includes a companion template for both log streams in
+`us-east-1`.
 The collector joins CloudFront's signed S3 object GETs to viewer keys and
 the timed fetch window. The cold arm needs a successful S3 response with
 body bytes. Use a fresh publication for each pair, keep other CloudFront
