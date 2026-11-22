@@ -61,7 +61,7 @@ def sample(provider: str) -> dict[str, Any]:
 
 
 def release_policy_row(scope: str) -> str:
-    return f"{scope} 1024 2048 1024 5000\n"
+    return f"{scope} 0 16 8 5000\n"
 
 
 def cli_candidate(scope: str, platform: str) -> dict:
@@ -1151,6 +1151,23 @@ class CdnQualificationTests(unittest.TestCase):
             path = arm / name
             json_file(path, json.loads(path.read_bytes()) | {"client_report_sha256": digest})
         self.rejected("disagrees with its compiled CDN read limits", "--cdn-release-policy", str(policy))
+
+    def test_release_uses_front_door_logs_when_the_client_cache_result_is_unknown(self):
+        self.configure("azure", "private", "direct")
+        policy = self.directory / "qualified-scopes.txt"
+        policy.write_text(release_policy_row(self.scope))
+        for label, hits, misses in (("cold_edge", 0, 1), ("warm_edge", 1, 0)):
+            arm = self.directory / CDN.GIT_BENCHMARK_DIR / "near/0001" / label
+            client = json.loads((arm / "client.json").read_bytes())
+            self.assertEqual((client["edge_hits"], client["edge_misses"]), (hits, misses))
+            client.update(edge_hits=0, edge_misses=0, edge_unknown=1)
+            next(iter(client["edge_responses"].values()))["cache"] = "unknown"
+            digest = json_file(arm / "client.json", client)
+            for name in (CDN.VIEWER_REQUEST_FILES["azure"], "measurement.json"):
+                path = arm / name
+                json_file(path, json.loads(path.read_bytes()) | {"client_report_sha256": digest})
+        result = self.command("--cdn-release-policy", str(policy))
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_rejects_unqualified_or_unproven_managed_mode(self) -> None:
         self.configure("s3", "private", "managed")

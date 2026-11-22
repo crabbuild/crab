@@ -54,8 +54,22 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         self.registration["candidate"] = fixture.cli_candidate(self.registration["scope"], PLATFORM)
         fixture.write_git_measurements(self.root, self.registration, PLATFORM)
 
-    def collect(self) -> dict:
-        return fixture.CDN.collect_git_performance(self.root, self.registration, PLATFORM, RUN_ID, ATTEMPT)
+    def collect(self, *, policy: Path | None = None) -> dict:
+        return fixture.CDN.collect_git_performance(self.root, self.registration, PLATFORM, RUN_ID, ATTEMPT, policy=policy)
+
+    def amend_edge_response(self, path: str, **changes: object) -> None:
+        directory = self.root / path
+        client = json.loads((directory / "client.json").read_bytes())
+        request, response = next(iter(client["edge_responses"].items()))
+        updated = response | changes
+        hits = int(updated["cache"] == "hit")
+        misses = int(updated["cache"] == "miss")
+        self.amend_client(path, edge_responses={request: updated}, edge_bytes=updated["bytes"],
+                          edge_hits=hits, edge_misses=misses, edge_unknown=1 - hits - misses)
+        proof_path = directory / fixture.CDN.VIEWER_REQUEST_FILES["s3"]
+        proof = json.loads(proof_path.read_bytes())
+        proof["records"][request].update(status=updated["status"], cache=updated["cache"])
+        fixture.json_file(proof_path, proof)
 
     def amend_client(self, path: str, **changes: object) -> None:
         directory = self.root / path
@@ -82,6 +96,24 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         self.assertEqual(BENCHMARK.verify_performance(performance, self.registration), 180)
         self.assertEqual(performance["near"]["pairs"][0]["cold_edge"]["origin_fill_bytes"], 8)
         self.assertEqual(performance["near"]["pairs"][0]["warm_local"]["local_payload_hits"], 1)
+
+    def test_release_requires_one_range_at_both_size_limits(self) -> None:
+        policy = self.root / "release-policy.txt"
+        policy.write_text(f"{self.registration['scope']} 0 17 8 5000\n")
+        self.amend_edge_response("near/0001/warm_edge", object_bytes=17, requested_bytes=7, bytes=7)
+        with self.assertRaisesRegex(ValueError, "warm edge hit at its compiled ranged GET size limit"):
+            self.collect(policy=policy)
+        self.amend_edge_response("near/0001/warm_edge", object_bytes=17, requested_bytes=8, bytes=8)
+        self.collect(policy=policy)
+
+    def test_cold_full_transfer_does_not_prove_cache_delivery_at_limit(self) -> None:
+        policy = self.root / "release-policy.txt"
+        policy.write_text(f"{self.registration['scope']} 8 16 8 5000\n")
+        self.amend_edge_response("near/0001/cold_edge", status=200, range=False, object_bytes=8)
+        with self.assertRaisesRegex(ValueError, "warm edge hit at its compiled full GET size limit"):
+            self.collect(policy=policy)
+        self.amend_edge_response("near/0001/warm_edge", status=200, range=False, object_bytes=8)
+        self.collect(policy=policy)
 
     def test_rejects_a_different_commit_with_the_same_content(self) -> None:
         self.amend_client("near/0001/warm_edge", publication_oid="b" * 40)

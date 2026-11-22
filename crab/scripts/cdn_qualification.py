@@ -1839,6 +1839,7 @@ class ViewerRequestMetrics(NamedTuple):
     origin_gets: int
     fill_bytes: int
     successful_fill: bool
+    completed_cache: dict[str, str]
 
 
 def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: str, edge: str) -> ViewerRequestMetrics:
@@ -1869,6 +1870,7 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
     logged_ids = set(records)
     origin_gets = child_fill_bytes = viewer_fill_bytes = 0
     successful_fill = False
+    completed_cache = {}
     observed_transfer = dict.fromkeys(("edge_hits", "edge_misses", "edge_unknown", "edge_bytes", "incomplete_edge_bytes"), 0)
     for request_id, record in records.items():
         row = fields(record, record_fields, "CDN viewer log record")
@@ -1880,6 +1882,8 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
                 "CDN log status or response bytes disagree with the client")
         if response["complete"] and response["cache"] != "unknown":
             require(row["cache"] == response["cache"], "CDN log cache result disagrees with the completed response")
+        if served_payload and row["cache"] in ("hit", "miss"):
+            completed_cache[request_id] = row["cache"]
         if keyed_origin or object_key is not None or transition_key is not None:
             require(matches(SHA256, row["key_sha256"]), "invalid CDN object key fingerprint")
             require(xorb_key is None or row["key_sha256"] == xorb_key,
@@ -1946,7 +1950,8 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
                 successful_fill |= positive(origin["response_body_bytes"])
     # Collapsed traffic and separate range-fills can describe the same bytes
     # at both levels. Use the strongest floor without adding overlapping totals.
-    return ViewerRequestMetrics(logged_ids, origin_gets, max(viewer_fill_bytes, child_fill_bytes), successful_fill)
+    return ViewerRequestMetrics(logged_ids, origin_gets, max(viewer_fill_bytes, child_fill_bytes),
+                                successful_fill, completed_cache)
 
 
 def verify_product_viewer_requests(raw: bytes, client: dict[str, Any], client_raw: bytes, edge: str) -> set[str]:
@@ -2545,6 +2550,12 @@ def collect_git_performance(
     spec = benchmark_registration(registration)
     scope = spec["scope"]
     limits = release_read_limits(policy).get(scope) if policy is not None else None
+    missing_boundaries = {}
+    if limits is not None:
+        if limits.full_bytes:
+            missing_boundaries["full GET"] = (limits.full_bytes, limits.full_bytes)
+        if limits.range_bytes:
+            missing_boundaries["ranged GET"] = (limits.ranged_object_bytes, limits.range_bytes)
     family = scope_parts(scope)[3]
     hydration = is_direct_xorb_read_scope(scope)
     require(hydration == (verify_xorb is not None), "xorb read benchmarks require verified publication and placement")
@@ -2765,7 +2776,8 @@ def collect_git_performance(
                 fixtures.add((payload, receipt, reader["origin_sha256"], reader["prefix_sha256"]))
                 windows[arm] = (client["started_at_unix_ms"], client["finished_at_unix_ms"])
                 viewer_log = None
-                traffic = ViewerRequestMetrics(set(), 0, 0, False)
+                traffic = ViewerRequestMetrics(set(), 0, 0, False, {})
+                cache_corrections = {"hit": 0, "miss": 0}
                 if provider in VIEWER_REQUEST_FILES and client["all_edge_attempts"]:
                     log_name = VIEWER_REQUEST_FILES[provider]
                     viewer_log = read_git_record(inputs / slot / log_name, limit=GIT_FETCH_RECORD_LIMIT)
@@ -2774,11 +2786,25 @@ def collect_git_performance(
                     )
                     require(provider_request_ids.isdisjoint(traffic.request_ids), "CDN log requests were reused across arms")
                     provider_request_ids.update(traffic.request_ids)
+                    responses = {request_id: row for request_id, row in client["edge_responses"].items()
+                                 if row["family"] == family}
                     if limits is not None:
-                        responses = [row for row in client["edge_responses"].values() if row["family"] == family]
-                        require((not client["observed_edge_gets"] or any(row["complete"] and row["bytes"] for row in responses))
-                                and all(limits.admits(row) for row in responses),
+                        require((not client["observed_edge_gets"]
+                                 or any(row["complete"] and row["bytes"] for row in responses.values()))
+                                and all(limits.admits(row) for row in responses.values()),
                                 f"{label} disagrees with its compiled CDN read limits")
+                    for request_id, cache in traffic.completed_cache.items():
+                        row = responses.get(request_id)
+                        if row is None:
+                            continue
+                        # A viewer header may describe only the first chunk.
+                        # Use the joined log's disposition for the entire response.
+                        if row["cache"] == "unknown":
+                            cache_corrections[cache] += 1
+                        if arm == "warm_edge" and cache == "hit":
+                            form = "ranged GET" if row["range"] else "full GET"
+                            if missing_boundaries.get(form) == (row["object_bytes"], row["requested_bytes"]):
+                                del missing_boundaries[form]
                 external_raw = read_git_record(inputs / slot / "measurement.json")
                 external = fields(decode(external_raw), GIT_MEASUREMENT_FIELDS, "benchmark measurement")
                 require(external["schema"] == "crab.cdn-git-measurement/v1" and external["provider"] == provider
@@ -2786,6 +2812,11 @@ def collect_git_performance(
                         f"{label} has mismatched provider measurements")
                 measured = {key: client[key] for key in GIT_CLIENT_METRICS}
                 measured.update({key: external[key] for key in GIT_EXTERNAL_METRICS})
+                corrected = sum(cache_corrections.values())
+                require(corrected <= measured["edge_unknown"], f"{label} undercounts its unknown CDN cache results")
+                measured["edge_unknown"] -= corrected
+                measured["edge_hits"] += cache_corrections["hit"]
+                measured["edge_misses"] += cache_corrections["miss"]
                 require(all(type(value) is int and value >= 0 for value in measured.values()),
                         f"{label} is missing measured metrics")
                 require(positive(measured["peak_memory_bytes"])
@@ -2871,6 +2902,9 @@ def collect_git_performance(
             previous_end = intervals[-1][1]
             pairs.append(pair)
         performance[location] = {"region": region, "pairs": pairs}
+    require(not missing_boundaries,
+            f"{scope}/{platform} lacks a provider-confirmed warm edge hit at its compiled "
+            f"{', '.join(missing_boundaries)} size limit")
     return performance
 
 

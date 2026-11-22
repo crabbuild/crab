@@ -906,7 +906,10 @@ or digest with the transfer evidence. The sum of parallel
 transfer times differs from elapsed action time. Front Door's response
 header describes the first 8 MB chunk, so Crab records an unknown cache
 disposition for larger objects. Use provider logs for their cache and
-origin-fill evidence. [Front Door caching documentation](https://learn.microsoft.com/en-us/azure/frontdoor/front-door-caching#response-headers)
+origin-fill evidence. The benchmark counts a completed request's provider
+cache result when the client reports an unknown result. A partial Front Door
+hit remains unknown. [Front Door caching documentation](https://learn.microsoft.com/en-us/azure/frontdoor/front-door-caching#response-headers) ·
+[Front Door access log fields](https://learn.microsoft.com/en-us/azure/frontdoor/standard-premium/how-to-monitor-metrics)
 
 Record a verified release scope as five space-separated columns in
 `crates/crab-storage/src/cdn/qualified-scopes.txt`. After the scope, record the
@@ -915,6 +918,13 @@ maximum bytes in one range, and the operation deadline in milliseconds. Zero
 in a byte column disables that request form. Set both range columns to zero
 for full GETs only. The verifier checks the candidate's compiled policy digest
 and compares its provider-correlated benchmark requests with the row's limits.
+On every release platform, the retained `warm_edge` samples must contain a
+provider-confirmed cache hit that completed at the exact byte limit for each
+enabled form. A ranged hit must reach both the object-size and single-range
+limits in the same request. The hit may come from either registered region.
+Both regions still need the full set of performance measurements.
+Use the qualification build's request records to choose the candidate limits,
+then repeat the workload on the ordinary release build with that policy.
 
 For Crab Server and the S3 gateway, start the candidate in a dedicated process with
 `RUST_LOG=crab_storage::cdn::transfer=debug,crab_storage::cdn::read_target=debug,crab_storage::cdn::service_build=debug,crab_storage::native_read=debug`.
