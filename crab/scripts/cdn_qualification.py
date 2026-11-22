@@ -175,6 +175,10 @@ SDK_HYDRATION_READ_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | SDK_TIMIN
     "schema", "arm", "platform", "workload_sha256", "candidate", "crab_sha256", "pointer_sha256", "payload",
     "reader", "xorb_key_sha256", "native_traffic", "edge_responses",
 }
+SERVICE_READ_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | SDK_TIMING_FIELDS | {
+    "schema", "arm", "platform", "workload_sha256", "publication_sha256", "commit", "payload_sha256",
+    "payload_bytes", "etag_sha256", "git_blob_oid_sha256", "lfs_key_sha256", "native_traffic", "edge_responses",
+}
 GIT_MODES = {"origin": "origin", "cold_edge": "edge", "warm_edge": "edge", "warm_local": "warm_local"}
 SHA256 = re.compile(r"[0-9a-f]{64}")
 COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
@@ -1220,6 +1224,11 @@ def is_direct_sdk_hydration_scope(scope: str) -> bool:
     return scope_parts(scope)[1:] == ("private", "sdk", "xorb", "direct")
 
 
+def is_direct_service_scope(scope: str) -> bool:
+    _, _, consumer, family, profile = scope_parts(scope)
+    return consumer in ("server", "s3-gateway") and family in ("git", "lfs") and profile == "direct"
+
+
 def cli_action_name(scope: str) -> str:
     return "lfs-fetch" if requires_cli_lfs_workload(scope) else "git-fetch"
 
@@ -1428,6 +1437,9 @@ def verify_sdk_git_read(raw: bytes, row: dict[str, Any], spec: dict[str, Any], m
 def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: str, edge: str) -> tuple[set[str], int, int]:
     keyed_origin = edge in ("cloudfront", "front-door")
     xorb_key = client.get("xorb_key_sha256")
+    lfs_key = client.get("lfs_key_sha256")
+    object_key = xorb_key or lfs_key
+    service = client.get("schema") == "crab.cdn-service-read/v1"
     proof_fields = {"schema", "client_report_sha256", "records"}
     if keyed_origin:
         proof_fields.add("origin_requests")
@@ -1442,12 +1454,12 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
     record_fields = {"status", "cache", "response_bytes"}
     if edge == "cloud-cdn":
         record_fields |= {"cache_fill_bytes", "origin_requests"}
-    if keyed_origin or xorb_key is not None:
+    if keyed_origin or object_key is not None:
         record_fields.add("key_sha256")
     viewer_keys = set()
     logged_ids = set(records)
     origin_gets = child_fill_bytes = viewer_fill_bytes = 0
-    xorb_transfer = dict.fromkeys(("edge_hits", "edge_misses", "edge_unknown", "edge_bytes", "incomplete_edge_bytes"), 0)
+    observed_transfer = dict.fromkeys(("edge_hits", "edge_misses", "edge_unknown", "edge_bytes", "incomplete_edge_bytes"), 0)
     for request_id, record in records.items():
         row = fields(record, record_fields, "CDN viewer log record")
         response = expected[request_id]
@@ -1457,20 +1469,22 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
                 "CDN log status or response bytes disagree with the client")
         if response["complete"] and response["cache"] != "unknown":
             require(row["cache"] == response["cache"], "CDN log cache result disagrees with the completed response")
-        if keyed_origin or xorb_key is not None:
+        if keyed_origin or object_key is not None:
             require(matches(SHA256, row["key_sha256"]), "invalid CDN object key fingerprint")
             require(xorb_key is None or row["key_sha256"] == xorb_key,
                     "CDN viewer request did not read the approved hydration xorb")
+            require(lfs_key is None or row["key_sha256"] == lfs_key,
+                    "CDN viewer request did not read the approved service LFS object")
             viewer_keys.add(row["key_sha256"])
-        if xorb_key is not None:
+        if xorb_key is not None or service:
             if response["complete"]:
-                require(response["status"] in (200, 206), "completed hydration response did not return object bytes")
+                require(response["status"] in (200, 206), "completed CDN response did not return object bytes")
                 if response["bytes"]:
                     metric = {"hit": "edge_hits", "miss": "edge_misses", "unknown": "edge_unknown"}[response["cache"]]
-                    xorb_transfer[metric] += 1
-                    xorb_transfer["edge_bytes"] += response["bytes"]
+                    observed_transfer[metric] += 1
+                    observed_transfer["edge_bytes"] += response["bytes"]
             else:
-                xorb_transfer["incomplete_edge_bytes"] += response["bytes"]
+                observed_transfer["incomplete_edge_bytes"] += response["bytes"]
         if edge == "cloud-cdn":
             require(type(row["cache_fill_bytes"]) is int and row["cache_fill_bytes"] >= 0,
                     "Cloud CDN log has invalid reported cache fill bytes")
@@ -1486,9 +1500,9 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
                 logged_ids.add(origin_id)
                 origin_gets += origin["method"] == "GET"
                 child_fill_bytes += origin["cache_fill_bytes"]
-    if xorb_key is not None:
-        require(client["edge_attempts"] == len(records) and all(client[key] == count for key, count in xorb_transfer.items()),
-                "SDK hydration transfer totals disagree with the logged responses")
+    if xorb_key is not None or service:
+        require(client["edge_attempts"] == len(records) and all(client[key] == count for key, count in observed_transfer.items()),
+                "CDN transfer totals disagree with the logged responses")
     if keyed_origin:
         service, viewer, timestamp, precision = (
             ("S3", "CloudFront", "at_unix_s", 1000) if edge == "cloudfront"

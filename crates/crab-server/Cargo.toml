@@ -63,7 +63,7 @@ tokio-rustls = "0.26"
 tokio-util = { workspace = true, features = ["io", "rt"] }
 toml = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { workspace = true }
 x509-cert = "0.2.5"
 zip = { version = "6.0", default-features = false, features = ["deflate"] }

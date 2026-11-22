@@ -746,8 +746,13 @@ from individual runs.
 Crab Server's loopback HTTP smoke verifies complete Git and LFS bodies through
 the ordinary read handlers with those native bodies blocked. It checks that
 partial LFS reads stay on origin and withdrawing the CDN layout gives a fresh
-native Git read with identical bytes and ETag. Live regional records and
-provider-log correlation for the server remain release requirements.
+native Git read with identical bytes and ETag. The service qualification
+worker verifies ordinary Crab Server and S3 gateway Git and LFS responses
+against a digest-pinned workload and captures allowlisted storage observations
+from the dedicated service process. The provider log collector joins every
+attempt and matches LFS reads to the exact approved object. Live regional
+records, independent placement and service-binding verification, and warm-local
+evidence remain release requirements.
 
 The protected workflow or its dedicated workers own producing these raw
 observations. The assembly and release jobs own rejecting missing, mismatched

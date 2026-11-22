@@ -1,6 +1,6 @@
 use reqwest::Method;
 
-const TARGET: &str = "crab_storage::native_read";
+pub(crate) const TARGET: &str = "crab_storage::native_read";
 
 pub(crate) struct NativeReadObservation {
     provider: &'static str,

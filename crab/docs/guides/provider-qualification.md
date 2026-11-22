@@ -793,6 +793,41 @@ header describes the first 8 MB chunk, so Crab records an unknown cache
 disposition for larger objects. Use provider logs for their cache and
 origin-fill evidence. [Front Door caching documentation](https://learn.microsoft.com/en-us/azure/frontdoor/front-door-caching#response-headers)
 
+For Crab Server and the S3 gateway, start a dedicated qualification build with
+`RUST_LOG=crab_storage::cdn::transfer=debug,crab_storage::native_read=debug`.
+On Cloud CDN, append `,crab_storage::cdn::gcs_viewer_log=trace` to correlate
+each request with Cloud Logging. Redirect stderr to a protected append-only
+file. Keep the process idle except for the measured request because the worker
+uses the bytes appended during that request to isolate storage observations.
+Use a fresh process and cache for each arm.
+
+Seal a `crab.cdn-service-workload/v1` JSON file with `schema`,
+`configuration_sha256`, `publication_sha256`, the service HTTPS `endpoint`,
+logical `repository`, the full Git `commit`, `payload_sha256`,
+`payload_bytes`, and the SHA-256 of the strong ETag including its quotes
+in `etag_sha256`. Publish the fixture file as `cdn-qualification.bin`.
+Use the Crab Server repository name as `owner/repo` or the S3 gateway bucket
+name. Put the dedicated viewer credential in a separate protected JSON file
+with `cookie` for a Crab browser session, `authorization` for the Git LFS
+Basic header, or `access_key`, `secret_key`, and `region` for S3 gateway SigV4.
+
+```bash
+python3 -B crab/scripts/e2e/run_cdn_service_read.py edge \
+  --fixture "$fixture" --configuration-sha256 "$configuration_sha256" \
+  --workload "$workload" --workload-sha256 "$workload_sha256" \
+  --credentials "$credentials" --service-log "$service_log" \
+  --source-sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" \
+  --run-attempt "$GITHUB_RUN_ATTEMPT" >"$edge_read"
+```
+
+Pass the edge report as `--client` to `collect_cdn_viewer_requests.py` with
+the approved provider log exports. The collector checks every viewer request
+and matches LFS reads to the exact approved storage key. Withdraw the CDN
+binding, restart the service with a fresh cache, and run the same workload
+with `origin` to measure native rollback with identical bytes and ETag.
+Live regional samples, publication and binding verification, and cache
+evidence remain required before either service's rows can qualify.
+
 ### Verify native publication and CDN Git fetch
 
 Use `crab/scripts/e2e/run_cdn_git_workload.py` for direct CLI Git, capsule, and

@@ -10,6 +10,18 @@ const TARGET: &str = "crab_storage::cdn::transfer";
 const GCS_VIEWER_LOG_TARGET: &str = "crab_storage::cdn::gcs_viewer_log";
 const PUBLIC_TRANSITION_TARGET: &str = "crab_storage::cdn::public_transition";
 
+/// Identify the storage targets used for redacted CDN qualification evidence.
+#[must_use]
+pub fn is_read_evidence_target(target: &str) -> bool {
+    matches!(
+        target,
+        TARGET
+            | PUBLIC_TRANSITION_TARGET
+            | GCS_VIEWER_LOG_TARGET
+            | crate::native_read_telemetry::TARGET
+    )
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct PublicTransitionObservation {
     approval: Output<Sha256>,
@@ -311,6 +323,27 @@ fn cache_status(provider: StorageProviderKind, object_size: u64, value: &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_evidence_excludes_other_storage_and_signed_request_targets() {
+        for target in [
+            TARGET,
+            PUBLIC_TRANSITION_TARGET,
+            GCS_VIEWER_LOG_TARGET,
+            crate::native_read_telemetry::TARGET,
+        ] {
+            assert!(is_read_evidence_target(target), "{target}");
+        }
+        for target in [
+            "crab_storage::cdn",
+            "crab_storage::cdn::transfer::debug",
+            "crab_storage::store",
+            "s3s::service",
+            "reqwest::connect",
+        ] {
+            assert!(!is_read_evidence_target(target), "{target}");
+        }
+    }
 
     #[test]
     fn viewer_request_id_is_hashed_only_for_the_selected_provider_and_one_header() {

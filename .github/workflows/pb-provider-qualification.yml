@@ -44,6 +44,8 @@ on:
       - "crab/scripts/e2e/run_cdn_sdk_hydration.py"
       - "crab/scripts/e2e/test_cdn_sdk_workload_qualification.py"
       - "crab/scripts/e2e/test_cdn_sdk_hydration_qualification.py"
+      - "crab/scripts/e2e/run_cdn_service_read.py"
+      - "crab/scripts/e2e/test_cdn_service_read_qualification.py"
       - "crates/crab-sdk/examples/cdn-sdk-read.rs"
       - "crates/crab-sdk/build.rs"
       - "crates/crab-remote-git/src/reader/edge_entry.rs"
@@ -62,7 +64,11 @@ on:
       - "crates/crab-auth-store/src/managed_repository.rs"
       - "crates/crab-sdk/Cargo.toml"
       - "crates/crab-server/Cargo.toml"
+      - "crates/crab-server/src/cli/mod.rs"
+      - "crates/crab-server/src/repository/tests/cdn.rs"
       - "crates/crab-s3-gateway/Cargo.toml"
+      - "crates/crab-s3-gateway/src/main.rs"
+      - "crates/crab-s3-gateway/src/gateway/cdn_tests.rs"
       - "packages/desktop/agent/Cargo.toml"
       - "crates/crab-metadata/src/pack_origin.rs"
       - "crates/crab-metadata/src/receipts.rs"
@@ -111,6 +117,8 @@ on:
       - "crab/scripts/e2e/run_cdn_sdk_hydration.py"
       - "crab/scripts/e2e/test_cdn_sdk_workload_qualification.py"
       - "crab/scripts/e2e/test_cdn_sdk_hydration_qualification.py"
+      - "crab/scripts/e2e/run_cdn_service_read.py"
+      - "crab/scripts/e2e/test_cdn_service_read_qualification.py"
       - "crates/crab-sdk/examples/cdn-sdk-read.rs"
       - "crates/crab-sdk/build.rs"
       - "crates/crab-remote-git/src/reader/edge_entry.rs"
@@ -129,7 +137,11 @@ on:
       - "crates/crab-auth-store/src/managed_repository.rs"
       - "crates/crab-sdk/Cargo.toml"
       - "crates/crab-server/Cargo.toml"
+      - "crates/crab-server/src/cli/mod.rs"
+      - "crates/crab-server/src/repository/tests/cdn.rs"
       - "crates/crab-s3-gateway/Cargo.toml"
+      - "crates/crab-s3-gateway/src/main.rs"
+      - "crates/crab-s3-gateway/src/gateway/cdn_tests.rs"
       - "packages/desktop/agent/Cargo.toml"
       - "crates/crab-metadata/src/pack_origin.rs"
       - "crates/crab-metadata/src/receipts.rs"
@@ -172,7 +184,7 @@ jobs:
   evidence-contract:
     name: Evidence contract
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -218,6 +230,17 @@ jobs:
           cargo test --locked -p crab-sdk --features local,service --example cdn-sdk-read
           cargo test --locked -p crab-lfs --test cdn_observation
           cargo test --locked -p crab-lfs --test cdn_observation --features crab-storage/provider-cdn-qualification
+
+      - name: Exercise CDN delivery through both service interfaces
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/provider-cdn-features
+        run: |
+          cargo check --locked -p crab-server -p crab-s3-gateway \
+            --features crab-server/provider-cdn-qualification,crab-s3-gateway/provider-cdn-qualification --bins
+          cargo test --locked -p crab-server --lib --features provider-cdn-qualification \
+            ordinary_http_reads_use_verified_edge_bodies_and_keep_native_controls
+          cargo test --locked -p crab-s3-gateway --lib --features provider-cdn-qualification \
+            authorized_gateway_reads_verified_git_and_lfs_from_the_edge
 
   rustfs:
     name: S3-compatible RustFS
