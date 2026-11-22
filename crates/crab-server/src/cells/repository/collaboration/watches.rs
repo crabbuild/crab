@@ -10,6 +10,11 @@ use crate::cells::{
     repository::CLASS,
 };
 
+mod inbox;
+pub(crate) use inbox::{
+    Dismiss, DismissItem, DismissSelection, InboxActivity, InboxVisibility, InboxVisibilityInput,
+};
+
 const PREFERENCES: &str = "collaboration/v2/watches/preferences/";
 const WATCHERS: &str = "collaboration/v2/watches/active/";
 const PAGE_SIZE: usize = 32;
@@ -176,6 +181,8 @@ struct ThreadSubscription {
     after: u64,
     #[serde(default)]
     choice_after: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dismissed: Option<inbox::Dismissal>,
 }
 
 fn thread_key(subject: Subject, actor: Key) -> String {
@@ -240,13 +247,14 @@ pub(super) fn participate(context: &Transaction<'_>, source: &activity::Event) -
         issuer: source.actor.issuer.clone(),
         subject: source.actor.subject.clone(),
     };
-    follow_recipient(context, source, &actor)
+    follow_recipient(context, source, &actor, true)
 }
 
 pub(super) fn follow_recipient(
     context: &Transaction<'_>,
     source: &activity::Event,
     actor: &IdentityKey,
+    can_resume: bool,
 ) -> Result<()> {
     let key = identity_key(actor)?;
     if subscription(context, key)?.preference.mode == Mode::Muted {
@@ -254,12 +262,21 @@ pub(super) fn follow_recipient(
     }
     let subject = source.target.subject();
     let mut current = thread_subscription(context, subject, key)?;
+    if !can_resume
+        && current.preference.mode == ThreadMode::Unsubscribed
+        && current.dismissed.is_some()
+    {
+        return Ok(());
+    }
     // A mention can be processed after the reader makes a newer choice.
     // The source sequence, rather than delivery time, decides which wins.
     if current.preference.mode != ThreadMode::Follow
         && current.after.max(current.choice_after) < source.number
     {
         current.after = source.number;
+        if can_resume && let Some(dismissal) = &mut current.dismissed {
+            dismissal.resume();
+        }
         save_thread(
             context,
             subject,
@@ -342,6 +359,11 @@ impl Mutation for SetThread {
         current.choice_after = activity::latest(context)?;
         if (current.preference.mode, mode) != (ThreadMode::Follow, ThreadMode::StateChanges) {
             current.after = current.choice_after;
+        }
+        if mode != ThreadMode::Unsubscribed
+            && let Some(dismissal) = &mut current.dismissed
+        {
+            dismissal.resume();
         }
         let saved = save_thread(
             context,

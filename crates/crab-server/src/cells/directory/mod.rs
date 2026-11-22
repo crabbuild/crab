@@ -239,6 +239,9 @@ pub(in crate::cells) fn dispatch_read(
         CompleteHandles::ID => invoke_read::<CompleteHandles>(context, input),
         MentionCandidates::ID => invoke_read::<MentionCandidates>(context, input),
         notifications::List::ID => invoke_read::<notifications::List>(context, input),
+        notifications::CheckSelection::ID => {
+            invoke_read::<notifications::CheckSelection>(context, input)
+        }
         notifications::ResolveHandlesAt::ID => {
             invoke_read::<notifications::ResolveHandlesAt>(context, input)
         }

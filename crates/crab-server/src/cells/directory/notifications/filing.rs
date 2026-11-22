@@ -180,6 +180,7 @@ mod tests {
             },
             reason: Reason::Mention,
             read: true,
+            resumed: None,
         });
         filed.saved = true;
         filed.done_at = Some(start);

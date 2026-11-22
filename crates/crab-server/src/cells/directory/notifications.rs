@@ -2,7 +2,7 @@ use super::{
     AccountsExist, CLASS, Error, IdentityKey, LookupAccounts, MAX_VERSION, Mutation,
     MutationResult, Read, Result, SqlValue, Transaction, advance, validate_handle,
 };
-use crate::cells::repository::collaboration::Target;
+use crate::cells::repository::collaboration::{Subject, Target};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
@@ -10,7 +10,10 @@ use uuid::Uuid;
 mod filing;
 mod triage;
 use filing::Filed;
-pub(crate) use triage::{Action, Changed, Selected, SetState, SetStateInput, validate_selection};
+pub(crate) use triage::{
+    Action, Changed, CheckSelection, Selected, Selection, SetState, SetStateInput,
+    validate_selection,
+};
 
 pub(crate) const MAX_RECIPIENTS: usize = 32;
 pub(crate) const MAX_HISTORY: usize = 100;
@@ -35,12 +38,7 @@ impl Notice {
     }
 
     pub(crate) fn thread_id(&self) -> Uuid {
-        let mut hash = blake3::Hasher::new_derive_key("crab inbox conversation v1");
-        hash.update(self.repository.as_bytes());
-        hash.update(self.target.subject().key().as_bytes());
-        let mut bytes = [0; 16];
-        bytes.copy_from_slice(&hash.finalize().as_bytes()[..16]);
-        uuid::Builder::from_custom_bytes(bytes).into_uuid()
+        thread_id(self.repository, self.target.subject())
     }
 
     fn validate(&self) -> Result<()> {
@@ -73,6 +71,15 @@ impl Notice {
     }
 }
 
+pub(crate) fn thread_id(repository: Uuid, subject: Subject) -> Uuid {
+    let mut hash = blake3::Hasher::new_derive_key("crab inbox conversation v1");
+    hash.update(repository.as_bytes());
+    hash.update(subject.key().as_bytes());
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&hash.finalize().as_bytes()[..16]);
+    uuid::Builder::from_custom_bytes(bytes).into_uuid()
+}
+
 // Direct reasons persist when more routine activity updates a thread.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -82,6 +89,15 @@ pub(crate) enum Reason {
     ReviewRequested,
     TeamMention,
     Mention,
+}
+
+impl Reason {
+    fn resumes(self) -> bool {
+        matches!(
+            self,
+            Self::Mention | Self::TeamMention | Self::ReviewRequested
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -132,7 +148,7 @@ pub(crate) struct Position {
 }
 
 impl Position {
-    fn validate(self) -> Result<()> {
+    pub(crate) fn validate(self) -> Result<()> {
         if self.id.is_nil() || self.created_at_ms > MAX_VERSION {
             return Err(Error::Invalid("Notification position is invalid"));
         }
@@ -146,17 +162,23 @@ pub(crate) struct Entry {
     pub notice: Notice,
     pub reason: Reason,
     pub read: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed: Option<Position>,
 }
 
 impl Entry {
     fn merge(&mut self, incoming: Self) {
         let reason = self.reason.max(incoming.reason);
+        // The strongest display reason can be older than the current
+        // contribution. Only the actual addressable activity can reopen.
+        let resumed = self.resumed.max(incoming.resumed);
         match self.notice.position().cmp(&incoming.notice.position()) {
             std::cmp::Ordering::Less => *self = incoming,
             std::cmp::Ordering::Equal => self.read |= incoming.read,
             std::cmp::Ordering::Greater => {}
         }
         self.reason = reason;
+        self.resumed = resumed;
     }
 }
 
@@ -279,12 +301,19 @@ impl Mutation for Deliver {
                 notice: input.notice.clone(),
                 reason,
                 read,
+                resumed: reason.resumes().then(|| input.notice.position()),
             };
             let now = context.now_ms();
             if let Some(filed) = previous.as_ref().filter(|filed| filed.retained(now)) {
                 incoming.reason = incoming.reason.max(filed.entry.reason);
                 incoming.read |=
                     filed.entry.read && filed.entry.notice.position() == incoming.notice.position();
+                incoming.resumed = incoming.resumed.max(
+                    filed
+                        .entry
+                        .resumed
+                        .filter(|position| *position <= incoming.notice.position()),
+                );
             }
             let store_recent = inbox.deliver(incoming.clone())?;
             if let Some(previous) = previous {
@@ -469,6 +498,7 @@ mod tests {
             },
             reason,
             read: false,
+            resumed: None,
         }
     }
 

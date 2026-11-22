@@ -319,6 +319,22 @@ async fn native_browser_saves_completes_and_restores_an_inbox_conversation() {
     browser.run(&["wait", "--text", title]).await;
     assert_eq!(h.json(INBOX, &bob).await["items"][0]["saved"], true);
     assert_eq!(h.json(DONE, &bob).await["items"], json!([]));
+    click("button", "Unsubscribe").await;
+    browser
+        .run(&["wait", "--text", "No notifications yet."])
+        .await;
+    assert_eq!(h.json(SAVED, &bob).await["items"][0]["title"], title);
+    h.write(
+        Method::POST,
+        "/api/repos/team/private/issues/1/comments",
+        &alice,
+        json!({"request_id":Uuid::now_v7(),"body":"@bob, re-opening the conversation."}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    h.deliver_notifications("team", "private").await;
+
     let second_title = "Review a second notification";
     h.write(
         Method::POST,

@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use axum::{
     Extension, Json, Router,
@@ -21,12 +18,15 @@ use crate::{
         directory::{
             IdentityKey,
             notifications::{
-                List, ListInput, Position, Reason, State as NotificationState, Thread, ThreadPage,
-                View,
+                Entry, List, ListInput, Position, Reason, State as NotificationState, Thread,
+                ThreadPage, View,
             },
         },
         repository::{
-            collaboration::{SubjectKind, Target, watches::Mode},
+            collaboration::{
+                Subject, SubjectKind, Target,
+                watches::{self, Mode},
+            },
             search::index::references::{FindReferences, ReferenceInput},
         },
     },
@@ -36,6 +36,7 @@ use crate::{
 
 mod state;
 mod subscriptions;
+mod unsubscribe;
 
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
@@ -54,6 +55,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .merge(
             Router::new()
                 .route("/api/notifications/bulk", post(state::bulk))
+                .route("/api/notifications/unsubscribe", post(unsubscribe::apply))
                 .layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .route_layer(middleware::from_fn_with_state(server, app::admit))
@@ -81,6 +83,7 @@ struct RepositoryLabel {
 struct Item {
     id: Uuid,
     repository: RepositoryLabel,
+    subject: Subject,
     title: String,
     href: String,
     sender: String,
@@ -157,7 +160,7 @@ async fn list(
                 .push((order, thread));
         }
         let batches: Vec<Vec<(usize, Item)>> = stream::iter(groups)
-            .map(|(id, entries)| repository_items(&server, &principal, &actor, id, entries))
+            .map(|(id, entries)| repository_items(&server, &principal, &actor, id, view, entries))
             .buffer_unordered(8)
             .try_collect()
             .await?;
@@ -213,21 +216,33 @@ async fn unread(
 ) -> Result<Json<Unread>> {
     let actor = app::account(&principal)?;
     let mut before = None;
-    let mut checked = HashSet::new();
     loop {
         let page = entries(&server, actor.clone(), before, View::Inbox).await?;
-        let repositories: Vec<_> = page
-            .threads
-            .into_iter()
-            .filter(|thread| !thread.state.read)
-            .map(|thread| thread.entry.notice.repository)
-            .filter(|id| checked.insert(*id))
-            .collect();
+        let mut repositories = HashMap::<Uuid, Vec<watches::InboxActivity>>::new();
+        for thread in page.threads.into_iter().filter(|thread| !thread.state.read) {
+            repositories
+                .entry(thread.entry.notice.repository)
+                .or_default()
+                .push(inbox_activity(&thread.entry));
+        }
         let mut accessible = stream::iter(repositories)
-            .filter_map(|id| std::future::ready(server.repositories.by_id(id)))
-            .map(|repo| {
+            .map(|(id, items)| {
                 let (server, principal, actor) = (&server, &principal, &actor);
-                async move { may_notify(server, principal, &repo, actor).await }
+                async move {
+                    let Some(repo) = server.repositories.by_id(id) else {
+                        return Ok(false);
+                    };
+                    if !may_notify(server, principal, &repo, actor).await? {
+                        return Ok(false);
+                    }
+                    Ok::<_, Error>(
+                        inbox_visibility(server, &repo, actor, &items)
+                            .await?
+                            .into_iter()
+                            .any(|visible| visible)
+                            && may_notify(server, principal, &repo, actor).await?,
+                    )
+                }
             })
             .buffer_unordered(8);
         while let Some(current) = accessible.try_next().await? {
@@ -263,11 +278,51 @@ async fn may_notify(
         && subscriptions::read(server, repo, actor.clone()).await?.mode != Mode::Muted)
 }
 
+fn inbox_activity(entry: &Entry) -> watches::InboxActivity {
+    watches::InboxActivity {
+        subject: entry.notice.target.subject(),
+        updated: entry.notice.position(),
+        resumed: entry.resumed,
+    }
+}
+
+async fn inbox_visibility(
+    server: &Server,
+    repo: &Repository,
+    actor: &IdentityKey,
+    items: &[watches::InboxActivity],
+) -> Result<Vec<bool>> {
+    let cell = app::repository_cell(server, repo)?;
+    let mut visibility = Vec::with_capacity(items.len());
+    for batch in items.chunks(50) {
+        let shown = app::query_output(
+            cell.client
+                .query::<watches::InboxVisibility>(
+                    &cell.target,
+                    None,
+                    watches::InboxVisibilityInput {
+                        actor: actor.clone(),
+                        items: batch.to_vec(),
+                    },
+                )
+                .await,
+        )?;
+        if shown.len() != batch.len() {
+            return Err(Error::CellContract(
+                "Notification visibility count does not match",
+            ));
+        }
+        visibility.extend(shown);
+    }
+    Ok(visibility)
+}
+
 async fn repository_items(
     server: &Server,
     principal: &Principal,
     actor: &IdentityKey,
     id: Uuid,
+    view: View,
     entries: Vec<(usize, Thread)>,
 ) -> Result<Vec<(usize, Item)>> {
     let Some(repo) = server.repositories.by_id(id) else {
@@ -276,12 +331,24 @@ async fn repository_items(
     if !may_notify(server, principal, &repo, actor).await? {
         return Ok(Vec::new());
     }
+    let visibility = if view == View::Inbox {
+        let activity: Vec<_> = entries
+            .iter()
+            .map(|(_, thread)| inbox_activity(&thread.entry))
+            .collect();
+        inbox_visibility(server, &repo, actor, &activity).await?
+    } else {
+        vec![true; entries.len()]
+    };
     let cell = app::repository_cell(server, &repo)?;
     let owner = &repo.config.owner;
     let name = &repo.config.name;
     let mut items = Vec::new();
     let mut cache = HashMap::new();
-    for (order, thread) in entries {
+    for ((order, thread), visible) in entries.into_iter().zip(visibility) {
+        if !visible {
+            continue;
+        }
         let entry = thread.entry;
         let notice = entry.notice;
         let (kind, number, files, contribution) = location(notice.target);
@@ -319,6 +386,7 @@ async fn repository_items(
                     owner: owner.clone(),
                     name: name.clone(),
                 },
+                subject: notice.target.subject(),
                 title: source.title.clone(),
                 href: format!(
                     "/{owner}/{name}/{path}/{number}{files}?repository_id={id}{contribution}"
@@ -389,6 +457,9 @@ mod triage_tests;
 
 #[cfg(test)]
 mod bulk_tests;
+
+#[cfg(test)]
+mod unsubscribe_tests;
 
 #[cfg(test)]
 mod tests {
@@ -494,6 +565,7 @@ mod tests {
                 items,
                 json!({"next": null, "items": [{
                     "id": notice.thread_id(), "repository": {"id":repo.id, "owner": "team", "name": "private"},
+                    "subject": {"kind":"issue","number":1},
                     "title": "Issue mentioned",
                     "href": format!("/team/private/issues/1?repository_id={}", repo.id),
                     "sender": "Alice", "reason": "mention", "read": attempt > 0, "saved": false, "done": false,

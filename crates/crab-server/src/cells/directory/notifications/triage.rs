@@ -2,7 +2,7 @@ use super::{
     Access, Entry, Filed, Inbox, Position, State, Thread, active_account, conversations, filing,
 };
 use crate::cells::directory::{
-    CLASS, Error, IdentityKey, Mutation, MutationResult, Result, Transaction, advance,
+    CLASS, Error, IdentityKey, Mutation, MutationResult, Read, Result, Transaction, advance,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -46,6 +46,56 @@ pub(crate) fn validate_selection(items: &[Selected]) -> std::result::Result<(), 
         }
     }
     Ok(())
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct Selection {
+    pub identity: IdentityKey,
+    pub items: Vec<Selected>,
+}
+
+pub(crate) struct CheckSelection;
+impl Read for CheckSelection {
+    const CLASS: &'static str = CLASS;
+    const ID: u32 = 24;
+    type Input = Selection;
+    type Output = Vec<bool>;
+
+    fn execute(context: &mut Transaction<'_>, input: Selection) -> Result<Self::Output> {
+        validate_selection(&input.items).map_err(Error::Invalid)?;
+        let Some(actor) = active_account(context, input.identity)? else {
+            return Ok(vec![false; input.items.len()]);
+        };
+        let inboxes = Access::CHANNELS
+            .into_iter()
+            .map(|access| {
+                context
+                    .document::<Inbox>(&access.inbox(actor))
+                    .map(Option::unwrap_or_default)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        input
+            .items
+            .into_iter()
+            .map(|item| {
+                let archived = filing::load(context, actor, item.id)?.filter(|record| {
+                    item.matches(&record.entry) && record.retained(context.now_ms())
+                });
+                let latest = inboxes
+                    .iter()
+                    .flat_map(|inbox| &inbox.entries)
+                    .filter(|entry| item.matches(entry))
+                    .map(|entry| entry.notice.position())
+                    .chain(
+                        archived
+                            .as_ref()
+                            .map(|record| record.entry.notice.position()),
+                    )
+                    .max();
+                Ok(latest == Some(item.expected))
+            })
+            .collect()
+    }
 }
 
 #[derive(Deserialize, Serialize)]

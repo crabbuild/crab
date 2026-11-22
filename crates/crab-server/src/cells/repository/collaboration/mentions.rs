@@ -256,20 +256,26 @@ pub(in crate::cells::repository) fn review_requested(
     }
     // Keep the oldest-first outbox page bounded for long qualified identities.
     for reviewers in reviewers.chunks(16) {
-        let event = Event {
-            id: Uuid::now_v7(),
-            target: source.target,
-            version: source.number,
-            actor: source.actor.clone(),
-            created_at_ms: source.created_at,
-            previous: Vec::new(),
-            current: Vec::new(),
-            reviewers: reviewers.to_vec(),
-            assignees: Vec::new(),
-            watch: None,
-            follow: None,
-        };
-        context.put_document(&key(event.id, event.created_at_ms), &event)?;
+        let id = Uuid::now_v7();
+        enqueue_follow(
+            context,
+            Event {
+                id,
+                target: source.target,
+                version: source.number,
+                actor: source.actor.clone(),
+                created_at_ms: source.created_at,
+                previous: Vec::new(),
+                current: Vec::new(),
+                reviewers: reviewers.to_vec(),
+                assignees: Vec::new(),
+                watch: None,
+                follow: Some(FollowSource {
+                    activity: source.number,
+                    event: id,
+                }),
+            },
+        )?;
     }
     Ok(())
 }
@@ -344,7 +350,7 @@ impl Mutation for Enroll {
                 ));
             }
             for actor in &input.recipients {
-                watches::follow_recipient(context, &source, actor)?;
+                watches::follow_recipient(context, &source, actor, event.assignees.is_empty())?;
             }
         }
         Ok(MutationResult::Success(()))

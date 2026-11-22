@@ -182,7 +182,8 @@ later watch pages until the inbox delivery and follow commit. The Directory
 groups inbox entries by typed discussion. `notifications/triage.rs` binds all
 selected rows to observed activity in one transaction. `notifications/filing.rs`
 retains saved and completed conversations with private activity-order indexes.
-`api/notifications/` checks repository access and mute state before listing
+`collaboration/watches/inbox.rs` commits inbox dismissal with the Repository
+watch preference. `api/notifications/` checks repository access and mute state before listing
 entries or changing their state.
 
 The native runtime lives in `src/cells/runtime.rs`; `src/cells/client.rs` owns

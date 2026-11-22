@@ -17,7 +17,18 @@ import {
 } from "@/components/ui/native-select";
 import { navigate, useRequest } from "@/lib/api";
 
-type Address = { id: string; owner: string; name: string };
+import {
+  bulkActions,
+  isBulkAction,
+  notificationIntent,
+  type Action,
+  type Address,
+  type BulkAction,
+  type BulkIntent,
+  type NoticeState,
+  type Selection,
+  type UnsubscribeStatus,
+} from "./actions";
 
 type InboxPage = { items: Notice[]; next: string | null };
 
@@ -55,40 +66,15 @@ function isReason(value: string | null): value is Reason {
   return value !== null && Object.hasOwn(reasons, value);
 }
 
-type NoticeState = { read: boolean; saved: boolean; done: boolean };
-type Action = { read: boolean } | { save: boolean } | { done: boolean };
-
 const MAX_SELECTION = 50;
-const bulkActions = {
-  read: { label: "Mark as read", action: { read: true } },
-  unread: { label: "Mark as unread", action: { read: false } },
-  save: { label: "Save", action: { save: true } },
-  unsave: { label: "Unsave", action: { save: false } },
-  done: { label: "Mark as done", action: { done: true } },
-  restore: { label: "Move to inbox", action: { done: false } },
-} satisfies Record<string, { label: string; action: Action }>;
 
-type BulkAction = keyof typeof bulkActions;
-type BulkIntent = {
-  request_id: string;
-  issued_at_ms: number;
-  items: { id: string; repository_id: string; expected: Notice["updated"] }[];
-  action: Action;
-};
-
-function isBulkAction(value: string): value is BulkAction {
-  return Object.hasOwn(bulkActions, value);
-}
-
-type Notice = NoticeState & {
-  id: string;
-  repository: Address;
-  title: string;
-  href: string;
-  sender: string;
-  reason: Reason;
-  updated: { id: string; created_at_ms: number };
-};
+type Notice = NoticeState &
+  Selection & {
+    title: string;
+    href: string;
+    sender: string;
+    reason: Reason;
+  };
 
 const INBOX_CHANGED = "crab-inbox-changed";
 
@@ -242,11 +228,14 @@ function NotificationList({
   const [older, setOlder] = useState<Notice[]>([]);
   const [confirmed, setConfirmed] = useState<Record<string, NoticeState>>({});
   const [announcement, setAnnouncement] = useState("");
+  const [dismissed, setDismissed] = useState<Set<string>>(() => new Set());
+  const [skipped, setSkipped] = useState(0);
   const [selection, setSelection] = useState<Set<string>>(() => new Set());
   const [rowPending, setRowPending] = useState(0);
   const [bulkAction, setBulkAction] = useState<BulkAction | "">("");
   const [intent, setIntent] = useState<BulkIntent>();
   const bulk = useMutation(csrf, null);
+  const canUnsubscribe = view === "all" || view === "unread";
   const filters = new URLSearchParams({ unread: String(view === "unread") });
   if (view === "saved" || view === "done") filters.set("view", view);
   if (repository) filters.set("repository", repository);
@@ -269,6 +258,8 @@ function NotificationList({
     setOlder([]);
     setCursor(undefined);
     setConfirmed({});
+    setDismissed(new Set());
+    setSkipped(0);
     setSelection(new Set());
     setBulkAction("");
     setIntent(undefined);
@@ -278,22 +269,41 @@ function NotificationList({
 
   async function applyBulk(submission: BulkIntent) {
     setIntent(submission);
-    const result = await bulk.run<{ items: (NoticeState & { id: string })[] }>(
-      "/api/notifications/bulk",
-      "POST",
-      submission,
-    );
-    if (!result) return;
+    setSkipped(0);
     const stamps = new Map(
-      submission.items.map(({ id, expected }) => [id, expected.id]),
+      submission.body.items.map(({ id, expected }) => [id, expected.id]),
     );
-    const confirmedStates: Record<string, NoticeState> = {};
-    for (const { id, ...state } of result.items) {
-      const stamp = stamps.get(id);
-      if (stamp) confirmedStates[stamp] = state;
+    if (submission.kind === "unsubscribe") {
+      const result = await bulk.run<{
+        items: { id: string; status: UnsubscribeStatus }[];
+      }>("/api/notifications/unsubscribe", "POST", submission.body);
+      if (!result) return;
+      const hidden = result.items.flatMap(({ id, status }) => {
+        const stamp = stamps.get(id);
+        return stamp && status !== "changed" ? [stamp] : [];
+      });
+      const count = result.items.filter(
+        ({ status }) => status === "unsubscribed",
+      ).length;
+      setDismissed((current) => new Set([...current, ...hidden]));
+      setSkipped(result.items.length - count);
+      if (count)
+        setAnnouncement(
+          `Unsubscribed from ${count === 1 ? "one conversation" : `${count} conversations`}.`,
+        );
+    } else {
+      const result = await bulk.run<{
+        items: (NoticeState & { id: string })[];
+      }>("/api/notifications/bulk", "POST", submission.body);
+      if (!result) return;
+      const confirmedStates: Record<string, NoticeState> = {};
+      for (const { id, ...state } of result.items) {
+        const stamp = stamps.get(id);
+        if (stamp) confirmedStates[stamp] = state;
+      }
+      setConfirmed((current) => ({ ...current, ...confirmedStates }));
+      setAnnouncement(`Updated ${result.items.length} notifications.`);
     }
-    setConfirmed((current) => ({ ...current, ...confirmedStates }));
-    setAnnouncement(`Updated ${result.items.length} notifications.`);
     setSelection(new Set());
     setBulkAction("");
     setIntent(undefined);
@@ -315,7 +325,9 @@ function NotificationList({
         const next = (cursor ? page.data : first)?.next;
         const visible = Array.from(threads.values())
           .map((item) => ({ ...item, ...confirmed[item.updated.id] }))
-          .filter((item) => visibleIn(view, item));
+          .filter(
+            (item) => !dismissed.has(item.updated.id) && visibleIn(view, item),
+          );
         const selected = visible.filter((item) =>
           selection.has(item.updated.id),
         );
@@ -372,6 +384,33 @@ function NotificationList({
             <p role="status" className="sr-only">
               {announcement}
             </p>
+            {(bulk.error || skipped > 0) && (
+              <div
+                className="notice error flex flex-wrap items-center gap-2"
+                role="alert"
+              >
+                <p>
+                  {bulk.error ??
+                    (skipped === 1
+                      ? "One conversation changed or is unavailable."
+                      : `${skipped} conversations changed or are unavailable.`)}
+                </p>
+                {intent && !reloadRequired && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void applyBulk(intent)}
+                  >
+                    {intent.kind === "unsubscribe"
+                      ? "Retry unsubscribe"
+                      : "Retry bulk action"}
+                  </Button>
+                )}
+                <Button variant="outline" size="sm" onClick={refresh}>
+                  Refresh inbox
+                </Button>
+              </div>
+            )}
             {visible.length ? (
               <>
                 <div className="flex flex-wrap items-center gap-3 rounded-lg border px-4 py-2">
@@ -421,10 +460,11 @@ function NotificationList({
                         </NativeSelectOption>
                         {Object.keys(bulkActions)
                           .filter(isBulkAction)
-                          .filter(
-                            (action) =>
-                              view !== "done" ||
-                              !["read", "unread", "done"].includes(action),
+                          .filter((action) =>
+                            action === "unsubscribe"
+                              ? canUnsubscribe
+                              : view !== "done" ||
+                                !["read", "unread", "done"].includes(action),
                           )
                           .map((action) => (
                             <NativeSelectOption key={action} value={action}>
@@ -438,16 +478,9 @@ function NotificationList({
                         disabled={!bulkAction || selectionLocked}
                         onClick={() => {
                           if (!bulkAction) return;
-                          void applyBulk({
-                            request_id: crypto.randomUUID(),
-                            issued_at_ms: Date.now(),
-                            items: selected.map((item) => ({
-                              id: item.id,
-                              repository_id: item.repository.id,
-                              expected: item.updated,
-                            })),
-                            action: bulkActions[bulkAction].action,
-                          });
+                          void applyBulk(
+                            notificationIntent(bulkAction, selected),
+                          );
                         }}
                       >
                         Apply to selected
@@ -455,26 +488,6 @@ function NotificationList({
                     </div>
                   )}
                 </div>
-                {bulk.error && (
-                  <div
-                    className="notice error flex flex-wrap items-center gap-2"
-                    role="alert"
-                  >
-                    <p>{bulk.error}</p>
-                    {intent && !reloadRequired && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => void applyBulk(intent)}
-                      >
-                        Retry bulk action
-                      </Button>
-                    )}
-                    <Button variant="outline" size="sm" onClick={refresh}>
-                      Refresh inbox
-                    </Button>
-                  </div>
-                )}
                 <ul
                   aria-label="Notifications"
                   className="divide-y overflow-hidden rounded-lg border"
@@ -492,6 +505,14 @@ function NotificationList({
                           (!checked && selected.length >= MAX_SELECTION)
                         }
                         actionsDisabled={!!intent || selected.length > 0}
+                        onUnsubscribe={
+                          canUnsubscribe
+                            ? () =>
+                                void applyBulk(
+                                  notificationIntent("unsubscribe", [item]),
+                                )
+                            : undefined
+                        }
                         onSelect={() => {
                           setSelection((current) => {
                             const next = new Set(current);
@@ -559,6 +580,7 @@ function NotificationRow({
   checked,
   selectionDisabled,
   actionsDisabled,
+  onUnsubscribe,
   onSelect,
   onPending,
   onChanged,
@@ -569,6 +591,7 @@ function NotificationRow({
   checked: boolean;
   selectionDisabled: boolean;
   actionsDisabled: boolean;
+  onUnsubscribe?: () => void;
   onSelect: () => void;
   onPending: (pending: boolean) => void;
   onChanged: (state: NoticeState, message: string) => void;
@@ -671,6 +694,16 @@ function NotificationRow({
             >
               {item.done ? "Move to inbox" : "Mark as done"}
             </Button>
+            {onUnsubscribe && (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={mutation.pending || actionsDisabled}
+                onClick={onUnsubscribe}
+              >
+                Unsubscribe
+              </Button>
+            )}
           </>
         )}
       </div>

@@ -343,8 +343,14 @@ roster and mute state. Inbox reads check current account, repository grant,
 and mute state before revealing existing notices. Issue and pull request
 overrides use typed subject addresses. The watcher read merges bounded pages
 from the repository and subject indexes, applies the private override to the
-committed event, and emits each eligible actor once. Unsubscribing from a
-discussion updates future activity delivery. A participating actor follows
+committed event, and emits each eligible actor once. The discussion sidebar
+updates future activity delivery. Inbox unsubscribe verifies the observed
+Directory activity and commits the preference and dismissal together in the
+Repository Cell. The inbox and its unread badge evaluate both from that owner.
+Saved and Done retain their own filing state. The Directory carries the most
+recent mention or review request separately from the strongest display reason
+so late ordinary delivery cannot reopen a dismissal. Replaying a dismissal
+preserves later follows. A participating actor follows
 the discussion in the same transaction that appends the activity. This
 increments the private preference version and uses the exact activity
 sequence as the cutoff. The outbox resolves qualified watchers to Directory

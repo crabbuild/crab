@@ -1848,7 +1848,7 @@ owner label does not acquire ownership.
 | Milestone search choices | `GET /api/repos/{owner}/{name}/discussion-search/milestones` |
 | Markdown suggestions | `GET /api/repos/{owner}/{name}/discussion-search/{mentions,team-mentions,references}` |
 | Team mention settings | `GET/PUT /api/repos/{owner}/{name}/mention-settings` |
-| Account notification inbox | `GET /api/notifications`, `GET /api/notifications/unread`, `PUT /api/notifications/{id}/state`, `POST /api/notifications/bulk` |
+| Account notification inbox | `GET /api/notifications`, `GET /api/notifications/unread`, `PUT /api/notifications/{id}/state`, `POST /api/notifications/bulk`, `POST /api/notifications/unsubscribe` |
 | Repository notification preference | `GET /api/repos/{owner}/{name}/subscription`, `PUT /api/repos/{owner}/{name}/subscription` |
 | Discussion notification preference | `GET` and `PUT /api/repos/{owner}/{name}/issues/{number}/subscription` or `/pulls/{number}/subscription` |
 | Stable discussion links | `GET /api/discussion-references/{repository_id}/{kind}/{number}` |
@@ -2599,6 +2599,18 @@ response has `items` with each row ID and its confirmed flags. Retry the same
 body after a lost response to recover the stored result within the receipt
 window.
 
+Use **Unsubscribe** on an inbox row or on selected rows to stop ordinary
+discussion updates and dismiss the observed activity. Saved bookmarks remain
+available. A newer personal or team mention or review request can reopen the
+conversation. Following the discussion again enables future activity.
+
+`POST /api/notifications/unsubscribe` accepts `items` with each row's `id`,
+`repository_id`, typed `subject`, and `updated` stamp as `expected`. Each row
+returns `unsubscribed`, `changed`, or `unavailable`. The server applies
+eligible rows and leaves changed and inaccessible rows alone. Retry the same
+selection after a lost response. The repository remembers what was dismissed
+and a replay preserves any newer follow.
+
 Open **Watch** in a repository to choose direct notifications, new issue
 activity, new pull request activity, both kinds, or mute. Watching adds
 `subscribed` notices for activity after the preference takes effect and
@@ -3346,7 +3358,7 @@ namespace and immutable asset bodies in backups. Restoring visible records
 without counters, claims, request ledgers,
 control and immutable roots loses numbering, ownership and retry guarantees.
 
-Discussion deletion, moderation, edit history, inbox unsubscribe, broad activity feeds, and
+Discussion deletion, moderation, edit history, broad activity feeds, and
 email delivery remain unimplemented. Native backup restore, cross-provider
 export, and complete product-root restore qualification remain pending.
 
@@ -3651,7 +3663,7 @@ The server is complete only when a real account can perform the workflow and obs
 | GitHub-quality design | Themes, responsive layouts, accessible controls, navigation, and loading/error behavior across workflows | In progress |
 | Team identity and authorization | OIDC, sessions, membership, permissions, isolation, revocation, CSRF, and administration | In progress; browser and CLI membership replacement are audited, and back-channel logout revokes delivered exact-identity sessions |
 | Git hosting | Authenticated fetch and push, exact branch/tag lifecycle, protection, publication, and independent-client proof | In progress; additional crash phases and coexistence qualification remain |
-| Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; moderation, edit history, inbox unsubscribe, release subscriptions, and external notification delivery remain |
+| Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; moderation, edit history, release subscriptions, and external notification delivery remain |
 | Repository management | CLI create/adopt/list, archive, settings, search, import, and audited administration | In progress; browser creation/import and audit history remain |
 | Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Native process restart and owner handoff tested; native metrics and shutdown wiring implemented. Backup restore, crash matrices, upgrades, and provider qualification remain |
 | Quality gates | API, UI, accessibility, realistic repositories, security, package smoke, and measured performance | In progress |

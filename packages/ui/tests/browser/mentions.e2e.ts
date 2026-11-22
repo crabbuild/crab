@@ -166,6 +166,7 @@ test("the private inbox links to the source and persists read state", async ({
   const { lifecycle } = await mockPullRequest(page);
   const notice = {
     id: "ba3633c5-7c00-4542-bf14-282eb2c91b0f",
+    subject: { kind: "pull", number: 2 },
     repository: { owner: "team", name: "project", id: lifecycle.repositoryId },
     title: "Plan rollout",
     href: `/team/project/pull/2/files?repository_id=${lifecycle.repositoryId}#review-thread-1`,

@@ -23,6 +23,7 @@ test("notifications preserve unread state and open the exact review reply", asyn
       repository,
       sender: actor.name,
       id: "notice-14",
+      subject: { kind: "pull", number: 2 },
       href: "/team/project/pull/2",
       updated: { id: "activity-14", created_at_ms: 1_700_000_100_000 },
       read: false,
@@ -35,6 +36,7 @@ test("notifications preserve unread state and open the exact review reply", asyn
       repository,
       sender: actor.name,
       id: "notice-13",
+      subject: { kind: "pull", number: 1 },
       href: "/team/project/pull/1/files?thread=1&reply=86",
       updated: { id: "activity-13", created_at_ms: 1_700_000_060_000 },
       read: false,
@@ -47,6 +49,7 @@ test("notifications preserve unread state and open the exact review reply", asyn
       repository: second,
       sender: actor.name,
       id: "notice-3",
+      subject: { kind: "issue", number: 2 },
       href: "/team/library/issues/2#issuecomment-9",
       updated: { id: "activity-3", created_at_ms: 1_700_000_000_000 },
       read: false,
@@ -59,6 +62,7 @@ test("notifications preserve unread state and open the exact review reply", asyn
       repository,
       sender: actor.name,
       id: "notice-2",
+      subject: { kind: "issue", number: 3 },
       href: "/team/project/issues/3",
       updated: { id: "activity-2", created_at_ms: 1_699_999_900_000 },
       read: false,
@@ -248,6 +252,7 @@ test("saved and done views persist and restore a conversation", async ({
   const notice = {
     repository: { id: lifecycle.repositoryId, owner: "team", name: "project" },
     id: "triage-thread",
+    subject: { kind: "pull", number: 1 },
     href: "/team/project/pull/1",
     updated: { id: "activity-1", created_at_ms: 1_700_000_100_000 },
     sender: "Alice",
@@ -355,6 +360,7 @@ test("bulk selection spans loaded pages and retries the same submission", async 
   const rows = [
     {
       id: "first-thread",
+      subject: { kind: "pull", number: 1 },
       repository: {
         id: lifecycle.repositoryId,
         owner: "team",
@@ -371,6 +377,7 @@ test("bulk selection spans loaded pages and retries the same submission", async 
     },
     {
       id: "second-thread",
+      subject: { kind: "pull", number: 1 },
       repository: { id: "another-repository", owner: "team", name: "library" },
       title: "Review the second change",
       href: "/team/library/pull/1",
@@ -518,4 +525,150 @@ test("bulk selection spans loaded pages and retries the same submission", async 
   await action.selectOption("restore");
   await apply.click();
   await expect(inbox.getByText("No completed notifications.")).toBeVisible();
+});
+
+test("unsubscribe recovers a lost reply and reports a stale row in a batch", async ({
+  page,
+}) => {
+  const { lifecycle } = await mockPullRequest(page);
+  const repository = {
+    id: lifecycle.repositoryId,
+    owner: "team",
+    name: "project",
+  };
+  const rows = [
+    {
+      id: "saved-thread",
+      repository,
+      subject: { kind: "pull", number: 1 },
+      updated: { id: "first-activity", created_at_ms: 1_700_001_000_000 },
+      title: "Saved discussion",
+      href: "/team/project/pull/1",
+      sender: "Alice",
+      reason: "mention",
+      read: false,
+      saved: true,
+      done: false,
+      dismissed: false,
+    },
+    {
+      id: "other-thread",
+      repository,
+      subject: { kind: "pull", number: 2 },
+      updated: { id: "second-activity", created_at_ms: 1_700_000_000_000 },
+      title: "Other discussion",
+      href: "/team/project/pull/2",
+      sender: "Alice",
+      reason: "mention",
+      read: false,
+      saved: false,
+      done: false,
+      dismissed: false,
+    },
+  ];
+  await page.route("**/api/session", (route) =>
+    route.fulfill({
+      json: {
+        authenticated: true,
+        user: { name: "Bob", subject: "bob" },
+        csrf: "unsubscribe-csrf",
+      },
+    }),
+  );
+  await page.route("**/api/notifications/unread", (route) =>
+    route.fulfill({ json: { unread: rows.some((item) => !item.dismissed) } }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/notifications",
+    (route) => {
+      const saved =
+        new URL(route.request().url()).searchParams.get("view") === "saved";
+      return route.fulfill({
+        json: {
+          items: rows.filter((row) => (saved ? row.saved : !row.dismissed)),
+          next: null,
+        },
+      });
+    },
+  );
+  let lost = true;
+  let original: unknown;
+  await page.route("**/api/notifications/unsubscribe", (route) => {
+    const request = route.request();
+    const body = request.postDataJSON();
+    expect(request.method()).toBe("POST");
+    expect(request.headers()["x-csrf-token"]).toBe("unsubscribe-csrf");
+    expect(body.items).toEqual(
+      rows.slice(0, body.items.length).map((row) => ({
+        id: row.id,
+        repository_id: repository.id,
+        subject: row.subject,
+        expected: row.updated,
+      })),
+    );
+    rows[0].dismissed = true;
+    if (lost) {
+      lost = false;
+      original = body;
+      return route.abort("failed");
+    }
+    if (body.items.length === 1) {
+      expect(body).toEqual(original);
+      return route.fulfill({
+        json: { items: [{ id: rows[0].id, status: "unsubscribed" }] },
+      });
+    }
+    rows[1].updated = {
+      id: "new-second-activity",
+      created_at_ms: 1_700_002_000_000,
+    };
+    return route.fulfill({
+      json: {
+        items: [
+          { id: rows[0].id, status: "unsubscribed" },
+          { id: rows[1].id, status: "changed" },
+        ],
+      },
+    });
+  });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/-/notifications");
+  const inbox = page.getByRole("region", { name: "Notifications" });
+  const savedLink = inbox.getByRole("link", { name: rows[0].title });
+  const savedRow = inbox.getByRole("listitem").filter({
+    has: page.getByRole("link", { name: rows[0].title }),
+  });
+  await savedRow.getByRole("button", { name: "Unsubscribe" }).click();
+  await expect(inbox.getByRole("alert")).toContainText("The response was lost");
+  await inbox.getByRole("button", { name: "Retry unsubscribe" }).click();
+  await expect(savedLink).toHaveCount(0);
+  await inbox.getByRole("link", { name: "Saved", exact: true }).click();
+  await expect(savedLink).toBeVisible();
+  await expect(
+    savedRow.getByRole("button", { name: "Unsubscribe" }),
+  ).toHaveCount(0);
+
+  rows[0].updated = {
+    id: "new-first-activity",
+    created_at_ms: 1_700_002_000_000,
+  };
+  rows[0].dismissed = false;
+  await inbox.getByRole("link", { name: "All", exact: true }).click();
+  await expect(savedLink).toBeVisible();
+  await inbox
+    .getByRole("checkbox", { name: "Select all loaded notifications" })
+    .click();
+  await inbox
+    .getByLabel("Bulk notification action")
+    .selectOption("unsubscribe");
+  await inbox.getByRole("button", { name: "Apply to selected" }).click();
+  await expect(inbox.getByRole("alert")).toContainText(
+    "One conversation changed",
+  );
+  await expect(savedLink).toHaveCount(0);
+  await expect(inbox.getByRole("link", { name: rows[1].title })).toBeVisible();
+  await inbox.getByRole("button", { name: "Refresh inbox" }).click();
+  await expect(inbox.getByRole("alert")).toHaveCount(0);
+  await expectNoAccessibilityViolations(page);
 });

@@ -69,15 +69,19 @@ async fn inbox_delivers_a_review_request_and_mention_to_the_current_member() {
         Method::POST, "/api/repos/team/private/pulls", &alice,
         json!({"request_id":Uuid::now_v7(),"title":"Please review","body":"","base_ref":"refs/heads/main","head_ref":"refs/heads/feature"}),
     ).await.error_for_status().unwrap();
-    h.write(
-        Method::PUT,
-        "/api/repos/team/private/pulls/1/review-requests",
-        &alice,
-        json!({"version":1,"change":{"kind":"request","actor_id":bob_id}}),
-    )
-    .await
-    .error_for_status()
-    .unwrap();
+    let requested: Value = h
+        .write(
+            Method::PUT,
+            "/api/repos/team/private/pulls/1/review-requests",
+            &alice,
+            json!({"version":1,"change":{"kind":"request","actor_id":bob_id}}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
 
     h.deliver_notifications("team", "private").await;
     let page = h.json("/api/notifications?limit=1&unread=true", &bob).await;
@@ -178,6 +182,61 @@ async fn inbox_delivers_a_review_request_and_mention_to_the_current_member() {
             .unwrap()
             .len(),
         2
+    );
+
+    let unsubscribe = json!({"items":[{
+        "id":review["id"],"repository_id":id,"subject":review["subject"],"expected":review["updated"]
+    }]});
+    let result: Value = h
+        .write(
+            Method::POST,
+            "/api/notifications/unsubscribe",
+            &bob,
+            unsubscribe,
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(result["items"][0]["status"], "unsubscribed");
+    assert_eq!(
+        h.json("/api/notifications?unread=true", &bob).await["items"],
+        remaining["items"]
+    );
+    let requests_path = "/api/repos/team/private/pulls/1/review-requests";
+    h.write(
+        Method::PUT,
+        requests_path,
+        &alice,
+        json!({"version":2,"change":{"kind":"cancel","id":requested["id"]}}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    h.write(
+        Method::PUT,
+        requests_path,
+        &alice,
+        json!({"version":3,"change":{"kind":"request","actor_id":bob_id}}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    h.deliver_notifications("team", "private").await;
+    let reopened = h
+        .json(
+            "/api/notifications?reason=review_requested&unread=true",
+            &bob,
+        )
+        .await;
+    assert_eq!(reopened["items"][0]["id"], review["id"]);
+    assert_ne!(reopened["items"][0]["updated"], review["updated"]);
+    assert_eq!(
+        h.json("/api/repos/team/private/pulls/1/subscription", &bob)
+            .await["mode"],
+        "follow"
     );
 
     h.server
