@@ -79,7 +79,7 @@ export function DiscussionWatch({
         modes={discussionModes}
         label="Notification settings"
         title={title}
-        description="Choose which future updates appear in your inbox. Direct mentions, assignments, and review requests use your repository notification settings."
+        description="Creating an issue or pull request, posting a comment or review, or changing its state follows future activity. Repository mute still applies."
       />
     </section>
   );

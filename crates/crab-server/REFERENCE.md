@@ -2598,8 +2598,12 @@ still use the repository setting. Past inbox items keep their read state.
 Use the issue or pull request subscription endpoint with the same versioned
 `GET` and `PUT` contract. The endpoints require current read access and return
 404 for a missing discussion. Issue and pull request numbers address distinct
-preferences. Automatic participant and mention subscriptions, release
-notifications, and email delivery remain open.
+preferences. Opening a discussion, publishing a comment or review, or changing
+its open, closed, or merged state automatically follows that discussion for
+the participating account. Participating again after unsubscribing starts a new
+follow with the activity as its cutoff. Repository mute suppresses automatic
+following. Mentions and assignments remain direct notices. Automatic following
+from those notices, release notifications, and email delivery remain open.
 
 ### Link related work
 
@@ -3309,7 +3313,7 @@ namespace and immutable asset bodies in backups. Restoring visible records
 without counters, claims, request ledgers,
 control and immutable roots loses numbering, ownership and retry guarantees.
 
-Discussion deletion, moderation, edit history, automatic participant subscriptions, broad activity feeds, and
+Discussion deletion, moderation, edit history, automatic following from mentions and assignments, broad activity feeds, and
 email delivery remain unimplemented. Native backup restore, cross-provider
 export, and complete product-root restore qualification remain pending.
 
@@ -3614,7 +3618,7 @@ The server is complete only when a real account can perform the workflow and obs
 | GitHub-quality design | Themes, responsive layouts, accessible controls, navigation, and loading/error behavior across workflows | In progress |
 | Team identity and authorization | OIDC, sessions, membership, permissions, isolation, revocation, CSRF, and administration | In progress; browser and CLI membership replacement are audited, and back-channel logout revokes delivered exact-identity sessions |
 | Git hosting | Authenticated fetch and push, exact branch/tag lifecycle, protection, publication, and independent-client proof | In progress; additional crash phases and coexistence qualification remain |
-| Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; moderation, edit history, automatic participant and release subscriptions, and external notification delivery remain |
+| Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; moderation, edit history, following from mentions and assignments, release subscriptions, and external notification delivery remain |
 | Repository management | CLI create/adopt/list, archive, settings, search, import, and audited administration | In progress; browser creation/import and audit history remain |
 | Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Native process restart and owner handoff tested; native metrics and shutdown wiring implemented. Backup restore, crash matrices, upgrades, and provider qualification remain |
 | Quality gates | API, UI, accessibility, realistic repositories, security, package smoke, and measured performance | In progress |

@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::{
     RepositoryAccess, RepositoryMember, app,
-    cells::repository::collaboration::watches,
+    cells::{directory::IdentityKey, repository::collaboration::watches},
     test_support::{git, http::Harness},
 };
 
@@ -190,15 +190,28 @@ async fn watch_fanout_advances_over_ineligible_pages() {
     set(&h, &bob, "issues", 0).await;
     let repo = h.server.repositories.values()[0].clone();
     let cell = app::repository_cell(&h.server, &repo).unwrap();
-    // Existing preferences can outlive a repository grant. Place a full page
-    // of higher UUIDs ahead of Bob without granting those accounts access.
-    for offset in 0..32 {
+    let session = h.json("/api/session", &bob).await;
+    let identity = IdentityKey {
+        issuer: session["user"]["issuer"].as_str().unwrap().into(),
+        subject: session["user"]["subject"].as_str().unwrap().into(),
+    };
+    let bob_key = watches::identity_key(&identity).unwrap();
+    // Existing preferences can outlive a grant. Place a full page of higher
+    // qualified keys ahead of Bob without granting those accounts access.
+    let candidates = (0..)
+        .map(|offset| IdentityKey {
+            issuer: identity.issuer.clone(),
+            subject: format!("revoked-{offset}"),
+        })
+        .filter(|actor| watches::identity_key(actor).unwrap() > bob_key)
+        .take(32);
+    for actor in candidates {
         cell.client
             .command::<watches::Set>(
                 &cell.target,
                 app::mutation_identity().unwrap(),
                 watches::Change {
-                    actor: Uuid::from_u128(u128::MAX - offset),
+                    actor,
                     desired: watches::Preference {
                         version: 0,
                         mode: watches::Mode::Issues,
@@ -281,7 +294,7 @@ async fn discussion_preferences_override_repository_watch_without_suppressing_me
     );
     assert_eq!(
         h.json(&preference, &alice).await,
-        json!({"mode":"inherit","version":0})
+        json!({"mode":"follow","version":1})
     );
     comment(&first, "This update should arrive").await;
     comment(&second, "The other thread is not followed").await;
@@ -343,5 +356,89 @@ async fn discussion_preferences_override_repository_watch_without_suppressing_me
             .len(),
         4
     );
+    h.close().await;
+}
+
+#[tokio::test]
+async fn participation_follows_before_delivery_and_fences_a_newer_choice() {
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    let preference = format!("{ROOT}/issues/1/subscription");
+    let comment_path = format!("{ROOT}/issues/1/comments");
+    let comment = |cookie: &str, body: &str| {
+        let cookie = cookie.to_owned();
+        let body = json!({"request_id":Uuid::now_v7(),"body":body});
+        let h = &h;
+        let path = &comment_path;
+        async move {
+            h.write(Method::POST, path, &cookie, body)
+                .await
+                .error_for_status()
+                .unwrap();
+        }
+    };
+    issue(&h, &alice, "Followed by participating", None).await;
+    assert_eq!(
+        h.json(&preference, &alice).await,
+        json!({"mode":"follow","version":1})
+    );
+    comment(&bob, "First reply").await;
+    assert_eq!(
+        h.json(&preference, &bob).await,
+        json!({"mode":"follow","version":1})
+    );
+    comment(&alice, "An answer before the worker runs").await;
+    h.deliver_notifications("team", "private").await;
+    let alice_notices = h.json(WATCHED, &alice).await;
+    let bob_notices = h.json(WATCHED, &bob).await;
+    assert_eq!(alice_notices["items"].as_array().unwrap().len(), 1);
+    assert_eq!(bob_notices["items"].as_array().unwrap().len(), 1);
+    assert!(
+        bob_notices["items"][0]["href"]
+            .as_str()
+            .unwrap()
+            .ends_with("#issuecomment-2")
+    );
+
+    h.write(
+        Method::PUT,
+        &preference,
+        &bob,
+        json!({"mode":"unsubscribed","version":1}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    comment(&alice, "No notice during the unsubscribe").await;
+    comment(&bob, "Participating again follows future replies").await;
+    assert_eq!(
+        h.json(&preference, &bob).await,
+        json!({"mode":"follow","version":3})
+    );
+    assert_eq!(
+        h.write(
+            Method::PUT,
+            &preference,
+            &bob,
+            json!({"mode":"unsubscribed","version":1})
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
+    comment(&alice, "A reply after following again").await;
+    h.deliver_notifications("team", "private").await;
+    let replayed = h.json(WATCHED, &bob).await;
+    assert_eq!(replayed["items"].as_array().unwrap().len(), 2);
+    assert!(
+        replayed["items"][0]["href"]
+            .as_str()
+            .unwrap()
+            .ends_with("#issuecomment-5")
+    );
+    h.deliver_notifications("team", "private").await;
+    assert_eq!(h.json(WATCHED, &bob).await, replayed);
     h.close().await;
 }

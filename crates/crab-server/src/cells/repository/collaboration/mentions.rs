@@ -50,7 +50,7 @@ pub(crate) struct Event {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Watch {
-    pub before: Option<Uuid>,
+    pub before: Option<watches::Key>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -61,7 +61,7 @@ pub(crate) struct EventKey {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch: Option<Watch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next: Option<Uuid>,
+    pub next: Option<watches::Key>,
 }
 
 fn key(id: Uuid, created_at_ms: u64) -> String {
@@ -236,7 +236,7 @@ pub(in crate::cells::repository) fn assigned(
 }
 
 pub(super) fn watched(context: &Transaction<'_>, source: &super::activity::Event) -> Result<()> {
-    if !watches::active(context, source.target.subject())? {
+    if !watches::active(context, source)? {
         return Ok(());
     }
     let event = Event {

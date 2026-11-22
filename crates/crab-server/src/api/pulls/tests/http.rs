@@ -287,6 +287,7 @@ async fn pending_review_keeps_comments_private_and_recovers_a_published_batch() 
     .unwrap();
     *h.provider.mode.lock().await = "member".into();
     let bob = h.login().await;
+    let subscription = format!("{ROOT}/1/subscription");
     let draft = format!("{ROOT}/1/pending-review");
     let submit = format!("{draft}/submit");
     let reviews = format!("{ROOT}/1/reviews");
@@ -341,6 +342,11 @@ async fn pending_review_keeps_comments_private_and_recovers_a_published_batch() 
     assert_eq!(h.json(&reviews, &alice).await["items"], json!([]));
     assert_eq!(h.json(&threads, &alice).await["items"], json!([]));
     assert_eq!(
+        h.json(&subscription, &bob).await,
+        json!({"mode":"inherit","version":0})
+    );
+    h.deliver_notifications("team", "private").await;
+    assert_eq!(
         h.json("/api/notifications", &alice).await["items"],
         json!([])
     );
@@ -365,7 +371,14 @@ async fn pending_review_keeps_comments_private_and_recovers_a_published_batch() 
     assert_eq!(submitted, json!({"review":1,"threads":[1,2]}));
     h.deliver_notifications("team", "private").await;
     let inbox = h.json("/api/notifications", &alice).await;
-    let notified = inbox["items"].as_array().unwrap();
+    let mentions = h.json("/api/notifications?reason=mention", &alice).await;
+    let notified = mentions["items"].as_array().unwrap();
+    let followed = h.json("/api/notifications?reason=subscribed", &alice).await;
+    assert_eq!(followed["items"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        h.json(&subscription, &bob).await,
+        json!({"mode":"follow","version":1})
+    );
     assert_eq!(notified.len(), 2);
     assert!(
         notified
@@ -432,6 +445,7 @@ async fn pending_review_keeps_comments_private_and_recovers_a_published_batch() 
         .await
         .unwrap();
     assert_eq!(replayed, submitted);
+    h.deliver_notifications("team", "private").await;
     assert_eq!(h.json("/api/notifications", &alice).await, inbox);
     assert_eq!(h.json(&draft, &bob).await["version"], json!(stale));
     let discarded = Uuid::now_v7();

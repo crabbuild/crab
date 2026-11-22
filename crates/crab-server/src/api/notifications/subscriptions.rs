@@ -4,17 +4,15 @@ use axum::{
     Extension, Json,
     extract::{Path, State},
 };
-use uuid::Uuid;
 
 use crate::{
     app::{self, Error, Result},
     auth::Principal,
     cells::{
-        Address, CellClient,
-        directory::RegisterAccounts,
+        directory::IdentityKey,
         repository::collaboration::{Subject, SubjectKind, watches},
     },
-    repository::{Repository, access::actor_id},
+    repository::Repository,
     server::Server,
 };
 
@@ -24,12 +22,10 @@ pub(super) async fn get(
     Path(route): Path<(String, String)>,
 ) -> Result<Json<watches::Preference>> {
     let repo = app::repository(&server, &principal, &route)?;
-    let actor = actor_id(&server, app::account(&principal)?).await?;
+    let actor = app::account(&principal)?;
+    let preference = read(&server, &repo, actor).await?;
     app::membership(&server, &principal, &repo).await?;
-    let preference = match actor {
-        Some(actor) => read(&server, &repo, actor).await?,
-        None => watches::Preference::default(),
-    };
+    app::account(&principal)?;
     Ok(Json(preference))
 }
 
@@ -44,9 +40,8 @@ pub(super) async fn set(
         return Err(Error::Invalid("Notification preference version is invalid"));
     }
     let cell = app::repository_cell(&server, &repo)?;
-    let actor = register(&cell.client, &principal).await?;
     app::membership(&server, &principal, &repo).await?;
-    app::account(&principal)?;
+    let actor = app::account(&principal)?;
     let preference = app::command_output(
         cell.client
             .command::<watches::Set>(
@@ -62,7 +57,7 @@ pub(super) async fn set(
 pub(super) async fn read(
     server: &Server,
     repo: &Repository,
-    actor: Uuid,
+    actor: IdentityKey,
 ) -> Result<watches::Preference> {
     let cell = app::repository_cell(server, repo)?;
     app::query_output(
@@ -70,25 +65,6 @@ pub(super) async fn read(
             .query::<watches::Get>(&cell.target, None, actor)
             .await,
     )
-}
-
-async fn register(client: &CellClient, principal: &Principal) -> Result<Uuid> {
-    let identity = app::account(principal)?;
-    let accounts = app::command_output(
-        client
-            .command::<RegisterAccounts>(
-                Address::Directory,
-                app::mutation_identity()?,
-                vec![identity],
-            )
-            .await,
-    )?;
-    match accounts.as_slice() {
-        [actor] => Ok(*actor),
-        _ => Err(Error::CellContract(
-            "Notification account registration is inconsistent",
-        )),
-    }
 }
 
 fn subject(discussion: &str, number: u64) -> Result<Subject> {
@@ -110,7 +86,7 @@ pub(super) async fn get_thread(
 ) -> Result<Json<watches::ThreadPreference>> {
     let subject = subject(&discussion, number)?;
     let repo = app::repository(&server, &principal, &(owner, name))?;
-    let actor = actor_id(&server, app::account(&principal)?).await?;
+    let actor = app::account(&principal)?;
     let cell = app::repository_cell(&server, &repo)?;
     let preference = app::query_output(
         cell.client
@@ -138,9 +114,8 @@ pub(super) async fn set_thread(
         return Err(Error::Invalid("Notification preference version is invalid"));
     }
     let cell = app::repository_cell(&server, &repo)?;
-    let actor = register(&cell.client, &principal).await?;
     app::membership(&server, &principal, &repo).await?;
-    app::account(&principal)?;
+    let actor = app::account(&principal)?;
     let outcome = app::command_output(
         cell.client
             .command::<watches::SetThread>(

@@ -18,15 +18,16 @@ use crate::{
     auth::Principal,
     cells::{
         Address,
-        directory::notifications::{
-            Entry, List, ListInput, MarkRead, MarkReadInput, Position, Reason,
+        directory::{
+            IdentityKey,
+            notifications::{Entry, List, ListInput, MarkRead, MarkReadInput, Position, Reason},
         },
         repository::{
             collaboration::{SubjectKind, Target, watches::Mode},
             search::index::references::{FindReferences, ReferenceInput},
         },
     },
-    repository::{Repository, access::actor_id},
+    repository::Repository,
     server::Server,
 };
 
@@ -120,16 +121,8 @@ async fn list(
             return Err(Error::NotFound);
         }
     }
-    let (entries, actor) = tokio::try_join!(
-        entries(&server, &principal, before),
-        actor_id(&server, app::account(&principal)?),
-    )?;
-    let Some(actor) = actor else {
-        return Ok(Json(Page {
-            items: Vec::new(),
-            next: None,
-        }));
-    };
+    let actor = app::account(&principal)?;
+    let entries = entries(&server, actor.clone(), before).await?;
     // Read one account's bounded history and authorize by repository, rather
     // than scanning private repositories or checking the same grant per item.
     let mut groups = HashMap::<Uuid, Vec<(usize, Entry)>>::new();
@@ -148,7 +141,7 @@ async fn list(
             .push((order, entry));
     }
     let batches: Vec<Vec<(usize, Item)>> = stream::iter(groups)
-        .map(|(id, entries)| repository_items(&server, &principal, actor, id, entries))
+        .map(|(id, entries)| repository_items(&server, &principal, &actor, id, entries))
         .buffer_unordered(8)
         .try_collect()
         .await?;
@@ -171,10 +164,9 @@ async fn list(
 
 async fn entries(
     server: &Server,
-    principal: &Principal,
+    identity: IdentityKey,
     before: Option<Position>,
 ) -> Result<Vec<Entry>> {
-    let identity = app::account(principal)?;
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     app::query_output(
         cells
@@ -192,13 +184,8 @@ async fn unread(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
 ) -> Result<Json<Unread>> {
-    let (entries, actor) = tokio::try_join!(
-        entries(&server, &principal, None),
-        actor_id(&server, app::account(&principal)?),
-    )?;
-    let Some(actor) = actor else {
-        return Ok(Json(Unread { unread: false }));
-    };
+    let actor = app::account(&principal)?;
+    let entries = entries(&server, actor.clone(), None).await?;
     let repositories: HashSet<_> = entries
         .into_iter()
         .filter(|entry| !entry.read)
@@ -207,7 +194,7 @@ async fn unread(
     let mut accessible = stream::iter(repositories)
         .filter_map(|id| std::future::ready(server.repositories.by_id(id)))
         .map(|repo| {
-            let (server, principal) = (&server, &principal);
+            let (server, principal, actor) = (&server, &principal, &actor);
             async move { may_notify(server, principal, &repo, actor).await }
         })
         .buffer_unordered(8);
@@ -233,16 +220,16 @@ async fn may_notify(
     server: &Server,
     principal: &Principal,
     repo: &Repository,
-    actor: Uuid,
+    actor: &IdentityKey,
 ) -> Result<bool> {
     Ok(may_read(server, principal, repo).await?
-        && subscriptions::read(server, repo, actor).await?.mode != Mode::Muted)
+        && subscriptions::read(server, repo, actor.clone()).await?.mode != Mode::Muted)
 }
 
 async fn repository_items(
     server: &Server,
     principal: &Principal,
-    actor: Uuid,
+    actor: &IdentityKey,
     id: Uuid,
     entries: Vec<(usize, Entry)>,
 ) -> Result<Vec<(usize, Item)>> {

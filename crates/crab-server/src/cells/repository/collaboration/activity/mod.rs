@@ -281,6 +281,7 @@ pub(in crate::cells::repository) fn append(
         context.put_document(&format!("{}{number:016x}", events(Some(related))), &true)?;
     }
     super::conversation::project_event(context, &event)?;
+    super::watches::participate(context, &event)?;
     super::mentions::watched(context, &event)?;
     Ok(event)
 }

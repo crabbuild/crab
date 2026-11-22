@@ -1,18 +1,33 @@
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use super::{Subject, SubjectKind, activity, next_version};
 use crate::cells::{
     Error, Result,
     application::{Mutation, MutationResult, Read, Transaction},
+    directory::IdentityKey,
     repository::CLASS,
 };
 
-const PREFERENCES: &str = "collaboration/v1/watches/preferences/";
-const WATCHERS: &str = "collaboration/v1/watches/active/";
+const PREFERENCES: &str = "collaboration/v2/watches/preferences/";
+const WATCHERS: &str = "collaboration/v2/watches/active/";
 const PAGE_SIZE: usize = 32;
+
+pub(crate) type Key = [u8; 32];
+
+pub(crate) fn identity_key(actor: &IdentityKey) -> Result<Key> {
+    actor.validate()?;
+    let mut hash = blake3::Hasher::new_derive_key("crab repository notification account v1");
+    hash.update(actor.issuer.as_bytes());
+    hash.update(b"\0");
+    hash.update(actor.subject.as_bytes());
+    Ok(*hash.finalize().as_bytes())
+}
+
+fn key_text(key: Key) -> String {
+    blake3::Hash::from_bytes(key).to_hex().to_string()
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -40,12 +55,9 @@ struct Subscription {
     pulls_after: Option<u64>,
 }
 
-fn subscription(context: &Transaction<'_>, actor: Uuid) -> Result<Subscription> {
-    if actor.is_nil() {
-        return Err(Error::Invalid("Watch account is invalid"));
-    }
+fn subscription(context: &Transaction<'_>, actor: Key) -> Result<Subscription> {
     Ok(context
-        .document(&format!("{PREFERENCES}{actor}"))?
+        .document(&format!("{PREFERENCES}{}", key_text(actor)))?
         .unwrap_or_default())
 }
 
@@ -53,18 +65,18 @@ pub(crate) struct Get;
 impl Read for Get {
     const CLASS: &'static str = CLASS;
     const ID: u32 = 416;
-    type Input = Uuid;
+    type Input = IdentityKey;
     type Output = Preference;
 
-    fn execute(context: &mut Transaction<'_>, actor: Uuid) -> Result<Preference> {
-        Ok(subscription(context, actor)?.preference)
+    fn execute(context: &mut Transaction<'_>, actor: IdentityKey) -> Result<Preference> {
+        Ok(subscription(context, identity_key(&actor)?)?.preference)
     }
 }
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Change {
-    pub actor: Uuid,
+    pub actor: IdentityKey,
     pub desired: Preference,
 }
 
@@ -79,7 +91,8 @@ impl Mutation for Set {
         context: &mut Transaction<'_>,
         input: Change,
     ) -> Result<MutationResult<Self::Output>> {
-        let mut current = subscription(context, input.actor)?;
+        let key = identity_key(&input.actor)?;
+        let mut current = subscription(context, key)?;
         let mode = input.desired.mode;
         if current.preference.mode == mode {
             return Ok(MutationResult::Success(Some(current.preference)));
@@ -96,31 +109,41 @@ impl Mutation for Set {
             mode,
             version: next_version(current.preference.version)?,
         };
-        let watcher = format!("{WATCHERS}{}", input.actor);
+        let suffix = key_text(key);
+        let watcher = format!("{WATCHERS}{suffix}");
         // The sparse index is updated with the preference. Version tombstones
         // fence stale writes after unwatching without keeping an active row.
         if current.issues_after.is_some() || current.pulls_after.is_some() {
-            context.put_document(&watcher, &true)?;
+            context.put_document(&watcher, &input.actor)?;
         } else {
             context.delete_document(&watcher)?;
         }
-        context.put_document(&format!("{PREFERENCES}{}", input.actor), &current)?;
+        context.put_document(&format!("{PREFERENCES}{suffix}"), &current)?;
         Ok(MutationResult::Success(Some(current.preference)))
     }
 }
 
 fn thread_index(subject: Subject) -> String {
     format!(
-        "collaboration/v1/watches/discussions/{}/active/",
+        "collaboration/v2/watches/discussions/{}/active/",
         subject.key()
     )
 }
 
-pub(super) fn active(context: &Transaction<'_>, subject: Subject) -> Result<bool> {
-    Ok(!context.documents::<bool>(WATCHERS, None, 1)?.is_empty()
-        || !context
-            .documents::<bool>(&thread_index(subject), None, 1)?
-            .is_empty())
+pub(super) fn active(context: &Transaction<'_>, source: &activity::Event) -> Result<bool> {
+    // An author-only subscription needs no outbox work. Two rows suffice to
+    // find another watcher because each index holds at most one row per actor.
+    let has_recipient = |prefix: &str| {
+        Ok::<_, Error>(
+            context
+                .documents::<IdentityKey>(prefix, None, 2)?
+                .into_iter()
+                .any(|(_, actor)| {
+                    actor.issuer != source.actor.issuer || actor.subject != source.actor.subject
+                }),
+        )
+    };
+    Ok(has_recipient(WATCHERS)? || has_recipient(&thread_index(source.target.subject()))?)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -153,31 +176,95 @@ struct ThreadSubscription {
     after: u64,
 }
 
-fn thread_key(subject: Subject, actor: Uuid) -> Result<String> {
-    if actor.is_nil() {
-        return Err(Error::Invalid("Watch account is invalid"));
-    }
-    Ok(format!(
-        "collaboration/v1/watches/discussions/{}/preferences/{actor}",
-        subject.key()
-    ))
+fn thread_key(subject: Subject, actor: Key) -> String {
+    format!(
+        "collaboration/v2/watches/discussions/{}/preferences/{}",
+        subject.key(),
+        key_text(actor)
+    )
 }
 
 fn thread_subscription(
     context: &Transaction<'_>,
     subject: Subject,
-    actor: Uuid,
+    actor: Key,
 ) -> Result<ThreadSubscription> {
     Ok(context
-        .document(&thread_key(subject, actor)?)?
+        .document(&thread_key(subject, actor))?
         .unwrap_or_default())
+}
+
+fn save_thread(
+    context: &Transaction<'_>,
+    subject: Subject,
+    actor: &IdentityKey,
+    key: Key,
+    current: &mut ThreadSubscription,
+    mode: ThreadMode,
+) -> Result<ThreadPreference> {
+    current.preference = ThreadPreference {
+        mode,
+        version: next_version(current.preference.version)?,
+    };
+    let index = format!("{}{}", thread_index(subject), key_text(key));
+    if mode.follows() {
+        context.put_document(&index, actor)?;
+    } else {
+        context.delete_document(&index)?;
+    }
+    context.put_document(&thread_key(subject, key), current)?;
+    Ok(current.preference)
+}
+
+pub(super) fn participate(context: &Transaction<'_>, source: &activity::Event) -> Result<()> {
+    use activity::Action;
+
+    if source.actor.issuer.starts_with("urn:crab:")
+        || !matches!(
+            source.action,
+            Action::Created
+                | Action::Approved
+                | Action::ChangesRequested
+                | Action::Commented
+                | Action::Closed
+                | Action::IssueClosed { .. }
+                | Action::Reopened
+                | Action::Merged
+        )
+    {
+        return Ok(());
+    }
+    let actor = IdentityKey {
+        issuer: source.actor.issuer.clone(),
+        subject: source.actor.subject.clone(),
+    };
+    let key = identity_key(&actor)?;
+    if subscription(context, key)?.preference.mode == Mode::Muted {
+        return Ok(());
+    }
+    let subject = source.target.subject();
+    let mut current = thread_subscription(context, subject, key)?;
+    if current.preference.mode != ThreadMode::Follow {
+        // Use the committed participation sequence so neither replay nor a
+        // delivery backlog can move the follow before its actual trigger.
+        current.after = source.number;
+        save_thread(
+            context,
+            subject,
+            &actor,
+            key,
+            &mut current,
+            ThreadMode::Follow,
+        )?;
+    }
+    Ok(())
 }
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ThreadAccount {
     pub subject: Subject,
-    pub actor: Option<Uuid>,
+    pub actor: IdentityKey,
 }
 
 pub(crate) struct GetThread;
@@ -191,10 +278,8 @@ impl Read for GetThread {
         if input.subject.closed(context)?.is_none() {
             return Ok(None);
         }
-        let preference = match input.actor {
-            Some(actor) => thread_subscription(context, input.subject, actor)?.preference,
-            None => ThreadPreference::default(),
-        };
+        let preference =
+            thread_subscription(context, input.subject, identity_key(&input.actor)?)?.preference;
         Ok(Some(preference))
     }
 }
@@ -203,7 +288,7 @@ impl Read for GetThread {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ThreadChange {
     pub subject: Subject,
-    pub actor: Uuid,
+    pub actor: IdentityKey,
     pub desired: ThreadPreference,
 }
 
@@ -229,7 +314,8 @@ impl Mutation for SetThread {
         if input.subject.closed(context)?.is_none() {
             return Ok(MutationResult::Rejected(ThreadOutcome::Missing));
         }
-        let mut current = thread_subscription(context, input.subject, input.actor)?;
+        let key = identity_key(&input.actor)?;
+        let mut current = thread_subscription(context, input.subject, key)?;
         let mode = input.desired.mode;
         if current.preference.mode == mode {
             return Ok(MutationResult::Success(ThreadOutcome::Saved(
@@ -244,40 +330,33 @@ impl Mutation for SetThread {
         if (current.preference.mode, mode) != (ThreadMode::Follow, ThreadMode::StateChanges) {
             current.after = activity::latest(context)?;
         }
-        current.preference = ThreadPreference {
+        let saved = save_thread(
+            context,
+            input.subject,
+            &input.actor,
+            key,
+            &mut current,
             mode,
-            version: next_version(current.preference.version)?,
-        };
-        let index = format!(
-            "{}{actor}",
-            thread_index(input.subject),
-            actor = input.actor
-        );
-        if mode.follows() {
-            context.put_document(&index, &true)?;
-        } else {
-            context.delete_document(&index)?;
-        }
-        context.put_document(&thread_key(input.subject, input.actor)?, &current)?;
-        Ok(MutationResult::Success(ThreadOutcome::Saved(
-            current.preference,
-        )))
+        )?;
+        Ok(MutationResult::Success(ThreadOutcome::Saved(saved)))
     }
 }
 
 fn watcher_keys(
     context: &Transaction<'_>,
     prefix: &str,
-    before: Option<Uuid>,
-) -> Result<Vec<Uuid>> {
-    let before = before.map(|actor| format!("{prefix}{actor}"));
+    before: Option<Key>,
+) -> Result<Vec<(Key, IdentityKey)>> {
+    let before = before.map(|actor| format!("{prefix}{}", key_text(actor)));
     context
-        .documents::<bool>(prefix, before.as_deref(), PAGE_SIZE + 1)?
+        .documents::<IdentityKey>(prefix, before.as_deref(), PAGE_SIZE + 1)?
         .into_iter()
-        .map(|(key, _)| {
-            key.strip_prefix(prefix)
-                .and_then(|key| Uuid::parse_str(key).ok())
-                .ok_or(Error::Invalid("Watch index key is invalid"))
+        .map(|(key, actor)| {
+            let expected = identity_key(&actor)?;
+            if key.strip_prefix(prefix) != Some(key_text(expected).as_str()) {
+                return Err(Error::Invalid("Watch index key is invalid"));
+            }
+            Ok((expected, actor))
         })
         .collect()
 }
@@ -287,14 +366,14 @@ fn watcher_keys(
 pub(crate) struct Query {
     pub subject: Subject,
     pub activity: u64,
-    pub before: Option<Uuid>,
+    pub before: Option<Key>,
 }
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct WatchPage {
-    pub recipients: Vec<Uuid>,
-    pub next: Option<Uuid>,
+    pub recipients: Vec<IdentityKey>,
+    pub next: Option<Key>,
 }
 
 pub(crate) struct ListWatchers;
@@ -316,7 +395,7 @@ impl Read for ListWatchers {
         );
         // Merge both index pages before picking a cursor. A reader following
         // this discussion and the repository can receive only one notice.
-        let rows: BTreeSet<_> = watcher_keys(context, WATCHERS, input.before)?
+        let rows: BTreeMap<_, _> = watcher_keys(context, WATCHERS, input.before)?
             .into_iter()
             .chain(watcher_keys(
                 context,
@@ -327,9 +406,15 @@ impl Read for ListWatchers {
         let more = rows.len() > PAGE_SIZE;
         let mut last = None;
         let mut recipients = Vec::new();
-        for actor in rows.into_iter().rev().take(PAGE_SIZE) {
-            last = Some(actor);
-            let thread = thread_subscription(context, input.subject, actor)?;
+        for (key, actor) in rows.into_iter().rev().take(PAGE_SIZE) {
+            last = Some(key);
+            let repo = subscription(context, key)?;
+            if repo.preference.mode == Mode::Muted
+                || (actor.issuer == event.actor.issuer && actor.subject == event.actor.subject)
+            {
+                continue;
+            }
+            let thread = thread_subscription(context, input.subject, key)?;
             if thread.after >= input.activity {
                 continue;
             }
@@ -338,7 +423,6 @@ impl Read for ListWatchers {
                 ThreadMode::Follow => true,
                 ThreadMode::StateChanges => state_changed,
                 ThreadMode::Inherit => {
-                    let repo = subscription(context, actor)?;
                     let after = match input.subject.kind {
                         SubjectKind::Issue => repo.issues_after,
                         SubjectKind::Pull => repo.pulls_after,
@@ -363,19 +447,18 @@ pub(crate) struct Unmuted;
 impl Read for Unmuted {
     const CLASS: &'static str = CLASS;
     const ID: u32 = 418;
-    type Input = Vec<Uuid>;
-    type Output = Vec<Uuid>;
+    type Input = Vec<IdentityKey>;
+    type Output = Vec<bool>;
 
-    fn execute(context: &mut Transaction<'_>, actors: Vec<Uuid>) -> Result<Vec<Uuid>> {
+    fn execute(context: &mut Transaction<'_>, actors: Vec<IdentityKey>) -> Result<Vec<bool>> {
         if actors.len() > crate::cells::directory::notifications::MAX_RECIPIENTS {
             return Err(Error::Invalid("Notification preference batch is too large"));
         }
-        let mut unmuted = Vec::with_capacity(actors.len());
-        for actor in actors {
-            if subscription(context, actor)?.preference.mode != Mode::Muted {
-                unmuted.push(actor);
-            }
-        }
-        Ok(unmuted)
+        actors
+            .iter()
+            .map(|actor| {
+                Ok(subscription(context, identity_key(actor)?)?.preference.mode != Mode::Muted)
+            })
+            .collect()
     }
 }

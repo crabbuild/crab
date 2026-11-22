@@ -174,8 +174,9 @@ single activity event is indexed into both timelines.
 `collaboration/mention_settings.rs` owns versioned aliases. `server/mentions.rs`
 delivers the durable outbox to `cells/directory/notifications.rs`.
 `collaboration/watches.rs` owns private repository and discussion preferences
-and their active watcher indexes. Watch outbox events carry the activity number
-and advance by bounded
+and their active watcher indexes. Activity writes enroll participants under
+their qualified identity before scheduling delivery. Watch outbox events carry
+the activity number and advance by bounded
 pages after Directory delivery. `api/notifications/` checks repository access
 and mute state when reading inbox entries.
 
