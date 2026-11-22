@@ -245,11 +245,14 @@ class CdnTransportQualificationTests(unittest.TestCase):
             response(403), response(403),
             *route_responses("cloudfront", hot),
             response(403), response(403),
-            hot,
+            hot, hot,
             response(403),
             response(403, X_Amz_Bucket_Region="us-west-2"), response(403),
         ]
         with (patch.object(TRANSPORT.time, "time", return_value=100), patch.object(TRANSPORT.time, "sleep") as wait,
+              patch.object(TRANSPORT.time, "time_ns", side_effect=[
+                  100_000_000_000, 100_001_000_000, 112_000_000_000, 112_001_000_000,
+              ]),
               patch.object(TRANSPORT, "parallel_range_samples", side_effect=[[{"before": 1}], [{"after": 2}]]) as ranges,
               patch.object(TRANSPORT, "verify_expiry_range_window") as verify):
             traces = TRANSPORT.collect(

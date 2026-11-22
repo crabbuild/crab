@@ -265,8 +265,11 @@ class CdnViewerIssuerQualificationTests(TestCase):
         config = settings("cloudfront")
         order = Mock()
         order.attest.return_value = {"schema": "test-policy"}
-        order.mint.return_value = {"Cookie": "private-viewer-fixture"}
+        primary = {"Cookie": "private-viewer-fixture"}
+        expiry = {"Cookie": "separate-expiring-viewer-fixture"}
+        order.mint.side_effect = [primary, expiry]
         order.probe.return_value = {"exact_get": [{"source": "edge", "status": 200}]}
+        order.expiry.return_value = {check: [] for check in TRANSPORT.EXPIRY_CHECKS}
         with TemporaryDirectory() as directory:
             root = Path(directory)
             path = root / "fixture.json"
@@ -278,11 +281,23 @@ class CdnViewerIssuerQualificationTests(TestCase):
                     "--run-attempt", "2", "--attest-deployment", "--github-viewer"]
             with (patch.object(sys, "argv", args), patch.object(DEPLOYMENT, "attest_fixture", order.attest),
                   patch.object(TRANSPORT, "collect", order.probe), patch.object(ISSUER, "issue_github_viewer", order.mint),
+                  patch.object(TRANSPORT.time, "time", side_effect=[100, 102, 102]),
+                  patch.object(TRANSPORT, "viewer_expiry", return_value=160) as signed_expiry,
+                  patch.object(TRANSPORT, "collect_expiry_window", order.expiry),
                   redirect_stdout(StringIO())):
                 self.assertEqual(TRANSPORT.main(), 0)
-            self.assertEqual([call[0] for call in order.mock_calls], ["attest", "mint", "probe", "attest"])
-            self.assertEqual(order.probe.call_args.args[4], order.mint.return_value)
-            self.assertNotIn("private-viewer-fixture", (output / "exact_get.json").read_text())
+            self.assertEqual([call[0] for call in order.mock_calls], ["attest", "mint", "probe", "mint", "expiry", "attest"])
+            self.assertEqual(order.probe.call_args.args[4], primary)
+            self.assertEqual(order.expiry.call_args.args[3:], (expiry, 160))
+            signed_expiry.assert_called_once_with("cloudfront", expiry)
+            for record in output.glob("*.json"):
+                encoded = record.read_text()
+                self.assertNotIn(primary["Cookie"], encoded)
+                self.assertNotIn(expiry["Cookie"], encoded)
+                if record.stem in TRANSPORT.EXPIRY_CHECKS:
+                    trace = json.loads(encoded)
+                    self.assertEqual(trace["viewer_expires_at_unix"], 160)
+                    self.assertEqual(trace["viewer_grant_sha256"], hashlib.sha256(json.dumps(expiry).encode()).hexdigest())
 
     def test_mixed_hosted_and_primary_file_inputs_fail_before_attestation(self):
         with TemporaryDirectory() as directory:

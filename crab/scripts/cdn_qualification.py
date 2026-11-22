@@ -65,12 +65,15 @@ EDGE_ROUTE_QUERY_PROBES = {
                    "snapshot": "?snapshot=1970-01-01T00%3A00%3A00.0000000Z",
                    "response_override": "?rsct=application%2Foctet-stream"},
 }
+EXPIRY_FULL_CHECK = "warm_expired_viewer_denied"
 EXPIRY_RANGE_CHECK = "expired_parallel_range_denied"
-EXPIRY_RANGE_FIELDS = {"range_offset", "started_at_unix_us", "finished_at_unix_us"}
+EXPIRY_CHECKS = {EXPIRY_FULL_CHECK, EXPIRY_RANGE_CHECK}
+EXPIRY_TIMING_FIELDS = {"started_at_unix_us", "finished_at_unix_us"}
+EXPIRY_GRANT_FIELDS = {"viewer_expires_at_unix", "viewer_grant_sha256"}
 EXPIRY_SETTLE_SECONDS = 2
 WARM_DENIAL_CHECKS = {
     "warm_anonymous_viewer_denied",
-    "warm_expired_viewer_denied",
+    EXPIRY_FULL_CHECK,
     "warm_unrelated_principal_denied",
 }
 PRIVATE_CHECKS = WARM_DENIAL_CHECKS | {
@@ -733,6 +736,7 @@ def verify_check_evidence(
         EXPIRY_RANGE_CHECK, PUBLIC_EXPORT_CHECK,
     }
     fixture_reads = {}
+    expiry_grants = {}
     cleanup_at = 0
     cleanup_targets = {}
     rotation_key = None
@@ -789,8 +793,8 @@ def verify_check_evidence(
             continue
         trace_fields = {"schema", "source_sha", "scope", "configuration_sha256",
                         "workflow_run_id", "workflow_run_attempt", "check", "requests"}
-        if name == EXPIRY_RANGE_CHECK:
-            trace_fields.add("viewer_expires_at_unix")
+        if name in EXPIRY_CHECKS:
+            trace_fields.update(EXPIRY_GRANT_FIELDS)
         trace = fields(decoded, trace_fields, name)
         require(trace["schema"] == "crab.cdn-trace/v1" and trace["check"] == name and all(
             trace[key] == report[key] for key in (
@@ -804,8 +808,10 @@ def verify_check_evidence(
             request_fields.add("probe")
         if name == PUBLIC_EXPORT_CHECK:
             request_fields.add("body_sha256")
+        if name in EXPIRY_CHECKS:
+            request_fields.update(EXPIRY_TIMING_FIELDS)
         if name == EXPIRY_RANGE_CHECK:
-            request_fields.update(EXPIRY_RANGE_FIELDS)
+            request_fields.add("range_offset")
         for value in requests:
             request = fields(value, request_fields, f"{name} request")
             require(request["source"] in ("edge", "origin")
@@ -816,8 +822,13 @@ def verify_check_evidence(
                     f"invalid trace observation: {name}")
             require(matches(SHA256, request["key_sha256"]), f"invalid trace key fingerprint: {name}")
         verify_trace_observations(name, requests)
-        if name == EXPIRY_RANGE_CHECK:
-            verify_expiry_range_window(requests, trace["viewer_expires_at_unix"])
+        if name in EXPIRY_CHECKS:
+            expiry = trace["viewer_expires_at_unix"]
+            digest = trace["viewer_grant_sha256"]
+            require(matches(SHA256, digest), "invalid expiry grant fingerprint")
+            verify_window = verify_expiry_range_window if name == EXPIRY_RANGE_CHECK else verify_expiry_full_window
+            verify_window(requests, expiry)
+            expiry_grants[name] = (expiry, digest)
         if name in fixture_checks:
             fixture_reads[name] = requests
     if profile == "managed":
@@ -837,9 +848,11 @@ def verify_check_evidence(
         require(full_sizes.get(key) == size, "rotation must probe the same complete object verified by exact GET")
         key, size = cache_reuse_key
         require(full_sizes.get(key) == size, "authenticated cache reuse must probe the same complete object verified by exact GET")
-        expired = fixture_reads["warm_expired_viewer_denied"][0]
+        expired = fixture_reads[EXPIRY_FULL_CHECK][0]
         require(fixture_reads[EXPIRY_RANGE_CHECK][0]["key_sha256"] == expired["key_sha256"],
                 "expired parallel ranges must probe the same warm object")
+        require(expiry_grants[EXPIRY_RANGE_CHECK] == expiry_grants[EXPIRY_FULL_CHECK],
+                "full and ranged expiry checks must use the same signed viewer grant")
         for name in sorted(WARM_DENIAL_CHECKS):
             warm = fixture_reads[name][0]
             require(full_sizes.get(warm["key_sha256"]) == warm["bytes"],
@@ -899,6 +912,17 @@ def verify_edge_route_policy(
             "edge route policy must deny HEAD on the approved object")
     require(all(row["status"] in (401, 403) and row["bytes"] == 0 for row in queries),
             "edge route policy must deny version, snapshot, and response override queries")
+
+
+def verify_expiry_full_window(requests: list[dict[str, Any]], expires_at: int) -> None:
+    verify_warm_denial(EXPIRY_FULL_CHECK, requests)
+    start, end = "started_at_unix_us", "finished_at_unix_us"
+    warm, denied = requests
+    require(positive(expires_at)
+            and all(positive(row[start]) and positive(row[end]) and row[start] < row[end] for row in requests)
+            and warm[end] < expires_at * 1_000_000
+            and denied[start] >= (expires_at + EXPIRY_SETTLE_SECONDS) * 1_000_000,
+            "full GET must hit the warm object before expiry and be denied after expiry")
 
 
 def verify_expiry_range_window(requests: list[dict[str, Any]], expires_at: int) -> None:

@@ -23,9 +23,10 @@ from urllib.parse import SplitResult, parse_qsl, urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cdn_qualification import (  # noqa: E402
-    COMMIT, EDGE_ROUTE_QUERY_PROBES, EXPIRY_RANGE_CHECK, EXPIRY_SETTLE_SECONDS, PREFIX, PROVIDERS, PROVIDER_FOR_EDGE, PUBLIC_EXPORT_CHECK,
+    COMMIT, EDGE_ROUTE_QUERY_PROBES, EXPIRY_CHECKS, EXPIRY_FULL_CHECK, EXPIRY_RANGE_CHECK, EXPIRY_SETTLE_SECONDS,
+    MAX_VIEWER_GRANT_SECONDS, PREFIX, PROVIDERS, PROVIDER_FOR_EDGE, PUBLIC_EXPORT_CHECK,
     RUN_NUMBER, SHA256, checked_placement, decode, edge_head_denials, edge_route_probe_names, fields, matches, require, scope_parts,
-    require_isolated_public_origins, verify_expiry_range_window,
+    require_isolated_public_origins, verify_expiry_full_window, verify_expiry_range_window,
 )
 
 
@@ -466,6 +467,33 @@ def parallel_range_samples(
         return list(executor.map(read, (0, 1)))
 
 
+def collect_expiry_window(
+    fixture: dict[str, Any], edge: str, family: str, viewer: dict[str, str], expires_at: int,
+    *, operator_binding: bool = False,
+) -> dict[str, list[dict[str, Any]]]:
+    base = fixture_base(fixture["base_url"])
+    repo = fixture_repository_prefix(fixture, "private", family, operator_binding=operator_binding)
+    key = f"{repo}/{fixture['object_path']}"
+
+    def full_sample(wanted: int | None) -> tuple[dict[str, Any], bytes]:
+        started = time.time_ns() // 1_000
+        observed, payload = request_sample(base, edge, key, viewer, size=fixture["size"],
+                                           check=EXPIRY_FULL_CHECK, wanted=wanted)
+        return observed | {"started_at_unix_us": started, "finished_at_unix_us": time.time_ns() // 1_000}, payload
+
+    warm, body = full_sample(200)
+    require(warm["cache"] == "hit" and hashlib.sha256(body).hexdigest() == fixture["sha256"],
+            "expiry check requires an authorized cache hit with the approved bytes")
+    before = parallel_range_samples(base, edge, key, viewer, body, expired=False)
+    require(time.time() < expires_at, "parallel expiry ranges must complete before the grant expires")
+    time.sleep(max(0.0, expires_at + EXPIRY_SETTLE_SECONDS - time.time()))
+    after = parallel_range_samples(base, edge, key, viewer, body, expired=True)
+    denied, _ = full_sample(None)
+    verify_expiry_range_window(before + after, expires_at)
+    verify_expiry_full_window([warm, denied], expires_at)
+    return {EXPIRY_FULL_CHECK: [warm, denied], EXPIRY_RANGE_CHECK: before + after}
+
+
 def collect(
     fixture: dict[str, Any], edge: str, access: str, family: str, viewer: dict[str, str],
     expires_at: int | None, *, unrelated_viewer: dict[str, str] | None = None,
@@ -519,17 +547,8 @@ def collect(
             after = read_unrelated_control(base, edge, repo, unrelated_viewer, control)
             warm_after = warm_full_read(base, edge, scope_key, viewer, body)
             traces[check] = [confirmed, before, denied, denied_range, after, warm_after]
-            confirmed = warm_after
         if expires_at is not None:
-            require(time.time() < expires_at, "expiry check needs an authorized cache hit before expiry")
-            before = parallel_range_samples(base, edge, scope_key, viewer, body, expired=False)
-            require(time.time() < expires_at, "parallel expiry ranges must complete before the grant expires")
-            time.sleep(max(0.0, expires_at + EXPIRY_SETTLE_SECONDS - time.time()))
-            after = parallel_range_samples(base, edge, scope_key, viewer, body, expired=True)
-            verify_expiry_range_window(before + after, expires_at)
-            traces[EXPIRY_RANGE_CHECK] = before + after
-            denied, _ = request_sample(base, edge, scope_key, viewer, size=size, check="warm_expired_viewer_denied")
-            traces["warm_expired_viewer_denied"] = [confirmed, denied]
+            traces.update(collect_expiry_window(fixture, edge, family, viewer, expires_at, operator_binding=operator_binding))
     return traces | collect_origin_access(fixture, edge, access, scope_key, body,
                                           native_read_url_file=native_read_url_file, native_identity_read=native_identity_read)
 
@@ -611,9 +630,27 @@ def main() -> int:
             from cdn_viewer_issuer import issue_github_viewer
 
             viewer = issue_github_viewer(fixture, edge, family)
+            primary_received_at = time.time()
         traces = collect(fixture, edge, access, family, viewer, args.viewer_expires_at,
                          unrelated_viewer=unrelated, native_read_url_file=args.native_read_url_file,
                          native_identity_read=args.native_identity_read)
+        expiry_viewer = viewer
+        expires_at = args.viewer_expires_at
+        if github_viewer:
+            # A second grant issued in the same second can have identical signed claims.
+            time.sleep(max(0.0, int(primary_received_at) + 1 - time.time()))
+            expiry_viewer = issue_github_viewer(fixture, edge, family)
+            require(expiry_viewer != viewer, "hosted expiry check requires a separately signed viewer grant")
+            expires_at = viewer_expiry(edge, expiry_viewer)
+            require(5 <= expires_at - time.time() <= MAX_VIEWER_GRANT_SECONDS,
+                    "hosted expiry grant has insufficient time or exceeds the maximum signed lifetime")
+            traces.update(collect_expiry_window(fixture, edge, family, expiry_viewer, expires_at))
+        expiry_metadata = {}
+        if expires_at is not None:
+            expiry_metadata = {
+                "viewer_expires_at_unix": expires_at,
+                "viewer_grant_sha256": hashlib.sha256(json.dumps(expiry_viewer, sort_keys=True).encode()).hexdigest(),
+            }
         policy = attest_fixture(fixture, edge, access) if args.attest_deployment else None
         provenance = {
             "schema": "crab.cdn-trace/v1", "source_sha": args.source_sha, "scope": fixture["scope"],
@@ -624,7 +661,7 @@ def main() -> int:
                      if args.private_binding_candidate is not None else None)
         args.trace_directory.mkdir(parents=True, exist_ok=False)
         for check, requests in traces.items():
-            metadata = {"viewer_expires_at_unix": args.viewer_expires_at} if check == EXPIRY_RANGE_CHECK else {}
+            metadata = expiry_metadata if check in EXPIRY_CHECKS else {}
             if check == "edge_route_policy":
                 requests = [row | {"probe": probe} for row, probe in zip(requests, edge_route_probe_names(edge), strict=True)]
             encoded = json.dumps(provenance | metadata | {"check": check, "requests": requests}, sort_keys=True)

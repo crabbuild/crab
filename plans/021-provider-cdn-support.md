@@ -651,19 +651,21 @@ and edge payload through redacted observations.
   enabled row on the required platforms against the compiled scope inventory.
   The provider workflow can qualify native S3 using a dedicated OIDC role.
   `crab/scripts/e2e/run_cdn_transport_checks.py` records the exact GET and range,
-  mutable and neighbor denial, and optional warm viewer expiry traces from an
-  existing approved CloudFront, Cloud CDN, or Front Door fixture. Private
+  mutable and neighbor denial, and signed viewer expiry traces from an
+  existing approved CloudFront, Cloud CDN, or Front Door private fixture with
+  a viewer issuer or a standalone expiry grant. Private
   evidence requires an authorized cache hit on the same complete object
   before and after denied anonymous full and ranged GETs.
   An unrelated viewer must also be denied full and ranged GETs of that warm
   object. Its grant must read a separate, approved control object before and
   after the denials. The control uses a disjoint grant prefix on the same
   endpoint, so an expired or invalid credential cannot supply the evidence.
-  The transport expiry probe checks the signed expiry and verifies two
-  overlapping range reads of the same warm object on each side of expiry.
-  Both early reads must return the approved bytes, and the expired grant
-  must be denied both ranges. Product refresh and expiry during an in-flight
-  action still require workload evidence.
+  The transport expiry probe verifies a full cache hit and two overlapping
+  range reads with the approved bytes before the signed expiry. It replays
+  them with the same grant after expiry and requires all three denials. The
+  full and parallel range traces carry the same grant fingerprint and signed
+  expiry. Product refresh and expiry during an in-flight action still require
+  workload evidence.
   A second authorized viewer grant exercises same-object cache reuse. The
   collector verifies the second response's bytes and cache hit and records
   miss-to-hit evidence when the first response was cold. Distinct credential
@@ -678,11 +680,12 @@ and edge payload through redacted observations.
   identities if the issuer authorizes each subject for its fixture scope.
   Use a short, independently issued grant for the expiry window. Keep viewer
   credentials out of artifacts and avoid long-lived credentials to cover
-  scheduling delays. An approved hosted private fixture can request its primary
-  viewer grant from a dedicated Crab Auth issuer using GitHub OIDC after
-  deployment preflight. The collector binds the response and signed prefix to
-  the exact fixture. Live issuer setup, distinct-subject evidence, and the
-  separate expiry window still require qualification.
+  scheduling delays. An approved hosted private fixture requests its primary
+  grant after deployment preflight and a separate expiry grant after the
+  ordinary probes. Both come from the dedicated Crab Auth issuer using GitHub
+  OIDC. The collector binds each response and signed prefix to the exact
+  fixture. Live issuer setup and real-provider evidence for the expiry window
+  and the two independently authorized subjects still require qualification.
   The collector also probes live-origin anonymity and the separate public
   export object and listing policies through the provider's native API.
   The verifier pairs live-origin denial with a successful authenticated read

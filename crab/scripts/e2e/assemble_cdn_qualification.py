@@ -14,7 +14,7 @@ from tempfile import TemporaryDirectory
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cdn_qualification import (  # noqa: E402
-    CDN_PROVENANCE_FIELDS, COMMIT, EXPIRY_RANGE_CHECK, GIT_BENCHMARK_DIR, GIT_PRODUCT_DIR, LABEL, PROVIDERS,
+    CDN_PROVENANCE_FIELDS, COMMIT, EXPIRY_CHECKS, GIT_BENCHMARK_DIR, GIT_PRODUCT_DIR, LABEL, PROVIDERS,
     PROVIDER_FOR_EDGE, PUBLIC_EXPORT_BEFORE, PUBLIC_EXPORT_CHECK, PUBLIC_EXPORT_DIR, PUBLIC_EXPORT_FILES,
     PUBLIC_TRANSITION_CHECK, RUN_NUMBER, SCHEMA, SCOPED_VIEW_CHECK, SERVICE_PRODUCT_DIR, SHA256,
     benchmark_registration, collect_desktop_product_action, collect_git_performance, collect_git_product_action,
@@ -42,7 +42,7 @@ CANARY_REQUIRED = {
     "public": CANARY_COMMON | {PUBLIC_EXPORT_CHECK, "live_origin_denied", "export_origin_access", "public_listing_denied"},
 }
 CANARY_OPTIONAL = {
-    "private": {"warm_unrelated_principal_denied", "warm_expired_viewer_denied", EXPIRY_RANGE_CHECK},
+    "private": {"warm_unrelated_principal_denied"} | EXPIRY_CHECKS,
     "public": set(),
 }
 
@@ -80,6 +80,8 @@ def load_canary_traces(root: Path, source: str, run_id: str, attempt: str) -> di
                     f"canary trace provenance mismatch: {name}")
             traces[name] = raw
         require(CANARY_REQUIRED[access] <= traces.keys(), "CDN canary artifact is missing required transport observations")
+        require(not EXPIRY_CHECKS & traces.keys() or EXPIRY_CHECKS <= traces.keys(),
+                "CDN canary artifact must include both expiry observations together")
         batches[(scope, configuration)] = traces
     require(bool(batches), "CDN canary trace root is empty")
     return batches

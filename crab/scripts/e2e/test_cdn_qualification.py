@@ -828,8 +828,14 @@ class CdnQualificationTests(unittest.TestCase):
         if check == "edge_route_policy":
             probes = CDN.edge_route_probe_names(self.scope.split("/", 1)[0])
             requests = [{"probe": probe} | row for probe, row in zip(probes, requests)]
-        if check == CDN.EXPIRY_RANGE_CHECK:
+        if check in CDN.EXPIRY_CHECKS:
             extra.setdefault("viewer_expires_at_unix", EXPIRY)
+            extra.setdefault("viewer_grant_sha256", "b" * 64)
+        if check == CDN.EXPIRY_FULL_CHECK:
+            requests = [
+                {"started_at_unix_us": started, "finished_at_unix_us": started + 100} | row
+                for started, row in zip((EXPIRY * 1_000_000 - 2000, (EXPIRY + 2) * 1_000_000 + 1000), requests)
+            ]
         trace = {key: self.report[key] for key in (
             "source_sha", "scope", "configuration_sha256", "workflow_run_id", "workflow_run_attempt",
         )}
@@ -1763,6 +1769,22 @@ class CdnQualificationTests(unittest.TestCase):
                 self.rejected(error)
         self.trace(check, [row | {"key_sha256": "d" * 64} for row in rows])
         self.rejected("expired parallel ranges must probe the same warm object")
+
+    def test_full_expiry_requires_deny_after_signed_expiry(self) -> None:
+        self.configure("s3", "private", "direct")
+        warm = self.request("edge", 200, "hit")
+        denied = self.request("edge", 403) | {
+            "started_at_unix_us": (EXPIRY + 1) * 1_000_000,
+            "finished_at_unix_us": (EXPIRY + 1) * 1_000_000 + 100,
+        }
+        self.trace(CDN.EXPIRY_FULL_CHECK, [warm, denied])
+        self.rejected("full GET must hit the warm object before expiry and be denied after expiry")
+
+    def test_full_and_parallel_expiry_require_the_same_signed_viewer(self) -> None:
+        self.configure("s3", "private", "direct")
+        self.trace(CDN.EXPIRY_FULL_CHECK, [self.request("edge", 200, "hit"), self.request("edge", 403)],
+                   viewer_grant_sha256="d" * 64)
+        self.rejected("full and ranged expiry checks must use the same signed viewer grant")
 
     def test_anonymous_denial_requires_a_warm_hit_after_both_denials(self) -> None:
         self.configure("gcs", "private", "direct")

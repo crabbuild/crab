@@ -560,6 +560,15 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
             self.assemble(digest, transport=transport)
         self.assertFalse(self.output.exists())
 
+    def test_canary_expiry_observations_must_arrive_together(self) -> None:
+        digest = self.inputs()
+        transport = self.canary_inputs("s3")
+        filename = f"{fixture.CDN.EXPIRY_RANGE_CHECK}.json"
+        (self.root / self.row / "traces" / filename).rename(transport / "s3" / filename)
+        with self.assertRaisesRegex(ValueError, "must include both expiry observations together"):
+            self.assemble(digest, transport=transport)
+        self.assertFalse(self.output.exists())
+
     def test_canary_from_a_different_fixture_cannot_supply_required_observations(self) -> None:
         digest = self.inputs()
         transport = self.canary_inputs("s3")

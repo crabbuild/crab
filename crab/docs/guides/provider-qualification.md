@@ -409,17 +409,22 @@ repository's actual subject format, including immutable owner and repository
 IDs where configured. Keep the service's cloud role, signing key, and viewer
 export scoped to that fixture. [GitHub OIDC discovery](https://token.actions.githubusercontent.com/.well-known/openid-configuration) · [GitHub environment subjects](https://docs.github.com/en/actions/reference/security/oidc#filtering-for-a-specific-environment) · [Crab Auth configuration](../../deploy/auth-service/README.md)
 
-The canary requests the GitHub token and viewer grant after passing the
+The canary requests the GitHub token and primary viewer grant after passing the
 deployment preflight. It checks the provider, native origin, viewer authority,
 physical view, signed object-family prefix, and expiry before the first edge
-request. The grant stays in the collector process. The native inspection role
-continues to supply the separate native read. The authenticated cache-reuse
-collector supplies the two-principal evidence on the measurement worker.
+request. After the transport and native reads, it requests a separate viewer
+grant for the expiry check. It verifies an exact full cache hit and two
+overlapping range reads of the same object, waits through the signed expiry,
+then checks that all three reads are denied with the same grant. Both traces
+contain the signed expiry and a common grant fingerprint. Viewer credentials
+stay in the collector process. The native inspection role supplies the
+separate native read. The authenticated cache-reuse collector supplies the
+two-principal evidence on the measurement worker.
 
 Download `provider-cdn-transport-<provider>-<run-id>-<attempt>` for the redacted
-traces. For manual warm expiry and parallel range denials on the same approved
-fixture, run the standalone collector with `--viewer-file` and
-`--viewer-expires-at`. The hosted workflow selects `--github-viewer`.
+traces. For an approved fixture using an externally issued grant, collect
+the expiry pair with the standalone collector and pass `--viewer-file` and
+`--viewer-expires-at` with the exact signed expiry.
 
 ### Record the deployed policy
 

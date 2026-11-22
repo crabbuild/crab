@@ -25,7 +25,7 @@ jobs:
   collect:
     name: Collect CDN transport traces (${{ inputs.provider }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     environment: provider-cdn-qualification-${{ inputs.provider }}
     permissions:
       contents: read
