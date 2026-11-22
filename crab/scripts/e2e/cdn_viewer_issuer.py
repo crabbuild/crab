@@ -15,7 +15,7 @@ from run_cdn_transport_checks import (
     native_remote, private_viewer_headers, viewer_policy,
 )
 
-from cdn_qualification import SHA256, CdnEvidenceError, decode, fields, matches, positive, require
+from cdn_qualification import MAX_VIEWER_GRANT_SECONDS, SHA256, CdnEvidenceError, decode, fields, matches, positive, require
 
 
 HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
@@ -25,7 +25,6 @@ JWT = re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
 PROVIDERS = {"cloudfront": ("aws", "cloudfront"), "cloud-cdn": ("gcp", "cloud_cdn"),
              "front-door": ("azure", "front_door")}
 MAX_ISSUER_RESPONSE = 1024 * 1024
-MAX_VIEWER_LIFETIME = 900
 APPROVAL_HEADER = "X-Crab-CDN-Approval-Sha256"
 
 
@@ -44,12 +43,12 @@ def https_endpoint(value: str, label: str) -> SplitResult:
 
 
 def issuer_settings(fixture: dict) -> tuple[SplitResult, str, str]:
-    settings = fields(fixture["viewer_issuer"], {"endpoint", "audience", "approval_sha256"}, "GitHub CDN viewer issuer")
+    settings = fields(fixture.get("viewer_issuer"), {"endpoint", "audience", "approval_sha256"}, "CDN viewer issuer")
     endpoint = https_endpoint(settings["endpoint"], "Crab Auth issuer")
     require(endpoint.path == "/v1/credentials" and not endpoint.query
             and endpoint.hostname != fixture_base(fixture["base_url"]).hostname,
             "Crab Auth issuer must use its own HTTPS /v1/credentials endpoint")
-    require(matches(AUDIENCE, settings["audience"]), "invalid GitHub OIDC audience")
+    require(matches(AUDIENCE, settings["audience"]), "invalid OIDC audience")
     require(matches(SHA256, settings["approval_sha256"]), "invalid private binding approval digest")
     return endpoint, settings["audience"], settings["approval_sha256"]
 
@@ -123,7 +122,7 @@ def approved_credential(fixture: dict, edge: str, family: str, response: dict) -
         raise CdnEvidenceError("Crab Auth returned an invalid parent expiration") from None
     expiry = envelope["expires_at"]
     now = time.time()
-    require(positive(expiry) and now < expiry <= min(parent_epoch, now + MAX_VIEWER_LIFETIME),
+    require(positive(expiry) and now < expiry <= min(parent_epoch, now + MAX_VIEWER_GRANT_SECONDS),
             "Crab Auth viewer grant must be live and bounded by its parent read grant")
     grants = envelope["grants"]
     require(isinstance(grants, list) and 0 < len(grants) <= 32, "invalid Crab Auth viewer grant list")
@@ -142,7 +141,7 @@ def verify_viewer_scope(
 ) -> int:
     signed_expiry, policy = viewer_policy(edge, viewer)
     now = time.time()
-    require(now < signed_expiry <= now + MAX_VIEWER_LIFETIME, "viewer credential must be live and short-lived")
+    require(now < signed_expiry <= now + MAX_VIEWER_GRANT_SECONDS, "viewer credential must be live and short-lived")
     resource = f"{base_url}/{prefix}"
     if edge == "cloudfront":
         cookie_parts = [part.strip() for part in viewer["Cookie"].split(";")]
@@ -167,12 +166,17 @@ def verify_viewer_scope(
     return signed_expiry
 
 
-def issue_github_viewer(fixture: dict, edge: str, family: str) -> dict[str, str]:
-    endpoint, audience, approval = issuer_settings(fixture)
-    token = github_id_token(audience)
+def issue_viewer(fixture: dict, edge: str, family: str, token: str) -> dict[str, str]:
+    endpoint, _, approval = issuer_settings(fixture)
+    require(matches(BEARER, token) and matches(JWT, token), "Crab Auth requires a bounded OIDC ID token")
     body = json.dumps({"id_token": token, "repo_url": native_remote(fixture, edge),
                        "operation": "fetch", "client_version": "provider-cdn-qualification"}).encode()
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json",
                "Accept-Encoding": "identity", "X-Crab-CDN-Grant-Version": "1", APPROVAL_HEADER: approval}
     response = response_json(endpoint, endpoint.path, headers, "Crab Auth viewer issuer", body=body, approval=approval)
     return approved_credential(fixture, edge, family, response)
+
+
+def issue_github_viewer(fixture: dict, edge: str, family: str) -> dict[str, str]:
+    _, audience, _ = issuer_settings(fixture)
+    return issue_viewer(fixture, edge, family, github_id_token(audience))

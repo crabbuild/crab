@@ -468,8 +468,7 @@ def parallel_range_samples(
 
 def collect(
     fixture: dict[str, Any], edge: str, access: str, family: str, viewer: dict[str, str],
-    expires_at: int | None, *, second_viewer: dict[str, str] | None = None,
-    unrelated_viewer: dict[str, str] | None = None,
+    expires_at: int | None, *, unrelated_viewer: dict[str, str] | None = None,
     native_read_url_file: Path | None = None, native_identity_read: bool = False,
     operator_binding: bool = False,
 ) -> dict[str, list[dict[str, Any]]]:
@@ -482,11 +481,8 @@ def collect(
         require(access == "private" and 5 <= expires_at - time.time() <= 120,
                 "expiry check needs a private credential expiring within 5 to 120 seconds")
         require(viewer_expiry(edge, viewer) == expires_at, "expiry argument differs from the viewer grant")
-    if second_viewer is not None:
-        require(access == "private" and second_viewer != viewer,
-                "the second principal check requires a distinct private viewer grant")
     if unrelated_viewer is not None:
-        require(access == "private" and "unrelated_control" in fixture and unrelated_viewer not in (viewer, second_viewer),
+        require(access == "private" and "unrelated_control" in fixture and unrelated_viewer != viewer,
                 "unrelated viewer check requires a separate private grant and approved control object")
 
     full, body = request_sample(base, edge, scope_key, viewer, size=size, check="exact_get", wanted=200)
@@ -504,15 +500,6 @@ def collect(
     ):
         denied, _ = request_sample(base, edge, key, viewer, size=size, check=check, range_offset=0)
         traces[check] = [denied]
-
-    if second_viewer is not None:
-        check = "primary_and_second_principal"
-        second, cached = request_sample(base, edge, scope_key, second_viewer, size=size, check=check, wanted=200)
-        require(second["cache"] == "hit" and cached == body,
-                "the second principal must receive the approved bytes from a cache hit")
-        traces[check] = [full, second]
-        if full["cache"] == "miss":
-            traces["authorized_cache_reuse"] = [full, second]
 
     route = collect_edge_route_policy(base, edge, access, scope_key, viewer, body)
     traces["edge_route_policy"] = route
@@ -584,7 +571,6 @@ def main() -> int:
     parser.add_argument("--run-attempt", required=True)
     parser.add_argument("--viewer-file", type=Path)
     parser.add_argument("--github-viewer", action="store_true", help="mint the viewer grant when the approved fixture selects GitHub OIDC")
-    parser.add_argument("--second-viewer-file", type=Path)
     parser.add_argument("--unrelated-viewer-file", type=Path)
     parser.add_argument("--viewer-expires-at", type=int, metavar="UNIX_SECONDS")
     native_reader = parser.add_mutually_exclusive_group()
@@ -616,7 +602,6 @@ def main() -> int:
                     "GitHub viewer issuance requires deployment attestation and exclusive primary authentication")
         else:
             viewer = viewer_headers(edge, access, args.viewer_file)
-        second = viewer_headers(edge, access, args.second_viewer_file) if args.second_viewer_file else None
         unrelated = viewer_headers(edge, access, args.unrelated_viewer_file) if args.unrelated_viewer_file else None
         if args.attest_deployment:
             from cdn_deployment_policy_cli import attest_fixture
@@ -626,7 +611,7 @@ def main() -> int:
             from cdn_viewer_issuer import issue_github_viewer
 
             viewer = issue_github_viewer(fixture, edge, family)
-        traces = collect(fixture, edge, access, family, viewer, args.viewer_expires_at, second_viewer=second,
+        traces = collect(fixture, edge, access, family, viewer, args.viewer_expires_at,
                          unrelated_viewer=unrelated, native_read_url_file=args.native_read_url_file,
                          native_identity_read=args.native_identity_read)
         policy = attest_fixture(fixture, edge, access) if args.attest_deployment else None

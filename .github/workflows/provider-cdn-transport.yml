@@ -15,8 +15,6 @@ on:
     secrets:
       CRAB_CDN_TRANSPORT_VIEWER:
         required: false
-      CRAB_CDN_TRANSPORT_SECOND_VIEWER:
-        required: false
       CRAB_CDN_TRANSPORT_UNRELATED_VIEWER:
         required: false
 
@@ -125,7 +123,6 @@ jobs:
           PROVIDER: ${{ inputs.provider }}
           FIXTURE_SHA256: ${{ vars.CRAB_CDN_TRANSPORT_FIXTURE_SHA256 }}
           VIEWER: ${{ secrets.CRAB_CDN_TRANSPORT_VIEWER }}
-          SECOND_VIEWER: ${{ secrets.CRAB_CDN_TRANSPORT_SECOND_VIEWER }}
           UNRELATED_VIEWER: ${{ secrets.CRAB_CDN_TRANSPORT_UNRELATED_VIEWER }}
         run: |
           set -euo pipefail
@@ -148,15 +145,11 @@ jobs:
             printf '%s' "$VIEWER" > "$scratch/viewer"
             args+=(--viewer-file "$scratch/viewer")
           fi
-          if [[ -n "$SECOND_VIEWER" ]]; then
-            printf '%s' "$SECOND_VIEWER" > "$scratch/second-viewer"
-            args+=(--second-viewer-file "$scratch/second-viewer")
-          fi
           if [[ -n "$UNRELATED_VIEWER" ]]; then
             printf '%s' "$UNRELATED_VIEWER" > "$scratch/unrelated-viewer"
             args+=(--unrelated-viewer-file "$scratch/unrelated-viewer")
           fi
-          unset VIEWER SECOND_VIEWER UNRELATED_VIEWER
+          unset VIEWER UNRELATED_VIEWER
           python3 -B crab/scripts/e2e/run_cdn_transport_checks.py "${args[@]}"
 
       - name: Upload redacted transport traces

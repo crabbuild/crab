@@ -44,6 +44,8 @@ DEPLOYMENT_POLICY_COMPONENTS = {
     "front-door": {"front-door-route", "viewer-policy", "blob-access", "viewer-key-ids"},
 }
 KEY_ROTATION_CHECK = "key_rotation"
+CACHE_REUSE_CHECK = "authorized_cache_reuse"
+CACHE_REUSE_ROLES = ("primary", "second")
 SCOPED_VIEW_CHECK = "scoped_view_isolation"
 SCOPED_VIEW_ROLES = {"target", "sibling"}
 SCOPED_VIEW_PROBES = ("target_before", "sibling_before", "sibling_full", "sibling_range", "sibling_after", "target_after")
@@ -52,6 +54,7 @@ SCOPED_VIEW_FIELDS = {"scope_sha256", "generation_sha256", "physical_prefix_sha2
 MANAGED_ISSUER_CHECK = "managed_v2_issuer"
 MANAGED_ISSUER_FIELDS = {"identity_sha256", "version", "approval_sha256"}
 MAX_ROTATION_GRANT_SECONDS = 900
+MAX_VIEWER_GRANT_SECONDS = 900
 VIEWER_KEY_ID = re.compile(r"[A-Za-z0-9_-]{1,90}")
 ROTATING_POLICY = {"cloudfront": "viewer-controls", "cloud-cdn": "backend-cache", "front-door": "viewer-policy"}
 TRACE_REQUEST_FIELDS = {"source", "status", "cache", "bytes", "elapsed_ms", "key_sha256"}
@@ -71,10 +74,9 @@ WARM_DENIAL_CHECKS = {
     "warm_unrelated_principal_denied",
 }
 PRIVATE_CHECKS = WARM_DENIAL_CHECKS | {
-    "primary_and_second_principal",
     "private_origin_denied",
     KEY_ROTATION_CHECK,
-    "authorized_cache_reuse",
+    CACHE_REUSE_CHECK,
     EXPIRY_RANGE_CHECK,
     SCOPED_VIEW_CHECK,
 }
@@ -676,6 +678,7 @@ def verify_check_evidence(
     cleanup_at = 0
     cleanup_targets = {}
     rotation_key = None
+    cache_reuse_key = None
     policy = {}
     managed_issuer = None
     history = None
@@ -705,6 +708,9 @@ def verify_check_evidence(
             continue
         if name == KEY_ROTATION_CHECK:
             rotation_key = verify_key_rotation(decoded, report, edge, deployment_policy_sha256)
+            continue
+        if name == CACHE_REUSE_CHECK:
+            cache_reuse_key = verify_cache_reuse(decoded, report, registration["cache_reuse_sha256"])
             continue
         if name == SCOPED_VIEW_CHECK:
             verify_scoped_view(decoded, report, registration["scoped_view_sha256"])
@@ -766,6 +772,8 @@ def verify_check_evidence(
     if access == "private":
         key, size = rotation_key
         require(full_sizes.get(key) == size, "rotation must probe the same complete object verified by exact GET")
+        key, size = cache_reuse_key
+        require(full_sizes.get(key) == size, "authenticated cache reuse must probe the same complete object verified by exact GET")
         expired = fixture_reads["warm_expired_viewer_denied"][0]
         require(fixture_reads[EXPIRY_RANGE_CHECK][0]["key_sha256"] == expired["key_sha256"],
                 "expired parallel ranges must probe the same warm object")
@@ -853,12 +861,6 @@ def verify_trace_observations(name: str, requests: list[dict[str, Any]]) -> None
     if name == "origin_only_control":
         require(all(row["source"] == "origin" for row in requests),
                 "origin-only control observed edge traffic")
-    if name == "primary_and_second_principal":
-        require(ordered_full_reads(requests, ("edge", None), ("edge", "hit")),
-                "the second principal requires a cache hit on the same complete object")
-    if name == "authorized_cache_reuse":
-        require(ordered_full_reads(requests, ("edge", "miss"), ("edge", "hit")),
-                "cache reuse requires a miss followed by a hit for the same complete object")
     if name == "rollback":
         require(ordered_full_reads(requests, ("edge", None), ("origin", None)),
                 "rollback requires an edge read followed by a native read of the same complete object")
@@ -953,6 +955,52 @@ def verify_scoped_view(value: Any, report: dict[str, Any], approved: str) -> Non
                     "scoped view needs verified warm target and authorized sibling reads before and after denial")
 
 
+def verify_cache_reuse(value: Any, report: dict[str, Any], approved: str) -> tuple[str, int]:
+    trace = fields(value, CDN_PROVENANCE_FIELDS | {"schema", "check", "authority", "grants", "requests"}, CACHE_REUSE_CHECK)
+    require(trace["schema"] == "crab.cdn-authenticated-cache-reuse/v1" and trace["check"] == CACHE_REUSE_CHECK
+            and all(trace[key] == report[key] for key in CDN_PROVENANCE_FIELDS),
+            "authenticated cache reuse must match the qualification row and workflow attempt")
+    authority = fields(trace["authority"], {"issuer_endpoint_sha256", "approval_sha256", "principals", "object"},
+                       "cache reuse authority")
+    require(matches(SHA256, authority["issuer_endpoint_sha256"]) and matches(SHA256, authority["approval_sha256"])
+            and deployment_component_digest(authority) == approved,
+            "cache reuse authority differs from the approved issuer, principals, or object")
+    roles = set(CACHE_REUSE_ROLES)
+    principals = fields(authority["principals"], roles, "approved cache reuse principals")
+    for role, principal in principals.items():
+        fields(principal, {"subject_sha256", "policy_identity_sha256"}, f"cache reuse principal {role}")
+        require(all(matches(SHA256, digest) for digest in principal.values()), "invalid cache reuse principal fingerprint")
+    require(all(principals["primary"][key] != principals["second"][key] for key in principals["primary"]),
+            "cache reuse requires two distinct OIDC subjects and Crab Auth policy identities")
+    obj = fields(authority["object"], {"key_sha256", "body_sha256", "bytes"}, "cache reuse object")
+    require(matches(SHA256, obj["key_sha256"]) and matches(SHA256, obj["body_sha256"])
+            and positive(obj["bytes"]) and 2 <= obj["bytes"] <= 1024 * 1024, "invalid cache reuse object descriptor")
+    grants = fields(trace["grants"], roles, "authenticated cache reuse grants")
+    requests = trace["requests"]
+    require(isinstance(requests, list) and len(requests) == 2, "cache reuse requires two authenticated reads")
+    previous_finish = 0
+    for role, cache, value in zip(CACHE_REUSE_ROLES, ("miss", "hit"), requests, strict=True):
+        grant = fields(grants[role], {"subject_sha256", "policy_identity_sha256", "issued_at_unix_ms", "expires_at_unix"},
+                       "authenticated cache reuse grant")
+        require(all(grant[key] == principals[role][key] for key in principals[role])
+                and positive(grant["issued_at_unix_ms"]) and positive(grant["expires_at_unix"]),
+                "cache reuse requires an authenticated grant for each approved principal")
+        row = fields(value, TRACE_REQUEST_FIELDS | {"principal", "body_sha256", "started_at_unix_ms", "finished_at_unix_ms"},
+                     "authenticated cache reuse read")
+        require(row["principal"] == role and row["source"] == "edge" and type(row["status"]) is int
+                and row["status"] == 200 and row["cache"] == cache
+                and all(row[key] == obj[key] for key in obj),
+                "cache reuse requires a verified first miss and second hit for the same complete object")
+        start, finish, expires = row["started_at_unix_ms"], row["finished_at_unix_ms"], grant["expires_at_unix"] * 1000
+        require(type(row["elapsed_ms"]) is int and row["elapsed_ms"] >= 0 and type(row["bytes"]) is int
+                and positive(start) and positive(finish)
+                and previous_finish <= start and grant["issued_at_unix_ms"] <= start <= finish < expires
+                and expires <= grant["issued_at_unix_ms"] + MAX_VIEWER_GRANT_SECONDS * 1000,
+                "cache reuse reads must be ordered and complete within the corresponding signed grant lifetime")
+        previous_finish = finish
+    return obj["key_sha256"], obj["bytes"]
+
+
 def ordered_full_reads(
     requests: list[dict[str, Any]], before: tuple[str, str | None], after: tuple[str, str | None],
 ) -> bool:
@@ -1031,9 +1079,11 @@ def benchmark_registration(registration: Any) -> dict[str, Any]:
         require(matches(SHA256, registration.get("historical_origin_sha256")),
                 "public benchmark needs approved native history")
     else:
-        expected.add("scoped_view_sha256")
+        expected.update(("scoped_view_sha256", "cache_reuse_sha256"))
         require(matches(SHA256, registration.get("scoped_view_sha256")),
                 "private benchmark needs the approved scoped view control digest")
+        require(matches(SHA256, registration.get("cache_reuse_sha256")),
+                "private benchmark needs the approved cache reuse authority digest")
     if profile == "managed":
         expected.add("managed_issuer")
         issuer = fields(registration.get("managed_issuer"), MANAGED_ISSUER_FIELDS, "registered production issuer")

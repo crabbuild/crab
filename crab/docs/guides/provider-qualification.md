@@ -207,13 +207,9 @@ For private delivery, add `--viewer-file` pointing to a protected file with the
 Cookie header value for CloudFront or Cloud CDN, or the raw bearer token for
 Front Door. The canary requires a byte-verified cache hit before and after
 anonymous full and ranged GETs to the same key. Both anonymous requests must
-receive an authorization denial. Use `--second-viewer-file` with a distinct
-grant issued to a different authorized principal for the same object. The
-collector requires the second principal's full read to hit the cache and match
-the approved bytes.
-It records a separate cache-reuse trace when the first read was an observed
-miss. Start with an uncached dedicated fixture to collect both traces. Retain
-the test principals' grant provenance separately from the viewer credentials.
+receive an authorization denial. For cross-principal cache reuse, use the
+authenticated cache-reuse collector below before warming the object with
+the transport canary.
 To capture warm expiry and parallel range denials, also pass the first
 credential's Unix expiry with `--viewer-expires-at` when it has 5 to 120 seconds
 remaining. The timestamp must match the credential's signed policy or token.
@@ -282,6 +278,40 @@ aws s3 presign "$live_s3_object_uri" --profile crab --region "$aws_region" \
 Keep the exact fixture path, including any protected-view suffix. Use the GCS
 XML endpoint or the canonical Azure Blob endpoint. [GCS signed URL command](https://docs.cloud.google.com/sdk/gcloud/reference/storage/sign-url) · [Azure blob SAS command](https://learn.microsoft.com/en-us/cli/azure/storage/blob#az-storage-blob-generate-sas)
 
+### Verify authenticated cache reuse
+
+Use an uncached private fixture with the approved `viewer_issuer` settings
+and two independently authorized OIDC test principals. The principal
+descriptor maps `primary` and `second` to objects containing `issuer`,
+`subject` and `policy_identity`. Use each ID token's `iss` and `sub` values
+and the identity evaluated by Crab Auth, which is the nonempty email claim
+or the subject. The collector compares policy identities
+case-insensitively, matching the reference service.
+
+Run `collect_cdn_cache_reuse.py` with the first three options below to obtain
+`cache_reuse_sha256`. Register that digest for the private row. It binds the
+issuer endpoint, CDN approval, the two principals and the exact fixture
+object. On the protected measurement worker, collect the trace before any
+other reader warms the fixture object. Pass each principal's short-lived
+OIDC ID token in its own protected file.
+
+```bash
+python3 -B crab/scripts/e2e/collect_cdn_cache_reuse.py \
+  --fixture "$approved_fixture_json" \
+  --configuration-sha256 "$approved_configuration_sha256" \
+  --principals "$approved_principals_json" \
+  --cache-reuse-sha256 "$approved_cache_reuse_sha256" \
+  --primary-token-file "$primary_oidc_file" --second-token-file "$second_oidc_file" \
+  --source-sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+  --output "$row_directory/traces/authorized_cache_reuse.json"
+```
+
+Crab Auth authenticates and authorizes each token before issuing the
+corresponding read grant. The collector verifies a first miss and a second
+hit on the same complete bytes while the grants are live. The trace retains
+fingerprints and request observations. OIDC tokens stay in the issuer
+exchange. Only the viewer credentials go to the CDN.
+
 ### Verify scoped-view isolation
 
 For a private release row, prepare a protected-view fixture for its exact
@@ -341,8 +371,6 @@ variables using the existing approved test fixture:
   that use an externally issued primary grant. Use a scoped credential valid
   through the probes. Leave it unset for public fixtures and private fixtures
   that configure `viewer_issuer`.
-- `CRAB_CDN_TRANSPORT_SECOND_VIEWER` is the optional environment **secret** for
-  the separately issued second private viewer grant.
 - `CRAB_CDN_TRANSPORT_UNRELATED_VIEWER` is the optional environment **secret**
   for the private control grant. Set it to collect the required unrelated-viewer
   trace using the fixture's approved `unrelated_control` object.
@@ -385,8 +413,8 @@ The canary requests the GitHub token and viewer grant after passing the
 deployment preflight. It checks the provider, native origin, viewer authority,
 physical view, signed object-family prefix, and expiry before the first edge
 request. The grant stays in the collector process. The native inspection role
-continues to supply the separate native read. Same-object cache reuse with
-another credential still needs issuer evidence to establish a second principal.
+continues to supply the separate native read. The authenticated cache-reuse
+collector supplies the two-principal evidence on the measurement worker.
 
 Download `provider-cdn-transport-<provider>-<run-id>-<attempt>` for the redacted
 traces. For manual warm expiry and parallel range denials on the same approved

@@ -18,6 +18,7 @@ on:
       - "crab/scripts/e2e/collect_private_cdn_binding.py"
       - "crab/scripts/e2e/test_cdn_private_binding_qualification.py"
       - "crab/scripts/e2e/collect_cdn_key_rotation.py"
+      - "crab/scripts/e2e/collect_cdn_cache_reuse.py"
       - "crab/scripts/e2e/collect_cdn_scoped_view.py"
       - "crab/scripts/e2e/collect_cdn_historical_origin.py"
       - "crab/scripts/e2e/test_cdn_historical_origin_qualification.py"
@@ -75,6 +76,7 @@ on:
       - "crab/scripts/e2e/collect_private_cdn_binding.py"
       - "crab/scripts/e2e/test_cdn_private_binding_qualification.py"
       - "crab/scripts/e2e/collect_cdn_key_rotation.py"
+      - "crab/scripts/e2e/collect_cdn_cache_reuse.py"
       - "crab/scripts/e2e/collect_cdn_scoped_view.py"
       - "crab/scripts/e2e/collect_cdn_historical_origin.py"
       - "crab/scripts/e2e/test_cdn_historical_origin_qualification.py"
@@ -510,7 +512,6 @@ jobs:
       id-token: write
     secrets:
       CRAB_CDN_TRANSPORT_VIEWER: ${{ secrets.CRAB_CDN_TRANSPORT_VIEWER }}
-      CRAB_CDN_TRANSPORT_SECOND_VIEWER: ${{ secrets.CRAB_CDN_TRANSPORT_SECOND_VIEWER }}
       CRAB_CDN_TRANSPORT_UNRELATED_VIEWER: ${{ secrets.CRAB_CDN_TRANSPORT_UNRELATED_VIEWER }}
     with:
       provider: s3
@@ -528,7 +529,6 @@ jobs:
       id-token: write
     secrets:
       CRAB_CDN_TRANSPORT_VIEWER: ${{ secrets.CRAB_CDN_TRANSPORT_VIEWER }}
-      CRAB_CDN_TRANSPORT_SECOND_VIEWER: ${{ secrets.CRAB_CDN_TRANSPORT_SECOND_VIEWER }}
       CRAB_CDN_TRANSPORT_UNRELATED_VIEWER: ${{ secrets.CRAB_CDN_TRANSPORT_UNRELATED_VIEWER }}
     with:
       provider: gcs
@@ -546,7 +546,6 @@ jobs:
       id-token: write
     secrets:
       CRAB_CDN_TRANSPORT_VIEWER: ${{ secrets.CRAB_CDN_TRANSPORT_VIEWER }}
-      CRAB_CDN_TRANSPORT_SECOND_VIEWER: ${{ secrets.CRAB_CDN_TRANSPORT_SECOND_VIEWER }}
       CRAB_CDN_TRANSPORT_UNRELATED_VIEWER: ${{ secrets.CRAB_CDN_TRANSPORT_UNRELATED_VIEWER }}
     with:
       provider: azure

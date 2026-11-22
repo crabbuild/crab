@@ -15,8 +15,9 @@ import sys
 
 import cdn_deployment_policy_cli as DEPLOYMENT
 import cdn_viewer_issuer as ISSUER
+import collect_cdn_cache_reuse as REUSE
 import run_cdn_transport_checks as TRANSPORT
-from test_cdn_transport_qualification import fixture, response
+from test_cdn_transport_qualification import BODY, fixture, response
 
 
 NOW = 1_800_000_000
@@ -123,6 +124,87 @@ class CdnViewerIssuerQualificationTests(TestCase):
                   self.assertRaisesRegex(ValueError, "GitHub OIDC")):
                 ISSUER.github_id_token(AUDIENCE)
         self.http.assert_not_called()
+
+    def test_cache_reuse_mints_both_grants_and_keeps_oidc_tokens_off_the_edge(self):
+        for edge, header, miss, hit in (
+            ("cloudfront", "X_Cache", "Miss from cloudfront", "Hit from cloudfront"),
+            ("cloud-cdn", "X_Crab_CDN_Cache", "miss", "hit"),
+            ("front-door", "X_Cache", "TCP_MISS", "TCP_HIT"),
+        ):
+            with self.subTest(edge=edge), TemporaryDirectory() as directory:
+                root = Path(directory)
+                protected = edge == "front-door"
+                config = settings(edge, protected=protected)
+                raw = json.dumps(config).encode()
+                (root / "fixture.json").write_bytes(raw)
+                roles = ("primary", "second")
+                issuer = "https://idp.example.com"
+                subjects = {role: {"issuer": issuer, "subject": f"{role}-subject", "policy_identity": f"{role}@example.com"}
+                            for role in roles}
+                principals = root / "principals.json"
+                principals.write_text(json.dumps(subjects), encoding="utf-8")
+                tokens = {role: f"header.{encoded({'iss': issuer, 'sub': spec['subject'], 'email': spec['policy_identity'], 'aud': AUDIENCE})}.token"
+                          for role, spec in subjects.items()}
+                for role, token in tokens.items():
+                    (root / role).write_text(token + "\n", encoding="utf-8")
+                args = ["probe", "--fixture", str(root / "fixture.json"), "--configuration-sha256", hashlib.sha256(raw).hexdigest(),
+                        "--principals", str(principals)]
+                stdout = StringIO()
+                with patch.object(sys, "argv", args), redirect_stdout(stdout):
+                    self.assertEqual(REUSE.main(), 0)
+                fingerprint = json.loads(stdout.getvalue())["cache_reuse_sha256"]
+                reply = issue_reply(edge, config)
+                issued = response(200, json.dumps(reply).encode(), Cache_Control="no-store", X_Crab_CDN_Approval_Sha256="a" * 64)
+                self.connection.getresponse.side_effect = [
+                    issued, response(200, BODY, Cache_Control="private, no-store", **{header: miss}),
+                    issued, response(200, BODY, Cache_Control="private, no-store", **{header: hit}),
+                ]
+                self.http.reset_mock()
+                output = root / "trace.json"
+                args += ["--cache-reuse-sha256", fingerprint, "--source-sha", "a" * 40, "--run-id", "123", "--run-attempt", "2",
+                         "--primary-token-file", str(root / "primary"), "--second-token-file", str(root / "second"),
+                         "--output", str(output)]
+                reused = [str(root / "primary") if value == str(root / "second") else value for value in args]
+                error = StringIO()
+                with (patch.object(sys, "argv", reused), patch.object(REUSE, "attest_fixture") as attest,
+                      redirect_stderr(error)):
+                    self.assertEqual(REUSE.main(), 1)
+                self.assertIn("different approved cache reuse principal", error.getvalue())
+                self.assertFalse(output.exists())
+                attest.assert_not_called()
+                self.http.assert_not_called()
+                with (patch.object(sys, "argv", args), patch.object(REUSE, "attest_fixture") as attest,
+                      patch.object(REUSE.time, "time_ns", side_effect=[NOW * 10**9 + i * 10**6 for i in range(6)])):
+                    self.assertEqual(REUSE.main(), 0)
+                self.assertEqual(attest.call_count, 2)
+                calls = self.connection.request.call_args_list
+                for role, grant, read in zip(roles, calls[::2], calls[1::2], strict=True):
+                    self.assertEqual(grant.args, ("POST", "/v1/credentials"))
+                    self.assertEqual(json.loads(grant.kwargs["body"])["id_token"], tokens[role])
+                    self.assertEqual(grant.kwargs["headers"]["Authorization"], f"Bearer {tokens[role]}")
+                    self.assertNotIn(tokens[role], str(read.kwargs["headers"]))
+                self.assertEqual(calls[1].args, calls[3].args)
+                trace = output.read_text()
+                for secret in (*tokens.values(), "primary@example.com", "native-credential-fixture", "fixture-signature"):
+                    self.assertNotIn(secret, trace)
+                self.assertEqual([row["cache"] for row in json.loads(trace)["requests"]], ["miss", "hit"])
+
+    def test_cache_reuse_cannot_relabel_one_policy_identity_as_two_principals(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = json.dumps(settings("cloudfront")).encode()
+            (root / "fixture.json").write_bytes(raw)
+            principal = {"issuer": "https://idp.example.com", "subject": "first", "policy_identity": "reader@example.com"}
+            (root / "principals.json").write_text(json.dumps({
+                "primary": principal, "second": principal | {"subject": "different", "policy_identity": "Reader@example.com"},
+            }))
+            error = StringIO()
+            with (patch.object(sys, "argv", ["probe", "--fixture", str(root / "fixture.json"), "--configuration-sha256",
+                                            hashlib.sha256(raw).hexdigest(), "--principals", str(root / "principals.json")]),
+                  redirect_stderr(error)):
+                self.assertEqual(REUSE.main(), 1)
+            self.assertIn("two distinct OIDC subjects and Crab Auth policy identities", error.getvalue())
+            self.http.assert_not_called()
 
     def test_issuer_rejection_and_nonprivate_responses_are_redacted(self):
         cases = (

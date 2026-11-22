@@ -276,55 +276,6 @@ class CdnTransportQualificationTests(unittest.TestCase):
                 self.assertNotIn("fixture-secret", str(error.exception))
         self.client.assert_not_called()
 
-    def test_second_principal_receives_the_same_bytes_from_a_warm_cache(self) -> None:
-        hot = response(200, BODY, X_Cache="Hit from cloudfront", Cache_Control="private, no-store")
-        for first_cache, reuse in (("Miss from cloudfront", True), ("Hit from cloudfront", False)):
-            with self.subTest(first_cache=first_cache):
-                self.connection.reset_mock()
-                self.connection.getresponse.side_effect = [
-                    response(200, BODY, X_Cache=first_cache, Cache_Control="private, no-store"),
-                    response(206, BODY[:1], Content_Range="bytes 0-0/6", Cache_Control="private, no-store"),
-                    response(403), response(403),
-                    hot,
-                    *route_responses("cloudfront", hot),
-                    response(403), response(403),
-                    hot,
-                    response(403, X_Amz_Bucket_Region="us-west-2"), response(403),
-                ]
-                traces = TRANSPORT.collect(
-                    fixture(access="private"), "cloudfront", "private", "git", {"Cookie": "first-viewer"}, None,
-                    second_viewer={"Cookie": "second-viewer"},
-                )
-                first, second = traces["primary_and_second_principal"]
-                self.assertEqual(first["key_sha256"], second["key_sha256"])
-                self.assertEqual(second["cache"], "hit")
-                self.assertEqual("authorized_cache_reuse" in traces, reuse)
-                initial_call = self.connection.request.call_args_list[0]
-                second_call = self.connection.request.call_args_list[4]
-                self.assertEqual(initial_call.args, second_call.args)
-                self.assertEqual(second_call.kwargs["headers"]["Cookie"], "second-viewer")
-
-    def test_second_principal_does_not_pass_on_a_miss_or_corrupt_payload(self) -> None:
-        for cache, payload in (("TCP_MISS", BODY), ("TCP_HIT", b"######")):
-            with self.subTest(cache=cache):
-                self.connection.getresponse.side_effect = [
-                    response(200, BODY, Cache_Control="private, no-store"),
-                    response(206, BODY[:1], Content_Range="bytes 0-0/6", Cache_Control="private, no-store"),
-                    response(403), response(403), response(200, payload, X_Cache=cache, Cache_Control="private, no-store"),
-                ]
-                with self.assertRaisesRegex(ValueError, "approved bytes from a cache hit"):
-                    TRANSPORT.collect(
-                        fixture("front-door", "private"), "front-door", "private", "git",
-                        {"Authorization": "Bearer first"}, None, second_viewer={"Authorization": "Bearer second"},
-                    )
-
-    def test_second_principal_refuses_reused_grant_before_accessing_edge(self) -> None:
-        viewer = {"Cookie": "first-viewer"}
-        with self.assertRaisesRegex(ValueError, "requires a distinct private viewer grant"):
-            TRANSPORT.collect(fixture(access="private"), "cloudfront", "private", "git", viewer, None,
-                              second_viewer=viewer)
-        self.client.assert_not_called()
-
     def test_anonymous_get_and_range_are_denied_without_avoiding_the_warm_cache(self) -> None:
         hot = response(200, BODY, X_Crab_CDN_Cache="hit", Cache_Control="private, no-store")
         denied = response(403)

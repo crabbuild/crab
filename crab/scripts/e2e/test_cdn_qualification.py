@@ -176,7 +176,6 @@ class CdnQualificationTests(unittest.TestCase):
             "edge_route_policy": [edge_hit, edge_deny, *(
                 edge_deny for _ in CDN.EDGE_ROUTE_QUERY_PROBES[CDN.PROVIDERS[provider][0]]
             ), edge_hit],
-            "primary_and_second_principal": [self.request("edge", 200), edge_hit],
             "warm_anonymous_viewer_denied": [edge_hit, edge_deny, edge_deny, edge_hit],
             "warm_expired_viewer_denied": [edge_hit, edge_deny],
             "warm_unrelated_principal_denied": [edge_hit, control, edge_deny, edge_deny, control, edge_hit],
@@ -185,7 +184,6 @@ class CdnQualificationTests(unittest.TestCase):
             "live_origin_denied": [origin_deny],
             "export_origin_access": [origin_deny if provider == "s3" else origin_read],
             "public_listing_denied": [origin_deny],
-            "authorized_cache_reuse": [self.request("edge", 200, "miss"), edge_hit],
             "rollback": [edge_hit, origin_read],
         }
         for check in CDN.required_check_names(access, profile):
@@ -195,6 +193,8 @@ class CdnQualificationTests(unittest.TestCase):
                 self.deployment_trace(self.policy_components, policy_digest)
             elif check == CDN.KEY_ROTATION_CHECK:
                 self.rotation_trace(edge)
+            elif check == CDN.CACHE_REUSE_CHECK:
+                self.cache_reuse_trace()
             elif check == CDN.SCOPED_VIEW_CHECK:
                 self.scoped_view_trace()
             elif check == CDN.MANAGED_ISSUER_CHECK:
@@ -314,6 +314,27 @@ class CdnQualificationTests(unittest.TestCase):
     def rollback_trace(self, evidence: dict[str, Any]) -> None:
         path = self.directory / "traces/rollback.json"
         self.report["checks"]["rollback"] = {"passed": True, "trace_sha256": json_file(path, evidence)}
+
+    def cache_reuse_trace(self, evidence: dict[str, Any] | None = None) -> None:
+        check = CDN.CACHE_REUSE_CHECK
+        if evidence is None:
+            principals = {
+                role: {"subject_sha256": marker * 64, "policy_identity_sha256": marker * 64}
+                for role, marker in (("primary", "a"), ("second", "b"))
+            }
+            authority = {"issuer_endpoint_sha256": "c" * 64, "approval_sha256": "d" * 64, "principals": principals,
+                         "object": {"key_sha256": self.object_key, "body_sha256": "e" * 64, "bytes": 8}}
+            self.registration["cache_reuse_sha256"] = CDN.deployment_component_digest(authority)
+            evidence = {key: self.report[key] for key in CDN.CDN_PROVENANCE_FIELDS} | {
+                "schema": "crab.cdn-authenticated-cache-reuse/v1", "check": check, "authority": authority,
+                "grants": {role: principals[role] | {"issued_at_unix_ms": 1000, "expires_at_unix": 5} for role in principals},
+                "requests": [self.request("edge", 200, cache) | {
+                    "principal": role, "body_sha256": "e" * 64,
+                    "started_at_unix_ms": 1010 + index * 100, "finished_at_unix_ms": 1020 + index * 100,
+                } for index, (role, cache) in enumerate((("primary", "miss"), ("second", "hit")))],
+            }
+        path = self.directory / "traces" / f"{check}.json"
+        self.report["checks"][check] = {"passed": True, "trace_sha256": json_file(path, evidence)}
 
     def scoped_view_trace(self, evidence: dict[str, Any] | None = None) -> None:
         check = CDN.SCOPED_VIEW_CHECK
@@ -935,19 +956,26 @@ class CdnQualificationTests(unittest.TestCase):
         self.scoped_view_trace(trace | {"placement": trace["placement"] | {"source_prefix_sha256": "7" * 64}})
         self.rejected("placement differs from the approved control fixture")
 
-    def test_cache_reuse_requires_a_hit_after_the_miss(self) -> None:
+    def test_cache_reuse_requires_authenticated_issuer_observations(self) -> None:
         self.configure("s3", "private", "direct")
-        self.trace("authorized_cache_reuse", [self.request("edge", 200, "hit"), self.request("edge", 200, "miss")])
-        self.rejected("cache reuse requires a miss followed by a hit")
+        self.trace(CDN.CACHE_REUSE_CHECK, [self.request("edge", 200, "miss"), self.request("edge", 200, "hit")])
+        self.rejected("invalid fields in authorized_cache_reuse")
 
-    def test_second_principal_requires_a_warm_read_of_the_same_key(self) -> None:
+    def test_cache_reuse_checks_the_read_and_its_signed_grant(self) -> None:
         self.configure("s3", "private", "direct")
-        full = self.request("edge", 200)
-        different_key = self.request("edge", 200, "hit") | {"key_sha256": "f" * 64}
-        for invalid in ([full], [full, full], [full, different_key]):
-            with self.subTest(invalid=invalid):
-                self.trace("primary_and_second_principal", invalid)
-                self.rejected("the second principal requires a cache hit")
+        trace = json.loads((self.directory / "traces" / f"{CDN.CACHE_REUSE_CHECK}.json").read_bytes())
+        for changes, reason in (
+            ({"cache": "miss"}, "verified first miss and second hit"),
+            ({"key_sha256": "f" * 64}, "verified first miss and second hit"),
+            ({"finished_at_unix_ms": 5000}, "complete within the corresponding signed grant lifetime"),
+        ):
+            with self.subTest(changes=changes):
+                primary, second = trace["requests"]
+                self.cache_reuse_trace(trace | {"requests": [primary, second | changes]})
+                self.rejected(reason)
+        grants = trace["grants"] | {"second": trace["grants"]["primary"]}
+        self.cache_reuse_trace(trace | {"grants": grants})
+        self.rejected("an authenticated grant for each approved principal")
 
     def test_rejects_expiry_without_evidence_the_edge_was_warm(self) -> None:
         self.configure("azure", "private", "direct")

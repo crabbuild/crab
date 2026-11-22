@@ -37,8 +37,7 @@ CANARY_REQUIRED = {
     "public": CANARY_COMMON | {PUBLIC_EXPORT_CHECK, "live_origin_denied", "export_origin_access", "public_listing_denied"},
 }
 CANARY_OPTIONAL = {
-    "private": {"primary_and_second_principal", "authorized_cache_reuse",
-                "warm_unrelated_principal_denied", "warm_expired_viewer_denied", EXPIRY_RANGE_CHECK},
+    "private": {"warm_unrelated_principal_denied", "warm_expired_viewer_denied", EXPIRY_RANGE_CHECK},
     "public": set(),
 }
 
