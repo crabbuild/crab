@@ -794,7 +794,7 @@ disposition for larger objects. Use provider logs for their cache and
 origin-fill evidence. [Front Door caching documentation](https://learn.microsoft.com/en-us/azure/frontdoor/front-door-caching#response-headers)
 
 For Crab Server and the S3 gateway, start a dedicated qualification build with
-`RUST_LOG=crab_storage::cdn::transfer=debug,crab_storage::native_read=debug`.
+`RUST_LOG=crab_storage::cdn::transfer=debug,crab_storage::cdn::read_target=debug,crab_storage::native_read=debug`.
 On Cloud CDN, append `,crab_storage::cdn::gcs_viewer_log=trace` to correlate
 each request with Cloud Logging. Redirect stderr to a protected append-only
 file. Keep the process idle except for the measured request because the worker
@@ -805,7 +805,9 @@ Seal a `crab.cdn-service-workload/v1` JSON file with `schema`,
 `configuration_sha256`, `publication_sha256`, the service HTTPS `endpoint`,
 logical `repository`, the full Git `commit`, `payload_sha256`,
 `payload_bytes`, and the SHA-256 of the strong ETag including its quotes
-in `etag_sha256`. Publish the fixture file as `cdn-qualification.bin`.
+in `etag_sha256`. Set `public_export_sha256` to the digest of the independently
+approved export's `publication.json` for a public row, or the empty string for
+a private row. Publish the fixture file as `cdn-qualification.bin`.
 Use the Crab Server repository name as `owner/repo` or the S3 gateway bucket
 name. Put the dedicated viewer credential in a separate protected JSON file
 with `cookie` for a Crab browser session, `authorization` for the Git LFS
@@ -821,12 +823,17 @@ python3 -B crab/scripts/e2e/run_cdn_service_read.py edge \
 ```
 
 Pass the edge report as `--client` to `collect_cdn_viewer_requests.py` with
-the approved provider log exports. The collector checks every viewer request
-and matches LFS reads to the exact approved storage key. Withdraw the CDN
-binding, restart the service with a fresh cache, and run the same workload
-with `origin` to measure native rollback with identical bytes and ETag.
-Live regional samples, publication and binding verification, and cache
-evidence remain required before either service's rows can qualify.
+the approved provider log exports. For a public edge read, also pass
+`--export-approval` to the read worker with the directory containing the
+sealed export receipt and inventory. The worker verifies the service's
+observed native origin, physical prefix, viewer binding, and loaded public
+receipt. The log collector checks every viewer request and matches LFS reads
+to the exact approved storage key. Withdraw the CDN binding, restart the
+service with a fresh cache, and run the same workload with `origin` and
+without `--export-approval`. The rollback worker requires the same native
+target and payload and an empty viewer binding. Live regional samples,
+independent publication lifecycle proof and cache evidence remain required
+before either service's rows can qualify.
 
 ### Verify native publication and CDN Git fetch
 

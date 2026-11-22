@@ -64,10 +64,14 @@ on:
       - "crates/crab-auth-store/src/managed_repository.rs"
       - "crates/crab-sdk/Cargo.toml"
       - "crates/crab-server/Cargo.toml"
+      - "crates/crab-server/build.rs"
       - "crates/crab-server/src/cli/mod.rs"
+      - "crates/crab-server/src/git/lfs/mod.rs"
+      - "crates/crab-server/src/repository/mod.rs"
       - "crates/crab-server/src/repository/tests/cdn.rs"
       - "crates/crab-s3-gateway/Cargo.toml"
       - "crates/crab-s3-gateway/src/main.rs"
+      - "crates/crab-s3-gateway/src/gateway.rs"
       - "crates/crab-s3-gateway/src/gateway/cdn_tests.rs"
       - "packages/desktop/agent/Cargo.toml"
       - "crates/crab-metadata/src/pack_origin.rs"
@@ -137,10 +141,14 @@ on:
       - "crates/crab-auth-store/src/managed_repository.rs"
       - "crates/crab-sdk/Cargo.toml"
       - "crates/crab-server/Cargo.toml"
+      - "crates/crab-server/build.rs"
       - "crates/crab-server/src/cli/mod.rs"
+      - "crates/crab-server/src/git/lfs/mod.rs"
+      - "crates/crab-server/src/repository/mod.rs"
       - "crates/crab-server/src/repository/tests/cdn.rs"
       - "crates/crab-s3-gateway/Cargo.toml"
       - "crates/crab-s3-gateway/src/main.rs"
+      - "crates/crab-s3-gateway/src/gateway.rs"
       - "crates/crab-s3-gateway/src/gateway/cdn_tests.rs"
       - "packages/desktop/agent/Cargo.toml"
       - "crates/crab-metadata/src/pack_origin.rs"
@@ -231,16 +239,32 @@ jobs:
           cargo test --locked -p crab-lfs --test cdn_observation
           cargo test --locked -p crab-lfs --test cdn_observation --features crab-storage/provider-cdn-qualification
 
+      - name: Set up repository frontend toolchain
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/ui/package-lock.json
+
+      - name: Build embedded repository frontend
+        run: |
+          npm ci --prefix packages/ui
+          npm run build --prefix packages/ui
+
       - name: Exercise CDN delivery through both service interfaces
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/provider-cdn-features
         run: |
+          set -euo pipefail
+          smoke() {
+            cargo test --locked -p "$1" --lib --features provider-cdn-qualification "$2" -- --exact \
+              | tee "$RUNNER_TEMP/cdn-service-smoke.log"
+            grep -Eq 'test result: ok\. 1 passed; 0 failed;' "$RUNNER_TEMP/cdn-service-smoke.log"
+          }
           cargo check --locked -p crab-server -p crab-s3-gateway \
             --features crab-server/provider-cdn-qualification,crab-s3-gateway/provider-cdn-qualification --bins
-          cargo test --locked -p crab-server --lib --features provider-cdn-qualification \
-            ordinary_http_reads_use_verified_edge_bodies_and_keep_native_controls
-          cargo test --locked -p crab-s3-gateway --lib --features provider-cdn-qualification \
-            authorized_gateway_reads_verified_git_and_lfs_from_the_edge
+          smoke crab-server repository::tests::cdn::ordinary_http_reads_use_verified_edge_bodies_and_keep_native_controls
+          smoke crab-s3-gateway gateway::cdn_tests::authorized_gateway_reads_verified_git_and_lfs_from_the_edge
 
   rustfs:
     name: S3-compatible RustFS

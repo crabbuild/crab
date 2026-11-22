@@ -1407,6 +1407,11 @@ impl S3 for Gateway {
         let permit = self.admit(RequestClass::Read).await?;
         reject_get_extensions(&req.input)?;
         let repository = self.repository(&req, &req.input.bucket, RepositoryAccess::Read)?;
+        let layout = repository
+            .edge_reader
+            .as_ref()
+            .map_or(&repository.layout, |reader| &reader.layout);
+        layout.observe_cdn_read_target(crab_storage::cdn::CdnConsumer::S3Gateway);
         let object = self.read_object(repository, &req.input.key).await?;
         let tag_count = tag_count(object.attributes.as_ref())?;
         evaluate_conditions(

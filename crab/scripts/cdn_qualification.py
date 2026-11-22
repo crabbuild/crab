@@ -163,7 +163,7 @@ GIT_FETCH_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | {
     "platform", "publication_sha256", "candidate", "reader", "edge_responses", "native_traffic",
 }
 SDK_GIT_ACTION = "sdk-git-snapshot"
-SDK_READ_FIELDS = CLI_NATIVE_FIELDS | {"binding_sha256", "public_export_sha256"}
+DIRECT_READ_TARGET_FIELDS = CLI_NATIVE_FIELDS | {"binding_sha256", "public_export_sha256"}
 SDK_PAYLOAD_FIELDS = {"sha256", "bytes", "git_blob_oid_sha256"}
 SDK_TIMING_FIELDS = {"started_at_unix_ms", "finished_at_unix_ms", "elapsed_ms"}
 SDK_PROBE_FIELDS = SDK_TIMING_FIELDS | {"commit", "payload", "build", "warm_local"}
@@ -177,7 +177,7 @@ SDK_HYDRATION_READ_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | SDK_TIMIN
 }
 SERVICE_READ_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | SDK_TIMING_FIELDS | {
     "schema", "arm", "platform", "workload_sha256", "publication_sha256", "commit", "payload_sha256",
-    "payload_bytes", "etag_sha256", "git_blob_oid_sha256", "lfs_key_sha256", "native_traffic", "edge_responses",
+    "payload_bytes", "etag_sha256", "git_blob_oid_sha256", "lfs_key_sha256", "reader", "native_traffic", "edge_responses",
 }
 GIT_MODES = {"origin": "origin", "cold_edge": "edge", "warm_edge": "edge", "warm_local": "warm_local"}
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -1406,7 +1406,7 @@ def verify_sdk_git_read(raw: bytes, row: dict[str, Any], spec: dict[str, Any], m
             for key in ("sha256", "publication_sha256", "git_blob_oid_sha256"))
             and type(client["bytes"]) is int and client["bytes"] == GIT_PAYLOAD_SIZE,
             "SDK snapshot did not verify the published payload")
-    reader = fields(client["reader"], SDK_READ_FIELDS, "verified SDK read target")
+    reader = fields(client["reader"], DIRECT_READ_TARGET_FIELDS, "verified SDK read target")
     require(all(matches(SHA256, reader[key]) for key in CLI_NATIVE_FIELDS),
             "SDK snapshot has invalid native origin or prefix fingerprints")
     expected_binding = spec["viewer_binding_sha256"] if mode != "origin" else ""

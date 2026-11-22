@@ -749,10 +749,13 @@ partial LFS reads stay on origin and withdrawing the CDN layout gives a fresh
 native Git read with identical bytes and ETag. The service qualification
 worker verifies ordinary Crab Server and S3 gateway Git and LFS responses
 against a digest-pinned workload and captures allowlisted storage observations
-from the dedicated service process. The provider log collector joins every
-attempt and matches LFS reads to the exact approved object. Live regional
-records, independent placement and service-binding verification, and warm-local
-evidence remain release requirements.
+from the dedicated service process. The authorized read handlers report the
+selected native origin and repository prefix, active viewer and loaded public
+export receipt. The worker checks those fingerprints against the approved
+fixture and confirms the binding was withdrawn for native rollback. The
+provider log collector joins every attempt and matches LFS reads to the exact
+approved object. Live regional records, independent native publication
+lifecycle observations, and warm-local evidence remain release requirements.
 
 The protected workflow or its dedicated workers own producing these raw
 observations. The assembly and release jobs own rejecting missing, mismatched

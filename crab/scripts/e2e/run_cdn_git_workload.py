@@ -69,6 +69,15 @@ def viewer_binding_sha256(fixture: dict) -> str:
     return hashlib.sha256(f"{access}\nhttps://{authority}{base.path.rstrip('/')}".encode()).hexdigest()
 
 
+def read_target_fingerprints(fixture: dict, *, edge: bool, export_sha256: str) -> dict[str, str]:
+    return {
+        "origin_sha256": hashlib.sha256(fixture["native_origin"].encode()).hexdigest(),
+        "prefix_sha256": hashlib.sha256(f"{fixture['fixture_prefix']}/".encode()).hexdigest(),
+        "binding_sha256": viewer_binding_sha256(fixture) if edge else "",
+        "public_export_sha256": export_sha256,
+    }
+
+
 def verified_read(lines: list[bytes], expected: dict) -> dict:
     found = False
     for line in lines:

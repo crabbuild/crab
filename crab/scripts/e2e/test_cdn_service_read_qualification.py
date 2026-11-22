@@ -28,8 +28,8 @@ GIT_SHA256 = hashlib.sha256(GIT_OID).hexdigest()
 ETAG = '"approved-validator"'
 
 
-def events(provider, consumer, family):
-    route = {"provider": provider, "access": "private", "consumer": consumer, "family": family, "profile": "direct"}
+def events(provider, consumer, family, access):
+    route = {"provider": provider, "access": access, "consumer": consumer, "family": family, "profile": "direct"}
     transfer = {"message": "CDN immutable GET", "status": 206, "bytes": 64, "cache": "hit", "range": True,
                 "complete": True, "elapsed_ms": 1, "request_sha256": "d" * 64}
     payload = {"message": f"CDN verified {'Git' if family == 'git' else 'LFS'} payload", "source": "edge"}
@@ -39,8 +39,8 @@ def events(provider, consumer, family):
 
 
 class CdnServiceReadTests(unittest.TestCase):
-    def prepare(self, root, provider, consumer, family):
-        config = fixture(provider, "private") | {"scope": f"{provider}/private/{consumer}/{family}/direct"}
+    def prepare(self, root, provider, consumer, family, access="private"):
+        config = fixture(provider, access) | {"scope": f"{provider}/{access}/{consumer}/{family}/direct"}
         if provider == "cloud-cdn":
             config["deployment"] = {"project": "fixture-project", "forwarding_rule": "crab-https"}
         if family == "lfs":
@@ -50,7 +50,8 @@ class CdnServiceReadTests(unittest.TestCase):
         workload = {"schema": "crab.cdn-service-workload/v1", "configuration_sha256": config_sha,
                     "publication_sha256": "a" * 64, "endpoint": "https://service.example.com", "repository": repo,
                     "commit": "c" * 40, "payload_sha256": SHA256, "payload_bytes": len(BODY),
-                    "etag_sha256": hashlib.sha256(ETAG.encode()).hexdigest()}
+                    "etag_sha256": hashlib.sha256(ETAG.encode()).hexdigest(),
+                    "public_export_sha256": "b" * 64 if access == "public" else ""}
         credentials = ({"access_key": "fixture-key", "secret_key": "fixture-secret", "region": "us-east-1"}
                        if consumer == "s3-gateway" else {"cookie": "__Host-crab_session=fixture-token"}
                        if family == "git" else {"authorization": "Basic Zml4dHVyZTp0b2tlbg=="})
@@ -58,10 +59,12 @@ class CdnServiceReadTests(unittest.TestCase):
         return argparse.Namespace(fixture=root / "fixture.json", configuration_sha256=config_sha,
             workload=root / "workload.json", workload_sha256=json_file(root / "workload.json", workload),
             credentials=root / "credentials.json", service_log=root / "server.log",
-            source_sha=COMMIT, run_id="123", run_attempt="2", arm="edge")
+            source_sha=COMMIT, run_id="123", run_attempt="2", arm="edge", export_approval=None)
 
     def request(self, args, provider, consumer, family, fault=""):
-        edge = events(PROVIDER_FOR_EDGE[provider], consumer, family)
+        config = json.loads(args.fixture.read_bytes())
+        _, access, _, _, _ = SERVICE.scope_parts(config["scope"])
+        edge = events(PROVIDER_FOR_EDGE[provider], consumer, family, access)
         natives = {"target": "crab_storage::native_read", "fields": {"message": "Native object store read",
                    "provider": PROVIDER_FOR_EDGE[provider], "method": "get", "status": 200, "bytes": len(BODY)}}
         prior = {"target": "crab_storage::cdn::transfer", "fields": edge[0]}
@@ -87,7 +90,19 @@ class CdnServiceReadTests(unittest.TestCase):
                 edge[0]["consumer"] = "sdk"
             if fault == "missing-request":
                 edge[0]["request_sha256"] = ""
+            reading_at_edge = args.arm == "edge" or fault == "rollback-binding"
+            export = "b" * 64 if reading_at_edge and access == "public" else ""
+            reader = SERVICE.read_target_fingerprints(config, edge=reading_at_edge, export_sha256=export)
+            for different in reader:
+                if fault == different:
+                    reader[different] = "e" * 64
+            target = {"target": SERVICE.READ_TARGET,
+                      "fields": reader | {"consumer": consumer, "message": "CDN service read target"}}
             lines = [natives]
+            if fault != "no-target":
+                lines.append(target)
+            if fault == "duplicate-target":
+                lines.append(target)
             if args.arm == "edge" and fault != "no-edge" or fault == "origin-edge":
                 lines += [{"target": "crab_storage::cdn::transfer", "fields": event} for event in edge]
             with args.service_log.open("a", encoding="utf-8") as log:
@@ -114,6 +129,9 @@ class CdnServiceReadTests(unittest.TestCase):
                 self.assertEqual((edge["verified_edge_payloads"], origin["all_edge_attempts"]), (1, 0))
                 self.assertEqual((edge["payload_sha256"], origin["payload_sha256"]), (SHA256, SHA256))
                 self.assertEqual(edge["etag_sha256"], origin["etag_sha256"])
+                self.assertEqual(edge["reader"]["origin_sha256"], origin["reader"]["origin_sha256"])
+                self.assertTrue(edge["reader"]["binding_sha256"])
+                self.assertEqual(origin["reader"]["binding_sha256"], "")
                 self.assertEqual(set(edge["edge_responses"]), {"d" * 64})
                 self.assertNotIn("fixture-token", json.dumps(edge))
                 self.assertNotIn("fixture-secret", json.dumps(edge))
@@ -132,6 +150,27 @@ class CdnServiceReadTests(unittest.TestCase):
             args.arm = "origin"
             with self.assertRaisesRegex(ValueError, "zero edge attempts"):
                 self.request(args, provider, consumer, family, "origin-edge")
+
+    def test_rejects_unproved_service_placement_and_viewer_binding(self):
+        provider, consumer, family = "front-door", "s3-gateway", "git"
+        with TemporaryDirectory() as directory:
+            args = self.prepare(Path(directory), provider, consumer, family, access="public")
+            args.export_approval = Path(directory)
+            with patch.object(SERVICE, "approved_public_export", return_value=("c" * 64, [], 1)):
+                with self.assertRaisesRegex(ValueError, "exact public export receipt"):
+                    self.request(args, provider, consumer, family)
+            with patch.object(SERVICE, "approved_public_export", return_value=("b" * 64, [], 1)):
+                for fault in ("origin_sha256", "prefix_sha256", "binding_sha256", "public_export_sha256",
+                              "no-target", "duplicate-target"):
+                    with self.subTest(fault=fault), self.assertRaisesRegex(ValueError, "approved native target"):
+                        self.request(args, provider, consumer, family, fault)
+                edge = self.request(args, provider, consumer, family)
+                self.assertEqual(edge["reader"]["public_export_sha256"], "b" * 64)
+            args.arm, args.export_approval = "origin", None
+            with self.assertRaisesRegex(ValueError, "approved native target"):
+                self.request(args, provider, consumer, family, "rollback-binding")
+            origin = self.request(args, provider, consumer, family)
+            self.assertEqual(origin["reader"]["public_export_sha256"], "")
 
     def test_cloud_cdn_viewer_logs_require_the_exact_service_lfs_key_and_traffic(self):
         with TemporaryDirectory() as directory:
@@ -152,17 +191,18 @@ class CdnServiceReadTests(unittest.TestCase):
             command = [sys.executable, "-B", str(Path(COLLECT.__file__)), "--fixture", str(args.fixture),
                        "--configuration-sha256", args.configuration_sha256, "--client", str(client),
                        "--log", str(log), "--output", str(output)]
-            for key, extra_bytes, error in (
-                (lfs_object_path("1" * 64), 0, "approved service LFS object"),
-                (config["object_path"], 1, "transfer totals disagree with the logged responses"),
-                (config["object_path"], 0, None),
+            for key, extras, error in (
+                (lfs_object_path("1" * 64), {}, "approved service LFS object"),
+                (config["object_path"], {"edge_bytes": report["edge_bytes"] + 1}, "transfer totals disagree with the logged responses"),
+                (config["object_path"], {"reader": report["reader"] | {"binding_sha256": "e" * 64}}, "approved native target"),
+                (config["object_path"], {}, None),
             ):
                 with self.subTest(error=error):
                     request = {"requestMethod": "GET", "requestUrl": f"{prefix}/{key}",
                                "responseSize": "300", "status": 206, "userAgent": tag,
                                "cacheHit": True, "cacheLookup": True}
                     json_file(log, [viewer | {"httpRequest": request}])
-                    json_file(client, report | {"edge_bytes": report["edge_bytes"] + extra_bytes})
+                    json_file(client, report | extras)
                     result = subprocess.run(command, capture_output=True, text=True, check=False)
                     if error:
                         self.assertEqual(result.returncode, 1, result.stderr)

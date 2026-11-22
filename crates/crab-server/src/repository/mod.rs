@@ -416,9 +416,13 @@ impl Repository {
         server: &Server,
         cancellation: &CancellationToken,
     ) -> Result<BrowseRepository> {
+        use crab_storage::cdn::CdnConsumer;
+
         let Some(reader) = &self.edge_reads else {
+            self.layout.observe_cdn_read_target(CdnConsumer::Server);
             return self.open(server, cancellation).await;
         };
+        reader.layout.observe_cdn_read_target(CdnConsumer::Server);
         self.open_pinned(
             &reader.layout,
             &reader.identity,
@@ -430,10 +434,10 @@ impl Repository {
         .await
     }
 
-    pub(crate) fn read_store(&self) -> &Store {
+    pub(crate) fn read_layout(&self) -> &StoreLayout<Store> {
         self.edge_reads
             .as_ref()
-            .map_or(&self.store, |reader| reader.layout.store())
+            .map_or(&self.layout, |reader| &reader.layout)
     }
 
     async fn open_pinned(

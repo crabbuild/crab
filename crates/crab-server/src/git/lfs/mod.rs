@@ -375,7 +375,11 @@ pub(crate) async fn download(
     let permit = server.acquire_transfer(&cancel).await?;
     let guard = cancel.clone().drop_guard();
     let store = if method == Method::GET {
-        entry.read_store()
+        let layout = entry.read_layout();
+        if range.is_none() {
+            layout.observe_cdn_read_target(crab_storage::cdn::CdnConsumer::Server);
+        }
+        layout.store()
     } else {
         &entry.store
     };

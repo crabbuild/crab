@@ -438,7 +438,9 @@ struct Capture {
 impl Subscriber for Capture {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
         match metadata.target() {
-            "crab_storage::cdn::transfer" | "crab_storage::cdn::public_transition" => true,
+            "crab_storage::cdn::transfer"
+            | "crab_storage::cdn::public_transition"
+            | "crab_storage::cdn::read_target" => true,
             "crab_storage::cdn::gcs_viewer_log" => self.gcs_viewer_log,
             _ => false,
         }
@@ -458,6 +460,61 @@ impl Subscriber for Capture {
         event.record(&mut fields);
         self.events.lock().unwrap().push(fields);
     }
+}
+
+#[test]
+fn service_read_target_reports_fingerprints_of_the_selected_layout() {
+    let capture = Capture::default();
+    let dispatcher = tracing::Dispatch::new(capture.clone());
+    let _guard = tracing::dispatcher::set_default(&dispatcher);
+    let origin =
+        Store::new(Arc::new(InMemory::new())).with_native_cdn_origin(Some("s3://origin".into()));
+    let layout = |store| StoreLayout::with_global_prefix(store, "org/repo".into(), ".crab".into());
+    layout(origin.clone()).observe_cdn_read_target(CdnConsumer::Server);
+    assert!(capture.events.lock().unwrap().is_empty());
+
+    let base = "http://127.0.0.1:1234/container";
+    let transport = CdnTransport {
+        base: Url::parse(base).unwrap(),
+        client: client_builder().no_proxy().build().unwrap(),
+    };
+    let origin = origin.with_target_identity([8; 32]);
+    let routed = origin
+        .clone()
+        .with_cdn_route(CdnRoute::new(
+            [8; 32],
+            "org/repo".into(),
+            None,
+            CdnAccess::Public,
+            transport,
+            Duration::from_secs(5),
+        ))
+        .unwrap();
+    layout(routed).observe_cdn_read_target(CdnConsumer::S3Gateway);
+    layout(origin).observe_cdn_read_target(CdnConsumer::Server);
+
+    let events = capture.events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    let edge = &events[0].0;
+    let native = &events[1].0;
+    assert_eq!(edge["consumer"], "\"s3-gateway\"");
+    assert_eq!(native["consumer"], "\"server\"");
+    for event in [edge, native] {
+        assert_eq!(
+            event["origin_sha256"],
+            format!("{:x}", Sha256::digest(b"s3://origin"))
+        );
+        assert_eq!(
+            event["prefix_sha256"],
+            format!("{:x}", Sha256::digest(b"org/repo/"))
+        );
+        assert_eq!(event["public_export_sha256"], "\"\"");
+    }
+    assert_eq!(
+        edge["binding_sha256"],
+        format!("\"{:x}\"", Sha256::digest(format!("public\n{base}")))
+    );
+    assert_eq!(native["binding_sha256"], "\"\"");
 }
 
 #[tokio::test]

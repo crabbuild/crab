@@ -16,10 +16,11 @@ from pathlib import Path
 from urllib.parse import SplitResult
 
 from collect_cdn_product_metrics import measure, measure_native
-from run_cdn_git_workload import runner_platform
+from run_cdn_git_workload import PAYLOAD, approved_public_export, read_target_fingerprints, runner_platform
 from run_cdn_sdk_workload import json_record
 from run_cdn_transport_checks import approved_fixture, fixture_base, fixture_object_key, https_response
 from s3_gateway_workload import _canonical_path, _signed_headers
+from public_inventory import ExportError
 
 from cdn_qualification import (
     COMMIT, GIT_FETCH_RECORD_LIMIT, GIT_OID, PRODUCT_COUNTERS, RUN_NUMBER, SHA256,
@@ -27,10 +28,10 @@ from cdn_qualification import (
 )
 
 
-PAYLOAD = "cdn-qualification.bin"
+READ_TARGET = "crab_storage::cdn::read_target"
 SERVICE_WORKLOAD_FIELDS = {
     "schema", "configuration_sha256", "publication_sha256", "endpoint", "repository", "commit",
-    "payload_sha256", "payload_bytes", "etag_sha256",
+    "payload_sha256", "payload_bytes", "etag_sha256", "public_export_sha256",
 }
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}")
 BUCKET = re.compile(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]")
@@ -122,6 +123,18 @@ def verify_body(response: http.client.HTTPResponse, approved: dict, *, git: bool
     return hashlib.sha256(git_hash.digest()).hexdigest()
 
 
+def verify_read_target(lines: list[bytes], reader: dict, consumer: str) -> None:
+    seen = []
+    for line in lines:
+        if READ_TARGET.encode() not in line:
+            continue
+        event = decode(line)
+        if isinstance(event, dict) and event.get("target") == READ_TARGET:
+            seen.append(event.get("fields"))
+    require(seen == [reader | {"message": "CDN service read target", "consumer": consumer}],
+            "service did not confirm the approved native target, prefix and active CDN binding")
+
+
 def probe(args: argparse.Namespace) -> dict:
     require(matches(COMMIT, args.source_sha) and matches(RUN_NUMBER, args.run_id)
             and matches(RUN_NUMBER, args.run_attempt), "exact workflow run provenance is required")
@@ -130,6 +143,19 @@ def probe(args: argparse.Namespace) -> dict:
     require(is_direct_service_scope(fixture["scope"])
             and not fixture["view_suffix"], "service read evidence requires a direct Git or LFS repository fixture")
     approved = workload(args, consumer)
+    public_edge = access == "public" and args.arm == "edge"
+    require((args.export_approval is not None) == public_edge,
+            "only public service edge reads require the approved export directory")
+    export_sha256 = ""
+    if public_edge:
+        export_sha256, _, _ = approved_public_export(args.export_approval, fixture)
+        require(approved["public_export_sha256"] == export_sha256,
+                "service workload must pin the exact public export receipt")
+    elif access == "public":
+        require(matches(SHA256, approved["public_export_sha256"]), "public workload needs its registered export receipt")
+    else:
+        require(approved["public_export_sha256"] == "", "private workload cannot name a public export receipt")
+    reader = read_target_fingerprints(fixture, edge=args.arm == "edge", export_sha256=export_sha256)
     lfs_key = None
     if family == "lfs":
         require(fixture["sha256"] == approved["payload_sha256"] and fixture["size"] == approved["payload_bytes"],
@@ -154,6 +180,7 @@ def probe(args: argparse.Namespace) -> dict:
         require(start <= finish and len(capture) == count and capture.endswith(b"\n"),
                 "service logs did not retain the complete read interval")
     lines = capture.splitlines()
+    verify_read_target(lines, reader, consumer)
     responses = {}
     counters = measure(lines, fixture["scope"], expected_git_blob=blob, edge_responses=responses)
     native = measure_native(lines, fixture["scope"])
@@ -172,7 +199,7 @@ def probe(args: argparse.Namespace) -> dict:
         "platform": runner_platform(), "publication_sha256": approved["publication_sha256"], "commit": approved["commit"],
         "payload_sha256": approved["payload_sha256"], "payload_bytes": approved["payload_bytes"],
         "etag_sha256": approved["etag_sha256"], "git_blob_oid_sha256": blob,
-        "lfs_key_sha256": lfs_key,
+        "lfs_key_sha256": lfs_key, "reader": reader,
         "started_at_unix_ms": start, "finished_at_unix_ms": finish, "elapsed_ms": elapsed,
         "native_traffic": native, "edge_responses": responses,
     }
@@ -183,11 +210,12 @@ def main() -> int:
     parser.add_argument("arm", choices=("edge", "origin"))
     for name in ("fixture", "workload", "credentials", "service-log"):
         parser.add_argument(f"--{name}", type=Path, required=True)
+    parser.add_argument("--export-approval", type=Path)
     for name in ("configuration-sha256", "workload-sha256", "source-sha", "run-id", "run-attempt"):
         parser.add_argument(f"--{name}", required=True)
     try:
         print(json_record(probe(parser.parse_args())), end="")
-    except (ValueError, OSError, http.client.HTTPException):
+    except (ValueError, OSError, http.client.HTTPException, ExportError):
         print("error: CDN service read evidence could not be verified", file=sys.stderr)
         return 1
     return 0

@@ -16,13 +16,14 @@ from urllib.parse import urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cdn_qualification import (  # noqa: E402
-    CDN_PROVENANCE_FIELDS, GIT_FETCH_RECORD_LIMIT, GIT_OID, PROVIDER_FOR_EDGE, SDK_GIT_READ_FIELDS,
-    SDK_HYDRATION_READ_FIELDS, SERVICE_READ_FIELDS, SHA256, VIEWER_REQUEST_FILES, decode, fields,
+    CDN_PROVENANCE_FIELDS, DIRECT_READ_TARGET_FIELDS, GIT_FETCH_RECORD_LIMIT, GIT_OID, PROVIDER_FOR_EDGE,
+    SDK_GIT_READ_FIELDS, SDK_HYDRATION_READ_FIELDS, SERVICE_READ_FIELDS, SHA256, VIEWER_REQUEST_FILES, decode, fields,
     is_direct_sdk_git_scope, is_direct_sdk_hydration_scope, is_direct_service_scope, matches, positive,
     read_git_record, require, scope_parts, validate_git_fetch,
     verify_git_traffic, verify_viewer_requests,
 )
 from collect_front_door_deployment_policy import FRONT_DOOR_HOST, SUBSCRIPTION  # noqa: E402
+from run_cdn_git_workload import read_target_fingerprints  # noqa: E402
 from run_cdn_transport_checks import approved_fixture, deployment_target, fixture_base, fixture_object_key, origin_bucket  # noqa: E402
 
 
@@ -448,6 +449,11 @@ def main() -> int:
             else:
                 require(matches(SHA256, client["git_blob_oid_sha256"]) and client["lfs_key_sha256"] is None,
                         "service viewer evidence requires a verified Git blob")
+            reader = fields(client["reader"], DIRECT_READ_TARGET_FIELDS, "CDN service read target")
+            export = reader["public_export_sha256"]
+            require((matches(SHA256, export) if access == "public" else export == "")
+                    and reader == read_target_fingerprints(fixture, edge=True, export_sha256=export),
+                    "service viewer evidence requires the approved native target and CDN binding")
             verify_git_traffic(client, edge, "CDN service read")
             require(client["verified_edge_payloads"] > 0 and client["observed_edge_gets"] > 0
                     and client["edge_bytes"] > 0 and client["local_payload_hits"] == 0,

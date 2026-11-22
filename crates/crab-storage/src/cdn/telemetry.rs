@@ -3,12 +3,13 @@ use std::time::Instant;
 use reqwest::{RequestBuilder, Response, header};
 use sha2::{Digest as _, Sha256, digest::Output};
 
-use super::{CdnPolicy, CdnReadFamily};
-use crate::StorageProviderKind;
+use super::{CdnConsumer, CdnPolicy, CdnReadFamily};
+use crate::{StorageProviderKind, Store, StoreLayout};
 
 const TARGET: &str = "crab_storage::cdn::transfer";
 const GCS_VIEWER_LOG_TARGET: &str = "crab_storage::cdn::gcs_viewer_log";
 const PUBLIC_TRANSITION_TARGET: &str = "crab_storage::cdn::public_transition";
+const READ_TARGET: &str = "crab_storage::cdn::read_target";
 
 /// Identify the storage targets used for redacted CDN qualification evidence.
 #[must_use]
@@ -18,8 +19,45 @@ pub fn is_read_evidence_target(target: &str) -> bool {
         TARGET
             | PUBLIC_TRANSITION_TARGET
             | GCS_VIEWER_LOG_TARGET
+            | READ_TARGET
             | crate::native_read_telemetry::TARGET
     )
+}
+
+impl StoreLayout<Store> {
+    /// Record the selected physical repository and attached viewer as fingerprints.
+    pub fn observe_cdn_read_target(&self, consumer: CdnConsumer) {
+        if !tracing::enabled!(target: READ_TARGET, tracing::Level::DEBUG) {
+            return;
+        }
+        let store = self.store();
+        let prefix = self.repo_prefix();
+        let Some(origin) = store.native_cdn_origin() else {
+            return;
+        };
+        if store
+            .read_prefix_target_identity(&object_store::path::Path::from(prefix))
+            .is_none()
+        {
+            return;
+        }
+        let binding = store.cdn_binding_sha256();
+        let publication = store.cdn_public_export_sha256();
+        let mut prefix_hash = Sha256::new();
+        prefix_hash.update(prefix.as_bytes());
+        prefix_hash.update(b"/");
+        tracing::event!(
+            target: READ_TARGET,
+            parent: None,
+            tracing::Level::DEBUG,
+            consumer = consumer.label(),
+            origin_sha256 = %format_args!("{:x}", Sha256::digest(origin.as_bytes())),
+            prefix_sha256 = %format_args!("{:x}", prefix_hash.finalize()),
+            binding_sha256 = binding.as_deref().unwrap_or_default(),
+            public_export_sha256 = publication.as_deref().unwrap_or_default(),
+            "CDN service read target"
+        );
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -330,6 +368,7 @@ mod tests {
             TARGET,
             PUBLIC_TRANSITION_TARGET,
             GCS_VIEWER_LOG_TARGET,
+            READ_TARGET,
             crate::native_read_telemetry::TARGET,
         ] {
             assert!(is_read_evidence_target(target), "{target}");
