@@ -20,7 +20,7 @@ use super::{
 use crate::{
     auth::Principal,
     repository::{MaintenanceTrigger, Repository, settings},
-    server::Server,
+    server::{Server, webhooks},
 };
 
 pub(super) const TTL: Duration = Duration::from_secs(300);
@@ -415,7 +415,19 @@ async fn run_request(
     let entry = entry.as_ref();
     let request = &request;
     let defer_readiness = input.defer_readiness;
-    let plan_id = input.plan_id.clone();
+    let plan_id = input.plan_id.clone().or_else(|| {
+        if sends_push_webhook(server, principal, entry, &request.updates) {
+            // A ref can be deleted and recreated with identical old and new
+            // OIDs. Give an unplanned write its own receipt for this operation.
+            Some(
+                blake3::hash(uuid::Uuid::now_v7().as_bytes())
+                    .to_hex()
+                    .to_string(),
+            )
+        } else {
+            None
+        }
+    });
     let attempt = PublishAttempt {
         directory: Arc::new(directory),
         plan_id: plan_id.clone(),
@@ -522,6 +534,22 @@ async fn run_request(
         }
     }
     result
+}
+
+fn sends_push_webhook(
+    server: &Server,
+    principal: &Principal,
+    repository: &Repository,
+    updates: &[crab_git::receive_plan::RefUpdate],
+) -> bool {
+    principal.import_grant().is_none()
+        && server
+            .webhook_sender
+            .as_ref()
+            .is_some_and(|sender| sender.target(repository.id).is_some())
+        && updates
+            .iter()
+            .any(|update| update.old != update.new && webhooks::is_push_ref(&update.name))
 }
 
 struct RefMutation<'a> {
@@ -1129,17 +1157,12 @@ async fn commit_authorized(
         };
         crate::api::authorize_branch_update(server, entry, branch, &update.name).await?;
     }
-    if matches!(mutation.publication, Publication::NativePush)
-        && principal.import_grant().is_none()
-        && let Some(plan) = plan_id
-        && server
-            .webhook_sender
-            .as_ref()
-            .is_some_and(|sender| sender.target(entry.id).is_some())
+    if let Some(plan) = plan_id
+        && sends_push_webhook(server, principal, entry, mutation.updates)
     {
         // Reserve before publication so a process loss after the ref CAS
         // cannot lose the event. Delivery requires the exact plan receipt.
-        crate::server::webhooks::reserve_push(server, entry, plan).await?;
+        webhooks::reserve_push(server, entry, plan).await?;
     }
     let outcome = artifacts
         .commit(plan_id, TTL, cancel)

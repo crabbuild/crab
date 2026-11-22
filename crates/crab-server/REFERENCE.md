@@ -3622,9 +3622,12 @@ with the configured secret and `X-Hub-Signature-256` (`sha256=` plus the
 hex-encoded HMAC-SHA256), then deduplicate by delivery UUID before processing.
 [Webhook signature guidance](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries)
 
-- `push` contains `data.updates` for one committed smart HTTP Git transaction.
-  Each update contains `ref`, `before`, and `after`. Creation and deletion use
-  `null` for the missing side. Native pushes publish branch and tag changes.
+- `push` contains `data.updates` for one committed branch or tag transaction.
+  It covers smart HTTP Git and Crab browser writes, including file commits,
+  branch creation and deletion, release tags, fork synchronization, and PR
+  merges. Each update contains `ref`, `before`, and `after`. Creation and
+  deletion use `null` for the missing side. Private merge-candidate refs and
+  Git import traffic stay outside the subscription.
 - `pull_request` contains `data.action`, PR number, title, draft state, version,
   base and head refs and SHAs, `head_repository`, and `merge_commit`. Actions
   include `opened`, `edited`, `closed`, `reopened`, `ready_for_review`, and

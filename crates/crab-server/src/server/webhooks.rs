@@ -85,6 +85,10 @@ pub(crate) fn secret(server: &Server, repo: Uuid, id: Uuid) -> Option<String> {
     Some(hash.finalize().to_hex().to_string())
 }
 
+pub(crate) fn is_push_ref(name: &str) -> bool {
+    name.starts_with("refs/heads/") || name.starts_with("refs/tags/")
+}
+
 pub(crate) async fn reserve_push(server: &Server, repo: &Repository, plan: &str) -> Result<()> {
     let cell = app::repository_cell(server, repo)?;
     app::command_output(
@@ -126,7 +130,7 @@ async fn deliver(
                 }
             };
             let updates = receipt.transaction().edits().iter()
-                .filter(|edit| edit.expected_old() != edit.new_oid() && (edit.ref_name().starts_with("refs/heads/") || edit.ref_name().starts_with("refs/tags/")))
+                .filter(|edit| edit.expected_old() != edit.new_oid() && is_push_ref(edit.ref_name()))
                 .map(|edit| json!({"ref":edit.ref_name(),"before":edit.expected_old(),"after":edit.new_oid()}))
                 .collect::<Vec<_>>();
             if updates.is_empty() {

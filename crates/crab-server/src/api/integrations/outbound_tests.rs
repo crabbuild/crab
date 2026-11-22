@@ -343,3 +343,277 @@ async fn native_browser_enables_an_outbound_webhook_and_reads_the_delivered_pull
     target.abort();
     let _ = target.await;
 }
+
+async fn enable_push(h: &Harness, account: &str) {
+    h.write(
+        Method::POST,
+        PATH,
+        account,
+        json!({"kind":"configure","id":Uuid::now_v7(),"expected":null,"push":true,"pull_request":false}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+}
+
+#[tokio::test]
+async fn browser_writes_emit_exact_public_refs_even_when_a_branch_address_is_reused() {
+    let (endpoint, received, target) = receiver(false).await;
+    let h = Harness::with_webhook_receiver(endpoint).await;
+    let alice = h.login().await;
+    let head = stock_push(&h, &alice).await;
+    enable_push(&h, &alice).await;
+    let root = "/api/repos/team/private";
+    let branches = format!("{root}/branches");
+    let file = json!({"branch":"refs/heads/feature","expected_head":head,"path_hex":"63692e747874","content":"Run browser CI\n","message":"Trigger browser CI"});
+    let edited: Value = h
+        .write(
+            Method::POST,
+            &format!("{root}/contents"),
+            &alice,
+            file.clone(),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let commit = &edited["commit"];
+    assert_eq!(
+        h.write(Method::POST, &format!("{root}/contents"), &alice, file)
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    let create = json!({"name":"browser-ci","source_oid":commit});
+    h.write(Method::POST, &branches, &alice, create.clone())
+        .await
+        .error_for_status()
+        .unwrap();
+    assert_eq!(
+        h.write(Method::POST, &branches, &alice, create.clone())
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    h.write(
+        Method::DELETE,
+        &branches,
+        &alice,
+        json!({"name":"browser-ci","expected_oid":commit}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    h.write(Method::POST, &branches, &alice, create)
+        .await
+        .error_for_status()
+        .unwrap();
+
+    let release = json!({"request_id":Uuid::now_v7(),"tag_name":"v1.0.0","target_oid":commit,"title":"Build from Crab","body":"","prerelease":false,"draft":false});
+    h.write(
+        Method::POST,
+        &format!("{root}/releases"),
+        &alice,
+        release.clone(),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    h.write(Method::POST, &format!("{root}/releases"), &alice, release)
+        .await
+        .error_for_status()
+        .unwrap();
+    drain(&h).await;
+    let expected = [
+        json!({"ref":"refs/heads/feature","before":head,"after":commit}),
+        json!({"ref":"refs/heads/browser-ci","before":null,"after":commit}),
+        json!({"ref":"refs/heads/browser-ci","before":commit,"after":null}),
+        json!({"ref":"refs/heads/browser-ci","before":null,"after":commit}),
+        json!({"ref":"refs/tags/v1.0.0","before":null,"after":commit}),
+    ];
+    {
+        let rows = received.lock().await;
+        assert_eq!(rows.len(), expected.len());
+        let mut ids = std::collections::HashSet::new();
+        for (row, update) in rows.iter().zip(expected) {
+            assert_eq!(row.event, "push");
+            assert!(ids.insert(row.id));
+            let body: Value = serde_json::from_slice(&row.body).unwrap();
+            assert_eq!(body["data"]["updates"], json!([update]));
+        }
+    }
+
+    h.write(
+        Method::PUT,
+        &format!("{root}/settings/branch-protections"),
+        &alice,
+        json!({"expected_version":0,"rules":[{"branch":"main","required_approvals":0,"required_checks":["ci"]}]}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    open(&h, &alice, &json!({"request_id":Uuid::now_v7(),"title":"Merge a browser change","body":"","base_ref":"refs/heads/main","head_ref":"refs/heads/feature"})).await;
+    let candidate_route = format!("{root}/pulls/1/merge-candidate");
+    let preview = h.json(&candidate_route, &alice).await["preview"].clone();
+    let candidate: Value = h
+        .write(Method::POST, &candidate_route, &alice, preview.clone())
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    drain(&h).await;
+    assert_eq!(
+        h.json(PATH, &alice).await["deliveries"]
+            .as_array()
+            .unwrap()
+            .len(),
+        5
+    );
+    let merge_route = format!("{root}/pulls/1/merge");
+    let merge = json!({"request_id":Uuid::now_v7(),"method":"merge_commit","version":preview["version"],"base_oid":preview["base_oid"],"head_oid":commit,"tested_candidate_oid":candidate["commit"]});
+    let report = async |oid: &Value| {
+        h.write(
+            Method::POST,
+            &format!("{root}/statuses/{}", oid.as_str().unwrap()),
+            &alice,
+            json!({"request_id":Uuid::now_v7(),"context":"ci","state":"success"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    };
+    report(commit).await;
+    assert_eq!(
+        h.write(Method::POST, &merge_route, &alice, merge.clone())
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    drain(&h).await;
+    assert_eq!(received.lock().await.len(), 5);
+    report(&candidate["commit"]).await;
+    h.drop_next_merge_reply
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let lost = h
+        .write(Method::POST, &merge_route, &alice, merge.clone())
+        .await
+        .error_for_status()
+        .unwrap();
+    assert!(lost.bytes().await.unwrap().is_empty());
+    h.write(Method::POST, &merge_route, &alice, merge)
+        .await
+        .error_for_status()
+        .unwrap();
+    drain(&h).await;
+    {
+        let rows = received.lock().await;
+        assert_eq!(rows.len(), 6);
+        let body: Value = serde_json::from_slice(&rows[5].body).unwrap();
+        assert_eq!(
+            body["data"]["updates"],
+            json!([{"ref":"refs/heads/main","before":preview["base_oid"],"after":candidate["commit"]}])
+        );
+    }
+    h.close().await;
+    target.abort();
+    let _ = target.await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires agent-browser and embedded assets for browser Git write and delivery verification"]
+async fn native_browser_file_edit_triggers_a_push_webhook() {
+    let (endpoint, received, target) = receiver(false).await;
+    let h = Harness::with_webhook_receiver(endpoint).await;
+    let alice = h.login().await;
+    let before = stock_push(&h, &alice).await;
+    enable_push(&h, &alice).await;
+    let worker = tokio::spawn(crate::server::webhooks::run(h.server.clone()));
+    let browser = Browser::new("edit-webhook");
+    browser
+        .run(&[
+            "open",
+            &format!("{}/team/private/edit/feature/README.md", h.origin),
+        ])
+        .await;
+    browser
+        .run(&["wait", "--text", "Continue to sign in"])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Continue to sign in",
+        ])
+        .await;
+    let editor = "[aria-label='File content']";
+    browser.run(&["wait", editor]).await;
+    browser.run(&["fill", editor, "Browser edit for CI"]).await;
+    browser
+        .run(&["fill", "#commit-message", "Trigger CI from Crab"])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Commit changes",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", "--url", "**/blob/feature/README.md*"])
+        .await;
+    tokio::time::timeout(std::time::Duration::from_secs(12), async {
+        loop {
+            if h.json(PATH, &alice).await["deliveries"][0]["status"] == "delivered" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let refs = h.json("/api/repos/team/private/refs", &alice).await;
+    let after = &refs["refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|reference| reference["name"] == "refs/heads/feature")
+        .unwrap()["oid"];
+    assert_ne!(after, &json!(before));
+    {
+        let rows = received.lock().await;
+        assert_eq!(rows.len(), 1);
+        let body: Value = serde_json::from_slice(&rows[0].body).unwrap();
+        assert_eq!(
+            body["data"]["updates"],
+            json!([{"ref":"refs/heads/feature","before":before,"after":after}])
+        );
+    }
+    browser
+        .run(&[
+            "open",
+            &format!("{}/team/private/settings/webhooks", h.origin),
+        ])
+        .await;
+    browser
+        .run(&["wait", "--text", "Delivery details · 1 attempt"])
+        .await;
+    let snapshot = browser.run(&["snapshot"]).await;
+    assert!(snapshot.contains("Delivered"));
+    browser.run(&["close"]).await;
+    h.server.cancellation.cancel();
+    worker.await.unwrap().unwrap();
+    h.close().await;
+    target.abort();
+    let _ = target.await;
+}

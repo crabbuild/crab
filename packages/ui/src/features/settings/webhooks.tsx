@@ -283,6 +283,9 @@ function EventsForm({
           />{" "}
           Git pushes
         </label>
+        <p className="text-xs text-muted-foreground">
+          Includes branch and tag changes made in Crab.
+        </p>
         <label className="flex items-center gap-2 text-sm">
           <input
             type="checkbox"
