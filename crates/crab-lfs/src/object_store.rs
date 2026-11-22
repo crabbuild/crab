@@ -340,7 +340,7 @@ impl LfsObjectStore {
                     session,
                 ))
                 .await?;
-            return Ok((range, Self::bound_delivery(Arc::new(attempt), stream)));
+            return Ok((range, Self::bound_delivery(Arc::new(attempt), stream, None)));
         };
         let attempt = Arc::new(attempt);
         let edge = Arc::clone(&attempt);
@@ -358,16 +358,39 @@ impl LfsObjectStore {
         let stream = futures_util::stream::iter([Ok(first)]).chain(tail).boxed();
         // An edge body proves the OID, never the native provider's version.
         let verified = Self::verify_delivery(stream, size, true, oid, session, None);
-        Ok((0..size, Self::bound_delivery(attempt, verified)))
+        Ok((0..size, Self::bound_delivery(attempt, verified, Some(size))))
     }
 
-    fn bound_delivery(attempt: Arc<CdnReadAttempt>, stream: LfsByteStream) -> LfsByteStream {
-        futures_util::stream::try_unfold((attempt, stream), |(attempt, mut stream)| async move {
-            let next = attempt
-                .within_deadline(async { stream.next().await.transpose() })
-                .await?;
-            Ok(next.map(|chunk| (chunk, (attempt, stream))))
-        })
+    fn bound_delivery(
+        attempt: Arc<CdnReadAttempt>,
+        stream: LfsByteStream,
+        edge_size: Option<u64>,
+    ) -> LfsByteStream {
+        let observation = edge_size.and_then(|size| {
+            attempt
+                .payload_observation()
+                .map(|observation| (size, observation))
+        });
+        futures_util::stream::try_unfold(
+            (attempt, stream, observation),
+            |(attempt, mut stream, mut observation)| async move {
+                let next = attempt
+                    .within_deadline(async { stream.next().await.transpose() })
+                    .await?;
+                Ok(next.map(|chunk| {
+                    if let Some((remaining, observed)) = &mut observation {
+                        // The verified stream withholds the last bytes until
+                        // EOF and SHA-256 have passed.
+                        *remaining -= chunk.len() as u64;
+                        if *remaining == 0 {
+                            observed.record_verified();
+                            observation = None;
+                        }
+                    }
+                    (chunk, (attempt, stream, observation))
+                }))
+            },
+        )
         .boxed()
     }
 
@@ -821,7 +844,7 @@ impl LfsObjectStore {
         }
         let path = self.object_path(oid);
         if let Some(edge) = self.store.cdn_attempt(&path) {
-            return edge
+            let accepted_edge: bool = edge
                 .with_file_deadline(cancel, async |cancel| {
                     if let Some(parent) = destination.parent() {
                         tokio::fs::create_dir_all(parent).await?;
@@ -844,11 +867,10 @@ impl LfsObjectStore {
                                 .await?
                                 .sync_all()
                                 .await?;
-                            return if cancel.is_cancelled() {
-                                Err(StorageError::Cancelled.into())
-                            } else {
-                                Ok(())
-                            };
+                            if cancel.is_cancelled() {
+                                return Err(StorageError::Cancelled.into());
+                            }
+                            return Ok(true);
                         }
                         tokio::fs::File::create(destination).await?;
                         tracing::warn!("CDN LFS digest mismatch; restarting from selected origin");
@@ -863,8 +885,13 @@ impl LfsObjectStore {
                         cancel,
                     )
                     .await
+                    .map(|()| false)
                 })
-                .await;
+                .await?;
+            if accepted_edge && let Some(observation) = edge.payload_observation() {
+                observation.record_verified();
+            }
+            return Ok(());
         }
         match Self::download_from_to_file(
             &self.store,

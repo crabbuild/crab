@@ -1,4 +1,4 @@
-use crab_storage::cdn::GitPayloadObservation;
+use crab_storage::cdn::PayloadObservation;
 use futures_util::future::try_join_all;
 
 use super::edge_entry::edge_entry_can_restart;
@@ -6,13 +6,13 @@ use super::*;
 
 enum EdgeWindow {
     Origin,
-    Bytes(Bytes, Option<GitPayloadObservation>),
+    Bytes(Bytes, Option<PayloadObservation>),
 }
 
 pub(super) struct EdgePackedBatch<'a> {
     store: &'a Store,
     edge_oids: HashSet<gix_hash::ObjectId>,
-    observations: Vec<GitPayloadObservation>,
+    observations: Vec<PayloadObservation>,
 }
 
 impl RemoteGitReader {
@@ -215,7 +215,7 @@ impl RemoteGitReader {
                 observe_storage_read("range_get", bytes.len() as u64);
                 Ok(EdgeWindow::Bytes(
                     memory.bind(bytes)?,
-                    attempt.git_payload_observation(),
+                    attempt.payload_observation(),
                 ))
             })
             .transpose()

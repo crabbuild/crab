@@ -491,7 +491,7 @@ def verify_public_transition(
     native = fields(trace["native_publication"], {"reference_sha256", "visible_at_unix_ms"}, "transition native publication")
     require(matches(SHA256, native["reference_sha256"]) and positive(native["visible_at_unix_ms"]),
             "public transition needs a visible native publication")
-    if requires_git_workload(report["scope"]):
+    if requires_cli_workload(report["scope"]):
         publication = validate_git_publication(read_git_record(directory / GIT_PRODUCT_DIR / "publication.json"), report)
         reference = deployment_component_digest({"ref": publication["ref"], "oid": publication["oid"]})
         require(publication["published"] and native == {
@@ -500,6 +500,10 @@ def verify_public_transition(
     records = {"action", "receipt_sha256", "key_sha256", "reference_sha256", "result_sha256", "result_bytes",
                "started_at_unix_ms", "finished_at_unix_ms", "edge_attempts", "verified_edge_key_sha256", "binding_active"}
     product = report["product_action"]
+    if family == "lfs":
+        require(path == lfs_object_path(product["observed_sha256"]) and latest[key].sha256 == product["observed_sha256"]
+                and latest[key].size == product["observed_bytes"],
+                "public transition must verify the exported LFS object itself")
     for phase, approval in (("before", previous_approval), ("after", registration["publication_sha256"])):
         observation = fields(trace[phase], records, f"public transition {phase} action")
         require(observation["action"] == product["name"] and observation["receipt_sha256"] == approval
@@ -517,7 +521,7 @@ def verify_public_transition(
     require(previous_seal <= native["visible_at_unix_ms"] <= before["started_at_unix_ms"]
             and before["finished_at_unix_ms"] < sealed_at <= after["started_at_unix_ms"],
             "public export must be sealed after the native-only read and before the verified edge action")
-    if requires_git_workload(report["scope"]):
+    if requires_cli_workload(report["scope"]):
         provenance = {key: report[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}}
         fetch = validate_git_fetch(read_git_record(directory / GIT_PRODUCT_DIR / "fetch.json"), provenance, "edge",
                                    "public transition Git action")
@@ -889,8 +893,8 @@ def verify_product_action(value: Any, family: str) -> None:
         "name", "expected_sha256", "observed_sha256", "expected_bytes", "observed_bytes",
         "native_writes", "observed_edge_gets", "visible_new_ref", "fixture_cleanup_verified",
     }
-    git_payload_required = family in {"git", "capsule"}
-    if git_payload_required:
+    verified_payload_required = family in {"git", "capsule", "lfs"}
+    if verified_payload_required:
         required.add("verified_edge_payloads")
     action = fields(value, required, "product action")
     require(matches(LABEL, action["name"]), "invalid product action name")
@@ -903,8 +907,8 @@ def verify_product_action(value: Any, family: str) -> None:
     )
     require(positive(action["native_writes"]) and positive(action["observed_edge_gets"]),
             "product action must prove a native write and a CDN GET")
-    if git_payload_required:
-        require(positive(action["verified_edge_payloads"]), "product action accepted no verified edge Git payload")
+    if verified_payload_required:
+        require(positive(action["verified_edge_payloads"]), "product action accepted no verified edge payload")
     require(action["visible_new_ref"] is True and action["fixture_cleanup_verified"] is True,
             "product action must prove immediate ref visibility and fixture cleanup")
 
@@ -1006,6 +1010,23 @@ def requires_git_workload(scope: str) -> bool:
     return consumer == "cli" and family in {"git", "capsule"} and profile == "direct"
 
 
+def requires_cli_lfs_workload(scope: str) -> bool:
+    _, _, consumer, family, profile = scope_parts(scope)
+    return consumer == "cli" and family == "lfs" and profile == "direct"
+
+
+def requires_cli_workload(scope: str) -> bool:
+    return requires_git_workload(scope) or requires_cli_lfs_workload(scope)
+
+
+def cli_action_name(scope: str) -> str:
+    return "lfs-fetch" if requires_cli_lfs_workload(scope) else "git-fetch"
+
+
+def lfs_object_path(digest: str) -> str:
+    return f"lfs/objects/{digest[:2]}/{digest[2:4]}/{digest}"
+
+
 def read_git_record(path: Path) -> bytes:
     limit = 8 * 1024
     with path.open("rb") as record:
@@ -1028,15 +1049,16 @@ def validate_git_publication(raw: bytes, provenance: dict[str, Any]) -> dict[str
 
 
 def validate_git_fetch(raw: bytes, provenance: dict[str, Any], mode: str, label: str) -> dict[str, Any]:
-    client = fields(decode(raw), GIT_FETCH_FIELDS, "redacted Git fetch")
-    require(client["schema"] == "crab.cdn-git-fetch/v1" and client["name"] == "git-fetch"
+    action = cli_action_name(provenance["scope"])
+    client = fields(decode(raw), GIT_FETCH_FIELDS, "redacted LFS fetch" if action == "lfs-fetch" else "redacted Git fetch")
+    require(client["schema"] == f"crab.cdn-{action}/v1" and client["name"] == action
             and client["arm"] == mode and all(client[key] == value for key, value in provenance.items()),
             f"{label} has mismatched Git fetch provenance")
     require(matches(GIT_OID, client["publication_oid"]) and matches(SHA256, client["publication_sha256"])
             and matches(SHA256, client["expected_sha256"]) and client["expected_sha256"] == client["observed_sha256"]
             and client["expected_bytes"] == client["observed_bytes"] == GIT_PAYLOAD_SIZE
             and positive(client["native_writes"]) and client["visible_new_ref"] is True,
-            f"{label} did not verify the published Git payload")
+            f"{label} did not verify the published payload")
     start, finish = client["started_at_unix_ms"], client["finished_at_unix_ms"]
     require(positive(start) and positive(finish) and finish >= start and positive(client["elapsed_ms"]),
             f"{label} has an invalid measurement interval")
@@ -1046,7 +1068,7 @@ def validate_git_fetch(raw: bytes, provenance: dict[str, Any], mode: str, label:
             <= client["edge_attempts"] <= client["all_edge_attempts"], f"{label} has inconsistent edge counts")
     if mode == "edge":
         require(positive(client["observed_edge_gets"]) and positive(client["verified_edge_payloads"]),
-                f"{label} accepted no verified edge Git payload")
+                f"{label} accepted no verified edge payload")
     return client
 
 
@@ -1199,8 +1221,9 @@ def verify_cdn_report(
     if requires_git_workload(scope):
         measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt)
         require(measured == row["performance"], "Git performance summary differs from the retained measurements")
+    if requires_cli_workload(scope):
         product = collect_git_product_action(directory / GIT_PRODUCT_DIR, row, cleanup_at=cleanup_at)
         require(row["product_action"] == product | {"fixture_cleanup_verified": True},
-                "Git product action differs from the retained publication, fetch, and retirement evidence")
+                "product action differs from the retained publication, fetch, and retirement evidence")
     return {"status": "verified", "scope": scope, "platform": platform, "deployment": row["deployment"],
             "checks": checks, "distant_median_savings_lower_bound_ms": lower}

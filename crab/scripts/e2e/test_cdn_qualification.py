@@ -703,7 +703,7 @@ class CdnQualificationTests(unittest.TestCase):
     def test_completed_get_does_not_replace_accepted_git_payload(self) -> None:
         self.configure("s3", "private", "direct")
         self.report["product_action"]["verified_edge_payloads"] = 0
-        self.rejected("accepted no verified edge Git payload")
+        self.rejected("accepted no verified edge payload")
 
     def test_warm_local_performance_requires_a_payload_cache_hit(self) -> None:
         self.configure("s3", "private", "direct")
@@ -718,7 +718,7 @@ class CdnQualificationTests(unittest.TestCase):
     def test_rejects_a_positive_product_summary_that_differs_from_the_fetch(self) -> None:
         self.configure("s3", "private", "direct")
         self.report["product_action"]["verified_edge_payloads"] += 1
-        self.rejected("Git product action differs from the retained publication, fetch, and retirement evidence")
+        self.rejected("product action differs from the retained publication, fetch, and retirement evidence")
 
     def test_product_record_requires_retirement_of_the_same_receipt_after_fetch(self) -> None:
         self.configure("gcs", "private", "direct")

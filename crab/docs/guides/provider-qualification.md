@@ -580,10 +580,14 @@ Retain the active inventory and sealed receipt under
 at the top level of `public-export/`, with its digest in `publication_sha256`.
 The publisher records its seal time after destination readback.
 
-For direct CLI Git and capsule qualification, use the normal Git workload
-to publish the test ref and retain its publication receipt. Identify the
-new repository-relative immutable object selected by that ref. Fetch
-while the earlier receipt is active and excludes that object. Use the same
+For direct CLI Git, capsule and LFS qualification, use the Git workload
+to publish the test ref and retain its publication receipt. For Git and
+capsule, identify the new repository-relative immutable object selected
+by that ref. For LFS, place the matched `crab` executable beside the
+Git helper. The worker stages the payload with `crab lfs clean`, publishes
+its pointer with ordinary Git push and derives the exact LFS object key
+from the publication receipt. Omit `--transition-object` on the LFS row.
+Fetch while the earlier receipt is active and excludes that object. Use the same
 ref, object and approved fixture on both fetches. Each fetch starts with
 fresh Git and Crab caches.
 
@@ -615,9 +619,13 @@ python3 -B crab/scripts/e2e/run_cdn_git_workload.py fetch "${git_workload_args[@
 The worker checks the active receipt digest and exact object fingerprint
 reported by Crab. The first fetch must see the object as unlisted and
 make zero CDN payload requests. The second fetch must accept verified edge
-bytes for that object. The release verifier checks both receipts, the
-native ref, the seal time, and the verified result. Other supported
-consumers still need equivalent observations from their ordinary action.
+bytes for that object. On the LFS row, the worker first fetches the pointer
+commit, then measures `crab lfs fetch` in the fresh repository and hashes
+the resulting local object. Crab reports a verified edge LFS object only
+after checking the complete SHA-256. The release verifier checks both
+receipts, the native ref, the seal time, and the verified result. Other
+supported consumers still need equivalent observations from their ordinary
+action.
 
 ### Verify retained native versions
 

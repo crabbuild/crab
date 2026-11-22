@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+use crate::core::cdn::verify_qualification_origin;
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::git::process::{self, MAX_CAPTURE_BYTES};
 use crate::lfs::config::LfsConfig;
@@ -110,8 +111,10 @@ pub(crate) async fn resolve_lfs_remote_context(
                 if is_lfs_read_operation(operation) {
                     let (selection, primary_fallback) =
                         resolver.read_store_with_primary_fallback(operation).await?;
+                    verify_qualification_origin(selection.store.as_storage())?;
                     let prefix = selection.router.repo_prefix().to_owned();
                     let store = if let Some(primary) = primary_fallback {
+                        verify_qualification_origin(primary.store.as_storage())?;
                         let primary_prefix = primary.router.repo_prefix().to_owned();
                         LfsObjectStore::new_with_primary_fallback(
                             selection.store.into_storage(),
@@ -125,6 +128,7 @@ pub(crate) async fn resolve_lfs_remote_context(
                     (Arc::new(store), prefix)
                 } else {
                     let selection = resolver.write_store(operation).await?;
+                    verify_qualification_origin(selection.store.as_storage())?;
                     let prefix = selection.router.repo_prefix().to_owned();
                     (
                         Arc::new(LfsObjectStore::new(selection.store.into_storage(), &prefix)),

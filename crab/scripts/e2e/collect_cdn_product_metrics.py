@@ -18,6 +18,7 @@ TARGET = "crab_storage::cdn::transfer"
 TARGET_MARKER = TARGET.encode()
 EVENT = "CDN immutable GET"
 VERIFIED_GIT_EVENT = "CDN verified Git payload"
+VERIFIED_LFS_EVENT = "CDN verified LFS payload"
 ROUTE = ("provider", "access", "consumer", "family", "profile")
 ROUTE_FIELDS = {"message", *ROUTE}
 VERIFIED_FIELDS = ROUTE_FIELDS | {"source"}
@@ -35,10 +36,12 @@ def measure(lines: Iterable[bytes], scope: str) -> dict[str, int]:
         if not isinstance(line, dict) or line.get("target") != TARGET:
             continue
         event = line.get("fields")
-        if isinstance(event, dict) and event.get("message") == VERIFIED_GIT_EVENT:
-            fields(event, VERIFIED_FIELDS, "CDN verified Git event")
+        if isinstance(event, dict) and event.get("message") in (VERIFIED_GIT_EVENT, VERIFIED_LFS_EVENT):
+            fields(event, VERIFIED_FIELDS, "CDN verified payload event")
             source = event["source"]
-            require(source in ("edge", "local"), "unknown verified Git source")
+            lfs = event["message"] == VERIFIED_LFS_EVENT
+            require(lfs == (event["family"] == "lfs") and source in (("edge",) if lfs else ("edge", "local")),
+                    "unknown verified payload source or family")
             if tuple(event[name] for name in ROUTE) == selected:
                 metric = "verified_edge_payloads" if source == "edge" else "local_payload_hits"
                 metrics[metric] += 1

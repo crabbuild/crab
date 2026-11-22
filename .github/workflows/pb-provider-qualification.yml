@@ -43,6 +43,8 @@ on:
       - "crab/scripts/e2e/run_add_commit_push_rustfs_smoke.py"
       - "crab/scripts/e2e/test_add_commit_push_source.py"
       - "crates/crab-storage/**"
+      - "crates/crab-lfs/src/object_store.rs"
+      - "crates/crab-lfs/tests/cdn_observation.rs"
       - "crates/crab-auth/src/crab_auth_client.rs"
       - "crates/crab-auth-store/src/managed_repository.rs"
       - "crates/crab-sdk/Cargo.toml"
@@ -95,6 +97,8 @@ on:
       - "crab/scripts/e2e/run_add_commit_push_rustfs_smoke.py"
       - "crab/scripts/e2e/test_add_commit_push_source.py"
       - "crates/crab-storage/**"
+      - "crates/crab-lfs/src/object_store.rs"
+      - "crates/crab-lfs/tests/cdn_observation.rs"
       - "crates/crab-auth/src/crab_auth_client.rs"
       - "crates/crab-auth-store/src/managed_repository.rs"
       - "crates/crab-sdk/Cargo.toml"
@@ -185,6 +189,8 @@ jobs:
           done
           cargo test --locked -p crab-storage --lib 'cdn::'
           cargo test --locked -p crab-storage --lib --features provider-cdn-qualification 'cdn::'
+          cargo test --locked -p crab-lfs --test cdn_observation
+          cargo test --locked -p crab-lfs --test cdn_observation --features crab-storage/provider-cdn-qualification
 
   rustfs:
     name: S3-compatible RustFS

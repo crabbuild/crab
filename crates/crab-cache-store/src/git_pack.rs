@@ -79,7 +79,7 @@ pub async fn read_pack_ranges(
             let sidecars = read_sidecars(origin, source, cancel).await?;
             if let Some(observation) = origin
                 .cdn_attempt(source.path)
-                .and_then(|edge| edge.git_payload_observation())
+                .and_then(|edge| edge.payload_observation())
             {
                 observation.record_local();
             }
@@ -113,7 +113,7 @@ pub async fn read_pack_ranges(
                     return Ok((
                         read_sidecars(origin, source, cancel).await?,
                         actual,
-                        edge.git_payload_observation(),
+                        edge.payload_observation(),
                     ));
                 }
                 tokio::fs::File::create(destination)

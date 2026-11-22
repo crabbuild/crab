@@ -17,7 +17,7 @@ from cdn_qualification import (  # noqa: E402
     CDN_PROVENANCE_FIELDS, COMMIT, EXPIRY_RANGE_CHECK, GIT_BENCHMARK_DIR, GIT_PRODUCT_DIR, LABEL, PROVIDERS,
     PROVIDER_FOR_EDGE, PUBLIC_EXPORT_BEFORE, PUBLIC_EXPORT_CHECK, PUBLIC_EXPORT_DIR, PUBLIC_EXPORT_FILES, RUN_NUMBER, SCHEMA, SHA256,
     collect_git_performance, collect_git_product_action, decode, fields, matches, read_trace, release_scopes, require,
-    required_check_names, required_platform_rows, requires_git_workload, scope_parts, verify_bundle_row,
+    required_check_names, required_platform_rows, requires_cli_workload, requires_git_workload, scope_parts, verify_bundle_row,
     verify_deployment_policy_trace,
 )
 from public_inventory import ExportError, read_document
@@ -115,7 +115,10 @@ def assemble_bundle(
                 native_report.write_bytes((origin_inputs / provider / "report.json").read_bytes())
 
             git_workload = requires_git_workload(scope)
-            expected = OBSERVATION_FIELDS - {"performance", "product_action"} if git_workload else OBSERVATION_FIELDS
+            cli_workload = requires_cli_workload(scope)
+            expected = OBSERVATION_FIELDS - ({"product_action"} if cli_workload else set())
+            if git_workload:
+                expected = expected - {"performance"}
             measured = fields(
                 decode((inputs / row / "observations.json").read_bytes()),
                 expected, "CDN observations",
@@ -155,10 +158,11 @@ def assemble_bundle(
                     trace = read_trace(trace_path, check)
                 (destination / "traces" / filename).write_bytes(trace)
                 checks[check] = {"passed": True, "trace_sha256": hashlib.sha256(trace).hexdigest()}
-            if git_workload:
+            if cli_workload:
                 product = collect_git_product_action(inputs / row / GIT_PRODUCT_DIR, measured,
                                                      retain=destination / GIT_PRODUCT_DIR)
                 measured["product_action"] = product | {"fixture_cleanup_verified": True}
+            if git_workload:
                 measured["performance"] = collect_git_performance(
                     inputs / row / GIT_BENCHMARK_DIR, registration, platform, run_id, attempt,
                     retain=destination / GIT_BENCHMARK_DIR,

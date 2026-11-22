@@ -10,11 +10,12 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from shutil import copytree
 from tempfile import TemporaryDirectory
 
 import run_cdn_git_workload as WORKLOAD
-from cdn_qualification import GIT_FETCH_FIELDS, collect_git_product_action
-from public_inventory import Object, SCHEMA, publication_receipt
+from cdn_qualification import GIT_FETCH_FIELDS, collect_git_product_action, lfs_object_path, verify_public_transition
+from public_inventory import Object, SCHEMA, publication_receipt, read_publication
 from test_cdn_transport_qualification import PACK, fixture
 
 
@@ -37,9 +38,38 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         # its wire protocol to a disposable local origin and supplies trace input.
         self.helper.write_text(
             f"#!{sys.executable}\n"
-            "import json, os, sys\n"
+            "import hashlib, json, os, subprocess, sys\n"
             "from pathlib import Path\n"
             "origin = Path(__file__).parent / 'origin.git'\n"
+            "if Path(sys.argv[0]).name == 'crab':\n"
+            "    if sys.argv[1:3] == ['lfs', 'clean']:\n"
+            "        data = sys.stdin.buffer.read()\n"
+            "        digest = hashlib.sha256(data).hexdigest()\n"
+            "        (origin / digest).write_bytes(data)\n"
+            "        print(f'version https://git-lfs.github.com/spec/v1\\noid sha256:{digest}\\nsize {len(data)}')\n"
+            "        sys.exit(0)\n"
+            "    assert sys.argv[1:4] == ['lfs', 'fetch', 'origin']\n"
+            "    pointer = subprocess.check_output(['git', 'cat-file', 'blob', sys.argv[4] + ':cdn-qualification.bin'])\n"
+            "    digest = pointer.splitlines()[1].split(b':')[1].decode()\n"
+            "    payload = Path('.git/lfs/objects') / digest[:2] / digest[2:4] / digest\n"
+            "    assert not payload.exists()\n"
+            "    payload.parent.mkdir(parents=True)\n"
+            "    payload.write_bytes((origin / digest).read_bytes())\n"
+            "    assert os.environ['CRAB_INTERNAL_CDN_QUALIFICATION_ORIGIN'] == 's3://fixture-bucket'\n"
+            "    print(json.dumps({'target':'crab::cdn::qualification', 'fields': {\n"
+            "        'message':'CDN qualification verified native origin'}}), file=sys.stderr)\n"
+            "    evidence = origin.parent / 'public-export-events.json'\n"
+            "    for event in json.loads(evidence.read_bytes()):\n"
+            "        print(json.dumps(event), file=sys.stderr)\n"
+            "    if not (origin.parent / 'origin-only').exists():\n"
+            "        policy = {'provider':'s3', 'access':'public', 'consumer':'cli', 'family':'lfs', 'profile':'direct'}\n"
+            "        print(json.dumps({'target':'crab_storage::cdn::transfer', 'fields': policy | {\n"
+            "            'message':'CDN immutable GET', 'status':206, 'cache':'hit', 'range':True,\n"
+            "            'bytes':payload.stat().st_size, 'complete':True, 'elapsed_ms':10}}), file=sys.stderr)\n"
+            "        if not (origin.parent / 'rejected-edge').exists():\n"
+            "            print(json.dumps({'target':'crab_storage::cdn::transfer', 'fields': policy | {\n"
+            "                'message':'CDN verified LFS payload', 'source':'edge'}}), file=sys.stderr)\n"
+            "    sys.exit(0)\n"
             "for line in sys.stdin.buffer:\n"
             "    if line == b'capabilities\\n':\n"
             "        print('connect\\n', flush=True)\n"
@@ -76,6 +106,7 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.helper.chmod(0o700)
+        (self.root / "crab").symlink_to(self.helper.name)
 
     def call(self, action: str, *arguments: str, digest: str | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run([
@@ -124,14 +155,21 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         self.assertTrue(self.run_phase("retire")["ref_retired"])
 
     def test_public_transition_checks_the_approval_and_exact_key_in_both_git_actions(self) -> None:
+        self.verify_public_transition("git")
+
+    def test_public_lfs_transition_requires_verified_bytes_from_the_exact_export(self) -> None:
+        self.verify_public_transition("lfs")
+
+    def verify_public_transition(self, family: str) -> None:
         sample = fixture(access="public") | {"base_url": "https://fixture.example.com"}
+        prior = Object("v2/pack-layers/bb/" + "b" * 64, 6, "c" * 64)
+        if family == "lfs":
+            prior = Object(lfs_object_path("b" * 64), 6, "b" * 64)
+            sample |= {"scope": "cloudfront/public/cli/lfs/direct", "object_path": prior.path, "sha256": prior.sha256}
         raw = json.dumps(sample).encode()
         self.fixture.write_bytes(raw)
         self.digest = hashlib.sha256(raw).hexdigest()
-        key = hashlib.sha256(f"{sample['fixture_prefix']}/{PACK}".encode()).hexdigest()
         event_path = self.root / "public-export-events.json"
-        prior = Object("v2/pack-layers/bb/" + "b" * 64, 6, "c" * 64)
-        added = Object(PACK, 6, "d" * 64)
 
         def seal(directory: Path, objects: list[Object]) -> str:
             directory.mkdir()
@@ -152,7 +190,7 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             event_path.write_text(json.dumps([
                 {"target": WORKLOAD.PUBLIC_TRANSITION_TARGET, "fields": {
                     "message": "CDN public export observation", "provider": "s3", "access": "public",
-                    "consumer": "cli", "family": "git", "profile": "direct", "key_sha256": key,
+                    "consumer": "cli", "family": family, "profile": "direct", "key_sha256": key,
                     "approval_sha256": approval, "observation": kind,
                 }} for kind in kinds
             ]))
@@ -160,10 +198,18 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         old, new = self.root / "previous", self.root / "current"
         previous = seal(old, [prior])
         self.run_phase("publish")
+        payload = json.loads(self.receipt.read_bytes())
+        if family == "lfs":
+            added = Object(lfs_object_path(payload["sha256"]), WORKLOAD.GIT_PAYLOAD_SIZE, payload["sha256"])
+            selector = ()
+        else:
+            added = Object(PACK, 6, "d" * 64)
+            selector = ("--transition-object", PACK)
+        key = hashlib.sha256(f"{sample['fixture_prefix']}/{added.path}".encode()).hexdigest()
         before, after = self.root / "before.json", self.root / "after.json"
         (self.root / "origin-only").touch()
         observe("0" * 64, "unlisted")
-        flags = ("--transition-object", PACK, "--export-approval", str(old), "--transition-output", str(before))
+        flags = (*selector, "--export-approval", str(old), "--transition-output", str(before))
         rejected = self.call("fetch-origin", *flags)
         self.assertNotEqual(rejected.returncode, 0)
         self.assertIn("different public export receipt", rejected.stderr)
@@ -175,18 +221,47 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         (self.root / "origin-only").unlink()
         current = seal(new, [prior, added])
         observe(current, "listed", "verified_edge")
-        result = self.call("fetch", "--transition-object", PACK, "--export-approval", str(new),
-                           "--transition-output", str(after), "--before-transition", str(before))
+        flags = (*selector, "--export-approval", str(new), "--transition-output", str(after), "--before-transition", str(before))
+        if family == "lfs":
+            (self.root / "rejected-edge").touch()
+            rejected = self.call("fetch", *flags)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("did not accept a verified edge payload", rejected.stderr)
+            self.assertFalse(after.exists())
+            (self.root / "rejected-edge").unlink()
+        result = self.call("fetch", *flags)
         self.assertEqual(result.returncode, 0, result.stderr)
         fetched = json.loads(result.stdout)
         self.assertEqual(set(fetched), GIT_FETCH_FIELDS)
+        self.assertEqual(fetched["name"], f"{family}-fetch")
         retained = json.loads(after.read_bytes())
         self.assertEqual(retained["before"]["receipt_sha256"], previous)
         self.assertEqual(retained["after"]["receipt_sha256"], current)
         self.assertEqual(retained["after"]["verified_edge_key_sha256"], key)
         self.assertEqual(retained["before"]["result_sha256"], fetched["observed_sha256"])
         self.assertEqual(retained["before"]["edge_attempts"], 0)
-        self.assertTrue(self.run_phase("retire")["ref_retired"])
+        retired = self.run_phase("retire")
+        self.assertTrue(retired["ref_retired"])
+        if family == "lfs":
+            records = self.root / "git-product"
+            records.mkdir()
+            (records / "publication.json").write_bytes(self.receipt.read_bytes())
+            (records / "fetch.json").write_text(json.dumps(fetched), encoding="utf-8")
+            (records / "retirement.json").write_text(json.dumps(retired), encoding="utf-8")
+            product = collect_git_product_action(records, fetched)
+            self.assertEqual(product["name"], "lfs-fetch")
+            export = self.root / "public-export"
+            copytree(new, export)
+            copytree(old, export / "before")
+            registration = {"previous_publication_sha256": previous, "publication_sha256": current}
+            binding, entries, sealed = read_publication(export, current)
+            row = fetched | {"product_action": product}
+            verify_public_transition(retained, self.root, row, registration, binding, entries, sealed)
+            with self.assertRaisesRegex(ValueError, "must verify the exported LFS object itself"):
+                verify_public_transition(
+                    retained, self.root, row | {"product_action": product | {"observed_sha256": prior.sha256}},
+                    registration, binding, entries, sealed,
+                )
 
     def test_a_fetch_with_only_rejected_edge_payloads_does_not_qualify(self) -> None:
         self.run_phase("publish")

@@ -109,7 +109,7 @@ impl RemoteGitReader {
                 .map(|object| (object, false))
             })
             .await?;
-        if from_edge && let Some(observation) = attempt.git_payload_observation() {
+        if from_edge && let Some(observation) = attempt.payload_observation() {
             observation.record_verified();
         }
         Ok(object)

@@ -503,9 +503,11 @@ distinguish fixture and candidate results.
   visible new ref and a byte-identical fetch through the ordinary product.
   The direct CLI workload in `crab/scripts/e2e/run_cdn_git_workload.py`
   publishes a leased test ref, verifies bytes from a fresh fetch, requires
-  a completed edge GET and a Git payload accepted after integrity
-  verification, and retires that ref. The release gate derives direct CLI Git
-  and capsule product evidence from the exact publication receipt and its
+  a completed edge GET and a payload accepted after integrity verification,
+  and retires that ref. For LFS it stages the pointer with `crab lfs clean`
+  and verifies the object from an ordinary `crab lfs fetch` after fetching
+  the commit. The release gate derives direct CLI Git, capsule, and LFS
+  product evidence from the exact publication receipt and its
   ordered fetch and retirement records. The fixture owner separately proves
   storage and export cleanup. The read-only cleanup collector verifies empty
   native inventories for the exact test prefix, records live and historical

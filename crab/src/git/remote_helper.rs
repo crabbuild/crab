@@ -17,6 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tracing::{Instrument, warn};
 
 use crate::audit::default_log_path;
+use crate::core::cdn::{qualification_origin, verify_qualification_origin};
 use crate::core::error::{CrabError, Result};
 use crate::core::metrics::{Metrics, MetricsSummary, persist_metrics_delta};
 use crate::core::output::{JsonlStream, OutputMode};
@@ -38,8 +39,6 @@ use crab_metadata::manifests::{PackEntry, PackList, PackManifestEntry};
 
 pub(crate) const AGENT_REBASE_FETCH_REF_FILTERING_ENV: &str =
     "CRAB_INTERNAL_AGENT_FETCH_REF_FILTERING";
-
-const CDN_QUALIFICATION_ORIGIN_ENV: &str = "CRAB_INTERNAL_CDN_QUALIFICATION_ORIGIN";
 
 #[derive(Debug, Serialize)]
 struct PushResultEventPayload {
@@ -630,39 +629,6 @@ fn internal_bool_value(value: &str) -> bool {
     )
 }
 
-fn cdn_qualification_origin() -> Result<Option<String>> {
-    let Some(value) = std::env::var_os(CDN_QUALIFICATION_ORIGIN_ENV) else {
-        return Ok(None);
-    };
-    value
-        .into_string()
-        .ok()
-        .filter(|value| !value.is_empty() && crab_storage::cdn::qualification_enabled())
-        .map(Some)
-        .ok_or_else(|| CrabError::Configuration {
-            key: CDN_QUALIFICATION_ORIGIN_ENV.to_owned(),
-            origin: "a CDN qualification build and approved native origin are required".to_owned(),
-        })
-}
-
-fn verify_cdn_qualification_origin(store: &crate::storage::store::Store) -> Result<()> {
-    if let Some(expected) = cdn_qualification_origin()? {
-        require_cdn_qualification_origin(store.as_storage().native_cdn_origin(), &expected)?;
-        tracing::debug!(target: "crab::cdn::qualification", "CDN qualification verified native origin");
-    }
-    Ok(())
-}
-
-fn require_cdn_qualification_origin(actual: Option<&str>, expected: &str) -> Result<()> {
-    if actual != Some(expected) {
-        return Err(CrabError::AuthFailed {
-            path: "the resolved native origin differs from the approved CDN qualification fixture"
-                .to_owned(),
-        });
-    }
-    Ok(())
-}
-
 async fn select_qualification_checked_replica(
     config: crate::core::config::Config,
     url: crate::git::url::CrabUrl,
@@ -670,7 +636,7 @@ async fn select_qualification_checked_replica(
 ) -> Result<crate::replication::ReadStoreSelection> {
     let selected = select_fetch_replica(config, url, cancel).await?;
     // Return a terminal authorization error before any payload read or native fallback.
-    verify_cdn_qualification_origin(&selected.store)?;
+    verify_qualification_origin(selected.store.as_storage())?;
     Ok(selected)
 }
 
@@ -775,7 +741,7 @@ pub async fn run_remote_helper(
         crab_git::RepositoryLocator::Managed(repository) => Some(repository.clone()),
         crab_git::RepositoryLocator::Direct(_) => None,
     };
-    if managed_repository.is_some() && cdn_qualification_origin()?.is_some() {
+    if managed_repository.is_some() && qualification_origin()?.is_some() {
         return Err(CrabError::AuthFailed {
             path: "the CDN qualification workload requires a direct repository".to_owned(),
         });
@@ -789,7 +755,7 @@ pub async fn run_remote_helper(
         &cancel,
     )
     .await?;
-    verify_cdn_qualification_origin(&resolved.store)?;
+    verify_qualification_origin(resolved.store.as_storage())?;
 
     // Protocol parsing and option handling do not depend on storage. Defer the
     // optional discovery read until Git requests repository data.
@@ -1812,7 +1778,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                                 key: "capsule-protocol push store".to_owned(),
                                 origin: "push requires a resolved object store".to_owned(),
                             })?;
-                    verify_cdn_qualification_origin(push_store)?;
+                    verify_qualification_origin(push_store.as_storage())?;
                     // Git owns stdout and negotiates quiet/progress per session.
                     // Keep the shared publisher's display on this caller's stderr.
                     push_config.progress = options.progress.then(|| {
@@ -3909,27 +3875,6 @@ mod tests {
 
         for value in ["", "0", "false", "no", "off", "maybe"] {
             assert!(!internal_bool_value(value), "{value}");
-        }
-    }
-
-    #[test]
-    fn cdn_qualification_rejects_same_named_targets_and_custom_endpoints() {
-        let s3 = "s3://qualification-bucket";
-        let azure = "https://primaryacct.blob.core.windows.net/container";
-        assert!(require_cdn_qualification_origin(Some(s3), s3).is_ok());
-        assert!(require_cdn_qualification_origin(Some(azure), azure).is_ok());
-        for (actual, expected) in [
-            (Some("gs://qualification-bucket"), s3),
-            (
-                Some("https://otheraccount.blob.core.windows.net/container"),
-                azure,
-            ),
-            (None, s3),
-        ] {
-            assert!(matches!(
-                require_cdn_qualification_origin(actual, expected),
-                Err(CrabError::AuthFailed { .. })
-            ));
         }
     }
 

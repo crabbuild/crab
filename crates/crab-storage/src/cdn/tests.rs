@@ -500,7 +500,7 @@ async fn product_read_records_one_redacted_transfer_for_its_actual_scope() {
     let attempt = store.cdn_attempt(&path).unwrap();
     let body = attempt.get(6, Some(1..3)).await.unwrap();
     assert_eq!(body, Some(Bytes::from_static(b"12")));
-    attempt.git_payload_observation().unwrap().record_verified();
+    attempt.payload_observation().unwrap().record_verified();
     request.await.unwrap();
 
     let events = capture.0.lock().unwrap();

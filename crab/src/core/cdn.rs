@@ -13,6 +13,41 @@ use serde::Deserialize;
 use crate::core::config::{AuthConfig, AuthProvider};
 use crate::core::error::{CrabError, Result};
 
+const CDN_QUALIFICATION_ORIGIN_ENV: &str = "CRAB_INTERNAL_CDN_QUALIFICATION_ORIGIN";
+
+pub(crate) fn qualification_origin() -> Result<Option<String>> {
+    let Some(value) = std::env::var_os(CDN_QUALIFICATION_ORIGIN_ENV) else {
+        return Ok(None);
+    };
+    value
+        .into_string()
+        .ok()
+        .filter(|value| !value.is_empty() && crab_storage::cdn::qualification_enabled())
+        .map(Some)
+        .ok_or_else(|| CrabError::Configuration {
+            key: CDN_QUALIFICATION_ORIGIN_ENV.to_owned(),
+            origin: "a CDN qualification build and approved native origin are required".to_owned(),
+        })
+}
+
+pub(crate) fn verify_qualification_origin(store: &Store) -> Result<()> {
+    if let Some(expected) = qualification_origin()? {
+        require_cdn_qualification_origin(store.native_cdn_origin(), &expected)?;
+        tracing::debug!(target: "crab::cdn::qualification", "CDN qualification verified native origin");
+    }
+    Ok(())
+}
+
+fn require_cdn_qualification_origin(actual: Option<&str>, expected: &str) -> Result<()> {
+    if actual != Some(expected) {
+        return Err(CrabError::AuthFailed {
+            path: "the resolved native origin differs from the approved CDN qualification fixture"
+                .to_owned(),
+        });
+    }
+    Ok(())
+}
+
 /// Optional edge endpoint for one native bucket and physical repository.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -232,6 +267,27 @@ fn config_error(reason: &str) -> CrabError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cdn_qualification_rejects_same_named_targets_and_custom_endpoints() {
+        let s3 = "s3://qualification-bucket";
+        let azure = "https://primaryacct.blob.core.windows.net/container";
+        assert!(require_cdn_qualification_origin(Some(s3), s3).is_ok());
+        assert!(require_cdn_qualification_origin(Some(azure), azure).is_ok());
+        for (actual, expected) in [
+            (Some("gs://qualification-bucket"), s3),
+            (
+                Some("https://otheraccount.blob.core.windows.net/container"),
+                azure,
+            ),
+            (None, s3),
+        ] {
+            assert!(matches!(
+                require_cdn_qualification_origin(actual, expected),
+                Err(CrabError::AuthFailed { .. })
+            ));
+        }
+    }
 
     #[test]
     fn private_mapping_needs_exact_source_prefix() {

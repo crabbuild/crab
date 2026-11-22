@@ -48,15 +48,15 @@ impl PublicTransitionObservation {
     }
 }
 
-/// Redacted source of Git payload bytes awaiting the reader's integrity check.
+/// Redacted source of payload bytes awaiting the reader's integrity check.
 #[derive(Clone, Copy)]
-pub struct GitPayloadObservation {
+pub struct PayloadObservation {
     policy: CdnPolicy,
     family: CdnReadFamily,
     public: Option<PublicTransitionObservation>,
 }
 
-impl GitPayloadObservation {
+impl PayloadObservation {
     pub(crate) fn new(
         policy: CdnPolicy,
         family: CdnReadFamily,
@@ -71,7 +71,7 @@ impl GitPayloadObservation {
         )
     }
 
-    /// Report only after accepting Git content that passed its authenticated digest or object ID check.
+    /// Report only after accepting content that passed its authenticated digest or object ID check.
     pub fn record_verified(self) {
         self.record("edge");
         if let Some(public) = self.public {
@@ -85,6 +85,10 @@ impl GitPayloadObservation {
     }
 
     fn record(self, source: &'static str) {
+        let message = match self.family {
+            CdnReadFamily::Lfs => "CDN verified LFS payload",
+            _ => "CDN verified Git payload",
+        };
         tracing::event!(
             target: TARGET,
             parent: None,
@@ -95,7 +99,7 @@ impl GitPayloadObservation {
             profile = self.policy.profile.label(),
             family = self.family.label(),
             source,
-            "CDN verified Git payload"
+            "{message}"
         );
     }
 }

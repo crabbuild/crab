@@ -15,7 +15,7 @@ use super::{StorageReadKind, Store};
 use crate::{
     Result, StorageError,
     cdn::{
-        CdnAccess, CdnGet, CdnReadFamily, CdnRoute, CdnViewer, GitPayloadObservation,
+        CdnAccess, CdnGet, CdnReadFamily, CdnRoute, CdnViewer, PayloadObservation,
         PublicTransitionObservation,
     },
     transport_read_admission,
@@ -313,13 +313,13 @@ pub struct CdnReadAttempt {
 }
 
 impl CdnReadAttempt {
-    /// Capture the edge source for a caller-owned Git payload verification.
+    /// Capture the edge source for a caller-owned payload verification.
     #[must_use]
-    pub fn git_payload_observation(&self) -> Option<GitPayloadObservation> {
+    pub fn payload_observation(&self) -> Option<PayloadObservation> {
         let public = self.route.publication.as_ref().and_then(|receipt| {
             PublicTransitionObservation::new(receipt.approval_digest, self.path.as_ref())
         });
-        GitPayloadObservation::new(self.route.policy()?, self.family, public)
+        PayloadObservation::new(self.route.policy()?, self.family, public)
     }
 
     /// Check direct edge delivery against caller-verified bytes from the native target.

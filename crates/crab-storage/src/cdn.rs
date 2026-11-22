@@ -26,7 +26,7 @@ pub use placement::NativeCdnOrigin;
 pub use policy::{CdnConsumer, CdnPolicy, CdnProfile, CdnReadFamily, CdnVisibility};
 #[cfg(any(test, feature = "test-support"))]
 pub use publication::write_publication_fixture;
-pub use telemetry::GitPayloadObservation;
+pub use telemetry::PayloadObservation;
 pub(crate) use telemetry::PublicTransitionObservation;
 
 use crate::{
