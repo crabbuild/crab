@@ -39,10 +39,22 @@ pub(super) async fn set(
     if desired.version > app::MAX_NUMBER {
         return Err(Error::Invalid("Notification preference version is invalid"));
     }
-    let cell = app::repository_cell(&server, &repo)?;
     app::membership(&server, &principal, &repo).await?;
     let actor = app::account(&principal)?;
-    let preference = app::command_output(
+    write(&server, &repo, actor, desired)
+        .await?
+        .map(Json)
+        .ok_or(Error::Conflict)
+}
+
+pub(super) async fn write(
+    server: &Server,
+    repo: &Repository,
+    actor: IdentityKey,
+    desired: watches::Preference,
+) -> Result<Option<watches::Preference>> {
+    let cell = app::repository_cell(server, repo)?;
+    app::command_output(
         cell.client
             .command::<watches::Set>(
                 &cell.target,
@@ -50,8 +62,7 @@ pub(super) async fn set(
                 watches::Change { actor, desired },
             )
             .await,
-    )?;
-    preference.map(Json).ok_or(Error::Conflict)
+    )
 }
 
 pub(super) async fn read(

@@ -4,6 +4,8 @@ import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { useRequest } from "@/lib/api";
 import type { Address } from "./actions";
+import { BulkUnwatch } from "./bulk-unwatch";
+import { refreshNotificationBadge } from "./index";
 import {
   RepositoryWatch,
   watchTopics,
@@ -15,7 +17,7 @@ type Watch = {
   preference: RepositoryPreference;
 };
 
-type WatchPage = { items: Watch[]; next: string | null };
+export type WatchPage = { items: Watch[]; next: string | null };
 
 export function WatchedRepositories({ csrf }: { csrf: string }) {
   const heading = useRef<HTMLHeadingElement>(null);
@@ -33,6 +35,10 @@ export function WatchedRepositories({ csrf }: { csrf: string }) {
       return topics.length ? [{ repository, topics }] : [];
     },
   );
+
+  const owners = [
+    ...new Set(rows.map(({ repository }) => repository.owner)),
+  ].sort();
 
   function preferenceSaved(
     repository: Address,
@@ -69,9 +75,19 @@ export function WatchedRepositories({ csrf }: { csrf: string }) {
         >
           Watched repositories
         </h1>
-        <Button asChild variant="outline">
-          <Link href="/-/notifications">Back to notifications</Link>
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <BulkUnwatch
+            csrf={csrf}
+            owners={owners}
+            onFinished={() => {
+              refreshNotificationBadge();
+              startOver();
+            }}
+          />
+          <Button asChild variant="outline">
+            <Link href="/-/notifications">Back to notifications</Link>
+          </Button>
+        </div>
       </div>
       <p role="status" className="sr-only">
         {announcement}

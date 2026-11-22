@@ -58,6 +58,10 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
             Router::new()
                 .route("/api/notifications/bulk", post(state::bulk))
                 .route("/api/notifications/unsubscribe", post(unsubscribe::apply))
+                .route(
+                    "/api/notifications/watched/unwatch",
+                    post(watched::bulk::apply),
+                )
                 .layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .route_layer(middleware::from_fn_with_state(server, app::admit))

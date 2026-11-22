@@ -1849,7 +1849,7 @@ owner label does not acquire ownership.
 | Markdown suggestions | `GET /api/repos/{owner}/{name}/discussion-search/{mentions,team-mentions,references}` |
 | Team mention settings | `GET/PUT /api/repos/{owner}/{name}/mention-settings` |
 | Account notification inbox | `GET /api/notifications`, `GET /api/notifications/unread`, `PUT /api/notifications/{id}/state`, `POST /api/notifications/bulk`, `POST /api/notifications/unsubscribe` |
-| Watched repositories | `GET /api/notifications/watched` |
+| Watched repositories | `GET /api/notifications/watched`, `POST /api/notifications/watched/unwatch` |
 | Repository notification preference | `GET /api/repos/{owner}/{name}/subscription`, `PUT /api/repos/{owner}/{name}/subscription` |
 | Discussion notification preference | `GET` and `PUT /api/repos/{owner}/{name}/issues/{number}/subscription` or `/pulls/{number}/subscription` |
 | Stable discussion links | `GET /api/discussion-references/{repository_id}/{kind}/{number}` |
@@ -2644,7 +2644,24 @@ Each page scans up to `limit` currently readable repositories (1–50, default
 with additional repositories left to scan. Pass `next` as `after` to continue
 until `next` is null. Access is refreshed after the preference reads. A change
 to the scanned portion returns 409 so the client can reload from the first
-page. Watch edits use the versioned repository subscription endpoints.
+page. An optional `owner` restricts the results and cursor to that repository
+namespace. Watch edits use the versioned repository subscription endpoints.
+
+In **Watched repositories**, choose **Unwatch all**, select an owner, and
+confirm the count of active watches across the owner's pages. The owner picker
+lists owners from loaded rows. Load more repositories to see additional
+owners. Crab stops
+repository-level issue, pull request, and release updates for those watches.
+Direct notices and individual discussion preferences remain available.
+
+`POST /api/notifications/watched/unwatch` accepts the `owner` and 1–50
+`items` with each repository's UUID as `id` and its previewed preference
+`version`. It requires CSRF protection. Each item returns `unwatched`,
+`changed`, `unavailable`, or `unconfirmed`. The server checks current
+ownership and read access and edits each repository independently. Newer
+watch or mute settings survive. Retry an unconfirmed item with its original
+version to recover a possible completed write. The browser splits larger
+selections into bounded requests.
 
 Use **Notification settings** in the issue or pull request sidebar for a private
 override. Each discussion starts with the repository setting (`inherit`).

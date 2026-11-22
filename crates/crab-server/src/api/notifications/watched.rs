@@ -18,9 +18,12 @@ use crate::{
     server::Server,
 };
 
+pub(super) mod bulk;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Parameters {
+    owner: Option<String>,
     after: Option<String>,
     limit: Option<u8>,
 }
@@ -49,8 +52,14 @@ pub(super) async fn list(
             "Watched repository pages require a limit of 1–50",
         ));
     }
+    let owner = params.owner.as_deref().map(valid_owner).transpose()?;
     let after = params.after.as_deref().map(cursor).transpose()?;
-    let visible = window(&server, &principal, after, limit + 1).await?;
+    if owner.is_some_and(|owner| after.is_some_and(|(previous, _)| owner != previous)) {
+        return Err(Error::Invalid(
+            "Watched repository cursor belongs to another owner",
+        ));
+    }
+    let visible = window(&server, &principal, owner, after, limit + 1).await?;
     let scanned = &visible[..limit.min(visible.len())];
     if scanned.is_empty() {
         return Ok(Json(Page {
@@ -70,7 +79,7 @@ pub(super) async fn list(
 
     // Preference reads can run concurrently with permission changes. Refresh
     // grants before emitting even a cursor, since it names a scanned repository.
-    let current = window(&server, &principal, after, limit + 1).await?;
+    let current = window(&server, &principal, owner, after, limit + 1).await?;
     if !scanned
         .iter()
         .map(|repo| (repo.id, key(repo)))
@@ -105,6 +114,7 @@ pub(super) async fn list(
 async fn window(
     server: &Server,
     principal: &Principal,
+    owner: Option<&str>,
     after: Option<(&str, &str)>,
     limit: usize,
 ) -> Result<Vec<Arc<Repository>>> {
@@ -112,13 +122,22 @@ async fn window(
         .await?
         .into_iter()
         .map(|visible| visible.repository)
-        .filter(|repo| after.is_none_or(|after| key(repo) > after))
+        .filter(|repo| {
+            owner.is_none_or(|owner| key(repo).0 == owner)
+                && after.is_none_or(|after| key(repo) > after)
+        })
         .take(limit)
         .collect())
 }
 
 fn key(repo: &Repository) -> (&str, &str) {
     (&repo.config.owner, &repo.config.name)
+}
+
+fn valid_owner(owner: &str) -> Result<&str> {
+    valid_repository_component(owner)
+        .then_some(owner)
+        .ok_or(Error::Invalid("Watched repository owner is invalid"))
 }
 
 fn cursor(text: &str) -> Result<(&str, &str)> {

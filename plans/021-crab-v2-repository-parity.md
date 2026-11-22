@@ -80,8 +80,9 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
   bookmarks survive. New mentions and review requests reopen conversations.
   Watched repositories lists the account’s current issue, pull request, and
   release watches and lets readers edit or stop watching from Notifications.
-  Bulk unwatch by owner, a discussion subscriptions view, expired completion
-  cleanup, and email delivery remain open.
+  Bulk unwatch previews a selected owner's repository watches across pages and
+  applies each confirmed change with its captured version. A discussion
+  subscriptions view, expired completion cleanup, and email delivery remain open.
   [GitHub subscription management](https://docs.github.com/en/subscriptions-and-notifications/how-tos/managing-subscriptions-for-activity-on-github/managing-your-subscriptions)
 - GitHub Actions reports signed push-workflow results for the PR head and can
   run required workflows automatically for queued candidates. The dispatch is
@@ -178,7 +179,7 @@ Effort is relative to the existing architecture. M is a bounded server and UI sl
 | P0 | Review and merge with confidence | Protected merge evaluates current eligible reviewers, all required check sources, and exact commit identity. Ref leases and publication receipts support recovery. `crates/crab-server/src/api/pulls/merge/mod.rs`, `crates/crab-server/src/api/pulls/tests/http.rs`, `crates/crab-server/src/app.rs` | Extend fault and live external CI qualification. Track additional protection policy in P2. | L / high |
 | P1 | Review a substantial change | Private pending review, atomic submission, revision-aware viewed progress and multi-file suggestion batches are available. `crates/crab-server/src/api/pulls/review_threads`, `packages/ui/src/features/pull-requests/reviews` | Qualify review and batch application on representative large changes using the embedded UI. | L / medium–high |
 | P1 | Create, import and find a repository | Personal and organization browser creation share durable setup. Organizations list accessible repositories. Git imports resume by job ID, verify the pinned refs before exposing a destination and exclude LFS object bytes. `crates/crab-server/src/api/catalog.rs`, `packages/ui/src/features/organizations/repositories.tsx`, `crates/crab-server/src/git_import/jobs.rs` | Add bounded catalog search and rename and transfer with stable UUIDs. | L / high |
-| P1 | Get back to requested work | The inbox groups assignments, review requests, mentions, discussion watch activity, and release publications. Rows offer reason filters, private read and filing state, latest contribution links, versioned bulk triage, inbox unsubscribe, and a watched-repositories manager. `crates/crab-server/src/api/notifications/mod.rs`, `packages/ui/src/features/notifications/index.tsx` | Add bulk unwatch by owner, a discussion subscriptions view, email delivery, and expired completion cleanup. | L / medium–high |
+| P1 | Get back to requested work | The inbox groups assignments, review requests, mentions, discussion watch activity, and release publications. Rows offer reason filters, private read and filing state, latest contribution links, versioned bulk triage, inbox unsubscribe, and a watched-repositories manager with bulk unwatch by owner. `crates/crab-server/src/api/notifications/mod.rs`, `packages/ui/src/features/notifications/index.tsx` | Add a discussion subscriptions view, email delivery, and expired completion cleanup. | L / medium–high |
 | P1 | Find code and symbols | Repository code search reads the authorized snapshot and returns text matches with commit-pinned line links. Go to file and current-file Symbols are available. `crates/crab-server/src/api/code_search.rs`, `packages/ui/src/features/repository/code-search.tsx` | Add indexed content, paths and symbols, visible indexing state, and cross-repository search after revocation and scale proof. | L / high |
 | P1 | Connect external CI | GitHub Actions workflow results use repository-scoped credentials, signature verification, durable redelivery receipts and provider-bound merge requirements. PR checks link to the GitHub run. Required workflows can dispatch from the queue with a candidate-scoped Git checkout. `crates/crab-server/src/api/integrations/mod.rs`, `packages/ui/src/features/settings/integrations.tsx` | Qualify a deployed GitHub App with live deliveries. Add durable outbound Git and PR events and delivery history. | L / high |
 | P2 | Govern and integrate changes | Merge methods are configurable and include squash and rebase. PR writers can merge the current base into the head branch, rebase onto it, or resolve simple text conflicts in the browser, including on a replacement branch for protected heads. Team grants and PR team review requests use current membership. CODEOWNERS requests owners, can require eligible approvals by changed path, and appears on repository files. Repository rulesets layer active branch and tag patterns with classic protection in Git HTTP and browser publication. Either branch policy can require all published inline review conversations to be resolved. Repository and organization rulesets support current role and visible team bypass. Organization rulesets target all, selected, or name-matched repositories and layer with local policy. `crates/crab-server/REFERENCE.md`, `crates/crab-server/src/api/pulls/branch_update.rs`, `crates/crab-server/src/api/pulls/codeowners/mod.rs` | Add team review filters, repository property targeting, and integration bypass authority. Add push attribution for retaining eligible auto-merge requests after a writer changes the head. Add batched publication and wider build concurrency. | XL / high |
@@ -225,6 +226,14 @@ Prove one private repository from an author’s browser and stock Git through a 
 - Define enforcement coverage for deployments with direct object-storage writers. A mandatory hosted ruleset needs mediated writes and tested storage IAM. Verify browser writes, Git HTTP and any protected CLI paths claimed by the deployment. `crates/crab-server/REFERENCE.md:920`, `crates/crab-server/REFERENCE.md:2523`.
 
 ## Verification and release claims
+
+- Native HTTP verified bulk unwatch with mixed outcomes, revocation, wrong-owner
+  rejection, CSRF protection, and retries that preserved newer settings.
+  Embedded Chromium confirmed a two-repository unwatch persisted after reload.
+  Playwright exercised a 52-watch preview spanning an empty page and retried
+  the original versions after a lost reply. The production UI build, 68
+  focused native tests, 120 UI unit tests, 84 Playwright cases, and three
+  embedded notification regressions passed.
 
 - Native HTTP verified release-only watches, account isolation, access
   revocation, and pagination past empty results. Embedded Chromium opened
