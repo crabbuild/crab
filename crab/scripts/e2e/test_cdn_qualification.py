@@ -114,6 +114,10 @@ class CdnQualificationTests(unittest.TestCase):
             "configuration_sha256": CONFIGURATION, "workload": "git-fetch", "samples": 30,
             "p95_budget_ms": 150, "cost_budget_microusd": 10, "regions": REGIONS, "deployment_policy_sha256": policy_digest,
         } | publication
+        if profile == "managed":
+            self.registration["managed_issuer"] = {
+                "identity_sha256": "1" * 64, "version": "2026.11.22", "approval_sha256": "2" * 64,
+            }
         self.report = {
             "schema": CDN.SCHEMA, "schema_version": 1, "status": "qualified", "scope": self.scope,
             "source_sha": COMMIT, "workflow_run_id": "123", "workflow_run_attempt": "2",
@@ -166,6 +170,8 @@ class CdnQualificationTests(unittest.TestCase):
                 self.deployment_trace(self.policy_components, policy_digest)
             elif check == CDN.KEY_ROTATION_CHECK:
                 self.rotation_trace(edge)
+            elif check == CDN.MANAGED_ISSUER_CHECK:
+                self.managed_issuer_trace()
             else:
                 self.trace(check, observations.get(check, [edge_hit]))
         if CDN.requires_git_workload(self.scope):
@@ -284,6 +290,38 @@ class CdnQualificationTests(unittest.TestCase):
         path = self.directory / "traces" / f"{check}.json"
         self.report["checks"][check] = {"passed": True, "trace_sha256": json_file(path, trace)}
 
+    def managed_issuer_trace(self) -> None:
+        issuer = self.registration["managed_issuer"]
+        approval = issuer["approval_sha256"]
+        action = self.report["product_action"]
+        issued = {"request_versions": [2], "request_approval_sha256": approval, "status": 201,
+                  "grant_version": 2, "grant_approval_sha256": approval}
+        verified = {"result": "verified", "verified_output_sha256": action["observed_sha256"],
+                    "verified_output_bytes": action["observed_bytes"], "edge_payload_requests": 1, "native_payload_reads": 0}
+        failed = {"verified_output_sha256": None, "verified_output_bytes": 0,
+                  "edge_payload_requests": 0, "native_payload_reads": 0}
+        trace = {key: self.report[key] for key in CDN.CDN_PROVENANCE_FIELDS | {"platform"}} | {
+            "schema": "crab.cdn-managed-issuer/v1",
+            "issuer": {key: issuer[key] for key in ("identity_sha256", "version")},
+            "binding_sha256": approval,
+            "placement_sha256": self.policy_components["private-binding"],
+            "workload": action["name"],
+            "operations": {
+                "approved_v2": issued | verified,
+                "v1_peer": issued | verified | {
+                    "request_versions": [1], "request_approval_sha256": None, "grant_version": 1,
+                    "grant_approval_sha256": None, "edge_payload_requests": 0, "native_payload_reads": 1,
+                },
+                "denied_v2": issued | failed | {
+                    "status": 403, "grant_version": None, "grant_approval_sha256": None, "result": "issuer_denied",
+                },
+                "mismatched_v2": issued | failed | {"grant_approval_sha256": "3" * 64, "result": "client_rejected"},
+            },
+        }
+        check = CDN.MANAGED_ISSUER_CHECK
+        path = self.directory / "traces" / f"{check}.json"
+        self.report["checks"][check] = {"passed": True, "trace_sha256": json_file(path, trace)}
+
     def command(self, *extra: str) -> subprocess.CompletedProcess[str]:
         report = self.directory / "cdn-report.json"
         registration = self.directory / "benchmark.json"
@@ -382,8 +420,49 @@ class CdnQualificationTests(unittest.TestCase):
         self.report["status"] = "fixture-only"
         self.rejected("does not claim a qualified CDN row")
         self.report["status"] = "qualified"
-        del self.report["checks"]["managed_v2_issuer"]
+        del self.report["checks"][CDN.MANAGED_ISSUER_CHECK]
         self.rejected("invalid fields in checks")
+
+    def test_managed_issuer_rejects_generic_trace(self) -> None:
+        self.configure("s3", "private", "managed")
+        self.trace(CDN.MANAGED_ISSUER_CHECK, [self.request("edge", 200, "hit")])
+        self.rejected("invalid fields in managed issuer trace")
+
+    def test_managed_observations_are_bound_to_approval_and_terminal_errors(self) -> None:
+        self.configure("gcs", "private", "managed")
+        check = CDN.MANAGED_ISSUER_CHECK
+        path = self.directory / "traces" / f"{check}.json"
+        original = path.read_bytes()
+        cases = (
+            (lambda t: t["issuer"].update(identity_sha256="4" * 64), "differs from the approved production issuer"),
+            (lambda t: t["issuer"].update(version="reference-v2"), "differs from the approved production issuer"),
+            (lambda t: t.update(placement_sha256="4" * 64), "approved binding and attested placement"),
+            (lambda t: t.update(binding_sha256="4" * 64), "approved binding and attested placement"),
+            (lambda t: t.update(workflow_run_attempt="1"), "match the release row and workflow attempt"),
+            (lambda t: t["operations"]["approved_v2"].update(request_approval_sha256="4" * 64),
+             "did not use the authenticated approval"),
+            (lambda t: t["operations"]["approved_v2"].update(grant_approval_sha256="4" * 64),
+             "did not verify the granted authority"),
+            (lambda t: t["operations"]["approved_v2"].update(verified_output_sha256="4" * 64),
+             "did not verify the granted authority"),
+            (lambda t: t["operations"]["v1_peer"].update(edge_payload_requests=1), "wrong payload path"),
+            (lambda t: t["operations"]["denied_v2"].update(request_versions=[2, 1]), "retried or downgraded"),
+            (lambda t: t["operations"]["denied_v2"].update(status=401), "issuer denial was not terminal"),
+            (lambda t: t["operations"]["mismatched_v2"].update(native_payload_reads=1), "attempted payload reads"),
+            (lambda t: t["operations"]["mismatched_v2"].update(grant_approval_sha256="2" * 64),
+             "did not reject a mismatched managed v2 approval"),
+        )
+        for mutate, reason in cases:
+            with self.subTest(reason=reason):
+                trace = json.loads(original)
+                mutate(trace)
+                self.report["checks"][check]["trace_sha256"] = json_file(path, trace)
+                self.rejected(reason)
+
+    def test_managed_benchmark_requires_production_preregistration(self) -> None:
+        self.configure("azure", "private", "managed")
+        del self.registration["managed_issuer"]
+        self.rejected("invalid fields in registered production issuer")
 
     def test_rejects_public_global_reads(self) -> None:
         self.configure("s3", "public", "direct")

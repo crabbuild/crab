@@ -44,6 +44,8 @@ DEPLOYMENT_POLICY_COMPONENTS = {
     "front-door": {"front-door-route", "viewer-policy", "blob-access", "viewer-key-ids"},
 }
 KEY_ROTATION_CHECK = "key_rotation"
+MANAGED_ISSUER_CHECK = "managed_v2_issuer"
+MANAGED_ISSUER_FIELDS = {"identity_sha256", "version", "approval_sha256"}
 MAX_ROTATION_GRANT_SECONDS = 900
 VIEWER_KEY_ID = re.compile(r"[A-Za-z0-9_-]{1,90}")
 ROTATING_POLICY = {"cloudfront": "viewer-controls", "cloud-cdn": "backend-cache", "front-door": "viewer-policy"}
@@ -228,7 +230,7 @@ def verify_bundle_row(
 def required_check_names(access: str, profile: str) -> set[str]:
     required = COMMON_CHECKS | (PRIVATE_CHECKS if access == "private" else PUBLIC_CHECKS)
     if profile == "managed":
-        required |= {"managed_v2_issuer"}
+        required |= {MANAGED_ISSUER_CHECK}
     return required
 
 
@@ -414,6 +416,66 @@ def verify_public_export(
             "public export proof must cover the same edge, native, and export object")
 
 
+def verify_managed_issuer(
+    value: Any, report: dict[str, Any], registration: dict[str, Any], policy: dict[str, Any],
+) -> None:
+    trace = fields(value, CDN_PROVENANCE_FIELDS | {
+        "schema", "platform", "issuer", "binding_sha256", "placement_sha256", "workload", "operations",
+    }, "managed issuer trace")
+    require(trace["schema"] == "crab.cdn-managed-issuer/v1"
+            and all(trace[key] == report[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}),
+            "managed issuer trace must match the release row and workflow attempt")
+    approved = registration["managed_issuer"]
+    issuer = fields(trace["issuer"], {"identity_sha256", "version"}, "observed production issuer")
+    require(all(issuer[key] == approved[key] for key in issuer),
+            "managed issuer identity or version differs from the approved production issuer")
+    approval = approved["approval_sha256"]
+    require(trace["binding_sha256"] == approval
+            and trace["placement_sha256"] == policy["components"]["private-binding"],
+            "managed resolution must observe the approved binding and attested placement")
+    action = report["product_action"]
+    require(trace["workload"] == action["name"], "managed issuer trace must exercise the registered product action")
+
+    operations = fields(trace["operations"], {"approved_v2", "v1_peer", "denied_v2", "mismatched_v2"},
+                        "managed issuer operations")
+    for role, value in operations.items():
+        operation = fields(value, {
+            "request_versions", "request_approval_sha256", "status", "grant_version", "grant_approval_sha256",
+            "result", "verified_output_sha256", "verified_output_bytes", "edge_payload_requests", "native_payload_reads",
+        }, "managed issuer operation")
+        versions = operation["request_versions"]
+        expected_version = 1 if role == "v1_peer" else 2
+        require(isinstance(versions, list) and len(versions) == 1
+                and type(versions[0]) is int and versions[0] == expected_version,
+                "managed issuer operation retried or downgraded transfer issuance")
+        require(operation["request_approval_sha256"] == (None if role == "v1_peer" else approval),
+                "managed issuance did not use the authenticated approval")
+        status, grant_version, grant_approval = (operation[key] for key in ("status", "grant_version", "grant_approval_sha256"))
+        edge, native = (operation[key] for key in ("edge_payload_requests", "native_payload_reads"))
+        require(all(type(n) is int and n >= 0 for n in (edge, native))
+                and type(status) is int and type(operation["verified_output_bytes"]) is int,
+                "invalid managed issuer observation")
+        if role in {"approved_v2", "v1_peer"}:
+            require(status == 201 and type(grant_version) is int and grant_version == expected_version
+                    and grant_approval == (approval if role == "approved_v2" else None)
+                    and operation["result"] == "verified"
+                    and operation["verified_output_sha256"] == action["observed_sha256"]
+                    and operation["verified_output_bytes"] == action["observed_bytes"],
+                    "managed operation did not verify the granted authority and expected output")
+            require((edge >= action["observed_edge_gets"] if role == "approved_v2" else edge == 0 and native > 0),
+                    "managed operation used the wrong payload path")
+        else:
+            require(operation["verified_output_sha256"] is None and operation["verified_output_bytes"] == edge == native == 0,
+                    "failed managed issuance attempted payload reads or returned content")
+            if role == "denied_v2":
+                require(status == 403 and grant_version is None and grant_approval is None
+                        and operation["result"] == "issuer_denied", "managed v2 issuer denial was not terminal")
+            else:
+                require(status == 201 and type(grant_version) is int and grant_version == 2
+                        and matches(SHA256, grant_approval) and grant_approval != approval
+                        and operation["result"] == "client_rejected", "client did not reject a mismatched managed v2 approval")
+
+
 def verify_check_evidence(
     report: dict[str, Any], edge: str, access: str, profile: str, directory: Path, *, registration: dict[str, Any],
 ) -> tuple[int, int]:
@@ -429,6 +491,7 @@ def verify_check_evidence(
     cleanup_targets = {}
     rotation_key = None
     policy = {}
+    managed_issuer = None
     deployment_policy_sha256 = registration["deployment_policy_sha256"]
     for name, value in checks.items():
         check = fields(value, {"passed", "trace_sha256"}, name)
@@ -450,6 +513,9 @@ def verify_check_evidence(
             continue
         if name == KEY_ROTATION_CHECK:
             rotation_key = verify_key_rotation(decoded, report, edge, deployment_policy_sha256)
+            continue
+        if name == MANAGED_ISSUER_CHECK:
+            managed_issuer = decoded
             continue
         trace_fields = {"schema", "source_sha", "scope", "configuration_sha256",
                         "workflow_run_id", "workflow_run_attempt", "check", "requests"}
@@ -484,6 +550,8 @@ def verify_check_evidence(
             verify_expiry_range_window(requests, trace["viewer_expires_at_unix"])
         if name in fixture_checks:
             fixture_reads[name] = requests
+    if profile == "managed":
+        verify_managed_issuer(managed_issuer, report, registration, policy)
     full_sizes = {}
     for row in fixture_reads["exact_get"]:
         if row["source"] == "edge" and row["status"] == 200:
@@ -699,10 +767,17 @@ def benchmark_registration(registration: Any) -> dict[str, Any]:
         "cost_budget_microusd", "regions", "deployment_policy_sha256",
     }
     require(isinstance(registration, dict) and isinstance(registration.get("scope"), str), "benchmark needs a CDN scope")
-    if scope_parts(registration["scope"])[1] == "public":
+    _, access, _, _, profile = scope_parts(registration["scope"])
+    if access == "public":
         expected.add("publication_sha256")
         require(matches(SHA256, registration.get("publication_sha256")),
                 "public benchmark needs the approved publication receipt digest")
+    if profile == "managed":
+        expected.add("managed_issuer")
+        issuer = fields(registration.get("managed_issuer"), MANAGED_ISSUER_FIELDS, "registered production issuer")
+        require(matches(SHA256, issuer["identity_sha256"]) and matches(LABEL, issuer["version"])
+                and matches(SHA256, issuer["approval_sha256"]),
+                "managed benchmark needs an approved issuer and binding receipt")
     spec = fields(registration, expected, "benchmark registration")
     require(spec["schema"] == "crab.cdn-benchmark/v1" and matches(LABEL, spec["workload"]),
             "invalid benchmark registration")
