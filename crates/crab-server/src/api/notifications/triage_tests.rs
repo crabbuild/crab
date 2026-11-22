@@ -54,6 +54,7 @@ async fn saved_threads_survive_history_eviction_and_done_tracks_the_seen_activit
                     Address::Directory,
                     app::mutation_identity().unwrap(),
                     Delivery {
+                        email: false,
                         notice,
                         recipients: vec![Recipient {
                             actor,

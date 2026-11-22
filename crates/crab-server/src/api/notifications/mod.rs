@@ -35,6 +35,7 @@ use crate::{
 };
 
 mod discussions;
+mod email;
 mod state;
 mod subscriptions;
 mod unsubscribe;
@@ -44,6 +45,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .route("/api/notifications", get(list))
         .route("/api/notifications/unread", get(unread))
+        .route("/api/notifications/email", get(email::get).put(email::set))
         .route("/api/notifications/watched", get(watched::list))
         .route("/api/notifications/subscriptions", get(discussions::list))
         .route("/api/notifications/{id}/state", put(state::single))
@@ -616,6 +618,7 @@ mod tests {
             sender: "Alice".into(),
         };
         let mut delivery = Delivery {
+            email: false,
             notice: notice.clone(),
             recipients: vec![Recipient {
                 actor,

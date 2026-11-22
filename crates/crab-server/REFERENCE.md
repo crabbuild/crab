@@ -1849,6 +1849,7 @@ owner label does not acquire ownership.
 | Markdown suggestions | `GET /api/repos/{owner}/{name}/discussion-search/{mentions,team-mentions,references}` |
 | Team mention settings | `GET/PUT /api/repos/{owner}/{name}/mention-settings` |
 | Account notification inbox | `GET /api/notifications`, `GET /api/notifications/unread`, `PUT /api/notifications/{id}/state`, `POST /api/notifications/bulk`, `POST /api/notifications/unsubscribe` |
+| Account email notifications | `GET/PUT /api/notifications/email` |
 | Watched repositories | `GET /api/notifications/watched`, `POST /api/notifications/watched/unwatch` |
 | Repository notification preference | `GET /api/repos/{owner}/{name}/subscription`, `PUT /api/repos/{owner}/{name}/subscription` |
 | Discussion subscriptions | `GET /api/notifications/subscriptions`, `POST /api/notifications/subscriptions/unsubscribe` |
@@ -2614,6 +2615,44 @@ returns `unsubscribed`, `changed`, or `unavailable`. The server applies
 eligible rows and leaves changed and inaccessible rows alone. Retry the same
 selection after a lost response. The repository remembers what was dismissed
 and a replay preserves any newer follow.
+
+#### Receive inbox notifications by email
+
+In **Notifications → Email settings**, opt in to email delivery. Crab uses
+the verified email from your OIDC sign-in or the verified primary email from
+GitHub sign-in. Sign in again after the server enables email or after updating
+your address with your identity provider. A changed or unverified address
+turns delivery off. Opt in again to send alerts to a newly verified address.
+
+Emails link to the inbox. Discussion titles and contents stay inside Crab,
+behind the current repository access checks. The sender checks repository
+access, account suspension, mute, and opt-in before sending queued activity.
+Repository watches and discussion follows apply to both delivery channels.
+Delivery is limited to future inbox activity and can be turned off at any time.
+
+`GET /api/notifications/email` returns `configured`, `address`, `enabled`,
+and `version` for the signed-in account. Send `enabled` and the captured
+`version` with `PUT`. A stale request for a different choice returns 409.
+The verified address comes from sign-in.
+
+Operators can enable delivery across serving peers with browser authentication
+and a [Resend API key with sending access](https://resend.com/docs/dashboard/api-keys/introduction).
+Mount the key as a readable secret file and use a From address on a verified
+Resend domain. Use the same sender, provider account, and public URL on each
+serving peer so a retried message keeps the same payload and provider
+idempotency scope.
+
+```toml
+[notification_email]
+from = "notifications@example.org"
+api_key_file = "/run/secrets/crab-notification-email"
+```
+
+OIDC must issue both `email` and `email_verified=true` in the signed ID
+token. When enabled, GitHub OAuth requests the
+[`user:email` scope](https://docs.github.com/en/rest/users/emails#list-email-addresses-for-the-authenticated-user).
+Omit the section to disable delivery. Deploy the serving peers together when
+enabling or disabling email.
 
 Open **Watch** in a repository to choose direct notifications, new issue
 activity, new pull request activity, both kinds, or mute. Enable **New
@@ -3734,7 +3773,7 @@ The server is complete only when a real account can perform the workflow and obs
 | GitHub-quality design | Themes, responsive layouts, accessible controls, navigation, and loading/error behavior across workflows | In progress |
 | Team identity and authorization | OIDC, sessions, membership, permissions, isolation, revocation, CSRF, and administration | In progress; browser and CLI membership replacement are audited, and back-channel logout revokes delivered exact-identity sessions |
 | Git hosting | Authenticated fetch and push, exact branch/tag lifecycle, protection, publication, and independent-client proof | In progress; additional crash phases and coexistence qualification remain |
-| Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; moderation, edit history, and external notification delivery remain |
+| Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; moderation, edit history, and email delivery qualification remain |
 | Repository management | CLI create/adopt/list, archive, settings, search, import, and audited administration | In progress; browser creation/import and audit history remain |
 | Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Native process restart and owner handoff tested; native metrics and shutdown wiring implemented. Backup restore, crash matrices, upgrades, and provider qualification remain |
 | Quality gates | API, UI, accessibility, realistic repositories, security, package smoke, and measured performance | In progress |

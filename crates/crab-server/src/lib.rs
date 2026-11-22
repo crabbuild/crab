@@ -30,8 +30,8 @@ pub use cells::repository::search::index::{
 };
 pub use config::{
     AuthProvider, BranchProtection, CellDurabilityMode, CellsConfig, Config, GitHubActionsBinding,
-    GitHubActionsConfig, GitHubConfig, ImportConfig, OidcConfig, RepositoryAccess,
-    RepositoryConfig, RepositoryGroup, RepositoryMember, StorageConfig,
+    GitHubActionsConfig, GitHubConfig, ImportConfig, NotificationEmailConfig, OidcConfig,
+    RepositoryAccess, RepositoryConfig, RepositoryGroup, RepositoryMember, StorageConfig,
 };
 pub use server::serve;
 pub use server::storage::probe_storage;

@@ -215,7 +215,16 @@ impl Harness {
         store: Store,
         catalog_prefix: &str,
     ) -> Self {
-        Self::configured(confidential, github, store, catalog_prefix, None, None).await
+        Self::configured(
+            confidential,
+            github,
+            store,
+            catalog_prefix,
+            None,
+            None,
+            None,
+        )
+        .await
     }
 
     pub(crate) async fn with_ci_key(catalog_prefix: &str) -> Self {
@@ -236,8 +245,16 @@ impl Harness {
             catalog_prefix,
             Some(file.path().to_owned()),
             github_actions,
+            None,
         )
         .await;
+        harness.initialize_directory().await;
+        harness
+    }
+
+    pub(crate) async fn with_notification_email(github: bool, endpoint: Url) -> Self {
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let harness = Self::configured(github, github, store, "", None, None, Some(endpoint)).await;
         harness.initialize_directory().await;
         harness
     }
@@ -249,6 +266,7 @@ impl Harness {
         catalog_prefix: &str,
         state_key_file: Option<std::path::PathBuf>,
         github_actions: Option<TestGitHubActions>,
+        email_endpoint: Option<Url>,
     ) -> Self {
         let (provider, provider_task) = start_provider(0).await;
         provider.confidential.store(confidential, Ordering::SeqCst);
@@ -375,6 +393,15 @@ impl Harness {
             server.cursor_key = [7; 32];
             server.auth = Some(auth);
             server.github_actions = github_actions.map(|configure| configure(record.id));
+            server.email = email_endpoint.map(|endpoint| {
+                crate::server::email::Sender::with_endpoint(
+                    "crab@example.test".into(),
+                    "fixture-mail-key".into(),
+                    &Url::parse(&origin).unwrap(),
+                    endpoint,
+                )
+                .unwrap()
+            });
             server.catalog = Some(catalog);
             server.git_import = Some(crate::git_import::ImportContext::for_test(address));
             server

@@ -370,6 +370,7 @@ pub(crate) async fn test_node_with_application(
         import: Default::default(),
         auth: None,
         github_actions: None,
+        notification_email: None,
     };
     let bucket = Bucket::open_dev(&directory.join("objects.sqlite")).unwrap();
     let http = reqwest::Client::builder().no_proxy().build().unwrap();

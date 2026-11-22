@@ -20,6 +20,15 @@ pub struct Config {
     pub import: ImportConfig,
     pub auth: Option<OidcConfig>,
     pub github_actions: Option<GitHubActionsConfig>,
+    pub notification_email: Option<NotificationEmailConfig>,
+}
+
+/// Explicit sender and credentials for the notification email provider.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NotificationEmailConfig {
+    pub from: String,
+    pub api_key_file: PathBuf,
 }
 
 /// Credentials for the GitHub App that starts queue workflows.
@@ -330,6 +339,15 @@ impl Config {
         } else if !self.listen.ip().is_loopback() {
             return Err(Error::Config(
                 "browser authentication is required beyond loopback",
+            ));
+        }
+        if let Some(email) = &self.notification_email
+            && (self.auth.is_none()
+                || email.api_key_file.as_os_str().is_empty()
+                || !crate::cells::directory::notifications::email::valid_address(&email.from))
+        {
+            return Err(Error::Config(
+                "notification email requires browser authentication, a sender address, and an API-key file",
             ));
         }
         Ok(())

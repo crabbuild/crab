@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 mod background;
 pub(crate) mod capacity;
+pub(crate) mod email;
 pub(crate) mod http;
 pub(crate) mod management;
 pub(crate) mod mentions;
@@ -53,6 +54,7 @@ pub(crate) struct Server {
     pub(crate) receives: tokio_util::task::TaskTracker,
     pub(crate) auth: Option<Authentication>,
     pub(crate) github_actions: Option<crate::api::GitHubActions>,
+    pub(crate) email: Option<email::Sender>,
     pub(crate) git_import: Option<git_import::ImportContext>,
     pub(crate) catalog: Option<CatalogStore>,
     repository_setup: Option<Arc<Config>>,
@@ -89,6 +91,7 @@ impl Server {
             receives: tokio_util::task::TaskTracker::new(),
             auth: None,
             github_actions: None,
+            email: None,
             git_import: None,
             catalog: None,
             repository_setup: None,
@@ -235,6 +238,12 @@ pub async fn serve(config: Config) -> Result<()> {
         )?),
         None => None,
     };
+    let email = config
+        .notification_email
+        .as_ref()
+        .zip(config.auth.as_ref())
+        .map(|(settings, auth)| email::Sender::new(settings, &auth.public_url))
+        .transpose()?;
     let github_actions = config
         .github_actions
         .as_ref()
@@ -353,6 +362,7 @@ pub async fn serve(config: Config) -> Result<()> {
         receives: tokio_util::task::TaskTracker::new(),
         auth,
         github_actions,
+        email,
         git_import: Some(git_import::ImportContext::new(&config, public_address)),
         catalog: Some(catalog),
         repository_setup: Some(Arc::new(config.clone())),
@@ -413,6 +423,9 @@ pub async fn serve(config: Config) -> Result<()> {
                   let mentions = server.clone();
                   background.spawn(async move { self::mentions::sweep(mentions).await; Ok(()) });
                   background.spawn(background::sweep_notification_filing(server.clone()));
+                  if server.email.is_some() {
+                      background.spawn(email::run(server.clone()));
+                  }
                   let integrity = server.clone();
                   background.spawn(async move { crate::integrity::run(integrity).await; Ok(()) });
               },

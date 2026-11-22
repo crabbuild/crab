@@ -49,6 +49,7 @@ impl Host {
             import: Default::default(),
             auth: None,
             github_actions: None,
+            notification_email: None,
         };
         let transport = crate::peer::PeerTransport::start(&tls).await.unwrap();
         let work = tokio_util::task::TaskTracker::new();

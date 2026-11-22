@@ -79,6 +79,10 @@ owns the reserved ref and leases the target, prospective parent, and PR head.
 in the native transaction that writes the source activity. `server/mentions.rs` expands current eligible
 recipients and delivers to the Directory inbox before acknowledging the event.
 `api/notifications/` rechecks access before exposing source links or titles.
+`cells/directory/notifications/email.rs` owns the verified address binding,
+versioned opt-in, and transactional email queue. `server/email.rs` rechecks
+current delivery authority and sends generic inbox links with durable
+provider idempotency keys.
 `cells/repository/integrations.rs` owns GitHub Actions connections, delivery
 receipts and workflow attempt ordering. It reads active providers and their
 exact-commit results from one snapshot for merge admission. `api/integrations/`

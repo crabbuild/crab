@@ -752,6 +752,7 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
             crate::cells::Address::Directory,
             crate::app::mutation_identity().unwrap(),
             Delivery {
+                email: false,
                 notice: Notice {
                     id: event.id,
                     repository: repo.id,

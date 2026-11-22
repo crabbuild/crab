@@ -135,6 +135,7 @@ async fn expired_completion_retires_recent_copies_and_replays_without_destroying
                 Address::Directory,
                 app::mutation_identity().unwrap(),
                 Delivery {
+                    email: false,
                     notice,
                     recipients: vec![Recipient {
                         actor,

@@ -30,6 +30,7 @@ import {
   type Selection,
   type UnsubscribeStatus,
 } from "./actions";
+import { EmailNotifications } from "./email";
 
 type InboxPage = { items: Notice[]; next: string | null };
 
@@ -203,6 +204,7 @@ export function Notifications({
         <Button asChild variant="outline" size="sm">
           <Link href="/-/notifications/watched">Watched repositories</Link>
         </Button>
+        {csrf && <EmailNotifications csrf={csrf} />}
       </div>
       {view === "done" && (
         <p className="text-sm text-muted-foreground">

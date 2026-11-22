@@ -548,6 +548,7 @@ async fn a_reply_waits_for_the_mention_that_subscribes_its_recipient() {
             Address::Directory,
             app::mutation_identity().unwrap(),
             Delivery {
+                email: false,
                 notice: notice.clone(),
                 recipients: vec![Recipient {
                     actor: serde_json::from_value(profile["id"].clone()).unwrap(),

@@ -36,7 +36,10 @@ use crate::{
 const SWEEP_INTERVAL: Duration = Duration::from_secs(2);
 const SWEEP_BATCH: usize = 16;
 
-async fn current_grants(server: &Server, repo: &Repository) -> Result<Option<MembershipSnapshot>> {
+pub(super) async fn current_grants(
+    server: &Server,
+    repo: &Repository,
+) -> Result<Option<MembershipSnapshot>> {
     let Some(catalog) = server.catalog() else {
         return Ok(None);
     };
@@ -237,7 +240,12 @@ impl DeliveryScope {
     }
 }
 
-async fn publish(client: &CellClient, notice: &Notice, recipients: Vec<Recipient>) -> Result<()> {
+async fn publish(
+    server: &Server,
+    client: &CellClient,
+    notice: &Notice,
+    recipients: Vec<Recipient>,
+) -> Result<()> {
     if recipients.is_empty() {
         return Ok(());
     }
@@ -250,6 +258,7 @@ async fn publish(client: &CellClient, notice: &Notice, recipients: Vec<Recipient
                 Delivery {
                     notice: notice.clone(),
                     recipients,
+                    email: server.email.is_some(),
                 },
             )
             .await,
@@ -393,6 +402,7 @@ async fn deliver(
             .collect();
         if !candidates.is_empty() && scope.current(server, repo).await? {
             publish(
+                server,
                 client,
                 &notice,
                 watched_recipients(client, candidates, Reason::Subscribed).await?,
@@ -498,6 +508,7 @@ async fn deliver(
             .filter_map(|(candidate, enabled)| enabled.then_some(candidate))
             .collect();
         publish(
+            server,
             client,
             &notice,
             recipients.iter().map(|(recipient, _)| *recipient).collect(),
@@ -545,6 +556,7 @@ async fn deliver_release(
                 sender: event.publisher.name,
             };
             publish(
+                server,
                 client,
                 &notice,
                 watched_recipients(client, candidates, Reason::Release).await?,

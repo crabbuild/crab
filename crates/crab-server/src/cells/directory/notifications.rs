@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
+pub(crate) mod email;
 mod filing;
 mod retention;
 mod triage;
@@ -181,6 +182,8 @@ impl Access {
 pub(crate) struct Delivery {
     pub notice: Notice,
     pub recipients: Vec<Recipient>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub email: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -363,14 +366,27 @@ impl Mutation for Deliver {
                         .filter(|position| *position <= incoming.notice.position()),
                 );
             }
+            // A change to the reason or access channel can replay an existing
+            // inbox activity. Only a newly visible activity can enqueue email.
+            let newest = input.notice.position();
+            let new_activity = !inbox.entries.iter().chain(&peer.entries).any(|entry| {
+                entry.notice.thread_id() == thread && entry.notice.position() >= newest
+            }) && previous
+                .as_ref()
+                .is_none_or(|record| record.entry.notice.position() < newest);
             let store_recent = inbox.deliver(incoming.clone())?;
+            let mut stored_filed = false;
             if let Some(previous) = previous {
                 let mut filed = previous.clone();
                 let restored_at = (!store_recent && previous.retained(now)).then_some(now);
                 // A delayed newer update can reopen a retained thread even
                 // when the rolling inbox's eviction floor has moved past it.
                 filed.deliver(incoming, restored_at)?;
-                changed |= filing::store(context, actor, Some(&previous), &filed)?;
+                stored_filed = filing::store(context, actor, Some(&previous), &filed)?;
+                changed |= stored_filed;
+            }
+            if input.email && new_activity && (store_recent || stored_filed) {
+                email::enqueue(context, actor, &input.notice)?;
             }
             if store_recent {
                 context.put_document(&key, &inbox)?;

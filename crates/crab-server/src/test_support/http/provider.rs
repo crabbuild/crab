@@ -176,7 +176,10 @@ async fn github_authorize(
 ) -> Redirect {
     assert_eq!(params["response_type"], "code");
     assert_eq!(params["client_id"], "crab-browser");
-    assert_eq!(params["scope"], "read:user");
+    assert!(matches!(
+        params["scope"].as_str(),
+        "read:user" | "read:user user:email"
+    ));
     assert_eq!(params["code_challenge_method"], "S256");
     let code = openidconnect::CsrfToken::new_random().secret().clone();
     let mut target = Url::parse(&params["redirect_uri"]).unwrap();
@@ -207,6 +210,18 @@ async fn github_user(headers: axum::http::HeaderMap) -> Json<Value> {
     Json(json!({"id":4242,"login":"octocat","name":"Octo Cat"}))
 }
 
+async fn github_emails(
+    State(provider): State<Arc<Provider>>,
+    headers: axum::http::HeaderMap,
+) -> Json<Value> {
+    assert_eq!(headers[header::AUTHORIZATION], "Bearer github-access-token");
+    let verified = provider.mode.lock().await.as_str() != "unverified-email";
+    Json(json!([
+        {"email":"secondary@example.test","primary":false,"verified":true},
+        {"email":"primary@example.test","primary":true,"verified":verified}
+    ]))
+}
+
 pub(crate) async fn start_provider(port: u16) -> (Arc<Provider>, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
         .await
@@ -227,6 +242,7 @@ pub(crate) async fn start_provider(port: u16) -> (Arc<Provider>, tokio::task::Jo
         .route("/github/authorize", get(github_authorize))
         .route("/github/token", post(github_token))
         .route("/github/user", get(github_user))
+        .route("/github/user/emails", get(github_emails))
         .with_state(Arc::clone(&provider));
     let task = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();

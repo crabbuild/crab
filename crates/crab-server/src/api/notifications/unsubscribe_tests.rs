@@ -149,6 +149,7 @@ async fn inbox_unsubscribe_preserves_bookmarks_and_only_reopens_for_new_direct_a
             Address::Directory,
             app::mutation_identity().unwrap(),
             Delivery {
+                email: false,
                 notice: Notice {
                     id: Uuid::now_v7(),
                     repository: repo.id,

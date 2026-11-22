@@ -333,6 +333,17 @@ archive pages and emits cursors from visible rows after account, grant, and mute
 checks. These native document records require no SQL preparation. Drain and
 upgrade peers together for the notification query and mutation contract.
 
+When email is enabled, Directory creates the email job in the inbox
+delivery transaction. Changes to the same activity or its access channel do
+not create more jobs. Each job retains the account's opt-in version. A
+changed sign-in address, opt-out, or revocation suppresses pending delivery.
+The worker claims a durable 60-second lease and checks current account and
+repository authority before sending. An interrupted worker can retry using
+the same provider idempotency key for the recipient and activity. Claims,
+retry times, and terminal receipts are native documents. They expire within
+23 hours of the activity, inside Resend's
+[24-hour idempotency window](https://resend.com/docs/dashboard/emails/idempotency-keys).
+
 Repository watch preferences are private native documents keyed by a digest
 of the actor's issuer and subject. A sparse index tracks actors watching
 issues or pull requests. Each

@@ -239,6 +239,15 @@ pub(in crate::cells) fn dispatch_read(
         CompleteHandles::ID => invoke_read::<CompleteHandles>(context, input),
         MentionCandidates::ID => invoke_read::<MentionCandidates>(context, input),
         notifications::List::ID => invoke_read::<notifications::List>(context, input),
+        notifications::email::ReadEmail::ID => {
+            invoke_read::<notifications::email::ReadEmail>(context, input)
+        }
+        notifications::email::MailPending::ID => {
+            invoke_read::<notifications::email::MailPending>(context, input)
+        }
+        notifications::email::MailDestination::ID => {
+            invoke_read::<notifications::email::MailDestination>(context, input)
+        }
         #[cfg(test)]
         notifications::InspectFiled::ID => {
             invoke_read::<notifications::InspectFiled>(context, input)
@@ -270,6 +279,18 @@ pub(in crate::cells) fn dispatch_mutation(
         CreateProfile::ID => invoke_mutation::<CreateProfile>(context, input),
         EditProfile::ID => invoke_mutation::<EditProfile>(context, input),
         notifications::Deliver::ID => invoke_mutation::<notifications::Deliver>(context, input),
+        notifications::email::BindEmail::ID => {
+            invoke_mutation::<notifications::email::BindEmail>(context, input)
+        }
+        notifications::email::SetEmail::ID => {
+            invoke_mutation::<notifications::email::SetEmail>(context, input)
+        }
+        notifications::email::ClaimMail::ID => {
+            invoke_mutation::<notifications::email::ClaimMail>(context, input)
+        }
+        notifications::email::FinishMail::ID => {
+            invoke_mutation::<notifications::email::FinishMail>(context, input)
+        }
         notifications::SetState::ID => invoke_mutation::<notifications::SetState>(context, input),
         notifications::SweepFiling::ID => {
             invoke_mutation::<notifications::SweepFiling>(context, input)
