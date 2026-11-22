@@ -31,6 +31,12 @@ ambient cloud credential variables, explicit provider overrides, or dotenv
 imports. The child checks the login and obtains its own private grant.
 Live cross-process provider qualification remains open.
 
+The qualification worker can exercise an ordinary CLI Git fetch through a
+pinned private managed URL. It retains an approved v2 read, a native v1
+control, and the two terminal v2 failures from the same native publication.
+Managed Git promotion still needs to bind those observations to the
+independent native ref lifecycle and regional product benchmarks.
+
 ### Open implementation and release gates
 
 | Gate | Current evidence and required closure |

@@ -56,7 +56,10 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             "approved = json.loads((origin.parent / 'fixture.json').read_bytes())\n"
             "target = json.loads(os.environ['CRAB_INTERNAL_CDN_QUALIFICATION_TARGET'])\n"
             "target.pop('read', None)\n"
+            "managed_url = target.pop('managed_url', None)\n"
             "assert target == {'origin':approved['native_origin'], 'repository_prefix':approved['fixture_prefix']}\n"
+            "if managed_url is not None:\n"
+            "    assert sys.argv[2] == managed_url == approved['managed_url']\n"
             "evidence = origin.parent / 'public-export-events.json'\n"
             "def emit_read():\n"
             "    binding = approved['scope'].split('/')[1] + '\\n' + approved['base_url'].rstrip('/')\n"
@@ -116,6 +119,13 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             "        print('connect\\n', flush=True)\n"
             "    elif line.startswith(b'connect '):\n"
             "        command = line.split()[1].decode()\n"
+            "        if managed_url is not None:\n"
+            "            assert command == 'git-upload-pack'\n"
+            "            managed = json.loads((origin.parent / 'managed-events.json').read_bytes())\n"
+            "            for event in managed:\n"
+            "                print(json.dumps(event), file=sys.stderr, flush=True)\n"
+            "            if not managed[-1]['fields']['accepted']:\n"
+            "                sys.exit(1)\n"
             "        print(flush=True)\n"
             "        if not (origin.parent / 'legacy-helper').exists():\n"
             "            print((origin.parent / 'build-event.json').read_text(), file=sys.stderr, flush=True)\n"
@@ -130,7 +140,7 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             "            family = 'capsule' if (origin.parent / 'foreign-edge').exists() else 'git'\n"
             "            local = (origin.parent / 'warm-cache').exists() and (cache / 'seed').exists()\n"
             "            policy = {'provider':'s3', 'access':'public' if evidence.exists() else 'private', 'consumer':'cli',\n"
-            "                      'family':family, 'profile':'direct'}\n"
+            "                      'family':family, 'profile':'direct' if managed_url is None else 'managed'}\n"
             "            if not local:\n"
             "                print(json.dumps({'target':'crab_storage::cdn::transfer', 'fields': policy | {\n"
             "                    'message':'CDN immutable GET', 'status':206, 'cache':'hit', 'range':True,\n"
@@ -198,6 +208,59 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             collect_git_product_action(records, fetched | {"viewer_binding_sha256": "0" * 64}, rollback_raw)
         self.assertEqual(measured["observed_sha256"], fetched["expected_sha256"])
         self.assertEqual(measured["verified_edge_payloads"], 1)
+
+    def test_managed_fetch_observes_the_grant_for_each_product_arm(self) -> None:
+        config = json.loads(self.fixture.read_bytes())
+        config.update(scope="cloudfront/private/cli/git/managed", managed_url="crab://issuer.example/org/models")
+        raw = json.dumps(config).encode()
+        self.fixture.write_bytes(raw)
+        self.digest = hashlib.sha256(raw).hexdigest()
+        self.assertTrue(self.run_phase("publish")["visible_new_ref"])
+        grant_events = self.root / "managed-events.json"
+        identity = {"issuer_identity_sha256": "a" * 64, "issuer_version": "1.2.3", "repository_sha256": "c" * 64}
+        origin, prefix, viewer = (hashlib.sha256(config[key].encode()).hexdigest()
+                                  for key in ("native_origin", "fixture_prefix", "base_url"))
+        approval = "b" * 64
+        for role, action, status, version, accepted, grant_approval in (
+            ("approved_v2", "fetch", 201, 2, True, approval),
+            ("v1_peer", "fetch-origin", 201, 1, True, ""),
+            ("denied_v2", "fetch-rejected", 403, 2, False, ""),
+            ("mismatched_v2", "fetch-rejected", 201, 2, False, "d" * 64),
+        ):
+            with self.subTest(role=role):
+                (self.root / "origin-only").unlink(missing_ok=True)
+                (self.root / "binding-off").unlink(missing_ok=True)
+                if version == 1:
+                    (self.root / "origin-only").touch()
+                    (self.root / "binding-off").touch()
+                grant_events.write_text(json.dumps([
+                    {"target": WORKLOAD.MANAGED_TARGET, "fields": identity | {
+                        "message": "Managed CDN repository resolution", "binding_approval_sha256": approval,
+                        "binding_origin_sha256": origin, "binding_prefix_sha256": prefix, "binding_viewer_sha256": viewer,
+                    }},
+                    {"target": WORKLOAD.MANAGED_TARGET, "fields": identity | {
+                        "message": "Managed CDN read grant exchange", "operation": "Fetch", "request_version": version,
+                        "status": status, "grant_version": version if status == 201 else 0, "accepted": accepted,
+                        "request_approval_sha256": approval if version == 2 else "", "grant_approval_sha256": grant_approval,
+                        "grant_origin_sha256": origin if accepted else "", "grant_prefix_sha256": prefix if accepted else "",
+                    }},
+                ]))
+                directory = self.root / role
+                result = self.run_phase(action, "--managed-issuer-capture", str(directory))
+                self.assertEqual((directory / "payload").exists(), accepted)
+                if accepted:
+                    self.assertEqual(hashlib.sha256((directory / "payload").read_bytes()).hexdigest(), result["observed_sha256"])
+                else:
+                    self.assertTrue(result["rejected"])
+        self.assertTrue(self.run_phase("retire")["ref_retired"])
+
+    def test_managed_workload_rejects_a_locator_with_an_unapproved_selector(self) -> None:
+        config = json.loads(self.fixture.read_bytes())
+        config.update(scope="cloudfront/private/cli/git/managed", managed_url="crab://issuer.example/org/models?view=other")
+        raw = json.dumps(config).encode()
+        self.fixture.write_bytes(raw)
+        self.assertIn("exact repository-local logical URL", self.call("publish", digest=hashlib.sha256(raw).hexdigest()).stderr)
+        self.assertFalse(self.receipt.exists())
 
     def test_rejects_a_different_compiled_source_before_writing(self) -> None:
         event = json.loads(self.build_event.read_bytes())

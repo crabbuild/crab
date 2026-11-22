@@ -1657,7 +1657,10 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                         .replication
                         .as_ref()
                         .is_some_and(|replication| replication.is_active_active());
-                if requires_repository && delegated_writer && qualification_target()?.is_some() {
+                if requires_repository
+                    && (delegated_writer || managed_repository.is_some())
+                    && qualification_target()?.is_some()
+                {
                     return Err(CrabError::AuthFailed {
                         path: "the CDN qualification workload requires a single native writer"
                             .into(),

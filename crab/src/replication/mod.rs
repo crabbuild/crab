@@ -13806,6 +13806,7 @@ mod tests {
             origin: "s3://qualification-bucket".into(),
             repository_prefix: "crab-cdn-qualification/current".into(),
             read: None,
+            managed_url: None,
         };
         let reads = Arc::new(AtomicUsize::new(0));
         let store = || {

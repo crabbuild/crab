@@ -16,11 +16,12 @@ from tempfile import TemporaryDirectory
 from typing import Any
 from uuid import uuid4
 
+from collect_cdn_managed_issuer import TARGET as MANAGED_TARGET, observation_events
 from collect_cdn_product_metrics import NATIVE_TARGET, ROUTE, ROUTE_FIELDS, TARGET, measure, measure_native
 from run_cdn_transport_checks import approved_fixture, fixture_base, fixture_object_key, native_remote
 
 from cdn_qualification import (
-    CLI_BUILD_FIELDS, CLI_NATIVE_FIELDS, COMMIT, GIT_OID, GIT_PAYLOAD_SIZE, PROVIDER_FOR_EDGE, RUN_NUMBER, SHA256,
+    CLI_BUILD_FIELDS, CLI_NATIVE_FIELDS, COMMIT, GIT_OID, GIT_PAYLOAD_SIZE, LABEL, PROVIDER_FOR_EDGE, RUN_NUMBER, SHA256,
     cli_action_name, decode, deployment_component_digest,
     fields, is_direct_desktop_git_scope, is_direct_sdk_git_scope, is_direct_service_scope, lfs_object_path,
     matches, read_git_record, require, requires_cli_lfs_workload,
@@ -42,6 +43,7 @@ GCS_VIEWER_LOG_TARGET = "crab_storage::cdn::gcs_viewer_log"
 
 def run_command(
     command: list[str], label: str, root: Path, env: dict[str, str], content: bytes | None = None,
+    *, allow_failure: bool = False,
 ) -> subprocess.CompletedProcess[bytes]:
     try:
         result = subprocess.run(
@@ -49,7 +51,7 @@ def run_command(
         )
     except subprocess.TimeoutExpired:
         raise ValueError(f"{label} timed out") from None
-    require(result.returncode == 0, f"{label} failed with exit {result.returncode}")
+    require(allow_failure or result.returncode == 0, f"{label} failed with exit {result.returncode}")
     return result
 
 
@@ -332,9 +334,62 @@ def write_transition(proof: dict, record: dict, result: dict, output: Path, befo
         destination.write("\n")
 
 
+def managed_observation(run: subprocess.CompletedProcess[bytes], fixture: dict, *, origin: bool, rejected: bool) -> list[dict]:
+    events = []
+    targets = (MANAGED_TARGET, TARGET, NATIVE_TARGET)
+    for line in run.stderr.splitlines():
+        if not any(target.encode() in line for target in targets):
+            continue
+        item = decode(line)
+        if isinstance(item, dict) and item.get("target") in targets:
+            events.append({key: item[key] for key in ("target", "fields")})
+    lines = [json.dumps(event).encode() for event in events]
+    resolved, grant = observation_events(lines)
+    require(matches(SHA256, resolved["issuer_identity_sha256"]) and matches(LABEL, resolved["issuer_version"])
+            and grant["operation"] == "Fetch", "managed Git fetch observed an invalid issuer or operation")
+    placement = {name: hashlib.sha256(value.encode()).hexdigest() for name, value in (
+        ("origin", fixture["native_origin"]), ("prefix", fixture["fixture_prefix"]), ("viewer", fixture["base_url"].rstrip("/")),
+    )}
+    approval = resolved["binding_approval_sha256"]
+    binding_matches = matches(SHA256, approval) and all(resolved[f"binding_{name}_sha256"] == value for name, value in placement.items())
+    native_only_binding = all(resolved[f"binding_{name}_sha256"] == "" for name in (*placement, "approval"))
+    version = 1 if origin else 2
+    require((binding_matches or (origin and native_only_binding))
+            and type(grant["request_version"]) is int and grant["request_version"] == version
+            and grant["request_approval_sha256"] == ("" if origin else approval),
+            "managed Git fetch did not negotiate the expected native or edge grant")
+    if rejected:
+        denied = (grant["status"], grant["grant_version"], grant["grant_approval_sha256"]) == (403, 0, "")
+        wrong_approval = (grant["status"] == 201 and grant["grant_version"] == 2
+                          and matches(SHA256, grant["grant_approval_sha256"]) and grant["grant_approval_sha256"] != approval)
+        require(run.returncode > 0 and grant["accepted"] is False and (denied or wrong_approval)
+                and grant["grant_origin_sha256"] == grant["grant_prefix_sha256"] == ""
+                and all(event["target"] == MANAGED_TARGET for event in events),
+                "rejected managed Git fetch must fail without reaching native or edge storage")
+    else:
+        traffic = measure(lines, fixture["scope"])
+        native = measure_native(lines, fixture["scope"])
+        require(run.returncode == 0 and grant["accepted"] is True and grant["status"] == 201
+                and type(grant["grant_version"]) is int and grant["grant_version"] == version
+                and grant["grant_approval_sha256"] == ("" if origin else approval)
+                and all(grant[f"grant_{name}_sha256"] == placement[name] for name in ("origin", "prefix"))
+                and (not origin or (traffic["all_edge_attempts"] == 0 and native["body_bytes"] > 0)),
+                "managed Git fetch did not accept the approved grant and use its expected payload path")
+    return events
+
+
+def retain_managed_observation(directory: Path, run: subprocess.CompletedProcess[bytes], events: list[dict], payload: bytes | None) -> None:
+    directory.mkdir(mode=0o700)
+    (directory / "stderr.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+    (directory / "exit-code").write_text(f"{run.returncode}\n", encoding="ascii")
+    if payload is not None:
+        (directory / "payload").write_bytes(payload)
+
+
 def fetch_once(
     remote: str, record: dict[str, Any], root: Path, env: dict[str, str], proof: dict | None,
     crab: Path | None, guard: NativeTargetGuard, binding: str, public_export: str, *, primed: bool = False,
+    managed: dict | None = None, managed_capture: Path | None = None, rejected: bool = False,
 ) -> dict:
     require(record["published"], "fetch requires a confirmed native publication")
     cache = Path(env["CRAB_CACHE_DIR"])
@@ -360,6 +415,13 @@ def fetch_once(
     # Use a new cache and exact refspec so another fetched ref cannot supply the bytes.
     started_at = time.time_ns() // 1_000_000
     started = time.monotonic_ns()
+    if rejected:
+        run = run_command(["git", "fetch", "--no-tags", "--no-auto-maintenance", remote, record["ref"]], "git fetch",
+                          root, env, allow_failure=True)
+        require(managed is not None and managed_capture is not None, "rejection needs a managed evidence destination")
+        events = managed_observation(run, managed, origin=False, rejected=True)
+        retain_managed_observation(managed_capture, run, events, None)
+        return {"rejected": True}
     if crab is None:
         run = run_git("fetch", "--no-tags", "--no-auto-maintenance", remote, record["ref"], root=root, env=env, guard=guard)
     else:
@@ -376,6 +438,10 @@ def fetch_once(
             blob = payload.read(GIT_PAYLOAD_SIZE + 1)
     observed = hashlib.sha256(blob).hexdigest()
     require(len(blob) == GIT_PAYLOAD_SIZE and observed == record["sha256"], "fetched bytes differ from the writer payload")
+    if managed is not None:
+        events = managed_observation(run, managed, origin=not binding, rejected=False)
+        if managed_capture is not None:
+            retain_managed_observation(managed_capture, run, events, blob)
     lines = run.stderr.splitlines()
     edge_responses = {}
     lfs_key = None
@@ -405,23 +471,29 @@ def require_edge_fetch(result: dict) -> None:
 def fetch(
     action: str, remote: str, record: dict[str, Any], root: Path, env: dict[str, str], proof: dict | None,
     crab: Path | None, guard: NativeTargetGuard, approved_binding: str, public_export: str,
+    *, managed: dict | None = None, managed_capture: Path | None = None,
 ) -> dict:
     if action == "fetch-warm-local":
         primer = root / "primer"
         primer.mkdir()
-        require_edge_fetch(fetch_once(remote, record, primer, env, None, crab, guard, approved_binding, public_export))
+        require_edge_fetch(fetch_once(remote, record, primer, env, None, crab, guard, approved_binding, public_export, managed=managed))
         # LFS stores verified payloads in the worktree's Git common directory.
         # The Git pack benchmark still starts with a fresh object database.
         measured = primer if crab is not None else root / "measured"
         if crab is None:
             measured.mkdir()
-        result = fetch_once(remote, record, measured, env, None, crab, guard, approved_binding, public_export, primed=True)
+        result = fetch_once(remote, record, measured, env, None, crab, guard, approved_binding, public_export,
+                            primed=True, managed=managed)
         require(result["edge_attempts"] == 0 and result["verified_edge_payloads"] == 0
                 and result["local_payload_hits"] > 0 and (crab is None or result["all_edge_attempts"] == 0),
                 "warm-local fetch must use a verified local payload without an edge request for this scope")
         return result | {"arm": "warm_local"}
     binding = "" if action == "fetch-origin" and proof is None else approved_binding
-    result = fetch_once(remote, record, root, env, proof, crab, guard, binding, public_export)
+    rejected = action == "fetch-rejected"
+    result = fetch_once(remote, record, root, env, proof, crab, guard, binding, public_export,
+                        managed=managed, managed_capture=managed_capture, rejected=rejected)
+    if rejected:
+        return result
     if action == "fetch-origin":
         require(result["all_edge_attempts"] == 0, "origin control observed edge traffic")
         return result | {"arm": "origin"}
@@ -443,7 +515,7 @@ def retire(remote: str, record: dict[str, Any], root: Path, env: dict[str, str],
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("inspect", "publish", "fetch", "fetch-origin", "fetch-warm-local", "retire"))
+    parser.add_argument("action", choices=("inspect", "publish", "fetch", "fetch-origin", "fetch-warm-local", "fetch-rejected", "retire"))
     parser.add_argument("--fixture", required=True, type=Path)
     parser.add_argument("--configuration-sha256", required=True)
     parser.add_argument("--receipt", type=Path, help="required for publication, fetch and retirement")
@@ -459,6 +531,7 @@ def main() -> int:
     parser.add_argument("--hydration-pointer", type=Path)
     parser.add_argument("--hydration-pointer-sha256")
     parser.add_argument("--service-lfs-payload", type=Path, help="fixture-pinned LFS bytes for native service publication")
+    parser.add_argument("--managed-issuer-capture", type=Path, help="new private directory for the managed product observation")
     args = parser.parse_args()
     try:
         require(matches(COMMIT, args.source_sha) and matches(RUN_NUMBER, args.run_id)
@@ -468,10 +541,15 @@ def main() -> int:
         scope = fixture["scope"]
         edge, access, _, family, _ = scope_parts(scope)
         service = is_direct_service_scope(scope)
+        managed = "managed_url" in fixture
+        capture_allowed = managed and args.action in ("fetch", "fetch-origin", "fetch-rejected")
+        require((args.managed_issuer_capture is None or capture_allowed)
+                and (args.action != "fetch-rejected" or (managed and args.managed_issuer_capture is not None)),
+                "managed issuer capture requires one approved managed fetch arm")
         native_publication = is_direct_sdk_git_scope(scope) or is_direct_desktop_git_scope(scope) or service
-        require(requires_cli_workload(scope)
+        require(requires_cli_workload(scope) or managed
                 or (native_publication and args.action in ("publish", "retire") and fixture["view_suffix"] == ""),
-                "workload needs a direct CLI scope or a native publication for a direct SDK, desktop, or service scope")
+                "workload needs an approved CLI fixture or a native publication for a direct SDK, desktop, or service scope")
         content = None
         if args.hydration_pointer is not None or args.hydration_pointer_sha256 is not None:
             require(is_direct_sdk_git_scope(fixture["scope"]) and access == "private" and args.action == "publish"
@@ -498,7 +576,13 @@ def main() -> int:
         with TemporaryDirectory(prefix="crab-cdn-git-", dir=args.scratch) as temporary:
             root = Path(temporary).resolve()
             target = {"origin": fixture["native_origin"], "repository_prefix": fixture["fixture_prefix"]}
+            managed_read = managed and args.action.startswith("fetch")
+            if managed_read:
+                remote = fixture["managed_url"]
+                target["managed_url"] = remote
             env = git_environment(args.helper, root, target)
+            if managed_read:
+                env["CRAB_LOG"] += f",{MANAGED_TARGET}=debug"
             if args.action in ("inspect", "publish"):
                 prepare_public_export(args, fixture, None)
                 guard = NativeTargetGuard(args.helper, args.source_sha, target, None)
@@ -518,7 +602,8 @@ def main() -> int:
                 if args.action == "retire":
                     result = retire(remote, record, root, env, guard)
                 else:
-                    result = fetch(args.action, remote, record, root, env, proof, crab, guard, approved_binding, public_export)
+                    result = fetch(args.action, remote, record, root, env, proof, crab, guard, approved_binding, public_export,
+                                   managed=fixture if managed_read else None, managed_capture=args.managed_issuer_capture)
                     if proof is not None:
                         write_transition(proof, record, result, args.transition_output, args.before_transition)
                         if proof["phase"] == "after":

@@ -1,4 +1,4 @@
-//! Operator-owned CDN bindings for direct repositories.
+//! Operator-owned CDN bindings and fixture read guards.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -23,6 +23,8 @@ pub(crate) struct QualificationTarget {
     pub(crate) repository_prefix: String,
     #[serde(default)]
     pub(crate) read: Option<QualificationRead>,
+    #[serde(default)]
+    pub(crate) managed_url: Option<String>,
 }
 
 #[derive(Deserialize, PartialEq, Eq)]
@@ -57,6 +59,23 @@ impl QualificationRead {
 }
 
 impl QualificationTarget {
+    pub(crate) fn verify_repository(&self, managed_fetch: Option<&str>) -> Result<()> {
+        if self.managed_url.as_deref() != managed_fetch
+            || (managed_fetch.is_some()
+                && !self.read.as_ref().is_some_and(|read| {
+                    read.mount_global_prefix_sha256.is_none()
+                        && read.public_export_sha256.is_empty()
+                }))
+        {
+            return Err(CrabError::AuthFailed {
+                path:
+                    "the repository or operation differs from the approved CDN qualification action"
+                        .into(),
+            });
+        }
+        Ok(())
+    }
+
     pub(crate) fn verify(&self, store: &Store, prefix: &str) -> Result<()> {
         let effective = store
             .storage_scope()
@@ -464,6 +483,7 @@ mod tests {
                 origin: origin.into(),
                 repository_prefix: prefix.into(),
                 read: None,
+                managed_url: None,
             };
             assert!(expected.require_exact(Some(origin), prefix).is_ok());
             for (actual, path) in [
@@ -550,6 +570,7 @@ mod tests {
             origin: origin.into(),
             repository_prefix: prefix.into(),
             read: None,
+            managed_url: None,
         };
         let base = Store::new(Arc::new(InMemory::new()))
             .with_target_identity([1; 32])
@@ -587,6 +608,7 @@ mod tests {
         let expected = QualificationTarget {
             origin: origin.into(),
             repository_prefix: prefix.clone(),
+            managed_url: None,
             read: Some(QualificationRead {
                 binding_sha256: String::new(),
                 cache_root_sha256: qualification_digest("scratch-cache"),
@@ -850,4 +872,32 @@ mod tests {
         let fresh = Path::from(format!("{prefix}/v2/pack-layers/bb/{}", "b".repeat(64)));
         assert!(routed.cdn_attempt(&fresh).is_none());
     }
+}
+#[test]
+fn qualification_pins_a_managed_fetch_to_its_logical_repository() {
+    let url = "crab://issuer.example/org/models";
+    let mut expected: QualificationTarget = serde_json::from_value(serde_json::json!({
+        "origin": "s3://qualification-bucket",
+        "repository_prefix": "crab-cdn-qualification/approved",
+        "managed_url": url,
+        "read": {
+            "binding_sha256": "a".repeat(64),
+            "cache_root_sha256": "b".repeat(64),
+            "public_export_sha256": "",
+        },
+    }))
+    .unwrap();
+
+    assert!(expected.verify_repository(Some(url)).is_ok());
+    assert!(expected.verify_repository(None).is_err());
+    assert!(
+        expected
+            .verify_repository(Some("crab://issuer.example/org/neighbor"))
+            .is_err()
+    );
+    expected.read = None;
+    assert!(expected.verify_repository(Some(url)).is_err());
+    expected.managed_url = None;
+    assert!(expected.verify_repository(Some(url)).is_err());
+    assert!(expected.verify_repository(None).is_ok());
 }

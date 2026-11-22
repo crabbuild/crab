@@ -821,11 +821,33 @@ Run the same product read in a fresh process and cache for each role.
 - `mismatched_v2` receives HTTP 201 with a different binding approval from
   the issuer's controlled fixture. The client rejects that grant.
 
-Set `CRAB_LOG=crab_auth::managed::cdn=debug,crab_storage::cdn::transfer=debug,crab_storage::native_read=debug`
-and redirect each process's stderr to its `<role>/stderr.jsonl` on the protected
-worker. Record the process's exit status in `<role>/exit-code` after it exits.
-For each successful role, save the exact reconstructed file as
-`<role>/payload`. Both rejected roles should exit with no payload file.
+For private CLI Git, include the exact managed URL (for example,
+`crab://issuer.example/org/repo`) as `managed_url` in the approved fixture JSON.
+Leave `view_suffix` empty. Publish the fixture once with
+`run_cdn_git_workload.py publish` and use that receipt across all four arms.
+The worker publishes and retires the temporary ref through the native bucket
+and runs ordinary `git fetch` against the managed URL. The guard checks the
+logical URL, native origin, physical prefix, active viewer binding, and
+isolated cache before admitting repository reads.
+
+Run `run_cdn_git_workload.py` with the same fixture, receipt, candidate, and
+workflow identity for every arm on the protected worker. Configure the
+issuer's protected test policy for each role before the corresponding
+invocation.
+
+| Role | Workload action | Extra argument |
+|---|---|---|
+| `approved_v2` | `fetch` | `--managed-issuer-capture <roles>/approved_v2` |
+| `v1_peer` | `fetch-origin` | `--managed-issuer-capture <roles>/v1_peer` |
+| `denied_v2` | `fetch-rejected` | `--managed-issuer-capture <roles>/denied_v2` |
+| `mismatched_v2` | `fetch-rejected` | `--managed-issuer-capture <roles>/mismatched_v2` |
+
+The v1 policy must return a direct native grant for the same physical
+repository. Each action creates its role directory with the allowlisted
+trace in `stderr.jsonl`, the Git process status in `exit-code`, and the
+verified `payload` for a successful fetch. For another managed consumer,
+capture those same files from its normal product operation with
+`CRAB_LOG=crab_auth::managed::cdn=debug,crab_storage::cdn::transfer=debug,crab_storage::native_read=debug`.
 
 ```bash
 python3 -B crab/scripts/e2e/collect_cdn_managed_issuer.py \
@@ -1060,6 +1082,18 @@ allowed to read the native fixture. On S3, the probe uses the AWS SDK's
 credential chain, including `AWS_PROFILE` for a named profile. On GCS and
 Azure, configure the storage client's native credentials for the fixture.
 [AWS SDK for Rust credential chain](https://docs.aws.amazon.com/sdk-for-rust/latest/dg/credproviders.html)
+
+For a local run backed by an `aws login --profile crab` session, configure a
+separate AWS process profile and set `AWS_PROFILE=crab-cdn-local` for the
+Crab writer and probe. Set the fixture bucket's region in the process profile.
+The AWS CLI refreshes temporary credentials while the login session is valid.
+Protected CI uses workload identity. [AWS CLI login credentials](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sign-in.html)
+
+```ini
+[profile crab-cdn-local]
+credential_process = aws configure export-credentials --profile crab --format process
+region = us-east-1
+```
 
 ```bash
 CARGO_TARGET_DIR="$measurement_cargo_target" cargo build --locked -p crab --example cdn-native-ref

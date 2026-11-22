@@ -35,6 +35,8 @@ BODY_LIMIT = 1024 * 1024
 VIEW_SUFFIX = re.compile(r"/acl-views/v2/[a-f0-9]{64}/(?:0|[1-9][0-9]{0,19})-[a-f0-9]{64}")
 SAFE_COMPONENT = re.compile(r"[a-zA-Z0-9._-]+")
 REPOSITORY_PREFIX = re.compile(r"[a-zA-Z0-9._-]+(?:/[a-zA-Z0-9._-]+)*")
+MANAGED_AUTHORITY = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+MANAGED_SLUG = re.compile(r"[a-z0-9._@+=,-]+")
 DEPLOYMENT_FIELDS = {
     "cloudfront": {"distribution_id", "region"},
     "cloud-cdn": {"project", "forwarding_rule"},
@@ -79,7 +81,7 @@ def approved_fixture(path: Path, configuration_sha256: str, *, operator_binding:
     fixture = decode(raw)
     require(isinstance(fixture, dict) and isinstance(fixture.get("scope"), str),
             "fixture must identify a scope")
-    edge, access, _, family, _ = scope_parts(fixture["scope"])
+    edge, access, consumer, family, profile = scope_parts(fixture["scope"])
     expected = {
         "scope", "base_url", "native_origin", "fixture_prefix", "view_suffix", "neighbor_prefix",
         "object_path", "size", "sha256",
@@ -93,6 +95,8 @@ def approved_fixture(path: Path, configuration_sha256: str, *, operator_binding:
             expected |= {"export_origin", "source_placement"}
         else:
             expected |= {"unrelated_control", "viewer_issuer"} & fixture.keys()
+            if (consumer, family, profile) == ("cli", "git", "managed"):
+                expected |= {"managed_url"} & fixture.keys()
         expected |= {"deployment"} & fixture.keys()
     fields(fixture, expected, "CDN fixture")
     if not operator_binding:
@@ -105,6 +109,16 @@ def approved_fixture(path: Path, configuration_sha256: str, *, operator_binding:
 
         issuer_settings(fixture)
     fixture_repository_prefix(fixture, access, family, operator_binding=operator_binding)
+    if "managed_url" in fixture:
+        locator = fixture["managed_url"]
+        require(isinstance(locator, str), "invalid managed qualification repository")
+        parsed = urlsplit(locator)
+        parts = parsed.path.split("/")
+        require(len(locator) <= 255 and parsed.scheme == "crab" and len(parsed.netloc) <= 253
+                and all(matches(MANAGED_AUTHORITY, label) for label in parsed.netloc.split("."))
+                and len(parts) == 3 and all(matches(MANAGED_SLUG, part) and part not in {".", ".."} for part in parts[1:])
+                and locator == f"crab://{parsed.netloc}{parsed.path}" and fixture["view_suffix"] == "",
+                "managed qualification needs an exact repository-local logical URL")
     origin_bucket(fixture["native_origin"], edge)
     if access == "public":
         origin_bucket(fixture["export_origin"], edge)
