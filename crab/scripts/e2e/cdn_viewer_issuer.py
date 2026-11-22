@@ -11,7 +11,7 @@ from datetime import datetime
 from urllib.parse import SplitResult, parse_qsl, quote, urlsplit
 
 from run_cdn_transport_checks import (
-    FAMILY_ROOTS, fixture_base, fixture_key, fixture_object_prefix, https_response,
+    FAMILY_ROOTS, fixture_base, fixture_repository_prefix, fixture_object_prefix, https_response,
     native_remote, private_viewer_headers, viewer_policy,
 )
 
@@ -95,7 +95,7 @@ def github_id_token(audience: str) -> str:
 
 def approved_credential(fixture: dict, edge: str, family: str, response: dict) -> dict[str, str]:
     source = fixture["fixture_prefix"]
-    physical = fixture_key(fixture, "private", family)
+    physical = fixture_repository_prefix(fixture, "private", family)
     global_prefix = f"{physical}/.crab" if physical != source else None
     expected = {"provider", "credentials", "expires_at", "permissions", "cdn"}
     if global_prefix is not None:

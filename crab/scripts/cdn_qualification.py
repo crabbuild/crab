@@ -75,6 +75,7 @@ PRIVATE_CHECKS = WARM_DENIAL_CHECKS | {
 }
 PUBLIC_EXPORT_CHECK = "approved_public_export"
 HISTORICAL_ORIGIN_CHECK = "historical_origin"
+PUBLIC_TRANSITION_CHECK = "public_export_transition"
 HISTORICAL_KINDS = {
     "cloudfront": {"versionId"},
     "cloud-cdn": {"generation"},
@@ -84,8 +85,12 @@ MAX_HISTORICAL_OBJECT_BYTES = 1024 * 1024
 MAX_HISTORICAL_VERSIONS = 8
 HISTORICAL_VERSION_FIELDS = {"kind", "selector_sha256", "sha256", "size"}
 PUBLIC_EXPORT_DIR = "public-export"
+PUBLIC_EXPORT_BEFORE = "before"
 PUBLIC_EXPORT_FILES = ("inventory.json", "publication.json")
-PUBLIC_CHECKS = {PUBLIC_EXPORT_CHECK, HISTORICAL_ORIGIN_CHECK, "live_origin_denied", "export_origin_access", "public_listing_denied"}
+PUBLIC_CHECKS = {
+    PUBLIC_EXPORT_CHECK, HISTORICAL_ORIGIN_CHECK, PUBLIC_TRANSITION_CHECK, "live_origin_denied",
+    "export_origin_access", "public_listing_denied",
+}
 CLEANUP_INVENTORIES = {
     "cloudfront": ({"versions_and_delete_markers": "empty"},),
     "cloud-cdn": ({"generations": "empty", "soft_deleted": "empty"},
@@ -443,18 +448,91 @@ def verify_historical_origin(
             == registration["historical_origin_sha256"], "observed native history differs from preregistration")
 
 
-def verify_public_export(
-    directory: Path, report: dict[str, Any], registration: dict[str, Any], policy: dict[str, Any],
-    reads: dict[str, list[dict[str, Any]]], native_reads: set[str], cleanup_targets: dict[str, Any], history: Any,
-) -> None:
-    root = directory / PUBLIC_EXPORT_DIR
+def verified_publication(root: Path, approval: str) -> tuple:
     require(root.is_dir() and not root.is_symlink(), "public qualification needs retained publication inputs")
     require(all((root / name).is_file() and not (root / name).is_symlink() for name in PUBLIC_EXPORT_FILES),
             "public qualification needs the exact approved inventory and publication receipt")
     try:
-        binding, entries = read_publication(root, registration["publication_sha256"])
+        return read_publication(root, approval)
     except (ExportError, ValueError, OSError) as error:
         raise CdnEvidenceError(f"invalid public export publication evidence: {error}") from None
+
+
+def verify_public_transition(
+    value: Any, directory: Path, report: dict[str, Any], registration: dict[str, Any],
+    binding: dict[str, Any], entries: Any, sealed_at: int,
+) -> None:
+    trace = fields(value, CDN_PROVENANCE_FIELDS | {"schema", "platform", "key_sha256", "native_publication", "before", "after"},
+                   "public export transition trace")
+    require(trace["schema"] == "crab.cdn-public-transition/v1"
+            and all(trace[key] == report[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}),
+            "public export transition does not match the release row and workflow attempt")
+    previous_approval = registration["previous_publication_sha256"]
+    previous, previous_entries, previous_seal = verified_publication(directory / PUBLIC_EXPORT_DIR / PUBLIC_EXPORT_BEFORE,
+                                                                      previous_approval)
+    require(all(previous[key] == binding[key] for key in binding.keys() - {"inventory_sha256"}),
+            "public export transition must keep the same source, export and viewer binding")
+    def keys(publication: dict[str, Any], inventory: Any) -> dict[str, Any]:
+        return {hashlib.sha256(f"{publication['repository_prefix']}/{entry.path}".encode()).hexdigest(): entry
+                for entry in inventory}
+
+    key = trace["key_sha256"]
+    prior = keys(previous, previous_entries)
+    latest = keys(binding, entries)
+    require(matches(SHA256, key) and key in latest, "public transition object is missing from the sealed export")
+    require(key not in prior, "the transition object was already approved before the native-only read")
+    require(all(latest.get(identity) == entry for identity, entry in prior.items()),
+            "the transition export must preserve previously approved objects")
+    family = scope_parts(report["scope"])[3]
+    path = latest[key].path
+    observed_family = ("git" if path.startswith("v2/pack-layers/")
+                       else "lfs" if path.startswith("lfs/objects/") else "capsule")
+    require(observed_family == family, "public transition object must match the selected read family")
+    native = fields(trace["native_publication"], {"reference_sha256", "visible_at_unix_ms"}, "transition native publication")
+    require(matches(SHA256, native["reference_sha256"]) and positive(native["visible_at_unix_ms"]),
+            "public transition needs a visible native publication")
+    if requires_git_workload(report["scope"]):
+        publication = validate_git_publication(read_git_record(directory / GIT_PRODUCT_DIR / "publication.json"), report)
+        reference = deployment_component_digest({"ref": publication["ref"], "oid": publication["oid"]})
+        require(publication["published"] and native == {
+            "reference_sha256": reference, "visible_at_unix_ms": publication["visible_at_unix_ms"],
+        }, "public transition must use the ordinary Git workload's confirmed native publication")
+    records = {"action", "receipt_sha256", "key_sha256", "reference_sha256", "result_sha256", "result_bytes",
+               "started_at_unix_ms", "finished_at_unix_ms", "edge_attempts", "verified_edge_key_sha256", "binding_active"}
+    product = report["product_action"]
+    for phase, approval in (("before", previous_approval), ("after", registration["publication_sha256"])):
+        observation = fields(trace[phase], records, f"public transition {phase} action")
+        require(observation["action"] == product["name"] and observation["receipt_sha256"] == approval
+                and observation["key_sha256"] == key and observation["reference_sha256"] == native["reference_sha256"]
+                and observation["result_sha256"] == product["observed_sha256"]
+                and positive(observation["result_bytes"]) and observation["result_bytes"] == product["observed_bytes"]
+                and observation["binding_active"] is True
+                and positive(observation["started_at_unix_ms"]) and positive(observation["finished_at_unix_ms"])
+                and observation["started_at_unix_ms"] <= observation["finished_at_unix_ms"],
+                "public transition needs the same verified product result with each active approval")
+    before, after = trace["before"], trace["after"]
+    require(type(before["edge_attempts"]) is int and before["edge_attempts"] == 0 and before["verified_edge_key_sha256"] is None
+            and positive(after["edge_attempts"]) and after["verified_edge_key_sha256"] == key,
+            "public transition must avoid the edge before approval and verify the exact edge object afterward")
+    require(previous_seal <= native["visible_at_unix_ms"] <= before["started_at_unix_ms"]
+            and before["finished_at_unix_ms"] < sealed_at <= after["started_at_unix_ms"],
+            "public export must be sealed after the native-only read and before the verified edge action")
+    if requires_git_workload(report["scope"]):
+        provenance = {key: report[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}}
+        fetch = validate_git_fetch(read_git_record(directory / GIT_PRODUCT_DIR / "fetch.json"), provenance, "edge",
+                                   "public transition Git action")
+        require(after["started_at_unix_ms"] == fetch["started_at_unix_ms"]
+                and after["finished_at_unix_ms"] == fetch["finished_at_unix_ms"]
+                and after["edge_attempts"] == fetch["all_edge_attempts"],
+                "the public transition must use the retained Git product fetch")
+
+
+def verify_public_export(
+    directory: Path, report: dict[str, Any], registration: dict[str, Any], policy: dict[str, Any],
+    reads: dict[str, list[dict[str, Any]]], native_reads: set[str], cleanup_targets: dict[str, Any],
+    history: Any, transition: Any,
+) -> None:
+    binding, entries, sealed_at = verified_publication(directory / PUBLIC_EXPORT_DIR, registration["publication_sha256"])
     require(binding["repository_prefix"] == report["fixture_prefix"]
             and policy["components"]["public-export"] == deployment_component_digest(binding),
             "publication receipt must match the attested public export and approved repository")
@@ -489,6 +567,7 @@ def verify_public_export(
                     and row["status"] == 206 and 0 < row["bytes"] < read["bytes"] for row in reads["exact_range"]),
             "public export proof must cover the same edge, native, and export object")
     verify_historical_origin(history, report, registration, cleanup_targets["native"]["origin_sha256"], read)
+    verify_public_transition(transition, directory, report, registration, binding, entries, sealed_at)
 
 
 def verify_managed_issuer(
@@ -568,6 +647,7 @@ def verify_check_evidence(
     policy = {}
     managed_issuer = None
     history = None
+    transition = None
     deployment_policy_sha256 = registration["deployment_policy_sha256"]
     for name, value in checks.items():
         check = fields(value, {"passed", "trace_sha256"}, name)
@@ -595,6 +675,9 @@ def verify_check_evidence(
             continue
         if name == HISTORICAL_ORIGIN_CHECK:
             history = decoded
+            continue
+        if name == PUBLIC_TRANSITION_CHECK:
+            transition = decoded
             continue
         trace_fields = {"schema", "source_sha", "scope", "configuration_sha256",
                         "workflow_run_id", "workflow_run_attempt", "check", "requests"}
@@ -668,7 +751,8 @@ def verify_check_evidence(
                     "the public export must serve the complete approved object")
         require(any(row["key_sha256"] in native_reads for row in export),
                 "export access must use the same object key as the live source")
-        verify_public_export(directory, report, registration, policy, fixture_reads, native_reads, cleanup_targets, history)
+        verify_public_export(directory, report, registration, policy, fixture_reads, native_reads, cleanup_targets,
+                             history, transition)
     return len(checks), cleanup_at
 
 
@@ -848,9 +932,12 @@ def benchmark_registration(registration: Any) -> dict[str, Any]:
     require(isinstance(registration, dict) and isinstance(registration.get("scope"), str), "benchmark needs a CDN scope")
     _, access, _, _, profile = scope_parts(registration["scope"])
     if access == "public":
-        expected |= {"publication_sha256", "historical_origin_sha256"}
+        expected |= {"publication_sha256", "previous_publication_sha256", "historical_origin_sha256"}
         require(matches(SHA256, registration.get("publication_sha256")),
                 "public benchmark needs the approved publication receipt digest")
+        require(matches(SHA256, registration.get("previous_publication_sha256"))
+                and registration["previous_publication_sha256"] != registration["publication_sha256"],
+                "public benchmark needs the distinct prior publication approval")
         require(matches(SHA256, registration.get("historical_origin_sha256")),
                 "public benchmark needs approved native history")
     if profile == "managed":

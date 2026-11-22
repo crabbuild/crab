@@ -13,7 +13,7 @@ from pathlib import Path
 from cdn_deployment_policy_cli import observe_deployment_policy
 from cdn_viewer_issuer import verify_viewer_scope
 from run_cdn_transport_checks import (
-    FAMILY_ROOTS, approved_fixture, collect, fixture_key, fixture_object_prefix,
+    FAMILY_ROOTS, approved_fixture, collect, fixture_repository_prefix, fixture_object_prefix,
     private_binding_candidate, private_viewer_headers, viewer_headers,
 )
 
@@ -67,7 +67,7 @@ def main() -> int:
             return 0
         require(policy["deployment_policy_sha256"] == args.deployment_policy_sha256,
                 "observed CDN deployment policy differs from the operator's approval")
-        physical = fixture_key(fixture, access, family, operator_binding=True)
+        physical = fixture_repository_prefix(fixture, access, family, operator_binding=True)
         prefix = f"{physical}/{fixture_object_prefix(fixture, FAMILY_ROOTS[family])}/"
         if args.signing_key_file is not None:
             viewer = sign_probe(fixture, edge, physical, prefix, args.signing_key_file, args.signing_key_id)

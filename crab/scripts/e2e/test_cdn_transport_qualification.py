@@ -345,10 +345,10 @@ class CdnTransportQualificationTests(unittest.TestCase):
     def test_refuses_unscoped_global_keys_and_unsafe_paths(self) -> None:
         path = ".crab/xorbs/aa/" + ("a" * 64)
         with self.assertRaisesRegex(ValueError, "protected qualification view"):
-            TRANSPORT.fixture_key(fixture(access="private") | {"object_path": path}, "private", "xorb")
+            TRANSPORT.fixture_repository_prefix(fixture(access="private") | {"object_path": path}, "private", "xorb")
         for relative in ("../" + PACK, PACK.replace("aa/", "bb/"), PACK + "/extra"):
             with self.subTest(relative=relative), self.assertRaisesRegex(ValueError, "immutable read family"):
-                TRANSPORT.fixture_key(fixture() | {"object_path": relative}, "public", "git")
+                TRANSPORT.fixture_repository_prefix(fixture() | {"object_path": relative}, "public", "git")
         self.client.assert_not_called()
 
     def test_public_export_requires_distinct_storage_on_the_same_cloud(self) -> None:
@@ -616,7 +616,7 @@ class CdnTransportQualificationTests(unittest.TestCase):
         same_prefix = {"object_path": "v2/history/source-roots/bb/" + ("b" * 64), "size": 6, "sha256": DIGEST}
         sample = primary | {"object_path": history, "unrelated_control": same_prefix}
         with self.assertRaisesRegex(ValueError, "disjoint immutable grant prefix"):
-            TRANSPORT.fixture_key(sample, "private", "capsule")
+            TRANSPORT.fixture_repository_prefix(sample, "private", "capsule")
 
     def test_attestation_brackets_the_transport_in_one_output_directory(self) -> None:
         import collect_cloudfront_deployment_policy

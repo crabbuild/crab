@@ -13,6 +13,7 @@ const MAX_BYTES: u64 = 8 * 1024 * 1024;
 pub(crate) struct Publication {
     pub(crate) source_origin: String,
     pub(crate) source_placement: Placement,
+    pub(crate) approval_digest: sha2::digest::Output<Sha256>,
     pub(crate) sizes: BTreeMap<String, u64>,
 }
 
@@ -28,6 +29,7 @@ struct Receipt {
     base_url: String,
     deployment: String,
     inventory_sha256: String,
+    sealed_at_unix_ms: u64,
     objects: Vec<Entry>,
 }
 
@@ -150,8 +152,8 @@ impl Publication {
         }
         let mut bytes = Vec::new();
         input.take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > MAX_BYTES || format!("{:x}", Sha256::digest(&bytes)) != file.sha256
-        {
+        let approval_digest = Sha256::digest(&bytes);
+        if bytes.len() as u64 > MAX_BYTES || format!("{approval_digest:x}") != file.sha256 {
             return Err(invalid("receipt differs from the approved SHA-256"));
         }
         let receipt: Receipt =
@@ -171,6 +173,7 @@ impl Publication {
             || receipt.deployment.is_empty()
             || receipt.deployment.chars().any(char::is_control)
             || !canonical_digest(&receipt.inventory_sha256)
+            || receipt.sealed_at_unix_ms == 0
             || receipt.objects.is_empty()
         {
             return Err(invalid(
@@ -198,6 +201,7 @@ impl Publication {
         Ok(Self {
             source_origin: receipt.source_origin,
             source_placement: receipt.source_placement,
+            approval_digest,
             sizes,
         })
     }
@@ -257,6 +261,7 @@ pub fn write_publication_fixture(
         "base_url": base,
         "deployment": "fixture",
         "inventory_sha256": "b".repeat(64),
+        "sealed_at_unix_ms": 1,
         "objects": [{
             "path": relative_key,
             "size": size,

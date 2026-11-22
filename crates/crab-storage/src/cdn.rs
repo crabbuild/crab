@@ -27,6 +27,7 @@ pub use policy::{CdnConsumer, CdnPolicy, CdnProfile, CdnReadFamily, CdnVisibilit
 #[cfg(any(test, feature = "test-support"))]
 pub use publication::write_publication_fixture;
 pub use telemetry::GitPayloadObservation;
+pub(crate) use telemetry::PublicTransitionObservation;
 
 use crate::{
     Result, StorageError, StorageProviderKind, Store,

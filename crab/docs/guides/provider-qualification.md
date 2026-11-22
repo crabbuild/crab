@@ -572,6 +572,53 @@ read and denial, and export access probe must describe the same receipted
 object. The recorded body digest and length must match its inventory entry.
 The cleanup trace must name the receipt's source and destination.
 
+### Verify a public export transition
+
+Retain the active inventory and sealed receipt under
+`public-export/before/` before the native publish. Register its digest as
+`previous_publication_sha256`. Keep the current inventory and sealed receipt
+at the top level of `public-export/`, with its digest in `publication_sha256`.
+The publisher records its seal time after destination readback.
+
+For direct CLI Git and capsule qualification, use the normal Git workload
+to publish the test ref and retain its publication receipt. Identify the
+new repository-relative immutable object selected by that ref. Fetch
+while the earlier receipt is active and excludes that object. Use the same
+ref, object and approved fixture on both fetches. Each fetch starts with
+fresh Git and Crab caches.
+
+```bash
+git_workload_args=(
+  --fixture "$approved_fixture_json" --configuration-sha256 "$configuration_sha256"
+  --receipt "$row_directory/git-product/publication.json"
+  --scratch "$scratch_directory" --helper "$qualification_helper"
+  --source-sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
+)
+python3 -B crab/scripts/e2e/run_cdn_git_workload.py fetch-origin "${git_workload_args[@]}" \
+  --transition-object "$new_object_path" --export-approval "$row_directory/public-export/before" \
+  --transition-output "$native_only_observation"
+```
+
+Stage the updated inventory with public delivery disabled. Preserve existing
+approved entries and add the new object. Use the provider's public publisher
+to verify and seal it. Re-enable the dedicated export, activate the new
+receipt in the trusted Crab configuration and repeat the normal fetch.
+
+```bash
+python3 -B crab/scripts/e2e/run_cdn_git_workload.py fetch "${git_workload_args[@]}" \
+  --transition-object "$new_object_path" --export-approval "$row_directory/public-export" \
+  --before-transition "$native_only_observation" \
+  --transition-output "$row_directory/traces/public_export_transition.json" \
+  > "$row_directory/git-product/fetch.json"
+```
+
+The worker checks the active receipt digest and exact object fingerprint
+reported by Crab. The first fetch must see the object as unlisted and
+make zero CDN payload requests. The second fetch must accept verified edge
+bytes for that object. The release verifier checks both receipts, the
+native ref, the seal time, and the verified result. Other supported
+consumers still need equivalent observations from their ordinary action.
+
 ### Verify retained native versions
 
 Use a dedicated public qualification source with retained versions of the

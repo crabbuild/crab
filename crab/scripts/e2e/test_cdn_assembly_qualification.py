@@ -113,8 +113,10 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         transport = self.canary_inputs("gcs")
         self.assertEqual(self.assemble(digest, transport=transport), 1)
         public = Path(self.row) / fixture.CDN.PUBLIC_EXPORT_DIR
-        for name in fixture.CDN.PUBLIC_EXPORT_FILES:
-            self.assertEqual((self.output / public / name).read_bytes(), (self.root / public / name).read_bytes())
+        for version in ("", fixture.CDN.PUBLIC_EXPORT_BEFORE):
+            for name in fixture.CDN.PUBLIC_EXPORT_FILES:
+                self.assertEqual((self.output / public / version / name).read_bytes(),
+                                 (self.root / public / version / name).read_bytes())
         proof = f"{fixture.CDN.PUBLIC_EXPORT_CHECK}.json"
         self.assertEqual((self.output / self.row / "traces" / proof).read_bytes(), (transport / "gcs" / proof).read_bytes())
 

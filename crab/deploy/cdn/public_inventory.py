@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
+import time
 
 
 SCHEMA = "crab.cdn-export.v1"
@@ -163,20 +164,23 @@ def read_publication(directory, approved_sha256):
     raw, receipt = read_document(directory / "publication.json")
     if hashlib.sha256(raw).hexdigest() != approved_sha256:
         raise ExportError("publication receipt differs from the preregistered SHA-256")
-    exact_fields(receipt, "schema objects " + " ".join(PUBLICATION_BINDING_FIELDS))
+    exact_fields(receipt, "schema objects sealed_at_unix_ms " + " ".join(PUBLICATION_BINDING_FIELDS))
     viewer_url(receipt["base_url"])
     if any(not isinstance(receipt[key], str) or not receipt[key]
            for key in PUBLICATION_BINDING_FIELDS - {"source_placement", "export_placement"}):
         raise ExportError("invalid public export binding")
+    sealed_at = receipt["sealed_at_unix_ms"]
+    if type(sealed_at) is not int or sealed_at <= 0:
+        raise ExportError("public export receipt needs its seal time")
     inventory_raw, inventory = read_document(directory / "inventory.json")
     source, source_placement, prefix, objects = parse_inventory(inventory, 2**64 - 1)
     expected = publication_receipt(source, receipt["export_origin"], source_placement, receipt["export_placement"],
                                    prefix, receipt["base_url"], receipt["deployment"],
                                    hashlib.sha256(inventory_raw).hexdigest(), objects)
     # Canonical JSON comparison also distinguishes booleans from integer sizes.
-    if json.dumps(receipt, sort_keys=True) != json.dumps(expected, sort_keys=True):
+    if json.dumps(receipt, sort_keys=True) != json.dumps(expected | {"sealed_at_unix_ms": sealed_at}, sort_keys=True):
         raise ExportError("publication receipt does not match the exact approved inventory")
-    return {name: receipt[name] for name in PUBLICATION_BINDING_FIELDS}, objects
+    return {name: receipt[name] for name in PUBLICATION_BINDING_FIELDS}, objects, sealed_at
 
 
 def write_publication(path, publish):
@@ -184,7 +188,7 @@ def write_publication(path, publish):
         raise ExportError("publication receipt path must be new")
     # Expose the complete receipt at a new path, even if publishers race.
     with TemporaryDirectory(prefix=".crab-export-publication-", dir=path.parent) as scratch:
-        receipt = publish()
+        receipt = publish() | {"sealed_at_unix_ms": time.time_ns() // 1_000_000}
         raw = (json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n").encode()
         if len(raw) > MAX_INVENTORY_BYTES:
             raise ExportError("publication receipt exceeds the supported size")

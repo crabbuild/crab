@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cdn_qualification import (  # noqa: E402
     CDN_PROVENANCE_FIELDS, COMMIT, EXPIRY_RANGE_CHECK, GIT_BENCHMARK_DIR, GIT_PRODUCT_DIR, LABEL, PROVIDERS,
-    PROVIDER_FOR_EDGE, PUBLIC_EXPORT_CHECK, PUBLIC_EXPORT_DIR, PUBLIC_EXPORT_FILES, RUN_NUMBER, SCHEMA, SHA256,
+    PROVIDER_FOR_EDGE, PUBLIC_EXPORT_BEFORE, PUBLIC_EXPORT_CHECK, PUBLIC_EXPORT_DIR, PUBLIC_EXPORT_FILES, RUN_NUMBER, SCHEMA, SHA256,
     collect_git_performance, collect_git_product_action, decode, fields, matches, read_trace, release_scopes, require,
     required_check_names, required_platform_rows, requires_git_workload, scope_parts, verify_bundle_row,
     verify_deployment_policy_trace,
@@ -132,15 +132,16 @@ def assemble_bundle(
             (destination / "traces").mkdir(parents=True)
             if access == "public":
                 publication = inputs / row / PUBLIC_EXPORT_DIR
-                require(publication.is_dir() and not publication.is_symlink(),
-                        f"{row} needs the public export publication inputs")
                 retained = destination / PUBLIC_EXPORT_DIR
-                retained.mkdir()
-                for name in PUBLIC_EXPORT_FILES:
-                    path = publication / name
-                    require(path.is_file() and not path.is_symlink(), f"{row} needs a regular publication artifact")
-                    raw, _ = read_document(path)
-                    (retained / name).write_bytes(raw)
+                for version in ("", PUBLIC_EXPORT_BEFORE):
+                    origin, target = publication / version, retained / version
+                    require(origin.is_dir() and not origin.is_symlink(), f"{row} needs the public export publication inputs")
+                    target.mkdir()
+                    for name in PUBLIC_EXPORT_FILES:
+                        path = origin / name
+                        require(path.is_file() and not path.is_symlink(), f"{row} needs a regular publication artifact")
+                        raw, _ = read_document(path)
+                        (target / name).write_bytes(raw)
             checks = {}
             for check in sorted(names):
                 filename = f"{check}.json"

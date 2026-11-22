@@ -14,7 +14,10 @@ use tokio_util::sync::CancellationToken;
 use super::{StorageReadKind, Store};
 use crate::{
     Result, StorageError,
-    cdn::{CdnAccess, CdnGet, CdnReadFamily, CdnRoute, CdnViewer, GitPayloadObservation},
+    cdn::{
+        CdnAccess, CdnGet, CdnReadFamily, CdnRoute, CdnViewer, GitPayloadObservation,
+        PublicTransitionObservation,
+    },
     transport_read_admission,
 };
 
@@ -213,12 +216,20 @@ impl Store {
         if self.read_prefix_target_identity(path) != Some(&route.target)
             || (family.global() && !route.allow_global)
             || (!route.transport.is_loopback() && !route.families.contains(&family))
-            || route
-                .publication
-                .as_ref()
-                .is_some_and(|receipt| !receipt.sizes.contains_key(path.as_ref()))
         {
             return None;
+        }
+        if let Some(receipt) = &route.publication {
+            let listed = receipt.sizes.contains_key(path.as_ref());
+            if let Some(policy) = route.policy()
+                && let Some(observation) =
+                    PublicTransitionObservation::new(receipt.approval_digest, path.as_ref())
+            {
+                observation.record(policy, family, if listed { "listed" } else { "unlisted" });
+            }
+            if !listed {
+                return None;
+            }
         }
         Some(CdnReadAttempt {
             store: self.clone(),
@@ -305,7 +316,10 @@ impl CdnReadAttempt {
     /// Capture the edge source for a caller-owned Git payload verification.
     #[must_use]
     pub fn git_payload_observation(&self) -> Option<GitPayloadObservation> {
-        GitPayloadObservation::new(self.route.policy()?, self.family)
+        let public = self.route.publication.as_ref().and_then(|receipt| {
+            PublicTransitionObservation::new(receipt.approval_digest, self.path.as_ref())
+        });
+        GitPayloadObservation::new(self.route.policy()?, self.family, public)
     }
 
     /// Check direct edge delivery against caller-verified bytes from the native target.

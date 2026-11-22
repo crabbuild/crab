@@ -16,18 +16,21 @@ from tempfile import TemporaryDirectory
 from typing import Any
 from uuid import uuid4
 
-from collect_cdn_product_metrics import TARGET, measure
-from run_cdn_transport_checks import approved_fixture, native_remote
+from collect_cdn_product_metrics import ROUTE, ROUTE_FIELDS, TARGET, measure
+from run_cdn_transport_checks import approved_fixture, fixture_object_key, native_remote
 
 from cdn_qualification import (
-    COMMIT, GIT_OID, GIT_PAYLOAD_SIZE, RUN_NUMBER, decode, matches, read_git_record, require,
-    requires_git_workload, scope_parts, validate_git_publication,
+    COMMIT, GIT_OID, GIT_PAYLOAD_SIZE, PROVIDER_FOR_EDGE, RUN_NUMBER, decode, deployment_component_digest,
+    fields, matches, read_git_record, require, requires_git_workload, scope_parts, validate_git_publication,
+    verified_publication,
 )
+from public_inventory import ExportError, read_document
 
 
 PAYLOAD = "cdn-qualification.bin"
 ORIGIN_TARGET = "crab::cdn::qualification"
 ORIGIN_EVENT = {"message": "CDN qualification verified native origin"}
+PUBLIC_TRANSITION_TARGET = "crab_storage::cdn::public_transition"
 
 
 def run_git(*args: str, root: Path, env: dict[str, str]) -> subprocess.CompletedProcess[bytes]:
@@ -55,7 +58,7 @@ def git_environment(helper: Path, root: Path, native_origin: str) -> dict[str, s
         "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_EXEC_PATH": str(helper.absolute().parent),
         "GIT_TERMINAL_PROMPT": "0", "CRAB_CACHE_DIR": str(root / "cache"),
-        "CRAB_LOG": f"{TARGET}=debug,{ORIGIN_TARGET}=debug",
+        "CRAB_LOG": f"{TARGET}=debug,{ORIGIN_TARGET}=debug,{PUBLIC_TRANSITION_TARGET}=debug",
         "CRAB_INTERNAL_CDN_QUALIFICATION_ORIGIN": native_origin,
     }
 
@@ -101,7 +104,87 @@ def publish(remote: str, provenance: dict[str, str], receipt: Path, root: Path, 
     return {"visible_new_ref": True, "native_writes": 1}
 
 
-def fetch_once(remote: str, record: dict[str, Any], root: Path, env: dict[str, str]) -> dict:
+def verify_transition_events(lines: list[bytes], scope: str, proof: dict) -> None:
+    edge, access, consumer, family, profile = scope_parts(scope)
+    selected = (PROVIDER_FOR_EDGE[edge], access, consumer, family, profile)
+    observations = set()
+    for line in lines:
+        if PUBLIC_TRANSITION_TARGET.encode() not in line:
+            continue
+        event = decode(line)
+        if not isinstance(event, dict) or event.get("target") != PUBLIC_TRANSITION_TARGET:
+            continue
+        row = fields(event.get("fields"), ROUTE_FIELDS | {"observation", "approval_sha256", "key_sha256"},
+                     "public export product observation")
+        require(row["message"] == "CDN public export observation"
+                and row["observation"] in ("listed", "unlisted", "verified_edge"),
+                "invalid public export product observation")
+        if tuple(row[key] for key in ROUTE) != selected or row["key_sha256"] != proof["key_sha256"]:
+            continue
+        require(row["approval_sha256"] == proof["receipt_sha256"], "Git fetch loaded a different public export receipt")
+        observations.add(row["observation"])
+    expected = {"unlisted"} if proof["phase"] == "before" else {"listed", "verified_edge"}
+    require(observations == expected, "Git fetch did not prove the selected object's public export transition")
+
+
+def prepare_transition(args: argparse.Namespace, fixture: dict) -> dict | None:
+    if not any((args.transition_object, args.export_approval, args.transition_output, args.before_transition)):
+        return None
+    _, access, _, family, _ = scope_parts(fixture["scope"])
+    require(access == "public" and args.action in ("fetch", "fetch-origin") and args.transition_object
+            and args.export_approval is not None and args.transition_output is not None,
+            "public transition needs the object, export approval and transition output on a public Git fetch")
+    phase = "before" if args.action == "fetch-origin" else "after"
+    require((args.before_transition is not None) == (phase == "after"), "the edge transition requires the native-only observation")
+    key = fixture_object_key(fixture | {"object_path": args.transition_object}, access, family)
+    raw, _ = read_document(args.export_approval / "publication.json")
+    digest = hashlib.sha256(raw).hexdigest()
+    binding, objects, sealed_at = verified_publication(args.export_approval, digest)
+    require(binding["source_origin"] == fixture["native_origin"]
+            and binding["source_placement"] == fixture["source_placement"]
+            and binding["export_origin"] == fixture["export_origin"] and binding["repository_prefix"] == fixture["fixture_prefix"]
+            and binding["base_url"] == fixture["base_url"].rstrip("/"), "public transition approval does not match the fixture")
+    listed = any(obj.path == args.transition_object for obj in objects)
+    require(listed == (phase == "after"), "public transition object membership does not match the phase")
+    require(not args.transition_output.exists() and not args.transition_output.is_symlink(),
+            "public transition observation output must be new")
+    return {"phase": phase, "receipt_sha256": digest, "key_sha256": hashlib.sha256(key.encode()).hexdigest(),
+            "sealed_at_unix_ms": sealed_at}
+
+
+def write_transition(proof: dict, record: dict, result: dict, output: Path, before: Path | None) -> None:
+    phase = proof["phase"]
+    reference = deployment_component_digest({"ref": record["ref"], "oid": record["oid"]})
+    identity = {key: record[key] for key in ("scope", "source_sha", "configuration_sha256", "workflow_run_id", "workflow_run_attempt")}
+    common = identity | {
+        "schema": "crab.cdn-public-transition/v1", "platform": result["platform"], "key_sha256": proof["key_sha256"],
+        "native_publication": {"reference_sha256": reference, "visible_at_unix_ms": record["visible_at_unix_ms"]},
+    }
+    observation = {
+        "action": result["name"], "receipt_sha256": proof["receipt_sha256"], "key_sha256": proof["key_sha256"],
+        "reference_sha256": reference, "result_sha256": result["observed_sha256"], "result_bytes": result["observed_bytes"],
+        "started_at_unix_ms": result["started_at_unix_ms"], "finished_at_unix_ms": result["finished_at_unix_ms"],
+        "edge_attempts": result["all_edge_attempts"], "binding_active": True,
+        "verified_edge_key_sha256": proof["key_sha256"] if phase == "after" else None,
+    }
+    trace = common | {phase: observation}
+    if before is None:
+        require(proof["sealed_at_unix_ms"] <= record["visible_at_unix_ms"] <= result["started_at_unix_ms"],
+                "prior public export must be sealed before the new native publication")
+    else:
+        first = fields(decode(read_git_record(before)), common.keys() | {"before"}, "native-only transition observation")
+        require(all(first[key] == value for key, value in common.items()),
+                "edge transition must follow the matching native-only observation")
+        initial = fields(first["before"], observation.keys(), "native-only product observation")
+        require(initial["finished_at_unix_ms"] < proof["sealed_at_unix_ms"] <= result["started_at_unix_ms"],
+                "public export must be sealed between the native-only and edge fetches")
+        trace["before"] = initial
+    with output.open("x", encoding="utf-8") as destination:
+        json.dump(trace, destination, sort_keys=True)
+        destination.write("\n")
+
+
+def fetch_once(remote: str, record: dict[str, Any], root: Path, env: dict[str, str], proof: dict | None = None) -> dict:
     require(record["published"], "fetch requires a confirmed native publication")
     run_git("init", "--bare", "--template=", "--object-format=sha1", root=root, env=env)
     # Use a new cache and exact refspec so another fetched ref cannot supply the bytes.
@@ -115,7 +198,10 @@ def fetch_once(remote: str, record: dict[str, Any], root: Path, env: dict[str, s
     blob = run_git("cat-file", "blob", f"FETCH_HEAD:{PAYLOAD}", root=root, env=env).stdout
     observed = hashlib.sha256(blob).hexdigest()
     require(len(blob) == GIT_PAYLOAD_SIZE and observed == record["sha256"], "fetched bytes differ from the writer payload")
-    metrics = measure(run.stderr.splitlines(), record["scope"])
+    lines = run.stderr.splitlines()
+    metrics = measure(lines, record["scope"])
+    if proof is not None:
+        verify_transition_events(lines, record["scope"], proof)
     system = "windows" if sys.platform == "win32" else sys.platform
     machine = platform.machine().lower()
     architecture = {"amd64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
@@ -133,7 +219,7 @@ def require_edge_fetch(result: dict) -> None:
     require(result["verified_edge_payloads"] > 0, "fetch did not accept a verified edge payload for the approved scope")
 
 
-def fetch(action: str, remote: str, record: dict[str, Any], root: Path, env: dict[str, str]) -> dict:
+def fetch(action: str, remote: str, record: dict[str, Any], root: Path, env: dict[str, str], proof: dict | None = None) -> dict:
     if action == "fetch-warm-local":
         primer = root / "primer"
         primer.mkdir()
@@ -146,7 +232,7 @@ def fetch(action: str, remote: str, record: dict[str, Any], root: Path, env: dic
                 and result["local_payload_hits"] > 0,
                 "warm-local fetch must use a verified local pack without an edge request for this scope")
         return result | {"arm": "warm_local"}
-    result = fetch_once(remote, record, root, env)
+    result = fetch_once(remote, record, root, env, proof)
     if action == "fetch-origin":
         require(result["all_edge_attempts"] == 0, "origin control observed edge traffic")
         return result | {"arm": "origin"}
@@ -177,6 +263,10 @@ def main() -> int:
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--run-attempt", required=True)
+    parser.add_argument("--transition-object", help="exact repository-relative immutable key selected by the Git fetch")
+    parser.add_argument("--export-approval", type=Path, help="directory with the active public inventory and receipt")
+    parser.add_argument("--transition-output", type=Path, help="retain an observed public transition phase")
+    parser.add_argument("--before-transition", type=Path, help="native-only observation to pair with this edge fetch")
     args = parser.parse_args()
     try:
         require(matches(COMMIT, args.source_sha) and matches(RUN_NUMBER, args.run_id)
@@ -185,6 +275,7 @@ def main() -> int:
         edge, _, _, _, _ = scope_parts(fixture["scope"])
         require(requires_git_workload(fixture["scope"]),
                 "Git workload requires a direct CLI Git or capsule scope")
+        proof = prepare_transition(args, fixture)
         remote = native_remote(fixture, edge)
         provenance = {
             "scope": fixture["scope"], "configuration_sha256": args.configuration_sha256,
@@ -201,9 +292,11 @@ def main() -> int:
                 if args.action == "retire":
                     result = retire(remote, record, root, env)
                 else:
-                    result = fetch(args.action, remote, record, root, env)
+                    result = fetch(args.action, remote, record, root, env, proof)
+                    if proof is not None:
+                        write_transition(proof, record, result, args.transition_output, args.before_transition)
                 result["publication_sha256"] = hashlib.sha256(raw).hexdigest()
-    except (OSError, ValueError) as error:
+    except (ExportError, OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     print(json.dumps(provenance | result, sort_keys=True))

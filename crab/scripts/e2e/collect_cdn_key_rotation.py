@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from cdn_deployment_policy_cli import attest_fixture
-from run_cdn_transport_checks import approved_fixture, fixture_base, fixture_key, request_sample, viewer_expiry, viewer_headers
+from run_cdn_transport_checks import approved_fixture, fixture_base, fixture_object_key, request_sample, viewer_expiry, viewer_headers
 
 from cdn_qualification import (
     COMMIT, KEY_ROTATION_CHECK, MAX_ROTATION_GRANT_SECONDS, RUN_NUMBER, SHA256, VIEWER_KEY_ID, CdnEvidenceError,
@@ -54,7 +54,7 @@ def collect_rotation(
     edge, access, _, family, _ = scope_parts(fixture["scope"])
     require(access == "private", "viewer key rotation requires a private CDN fixture")
     base = fixture_base(fixture["base_url"])
-    key = f"{fixture_key(fixture, access, family)}/{fixture['object_path']}"
+    key = fixture_object_key(fixture, access, family)
     viewers = {"retired": retired, "replacement": replacement}
     grants = {role: grant_metadata(edge, viewer) for role, viewer in viewers.items()}
     old_id, new_id = (grants[role]["key_id"] for role in viewers)

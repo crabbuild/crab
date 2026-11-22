@@ -24,6 +24,7 @@ REGIONS = {"near": "region-1", "distant": "region-2"}
 EXPIRY = 120
 FIXTURE_PREFIX = "crab-cdn-qualification/run-123-2"
 EXPORT_BODY = b"approved"
+PUBLIC_SEAL = 1_011_990
 
 
 def azure_resource(account: str) -> str:
@@ -112,7 +113,7 @@ class CdnQualificationTests(unittest.TestCase):
         self.object_key = "e" * 64
         publication = {}
         if access == "public":
-            publication = {"publication_sha256": self.write_public_export(provider)}
+            publication = self.write_public_export(provider)
         policy_digest = CDN.deployment_policy_digest(edge, access, self.policy_components)
         self.registration = {
             "schema": "crab.cdn-benchmark/v1", "source_sha": COMMIT, "scope": self.scope,
@@ -179,13 +180,17 @@ class CdnQualificationTests(unittest.TestCase):
                 self.managed_issuer_trace()
             elif check == CDN.HISTORICAL_ORIGIN_CHECK:
                 self.historical_origin_trace(edge)
+            elif check == CDN.PUBLIC_TRANSITION_CHECK:
+                continue
             else:
                 self.trace(check, observations.get(check, [edge_hit]))
         if CDN.requires_git_workload(self.scope):
             write_git_measurements(self.directory / CDN.GIT_BENCHMARK_DIR, self.registration, platform)
             self.record_git_product()
+        if access == "public":
+            self.public_transition_trace()
 
-    def write_public_export(self, provider: str) -> str:
+    def write_public_export(self, provider: str) -> dict[str, str]:
         source, export, deployment, source_resource, export_resource, location = {
             "s3": ("s3://source-bucket", "s3://export-bucket", "arn:aws:cloudfront::123456789012:distribution/EDIST",
                    "accounts/111111111111/buckets/source-bucket", "accounts/123456789012/buckets/export-bucket", "us-east-1"),
@@ -198,21 +203,32 @@ class CdnQualificationTests(unittest.TestCase):
         source_placement = {"resource": source_resource, "location": location}
         export_placement = {"resource": export_resource, "location": location}
         root = self.directory / CDN.PUBLIC_EXPORT_DIR
-        root.mkdir(exist_ok=True)
+        previous = root / CDN.PUBLIC_EXPORT_BEFORE
+        previous.mkdir(parents=True, exist_ok=True)
         self.public_origins = {"native": source, "export": export}
         entry = Object("v2/pack-layers/aa/" + "a" * 64, len(EXPORT_BODY), hashlib.sha256(EXPORT_BODY).hexdigest())
+        old_entry = Object("v2/pack-layers/bb/" + "b" * 64, len(EXPORT_BODY), "c" * 64)
         self.object_key = hashlib.sha256(f"{FIXTURE_PREFIX}/{entry.path}".encode()).hexdigest()
         inventory = json_file(root / "inventory.json", {
             "schema": INVENTORY_SCHEMA, "source_origin": source, "repository_prefix": FIXTURE_PREFIX,
             "source_placement": source_placement,
-            "objects": [vars(entry)],
+            "objects": [vars(entry), vars(old_entry)],
         })
         receipt = publication_receipt(source, export, source_placement, export_placement, FIXTURE_PREFIX,
-                                      "https://export.example.com", deployment, inventory, [entry])
+                                      "https://export.example.com", deployment, inventory, [entry, old_entry])
         self.policy_components["public-export"] = CDN.deployment_component_digest({
             name: receipt[name] for name in PUBLICATION_BINDING_FIELDS
         })
-        return json_file(root / "publication.json", receipt)
+        old_inventory = json_file(previous / "inventory.json", {
+            "schema": INVENTORY_SCHEMA, "source_origin": source, "source_placement": source_placement,
+            "repository_prefix": FIXTURE_PREFIX, "objects": [vars(old_entry)],
+        })
+        old_receipt = publication_receipt(source, export, source_placement, export_placement, FIXTURE_PREFIX,
+                                          "https://export.example.com", deployment, old_inventory, [old_entry])
+        return {
+            "publication_sha256": json_file(root / "publication.json", receipt | {"sealed_at_unix_ms": PUBLIC_SEAL}),
+            "previous_publication_sha256": json_file(previous / "publication.json", old_receipt | {"sealed_at_unix_ms": 100}),
+        }
 
     def cleanup_trace(self, access: str, edge: str, **changes: Any) -> None:
         inventories = CDN.CLEANUP_INVENTORIES[edge][0]
@@ -286,6 +302,33 @@ class CdnQualificationTests(unittest.TestCase):
             "versions": [version | {"authorized_status": 206 if edge == "cloudfront" else 200, "anonymous_status": 403}],
         }
         check = CDN.HISTORICAL_ORIGIN_CHECK
+        path = self.directory / "traces" / f"{check}.json"
+        self.report["checks"][check] = {"passed": True, "trace_sha256": json_file(path, trace)}
+
+    def public_transition_trace(self) -> None:
+        reference, visible, start, finish, attempts = "4" * 64, PUBLIC_SEAL - 40, PUBLIC_SEAL + 10, PUBLIC_SEAL + 30, 1
+        if CDN.requires_git_workload(self.scope):
+            records = self.directory / CDN.GIT_PRODUCT_DIR
+            publication = json.loads((records / "publication.json").read_bytes())
+            fetch = json.loads((records / "fetch.json").read_bytes())
+            reference = CDN.deployment_component_digest({"ref": publication["ref"], "oid": publication["oid"]})
+            visible = publication["visible_at_unix_ms"]
+            start, finish, attempts = (fetch[key] for key in ("started_at_unix_ms", "finished_at_unix_ms", "all_edge_attempts"))
+        action = self.report["product_action"]
+        common = {"action": action["name"], "reference_sha256": reference, "key_sha256": self.object_key,
+                  "result_sha256": action["observed_sha256"], "result_bytes": action["observed_bytes"], "binding_active": True}
+        trace = {key: self.report[key] for key in CDN.CDN_PROVENANCE_FIELDS | {"platform"}} | {
+            "schema": "crab.cdn-public-transition/v1",
+            "key_sha256": self.object_key,
+            "native_publication": {"reference_sha256": reference, "visible_at_unix_ms": visible},
+            "before": common | {"receipt_sha256": self.registration["previous_publication_sha256"],
+                                "started_at_unix_ms": visible + 5, "finished_at_unix_ms": visible + 10,
+                                "edge_attempts": 0, "verified_edge_key_sha256": None},
+            "after": common | {"receipt_sha256": self.registration["publication_sha256"],
+                               "started_at_unix_ms": start, "finished_at_unix_ms": finish,
+                               "edge_attempts": attempts, "verified_edge_key_sha256": self.object_key},
+        }
+        check = CDN.PUBLIC_TRANSITION_CHECK
         path = self.directory / "traces" / f"{check}.json"
         self.report["checks"][check] = {"passed": True, "trace_sha256": json_file(path, trace)}
 
@@ -549,7 +592,7 @@ class CdnQualificationTests(unittest.TestCase):
         self.configure("s3", "public", "direct", consumer="sdk")
         inventory = self.directory / CDN.PUBLIC_EXPORT_DIR / "inventory.json"
         document = json.loads(inventory.read_bytes())
-        document["objects"].append({"path": "v2/pack-layers/bb/" + "b" * 64, "sha256": "d" * 64, "size": 60})
+        document["objects"].append({"path": "v2/pack-layers/cc/" + "c" * 64, "sha256": "d" * 64, "size": 60})
         json_file(inventory, document)
         self.rejected("publication receipt does not match the exact approved inventory")
 
@@ -589,6 +632,37 @@ class CdnQualificationTests(unittest.TestCase):
             with self.subTest(changes=changes):
                 self.report["checks"][check]["trace_sha256"] = json_file(path, original | changes)
                 self.rejected(reason)
+
+    def test_public_transition_requires_the_same_verified_action_around_export_sealing(self) -> None:
+        self.configure("s3", "public", "direct")
+        check = CDN.PUBLIC_TRANSITION_CHECK
+        path = self.directory / "traces" / f"{check}.json"
+        raw = path.read_bytes()
+        cases = (
+            ("native_publication", {"reference_sha256": "9" * 64}, "confirmed native publication"),
+            ("before", {"binding_active": False}, "each active approval"),
+            ("before", {"edge_attempts": 1}, "must avoid the edge before approval"),
+            ("before", {"finished_at_unix_ms": PUBLIC_SEAL}, "must be sealed after the native-only read"),
+            ("after", {"verified_edge_key_sha256": "8" * 64}, "verify the exact edge object"),
+            ("after", {"edge_attempts": 2}, "must use the retained Git product fetch"),
+        )
+        for phase, changes, reason in cases:
+            with self.subTest(phase=phase, changes=changes):
+                trace = json.loads(raw)
+                trace[phase].update(changes)
+                self.report["checks"][check]["trace_sha256"] = json_file(path, trace)
+                self.rejected(reason)
+
+    def test_public_transition_requires_the_object_to_be_unlisted_beforehand(self) -> None:
+        self.configure("azure", "public", "direct", consumer="sdk")
+        root = self.directory / CDN.PUBLIC_EXPORT_DIR
+        prior = root / CDN.PUBLIC_EXPORT_BEFORE
+        (prior / "inventory.json").write_bytes((root / "inventory.json").read_bytes())
+        current_receipt = json.loads((root / "publication.json").read_bytes())
+        self.registration["previous_publication_sha256"] = json_file(
+            prior / "publication.json", current_receipt | {"sealed_at_unix_ms": 100},
+        )
+        self.rejected("already approved before the native-only read")
 
     def test_public_release_pins_observed_export_owner_and_location_even_with_reapproved_receipt(self) -> None:
         self.configure("s3", "public", "direct", consumer="sdk")

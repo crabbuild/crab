@@ -15,7 +15,7 @@ from urllib.parse import SplitResult, urlencode
 
 from collect_cdn_fixture_cleanup import bearer
 from collect_cloudfront_deployment_policy import aws
-from run_cdn_transport_checks import approved_fixture, fixture_key, https_response, native_base, request_sample
+from run_cdn_transport_checks import approved_fixture, fixture_object_key, https_response, native_base, request_sample
 
 from cdn_qualification import (
     COMMIT, HISTORICAL_KINDS, MAX_HISTORICAL_OBJECT_BYTES, MAX_HISTORICAL_VERSIONS, RUN_NUMBER, SHA256,
@@ -136,7 +136,7 @@ def main() -> int:
         fixture = approved_fixture(args.fixture, args.configuration_sha256)
         edge, access, _, family, _ = scope_parts(fixture["scope"])
         require(access == "public", "native history qualification needs a public CDN fixture")
-        key = fixture_key(fixture, access, family)
+        key = fixture_object_key(fixture, access, family)
         plan = history_plan(args.history, edge, fixture["sha256"])
         origin_digest = hashlib.sha256(fixture["native_origin"].encode()).hexdigest()
         key_digest = hashlib.sha256(key.encode()).hexdigest()

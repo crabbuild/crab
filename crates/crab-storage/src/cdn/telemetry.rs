@@ -1,27 +1,82 @@
 use std::time::Instant;
 
 use reqwest::Response;
+use sha2::{Digest as _, Sha256, digest::Output};
 
 use super::{CdnPolicy, CdnReadFamily};
 use crate::StorageProviderKind;
 
 const TARGET: &str = "crab_storage::cdn::transfer";
+const PUBLIC_TRANSITION_TARGET: &str = "crab_storage::cdn::public_transition";
+
+#[derive(Clone, Copy)]
+pub(crate) struct PublicTransitionObservation {
+    approval: Output<Sha256>,
+    key: Output<Sha256>,
+}
+
+impl PublicTransitionObservation {
+    pub(crate) fn new(approval: Output<Sha256>, key: &str) -> Option<Self> {
+        (super::qualification_enabled()
+            && tracing::enabled!(target: PUBLIC_TRANSITION_TARGET, tracing::Level::DEBUG))
+        .then(|| Self {
+            approval,
+            key: Sha256::digest(key.as_bytes()),
+        })
+    }
+
+    pub(crate) fn record(
+        self,
+        policy: CdnPolicy,
+        family: CdnReadFamily,
+        observation: &'static str,
+    ) {
+        tracing::event!(
+            target: PUBLIC_TRANSITION_TARGET,
+            parent: None,
+            tracing::Level::DEBUG,
+            provider = provider_label(policy.provider),
+            consumer = policy.consumer.label(),
+            access = policy.visibility.label(),
+            profile = policy.profile.label(),
+            family = family.label(),
+            approval_sha256 = %format_args!("{:x}", self.approval),
+            key_sha256 = %format_args!("{:x}", self.key),
+            observation,
+            "CDN public export observation"
+        );
+    }
+}
 
 /// Redacted source of Git payload bytes awaiting the reader's integrity check.
 #[derive(Clone, Copy)]
 pub struct GitPayloadObservation {
     policy: CdnPolicy,
     family: CdnReadFamily,
+    public: Option<PublicTransitionObservation>,
 }
 
 impl GitPayloadObservation {
-    pub(crate) fn new(policy: CdnPolicy, family: CdnReadFamily) -> Option<Self> {
-        tracing::enabled!(target: TARGET, tracing::Level::DEBUG).then_some(Self { policy, family })
+    pub(crate) fn new(
+        policy: CdnPolicy,
+        family: CdnReadFamily,
+        public: Option<PublicTransitionObservation>,
+    ) -> Option<Self> {
+        (public.is_some() || tracing::enabled!(target: TARGET, tracing::Level::DEBUG)).then_some(
+            Self {
+                policy,
+                family,
+                public,
+            },
+        )
     }
 
     /// Report only after accepting Git content that passed its authenticated digest or object ID check.
     pub fn record_verified(self) {
         self.record("edge");
+        if let Some(public) = self.public {
+            public.record(self.policy, self.family, "verified_edge");
+        }
     }
 
     /// Report a verified local Git pack hit on the selected CDN-enabled payload route.

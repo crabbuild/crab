@@ -433,7 +433,10 @@ async fn product_read_records_one_redacted_transfer_for_its_actual_scope() {
 
     impl Subscriber for Capture {
         fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-            metadata.target() == "crab_storage::cdn::transfer"
+            matches!(
+                metadata.target(),
+                "crab_storage::cdn::transfer" | "crab_storage::cdn::public_transition"
+            )
         }
 
         fn new_span(&self, _: &Attributes<'_>) -> Id {
@@ -458,6 +461,18 @@ async fn product_read_records_one_redacted_transfer_for_its_actual_scope() {
     let (transport, request) = endpoint(
         "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 1-2/6\r\nContent-Length: 2\r\nX-Cache: Hit from cloudfront\r\n\r\n12",
     ).await;
+    let directory = tempfile::tempdir().unwrap();
+    let relative = format!("v2/pack-layers/aa/{}", "a".repeat(64));
+    let approval = write_publication_fixture(
+        directory.path().join("publication.json"),
+        "s3://origin",
+        "s3://export",
+        "org/repo",
+        transport.base.as_str().trim_end_matches('/'),
+        &relative,
+        6,
+    )
+    .unwrap();
     let store = Store::new(Arc::new(InMemory::new()))
         .with_target_identity([8; 32])
         .with_bucket_identity(BucketIdentity::new(
@@ -465,30 +480,35 @@ async fn product_read_records_one_redacted_transfer_for_its_actual_scope() {
             "origin",
             "origin",
         ))
-        .with_cdn_route(
-            CdnRoute::new(
-                [8; 32],
-                "org/repo".into(),
-                None,
-                CdnAccess::Public,
-                transport,
-                Duration::from_secs(5),
-            )
-            .for_consumer(CdnConsumer::Cli, CdnProfile::Direct),
-        )
-        .unwrap();
-    let path = Path::from(format!("org/repo/v2/pack-layers/aa/{}", "a".repeat(64)));
-    let body = store
-        .cdn_attempt(&path)
-        .unwrap()
-        .get(6, Some(1..3))
-        .await
-        .unwrap();
+        .with_native_cdn_origin(Some("s3://origin".into()));
+    let route = CdnRoute::new(
+        [8; 32],
+        "org/repo".into(),
+        None,
+        CdnAccess::Public,
+        transport,
+        Duration::from_secs(5),
+    )
+    .for_consumer(CdnConsumer::Cli, CdnProfile::Direct)
+    .with_publication(&store, &approval, "s3://export")
+    .await
+    .unwrap();
+    let store = store.with_cdn_route(route).unwrap();
+    let missing = Path::from(format!("org/repo/v2/pack-layers/bb/{}", "b".repeat(64)));
+    assert!(store.cdn_attempt(&missing).is_none());
+    let path = Path::from(format!("org/repo/{relative}"));
+    let attempt = store.cdn_attempt(&path).unwrap();
+    let body = attempt.get(6, Some(1..3)).await.unwrap();
     assert_eq!(body, Some(Bytes::from_static(b"12")));
+    attempt.git_payload_observation().unwrap().record_verified();
     request.await.unwrap();
 
     let events = capture.0.lock().unwrap();
-    let [event] = events.as_slice() else {
+    let transfers: Vec<_> = events
+        .iter()
+        .filter(|event| event.0.contains_key("status"))
+        .collect();
+    let [event] = transfers.as_slice() else {
         panic!("expected one event for one GET")
     };
     let fields = &event.0;
@@ -507,7 +527,33 @@ async fn product_read_records_one_redacted_transfer_for_its_actual_scope() {
     ] {
         assert_eq!(fields[name], expected);
     }
-    assert!(!fields.values().any(|value| value.contains("org/repo")));
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.0.values().any(|value| value.contains("org/repo")))
+    );
+    let transitions: Vec<_> = events
+        .iter()
+        .filter(|event| event.0.contains_key("observation"))
+        .collect();
+    if qualification_enabled() {
+        use sha2::{Digest as _, Sha256};
+
+        let key = format!("{:x}", Sha256::digest(path.as_ref().as_bytes()));
+        let missing = format!("{:x}", Sha256::digest(missing.as_ref().as_bytes()));
+        assert_eq!(transitions.len(), 3);
+        for (event, kind, digest) in [
+            (transitions[0], "\"unlisted\"", &missing),
+            (transitions[1], "\"listed\"", &key),
+            (transitions[2], "\"verified_edge\"", &key),
+        ] {
+            assert_eq!(event.0["observation"], kind);
+            assert_eq!(event.0["key_sha256"], *digest);
+            assert_eq!(event.0["approval_sha256"], approval.sha256);
+        }
+    } else {
+        assert!(transitions.is_empty());
+    }
 }
 
 #[tokio::test]

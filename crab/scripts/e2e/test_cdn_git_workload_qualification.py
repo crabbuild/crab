@@ -7,13 +7,15 @@ import json
 import os
 import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import run_cdn_git_workload as WORKLOAD
 from cdn_qualification import GIT_FETCH_FIELDS, collect_git_product_action
-from test_cdn_transport_qualification import fixture
+from public_inventory import Object, SCHEMA, publication_receipt
+from test_cdn_transport_qualification import PACK, fixture
 
 
 @unittest.skipUnless(os.name == "posix", "the local fixture helper uses a Python shebang")
@@ -50,11 +52,15 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             "        if not (origin.parent / 'legacy-helper').exists():\n"
             "            print(json.dumps({'target':'crab::cdn::qualification', 'fields': {\n"
             "                'message':'CDN qualification verified native origin'}}), file=sys.stderr, flush=True)\n"
+            "        evidence = origin.parent / 'public-export-events.json'\n"
+            "        if command == 'git-upload-pack' and evidence.exists():\n"
+            "            for event in json.loads(evidence.read_bytes()):\n"
+            "                print(json.dumps(event), file=sys.stderr, flush=True)\n"
             "        if command == 'git-upload-pack' and not (origin.parent / 'origin-only').exists():\n"
             "            cache = Path(os.environ['CRAB_CACHE_DIR'])\n"
             "            family = 'capsule' if (origin.parent / 'foreign-edge').exists() else 'git'\n"
             "            local = (origin.parent / 'warm-cache').exists() and (cache / 'seed').exists()\n"
-            "            policy = {'provider':'s3', 'access':'private', 'consumer':'cli',\n"
+            "            policy = {'provider':'s3', 'access':'public' if evidence.exists() else 'private', 'consumer':'cli',\n"
             "                      'family':family, 'profile':'direct'}\n"
             "            if not local:\n"
             "                print(json.dumps({'target':'crab_storage::cdn::transfer', 'fields': policy | {\n"
@@ -71,12 +77,13 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         )
         self.helper.chmod(0o700)
 
-    def call(self, action: str, *, digest: str | None = None) -> subprocess.CompletedProcess[str]:
+    def call(self, action: str, *arguments: str, digest: str | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run([
             sys.executable, "-B", str(Path(WORKLOAD.__file__)), action,
             "--fixture", str(self.fixture), "--configuration-sha256", digest or self.digest,
             "--receipt", str(self.receipt), "--scratch", str(self.root), "--helper", str(self.helper),
             "--source-sha", "a" * 40, "--run-id", "123", "--run-attempt", "2",
+            *arguments,
         ], capture_output=True, text=True, check=False)
 
     def run_phase(self, action: str) -> dict:
@@ -114,6 +121,71 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         fetched = self.call("fetch")
         self.assertEqual(fetched.returncode, 1, fetched.stdout)
         self.assertIn("no completed edge GET", fetched.stderr)
+        self.assertTrue(self.run_phase("retire")["ref_retired"])
+
+    def test_public_transition_checks_the_approval_and_exact_key_in_both_git_actions(self) -> None:
+        sample = fixture(access="public") | {"base_url": "https://fixture.example.com"}
+        raw = json.dumps(sample).encode()
+        self.fixture.write_bytes(raw)
+        self.digest = hashlib.sha256(raw).hexdigest()
+        key = hashlib.sha256(f"{sample['fixture_prefix']}/{PACK}".encode()).hexdigest()
+        event_path = self.root / "public-export-events.json"
+        prior = Object("v2/pack-layers/bb/" + "b" * 64, 6, "c" * 64)
+        added = Object(PACK, 6, "d" * 64)
+
+        def seal(directory: Path, objects: list[Object]) -> str:
+            directory.mkdir()
+            inventory = json.dumps({"schema": SCHEMA, "source_origin": sample["native_origin"],
+                                    "source_placement": sample["source_placement"], "repository_prefix": sample["fixture_prefix"],
+                                    "objects": [vars(obj) for obj in objects]}).encode()
+            (directory / "inventory.json").write_bytes(inventory)
+            receipt = publication_receipt(
+                sample["native_origin"], sample["export_origin"], sample["source_placement"],
+                {"resource": "accounts/123456789012/buckets/export-bucket", "location": "us-east-1"},
+                sample["fixture_prefix"], sample["base_url"], "fixture-deployment", hashlib.sha256(inventory).hexdigest(), objects,
+            ) | {"sealed_at_unix_ms": time.time_ns() // 1_000_000}
+            document = json.dumps(receipt).encode()
+            (directory / "publication.json").write_bytes(document)
+            return hashlib.sha256(document).hexdigest()
+
+        def observe(approval: str, *kinds: str) -> None:
+            event_path.write_text(json.dumps([
+                {"target": WORKLOAD.PUBLIC_TRANSITION_TARGET, "fields": {
+                    "message": "CDN public export observation", "provider": "s3", "access": "public",
+                    "consumer": "cli", "family": "git", "profile": "direct", "key_sha256": key,
+                    "approval_sha256": approval, "observation": kind,
+                }} for kind in kinds
+            ]))
+
+        old, new = self.root / "previous", self.root / "current"
+        previous = seal(old, [prior])
+        self.run_phase("publish")
+        before, after = self.root / "before.json", self.root / "after.json"
+        (self.root / "origin-only").touch()
+        observe("0" * 64, "unlisted")
+        flags = ("--transition-object", PACK, "--export-approval", str(old), "--transition-output", str(before))
+        rejected = self.call("fetch-origin", *flags)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("different public export receipt", rejected.stderr)
+        self.assertFalse(before.exists())
+        observe(previous, "unlisted")
+        result = self.call("fetch-origin", *flags)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        (self.root / "origin-only").unlink()
+        current = seal(new, [prior, added])
+        observe(current, "listed", "verified_edge")
+        result = self.call("fetch", "--transition-object", PACK, "--export-approval", str(new),
+                           "--transition-output", str(after), "--before-transition", str(before))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        fetched = json.loads(result.stdout)
+        self.assertEqual(set(fetched), GIT_FETCH_FIELDS)
+        retained = json.loads(after.read_bytes())
+        self.assertEqual(retained["before"]["receipt_sha256"], previous)
+        self.assertEqual(retained["after"]["receipt_sha256"], current)
+        self.assertEqual(retained["after"]["verified_edge_key_sha256"], key)
+        self.assertEqual(retained["before"]["result_sha256"], fetched["observed_sha256"])
+        self.assertEqual(retained["before"]["edge_attempts"], 0)
         self.assertTrue(self.run_phase("retire")["ref_retired"])
 
     def test_a_fetch_with_only_rejected_edge_payloads_does_not_qualify(self) -> None:

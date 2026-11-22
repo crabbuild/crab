@@ -102,7 +102,7 @@ def approved_fixture(path: Path, configuration_sha256: str, *, operator_binding:
         from cdn_viewer_issuer import issuer_settings
 
         issuer_settings(fixture)
-    fixture_key(fixture, access, family, operator_binding=operator_binding)
+    fixture_repository_prefix(fixture, access, family, operator_binding=operator_binding)
     origin_bucket(fixture["native_origin"], edge)
     if access == "public":
         origin_bucket(fixture["export_origin"], edge)
@@ -140,7 +140,7 @@ def fixture_base(value: Any) -> SplitResult:
     return base
 
 
-def fixture_key(fixture: dict[str, Any], access: str, family: str, *, operator_binding: bool = False) -> str:
+def fixture_repository_prefix(fixture: dict[str, Any], access: str, family: str, *, operator_binding: bool = False) -> str:
     repo, neighbor, view = (fixture[key] for key in ("fixture_prefix", "neighbor_prefix", "view_suffix"))
     if operator_binding:
         require(matches(REPOSITORY_PREFIX, repo) and len(repo) <= 255
@@ -182,6 +182,10 @@ def fixture_object_prefix(fixture: dict[str, Any], roots: set[str]) -> str:
         require(digest == fixture["sha256"], "LFS key must match the approved body digest")
     # The viewer grant treats source-roots as part of the history prefix.
     return "v2/history" if root == "v2/history/source-roots" else root
+
+
+def fixture_object_key(fixture: dict[str, Any], access: str, family: str) -> str:
+    return f"{fixture_repository_prefix(fixture, access, family)}/{fixture['object_path']}"
 
 
 def viewer_headers(edge: str, access: str, credential_file: Path | None) -> dict[str, str]:
@@ -470,7 +474,7 @@ def collect(
     operator_binding: bool = False,
 ) -> dict[str, list[dict[str, Any]]]:
     base = fixture_base(fixture["base_url"])
-    repo = fixture_key(fixture, access, family, operator_binding=operator_binding)
+    repo = fixture_repository_prefix(fixture, access, family, operator_binding=operator_binding)
     scope_key = f"{repo}/{fixture['object_path']}"
     size = fixture["size"]
     require(bool(viewer) == (access == "private"), "private transport qualification requires an authorized viewer grant")
@@ -550,7 +554,7 @@ def private_binding_candidate(
     binding = policy.get("private_binding")
     require(isinstance(binding, dict), "private binding requires an observed deployment and native placement")
     edge, _, _, family, _ = scope_parts(fixture["scope"])
-    repo = fixture_key(fixture, "private", family, operator_binding=operator_binding)
+    repo = fixture_repository_prefix(fixture, "private", family, operator_binding=operator_binding)
     key = f"{repo}/{fixture['object_path']}"
     key_sha256 = hashlib.sha256(key.encode()).hexdigest()
     for check, source in (("exact_get", "edge"), ("native_origin_read", "origin")):

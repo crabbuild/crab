@@ -30,7 +30,7 @@ class HistoricalOriginQualificationTests(unittest.TestCase):
         for edge, kind, selector in CASES:
             with self.subTest(edge=edge, kind=kind):
                 selected = fixture(edge)
-                key = TRANSPORT.fixture_key(selected, "public", "git")
+                key = f"{selected['fixture_prefix']}/{selected['object_path']}"
                 entry = {"kind": kind, "selector": selector, "size": len(RETIRED), "sha256": SHA256}
                 base = {
                     "cloudfront": "https://s3.us-east-1.amazonaws.com/fixture-bucket",
@@ -117,7 +117,8 @@ class HistoricalOriginQualificationTests(unittest.TestCase):
                 trace, {field: trace[field] for field in CDN_PROVENANCE_FIELDS},
                 {"historical_origin_sha256": approval},
                 hashlib.sha256(selected["native_origin"].encode()).hexdigest(),
-                {"key_sha256": trace["key_sha256"], "body_sha256": selected["sha256"]},
+                {"key_sha256": hashlib.sha256(f"{selected['fixture_prefix']}/{selected['object_path']}".encode()).hexdigest(),
+                 "body_sha256": selected["sha256"]},
             )
 
 
