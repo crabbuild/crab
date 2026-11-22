@@ -784,8 +784,14 @@ impl Client for StoreClient {
             .iter()
             .map(|range| (range.start, range.end))
             .collect::<Vec<_>>();
+        let encoded_size = match &self.file_index_lookup {
+            Some(lookup) if self.store.origin().cdn_attempt(&xorb_path).is_some() => {
+                lookup.cached_xorb_encoded_size(&xorb_hash).await
+            }
+            _ => None,
+        };
         let decoded = self.store
-            .get_xorb_chunks_with_mode(&xorb_path, &xorb_hash, &ranges, self.xorb_read_mode)
+            .get_xorb_chunks_with_mode(&xorb_path, &xorb_hash, &ranges, self.xorb_read_mode, encoded_size)
             .await
             .map_err(ReadError::from)
             .map_err(|error| self.map_read_error(error))?;

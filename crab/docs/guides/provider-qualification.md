@@ -1491,6 +1491,9 @@ fill. The worker rejects whole xorb GETs and verifies fewer viewer bytes
 than the approved xorb size. Retain these pilot records alongside the
 complete hydration evidence used for release qualification.
 
+Crab skips the xorb size HEAD if the file lookup already authenticated the
+encoded size. The native-origin counters still include other metadata reads.
+
 ### Capture projected NFS mount evidence
 
 Use a `private/mount/xorb/direct` fixture and the same native publication,

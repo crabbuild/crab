@@ -85,7 +85,7 @@ impl CachingStore {
         xorb_hash: &MerkleHash,
         ranges: &[(u32, u32)],
     ) -> Result<(Bytes, Vec<u32>)> {
-        self.get_xorb_chunks_with_mode(path, xorb_hash, ranges, XorbReadMode::Selective)
+        self.get_xorb_chunks_with_mode(path, xorb_hash, ranges, XorbReadMode::Selective, None)
             .await
     }
 
@@ -96,7 +96,7 @@ impl CachingStore {
         xorb_hash: &MerkleHash,
         ranges: &[(u32, u32)],
     ) -> Result<(Bytes, Vec<u32>)> {
-        self.get_xorb_chunks_with_mode(path, xorb_hash, ranges, XorbReadMode::Whole)
+        self.get_xorb_chunks_with_mode(path, xorb_hash, ranges, XorbReadMode::Whole, None)
             .await
     }
 
@@ -135,12 +135,14 @@ impl CachingStore {
     }
 
     /// Read authenticated xorb chunks using the caller's transfer and retention policy.
+    /// `encoded_size`, when present, must come from the captured catalog of this target.
     pub async fn get_xorb_chunks_with_mode(
         &self,
         path: &Path,
         xorb_hash: &MerkleHash,
         ranges: &[(u32, u32)],
         mode: XorbReadMode,
+        encoded_size: Option<u64>,
     ) -> Result<(Bytes, Vec<u32>)> {
         if ranges.is_empty() {
             return Ok((Bytes::new(), vec![0]));
@@ -176,7 +178,7 @@ impl CachingStore {
             .chain([XorbSource::Origin(edge.as_ref())])
         {
             match self
-                .xorb_chunks_from_source(path, xorb_hash, ranges, source, mode)
+                .xorb_chunks_from_source(path, xorb_hash, ranges, source, mode, encoded_size)
                 .await
             {
                 Ok(Some(result)) => {
@@ -276,6 +278,7 @@ impl CachingStore {
         ranges: &[(u32, u32)],
         source: XorbSource<'_>,
         mode: XorbReadMode,
+        encoded_size: Option<u64>,
     ) -> Result<Option<(Bytes, Vec<u32>)>> {
         let install = mode == XorbReadMode::Selective;
         if !matches!(
@@ -283,11 +286,14 @@ impl CachingStore {
             (XorbReadMode::Selective, _) | (XorbReadMode::SelectiveCdn, XorbSource::Cdn(_))
         ) {
             return self
-                .complete_xorb_ranges(path, xorb_hash, ranges, source, None, false)
+                .complete_xorb_ranges(path, xorb_hash, ranges, source, encoded_size, false)
                 .await;
         }
         let object_len = if let XorbSource::Cdn(edge) = source {
-            let size = source.read_origin(self.origin.head(path)).await?.size;
+            let size = match encoded_size {
+                Some(size) => size,
+                None => source.read_origin(self.origin.head(path)).await?.size,
+            };
             Self::validate_xorb_size(path, size)?;
             if edge.range_chunk_bytes(size).is_none() {
                 // A full-only policy can still serve this xorb. Select that

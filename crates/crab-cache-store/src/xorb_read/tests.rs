@@ -354,7 +354,7 @@ async fn verified_xorb_chunks_report_their_delivery_source() {
         let range = [(0, 1)];
         for _ in 0..2 {
             let (bytes, _) = store
-                .get_xorb_chunks_with_mode(&path, &xorb.hash, &range, mode)
+                .get_xorb_chunks_with_mode(&path, &xorb.hash, &range, mode, None)
                 .await
                 .unwrap();
             assert_eq!(bytes, expected);

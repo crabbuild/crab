@@ -48,7 +48,9 @@ entries are bypassed even when eviction fails; corrupt origin bytes return
 Transport retry policy remains owned by `crab-storage`.
 Sparse CDN reads authenticate the footer and chunk table, then fetch the
 selected compressed spans. Span requests that exceed the qualified range
-size are split before decoding. High-coverage reads can use an admitted full
+size are split before decoding. The edge attempt reuses the encoded size
+from a captured file catalog when available. Otherwise it uses a native
+HEAD before requesting bytes. High-coverage reads can use an admitted full
 GET. SDK and mount range hydration keeps its decoded-chunk cache policy.
 
 The optional `lfs` feature composes full CDN-eligible LFS reads with the

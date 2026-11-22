@@ -206,6 +206,9 @@ async fn pinned_batches_preserve_order_misses_and_page_bounds_as_history_grows()
         let file = super::tests::hash_from_seed(42);
         let later = super::tests::hash_from_seed(count as u64);
         let shard = super::tests::hash_from_seed(1_000_042);
+        let xorb = super::tests::hash_from_seed(2_000_042);
+        assert_eq!(lookup.cached_xorb_encoded_size(&xorb).await, None);
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
         assert_eq!(
             lookup.lookup_batch(&[file, later, file]).await.unwrap(),
             vec![Some(shard), None, Some(shard)]
@@ -216,6 +219,9 @@ async fn pinned_batches_preserve_order_misses_and_page_bounds_as_history_grows()
             "fixed file lookup exceeded its page bound: {cold}"
         );
         assert_eq!(lookup.lookup(&file).await.unwrap(), Some(shard));
+        assert_eq!(lookup.cached_xorb_encoded_size(&xorb).await, Some(99));
+        let unrelated = super::tests::hash_from_seed(2_000_043);
+        assert_eq!(lookup.cached_xorb_encoded_size(&unrelated).await, None);
         assert_eq!(
             reads.load(Ordering::SeqCst),
             cold,
@@ -224,6 +230,7 @@ async fn pinned_batches_preserve_order_misses_and_page_bounds_as_history_grows()
         let clone = lookup.clone();
         lookup.close().await.unwrap();
         assert!(clone.lookup(&file).await.is_err());
+        assert_eq!(clone.cached_xorb_encoded_size(&xorb).await, None);
     }
 }
 

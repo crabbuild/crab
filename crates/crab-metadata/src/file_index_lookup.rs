@@ -23,6 +23,7 @@ const DB_LABEL: &str = "file_index_db";
 const GET_BATCH_CONCURRENCY: usize = 256;
 const SHARD_SEARCH_CONCURRENCY: usize = 4;
 const MAX_VERIFIED_CATALOG_FILES: usize = 4096;
+const MAX_VERIFIED_CATALOG_XORBS: usize = 4096;
 static SHARD_SCANS: LazyLock<Arc<tokio::sync::Semaphore>> =
     LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(SHARD_SEARCH_CONCURRENCY)));
 
@@ -149,6 +150,7 @@ impl CommittedShardAnchor {
 struct FileLookupCache {
     found: HashMap<MerkleHash, ShardLocation>,
     missing: HashSet<MerkleHash>,
+    xorb_sizes: HashMap<MerkleHash, u64>,
     shard_visits: usize,
 }
 
@@ -584,7 +586,27 @@ impl FileIndexLookupSession {
                 .transpose()?;
         }
         if !missing.is_empty() {
+            let xorb_sizes = selected
+                .xorbs()
+                .iter()
+                .take(MAX_VERIFIED_CATALOG_XORBS)
+                .map(|(key, entry)| {
+                    let hash = MerkleHash::from_hex(key).map_err(|source| {
+                        MetadataError::CorruptObject {
+                            path: "capsule-protocol pointer catalog".to_owned(),
+                            reason: format!("invalid xorb hash {key}: {source}"),
+                        }
+                    })?;
+                    Ok((hash, entry.encoded_size()))
+                })
+                .collect::<Result<Vec<_>>>()?;
             let mut cache = self.resolved_files.lock().await;
+            // Preserve bounded lengths from the authenticated dependency closure.
+            // A missing size must not trigger another catalog traversal per xorb.
+            if cache.xorb_sizes.len() + xorb_sizes.len() > MAX_VERIFIED_CATALOG_XORBS {
+                cache.xorb_sizes.clear();
+            }
+            cache.xorb_sizes.extend(xorb_sizes);
             for (index, hash) in missing {
                 if cache.found.contains_key(&hash) || cache.missing.contains(&hash) {
                     continue;
@@ -1004,6 +1026,23 @@ impl SharedFileIndexLookup {
             return Ok(Vec::new());
         }
         self.session().await?.lookup_shards_batch(file_hashes).await
+    }
+
+    /// Return an encoded size already authenticated by a file dependency lookup.
+    /// An unopened or closed session and a cache miss return no size without storage I/O.
+    pub async fn cached_xorb_encoded_size(&self, hash: &MerkleHash) -> Option<u64> {
+        let guard = self.inner.session.read().await;
+        if self.inner.closed.load(Ordering::Acquire) {
+            return None;
+        }
+        let session = guard.get()?;
+        session
+            .resolved_files
+            .lock()
+            .await
+            .xorb_sizes
+            .get(hash)
+            .copied()
     }
 
     async fn session(&self) -> Result<tokio::sync::RwLockReadGuard<'_, FileIndexLookupSession>> {

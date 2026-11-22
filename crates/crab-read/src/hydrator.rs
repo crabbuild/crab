@@ -891,6 +891,7 @@ mod tests {
     #[derive(Debug)]
     struct RejectFullXorbReads {
         inner: Arc<dyn object_store::ObjectStore>,
+        reject_head: bool,
     }
 
     impl std::fmt::Display for RejectFullXorbReads {
@@ -923,11 +924,13 @@ mod tests {
             location: &object_store::path::Path,
             options: object_store::GetOptions,
         ) -> object_store::Result<object_store::GetResult> {
-            if !options.head && options.range.is_none() && location.as_ref().contains("/xorbs/") {
+            if ((!options.head && options.range.is_none()) || (options.head && self.reject_head))
+                && location.as_ref().contains("/xorbs/")
+            {
                 return Err(object_store::Error::Generic {
                     store: "RejectFullXorbReads",
                     source: Box::new(std::io::Error::other(
-                        "test forbids complete xorb body reads",
+                        "test forbids this native xorb request",
                     )),
                 });
             }
@@ -1826,13 +1829,16 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let native = Arc::new(InMemory::new());
         let target = [17; 32];
-        let (fixture, pointer, original) = reconstruction_fixture_with_origin(
+        let (fixture, mut pointer, original) = reconstruction_fixture_with_origin(
             &directory.path().join("seed"),
             false,
             crab_storage::Store::new(native.clone()).with_target_identity(target),
         )
         .await;
         let lookup = capture_fixture_catalog(&fixture, &pointer).await;
+        // Resolve the file through the authenticated catalog before selecting
+        // spans. Neither this metadata lookup nor the edge read needs a HEAD.
+        pointer.shard_hint = None;
         let xorb = native
             .list(Some(&Path::from(".crab/xorbs")))
             .try_next()
@@ -1891,10 +1897,13 @@ mod tests {
             &format!("{size} {size} {RANGE_CAP} 10000"),
         )
         .unwrap();
-        let origin = crab_storage::Store::new(Arc::new(RejectFullXorbReads { inner: native }))
-            .with_target_identity(target)
-            .with_cdn_route(route)
-            .unwrap();
+        let origin = crab_storage::Store::new(Arc::new(RejectFullXorbReads {
+            inner: native,
+            reject_head: true,
+        }))
+        .with_target_identity(target)
+        .with_cdn_route(route)
+        .unwrap();
         let requests = expected.len();
         let edge = tokio::spawn(async move {
             let mut observed = Vec::new();
@@ -1947,6 +1956,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let guarded = Arc::new(RejectFullXorbReads {
             inner: Arc::new(object_store::memory::InMemory::new()),
+            reject_head: false,
         });
         let origin = crab_storage::Store::new(guarded);
         let (hydrator, pointer, original) =
