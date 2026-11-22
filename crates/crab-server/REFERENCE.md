@@ -569,8 +569,32 @@ content are counted as skipped. An empty page may have a continuation.
 The browser reports scanned and skipped counts and keeps earlier results
 visible when a continuation needs to be retried. This search uses the
 verified snapshot reader and bulk read budgets. It scans eligible blobs on
-demand. Persistent full-text and symbol indexes and cross-repository search
-are separate capabilities.
+demand.
+
+### Search across repositories
+
+Open **Search code** from the global header, or **Search organization code**
+from an organization's repository list. Search file contents or paths on
+default branches. Use an exact directory and **Match case** to narrow the
+scan. Results name the repository and link to the exact Git commit, file,
+and matching line.
+
+`GET /api/code-search` takes `q`, optional `organization` UUID and
+`directory`, `kind=content|path` (default `content`), `case_sensitive`,
+and `cursor`. It returns `{groups, scanned, skipped, next}`. Groups carry
+`id`, `owner`, `name`, `commit`, and matching `files`. Path matches
+have no excerpts and use the Git tree without fetching file bodies. Each
+page examines up to four repositories, 32 paths per repository, and 20
+matching files. Follow `next` with the same parameters to scan further,
+including after a page with zero matches. A repository in progress keeps
+the same commit until its scan finishes.
+
+Search considers current readable repositories and checks them again before
+returning excerpts or a cursor. A continuation binds the account, filters,
+and readable repository set. A grant or address change in that scope returns
+HTTP 409, and **Start over** opens a new search. This is an on-demand search.
+Persistent content and symbol indexes and large-catalog performance
+qualification remain separate work.
 
 ### Create a repository in the browser
 

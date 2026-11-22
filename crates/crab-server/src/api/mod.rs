@@ -566,6 +566,10 @@ pub(crate) fn routes(server: Arc<Server>) -> axum::Router<Arc<Server>> {
             "/api/repos/{owner}/{name}/code-search",
             axum::routing::get(code_search::search),
         )
+        .route(
+            "/api/code-search",
+            axum::routing::get(code_search::workspace::search),
+        )
         .route("/api/repos", axum::routing::get(catalog::list))
         .merge(catalog::creation_routes(Arc::clone(&server)))
         .merge(repository_name::routes(Arc::clone(&server)))

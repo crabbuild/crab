@@ -473,6 +473,15 @@ with open(run / "commands.log", "w") as log:
         })
         pull_path = f"/api/repos/team/project/pulls/{pull['number']}"
         assert pull["draft"] is True and pull["can_merge"] is False
+        workspace = request("/api/code-search?q=Native+Cellar+qualification")
+        assert len(workspace["groups"]) == 1
+        group = workspace["groups"][0]
+        assert (group["owner"], group["name"], group["commit"]) == ("team", "project", pull["base_oid"])
+        assert group["files"][0]["path"] == "README.md"
+        assert group["files"][0]["lines"][0]["line"] == 1
+        paths = request("/api/code-search?q=README&kind=path")
+        assert paths["groups"][0]["files"][0]["path"] == "README.md"
+        assert paths["groups"][0]["files"][0]["lines"] == []
         pull_search = "/api/repos/team/project/pulls?" + urllib.parse.urlencode({
             "q": 'is:pr draft:true no:assignee AND "Related issue"',
         })
@@ -897,6 +906,7 @@ with open(run / "commands.log", "w") as log:
             "milestone_search_restart": True,
             "milestone_options_rebuild": True,
             "milestone_progress": True,
+            "workspace_code_and_path_search": True,
             "git_push": True,
             "process_restart": True,
             "durable_objects": int(count),

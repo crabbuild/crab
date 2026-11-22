@@ -1,3 +1,5 @@
+import { Button } from "@/components/ui/button";
+import { Link } from "@/components/navigation/link";
 import { GitImport } from "@/features/imports";
 import { BrowseRepositories } from "@/features/repository/catalog-browse";
 import { CreateRepository } from "@/features/repository/create";
@@ -26,23 +28,32 @@ export function OrganizationRepositories({
         <h2 id="organization-repositories" className="text-lg font-semibold">
           Organization repositories
         </h2>
-        {canCreate && (
-          <div className="flex flex-wrap items-start gap-2">
-            <CreateRepository
-              key={`${id}:${actor}`}
-              organization={{ id, name, actor }}
-              csrf={csrf}
-              onCreated={(repo) => navigate(repoHref(repo))}
-            />
-            <GitImport
-              key={`${id}:${actor}:${requestedImport ?? ""}`}
-              account={actor}
-              organization={{ id, name, requestedJob: requestedImport }}
-              csrf={csrf}
-              onImported={(repo) => navigate(repoHref(repo))}
-            />
-          </div>
-        )}
+        <div className="flex flex-wrap items-start gap-2">
+          <Button asChild variant="outline" size="sm">
+            <Link
+              href={`/-/code-search?${new URLSearchParams({ organization: id })}`}
+            >
+              Search organization code
+            </Link>
+          </Button>
+          {canCreate && (
+            <>
+              <CreateRepository
+                key={`${id}:${actor}`}
+                organization={{ id, name, actor }}
+                csrf={csrf}
+                onCreated={(repo) => navigate(repoHref(repo))}
+              />
+              <GitImport
+                key={`${id}:${actor}:${requestedImport ?? ""}`}
+                account={actor}
+                organization={{ id, name, requestedJob: requestedImport }}
+                csrf={csrf}
+                onImported={(repo) => navigate(repoHref(repo))}
+              />
+            </>
+          )}
+        </div>
       </header>
       <BrowseRepositories url={url} organization={id} />
     </section>

@@ -293,8 +293,10 @@ and session migration paths are supported.
   for current direct, group, organization, and fork grants. Browse reads
   lifecycle settings only for the result page and rechecks access before
   returning results and continuations.
-- `api/code_search.rs` searches authorized Git snapshots under bulk read admission.
-  Its signed continuation binds the repository UUID, commit, and query filters.
+- `api/code_search/` searches authorized Git snapshots under bulk read
+  admission. Repository searches bind the UUID, commit, and query filters.
+  Workspace search reuses the catalog's current grants and the same bounded
+  Git scans. Its cursor also binds the actor and readable repository scope.
 - `api/contracts.rs` exports the public identity/access/organization/team wire
   types to `packages/ui/src/lib/contracts.ts` during tests. Update the actual
   Serde owner, regenerate with `npm run contracts:generate` in `packages/ui`,

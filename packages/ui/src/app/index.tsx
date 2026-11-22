@@ -51,9 +51,13 @@ import {
   type CodeTheme,
 } from "@/lib/code-theme";
 import { repoHref, repositoryRoute } from "@/lib/repository-route";
-import { RepoIcon } from "@primer/octicons-react";
-import { useEffect, useLayoutEffect, useState } from "react";
+import { RepoIcon, SearchIcon } from "@primer/octicons-react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useState } from "react";
 import crabMark from "../../../web/crab.optimized.svg";
+
+const WorkspaceCodeSearch = lazy(
+  () => import("@/features/repository/workspace-code-search"),
+);
 
 export function App() {
   const location = useLocation();
@@ -126,6 +130,7 @@ export function App() {
     };
   }, [codeTheme, resolved]);
   const url = new URL(location, window.location.origin);
+  const codeSearch = url.pathname === "/-/code-search";
   const inbox = url.pathname === "/-/notifications";
   const watched = url.pathname === "/-/notifications/watched";
   const subscriptions = url.pathname === "/-/notifications/subscriptions";
@@ -148,7 +153,8 @@ export function App() {
     actorId ||
     transferId ||
     organizationRoute ||
-    notifications
+    notifications ||
+    codeSearch
       ? undefined
       : repositoryRoute(url);
   const projectWorkspace = organizationRoute?.[2]?.startsWith("/projects")
@@ -242,8 +248,18 @@ export function App() {
               ? "Repository transfer · Crab"
               : projectWorkspace
                 ? "Projects · Crab"
-                : "Repositories · Crab";
-  }, [repo, watched, inbox, subscriptions, projectWorkspace, transferId]);
+                : codeSearch
+                  ? "Search code · Crab"
+                  : "Repositories · Crab";
+  }, [
+    repo,
+    watched,
+    inbox,
+    subscriptions,
+    projectWorkspace,
+    transferId,
+    codeSearch,
+  ]);
   useEffect(() => {
     if (!importedRepository || url.pathname !== "/") return;
     if (
@@ -295,6 +311,18 @@ export function App() {
               </Link>
             )}
             <div className="header-actions">
+              {session.data?.authenticated && (
+                <Button asChild variant="ghost" size="sm">
+                  <Link
+                    href="/-/code-search"
+                    aria-label="Search code across repositories"
+                    aria-current={codeSearch ? "page" : undefined}
+                  >
+                    <SearchIcon data-icon="inline-start" />
+                    <span className="hidden sm:inline">Search code</span>
+                  </Link>
+                </Button>
+              )}
               {session.data?.user && (
                 <GitAccess
                   session={session.data}
@@ -433,6 +461,16 @@ export function App() {
                     : "Continue to sign in"}
                 </Button>
               </div>
+            ) : codeSearch ? (
+              <Suspense
+                fallback={
+                  <p role="status" className="notice">
+                    <Spinner /> Loading code search…
+                  </p>
+                }
+              >
+                <WorkspaceCodeSearch key={teamAccount} url={url} />
+              </Suspense>
             ) : subscriptions ? (
               <DiscussionSubscriptions
                 key={teamAccount}

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { FileCodeIcon, SearchIcon } from "@primer/octicons-react";
+import { SearchIcon } from "@primer/octicons-react";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
@@ -17,20 +17,11 @@ import {
 import { short } from "@/lib/format";
 import { repoHref, repositoryRef } from "@/lib/repository-route";
 import { RevisionPicker } from "./refs/picker";
+import { CodeSearchMatch, type MatchingFile } from "./code-search-match";
 
 interface SearchPage {
   commit: string;
-  items: Array<{
-    path: string;
-    path_hex: string;
-    lines: Array<{
-      line: number;
-      before: string;
-      matched: string;
-      after: string;
-    }>;
-    more_lines: boolean;
-  }>;
+  items: MatchingFile[];
   next: string | null;
   scanned: number;
   skipped: number;
@@ -275,50 +266,14 @@ function Matches({
             : "No matching text found."}
         </p>
       )}
-      {files.map((file) => {
-        const fileHref = repoHref(repo, {
-          rev: first.commit,
-          path: file.path_hex,
-          kind: "Blob",
-        });
-        return (
-          <article
-            className="panel min-w-0 overflow-hidden"
-            key={file.path_hex}
-          >
-            <h3 className="flex items-center gap-2 break-all border-b px-3 py-2 text-sm font-medium">
-              <FileCodeIcon className="shrink-0" />{" "}
-              <Link href={fileHref}>{file.path}</Link>
-            </h3>
-            <div className="overflow-x-auto">
-              {file.lines.map((line) => (
-                <Link
-                  key={line.line}
-                  href={`${fileHref}#L${line.line}`}
-                  className="flex min-w-max items-baseline gap-4 px-3 py-1 font-mono text-sm hover:bg-muted"
-                >
-                  <span className="w-10 shrink-0 text-right text-muted-foreground">
-                    <span className="sr-only">Line </span>
-                    {line.line}
-                  </span>
-                  <code className="whitespace-pre">
-                    {line.before}
-                    <mark className="bg-accent font-semibold text-accent-foreground">
-                      {line.matched}
-                    </mark>
-                    {line.after}
-                  </code>
-                </Link>
-              ))}
-            </div>
-            {file.more_lines && (
-              <p className="px-3 py-2 text-sm text-muted-foreground">
-                More matching lines in this file.
-              </p>
-            )}
-          </article>
-        );
-      })}
+      {files.map((file) => (
+        <CodeSearchMatch
+          key={file.path_hex}
+          repo={repo}
+          commit={first.commit}
+          file={file}
+        />
+      ))}
       {error && <p role="alert">{error}</p>}
       {next && (
         <div className="flex flex-wrap items-center gap-3">
