@@ -115,6 +115,11 @@ METRICS = {
 }
 GIT_BENCHMARK_DIR = "git-benchmarks"
 GIT_PRODUCT_DIR = "git-product"
+GIT_NATIVE_REF_FILES = {"published": "provider-published.json", "retired": "provider-retired.json"}
+GIT_NATIVE_REF_FIELDS = {
+    "origin_sha256", "prefix_sha256", "ref_sha256", "repository_sha256", "epoch_sha256",
+    "root_digest", "head_sha256", "revision_sha256", "transaction_id", "oid", "probe_source_sha",
+}
 GIT_PAYLOAD_SIZE = 256 * 1024
 GIT_OID = re.compile(r"[0-9a-f]{40}")
 GIT_TEST_REF = re.compile(r"refs/heads/crab-cdn-qualification-[1-9][0-9]{0,19}-[1-9][0-9]{0,19}-[0-9a-f]{12}")
@@ -639,7 +644,7 @@ def verify_managed_issuer(
 
 def verify_check_evidence(
     report: dict[str, Any], edge: str, access: str, profile: str, directory: Path, *, registration: dict[str, Any],
-) -> tuple[int, int]:
+) -> tuple[int, int, str]:
     required = required_check_names(access, profile)
     checks = fields(report["checks"], required, "checks")
     origin_denial = "private_origin_denied" if access == "private" else "live_origin_denied"
@@ -760,7 +765,7 @@ def verify_check_evidence(
                 "export access must use the same object key as the live source")
         verify_public_export(directory, report, registration, policy, fixture_reads, native_reads, cleanup_targets,
                              history, transition)
-    return len(checks), cleanup_at
+    return len(checks), cleanup_at, cleanup_targets["native"]["origin_sha256"]
 
 
 def anonymous_origin_denial(row: dict[str, Any]) -> bool:
@@ -1112,8 +1117,35 @@ def validate_git_fetch(raw: bytes, provenance: dict[str, Any], mode: str, label:
     return client
 
 
+def verify_git_native_ref(
+    value: Any, row: dict[str, Any], publication: dict[str, Any], publication_sha256: str,
+    phase: str, origin_sha256: str,
+) -> dict[str, Any]:
+    trace = fields(value, CDN_PROVENANCE_FIELDS | {"schema", "phase", "platform", "publication_sha256",
+                                                  "started_at_unix_ms", "observed_at_unix_ms", "native_ref"},
+                   "native ref observation")
+    require(trace["schema"] == "crab.cdn-native-ref/v1" and trace["phase"] == phase
+            and trace["publication_sha256"] == publication_sha256
+            and all(trace[key] == row[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}),
+            "native ref observation does not match the Git publication and workflow attempt")
+    observed = fields(trace["native_ref"], GIT_NATIVE_REF_FIELDS, "provider ref head")
+    require(all(matches(SHA256, observed[key]) for key in GIT_NATIVE_REF_FIELDS - {"oid", "probe_source_sha"})
+            and observed["probe_source_sha"] == row["source_sha"]
+            and observed["origin_sha256"] == origin_sha256
+            and observed["prefix_sha256"] == hashlib.sha256((row["fixture_prefix"] + "/").encode()).hexdigest()
+            and observed["ref_sha256"] == hashlib.sha256(publication["ref"].encode()).hexdigest(),
+            "provider ref head was observed for a different source, origin, prefix, or ref")
+    expected_oid = publication["oid"] if phase == "published" else None
+    require(observed["oid"] == expected_oid, "provider ref head has an unexpected committed tip")
+    require(positive(trace["started_at_unix_ms"]) and positive(trace["observed_at_unix_ms"])
+            and trace["started_at_unix_ms"] <= trace["observed_at_unix_ms"],
+            "native ref observation has an invalid interval")
+    return trace
+
+
 def collect_git_product_action(
     inputs: Path, row: dict[str, Any], *, retain: Path | None = None, cleanup_at: int | None = None,
+    native_origin_sha256: str | None = None,
 ) -> dict[str, Any]:
     publication_raw = read_git_record(inputs / "publication.json")
     publication = validate_git_publication(publication_raw, row)
@@ -1139,11 +1171,30 @@ def collect_git_product_action(
             "Git product action requires retirement of the same published ref after the fetch")
     if cleanup_at is not None:
         require(cleanup_at >= retirement["retired_at_unix_ms"], "fixture cleanup must be verified after Git ref retirement")
+    observations = {}
+    if retain is not None or native_origin_sha256 is not None:
+        observations = {phase: read_git_record(inputs / filename) for phase, filename in GIT_NATIVE_REF_FILES.items()}
+    if native_origin_sha256 is not None:
+        published, retired = (
+            verify_git_native_ref(decode(observations[phase]), row, publication, digest, phase, native_origin_sha256)
+            for phase in GIT_NATIVE_REF_FILES
+        )
+        require(cleanup_at is not None and publication["visible_at_unix_ms"] <= published["started_at_unix_ms"]
+                <= published["observed_at_unix_ms"] <= fetch["started_at_unix_ms"]
+                and retirement["retired_at_unix_ms"] <= retired["started_at_unix_ms"]
+                <= retired["observed_at_unix_ms"] <= cleanup_at,
+                "native ref observations must bracket the fetch and precede fixture cleanup")
+        before, after = published["native_ref"], retired["native_ref"]
+        require(all(before[key] == after[key] for key in ("repository_sha256", "epoch_sha256"))
+                and all(before[key] != after[key] for key in ("transaction_id", "head_sha256", "revision_sha256")),
+                "native ref retirement must commit a distinct tombstone in the same repository epoch")
     if retain is not None:
         retain.mkdir()
         for filename, raw in (("publication.json", publication_raw), ("fetch.json", fetch_raw),
                               ("retirement.json", retirement_raw)):
             (retain / filename).write_bytes(raw)
+        for phase, raw in observations.items():
+            (retain / GIT_NATIVE_REF_FILES[phase]).write_bytes(raw)
     return {key: fetch[key] for key in (
         "name", "expected_sha256", "observed_sha256", "expected_bytes", "observed_bytes",
         "native_writes", "observed_edge_gets", "visible_new_ref", "verified_edge_payloads",
@@ -1263,13 +1314,13 @@ def verify_cdn_report(
     verify_product_action(row["product_action"], family)
     require(row["product_action"]["name"] == registration["workload"],
             "product action does not match the registered workload")
-    checks, cleanup_at = verify_check_evidence(row, edge, access, profile, directory, registration=registration)
+    checks, cleanup_at, native_origin_sha256 = verify_check_evidence(row, edge, access, profile, directory, registration=registration)
     if requires_git_workload(scope):
         measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt)
         require(measured == row["performance"], "Git performance summary differs from the retained measurements")
     if requires_cli_workload(scope):
         product = collect_git_product_action(directory / GIT_PRODUCT_DIR, row | {"candidate": registration["candidate"]},
-                                             cleanup_at=cleanup_at)
+                                             cleanup_at=cleanup_at, native_origin_sha256=native_origin_sha256)
         require(row["product_action"] == product | {"fixture_cleanup_verified": True},
                 "product action differs from the retained publication, fetch, and retirement evidence")
     return {"status": "verified", "scope": scope, "platform": platform, "deployment": row["deployment"],

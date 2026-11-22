@@ -176,6 +176,42 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         finally:
             self.helper.write_bytes(raw)
         self.assertTrue(self.run_phase("retire")["ref_retired"])
+
+    def test_native_collector_observes_only_the_approved_provider_and_ref(self) -> None:
+        self.run_phase("publish")
+        publication = json.loads(self.receipt.read_bytes())
+        configuration = json.loads(self.fixture.read_bytes())
+
+        def digest(value: str) -> str:
+            return hashlib.sha256(value.encode()).hexdigest()
+
+        body = {
+            "origin_sha256": digest(configuration["native_origin"]),
+            "prefix_sha256": digest(configuration["fixture_prefix"] + "/"),
+            "ref_sha256": digest(publication["ref"]), "probe_source_sha": publication["source_sha"],
+            "oid": publication["oid"], "repository_sha256": "1" * 64, "epoch_sha256": "2" * 64,
+            "root_digest": "3" * 64, "head_sha256": "4" * 64, "revision_sha256": "5" * 64, "transaction_id": "6" * 64,
+        }
+        probe = self.root / "native-probe"
+        output = self.root / "observation.json"
+        executor = Path(WORKLOAD.__file__).with_name("collect_cdn_git_native_ref.py")
+        command = [sys.executable, "-B", str(executor), "published", "--fixture", str(self.fixture),
+                   "--configuration-sha256", self.digest, "--publication", str(self.receipt),
+                   "--output", str(output), "--probe", str(probe), "--source-sha", publication["source_sha"],
+                   "--run-id", "123", "--run-attempt", "2"]
+        for identity in ("f" * 64, body["origin_sha256"]):
+            probe.write_text(f"#!{sys.executable}\nimport sys\n"
+                             f"assert sys.argv[1:] == {[configuration['native_origin'], configuration['fixture_prefix'], publication['ref']]!r}\n"
+                             f"print({json.dumps(body | {'origin_sha256': identity})!r})\n")
+            probe.chmod(0o700)
+            result = subprocess.run(command, capture_output=True, text=True, check=False)
+            if identity != body["origin_sha256"]:
+                self.assertEqual(result.returncode, 1)
+                self.assertFalse(output.exists())
+            else:
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(output.read_bytes())["native_ref"], body)
+        self.assertTrue(self.run_phase("retire")["ref_retired"])
         self.assertTrue(self.run_phase("retire")["ref_retired"])
 
     def test_a_byte_identical_fetch_from_origin_only_does_not_qualify(self) -> None:

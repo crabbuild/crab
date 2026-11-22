@@ -485,8 +485,11 @@ state, and digest of the embedded policy. Direct CLI product records and Git
 benchmark arms must match the registered build. Promotion rejects fixture
 builds and requires the exact checkout policy. For the ordinary candidate
 run, restrict the writer to the preregistered native target and test prefix.
-Retain independent provider evidence for publication and retirement, and
-verify the selected replica and edge payload through redacted observations.
+The independent `cdn-native-ref` probe reads the provider's current root and
+exact single-ref head using native credentials. The release verifier requires
+the committed tip before the fetch and a distinct provider tombstone in the
+same repository epoch before physical cleanup. Verify the selected replica
+and edge payload through redacted observations.
 
 ### Required release evidence
 

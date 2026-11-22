@@ -160,7 +160,7 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         self.assertEqual(report["performance"], self.example.report["performance"])
         self.assertEqual(report["product_action"], self.example.report["product_action"])
         self.assertEqual({path.name for path in (row / fixture.CDN.GIT_PRODUCT_DIR).iterdir()},
-                         {"publication.json", "fetch.json", "retirement.json"})
+                         {"publication.json", "fetch.json", "retirement.json", *fixture.CDN.GIT_NATIVE_REF_FILES.values()})
 
     def test_missing_git_measurement_prevents_artifact_publication(self) -> None:
         digest = self.inputs(consumer="cli")

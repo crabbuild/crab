@@ -760,8 +760,27 @@ python3 -B crab/scripts/e2e/run_cdn_git_workload.py publish \
 ```
 
 `publish` creates a unique test ref with an absence lease and checks its
-advertisement immediately. Keep the receipt even if the push fails. Prepare
-any checkpoint, protected view, or public export required by the registered
+advertisement immediately. Keep the receipt even if the push fails. Confirm
+the committed ref independently on the native provider before the fetch.
+Build the `cdn-native-ref` example from the approved commit using the
+measurement worker's Cargo target directory. Point `native_ref_probe` at
+the resulting executable and run it with credentials
+allowed to read the native fixture. On S3, the probe uses the AWS SDK's
+credential chain, including `AWS_PROFILE` for a named profile. On GCS and
+Azure, configure the storage client's native credentials for the fixture.
+[AWS SDK for Rust credential chain](https://docs.aws.amazon.com/sdk-for-rust/latest/dg/credproviders.html)
+
+```bash
+CARGO_TARGET_DIR="$measurement_cargo_target" cargo build --locked -p crab --example cdn-native-ref
+phase=published
+python3 -B crab/scripts/e2e/collect_cdn_git_native_ref.py "$phase" \
+  --fixture "$approved_fixture_json" --configuration-sha256 "$approved_configuration_sha256" \
+  --publication "$publication_receipt" --probe "$native_ref_probe" \
+  --output "$row_directory/git-product/provider-$phase.json" \
+  --source-sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
+```
+
+Prepare any checkpoint, protected view, or public export required by the registered
 read family after publication. For public runs, add the export publisher's
 receipt and SHA-256 to the worker's trusted CDN binding before measuring
 the edge arm. The workload's own receipt records the native Git publication.
@@ -787,7 +806,13 @@ under the measured row, and capture the `fetch` and `retire` stdout as
 `git-product/fetch.json` and `git-product/retirement.json`. Use a single worker
 for these ordered product phases so their timestamps share a clock. Both phase
 reports bind the exact publication receipt by digest. Record storage and CDN
-fixture cleanup separately in the `cleanup` check.
+fixture cleanup separately in the `cleanup` check. Immediately after `retire`,
+repeat the collector with `phase=retired` before deleting any fixture objects.
+The release verifier requires a committed provider tombstone with a new
+transaction and revision in the same repository epoch. It checks that the
+publication observation preceded the fetch and the retirement observation
+preceded cleanup. The probe reads the root and exact single-ref head through
+the provider SDK and uses the canonical v2 decoder to resolve the visible tip.
 [Git's explicit push lease](https://git-scm.com/docs/git-push#Documentation/git-push.txt---force-with-leaseltrefnamegtltexpectgt)
 
 ### Verify fixture cleanup

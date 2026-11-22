@@ -265,8 +265,9 @@ class CdnQualificationTests(unittest.TestCase):
         records = self.directory / CDN.GIT_PRODUCT_DIR
         records.mkdir(exist_ok=True)
         provenance = {key: fetch[key] for key in CDN.CDN_PROVENANCE_FIELDS}
+        ref = "refs/heads/crab-cdn-qualification-123-2-abcdefabcdef"
         receipt = json_file(records / "publication.json", provenance | {
-            "schema": "crab.cdn-git-publication/v1", "ref": "refs/heads/crab-cdn-qualification-123-2-abcdefabcdef",
+            "schema": "crab.cdn-git-publication/v1", "ref": ref,
             "oid": fetch["publication_oid"], "sha256": fetch["expected_sha256"], "published": True,
             "visible_at_unix_ms": fetch["started_at_unix_ms"] - 50, "candidate": fetch["candidate"],
         })
@@ -275,6 +276,22 @@ class CdnQualificationTests(unittest.TestCase):
             "schema": "crab.cdn-git-retirement/v1", "publication_sha256": receipt, "ref_retired": True,
             "retired_at_unix_ms": fetch["finished_at_unix_ms"] + 50, "candidate": fetch["candidate"],
         })
+        cleanup = json.loads((self.directory / "traces/cleanup.json").read_bytes())
+        for phase, timestamp, marker in (
+            ("published", fetch["started_at_unix_ms"] - 40, "5"),
+            ("retired", fetch["finished_at_unix_ms"] + 60, "6"),
+        ):
+            json_file(records / CDN.GIT_NATIVE_REF_FILES[phase], provenance | {
+                "schema": "crab.cdn-native-ref/v1", "phase": phase, "platform": self.report["platform"],
+                "publication_sha256": receipt, "started_at_unix_ms": timestamp, "observed_at_unix_ms": timestamp + 5,
+                "native_ref": {
+                    "probe_source_sha": COMMIT, "origin_sha256": cleanup["targets"]["native"]["origin_sha256"],
+                    "prefix_sha256": cleanup["prefix_sha256"], "ref_sha256": hashlib.sha256(ref.encode()).hexdigest(),
+                    "repository_sha256": "3" * 64, "epoch_sha256": "4" * 64, "root_digest": "b" * 64,
+                    "head_sha256": marker * 64, "revision_sha256": marker * 64, "transaction_id": marker * 64,
+                    "oid": fetch["publication_oid"] if phase == "published" else None,
+                },
+            })
         self.report["product_action"].update({key: fetch[key] for key in self.report["product_action"] if key in fetch})
 
     def request(self, source: str, status: int, cache: str = "unknown") -> dict[str, Any]:
@@ -760,6 +777,30 @@ class CdnQualificationTests(unittest.TestCase):
         self.configure("gcs", "private", "direct")
         self.cleanup_trace("private", "cloud-cdn", observed_at_unix_ms=1)
         self.rejected("fixture cleanup must be verified after Git ref retirement")
+
+    def test_provider_retirement_requires_a_new_tombstone_in_the_observed_epoch(self) -> None:
+        self.configure("s3", "private", "direct")
+        records = self.directory / CDN.GIT_PRODUCT_DIR
+        publication = json.loads((records / CDN.GIT_NATIVE_REF_FILES["published"]).read_bytes())
+        path = records / CDN.GIT_NATIVE_REF_FILES["retired"]
+        retired = json.loads(path.read_bytes())
+        for change, reason in (
+            ({"oid": publication["native_ref"]["oid"]}, "unexpected committed tip"),
+            ({"probe_source_sha": "f" * 40}, "observed for a different source"),
+            ({"origin_sha256": "f" * 64}, "observed for a different source"),
+            ({"epoch_sha256": "f" * 64}, "distinct tombstone in the same repository epoch"),
+            ({"revision_sha256": publication["native_ref"]["revision_sha256"]}, "distinct tombstone in the same repository epoch"),
+        ):
+            with self.subTest(change=change):
+                json_file(path, retired | {"native_ref": retired["native_ref"] | change})
+                self.rejected(reason)
+
+    def test_provider_observation_must_precede_cleanup(self) -> None:
+        self.configure("azure", "private", "direct")
+        path = self.directory / CDN.GIT_PRODUCT_DIR / CDN.GIT_NATIVE_REF_FILES["retired"]
+        retired = json.loads(path.read_bytes())
+        self.cleanup_trace("private", "front-door", observed_at_unix_ms=retired["started_at_unix_ms"])
+        self.rejected("observations must bracket the fetch and precede fixture cleanup")
 
     def test_cleanup_must_check_the_fixture_prefix_and_both_public_origins(self) -> None:
         self.configure("azure", "public", "direct")
