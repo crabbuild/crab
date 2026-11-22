@@ -16,7 +16,7 @@ from run_cdn_transport_checks import approved_fixture
 
 from cdn_qualification import (
     COMMIT, GIT_NATIVE_REF_FILES, RUN_NUMBER, decode, is_direct_sdk_git_scope,
-    is_direct_sdk_hydration_scope, matches, read_git_record,
+    is_direct_sdk_hydration_scope, is_direct_service_scope, matches, read_git_record,
     require, requires_cli_workload, validate_git_publication, validate_sdk_hydration_publication, verify_git_native_ref,
 )
 
@@ -39,9 +39,10 @@ def main() -> int:
         require(not args.output.exists() and not args.output.is_symlink(), "native ref observation output must be new")
         fixture = approved_fixture(args.fixture, args.configuration_sha256)
         scope = fixture["scope"]
-        require(requires_cli_workload(scope) or (is_direct_sdk_git_scope(scope) and fixture["view_suffix"] == "")
+        require(requires_cli_workload(scope) or ((is_direct_sdk_git_scope(scope) or is_direct_service_scope(scope))
+                                                 and fixture["view_suffix"] == "")
                 or is_direct_sdk_hydration_scope(scope),
-                "native ref observation needs a supported direct CLI or SDK publication workload")
+                "native ref observation needs a supported direct CLI, SDK, or service publication workload")
         provenance = {
             "scope": fixture["scope"], "configuration_sha256": args.configuration_sha256, "source_sha": args.source_sha,
             "workflow_run_id": args.run_id, "workflow_run_attempt": args.run_attempt, "platform": runner_platform(),

@@ -16,10 +16,10 @@ from urllib.parse import urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cdn_qualification import (  # noqa: E402
-    CDN_PROVENANCE_FIELDS, DIRECT_READ_TARGET_FIELDS, GIT_FETCH_RECORD_LIMIT, GIT_OID, PROVIDER_FOR_EDGE,
-    SDK_GIT_READ_FIELDS, SDK_HYDRATION_READ_FIELDS, SERVICE_READ_FIELDS, SHA256, VIEWER_REQUEST_FILES, decode, fields,
-    is_direct_sdk_git_scope, is_direct_sdk_hydration_scope, is_direct_service_scope, matches, positive,
-    read_git_record, require, scope_parts, validate_git_fetch,
+    CDN_PROVENANCE_FIELDS, GIT_FETCH_RECORD_LIMIT, PROVIDER_FOR_EDGE,
+    SDK_GIT_READ_FIELDS, SDK_HYDRATION_READ_FIELDS, VIEWER_REQUEST_FILES, decode, fields,
+    is_direct_sdk_git_scope, is_direct_sdk_hydration_scope, is_direct_service_scope, matches,
+    read_git_record, require, scope_parts, validate_git_fetch, validate_service_read,
     verify_git_traffic, verify_viewer_requests,
 )
 from collect_front_door_deployment_policy import FRONT_DOOR_HOST, SUBSCRIPTION  # noqa: E402
@@ -433,31 +433,16 @@ def main() -> int:
                     "SDK viewer evidence requires a timed hydration of the approved xorb")
             verify_git_traffic(client, edge, "CDN benchmark SDK hydration")
         elif is_direct_service_scope(fixture["scope"]):
-            client = fields(candidate, SERVICE_READ_FIELDS, "CDN service read")
-            require(client["schema"] == "crab.cdn-service-read/v1" and client["arm"] == "edge"
-                    and matches(GIT_OID, client["commit"])
-                    and all(matches(SHA256, client[key]) for key in
-                            ("workload_sha256", "publication_sha256", "payload_sha256", "etag_sha256"))
-                    and positive(client["payload_bytes"]),
-                    "service viewer evidence requires a verified edge HTTP read")
+            client = validate_service_read(candidate, provenance, "edge")
             if family == "lfs":
                 key = fixture_object_key(fixture, access, family)
                 require(client["lfs_key_sha256"] == hashlib.sha256(key.encode()).hexdigest()
-                        and client["git_blob_oid_sha256"] is None
                         and client["payload_sha256"] == fixture["sha256"] and client["payload_bytes"] == fixture["size"],
                         "service viewer evidence requires the approved LFS object")
-            else:
-                require(matches(SHA256, client["git_blob_oid_sha256"]) and client["lfs_key_sha256"] is None,
-                        "service viewer evidence requires a verified Git blob")
-            reader = fields(client["reader"], DIRECT_READ_TARGET_FIELDS, "CDN service read target")
+            reader = client["reader"]
             export = reader["public_export_sha256"]
-            require((matches(SHA256, export) if access == "public" else export == "")
-                    and reader == read_target_fingerprints(fixture, edge=True, export_sha256=export),
+            require(reader == read_target_fingerprints(fixture, edge=True, export_sha256=export),
                     "service viewer evidence requires the approved native target and CDN binding")
-            verify_git_traffic(client, edge, "CDN service read")
-            require(client["verified_edge_payloads"] > 0 and client["observed_edge_gets"] > 0
-                    and client["edge_bytes"] > 0 and client["local_payload_hits"] == 0,
-                    "service viewer evidence requires verified edge delivery from a cold process")
         else:
             client = validate_git_fetch(raw, provenance, candidate["arm"], "CDN benchmark fetch")
         require(client["all_edge_attempts"] > 0 and len(client["edge_responses"]) == client["all_edge_attempts"],

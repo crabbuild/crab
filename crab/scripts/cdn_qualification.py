@@ -178,6 +178,7 @@ SDK_HYDRATION_READ_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | SDK_TIMIN
 SERVICE_READ_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | SDK_TIMING_FIELDS | {
     "schema", "arm", "platform", "workload_sha256", "publication_sha256", "commit", "payload_sha256",
     "payload_bytes", "etag_sha256", "git_blob_oid_sha256", "lfs_key_sha256", "reader", "native_traffic", "edge_responses",
+    "native_published_sha256",
 }
 GIT_MODES = {"origin": "origin", "cold_edge": "edge", "warm_edge": "edge", "warm_local": "warm_local"}
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -1359,6 +1360,40 @@ def verify_git_traffic(client: dict[str, Any], edge: str, label: str) -> None:
                 f"{label} has an invalid CDN viewer response")
     require(client["edge_hits"] + client["edge_misses"] + client["edge_unknown"] == client["observed_edge_gets"]
             <= client["edge_attempts"] <= client["all_edge_attempts"], f"{label} has inconsistent edge counts")
+
+
+def validate_service_read(value: Any, provenance: dict[str, Any], arm: str) -> dict[str, Any]:
+    client = fields(value, SERVICE_READ_FIELDS, "CDN service read")
+    edge, access, _, family, _ = scope_parts(provenance["scope"])
+    require(is_direct_service_scope(provenance["scope"]) and arm in ("edge", "origin")
+            and client["schema"] == "crab.cdn-service-read/v1" and client["arm"] == arm
+            and all(client[key] == provenance[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}),
+            "CDN service read has mismatched workflow or product provenance")
+    require(matches(GIT_OID, client["commit"]) and positive(client["payload_bytes"])
+            and all(matches(SHA256, client[key]) for key in ("workload_sha256", "publication_sha256",
+                    "native_published_sha256", "payload_sha256", "etag_sha256")),
+            "CDN service read has invalid publication or payload fingerprints")
+    git, lfs = client["git_blob_oid_sha256"], client["lfs_key_sha256"]
+    require((matches(SHA256, git) and lfs is None) if family == "git" else (matches(SHA256, lfs) and git is None),
+            "CDN service read needs the exact Git blob or LFS object fingerprint")
+    reader = fields(client["reader"], DIRECT_READ_TARGET_FIELDS, "CDN service read target")
+    require(all(matches(SHA256, reader[key]) for key in CLI_NATIVE_FIELDS)
+            and (matches(SHA256, reader["binding_sha256"]) if arm == "edge" else reader["binding_sha256"] == "")
+            and (matches(SHA256, reader["public_export_sha256"]) if arm == "edge" and access == "public"
+                 else reader["public_export_sha256"] == ""),
+            "CDN service read has an invalid native target, viewer binding or public receipt")
+    verify_git_traffic(client, edge, "CDN service read")
+    if arm == "origin":
+        native = client["native_traffic"]
+        require(all(client[key] == 0 for key in PRODUCT_COUNTERS)
+                and positive(native["get_responses"]) and positive(native["body_bytes"]),
+                "service rollback requires native body reads and zero edge attempts")
+    else:
+        require(all(positive(client[key]) for key in ("observed_edge_gets", "edge_bytes", "verified_edge_payloads"))
+                and client["local_payload_hits"] == 0
+                and client["edge_attempts"] == client["all_edge_attempts"] == len(client["edge_responses"]),
+                "service read requires verified edge delivery and a fingerprint for every viewer attempt")
+    return client
 
 
 def verify_sdk_git_read(raw: bytes, row: dict[str, Any], spec: dict[str, Any], mode: str, *,

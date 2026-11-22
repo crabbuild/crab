@@ -23,8 +23,9 @@ from s3_gateway_workload import _canonical_path, _signed_headers
 from public_inventory import ExportError
 
 from cdn_qualification import (
-    COMMIT, GIT_FETCH_RECORD_LIMIT, GIT_OID, PRODUCT_COUNTERS, RUN_NUMBER, SHA256,
+    COMMIT, GIT_FETCH_RECORD_LIMIT, GIT_OID, RUN_NUMBER, SHA256,
     decode, fields, is_direct_service_scope, matches, positive, read_git_record, require, scope_parts,
+    validate_git_publication, validate_service_read, verify_git_native_ref,
 )
 
 
@@ -135,6 +136,16 @@ def verify_read_target(lines: list[bytes], reader: dict, consumer: str) -> None:
             "service did not confirm the approved native target, prefix and active CDN binding")
 
 
+def service_publication(path: Path, provenance: dict, approved: dict) -> tuple[bytes, dict, str]:
+    raw = read_git_record(path)
+    digest = hashlib.sha256(raw).hexdigest()
+    publication = validate_git_publication(raw, provenance)
+    require(publication["published"] and digest == approved["publication_sha256"]
+            and publication["oid"] == approved["commit"] and publication["sha256"] == approved["payload_sha256"],
+            "service workload needs the exact published commit and payload")
+    return raw, publication, digest
+
+
 def probe(args: argparse.Namespace) -> dict:
     require(matches(COMMIT, args.source_sha) and matches(RUN_NUMBER, args.run_id)
             and matches(RUN_NUMBER, args.run_attempt), "exact workflow run provenance is required")
@@ -143,6 +154,10 @@ def probe(args: argparse.Namespace) -> dict:
     require(is_direct_service_scope(fixture["scope"])
             and not fixture["view_suffix"], "service read evidence requires a direct Git or LFS repository fixture")
     approved = workload(args, consumer)
+    provenance = {"scope": fixture["scope"], "configuration_sha256": args.configuration_sha256,
+                  "source_sha": args.source_sha, "workflow_run_id": args.run_id,
+                  "workflow_run_attempt": args.run_attempt, "platform": runner_platform()}
+    _, publication, publication_sha256 = service_publication(args.publication, provenance, approved)
     public_edge = access == "public" and args.arm == "edge"
     require((args.export_approval is not None) == public_edge,
             "only public service edge reads require the approved export directory")
@@ -156,6 +171,11 @@ def probe(args: argparse.Namespace) -> dict:
     else:
         require(approved["public_export_sha256"] == "", "private workload cannot name a public export receipt")
     reader = read_target_fingerprints(fixture, edge=args.arm == "edge", export_sha256=export_sha256)
+    raw_observation = read_git_record(args.native_published)
+    observed = verify_git_native_ref(decode(raw_observation), provenance | {"fixture_prefix": fixture["fixture_prefix"]},
+                                     publication, publication_sha256, "published", reader["origin_sha256"])
+    require(publication["visible_at_unix_ms"] <= observed["started_at_unix_ms"],
+            "native ref observation started before publication")
     lfs_key = None
     if family == "lfs":
         require(fixture["sha256"] == approved["payload_sha256"] and fixture["size"] == approved["payload_bytes"],
@@ -167,6 +187,7 @@ def probe(args: argparse.Namespace) -> dict:
         require(stat.S_ISREG(file.st_mode), "service logs must be a regular append-only capture file")
         offset = log.seek(0, os.SEEK_END)
         start = time.time_ns() // 1_000_000
+        require(observed["observed_at_unix_ms"] <= start, "service read started before the independent publication observation")
         monotonic = time.monotonic_ns()
         with https_response(base, "GET", path, headers, "CDN service read") as response:
             blob = verify_body(response, approved, git=family == "git", server=consumer == "server")
@@ -184,31 +205,23 @@ def probe(args: argparse.Namespace) -> dict:
     responses = {}
     counters = measure(lines, fixture["scope"], expected_git_blob=blob, edge_responses=responses)
     native = measure_native(lines, fixture["scope"])
-    if args.arm == "edge":
-        require(all(positive(counters[key]) for key in ("observed_edge_gets", "edge_bytes", "verified_edge_payloads"))
-                and counters["local_payload_hits"] == 0
-                and counters["edge_attempts"] == counters["all_edge_attempts"] == len(responses),
-                "service read requires verified edge delivery and a fingerprint for every viewer attempt")
-    else:
-        require(all(counters[key] == 0 for key in PRODUCT_COUNTERS) and native["get_responses"] > 0
-                and native["body_bytes"] > 0, "service rollback requires native body reads and zero edge attempts")
-    return counters | {
-        "schema": "crab.cdn-service-read/v1", "scope": fixture["scope"], "arm": args.arm,
-        "configuration_sha256": args.configuration_sha256, "workload_sha256": args.workload_sha256,
-        "source_sha": args.source_sha, "workflow_run_id": args.run_id, "workflow_run_attempt": args.run_attempt,
-        "platform": runner_platform(), "publication_sha256": approved["publication_sha256"], "commit": approved["commit"],
+    record = provenance | counters | {
+        "schema": "crab.cdn-service-read/v1", "arm": args.arm,
+        "workload_sha256": args.workload_sha256, "publication_sha256": publication_sha256,
+        "native_published_sha256": hashlib.sha256(raw_observation).hexdigest(), "commit": approved["commit"],
         "payload_sha256": approved["payload_sha256"], "payload_bytes": approved["payload_bytes"],
         "etag_sha256": approved["etag_sha256"], "git_blob_oid_sha256": blob,
         "lfs_key_sha256": lfs_key, "reader": reader,
         "started_at_unix_ms": start, "finished_at_unix_ms": finish, "elapsed_ms": elapsed,
         "native_traffic": native, "edge_responses": responses,
     }
+    return validate_service_read(record, provenance, args.arm)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("arm", choices=("edge", "origin"))
-    for name in ("fixture", "workload", "credentials", "service-log"):
+    for name in ("fixture", "workload", "credentials", "service-log", "publication", "native-published"):
         parser.add_argument(f"--{name}", type=Path, required=True)
     parser.add_argument("--export-approval", type=Path)
     for name in ("configuration-sha256", "workload-sha256", "source-sha", "run-id", "run-attempt"):

@@ -16,8 +16,9 @@ from unittest.mock import patch
 
 import collect_cdn_viewer_requests as COLLECT
 import run_cdn_service_read as SERVICE
-from cdn_qualification import PROVIDER_FOR_EDGE, lfs_object_path
-from test_cdn_qualification import COMMIT, json_file
+import verify_cdn_service_lifecycle as LIFECYCLE
+from cdn_qualification import CDN_PROVENANCE_FIELDS, CLEANUP_INVENTORIES, PROVIDER_FOR_EDGE, lfs_object_path
+from test_cdn_qualification import COMMIT, cli_candidate, json_file
 from test_cdn_transport_qualification import fixture
 
 
@@ -46,9 +47,28 @@ class CdnServiceReadTests(unittest.TestCase):
         if family == "lfs":
             config |= {"object_path": lfs_object_path(SHA256), "sha256": SHA256, "size": len(BODY)}
         config_sha = json_file(root / "fixture.json", config)
+        provenance = {"scope": config["scope"], "configuration_sha256": config_sha, "source_sha": COMMIT,
+                      "workflow_run_id": "123", "workflow_run_attempt": "2"}
+        platform = SERVICE.runner_platform()
+        ref = "refs/heads/crab-cdn-qualification-123-2-abcdefabcdef"
+        publication = provenance | {
+            "schema": "crab.cdn-git-publication/v1", "ref": ref, "oid": "c" * 40, "sha256": SHA256,
+            "published": True, "visible_at_unix_ms": 10, "candidate": cli_candidate(config["scope"], platform),
+        }
+        publication_sha = json_file(root / "publication.json", publication)
+        native_ref = {"origin_sha256": hashlib.sha256(config["native_origin"].encode()).hexdigest(),
+                      "prefix_sha256": hashlib.sha256(f"{config['fixture_prefix']}/".encode()).hexdigest(),
+                      "ref_sha256": hashlib.sha256(ref.encode()).hexdigest(), "probe_source_sha": COMMIT,
+                      "oid": publication["oid"], "repository_sha256": "1" * 64, "epoch_sha256": "2" * 64,
+                      "root_digest": "3" * 64, "head_sha256": "4" * 64,
+                      "revision_sha256": "5" * 64, "transaction_id": "6" * 64}
+        json_file(root / "native-published.json", provenance | {
+            "schema": "crab.cdn-native-ref/v1", "phase": "published", "publication_sha256": publication_sha,
+            "platform": platform, "started_at_unix_ms": 20, "observed_at_unix_ms": 30, "native_ref": native_ref,
+        })
         repo = "org/repo" if consumer == "server" else "fixture-bucket"
         workload = {"schema": "crab.cdn-service-workload/v1", "configuration_sha256": config_sha,
-                    "publication_sha256": "a" * 64, "endpoint": "https://service.example.com", "repository": repo,
+                    "publication_sha256": publication_sha, "endpoint": "https://service.example.com", "repository": repo,
                     "commit": "c" * 40, "payload_sha256": SHA256, "payload_bytes": len(BODY),
                     "etag_sha256": hashlib.sha256(ETAG.encode()).hexdigest(),
                     "public_export_sha256": "b" * 64 if access == "public" else ""}
@@ -59,6 +79,7 @@ class CdnServiceReadTests(unittest.TestCase):
         return argparse.Namespace(fixture=root / "fixture.json", configuration_sha256=config_sha,
             workload=root / "workload.json", workload_sha256=json_file(root / "workload.json", workload),
             credentials=root / "credentials.json", service_log=root / "server.log",
+            publication=root / "publication.json", native_published=root / "native-published.json",
             source_sha=COMMIT, run_id="123", run_attempt="2", arm="edge", export_approval=None)
 
     def request(self, args, provider, consumer, family, fault=""):
@@ -171,6 +192,80 @@ class CdnServiceReadTests(unittest.TestCase):
                 self.request(args, provider, consumer, family, "rollback-binding")
             origin = self.request(args, provider, consumer, family)
             self.assertEqual(origin["reader"]["public_export_sha256"], "")
+
+    def test_requires_the_same_published_ref_before_opening_the_service(self):
+        with TemporaryDirectory() as directory:
+            args = self.prepare(Path(directory), "cloudfront", "server", "git")
+            observed = json.loads(args.native_published.read_bytes())
+            cases = (
+                ({"phase": "retired"}, "does not match the Git publication"),
+                ({"native_ref": observed["native_ref"] | {"oid": "d" * 40}}, "unexpected committed tip"),
+                ({"started_at_unix_ms": 1}, "started before publication"),
+                ({"observed_at_unix_ms": 10**17}, "started before the independent publication observation"),
+            )
+            for change, message in cases:
+                with self.subTest(change=change), patch.object(SERVICE, "https_response") as http:
+                    json_file(args.native_published, observed | change)
+                    args.service_log.touch()
+                    with self.assertRaisesRegex(ValueError, message):
+                        SERVICE.probe(args)
+                    http.assert_not_called()
+
+    def test_service_lifecycle_requires_edge_rollback_distinct_tombstone_and_matching_cleanup(self):
+        provider, consumer, family = "cloud-cdn", "s3-gateway", "lfs"
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = self.prepare(root, provider, consumer, family)
+            edge = self.request(args, provider, consumer, family)
+            args.arm = "origin"
+            origin = self.request(args, provider, consumer, family)
+            publication = json.loads(args.publication.read_bytes())
+            published = json.loads(args.native_published.read_bytes())
+            reader = edge["reader"]
+            provenance = {key: edge[key] for key in CDN_PROVENANCE_FIELDS}
+            for field in ("edge", "origin", "viewer_requests", "retirement", "native_retired", "cleanup"):
+                setattr(args, field, root / f"{field}.json")
+            edge_sha = json_file(args.edge, edge)
+            json_file(args.origin, origin)
+            viewer = {"schema": "crab.cloud-cdn-viewer-requests/v1", "client_report_sha256": edge_sha,
+                      "records": {"d" * 64: {"status": 206, "cache": "hit", "response_bytes": 300, "cache_fill_bytes": 0,
+                                              "origin_requests": {}, "key_sha256": edge["lfs_key_sha256"]}}}
+            retirement_time = origin["finished_at_unix_ms"] + 10
+            retirement = provenance | {
+                "schema": "crab.cdn-git-retirement/v1", "publication_sha256": edge["publication_sha256"],
+                "candidate": publication["candidate"], "ref_retired": True, "retired_at_unix_ms": retirement_time,
+            }
+            tombstone = published["native_ref"] | {"oid": None, "head_sha256": "7" * 64,
+                                                   "revision_sha256": "8" * 64, "transaction_id": "9" * 64}
+            retired = published | {"phase": "retired", "started_at_unix_ms": retirement_time + 10,
+                                   "observed_at_unix_ms": retirement_time + 20, "native_ref": tombstone}
+            cleanup = provenance | {
+                "schema": "crab.cdn-cleanup-trace/v1", "check": "cleanup", "prefix_sha256": reader["prefix_sha256"],
+                "observed_at_unix_ms": retirement_time + 30,
+                "targets": {"native": {"origin_sha256": reader["origin_sha256"],
+                                       "inventories": CLEANUP_INVENTORIES[provider][0]}},
+            }
+            files = [(args.origin, origin), (args.viewer_requests, viewer), (args.retirement, retirement),
+                     (args.native_retired, retired), (args.cleanup, cleanup)]
+            for path, record in files:
+                json_file(path, record)
+            evidence = LIFECYCLE.verify(args)
+            self.assertEqual(evidence["records"]["edge"], edge_sha)
+            for path, change, error in (
+                (args.origin, {"native_published_sha256": "c" * 64}, "same approved workload and native publication"),
+                (args.viewer_requests, {"client_report_sha256": "c" * 64}, "differs from the measured fetch"),
+                (args.retirement, {"retired_at_unix_ms": 1}, "after rollback"),
+                (args.native_retired, {"native_ref": tombstone | {"transaction_id": published["native_ref"]["transaction_id"]}},
+                 "distinct tombstone"),
+                (args.cleanup, {"observed_at_unix_ms": retirement_time}, "precede fixture cleanup"),
+            ):
+                with self.subTest(path=path.name), self.assertRaisesRegex(ValueError, error):
+                    record = dict(files)[path]
+                    json_file(path, record | change)
+                    try:
+                        LIFECYCLE.verify(args)
+                    finally:
+                        json_file(path, record)
 
     def test_cloud_cdn_viewer_logs_require_the_exact_service_lfs_key_and_traffic(self):
         with TemporaryDirectory() as directory:

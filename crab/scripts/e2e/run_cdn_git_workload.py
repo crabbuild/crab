@@ -22,7 +22,7 @@ from run_cdn_transport_checks import approved_fixture, fixture_base, fixture_obj
 from cdn_qualification import (
     CLI_BUILD_FIELDS, CLI_NATIVE_FIELDS, COMMIT, GIT_OID, GIT_PAYLOAD_SIZE, PROVIDER_FOR_EDGE, RUN_NUMBER, SHA256,
     cli_action_name, decode, deployment_component_digest,
-    fields, is_direct_sdk_git_scope, lfs_object_path, matches, read_git_record,
+    fields, is_direct_sdk_git_scope, is_direct_service_scope, lfs_object_path, matches, read_git_record,
     require, requires_cli_lfs_workload,
     requires_cli_workload, scope_parts,
     validate_git_publication, verified_publication, verify_read_candidate,
@@ -139,8 +139,8 @@ def run_git(*args: str, root: Path, env: dict[str, str], guard: NativeTargetGuar
     return result
 
 
-def lfs_pointer(digest: str) -> bytes:
-    return f"version https://git-lfs.github.com/spec/v1\noid sha256:{digest}\nsize {GIT_PAYLOAD_SIZE}\n".encode()
+def lfs_pointer(digest: str, size: int = GIT_PAYLOAD_SIZE) -> bytes:
+    return f"version https://git-lfs.github.com/spec/v1\noid sha256:{digest}\nsize {size}\n".encode()
 
 
 def companion_crab(helper: Path) -> Path:
@@ -182,17 +182,17 @@ def ref_tip(remote: str, ref: str, root: Path, env: dict[str, str], guard: Nativ
 
 def publish(
     remote: str, provenance: dict[str, str], receipt: Path, root: Path, env: dict[str, str],
-    crab: Path | None, guard: NativeTargetGuard, *, hydration_pointer: bytes | None = None,
+    crab: Path | None, guard: NativeTargetGuard, *, supplied_content: bytes | None = None,
 ) -> dict:
     ref = f"refs/heads/crab-cdn-qualification-{provenance['workflow_run_id']}-{provenance['workflow_run_attempt']}-{uuid4().hex[:12]}"
-    content = hydration_pointer
+    content = supplied_content
     if content is None:
         content = hashlib.shake_256(f"{provenance['configuration_sha256']}/{ref}".encode()).digest(GIT_PAYLOAD_SIZE)
     sha256 = hashlib.sha256(content).hexdigest()
     run_git("init", "--template=", "--object-format=sha1", root=root, env=env)
     if crab is not None:
         pointer = run_command([str(crab), "lfs", "clean", PAYLOAD], "crab lfs clean", root, env, content).stdout
-        require(pointer == lfs_pointer(sha256), "crab lfs clean did not stage the expected fixture pointer")
+        require(pointer == lfs_pointer(sha256, len(content)), "crab lfs clean did not stage the expected fixture pointer")
         content = pointer
     (root / PAYLOAD).write_bytes(content)
     run_git("add", "--", PAYLOAD, root=root, env=env)
@@ -454,26 +454,37 @@ def main() -> int:
     parser.add_argument("--before-transition", type=Path, help="native-only observation to pair with this edge fetch")
     parser.add_argument("--hydration-pointer", type=Path)
     parser.add_argument("--hydration-pointer-sha256")
+    parser.add_argument("--service-lfs-payload", type=Path, help="fixture-pinned LFS bytes for native service publication")
     args = parser.parse_args()
     try:
         require(matches(COMMIT, args.source_sha) and matches(RUN_NUMBER, args.run_id)
                 and matches(RUN_NUMBER, args.run_attempt), "exact workflow run provenance is required")
         require(args.action == "inspect" or args.receipt is not None, "this action requires a publication receipt path")
         fixture = approved_fixture(args.fixture, args.configuration_sha256)
-        edge, access, _, _, _ = scope_parts(fixture["scope"])
-        require(requires_cli_workload(fixture["scope"])
-                or (args.action in ("publish", "retire") and is_direct_sdk_git_scope(fixture["scope"])),
-                "workload needs a direct CLI scope or native publication for a direct SDK Git scope")
-        pointer = None
+        scope = fixture["scope"]
+        edge, access, _, family, _ = scope_parts(scope)
+        service = is_direct_service_scope(scope)
+        require(requires_cli_workload(scope)
+                or (args.action in ("publish", "retire") and (is_direct_sdk_git_scope(scope) or service)
+                    and fixture["view_suffix"] == ""),
+                "workload needs a direct CLI scope or a native publication for a direct SDK or service scope")
+        content = None
         if args.hydration_pointer is not None or args.hydration_pointer_sha256 is not None:
             require(is_direct_sdk_git_scope(fixture["scope"]) and access == "private" and args.action == "publish"
                     and fixture["view_suffix"] == "" and args.hydration_pointer is not None
                     and matches(SHA256, args.hydration_pointer_sha256),
                     "SDK hydration pointer publication requires the approved native source fixture and pointer digest")
-            pointer = read_git_record(args.hydration_pointer, limit=4096)
-            require(pointer and hashlib.sha256(pointer).hexdigest() == args.hydration_pointer_sha256,
+            content = read_git_record(args.hydration_pointer, limit=4096)
+            require(content and hashlib.sha256(content).hexdigest() == args.hydration_pointer_sha256,
                     "hydration pointer differs from the approved workload")
-        crab = companion_crab(args.helper) if requires_cli_lfs_workload(fixture["scope"]) else None
+        service_lfs_publish = service and family == "lfs" and args.action == "publish"
+        require((args.service_lfs_payload is not None) == service_lfs_publish,
+                "native service LFS publication requires the exact approved fixture payload")
+        if service_lfs_publish:
+            content = read_git_record(args.service_lfs_payload, limit=fixture["size"])
+            require(len(content) == fixture["size"] and hashlib.sha256(content).hexdigest() == fixture["sha256"],
+                    "service LFS payload differs from the approved fixture")
+        crab = companion_crab(args.helper) if requires_cli_lfs_workload(scope) or service_lfs_publish else None
         remote = native_remote(fixture, edge)
         approved_binding = viewer_binding_sha256(fixture)
         provenance = {
@@ -494,7 +505,7 @@ def main() -> int:
                               "viewer_binding_sha256": approved_binding}
                 else:
                     result = publish(remote, provenance, args.receipt, root, env, crab, guard,
-                                     hydration_pointer=pointer) | {"candidate": guard.candidate}
+                                     supplied_content=content) | {"candidate": guard.candidate}
             else:
                 raw = read_git_record(args.receipt)
                 record = validate_git_publication(raw, provenance)

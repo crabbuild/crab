@@ -492,6 +492,38 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         self.digest = hashlib.sha256(raw).hexdigest()
         self.verify_native_ref_observation()
 
+    def test_native_service_lfs_writer_publishes_the_approved_fixture_payload(self) -> None:
+        content = b"approved native LFS content for the service"
+        digest = hashlib.sha256(content).hexdigest()
+        config = fixture(access="private") | {
+            "scope": "cloudfront/private/s3-gateway/lfs/direct", "object_path": lfs_object_path(digest),
+            "sha256": digest, "size": len(content),
+        }
+        self.fixture.write_text(json.dumps(config), encoding="utf-8")
+        self.digest = hashlib.sha256(self.fixture.read_bytes()).hexdigest()
+        payload = self.root / "payload.bin"
+        arguments = ("--service-lfs-payload", str(payload))
+        self.assertIn("requires the exact approved fixture payload", self.call("publish").stderr)
+        payload.write_bytes(b"x" * len(content))
+        self.assertIn("payload differs from the approved fixture", self.call("publish", *arguments).stderr)
+        self.assertFalse(self.receipt.exists())
+        payload.write_bytes(content)
+        self.assertTrue(self.run_phase("publish", *arguments)["visible_new_ref"])
+        publication = json.loads(self.receipt.read_bytes())
+        pointer = subprocess.check_output(["git", "--git-dir", str(self.origin), "cat-file", "blob",
+                                           publication["oid"] + ":" + WORKLOAD.PAYLOAD])
+        self.assertEqual(publication["sha256"], digest)
+        self.assertEqual(pointer, WORKLOAD.lfs_pointer(digest, len(content)))
+        self.assertEqual((self.origin / digest).read_bytes(), content)
+        self.assertNotEqual(self.call("fetch").returncode, 0)
+        self.assertTrue(self.run_phase("retire")["ref_retired"])
+
+    def test_native_writer_and_independent_probe_support_a_server_fixture(self) -> None:
+        config = fixture(access="private") | {"scope": "cloudfront/private/server/git/direct"}
+        self.fixture.write_text(json.dumps(config), encoding="utf-8")
+        self.digest = hashlib.sha256(self.fixture.read_bytes()).hexdigest()
+        self.verify_native_ref_observation()
+
     def test_rejects_unapproved_fixture_or_another_runs_receipt(self) -> None:
         rejected = self.call("publish", digest="f" * 64)
         self.assertEqual(rejected.returncode, 1, rejected.stdout)

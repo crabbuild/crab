@@ -801,6 +801,13 @@ file. Keep the process idle except for the measured request because the worker
 uses the bytes appended during that request to isolate storage observations.
 Use a fresh process and cache for each arm.
 
+Use the native `publish` action below with the direct service fixture. For
+LFS, pass `--service-lfs-payload` with the file whose size and SHA-256 the
+fixture approves. The writer checks the bytes before pushing and commits their
+LFS pointer. For Git, prepare a layered checkpoint that places the fixture
+blob in a physical pack layer. Run `collect_cdn_git_native_ref.py published`
+against the same fixture and publication receipt before either service read.
+
 Seal a `crab.cdn-service-workload/v1` JSON file with `schema`,
 `configuration_sha256`, `publication_sha256`, the service HTTPS `endpoint`,
 logical `repository`, the full Git `commit`, `payload_sha256`,
@@ -817,6 +824,7 @@ Basic header, or `access_key`, `secret_key`, and `region` for S3 gateway SigV4.
 python3 -B crab/scripts/e2e/run_cdn_service_read.py edge \
   --fixture "$fixture" --configuration-sha256 "$configuration_sha256" \
   --workload "$workload" --workload-sha256 "$workload_sha256" \
+  --publication "$publication_receipt" --native-published "$native_published" \
   --credentials "$credentials" --service-log "$service_log" \
   --source-sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" \
   --run-attempt "$GITHUB_RUN_ATTEMPT" >"$edge_read"
@@ -831,9 +839,26 @@ receipt. The log collector checks every viewer request and matches LFS reads
 to the exact approved storage key. Withdraw the CDN binding, restart the
 service with a fresh cache, and run the same workload with `origin` and
 without `--export-approval`. The rollback worker requires the same native
-target and payload and an empty viewer binding. Live regional samples,
-independent publication lifecycle proof and cache evidence remain required
-before either service's rows can qualify.
+target and payload and an empty viewer binding. After rollback, retire the
+temporary ref, collect the native `retired` observation, then remove the
+isolated fixture and retain the cleanup inventory. Bind the records with
+`verify_cdn_service_lifecycle.py`:
+
+```bash
+python3 -B crab/scripts/e2e/verify_cdn_service_lifecycle.py \
+  --fixture "$fixture" --configuration-sha256 "$configuration_sha256" \
+  --workload "$workload" --workload-sha256 "$workload_sha256" \
+  --publication "$publication_receipt" --retirement "$retirement" \
+  --native-published "$native_published" --native-retired "$native_retired" \
+  --edge "$edge_read" --origin "$origin_read" --viewer-requests "$viewer_requests" \
+  --cleanup "$cleanup" --source-sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" \
+  --run-attempt "$GITHUB_RUN_ATTEMPT" >"$service_lifecycle"
+```
+
+The verifier requires a distinct tombstone in the same epoch, matching storage
+targets, and cleanup after both reads and retirement. Live regional samples,
+cache evidence, and release assembly integration remain required before either
+service's rows can qualify.
 
 ### Verify native publication and CDN Git fetch
 

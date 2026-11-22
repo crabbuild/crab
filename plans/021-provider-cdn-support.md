@@ -754,8 +754,13 @@ selected native origin and repository prefix, active viewer and loaded public
 export receipt. The worker checks those fingerprints against the approved
 fixture and confirms the binding was withdrawn for native rollback. The
 provider log collector joins every attempt and matches LFS reads to the exact
-approved object. Live regional records, independent native publication
-lifecycle observations, and warm-local evidence remain release requirements.
+approved object. The native writer can publish these service fixtures and
+verifies LFS bytes against the approved fixture before pushing. Both service
+read arms require the same independently observed native publication. The
+lifecycle verifier binds the edge and rollback records, provider viewer logs,
+distinct native retirement tombstone, and final storage inventories. Live
+regional records, warm-local evidence, and release assembly integration remain
+release requirements.
 
 The protected workflow or its dedicated workers own producing these raw
 observations. The assembly and release jobs own rejecting missing, mismatched
