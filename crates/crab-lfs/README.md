@@ -36,6 +36,9 @@ out of memory.
 using the descriptor's OID and size. It validates bounded edge ranges and
 holds the final bytes until SHA-256 verification succeeds. Partial reads still
 require proof of the native object version or a verified local descriptor.
+Verified edge delivery and CLI local-cache evidence include a SHA-256
+fingerprint of the physical object key so qualification can match the selected
+payload without recording its path.
 
 `local` shares local payload paths and storage-key precedence with CLI and SDK
 callers. Its preparation snapshots verify SHA-256 and exact size while copying

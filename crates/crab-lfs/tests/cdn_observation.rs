@@ -20,7 +20,11 @@ use tracing::{
     span::{Attributes, Id, Record},
 };
 
-struct Capture(Arc<AtomicUsize>);
+struct Capture {
+    edge: Arc<AtomicUsize>,
+    local: Arc<AtomicUsize>,
+    key: String,
+}
 
 impl Subscriber for Capture {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
@@ -34,18 +38,35 @@ impl Subscriber for Capture {
     fn enter(&self, _: &Id) {}
     fn exit(&self, _: &Id) {}
     fn event(&self, event: &Event<'_>) {
-        struct Verified(bool);
-        impl Visit for Verified {
+        #[derive(Default)]
+        struct Payload {
+            verified: bool,
+            source: String,
+            key: String,
+        }
+        impl Visit for Payload {
             fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
                 if field.name() == "message" {
-                    self.0 = format!("{value:?}") == "CDN verified LFS payload";
+                    self.verified = format!("{value:?}") == "CDN verified LFS payload";
+                }
+            }
+            fn record_str(&mut self, field: &Field, value: &str) {
+                match field.name() {
+                    "source" => self.source = value.to_owned(),
+                    "lfs_key_sha256" => self.key = value.to_owned(),
+                    _ => {}
                 }
             }
         }
-        let mut verified = Verified(false);
-        event.record(&mut verified);
-        if verified.0 {
-            self.0.fetch_add(1, Ordering::Relaxed);
+        let mut payload = Payload::default();
+        event.record(&mut payload);
+        if payload.verified {
+            assert_eq!(payload.key, self.key);
+            match payload.source.as_str() {
+                "edge" => self.edge.fetch_add(1, Ordering::Relaxed),
+                "local" => self.local.fetch_add(1, Ordering::Relaxed),
+                source => panic!("unexpected verified LFS payload source {source}"),
+            };
         }
     }
 }
@@ -54,9 +75,16 @@ impl Subscriber for Capture {
 async fn observes_only_edge_payloads_that_pass_full_verification() {
     // Give this binary a single subscriber before any edge callsites register.
     let accepted = Arc::new(AtomicUsize::new(0));
-    tracing::subscriber::set_global_default(Capture(Arc::clone(&accepted))).unwrap();
-    let scratch = tempfile::tempdir().unwrap();
+    let local = Arc::new(AtomicUsize::new(0));
     let oid = Sha256::digest(b"verified").into();
+    let key = LfsObjectStore::object_path_for_prefix("stream", &oid);
+    tracing::subscriber::set_global_default(Capture {
+        edge: Arc::clone(&accepted),
+        local: Arc::clone(&local),
+        key: format!("{:x}", Sha256::digest(key.as_ref().as_bytes())),
+    })
+    .unwrap();
+    let scratch = tempfile::tempdir().unwrap();
     for body in [b"corrupt!", b"verified"] {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let transport = CdnTransport::loopback_fixture(listener.local_addr().unwrap()).unwrap();
@@ -107,9 +135,17 @@ async fn observes_only_edge_payloads_that_pass_full_verification() {
         if body == b"verified" {
             assert_eq!(result.unwrap().concat(), body);
             assert_eq!(accepted.load(Ordering::Relaxed), 2);
+            let cached = std::fs::read(scratch.path().join("object")).unwrap();
+            assert_eq!(Sha256::digest(&cached).as_slice(), oid);
+            lfs.store()
+                .observe_verified_lfs_cache_hit(&key, cached.len() as u64);
+            assert_eq!(local.load(Ordering::Relaxed), 1);
         } else {
             assert!(matches!(result, Err(LfsError::ObjectCorrupt { .. })));
             assert_eq!(accepted.load(Ordering::Relaxed), 0);
         }
     }
+    let native = Store::new(Arc::new(InMemory::new()));
+    native.observe_verified_lfs_cache_hit(&key, 8);
+    assert_eq!(local.load(Ordering::Relaxed), 1);
 }

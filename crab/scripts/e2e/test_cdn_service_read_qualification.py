@@ -87,6 +87,9 @@ class CdnServiceReadTests(unittest.TestCase):
         config = json.loads(args.fixture.read_bytes())
         _, access, _, _, _ = SERVICE.scope_parts(config["scope"])
         edge = events(PROVIDER_FOR_EDGE[provider], consumer, family, access)
+        if family == "lfs":
+            key = SERVICE.fixture_object_key(config, access, family)
+            edge[1]["lfs_key_sha256"] = hashlib.sha256(key.encode()).hexdigest()
         instance = "f" * 64 if args.arm == "origin" or fault == "another-process" else "a" * 64
         if args.arm == "prior_export":
             instance = "8" * 64
@@ -119,6 +122,10 @@ class CdnServiceReadTests(unittest.TestCase):
                 args.service_log.rename(args.service_log.with_suffix(".old"))
             if fault == "wrong-blob-event":
                 edge[1]["git_blob_oid_sha256"] = "e" * 64
+            if fault == "wrong-lfs-event":
+                edge[1]["lfs_key_sha256"] = "e" * 64
+            if fault == "unkeyed-lfs-event":
+                del edge[1]["lfs_key_sha256"]
             if fault == "unrelated-route":
                 edge[0]["consumer"] = "sdk"
             if fault == "missing-request":
@@ -187,6 +194,14 @@ class CdnServiceReadTests(unittest.TestCase):
                 self.assertEqual(set(edge["edge_responses"]), {"d" * 64})
                 self.assertNotIn("fixture-token", json.dumps(edge))
                 self.assertNotIn("fixture-secret", json.dumps(edge))
+
+    def test_requires_the_exact_verified_lfs_key(self):
+        with TemporaryDirectory() as directory:
+            args = self.prepare(Path(directory), "cloudfront", "server", "lfs")
+            for fault, reason in (("wrong-lfs-event", "requires verified edge delivery"),
+                                  ("unkeyed-lfs-event", "CDN verified LFS event")):
+                with self.subTest(fault=fault), self.assertRaisesRegex(ValueError, reason):
+                    self.request(args, "cloudfront", "server", "lfs", fault)
 
     def test_requires_verified_http_content_and_exact_new_storage_observations(self):
         provider, consumer, family = "cloudfront", "server", "git"

@@ -176,6 +176,7 @@ enum PayloadIdentity<'a> {
     None,
     GitBlob(&'a [u8]),
     GitPack(blake3::Hash),
+    LfsKey(&'a str),
     XorbKey(&'a str),
 }
 
@@ -222,6 +223,17 @@ impl PayloadObservation {
         }
     }
 
+    pub(crate) fn record_verified_lfs(self, key: &str) {
+        self.record("edge", PayloadIdentity::LfsKey(key));
+        if let Some(public) = self.public {
+            public.record(self.policy, self.family, "verified_edge", None);
+        }
+    }
+
+    pub(crate) fn record_local_lfs(self, key: &str) {
+        self.record("local", PayloadIdentity::LfsKey(key));
+    }
+
     pub(crate) fn record_verified_xorb(self, key: &str) {
         self.record("edge", PayloadIdentity::XorbKey(key));
     }
@@ -249,14 +261,17 @@ impl PayloadObservation {
             CdnReadFamily::Xorb => "CDN verified xorb payload",
             _ => "CDN verified Git payload",
         };
-        let (oid, pack, xorb) = match identity {
-            PayloadIdentity::None => (None, None, None),
+        let (oid, pack, lfs, xorb) = match identity {
+            PayloadIdentity::None => (None, None, None, None),
             PayloadIdentity::GitBlob(oid) => {
-                (Some(format!("{:x}", Sha256::digest(oid))), None, None)
+                (Some(format!("{:x}", Sha256::digest(oid))), None, None, None)
             }
-            PayloadIdentity::GitPack(pack) => (None, Some(pack.to_hex()), None),
+            PayloadIdentity::GitPack(pack) => (None, Some(pack.to_hex()), None, None),
+            PayloadIdentity::LfsKey(key) => {
+                (None, None, Some(format!("{:x}", Sha256::digest(key))), None)
+            }
             PayloadIdentity::XorbKey(key) => {
-                (None, None, Some(format!("{:x}", Sha256::digest(key))))
+                (None, None, None, Some(format!("{:x}", Sha256::digest(key))))
             }
         };
         tracing::event!(
@@ -271,6 +286,7 @@ impl PayloadObservation {
             source,
             git_blob_oid_sha256 = oid.as_deref(),
             git_pack_blake3 = pack.as_ref().map(|digest| digest.as_str()),
+            lfs_key_sha256 = lfs.as_deref(),
             xorb_key_sha256 = xorb.as_deref(),
             "{message}"
         );

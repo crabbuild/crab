@@ -249,7 +249,8 @@ def probe(args: argparse.Namespace) -> dict:
     instance = verify_read_target(lines, reader, consumer)
     candidate = service_candidate(startup, consumer, instance, provenance)
     responses = {}
-    counters = measure(lines, fixture["scope"], expected_git_blob=blob, edge_responses=responses)
+    counters = measure(lines, fixture["scope"], expected_git_blob=blob, expected_lfs_key=lfs_key,
+                       edge_responses=responses)
     native = measure_native(lines, fixture["scope"])
     if transition is not None:
         verify_transition_events(lines, fixture["scope"], transition, git_blob=blob)

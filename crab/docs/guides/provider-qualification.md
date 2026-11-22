@@ -689,11 +689,11 @@ reported by Crab. The first fetch must see the object as unlisted and
 make zero CDN payload requests. The second fetch must accept verified edge
 bytes for that object. On the LFS row, the worker first fetches the pointer
 commit, then measures `crab lfs fetch` in the fresh repository and hashes
-the resulting local object. Crab reports a verified edge LFS object only
-after checking the complete SHA-256. The release verifier checks both
-receipts, the native ref, the seal time, and the verified result. Other
-supported consumers still need equivalent observations from their ordinary
-action.
+the resulting local object. After checking the complete SHA-256, Crab
+reports the fingerprint of the physical LFS key for edge delivery or a
+verified local cache hit. The CLI and service measurement workers match
+that fingerprint to the object approved for the run. The release verifier
+checks both receipts, the native ref, the seal time, and the verified result.
 
 ### Verify retained native versions
 

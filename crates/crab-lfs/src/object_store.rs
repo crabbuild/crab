@@ -366,28 +366,23 @@ impl LfsObjectStore {
         stream: LfsByteStream,
         edge_size: Option<u64>,
     ) -> LfsByteStream {
-        let observation = edge_size.and_then(|size| {
-            attempt
-                .payload_observation()
-                .map(|observation| (size, observation))
-        });
         futures_util::stream::try_unfold(
-            (attempt, stream, observation),
-            |(attempt, mut stream, mut observation)| async move {
+            (attempt, stream, edge_size),
+            |(attempt, mut stream, mut remaining)| async move {
                 let next = attempt
                     .within_deadline(async { stream.next().await.transpose() })
                     .await?;
                 Ok(next.map(|chunk| {
-                    if let Some((remaining, observed)) = &mut observation {
+                    if let Some(size) = &mut remaining {
                         // The verified stream withholds the last bytes until
                         // EOF and SHA-256 have passed.
-                        *remaining -= chunk.len() as u64;
-                        if *remaining == 0 {
-                            observed.record_verified();
-                            observation = None;
+                        *size -= chunk.len() as u64;
+                        if *size == 0 {
+                            attempt.observe_verified_lfs();
+                            remaining = None;
                         }
                     }
-                    (chunk, (attempt, stream, observation))
+                    (chunk, (attempt, stream, remaining))
                 }))
             },
         )
@@ -888,8 +883,8 @@ impl LfsObjectStore {
                     .map(|()| false)
                 })
                 .await?;
-            if accepted_edge && let Some(observation) = edge.payload_observation() {
-                observation.record_verified();
+            if accepted_edge {
+                edge.observe_verified_lfs();
             }
             return Ok(());
         }

@@ -204,6 +204,20 @@ impl Store {
         }
     }
 
+    /// Report a SHA-256-verified local LFS object for the active CDN route.
+    pub fn observe_verified_lfs_cache_hit(&self, path: &Path, size: u64) {
+        if let Some((route, CdnReadFamily::Lfs)) = self.cdn_route_for(path)
+            && route
+                .publication
+                .as_ref()
+                .is_none_or(|receipt| receipt.sizes.get(path.as_ref()) == Some(&size))
+            && let Some(policy) = route.policy()
+            && let Some(observation) = PayloadObservation::new(policy, CdnReadFamily::Lfs, None)
+        {
+            observation.record_local_lfs(path.as_ref());
+        }
+    }
+
     /// Read and verify one immutable unit, optionally using the scoped CDN route.
     ///
     /// Size and range must come from an authenticated descriptor. The verifier
@@ -387,6 +401,15 @@ impl CdnReadAttempt {
             PublicTransitionObservation::new(receipt.approval_digest, self.path.as_ref())
         });
         PayloadObservation::new(self.route.policy()?, self.family, public)
+    }
+
+    /// Report the exact edge LFS object after validating its full SHA-256 and size.
+    pub fn observe_verified_lfs(&self) {
+        if self.family == CdnReadFamily::Lfs
+            && let Some(observation) = self.payload_observation()
+        {
+            observation.record_verified_lfs(self.path.as_ref());
+        }
     }
 
     /// Record a nonempty xorb payload after verifying the requested chunks.

@@ -101,14 +101,11 @@ pub fn run_lfs_fetch(options: LfsFetchOptions, cancel: &CancellationToken) -> Re
         &ctx.local_lfs_dir,
         options.refetch,
         |pointer| {
-            if !options.dry_run
-                && let Some(observation) = ctx
-                    .store
-                    .store()
-                    .cdn_attempt(&ctx.store.object_path_for(&pointer.oid))
-                    .and_then(|attempt| attempt.payload_observation())
-            {
-                observation.record_local();
+            if !options.dry_run {
+                ctx.store.store().observe_verified_lfs_cache_hit(
+                    &ctx.store.object_path_for(&pointer.oid),
+                    pointer.size,
+                );
             }
         },
     )?;

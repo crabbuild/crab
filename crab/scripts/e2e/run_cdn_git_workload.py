@@ -378,7 +378,11 @@ def fetch_once(
     require(len(blob) == GIT_PAYLOAD_SIZE and observed == record["sha256"], "fetched bytes differ from the writer payload")
     lines = run.stderr.splitlines()
     edge_responses = {}
-    metrics = measure(lines, record["scope"], edge_responses=edge_responses)
+    lfs_key = None
+    if crab is not None:
+        physical_key = f"{target['repository_prefix']}/{lfs_object_path(record['sha256'])}"
+        lfs_key = hashlib.sha256(physical_key.encode()).hexdigest()
+    metrics = measure(lines, record["scope"], edge_responses=edge_responses, expected_lfs_key=lfs_key)
     if proof is not None:
         verify_transition_events(lines, record["scope"], proof)
     action = cli_action_name(record["scope"])
