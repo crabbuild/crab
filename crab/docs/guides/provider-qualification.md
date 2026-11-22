@@ -910,11 +910,11 @@ preceded cleanup. The probe reads the root and exact single-ref head through
 the provider SDK and uses the canonical v2 decoder to resolve the visible tip.
 [Git's explicit push lease](https://git-scm.com/docs/git-push#Documentation/git-push.txt---force-with-leaseltrefnamegtltexpectgt)
 
-### Capture SDK Git snapshot evidence
+### Capture SDK Git snapshot, clone, and fetch evidence
 
 Use a direct SDK Git fixture on the repository prefix. The same native
-`publish` and `retire` actions work with that fixture. Between them, make two
-ordinary SDK reads of the confirmed branch and payload. Build the reader
+`publish` and `retire` actions work with that fixture. Between them, run
+the edge and native snapshot, clone, and fetch pairs. Build the reader
 from the checkout used for the native publication.
 
 ```bash
@@ -947,7 +947,8 @@ requires native body bytes, an inactive viewer and zero edge attempts.
 Use the independent native ref probe described above for both publication and
 retirement on the same SDK fixture. The record order is native publication,
 independent ref observation, edge snapshot, origin snapshot, edge clone,
-origin clone, native retirement, independent tombstone observation, and cleanup.
+origin clone, edge fetch, origin fetch, native retirement, independent tombstone
+observation, and cleanup.
 
 Preregister `sdk-git-snapshot` as the workload. Set `sdk_candidate` to the
 build info plus the SHA-256 of the probe executable as `binary_sha256`.
@@ -963,8 +964,8 @@ Keep the edge record at `git-product/snapshot.json` and the origin record at
 assembler derives `product_action` from these records, and the release
 verifier recomputes it.
 
-For both clone arms, pass `--clone-git` and `--clone-crab` with the executable
-paths and keep stdout as `git-product/clone-edge.json` or
+For both clone arms, pass `--action clone`, `--git`, and `--crab` with the
+executable paths and keep stdout as `git-product/clone-edge.json` or
 `git-product/clone-origin.json`. Use the same Crab build as the native
 publisher. Each invocation calls `Client::clone_local` in a fresh worktree.
 The probe checks HEAD and the visible file, identifies the packs containing
@@ -972,7 +973,15 @@ the blob through their local Git indexes, and fingerprints the installed
 pack bytes. The edge arm requires a matching digest verified by the CDN
 pack reader. The origin arm proves the same pack is available natively
 with the binding withdrawn. Use an authenticated layered checkpoint that
-covers the test ref so the clone has eligible immutable pack ranges.
+covers the test ref so clone and fetch have eligible immutable pack ranges.
+
+For both fetch arms, use `--action fetch` with the same executable paths.
+Keep stdout as `git-product/fetch-edge.json` or `git-product/fetch-origin.json`.
+The probe starts with an identical local commit and an empty remote-tracking
+namespace in each worktree. `Local::fetch` must publish the expected
+remote-tracking ref and preserve local HEAD and the worktree. The probe then
+checks out that ref and verifies the visible file and installed pack. The
+origin fetch must install the same pack verified by the edge arm.
 
 For each registered regional pair, start a fresh probe for `origin`,
 `cold_edge`, and `warm_edge`. The timed window covers repository open,

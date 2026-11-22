@@ -698,6 +698,11 @@ fixture cleanup. The SDK Git release row also requires a fresh
 `Client::clone_local` through the CDN and a native clone of the same ref.
 The probe verifies the checked-out commit and file bytes and matches the
 pack containing the file to a digest observed by the CDN pack reader.
+The release row also requires paired `Local::fetch` evidence. From the same
+local baseline, both arms must publish the new remote-tracking ref without
+changing local HEAD or checking out the fixture file. The probe checks out
+the fetched ref afterward and verifies the visible file. Both arms must
+install the pack verified during the CDN fetch before native ref retirement.
 Regional SDK inputs use a fresh probe for the native,
 cold edge and warm edge arms. The local arm repeats the blob read on the
 warm probe's pinned snapshot. It proves the exact checksum-verified cached
@@ -708,8 +713,8 @@ read with each active approval. The prior read proves native delivery of
 the exact blob from its unlisted pack layer. The current read proves CDN
 delivery of that blob from the same layer. The release verifier reconstructs
 the transition trace from the retained SDK records. Live runs still require
-the protected provider fixtures. SDK fetch and the child hydration paths
-still need their own product evidence.
+the protected provider fixtures. SDK child hydration still needs its own
+product evidence.
 
 The protected workflow or its dedicated workers own producing these raw
 observations. The assembly and release jobs own rejecting missing, mismatched

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Verify an ordinary SDK Git snapshot read of a published CDN fixture."""
+"""Verify SDK Git snapshot, clone, or fetch of a published CDN fixture."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import time
@@ -14,10 +15,10 @@ from pathlib import Path
 from collect_cdn_product_metrics import measure, measure_native
 from cdn_viewer_issuer import issuer_settings
 from run_cdn_git_workload import approved_public_export, runner_platform, verify_transition_events, viewer_binding_sha256
-from run_cdn_transport_checks import approved_fixture, fixture_object_key
+from run_cdn_transport_checks import approved_fixture, fixture_object_key, native_remote
 
 from cdn_qualification import (
-    COMMIT, GIT_PAYLOAD_SIZE, PRODUCT_COUNTERS, RUN_NUMBER, SDK_PAYLOAD_FIELDS, SDK_PROBE_FIELDS, SDK_TIMING_FIELDS,
+    COMMIT, GIT_OID, GIT_PAYLOAD_SIZE, PRODUCT_COUNTERS, RUN_NUMBER, SDK_PAYLOAD_FIELDS, SDK_PROBE_FIELDS, SDK_TIMING_FIELDS,
     SHA256, decode, fields, is_direct_sdk_git_scope, matches, positive, read_git_record, require, scope_parts,
     validate_git_publication, verify_sdk_candidate,
 )
@@ -119,8 +120,10 @@ def fetch(args: argparse.Namespace) -> tuple[dict, dict | None]:
     raw = read_git_record(args.receipt)
     publication = validate_git_publication(raw, provenance)
     require(publication["published"], "SDK read requires a confirmed native publication")
-    require((args.clone_git is None) == (args.clone_crab is None), "SDK clone needs both Git and Crab executables")
-    clone = args.clone_crab is not None
+    install = args.action != "snapshot"
+    fetching = args.action == "fetch"
+    require((args.git is not None) == (args.crab is not None) == install,
+            "SDK clone and fetch need both Git and Crab executables")
     repeat = args.warm_local_output is not None
     require(not repeat or args.arm == "edge", "SDK warm-local reads must reuse an edge primer")
     access = scope_parts(scope)[1]
@@ -128,8 +131,8 @@ def fetch(args: argparse.Namespace) -> tuple[dict, dict | None]:
             "SDK prior export needs the exact transition object")
     require(args.transition_object is None or (access == "public" and args.arm != "origin" and not repeat),
             "SDK transition requires a public read with an active receipt")
-    require(not clone or (args.arm in ("edge", "origin") and not repeat and args.transition_object is None),
-            "SDK clone requires a standalone edge or origin arm")
+    require(not install or (args.arm in ("edge", "origin") and not repeat and args.transition_object is None),
+            "SDK clone and fetch require a standalone edge or origin arm")
     binding, approval, transition = binding_for(args, fixture)
     if args.arm == "prior_export":
         require(transition is not None and transition["sealed_at_unix_ms"] <= publication["visible_at_unix_ms"],
@@ -140,25 +143,33 @@ def fetch(args: argparse.Namespace) -> tuple[dict, dict | None]:
                "expected_bytes": GIT_PAYLOAD_SIZE, "binding": binding, "repeat_snapshot": repeat,
                "public_transition": transition is not None}
     crab_digest = ""
-    if clone:
-        git, crab = args.clone_git.resolve(strict=True), args.clone_crab.resolve(strict=True)
+    if install:
+        git, crab = args.git.resolve(strict=True), args.crab.resolve(strict=True)
         with crab.open("rb") as executable:
             crab_digest = hashlib.file_digest(executable, "sha256").hexdigest()
         require(crab_digest == publication["candidate"]["binary_sha256"],
-                "SDK clone must launch the approved Crab build from the native publication")
-        request["clone_tools"] = {"git": str(git), "crab": str(crab)}
+                "SDK worktree action must launch the approved Crab build from the native publication")
+        request["worktree"] = {
+            "git": str(git), "crab": str(crab),
+            "fetch_remote": native_remote(fixture, scope_parts(scope)[0]) if fetching else None,
+        }
     probe = args.probe.resolve(strict=True)
     with probe.open("rb") as binary:
         probe_digest = hashlib.file_digest(binary, "sha256").hexdigest()
     started_at = time.time_ns() // 1_000_000
     require(publication["visible_at_unix_ms"] <= started_at, "SDK measurement started before native publication")
+    env = {name: value for name, value in os.environ.items() if not name.upper().startswith("GIT_")}
+    env |= {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0"}
     try:
-        result = subprocess.run([str(probe)], input=json.dumps(request).encode(), capture_output=True, timeout=300, check=False)
+        result = subprocess.run([str(probe)], input=json.dumps(request).encode(), capture_output=True, timeout=300,
+                                check=False, env=env)
     except subprocess.TimeoutExpired:
-        raise ValueError("SDK snapshot read timed out") from None
+        raise ValueError("SDK Git workload timed out") from None
     finished_at = time.time_ns() // 1_000_000
-    require(result.returncode == 0, f"SDK snapshot read failed with exit {result.returncode}")
-    expected_fields = SDK_PROBE_FIELDS | ({"clone_packs"} if clone else set())
+    require(result.returncode == 0, f"SDK Git workload failed with exit {result.returncode}")
+    expected_fields = SDK_PROBE_FIELDS | ({"installed_packs"} if install else set())
+    if fetching:
+        expected_fields |= {"previous_head", "head_after_fetch"}
     observed = fields(decode(result.stdout), expected_fields, "SDK read result")
     platform = runner_platform()
     build = observed.pop("build")
@@ -169,20 +180,24 @@ def fetch(args: argparse.Namespace) -> tuple[dict, dict | None]:
             and type(payload["bytes"]) is int and payload["bytes"] == GIT_PAYLOAD_SIZE
             and matches(SHA256, payload["git_blob_oid_sha256"]),
             "SDK snapshot did not verify the published Git payload")
+    if fetching:
+        require(matches(GIT_OID, observed["previous_head"])
+                and observed["head_after_fetch"] == observed["previous_head"] != observed["commit"],
+                "SDK fetch did not preserve the local HEAD before checkout")
     timing = observed_interval({key: observed[key] for key in SDK_TIMING_FIELDS}, started_at, finished_at)
     lines, local_lines = split_observations(result.stderr.splitlines(), repeat)
     reader = verified_target(lines, fixture, args.arm, approval)
     packs = None
-    if clone:
-        packs = observed["clone_packs"]
+    if install:
+        packs = observed["installed_packs"]
         require(isinstance(packs, list) and 0 < len(packs) <= 1024
                 and all(matches(SHA256, pack) for pack in packs) and sorted(set(packs)) == packs,
-                "SDK clone did not verify installed packs containing the checked-out blob")
+                "SDK did not verify installed packs containing the checked-out blob")
     responses = {}
     edge_packs: set[str] = set()
     counters = measure(lines, scope, edge_responses=responses,
-                       expected_git_blob=None if clone else payload["git_blob_oid_sha256"],
-                       expected_git_packs=set(packs) if clone else None, verified_git_packs=edge_packs)
+                       expected_git_blob=None if install else payload["git_blob_oid_sha256"],
+                       expected_git_packs=set(packs) if install else None, verified_git_packs=edge_packs)
     native = measure_native(lines, scope)
     if args.arm == "edge":
         require(counters["observed_edge_gets"] > 0 and counters["verified_edge_payloads"] > 0,
@@ -197,9 +212,11 @@ def fetch(args: argparse.Namespace) -> tuple[dict, dict | None]:
         "publication_sha256": hashlib.sha256(raw).hexdigest(), "reader": reader, "commit": observed["commit"],
     }
     primary = context | timing | counters | {"arm": args.arm, "edge_responses": responses, "native_traffic": native}
-    if clone:
-        primary |= {"schema": "crab.cdn-sdk-git-clone/v1", "crab_sha256": crab_digest,
+    if install:
+        primary |= {"schema": f"crab.cdn-sdk-git-{args.action}/v1", "crab_sha256": crab_digest,
                     "installed_packs": packs, "verified_edge_packs": sorted(edge_packs)}
+    if fetching:
+        primary |= {key: observed[key] for key in ("previous_head", "head_after_fetch")}
     if transition is not None:
         primary["transition_key_sha256"] = transition["key_sha256"]
     local = None
@@ -231,8 +248,9 @@ def main() -> int:
     parser.add_argument("--private-reader", type=Path)
     parser.add_argument("--export-approval", type=Path)
     parser.add_argument("--transition-object", help="exact repository-relative pack-layer key selected by the snapshot")
-    parser.add_argument("--clone-git", type=Path, help="run SDK clone with this exact Git executable")
-    parser.add_argument("--clone-crab", type=Path, help="run SDK clone with this exact Crab executable")
+    parser.add_argument("--action", choices=("snapshot", "clone", "fetch"), default="snapshot")
+    parser.add_argument("--git", type=Path, help="exact Git executable for clone or fetch")
+    parser.add_argument("--crab", type=Path, help="exact Crab executable for clone or fetch")
     parser.add_argument("--warm-local-output", type=Path, help="write the timed repeat read of the same pinned SDK snapshot")
     args = parser.parse_args()
     try:

@@ -425,9 +425,15 @@ class CdnQualificationTests(unittest.TestCase):
                 "started_at_unix_ms": PUBLIC_SEAL + start, "finished_at_unix_ms": PUBLIC_SEAL + start + 5,
                 "elapsed_ms": 5, "installed_packs": [pack], "verified_edge_packs": [pack] if arm == "edge" else [],
             })
+            json_file(records / CDN.SDK_FETCH_FILES[arm], read | {
+                "schema": "crab.cdn-sdk-git-fetch/v1", "crab_sha256": writer["binary_sha256"],
+                "started_at_unix_ms": PUBLIC_SEAL + start + 12, "finished_at_unix_ms": PUBLIC_SEAL + start + 17,
+                "elapsed_ms": 5, "installed_packs": [pack], "verified_edge_packs": [pack] if arm == "edge" else [],
+                "previous_head": "5" * 40, "head_after_fetch": "5" * 40,
+            })
         json_file(records / "retirement.json", provenance | {
             "schema": "crab.cdn-git-retirement/v1", "publication_sha256": receipt, "ref_retired": True,
-            "retired_at_unix_ms": PUBLIC_SEAL + 50, "candidate": writer,
+            "retired_at_unix_ms": PUBLIC_SEAL + 59, "candidate": writer,
         })
         for phase, delta, marker in (("published", -30, "5"), ("retired", 60, "6")):
             json_file(records / CDN.GIT_NATIVE_REF_FILES[phase], provenance | {
@@ -1057,6 +1063,26 @@ class CdnQualificationTests(unittest.TestCase):
                 self.rejected(reason, *args)
         path.unlink()
         self.rejected(CDN.SDK_CLONE_FILES["edge"], *args)
+
+    def test_sdk_release_requires_fetch_after_clone_from_the_same_local_head(self) -> None:
+        self.configure("s3", "private", "direct", consumer="sdk")
+        policy = self.directory / "qualified-scopes.txt"
+        policy.write_text(self.scope + "\n", encoding="utf-8")
+        args = ("--cdn-release-policy", str(policy))
+        path = self.directory / CDN.GIT_PRODUCT_DIR / CDN.SDK_FETCH_FILES["origin"]
+        original = json.loads(path.read_bytes())
+        for changes, reason in (
+            ({"head_after_fetch": original["commit"]}, "did not preserve the local HEAD"),
+            (dict.fromkeys(("previous_head", "head_after_fetch"), "6" * 40), "same local HEAD"),
+            ({"installed_packs": ["9" * 64]}, "must install the same verified CDN packs"),
+            ({"started_at_unix_ms": PUBLIC_SEAL + 47}, "must follow the preceding workload"),
+            ({"finished_at_unix_ms": PUBLIC_SEAL + 65}, "requires retirement of the same published ref after rollback"),
+        ):
+            with self.subTest(changes=changes):
+                json_file(path, original | changes)
+                self.rejected(reason, *args)
+        path.unlink()
+        self.rejected(CDN.SDK_FETCH_FILES["origin"], *args)
 
     def test_private_sdk_release_accepts_regional_provider_records(self) -> None:
         for provider in ("s3", "gcs", "azure"):

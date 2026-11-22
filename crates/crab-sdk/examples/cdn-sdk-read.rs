@@ -1,7 +1,8 @@
-//! Read one published fixture blob through the normal SDK snapshot API.
+//! Verify one published fixture blob through the SDK snapshot, clone, or fetch API.
 
 use std::io::{Read as _, Write as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::process::ExitCode;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -31,14 +32,15 @@ struct Request {
     repeat_snapshot: bool,
     public_transition: bool,
     #[serde(default)]
-    clone_tools: Option<CloneTools>,
+    worktree: Option<Worktree>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CloneTools {
+struct Worktree {
     git: PathBuf,
     crab: PathBuf,
+    fetch_remote: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -120,8 +122,7 @@ impl Request {
             return Err("SDK snapshot selected a different published commit".into());
         }
         let payload = self.read_blob(&snapshot).await?;
-        let mut report = timing.finish()?;
-        tracing::debug!(target: "crab_cdn_probe::arm_boundary", parent: None, phase = "primary_finish");
+        let mut report = primary_finish(timing)?;
         report["commit"] = serde_json::json!(oid.to_string());
         report["payload"] = payload.clone();
         report["warm_local"] = serde_json::Value::Null;
@@ -175,25 +176,120 @@ impl Request {
                 CloneOptions::default().with_branch(&self.branch)?,
             )
             .await?;
+        let report = primary_finish(timing)?;
+        self.worktree_report(repository.local()?, report).await
+    }
+
+    async fn fetch_read(
+        &self,
+        client: &Client,
+        git: &Path,
+        remote: &str,
+    ) -> Result<serde_json::Value, Failure> {
+        use crab_sdk::local::{CheckoutOptions, FetchOptions};
+
+        let scratch = tempfile::tempdir()?;
+        initialize_fetch_worktree(git, scratch.path(), remote)?;
+        let repository = client.open(OpenOptions::local(scratch.path())).await?;
         let local = repository.local()?;
+        let previous_head = local.snapshot("HEAD").await?.commit_id();
+        let target = ObjectId::from_hex(&self.expected_oid)?;
+        let tracking_ref = format!("refs/remotes/origin/{}", self.branch);
+        if previous_head == target {
+            return Err("SDK fetch fixture already has the published commit at HEAD".into());
+        }
+        let timing = Timing::start()?;
+        let outcome = local.fetch(FetchOptions::default()).await?;
+        let report = primary_finish(timing)?;
+        if outcome.head() != Some(previous_head)
+            || local.snapshot("HEAD").await?.commit_id() != previous_head
+            || local.snapshot(&tracking_ref).await?.commit_id() != target
+            || local.path().join(PAYLOAD).try_exists()?
+        {
+            return Err("SDK fetch did not publish the remote-tracking ref while preserving HEAD and the worktree".into());
+        }
+        local
+            .checkout(&tracking_ref, CheckoutOptions::default())
+            .await?;
+        let mut report = self.worktree_report(local, report).await?;
+        report["previous_head"] = serde_json::json!(previous_head.to_string());
+        report["head_after_fetch"] = serde_json::json!(outcome.head().map(|oid| oid.to_string()));
+        Ok(report)
+    }
+
+    async fn worktree_report(
+        &self,
+        local: crab_sdk::local::Local<'_>,
+        mut report: serde_json::Value,
+    ) -> Result<serde_json::Value, Failure> {
         let oid = local.snapshot("HEAD").await?.commit_id();
         if oid != ObjectId::from_hex(&self.expected_oid)? {
-            return Err("SDK clone checked out a different commit".into());
+            return Err("SDK checked out a different commit".into());
         }
         let mut bytes = Vec::new();
-        std::fs::File::open(destination.join(PAYLOAD))?
+        std::fs::File::open(local.path().join(PAYLOAD))?
             .take(self.expected_bytes as u64 + 1)
             .read_to_end(&mut bytes)?;
         let (payload, blob) = self.verified_payload(&bytes)?;
-        let mut report = timing.finish()?;
-        tracing::debug!(target: "crab_cdn_probe::arm_boundary", parent: None, phase = "primary_finish");
         report["commit"] = serde_json::json!(oid.to_string());
         report["payload"] = payload;
         report["warm_local"] = serde_json::Value::Null;
-        report["clone_packs"] =
+        report["installed_packs"] =
             serde_json::json!(installed_blob_packs(local.common_directory(), blob)?);
         Ok(report)
     }
+}
+
+fn initialize_fetch_worktree(git: &Path, root: &Path, remote: &str) -> Result<(), Failure> {
+    // Create a real local HEAD without borrowing any objects or refs from the
+    // CDN fixture. Only the SDK fetch can bring the published ref into this ODB.
+    let global = root.join("empty.gitconfig");
+    std::fs::File::create(&global)?;
+    let run = |args: &[&str]| -> Result<(), Failure> {
+        let mut command = Command::new(git);
+        for (key, _) in std::env::vars_os() {
+            if key
+                .to_string_lossy()
+                .to_ascii_uppercase()
+                .starts_with("GIT_")
+            {
+                command.env_remove(key);
+            }
+        }
+        let output = command
+            .current_dir(root)
+            .env("GIT_CONFIG_GLOBAL", &global)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z")
+            .args(args)
+            .output()?;
+        if !output.status.success() {
+            return Err("cannot initialize the isolated SDK fetch worktree".into());
+        }
+        Ok(())
+    };
+    run(&[
+        "init",
+        "--quiet",
+        "--template=",
+        "--object-format=sha1",
+        "--initial-branch=local",
+    ])?;
+    run(&[
+        "-c",
+        "user.name=Crab CDN qualification",
+        "-c",
+        "user.email=qualification@example.invalid",
+        "commit",
+        "--allow-empty",
+        "--no-gpg-sign",
+        "-m",
+        "Local SDK fetch baseline",
+    ])?;
+    run(&["remote", "add", "origin", remote])?;
+    std::fs::remove_file(global)?;
+    Ok(())
 }
 
 fn installed_blob_packs(
@@ -215,7 +311,7 @@ fn installed_blob_packs(
         }
     }
     if packs.is_empty() {
-        return Err("SDK clone did not install a Git pack containing the fixture blob".into());
+        return Err("SDK did not install a Git pack containing the fixture blob".into());
     }
     Ok(packs)
 }
@@ -223,6 +319,12 @@ fn installed_blob_packs(
 struct Timing {
     started_at: u64,
     clock: Instant,
+}
+
+fn primary_finish(timing: Timing) -> Result<serde_json::Value, Failure> {
+    let report = timing.finish()?;
+    tracing::debug!(target: "crab_cdn_probe::arm_boundary", parent: None, phase = "primary_finish");
+    Ok(report)
 }
 
 impl Timing {
@@ -298,7 +400,7 @@ async fn run() -> Result<(), Failure> {
     let builder = Client::builder()
         .direct_store(request.store()?)
         .direct_cdn(request.cdn()?);
-    let builder = if let Some(tools) = &request.clone_tools {
+    let builder = if let Some(tools) = &request.worktree {
         builder.local(crab_sdk::local::Options::new(crab_sdk::local::Tools::new(
             &tools.git,
             &tools.crab,
@@ -307,10 +409,12 @@ async fn run() -> Result<(), Failure> {
         builder
     };
     let client = builder.build()?;
-    let read = if request.clone_tools.is_some() {
-        request.clone_read(&client).await
-    } else {
-        request.read(&client).await
+    let read = match &request.worktree {
+        Some(worktree) => match &worktree.fetch_remote {
+            Some(remote) => request.fetch_read(&client, &worktree.git, remote).await,
+            None => request.clone_read(&client).await,
+        },
+        None => request.read(&client).await,
     };
     let close = client.close().await;
     let mut report = read?;
@@ -325,7 +429,7 @@ async fn main() -> ExitCode {
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => {
-            eprintln!("SDK CDN probe could not verify the published snapshot");
+            eprintln!("SDK CDN probe could not verify the published Git content");
             ExitCode::FAILURE
         }
     }
@@ -334,6 +438,33 @@ async fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fetch_arms_start_with_identical_local_heads_and_no_tracking_ref() {
+        let remote = "crab://qualification-bucket/repository";
+        let mut heads = Vec::new();
+        for _ in 0..2 {
+            let worktree = tempfile::tempdir().unwrap();
+            initialize_fetch_worktree(Path::new("git"), worktree.path(), remote).unwrap();
+            let git = |args: &[&str]| {
+                let result = Command::new("git")
+                    .current_dir(worktree.path())
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert!(result.status.success(), "{args:?}");
+                String::from_utf8(result.stdout).unwrap().trim().to_owned()
+            };
+            heads.push(git(&["rev-parse", "HEAD"]));
+            assert_eq!(
+                git(&["config", "--local", "--get", "remote.origin.url"]),
+                remote
+            );
+            assert!(git(&["for-each-ref", "refs/remotes"]).is_empty());
+            assert!(git(&["status", "--porcelain"]).is_empty());
+        }
+        assert_eq!(heads[0], heads[1]);
+    }
 
     #[test]
     fn installed_pack_lookup_reads_real_git_indexes_and_hashes_the_pack() {

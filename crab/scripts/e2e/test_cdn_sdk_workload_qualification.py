@@ -49,7 +49,7 @@ class CdnSdkWorkloadQualificationTests(unittest.TestCase):
         self.args = argparse.Namespace(arm="edge", fixture=config_path, configuration_sha256=configuration,
                                        receipt=receipt, probe=probe, source_sha=COMMIT, run_id="123", run_attempt="2",
                                        private_reader=reader, export_approval=None, warm_local_output=None, transition_object=None,
-                                       clone_git=None, clone_crab=None)
+                                       action="snapshot", git=None, crab=None)
         self.build = {key: value for key, value in sdk_candidate(scope, SDK.runner_platform()).items() if key in CLI_BUILD_FIELDS}
         clock = patch.object(SDK.time, "time_ns", side_effect=cycle((1_000_000_000, 1_010_000_000)))
         clock.start()
@@ -207,24 +207,43 @@ class CdnSdkWorkloadQualificationTests(unittest.TestCase):
                             self.assertEqual(read["transition_key_sha256"], key)
                             self.assertIsNone(local)
 
-    def test_clone_requires_matching_cdn_packs_containing_the_checked_out_blob(self) -> None:
-        self.args.clone_git = self.args.probe
-        self.args.clone_crab = self.args.probe.with_name("crab")
-        self.args.clone_crab.write_bytes(b"fixture Crab binary")
+    def worktree(self, action: str) -> None:
+        self.args.action = action
+        self.args.git = self.args.probe
+        self.args.crab = self.args.probe.with_name("crab")
+        self.args.crab.write_bytes(b"fixture Crab binary")
         receipt = json.loads(self.args.receipt.read_bytes())
         receipt["candidate"]["binary_sha256"] = hashlib.sha256(b"fixture Crab binary").hexdigest()
         json_file(self.args.receipt, receipt)
+
+    def test_clone_and_fetch_require_matching_cdn_packs_containing_the_checked_out_blob(self) -> None:
         pack = "1" * 64
-        base = self.observe(edge=True, clone_packs=[pack])
         event = {"target": "crab_storage::cdn::transfer", "fields": {
             "message": "CDN verified Git payload", "provider": "s3", "access": "private",
             "consumer": "sdk", "family": "git", "profile": "direct", "source": "edge", "git_pack_blake3": pack,
         }}
-        with patch.object(SDK.subprocess, "run", return_value=base):
-            with self.assertRaisesRegex(ValueError, "did not accept verified Git bytes"):
+        for action in ("clone", "fetch"):
+            with self.subTest(action=action):
+                self.worktree(action)
+                head = {"previous_head": "c" * 40, "head_after_fetch": "c" * 40} if action == "fetch" else {}
+                base = self.observe(edge=True, installed_packs=[pack], **head)
+                with patch.object(SDK.subprocess, "run", return_value=base):
+                    with self.assertRaisesRegex(ValueError, "did not accept verified Git bytes"):
+                        SDK.fetch(self.args)
+                matching = subprocess.CompletedProcess([], 0, base.stdout, json.dumps(event).encode() + b"\n" + base.stderr)
+                with patch.object(SDK.subprocess, "run", return_value=matching) as run:
+                    record, _ = SDK.fetch(self.args)
+                worktree = json.loads(run.call_args.kwargs["input"])["worktree"]
+                self.assertEqual(worktree["fetch_remote"],
+                                 SDK.native_remote(self.config, "cloudfront") if action == "fetch" else None)
+                self.assertEqual(record["schema"], f"crab.cdn-sdk-git-{action}/v1")
+                self.assertEqual(record["installed_packs"], record["verified_edge_packs"])
+                self.assertEqual({key: record[key] for key in head}, head)
+
+    def test_fetch_rejects_an_integrated_head(self) -> None:
+        self.worktree("fetch")
+        result = self.observe(edge=False, installed_packs=["1" * 64],
+                              previous_head="a" * 40, head_after_fetch=self.oid)
+        with patch.object(SDK.subprocess, "run", return_value=result):
+            with self.assertRaisesRegex(ValueError, "did not preserve the local HEAD"):
                 SDK.fetch(self.args)
-        matching = subprocess.CompletedProcess([], 0, base.stdout, json.dumps(event).encode() + b"\n" + base.stderr)
-        with patch.object(SDK.subprocess, "run", return_value=matching):
-            record, _ = SDK.fetch(self.args)
-        self.assertEqual(record["schema"], "crab.cdn-sdk-git-clone/v1")
-        self.assertEqual(record["installed_packs"], record["verified_edge_packs"])
