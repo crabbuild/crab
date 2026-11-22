@@ -743,6 +743,12 @@ Scopes with generic workload summaries can produce fixture reports. Release
 verification requires a product-specific verifier that rebuilds the summary
 from individual runs.
 
+Crab Server's loopback HTTP smoke verifies complete Git and LFS bodies through
+the ordinary read handlers with those native bodies blocked. It checks that
+partial LFS reads stay on origin and withdrawing the CDN layout gives a fresh
+native Git read with identical bytes and ETag. Live regional records and
+provider-log correlation for the server remain release requirements.
+
 The protected workflow or its dedicated workers own producing these raw
 observations. The assembly and release jobs own rejecting missing, mismatched
 or semantically incomplete records. Until each affected check has both a live

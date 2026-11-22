@@ -455,6 +455,11 @@ use the native storage paths. The default build excludes this
 configuration. See [Plan 021](../../plans/021-provider-cdn-support.md) for
 the live qualification requirements.
 
+The repository HTTP smoke test covers full Git and LFS delivery with native
+body reads blocked, native LFS ranges, and Git rollback with the same ETag.
+Run `ordinary_http_reads_use_verified_edge_bodies_and_keep_native_controls`
+from the library test suite after building the embedded UI.
+
 ## Find the relevant contract
 
 Read [CELLAR.md](CELLAR.md) for the native runtime, storage, and lifecycle
