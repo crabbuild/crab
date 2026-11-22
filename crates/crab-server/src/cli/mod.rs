@@ -197,6 +197,15 @@ enum RepositoryCommand {
     Adopt(AdoptRepository),
     /// Replace a cataloged repository's membership.
     SetMembers(SetRepositoryMembers),
+    /// Bind a repository to an organization or replace its team grants.
+    SetOrganization {
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        input_file: PathBuf,
+    },
     /// Print the durable repository catalog as JSON.
     List,
 }
@@ -701,6 +710,29 @@ async fn repository(
                 )
                 .await?;
             println!("{}", serde_json::to_string_pretty(&record)?);
+        }
+        RepositoryCommand::SetOrganization {
+            owner,
+            name,
+            input_file,
+        } => {
+            let mut bytes = Vec::new();
+            std::fs::File::open(input_file)?
+                .take(32 * 1024 + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > 32 * 1024 {
+                return Err(crab_server::Error::Config(
+                    "Repository organization input exceeds 32 KiB",
+                ));
+            }
+            let input: serde_json::Value = serde_json::from_slice(&bytes)?;
+            let path = format!("/internal/repositories/{owner}/{name}/organization");
+            let result = management_request(config, reqwest::Method::PUT, &path, Some(&input))
+                .await?
+                .text()
+                .await
+                .map_err(|source| crab_server::Error::Healthcheck { source })?;
+            println!("{result}");
         }
         RepositoryCommand::List => {
             let catalog = CatalogStore::from_config(config)?;

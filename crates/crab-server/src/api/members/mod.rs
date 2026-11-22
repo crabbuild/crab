@@ -1,4 +1,5 @@
 pub(in crate::api) mod roster;
+mod team_access;
 
 use std::sync::Arc;
 
@@ -13,7 +14,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::{
-    RepositoryGroup, RepositoryMember,
+    RepositoryGroup, RepositoryMember, app,
     auth::Principal,
     catalog::{AccessUpdate, CatalogDocument, CatalogError, CatalogStore, MembershipActor},
     server::Server,
@@ -21,6 +22,7 @@ use crate::{
 
 pub(crate) fn routes() -> Router<Arc<Server>> {
     Router::new()
+        .merge(team_access::routes())
         .route("/api/repos/{owner}/{name}/members", get(list).put(replace))
         .layer(axum::extract::DefaultBodyLimit::max(256 * 1024))
 }
@@ -117,11 +119,15 @@ async fn authorized(
             "Repository not found.",
         ));
     }
-    let issuer = server
-        .auth
-        .as_ref()
-        .map_or("urn:crab:local", |auth| auth.issuer());
-    let current = principal.with_membership(record.id, &config, issuer);
+    let current = app::resolve_repository_membership(
+        server,
+        principal,
+        record.id,
+        &config,
+        record.organization.as_ref(),
+    )
+    .await
+    .map_err(|error| Box::new(error.into_response()))?;
     if !current.can_admin(record.id) {
         return Err(boxed_error(
             StatusCode::NOT_FOUND,
@@ -231,13 +237,18 @@ async fn replace(
                     );
                 }
             };
-            let issuer = server
-                .auth
-                .as_ref()
-                .map_or("urn:crab:local", |auth| auth.issuer());
-            let can_admin = principal
-                .with_membership(record.id, &config, issuer)
-                .can_admin(record.id);
+            let can_admin = match app::resolve_repository_membership(
+                &server,
+                &principal,
+                record.id,
+                &config,
+                record.organization.as_ref(),
+            )
+            .await
+            {
+                Ok(current) => current.can_admin(record.id),
+                Err(error) => return error.into_response(),
+            };
             Json(MembershipState {
                 revision: if old.as_ref() == Some(&(record.members.clone(), record.groups.clone()))
                 {

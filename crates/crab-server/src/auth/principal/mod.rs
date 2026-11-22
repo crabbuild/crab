@@ -130,6 +130,7 @@ impl Principal {
         repository: Uuid,
         config: &RepositoryConfig,
         issuer: &str,
+        organization: Option<RepositoryAccess>,
     ) -> Self {
         let account = match &self.credential {
             Credential::Local => return self.clone(),
@@ -157,6 +158,7 @@ impl Principal {
             individual
                 .into_iter()
                 .chain(group)
+                .chain(organization)
                 .max()
                 .map(|access| std::cmp::min(access, ceiling))
         });

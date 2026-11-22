@@ -86,6 +86,7 @@ impl CatalogStore {
             revision: document.version,
             members: record.members.clone(),
             groups: record.groups.clone(),
+            organization: record.organization.clone(),
         })
     }
 }

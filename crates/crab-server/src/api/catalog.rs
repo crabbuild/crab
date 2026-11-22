@@ -41,10 +41,6 @@ pub(super) async fn list(
                 .collect::<std::collections::HashMap<_, _>>(),
         )
     };
-    let issuer = server
-        .auth
-        .as_ref()
-        .map_or("urn:crab:local", |auth| auth.issuer());
     let mut repositories = Vec::new();
     for repository in server.repositories.values() {
         if selection.owner.as_ref().is_some_and(|owner| {
@@ -53,25 +49,35 @@ pub(super) async fn list(
         }) {
             continue;
         }
-        let current = if let Some(grants) = &grants {
-            let Some(record) = grants.get(&repository.id).filter(|record| {
+        let record = grants
+            .as_ref()
+            .and_then(|grants| grants.get(&repository.id))
+            .filter(|record| {
                 record.owner == repository.config.owner && record.name == repository.config.name
-            }) else {
-                continue;
-            };
+            });
+        let current = if let Some(record) = record {
             let mut config = repository.config.clone();
             config.members = record.members.clone();
             config.groups = record.groups.clone();
-            principal.with_membership(repository.id, &config, issuer)
-        } else {
+            app::resolve_repository_membership(
+                &server,
+                &principal,
+                repository.id,
+                &config,
+                record.organization.as_ref(),
+            )
+            .await?
+        } else if principal.is_local() {
             principal.clone()
+        } else {
+            continue;
         };
         if !current.can_read(repository.id) {
             continue;
         }
         let protections = crate::repository::settings::load(&server, &repository).await?;
         let lifecycle = crate::repository::settings::load_lifecycle(&server, &repository).await?;
-        repositories.push(json!({
+        let mut view = json!({
             "id": repository.id,
             "owner": repository.config.owner, "name": repository.config.name,
             "description": repository.config.description,
@@ -81,7 +87,11 @@ pub(super) async fn list(
             "protected_branches": protections.rules,
             "archive_version": lifecycle.version,
             "archived": lifecycle.archived,
-        }));
+        });
+        if let Some(organization) = record.and_then(|record| record.organization.as_ref()) {
+            view["organization_id"] = json!(organization.id);
+        }
+        repositories.push(view);
     }
     Ok(Json(json!({"repositories":repositories})))
 }

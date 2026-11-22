@@ -14,7 +14,14 @@ use crab_storage::StorageError;
 use serde_json::json;
 
 use crate::{
+    RepositoryAccess, RepositoryConfig,
     auth::{Identity, Principal},
+    catalog::{CatalogError, OrganizationAccess},
+    cells::{
+        Address,
+        directory::{IdentityKey, LookupAccounts},
+        organization::teams::{GetRepositoryTeamAccess, RepositoryTeamAccess, RepositoryTeams},
+    },
     repository::Repository,
     server::Server,
 };
@@ -645,6 +652,95 @@ pub(crate) struct Membership {
     pub principal: Principal,
 }
 
+pub(crate) fn repository_access_error(error: CatalogError) -> Error {
+    match error {
+        CatalogError::Conflict => Error::Conflict,
+        CatalogError::NotFound => Error::NotFound,
+        CatalogError::Invalid(message) => Error::Invalid(message),
+        error => Error::Membership(Box::new(error)),
+    }
+}
+
+pub(crate) async fn repository_team_access(
+    server: &Server,
+    organization: &OrganizationAccess,
+    actor: Option<uuid::Uuid>,
+) -> Result<RepositoryTeamAccess> {
+    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    query_output(
+        cells
+            .query::<GetRepositoryTeamAccess>(
+                Address::Organization(organization.id),
+                None,
+                RepositoryTeams {
+                    actor,
+                    teams: organization.teams.iter().map(|grant| grant.team).collect(),
+                },
+            )
+            .await,
+    )
+}
+
+pub(crate) async fn registered_actor(
+    server: &Server,
+    identity: IdentityKey,
+) -> Result<Option<uuid::Uuid>> {
+    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    let accounts = query_output(
+        cells
+            .query::<LookupAccounts>(Address::Directory, None, vec![identity])
+            .await,
+    )?;
+    match accounts.as_slice() {
+        [actor] => Ok(*actor),
+        _ => Err(Error::CellContract(
+            "Account lookup returned an invalid result count",
+        )),
+    }
+}
+
+pub(crate) async fn resolve_repository_membership(
+    server: &Server,
+    principal: &Principal,
+    repository: uuid::Uuid,
+    config: &RepositoryConfig,
+    organization: Option<&OrganizationAccess>,
+) -> Result<Principal> {
+    if principal.is_local() {
+        return Ok(principal.clone());
+    }
+    let issuer = server.auth.as_ref().ok_or(Error::NotFound)?.issuer();
+    let mut access = None;
+    if let Some(organization) = organization
+        && let Some(identity) = principal
+            .identity()
+            .filter(|identity| identity.issuer == issuer)
+    {
+        if let Some(actor) = registered_actor(
+            server,
+            IdentityKey {
+                issuer: identity.issuer,
+                subject: identity.subject,
+            },
+        )
+        .await?
+        {
+            let membership = repository_team_access(server, organization, Some(actor)).await?;
+            access = if membership.owner {
+                Some(RepositoryAccess::Admin)
+            } else {
+                organization
+                    .teams
+                    .iter()
+                    .filter(|grant| membership.teams.contains(&grant.team))
+                    .map(|grant| grant.access)
+                    .max()
+            };
+        }
+    }
+    Ok(principal.with_membership(repository, config, issuer, access))
+}
+
 pub(crate) async fn membership(
     server: &Server,
     principal: &Principal,
@@ -660,7 +756,6 @@ pub(crate) async fn membership(
             principal: principal.clone(),
         });
     }
-    let issuer = server.auth.as_ref().ok_or(Error::NotFound)?.issuer();
     let snapshot = server
         .catalog()
         .ok_or(Error::NotFound)?
@@ -676,7 +771,14 @@ pub(crate) async fn membership(
     let mut config = repo.config.clone();
     config.members = snapshot.members;
     config.groups = snapshot.groups;
-    let principal = principal.with_membership(repo.id, &config, issuer);
+    let principal = resolve_repository_membership(
+        server,
+        principal,
+        repo.id,
+        &config,
+        snapshot.organization.as_ref(),
+    )
+    .await?;
     if !principal.can_read(repo.id) {
         return Err(Error::NotFound);
     }
