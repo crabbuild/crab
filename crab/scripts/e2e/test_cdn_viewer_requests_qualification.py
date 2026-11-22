@@ -287,6 +287,55 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                     self.assertEqual(proof["client_report_sha256"], hydration_digest)
                     self.assertEqual(proof["records"][fingerprint]["key_sha256"], key_sha256)
 
+    def test_public_sdk_snapshot_requires_cloud_cdn_delivery_of_the_approved_pack(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project, rule = "fixture-project", "crab-https"
+            config = fixture("cloud-cdn", "public") | {
+                "scope": "cloud-cdn/public/sdk/git/direct", "deployment": {"project": project, "forwarding_rule": rule},
+            }
+            fixture_path = root / "fixture.json"
+            configuration = examples.json_file(fixture_path, config)
+            registration = {"scope": config["scope"], "source_sha": examples.COMMIT, "configuration_sha256": configuration,
+                            "regions": {"near": "near"}, "samples": 1, "viewer_binding_sha256": "e" * 64,
+                            "sdk_candidate": examples.sdk_candidate(config["scope"], "linux-x86_64")}
+            examples.write_git_measurements(root, registration, "linux-x86_64")
+            client = root / "near/0001/cold_edge/client.json"
+            report = json.loads(client.read_bytes())
+            tag = f"crab-cdn-qualification/{'0a' * 16}"
+            fingerprint = hashlib.sha256(tag.encode()).hexdigest()
+            response = next(iter(report["edge_responses"].values()))
+            key = f"{config['fixture_prefix']}/{PACK}"
+            digest = hashlib.sha256(key.encode()).hexdigest()
+            snapshot = report | {"transition_key_sha256": digest, "edge_responses": {fingerprint: response}}
+            log, output = root / "gcloud.json", root / "viewer-requests.json"
+            command = [sys.executable, "-B", str(Path(COLLECT.__file__)), "--fixture", str(fixture_path), "--log", str(log),
+                       "--client", str(client), "--configuration-sha256", configuration, "--output", str(output)]
+            for observed_key, status, error in (
+                (key[:-64] + "b" * 64, 206, "did not confirm the new export object"),
+                (key, 403, "did not confirm the new export object"),
+                (key, 206, None),
+            ):
+                with self.subTest(observed_key=observed_key, status=status):
+                    snapshot_digest = examples.json_file(client, snapshot | {"edge_responses": {
+                        fingerprint: response | {"status": status},
+                    }})
+                    request = {"requestMethod": "GET", "requestUrl": f"{config['base_url']}/{observed_key}",
+                               "responseSize": "620", "status": status, "userAgent": tag, "cacheLookup": True}
+                    resource = {"type": "http_load_balancer", "labels": {"project_id": project, "forwarding_rule_name": rule}}
+                    examples.json_file(log, [{"httpRequest": request, "jsonPayload": {}, "insertId": "viewer",
+                                              "logName": f"projects/{project}/logs/requests", "resource": resource}])
+                    result = subprocess.run(command, capture_output=True, text=True, check=False)
+                    if error:
+                        self.assertEqual(result.returncode, 1)
+                        self.assertIn(error, result.stderr)
+                        self.assertFalse(output.exists())
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        proof = json.loads(output.read_bytes())
+                        self.assertEqual(proof["client_report_sha256"], snapshot_digest)
+                        self.assertEqual(proof["records"][fingerprint]["key_sha256"], digest)
+
     def test_front_door_matches_blob_reads_and_excludes_origin_shield_and_direct_reads(self):
         for access in ("private", "public"):
             with self.subTest(access=access), TemporaryDirectory() as temporary:

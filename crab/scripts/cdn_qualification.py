@@ -134,6 +134,7 @@ SERVICE_PUBLIC_PRIOR_RECORD = "before-export.json"
 SERVICE_PAYLOAD_LIMIT = 512 * 1024 * 1024
 SERVICE_WORKLOAD_REGISTRATION_FIELDS = {"sha256", "origin_sha256", "prefix_sha256", "etag_sha256", "payload_bytes"}
 SDK_PRIOR_EXPORT_RECORD = "before-export.json"
+SDK_PUBLIC_VIEWER_RECORD = "viewer-requests.json"
 SDK_CLONE_FILES = {"edge": "clone-edge.json", "origin": "clone-origin.json"}
 SDK_FETCH_FILES = {"edge": "fetch-edge.json", "origin": "fetch-origin.json"}
 VIEWER_REQUEST_FILES = {"s3": "cloudfront-requests.json", "gcs": "cloud-cdn-requests.json", "azure": "front-door-requests.json"}
@@ -1547,7 +1548,7 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
     lfs_key = client.get("lfs_key_sha256")
     object_key = xorb_key or lfs_key
     service = client.get("schema") == "crab.cdn-service-read/v1"
-    transition_key = client.get("transition_key_sha256") if service else None
+    transition_key = client.get("transition_key_sha256")
     verified_transition = False
     proof_fields = {"schema", "client_report_sha256", "records"}
     if keyed_origin:
@@ -1585,7 +1586,8 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
             require(lfs_key is None or row["key_sha256"] == lfs_key,
                     "CDN viewer request did not read the approved service LFS object")
             viewer_keys.add(row["key_sha256"])
-            if row["key_sha256"] == transition_key and response["complete"] and response["bytes"] > 0:
+            if (row["key_sha256"] == transition_key and response["status"] in (200, 206)
+                    and response["complete"] and response["bytes"] > 0):
                 verified_transition = True
         if xorb_key is not None or service:
             if response["complete"]:
@@ -1614,7 +1616,7 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
     if xorb_key is not None or service:
         require(client["edge_attempts"] == len(records) and all(client[key] == count for key, count in observed_transfer.items()),
                 "CDN transfer totals disagree with the logged responses")
-    require(transition_key is None or verified_transition, "CDN logs did not confirm the new service export object")
+    require(transition_key is None or verified_transition, "CDN logs did not confirm the new export object")
     if keyed_origin:
         service, viewer, timestamp, precision = (
             ("S3", "CloudFront", "at_unix_s", 1000) if edge == "cloudfront"
@@ -2025,6 +2027,8 @@ def collect_sdk_product_action(
     if scope_parts(row["scope"])[1] == "public":
         prior_raw = read_git_record(inputs / SDK_PRIOR_EXPORT_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
         retained[SDK_PRIOR_EXPORT_RECORD] = prior_raw
+        if retain is not None:
+            retained[SDK_PUBLIC_VIEWER_RECORD] = read_git_record(inputs / SDK_PUBLIC_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
         earliest = verify_sdk_git_read(prior_raw, row, spec, "prior_export")
     verify_git_lifecycle(native_records, row, publication, receipt, earliest["started_at_unix_ms"], earliest["reader"],
                          retired_at, cleanup_at, native_origin_sha256)
@@ -2051,6 +2055,8 @@ def derive_sdk_public_transition(inputs: Path, row: dict[str, Any], spec: dict[s
     edge = verify_sdk_git_read(edge_raw, row, spec, "edge")
     key = prior["transition_key_sha256"]
     require(key == edge.get("transition_key_sha256"), "SDK export transition did not verify the same pack-layer key")
+    viewer_raw = read_git_record(inputs / SDK_PUBLIC_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
+    verify_viewer_requests(decode(viewer_raw), edge, hashlib.sha256(edge_raw).hexdigest(), scope_parts(row["scope"])[0])
     require(publication["published"] and
             all(read["publication_sha256"] == digest and read["commit"] == publication["oid"]
                 and read["sha256"] == publication["sha256"] for read in (prior, edge))

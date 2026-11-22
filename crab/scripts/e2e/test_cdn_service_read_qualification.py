@@ -378,7 +378,7 @@ class CdnServiceReadTests(unittest.TestCase):
 
     def test_cloud_cdn_viewer_logs_join_the_exact_service_git_transition_key(self):
         self.check_viewer_key("git", "transition_key_sha256", "v2/pack-layers/ff/" + "f" * 64,
-                              "did not confirm the new service export object")
+                              "did not confirm the new export object")
 
     def check_viewer_key(self, family, fingerprint_field, unrelated_key, error_message):
         with TemporaryDirectory() as directory:

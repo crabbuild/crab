@@ -708,10 +708,12 @@ build. Each arm confirms the native origin and effective repository prefix
 captured after SDK authorization. The edge arm confirms the active viewer,
 the public receipt where applicable, and the Git object ID fingerprint for the
 verified blob delivered to the caller. The independent native ref collector
-also accepts the SDK fixture. Assembly and verification derive the product
-result from the registered SDK build, verified edge snapshot, ordinary
-native rollback, independently observed publication and tombstone, and
-fixture cleanup. The SDK Git release row also requires a fresh
+also accepts the SDK fixture. For public SDK Git, release qualification
+joins the retained edge snapshot with a successful provider request for the
+exact pack-layer key added to the approved export. Assembly and verification
+derive the product result from the registered SDK build, verified edge
+snapshot, ordinary native rollback, independently observed publication and
+tombstone, and fixture cleanup. The SDK Git release row also requires a fresh
 `Client::clone_local` through the CDN and a native clone of the same ref.
 The probe verifies the checked-out commit and file bytes and matches the
 pack containing the file to a digest observed by the CDN pack reader.

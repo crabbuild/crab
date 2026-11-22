@@ -549,14 +549,26 @@ class CdnQualificationTests(unittest.TestCase):
         export = self.registration.get("publication_sha256", "")
         transition = {"transition_key_sha256": self.object_key} if export else {}
         binding = reader | {"binding_sha256": self.registration["viewer_binding_sha256"]}
-        json_file(records / "snapshot.json", base | dict.fromkeys(
+        request = hashlib.sha256(b"public-sdk-transition-viewer").hexdigest()
+        snapshot = json_file(records / "snapshot.json", base | dict.fromkeys(
             ("edge_attempts", "observed_edge_gets", "edge_hits", "edge_bytes", "verified_edge_payloads", "all_edge_attempts"), 1,
         ) | {
             "arm": "edge", "started_at_unix_ms": PUBLIC_SEAL + 10, "finished_at_unix_ms": PUBLIC_SEAL + 20,
             "approval_sha256": self.registration.get("viewer_approval_sha256", export),
             "reader": binding | {"public_export_sha256": export},
-        } | transition)
+        } | transition | ({"edge_responses": {
+            request: {"status": 206, "cache": "hit", "bytes": 1, "complete": True},
+        }} if export else {}))
         if export:
+            edge = self.scope.split("/", 1)[0]
+            log = {"status": 206, "cache": "hit", "response_bytes": 30, "key_sha256": self.object_key}
+            proof = {"schema": f"crab.{edge}-viewer-requests/v1", "client_report_sha256": snapshot,
+                     "records": {request: log}}
+            if edge == "cloud-cdn":
+                log.update(cache_fill_bytes=0, origin_requests={})
+            else:
+                proof["origin_requests"] = {}
+            json_file(records / CDN.SDK_PUBLIC_VIEWER_RECORD, proof)
             prior = self.registration["previous_publication_sha256"]
             json_file(records / CDN.SDK_PRIOR_EXPORT_RECORD, base | transition | {
                 "arm": "prior_export", "started_at_unix_ms": PUBLIC_SEAL - 20, "finished_at_unix_ms": PUBLIC_SEAL - 10,
@@ -1418,6 +1430,22 @@ class CdnQualificationTests(unittest.TestCase):
                 self.rejected(reason, *args)
         path.unlink()
         self.rejected(CDN.SDK_PRIOR_EXPORT_RECORD, *args)
+
+    def test_public_sdk_release_requires_provider_delivery_of_the_transition_key(self) -> None:
+        self.configure("gcs", "public", "direct", consumer="sdk")
+        policy = self.directory / "qualified-scopes.txt"
+        policy.write_text(self.scope + "\n", encoding="utf-8")
+        args = ("--cdn-release-policy", str(policy))
+        path = self.directory / CDN.GIT_PRODUCT_DIR / CDN.SDK_PUBLIC_VIEWER_RECORD
+        proof = json.loads(path.read_bytes())
+        json_file(path, proof | {"client_report_sha256": "0" * 64})
+        self.rejected("CDN viewer evidence differs from the measured fetch", *args)
+        for record in proof["records"].values():
+            record["key_sha256"] = "0" * 64
+        json_file(path, proof)
+        self.rejected("CDN logs did not confirm the new export object", *args)
+        path.unlink()
+        self.rejected(CDN.SDK_PUBLIC_VIEWER_RECORD, *args)
 
     def test_sdk_rollback_requires_same_approved_build_and_blob_at_origin(self) -> None:
         self.configure("azure", "private", "direct", consumer="sdk")

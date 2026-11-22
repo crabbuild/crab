@@ -151,6 +151,18 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
             self.assemble(digest)
         self.assertFalse(self.output.exists())
 
+    def test_public_sdk_assembly_requires_and_retains_the_transition_viewer_proof(self) -> None:
+        digest = self.inputs("azure", access="public")
+        relative = Path(self.row) / fixture.CDN.GIT_PRODUCT_DIR / fixture.CDN.SDK_PUBLIC_VIEWER_RECORD
+        proof = (self.root / relative).read_bytes()
+        (self.root / relative).unlink()
+        with self.assertRaises(FileNotFoundError):
+            self.assemble(digest)
+        self.assertFalse(self.output.exists())
+        (self.root / relative).write_bytes(proof)
+        self.assertEqual(self.assemble(digest), 1)
+        self.assertEqual((self.output / relative).read_bytes(), proof)
+
     def test_service_assembly_derives_the_product_from_the_retained_lifecycle(self) -> None:
         digest = self.inputs("gcs", consumer="s3-gateway", family="lfs")
         self.assertEqual(self.assemble(digest), 1)

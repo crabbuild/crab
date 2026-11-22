@@ -1146,9 +1146,13 @@ and verifies that the absent pack key was read natively with zero edge
 requests. Seal the new export after that read. Use its approval for the
 `edge` arm and pass the same `--transition-object`, retaining stdout as
 `git-product/snapshot.json`. Both reads prove the exact Git blob on the
-specified layer. Assembly builds the transition trace from those reads
-and verifies both retained inventories and their sealing order. Run the
-separate `origin` rollback with the public binding withdrawn before retirement.
+specified layer. Pass the edge snapshot as `--client` to
+`collect_cdn_viewer_requests.py` and retain its output as
+`git-product/viewer-requests.json`. The release verifier joins the snapshot
+to a successful provider request for that same pack-layer key. Assembly
+builds the transition trace from those records and verifies both retained
+inventories and their sealing order. Run the separate `origin` rollback
+with the public binding withdrawn before retirement.
 
 ### Capture protected SDK hydration evidence
 
