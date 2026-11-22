@@ -1,4 +1,4 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
 use crab_remote::local::LocalTools;
@@ -13,6 +13,39 @@ pub(super) struct WorktreeRead {
 }
 
 impl WorktreeRead {
+    pub(super) async fn run_content(
+        &self,
+        root: &Path,
+        args: impl IntoIterator<Item = impl AsRef<OsStr>>,
+        trusted: bool,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        let binding = self.environment();
+        #[cfg(feature = "service")]
+        let observe = binding.is_some() && super::child_evidence::enabled();
+        #[cfg(feature = "service")]
+        let filter = observe.then(|| ("CRAB_LOG", OsString::from(super::child_evidence::FILTER)));
+        #[cfg(not(feature = "service"))]
+        let filter = None;
+        let output = self
+            .tools
+            .run_crab_with_env(
+                Some(root),
+                args,
+                binding.into_iter().chain(filter),
+                trusted,
+                cancel,
+            )
+            .await
+            .map_err(super::local_error)?;
+        #[cfg(feature = "service")]
+        if observe {
+            super::child_evidence::relay(&output.stderr);
+        }
+        drop(output);
+        Ok(())
+    }
+
     pub(super) async fn prepare(
         state: &ClientState,
         tools: &LocalTools,

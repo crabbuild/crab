@@ -717,8 +717,12 @@ the transition trace from the retained SDK records. Live runs still require
 the protected provider fixtures. Xorb readers now report the physical key
 fingerprint after verifying the requested chunks from the edge. The
 collector can match that fingerprint to the approved projected view.
-SDK child hydration still needs a worker that captures this observation
-from the child and verifies the hydrated file.
+The SDK hydration worker captures allowlisted child observations and checks
+the file written by the ordinary hydration API. It binds the projected
+view, exact xorb, local cache and file digest to the approved fixture.
+The native control keeps the same issuer and withdraws viewer approval.
+Release assembly and verification still need to consume these SDK xorb
+records and their paired provider measurements.
 
 The protected workflow or its dedicated workers own producing these raw
 observations. The assembly and release jobs own rejecting missing, mismatched

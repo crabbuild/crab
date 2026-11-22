@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 
 use crate::{Client, Error, ErrorKind, OperationOptions, RepositoryLocator, Result};
 
+#[cfg(feature = "service")]
+#[path = "local/child_evidence.rs"]
+mod child_evidence;
 #[path = "local/child_read.rs"]
 mod child_read;
 #[path = "local/edit.rs"]

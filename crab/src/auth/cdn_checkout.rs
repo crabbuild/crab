@@ -137,6 +137,28 @@ impl Checkout {
             () = cancel.cancelled() => return Err(CrabError::Cancelled),
             result = super::open_repository_root(&store, &repository_prefix, &remote) => result?,
         };
+        if tracing::enabled!(target: "crab::cdn::checkout_target", tracing::Level::DEBUG) {
+            use crate::core::cdn::qualification_digest;
+            let cache_root = crab_cache::default_cache_root();
+            let global_prefix = store
+                .storage_scope()
+                .map_or(crab_storage::GLOBAL_PREFIX, |scope| {
+                    scope.global_prefix.as_str()
+                });
+            let approval = deployment.approval_sha256().unwrap_or_default();
+            tracing::debug!(
+                target: "crab::cdn::checkout_target",
+                parent: None,
+                origin_sha256 = %qualification_digest(&deployment.origin),
+                prefix_sha256 = %qualification_digest(&repository_prefix),
+                global_prefix_sha256 = %qualification_digest(global_prefix),
+                cache_root_sha256 = %qualification_digest(cache_root.as_os_str().as_encoded_bytes()),
+                binding_sha256 = store.as_storage().cdn_binding_sha256().as_deref().unwrap_or_default(),
+                approval_sha256 = approval,
+                local_cache_only = config.cache.service_url.is_none(),
+                "CDN child captured read target"
+            );
+        }
         Ok(RepositoryStore {
             store,
             repository_prefix,

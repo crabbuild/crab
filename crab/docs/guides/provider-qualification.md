@@ -1019,6 +1019,34 @@ specified layer. Assembly builds the transition trace from those reads
 and verifies both retained inventories and their sealing order. Run the
 separate `origin` rollback with the public binding withdrawn before retirement.
 
+### Capture protected SDK hydration evidence
+
+Use a private direct SDK xorb fixture with an independently materialized view.
+Keep the ordinary Crab pointer for a file that requires the approved xorb.
+The workload JSON has schema `crab.cdn-sdk-hydration-workload/v1` and the
+fields `configuration_sha256`, `pointer_sha256`, `payload_sha256`,
+`payload_bytes`, and `crab_sha256`. Compute the payload digest and length
+from the original file. Preregister the workload document digest and the
+exact Crab executable. Use the same SDK probe build and issuer settings as
+the Git workload.
+
+```bash
+python3 -B crab/scripts/e2e/run_cdn_sdk_hydration.py edge \
+  --fixture "$approved_fixture_json" --configuration-sha256 "$approved_configuration_sha256" \
+  --workload "$hydration_workload" --workload-sha256 "$approved_workload_sha256" \
+  --pointer "$fixture_pointer" --probe "$sdk_read_probe" --git "$git_executable" --crab "$crab_executable" \
+  --private-reader "$sdk_reader_settings" \
+  --source-sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" > "$hydration_edge"
+```
+
+Run the same command with `origin` for the paired control. The worker creates
+a fresh worktree and cache for each arm and calls `Local::hydrate` on the
+tracked pointer. It verifies the file written to disk, the child's captured
+origin and physical view, and the xorb chunk verification event. The origin
+arm withdraws viewer approval, keeps native issuer authorization, and
+requires zero edge attempts. Retain both reduced records. The SDK xorb
+release gate still needs to consume the paired records and provider measurements.
+
 ### Verify fixture cleanup
 
 After retiring the test ref and completing fixture cleanup, collect

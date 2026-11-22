@@ -645,16 +645,8 @@ impl LocalRepository {
                                     .await?;
                             &late_read
                         };
-                        read.tools
-                            .run_crab_with_env(
-                                Some(&root),
-                                ["hydrate", "--all", "--json"],
-                                read.environment(),
-                                trusted,
-                                &cancel,
-                            )
+                        read.run_content(&root, ["hydrate", "--all", "--json"], trusted, &cancel)
                             .await
-                            .map_err(local_error)
                     };
                     match hydration.await {
                         Ok(_) => HydrationState::Ready,
@@ -876,12 +868,7 @@ impl LocalRepository {
                 if matches!(command, "hydrate" | "fetch") {
                     let read =
                         WorktreeRead::prepare(&state, &tools.owner, &root, true, &cancel).await?;
-                    return read
-                        .tools
-                        .run_crab_with_env(Some(&root), args, read.environment(), trusted, &cancel)
-                        .await
-                        .map(drop)
-                        .map_err(local_error);
+                    return read.run_content(&root, args, trusted, &cancel).await;
                 }
                 tools
                     .owner

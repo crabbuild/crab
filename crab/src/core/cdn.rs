@@ -99,7 +99,7 @@ pub(crate) fn qualification_target() -> Result<Option<QualificationTarget>> {
         })
 }
 
-fn qualification_digest(bytes: impl AsRef<[u8]>) -> String {
+pub(crate) fn qualification_digest(bytes: impl AsRef<[u8]>) -> String {
     let digest: [u8; 32] = Sha256::digest(bytes).into();
     crab_git::lfs_pointer::hex_encode(&digest)
 }

@@ -41,7 +41,9 @@ on:
       - "crab/scripts/e2e/test_cdn_product_qualification.py"
       - "crab/scripts/e2e/run_cdn_git_workload.py"
       - "crab/scripts/e2e/run_cdn_sdk_workload.py"
+      - "crab/scripts/e2e/run_cdn_sdk_hydration.py"
       - "crab/scripts/e2e/test_cdn_sdk_workload_qualification.py"
+      - "crab/scripts/e2e/test_cdn_sdk_hydration_qualification.py"
       - "crates/crab-sdk/examples/cdn-sdk-read.rs"
       - "crates/crab-sdk/build.rs"
       - "crates/crab-remote-git/src/reader/edge_entry.rs"
@@ -106,7 +108,9 @@ on:
       - "crab/scripts/e2e/test_cdn_product_qualification.py"
       - "crab/scripts/e2e/run_cdn_git_workload.py"
       - "crab/scripts/e2e/run_cdn_sdk_workload.py"
+      - "crab/scripts/e2e/run_cdn_sdk_hydration.py"
       - "crab/scripts/e2e/test_cdn_sdk_workload_qualification.py"
+      - "crab/scripts/e2e/test_cdn_sdk_hydration_qualification.py"
       - "crates/crab-sdk/examples/cdn-sdk-read.rs"
       - "crates/crab-sdk/build.rs"
       - "crates/crab-remote-git/src/reader/edge_entry.rs"
@@ -211,7 +215,7 @@ jobs:
           done
           cargo test --locked -p crab-storage --lib 'cdn::'
           cargo test --locked -p crab-storage --lib --features provider-cdn-qualification 'cdn::'
-          cargo check --locked -p crab-sdk --features local,service --example cdn-sdk-read
+          cargo test --locked -p crab-sdk --features local,service --example cdn-sdk-read
           cargo test --locked -p crab-lfs --test cdn_observation
           cargo test --locked -p crab-lfs --test cdn_observation --features crab-storage/provider-cdn-qualification
 

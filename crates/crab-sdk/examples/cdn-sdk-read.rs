@@ -1,4 +1,4 @@
-//! Verify one published fixture blob through the SDK snapshot, clone, or fetch API.
+//! Verify fixture content through the ordinary SDK read and worktree APIs.
 
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -41,6 +41,14 @@ struct Worktree {
     git: PathBuf,
     crab: PathBuf,
     fetch_remote: Option<String>,
+    hydration: Option<Hydration>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Hydration {
+    remote: String,
+    pointer: String,
 }
 
 #[derive(Deserialize)]
@@ -189,7 +197,7 @@ impl Request {
         use crab_sdk::local::{CheckoutOptions, FetchOptions};
 
         let scratch = tempfile::tempdir()?;
-        initialize_fetch_worktree(git, scratch.path(), remote)?;
+        initialize_worktree(git, scratch.path(), remote, &[])?;
         let repository = client.open(OpenOptions::local(scratch.path())).await?;
         let local = repository.local()?;
         let previous_head = local.snapshot("HEAD").await?.commit_id();
@@ -217,6 +225,54 @@ impl Request {
         Ok(report)
     }
 
+    async fn hydrate(
+        &self,
+        client: &Client,
+        git: &Path,
+        hydration: &Hydration,
+    ) -> Result<serde_json::Value, Failure> {
+        let pointer = crab_types::pointer::Pointer::parse(hydration.pointer.as_bytes())?;
+        if pointer.size != self.expected_bytes as u64 {
+            return Err("SDK hydration fixture size differs from the pointer".into());
+        }
+        let scratch = tempfile::tempdir()?;
+        let config = format!(
+            "[remote]\nurl = {}\n",
+            serde_json::to_string(&hydration.remote)?
+        );
+        initialize_worktree(
+            git,
+            scratch.path(),
+            &hydration.remote,
+            &[
+                ("crab.toml", config.as_bytes()),
+                (
+                    ".gitattributes",
+                    b"cdn-qualification.bin filter=crab -text\n",
+                ),
+                (PAYLOAD, hydration.pointer.as_bytes()),
+            ],
+        )?;
+        client.configure_local(scratch.path()).await?;
+        let repository = client.open(OpenOptions::local(scratch.path())).await?;
+        let timing = Timing::start()?;
+        repository
+            .local()?
+            .hydrate(vec![PathBuf::from(PAYLOAD)])
+            .await?;
+        let mut report = primary_finish(timing)?;
+        let mut file = std::fs::File::open(scratch.path().join(PAYLOAD))?
+            .take(pointer.size.checked_add(1).ok_or("invalid fixture size")?);
+        let mut digest = Sha256::new();
+        let size = std::io::copy(&mut file, &mut digest)?;
+        let sha256 = format!("{:x}", digest.finalize());
+        if size != pointer.size || sha256 != self.expected_sha256 {
+            return Err("SDK hydration wrote different fixture bytes".into());
+        }
+        report["payload"] = serde_json::json!({"sha256": sha256, "bytes": size});
+        Ok(report)
+    }
+
     async fn worktree_report(
         &self,
         local: crab_sdk::local::Local<'_>,
@@ -240,9 +296,13 @@ impl Request {
     }
 }
 
-fn initialize_fetch_worktree(git: &Path, root: &Path, remote: &str) -> Result<(), Failure> {
-    // Create a real local HEAD without borrowing any objects or refs from the
-    // CDN fixture. Only the SDK fetch can bring the published ref into this ODB.
+fn initialize_worktree(
+    git: &Path,
+    root: &Path,
+    remote: &str,
+    files: &[(&str, &[u8])],
+) -> Result<(), Failure> {
+    // Seed the local fixture without borrowing remote objects, refs, or Git configuration.
     let global = root.join("empty.gitconfig");
     std::fs::File::create(&global)?;
     let run = |args: &[&str]| -> Result<(), Failure> {
@@ -265,7 +325,7 @@ fn initialize_fetch_worktree(git: &Path, root: &Path, remote: &str) -> Result<()
             .args(args)
             .output()?;
         if !output.status.success() {
-            return Err("cannot initialize the isolated SDK fetch worktree".into());
+            return Err("cannot initialize the isolated SDK worktree".into());
         }
         Ok(())
     };
@@ -276,6 +336,10 @@ fn initialize_fetch_worktree(git: &Path, root: &Path, remote: &str) -> Result<()
         "--object-format=sha1",
         "--initial-branch=local",
     ])?;
+    for (path, content) in files {
+        std::fs::write(root.join(path), content)?;
+        run(&["add", "--", path])?;
+    }
     run(&[
         "-c",
         "user.name=Crab CDN qualification",
@@ -390,6 +454,13 @@ async fn run() -> Result<(), Failure> {
     if request.public_transition {
         filter.push_str(",crab_storage::cdn::public_transition=debug");
     }
+    if request
+        .worktree
+        .as_ref()
+        .is_some_and(|worktree| worktree.hydration.is_some())
+    {
+        filter.push_str(",crab_sdk::cdn::child=debug");
+    }
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
@@ -410,9 +481,11 @@ async fn run() -> Result<(), Failure> {
     };
     let client = builder.build()?;
     let read = match &request.worktree {
-        Some(worktree) => match &worktree.fetch_remote {
-            Some(remote) => request.fetch_read(&client, &worktree.git, remote).await,
-            None => request.clone_read(&client).await,
+        Some(worktree) => match (&worktree.fetch_remote, &worktree.hydration) {
+            (Some(remote), None) => request.fetch_read(&client, &worktree.git, remote).await,
+            (None, Some(hydration)) => request.hydrate(&client, &worktree.git, hydration).await,
+            (None, None) => request.clone_read(&client).await,
+            _ => Err("SDK probe requires one worktree action".into()),
         },
         None => request.read(&client).await,
     };
@@ -429,7 +502,7 @@ async fn main() -> ExitCode {
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => {
-            eprintln!("SDK CDN probe could not verify the published Git content");
+            eprintln!("SDK CDN probe could not verify the fixture content");
             ExitCode::FAILURE
         }
     }
@@ -439,13 +512,79 @@ async fn main() -> ExitCode {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hydration_fixture_reads_the_file_written_by_the_child() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let git = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|directory| directory.join("git"))
+            .find(|path| path.is_file())
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let executable = scratch.path().join("crab");
+        let content = b"hydrated fixture bytes";
+        std::fs::write(
+            &executable,
+            format!(
+                r#"#!/bin/sh
+set -eu
+case "$1" in
+    sdk-capabilities) printf '%s\n' '{}' ;;
+    hydrate)
+        test "$3" = cdn-qualification.bin
+        "$CRAB_INTERNAL_GIT_EXECUTABLE" ls-files --error-unmatch "$3" >/dev/null
+        grep -q '^file-hash ' "$3"
+        printf %s 'hydrated fixture bytes' > "$3"
+        ;;
+    *) exit 64 ;;
+esac
+"#,
+                crab_remote::local::CURRENT_CAPABILITIES_JSON
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let client = Client::builder()
+            .direct_store(DirectStoreOptions::filesystem(scratch.path()).unwrap())
+            .local(crab_sdk::local::Options::new(
+                crab_sdk::local::Tools::new(&git, executable).unwrap(),
+            ))
+            .build()
+            .unwrap();
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "origin": "s3://fixture-bucket", "repository_prefix": "fixture", "base_url": "https://edge.example.test",
+            "branch": "", "expected_oid": "", "expected_sha256": format!("{:x}", Sha256::digest(content)),
+            "expected_bytes": content.len(), "repeat_snapshot": false, "public_transition": false,
+            "binding": {"access": "public", "export_origin": "s3://export-bucket"},
+        })).unwrap();
+        let result = request
+            .hydrate(
+                &client,
+                &git,
+                &Hydration {
+                    remote: "crab-sdk:fixture".to_owned(),
+                    pointer: format!(
+                        "version https://crab.build/spec/v1\nfile-hash {}\nsize {}\n",
+                        "a".repeat(64),
+                        content.len()
+                    ),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["payload"]["sha256"], request.expected_sha256);
+        client.close().await.unwrap();
+    }
+
     #[test]
     fn fetch_arms_start_with_identical_local_heads_and_no_tracking_ref() {
         let remote = "crab://qualification-bucket/repository";
         let mut heads = Vec::new();
         for _ in 0..2 {
             let worktree = tempfile::tempdir().unwrap();
-            initialize_fetch_worktree(Path::new("git"), worktree.path(), remote).unwrap();
+            initialize_worktree(Path::new("git"), worktree.path(), remote, &[]).unwrap();
             let git = |args: &[&str]| {
                 let result = Command::new("git")
                     .current_dir(worktree.path())
