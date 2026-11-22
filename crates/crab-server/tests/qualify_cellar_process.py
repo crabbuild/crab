@@ -344,12 +344,14 @@ with open(run / "commands.log", "w") as log:
                                "--prefix", "team/large-files"), env=env)
         server = start()
         wait()
-        cmd(server_command("cells", "initialize-directory"), env=env)
+        directory_command = server_command("cells", "directory-status")
+        assert json.loads(subprocess.check_output(directory_command, env=env, text=True))["state"] == "missing"
         organization_id = str(uuid.uuid4())
         organization_bootstrap = run / "organization.json"
         organization_bootstrap.write_text(json.dumps({"owner": {"issuer": "urn:crab:local", "subject": "operator"}, "name": "Qualification organization", "description": "Native authority"}))
         organization_command = server_command("cells", "bootstrap-organization", "--organization", organization_id, "--input-file", organization_bootstrap)
         organization_created = json.loads(subprocess.check_output(organization_command, env=env, text=True))
+        assert json.loads(subprocess.check_output(directory_command, env=env, text=True))["state"] == "ready"
         organization_root = "/api/organizations/" + organization_id
         organization_before = request(organization_root)
         assert organization_before["role"] == "owner"

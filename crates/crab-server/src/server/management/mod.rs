@@ -18,6 +18,7 @@ use std::{
     time::Duration,
 };
 
+mod accounts;
 mod assignments;
 mod directory;
 mod lifecycle;
@@ -38,6 +39,7 @@ fn admit(server: &Server) -> crate::app::Result<tokio::sync::SemaphorePermit<'_>
 
 pub(crate) fn router(server: Arc<Server>, peers: Router) -> Router {
     Router::new()
+        .merge(accounts::routes())
         .merge(search::routes())
         .merge(assignments::routes())
         .merge(directory::routes())
@@ -302,6 +304,62 @@ mod tests {
     use super::*;
     use axum::{body::Body, extract::Request};
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn private_account_suspension_rejects_browser_and_git_requests() {
+        use crate::test_support::http::Harness;
+
+        let h = Harness::new(false).await;
+        let cookie = h.login().await;
+        let signed_in = h.json("/api/session", &cookie).await;
+        let subject = signed_in["user"]["subject"].as_str().unwrap();
+        let issued: serde_json::Value = h
+            .write(
+                reqwest::Method::POST,
+                "/api/git-token",
+                &cookie,
+                json!({"owner":"team","repository":"private","access":"read"}),
+            )
+            .await
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let url = format!(
+            "{}/git/team/private.git/info/refs?service=git-upload-pack",
+            h.origin
+        );
+        let git_request = || {
+            h.http
+                .get(&url)
+                .header("Git-Protocol", "version=2")
+                .basic_auth("crab", issued["token"].as_str())
+                .send()
+        };
+        assert_eq!(git_request().await.unwrap().status(), StatusCode::OK);
+
+        let private = router(Arc::clone(&h.server), Router::new());
+        let suspend = Request::post("/internal/accounts/state")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({"subject":subject,"expected_revision":0,"suspended":true}).to_string(),
+            ))
+            .unwrap();
+        assert_eq!(
+            private.oneshot(suspend).await.unwrap().status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            h.json("/api/session", &cookie).await["authenticated"],
+            false
+        );
+        assert_eq!(
+            git_request().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        h.close().await;
+    }
 
     async fn prepare_projection(server: &Arc<Server>, version: u64) -> Response {
         router(Arc::clone(server), Router::new())

@@ -79,10 +79,27 @@ writes; keep credentials and raw identity tokens out of logs.
 
 ## Manage membership and sessions
 
-Use **Settings → Members** or conditional `repository members replace` to update
+Use **Settings → Members** or `repository set-members` to update
 membership. Both publish the catalog revision and durable audit event. Servers
 refresh the catalog periodically; already-admitted operations can finish under
 their captured membership.
+
+Operators can suspend sign-in, browser sessions, and their derived Git and LFS
+credentials for a subject from this deployment's configured identity provider.
+Run these through the private management listener on a current replica:
+
+```sh
+crab-server --config /etc/crab/server.toml accounts status --subject SUBJECT
+crab-server --config /etc/crab/server.toml accounts suspend --subject SUBJECT --expected-revision 0
+crab-server --config /etc/crab/server.toml accounts reactivate --subject SUBJECT --expected-revision 1
+```
+
+Use the revision returned by `status`. The numbers above are for a subject's
+first suspension and reactivation. A conflict calls for reading current status
+before retrying. After suspension, new requests using browser or Git credentials
+fail across replicas. Reactivation requires a fresh sign-in. Repository and
+organization membership are managed through their existing controls. Coordinate
+replacement of all replicas before using account suspension.
 
 Back-channel logout accepts signed, subject-scoped OIDC Logout Tokens. Test with
 a dedicated identity: sign in twice, issue a Git token, deliver logout, and verify
@@ -92,6 +109,9 @@ rejected; the server neither repairs old records nor scans the entire session
 namespace during revocation.
 
 The 24-hour auth lifecycle applies below `.crab/http-server/v1/auth/`.
+Keep suspension records under `.crab/http-server/v1/accounts/` outside that
+lifecycle. After restoring an older root, reconcile account state with the IdP
+and verify revoked credentials fail before reopening public ingress.
 Logout replay records live separately under `.crab/http-server/v1/logout-replays/`;
 retain them through their signed expiry and collect them with an expiry-aware job.
 Keep the state key stable across replicas and process replacement. Rotate peer

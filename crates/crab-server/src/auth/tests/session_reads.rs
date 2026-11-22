@@ -99,7 +99,7 @@ async fn queued_session_checks_share_one_fresh_verification() {
             second.is_some(),
             reads.requests.load(Ordering::SeqCst)
         ),
-        (true, true, 2)
+        (true, true, 3)
     );
 }
 

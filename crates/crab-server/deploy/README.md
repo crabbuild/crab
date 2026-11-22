@@ -287,8 +287,16 @@ Complete the setup in this order:
 5. Create a dedicated namespace with the Restricted Pod Security policy, create
    the Kubernetes Secret, and install the chart.
 6. Run `helm test` to prove a fresh workload can read, list, write, conditionally update, and delete through its cloud workload identity.
-7. Create the first repository through a running pod.
-8. Complete and run the native multi-replica provider/fault qualification before admitting critical repositories; the historical protected workflow currently fails closed.
+7. Run [`cells bootstrap-organization`](../CELLAR.md#organization-authority) through
+   a running pod to initialize the Directory and register the first owner. Keep
+   the inputs and organization UUID for safe retries.
+8. [Create the first repository](helm/crab-server/README.md#create-the-first-repository)
+   and run `crab-server --config /etc/crab/http-server/server.toml team-preflight`
+   in the pod. The preflight checks Directory readiness, private readiness, and
+   workload storage access.
+9. Complete the native multi-replica provider and fault qualification before
+   admitting critical repositories. Verify OIDC, Git, and LFS through public
+   ingress.
 
 Do not grant team members direct write credentials for the storage root. Git,
 LFS, browser, and administration traffic must pass through the server so its

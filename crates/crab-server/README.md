@@ -624,10 +624,10 @@ The internal owners are:
 | `cells/repository/{checks,settings,releases,labels,statuses,projection}/` | Feature commands, local persistence/validation, and tests |
 
 Authentication always uses shared durable state, including in-memory object-store
-test fixtures; there is no separate process-local authentication mode. A cached
-session supplies only its marker location, allowing the session record and marker
-to be reread concurrently. The current record selects and validates the marker;
-missing or expired state still denies browser and derived Git credentials.
+test fixtures. A cached session supplies the marker and account addresses so all
+three durable reads can overlap. The current session selects and validates its
+marker and account revision. Git tokens also require attachment to the current
+session. See [account suspension](deploy/operations.md#manage-membership-and-sessions).
 Repository construction initializes private cache and maintenance state. Settings
 policy stays in `repository/settings.rs`; repository reads do not forward HTTP
 settings operations. HTTP mutation families share one request identity policy in
