@@ -1034,8 +1034,13 @@ Run `retire` with the same arguments after the rollback fetch. It verifies the
 exact ref is absent after retirement and refuses to remove a ref whose tip
 changed. Retain the publication receipt unchanged as `git-product/publication.json`
 under the measured row, and capture the `fetch` and `retire` stdout as
-`git-product/fetch.json` and `git-product/retirement.json`. Use a single worker
-for these ordered product phases so their timestamps share a clock. Both phase
+`git-product/fetch.json` and `git-product/retirement.json`. Pass that exact
+edge fetch file as `--client` to `collect_cdn_viewer_requests.py` and retain
+the output as `git-product/viewer-requests.json`. The collector accepts
+the approved provider log exports or the AWS companion stack. For a public
+transition it confirms delivery of the exact newly approved object.
+Use a single worker for these ordered product phases so their timestamps
+share a clock. Both phase
 reports bind the exact publication receipt by digest. Record storage and CDN
 fixture cleanup separately in the `cleanup` check. Immediately after `retire`,
 repeat the collector with `phase=retired` before deleting any fixture objects.
@@ -1428,6 +1433,7 @@ cloudfront/private/cli/git/direct/linux-x86_64/observations.json
 cloudfront/private/cli/git/direct/linux-x86_64/traces/<check>.json
 cloudfront/private/cli/git/direct/linux-x86_64/git-product/publication.json
 cloudfront/private/cli/git/direct/linux-x86_64/git-product/fetch.json
+cloudfront/private/cli/git/direct/linux-x86_64/git-product/viewer-requests.json
 cloudfront/private/cli/git/direct/linux-x86_64/git-product/retirement.json
 cloudfront/private/cli/git/direct/linux-x86_64/git-benchmarks/near/0001/origin/client.json
 cloudfront/private/cli/git/direct/linux-x86_64/git-benchmarks/near/0001/origin/measurement.json

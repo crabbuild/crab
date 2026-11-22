@@ -521,6 +521,8 @@ def main() -> int:
                     result = fetch(args.action, remote, record, root, env, proof, crab, guard, approved_binding, public_export)
                     if proof is not None:
                         write_transition(proof, record, result, args.transition_output, args.before_transition)
+                        if proof["phase"] == "after":
+                            result["transition_key_sha256"] = proof["key_sha256"]
                 result["publication_sha256"] = hashlib.sha256(raw).hexdigest()
     except (ExportError, OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)

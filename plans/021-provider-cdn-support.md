@@ -536,7 +536,9 @@ and edge payload through redacted observations.
   and verifies the object from an ordinary `crab lfs fetch` after fetching
   the commit. The release gate derives direct CLI Git, capsule, and LFS
   product evidence from the exact publication receipt and its
-  ordered fetch and retirement records. The fixture owner separately proves
+  ordered fetch and retirement records. The retained product fetch must
+  match provider viewer logs, including delivery of the exact new object
+  for public transitions. The fixture owner separately proves
   storage and export cleanup. The read-only cleanup collector verifies empty
   native inventories for the exact test prefix, records live and historical
   inventory results, and binds public exports separately. The release gate

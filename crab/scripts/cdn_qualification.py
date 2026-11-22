@@ -128,13 +128,13 @@ METRICS = {
 }
 GIT_BENCHMARK_DIR = "git-benchmarks"
 GIT_PRODUCT_DIR = "git-product"
+GIT_PRODUCT_VIEWER_RECORD = "viewer-requests.json"
 SERVICE_PRODUCT_DIR = "service-product"
 SERVICE_READ_ACTION = "service-http-read"
 SERVICE_PUBLIC_PRIOR_RECORD = "before-export.json"
 SERVICE_PAYLOAD_LIMIT = 512 * 1024 * 1024
 SERVICE_WORKLOAD_REGISTRATION_FIELDS = {"sha256", "origin_sha256", "prefix_sha256", "etag_sha256", "payload_bytes"}
 SDK_PRIOR_EXPORT_RECORD = "before-export.json"
-SDK_PUBLIC_VIEWER_RECORD = "viewer-requests.json"
 SDK_CLONE_FILES = {"edge": "clone-edge.json", "origin": "clone-origin.json"}
 SDK_FETCH_FILES = {"edge": "fetch-edge.json", "origin": "fetch-origin.json"}
 VIEWER_REQUEST_FILES = {"s3": "cloudfront-requests.json", "gcs": "cloud-cdn-requests.json", "azure": "front-door-requests.json"}
@@ -597,7 +597,7 @@ def verify_public_transition(
         require(after["started_at_unix_ms"] == fetch["started_at_unix_ms"]
                 and after["finished_at_unix_ms"] == fetch["finished_at_unix_ms"]
                 and after["edge_attempts"] == fetch["all_edge_attempts"]
-                and after["reader"] == fetch["reader"],
+                and after["reader"] == fetch["reader"] and key == fetch.get("transition_key_sha256"),
                 "the public transition must use the retained Git product fetch")
         require(all(before["reader"][key] == after["reader"][key] for key in CLI_NATIVE_FIELDS),
                 "the public transition changed the selected native target")
@@ -1338,7 +1338,14 @@ def validate_git_publication(raw: bytes, provenance: dict[str, Any]) -> dict[str
 
 def validate_git_fetch(raw: bytes, provenance: dict[str, Any], mode: str, label: str) -> dict[str, Any]:
     action = cli_action_name(provenance["scope"])
-    client = fields(decode(raw), GIT_FETCH_FIELDS, "redacted LFS fetch" if action == "lfs-fetch" else "redacted Git fetch")
+    edge, access, _, _, _ = scope_parts(provenance["scope"])
+    value = decode(raw)
+    expected = GIT_FETCH_FIELDS
+    if isinstance(value, dict) and "transition_key_sha256" in value:
+        require(access == "public" and mode == "edge" and matches(SHA256, value["transition_key_sha256"]),
+                "CLI transition needs an exact public object fingerprint on the edge fetch")
+        expected = expected | {"transition_key_sha256"}
+    client = fields(value, expected, "redacted LFS fetch" if action == "lfs-fetch" else "redacted Git fetch")
     require(client["schema"] == f"crab.cdn-{action}/v1" and client["name"] == action
             and client["arm"] == mode and all(client[key] == value for key, value in provenance.items() if key != "candidate"),
             f"{label} has mismatched Git fetch provenance")
@@ -1348,7 +1355,6 @@ def validate_git_fetch(raw: bytes, provenance: dict[str, Any], mode: str, label:
             and (matches(SHA256, reader["binding_sha256"])
                  or (mode == "origin" and reader["binding_sha256"] == "")),
             f"{label} has an invalid CDN binding, native target or local cache fingerprint")
-    edge, access, _, _, _ = scope_parts(provenance["scope"])
     require(matches(SHA256, reader["public_export_sha256"]) if mode != "origin" and access == "public"
             else reader["public_export_sha256"] == "",
             f"{label} has an invalid public export approval")
@@ -1962,10 +1968,14 @@ def collect_git_product_action(
         require(cleanup_at is not None, "native ref observations require a verified cleanup")
         verify_git_lifecycle(observations, row, publication, digest, fetch["started_at_unix_ms"], fetch["reader"],
                              retired_at, cleanup_at, native_origin_sha256)
+    viewer_raw = read_git_record(inputs / GIT_PRODUCT_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
+    verify_viewer_requests(decode(viewer_raw), fetch, hashlib.sha256(fetch_raw).hexdigest(), scope_parts(row["scope"])[0])
+    require(any(response["status"] in (200, 206) and response["complete"] and response["bytes"] > 0
+                for response in fetch["edge_responses"].values()), "provider logs confirm no completed product fetch response")
     if retain is not None:
         retain.mkdir()
         for filename, raw in (("publication.json", publication_raw), ("fetch.json", fetch_raw),
-                              ("retirement.json", retirement_raw)):
+                              ("retirement.json", retirement_raw), (GIT_PRODUCT_VIEWER_RECORD, viewer_raw)):
             (retain / filename).write_bytes(raw)
         for phase, raw in observations.items():
             (retain / GIT_NATIVE_REF_FILES[phase]).write_bytes(raw)
@@ -2028,7 +2038,7 @@ def collect_sdk_product_action(
         prior_raw = read_git_record(inputs / SDK_PRIOR_EXPORT_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
         retained[SDK_PRIOR_EXPORT_RECORD] = prior_raw
         if retain is not None:
-            retained[SDK_PUBLIC_VIEWER_RECORD] = read_git_record(inputs / SDK_PUBLIC_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
+            retained[GIT_PRODUCT_VIEWER_RECORD] = read_git_record(inputs / GIT_PRODUCT_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
         earliest = verify_sdk_git_read(prior_raw, row, spec, "prior_export")
     verify_git_lifecycle(native_records, row, publication, receipt, earliest["started_at_unix_ms"], earliest["reader"],
                          retired_at, cleanup_at, native_origin_sha256)
@@ -2055,7 +2065,7 @@ def derive_sdk_public_transition(inputs: Path, row: dict[str, Any], spec: dict[s
     edge = verify_sdk_git_read(edge_raw, row, spec, "edge")
     key = prior["transition_key_sha256"]
     require(key == edge.get("transition_key_sha256"), "SDK export transition did not verify the same pack-layer key")
-    viewer_raw = read_git_record(inputs / SDK_PUBLIC_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
+    viewer_raw = read_git_record(inputs / GIT_PRODUCT_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
     verify_viewer_requests(decode(viewer_raw), edge, hashlib.sha256(edge_raw).hexdigest(), scope_parts(row["scope"])[0])
     require(publication["published"] and
             all(read["publication_sha256"] == digest and read["commit"] == publication["oid"]

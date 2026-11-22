@@ -153,7 +153,7 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
 
     def test_public_sdk_assembly_requires_and_retains_the_transition_viewer_proof(self) -> None:
         digest = self.inputs("azure", access="public")
-        relative = Path(self.row) / fixture.CDN.GIT_PRODUCT_DIR / fixture.CDN.SDK_PUBLIC_VIEWER_RECORD
+        relative = Path(self.row) / fixture.CDN.GIT_PRODUCT_DIR / fixture.CDN.GIT_PRODUCT_VIEWER_RECORD
         proof = (self.root / relative).read_bytes()
         (self.root / relative).unlink()
         with self.assertRaises(FileNotFoundError):
@@ -370,7 +370,8 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         self.assertEqual(report["performance"], self.example.report["performance"])
         self.assertEqual(report["product_action"], self.example.report["product_action"])
         self.assertEqual({path.name for path in (row / fixture.CDN.GIT_PRODUCT_DIR).iterdir()},
-                         {"publication.json", "fetch.json", "retirement.json", *fixture.CDN.GIT_NATIVE_REF_FILES.values()})
+                         {"publication.json", "fetch.json", "retirement.json", fixture.CDN.GIT_PRODUCT_VIEWER_RECORD,
+                          *fixture.CDN.GIT_NATIVE_REF_FILES.values()})
 
     def test_missing_git_measurement_prevents_artifact_publication(self) -> None:
         digest = self.inputs(consumer="cli")

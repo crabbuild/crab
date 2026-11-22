@@ -17,7 +17,7 @@ import run_cdn_git_workload as WORKLOAD
 from cdn_qualification import CLI_BUILD_FIELDS, GIT_FETCH_FIELDS, collect_git_product_action, lfs_object_path, verify_public_transition
 from public_inventory import Object, SCHEMA, publication_receipt, read_publication
 from test_cdn_transport_qualification import PACK, fixture
-from test_cdn_qualification import cli_candidate
+from test_cdn_qualification import cli_candidate, write_git_product_viewer_proof
 
 
 @unittest.skipUnless(os.name == "posix", "the local fixture helper uses a Python shebang")
@@ -187,7 +187,9 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         records = self.root / "git-product"
         records.mkdir()
         (records / "publication.json").write_bytes(self.receipt.read_bytes())
-        (records / "fetch.json").write_text(json.dumps(fetched), encoding="utf-8")
+        fetch_path = records / "fetch.json"
+        fetch_path.write_text(json.dumps(fetched), encoding="utf-8")
+        write_git_product_viewer_proof(fetch_path)
         (records / "retirement.json").write_text(json.dumps(retired), encoding="utf-8")
         viewer = WORKLOAD.viewer_binding_sha256(json.loads(self.fixture.read_bytes()))
         rollback_raw = json.dumps(rollback).encode()
@@ -380,7 +382,8 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         result = self.call("fetch", *flags)
         self.assertEqual(result.returncode, 0, result.stderr)
         fetched = json.loads(result.stdout)
-        self.assertEqual(set(fetched), GIT_FETCH_FIELDS)
+        self.assertEqual(set(fetched), GIT_FETCH_FIELDS | {"transition_key_sha256"})
+        self.assertEqual(fetched["transition_key_sha256"], key)
         self.assertEqual(fetched["name"], f"{family}-fetch")
         retained = json.loads(after.read_bytes())
         self.assertEqual(retained["before"]["receipt_sha256"], previous)
@@ -409,7 +412,9 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             records = self.root / "git-product"
             records.mkdir()
             (records / "publication.json").write_bytes(self.receipt.read_bytes())
-            (records / "fetch.json").write_text(json.dumps(fetched), encoding="utf-8")
+            fetch_path = records / "fetch.json"
+            fetch_path.write_text(json.dumps(fetched), encoding="utf-8")
+            write_git_product_viewer_proof(fetch_path, key)
             (records / "retirement.json").write_text(json.dumps(retired), encoding="utf-8")
             viewer = WORKLOAD.viewer_binding_sha256(sample)
             product = collect_git_product_action(records, fetched | {"viewer_binding_sha256": viewer},

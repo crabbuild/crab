@@ -84,6 +84,25 @@ def service_candidate(scope: str, platform: str) -> dict:
     }
 
 
+def write_git_product_viewer_proof(client_path: Path, key_sha256: str | None = None) -> None:
+    raw = client_path.read_bytes()
+    client = json.loads(raw)
+    edge = client["scope"].split("/", 1)[0]
+    records = {}
+    proof = {"schema": f"crab.{edge}-viewer-requests/v1", "client_report_sha256": hashlib.sha256(raw).hexdigest(),
+             "records": records}
+    if edge != "cloud-cdn":
+        proof["origin_requests"] = {}
+    for request, response in client["edge_responses"].items():
+        log = {"status": response["status"], "cache": response["cache"], "response_bytes": response["bytes"]}
+        if edge != "cloud-cdn" or key_sha256 is not None:
+            log["key_sha256"] = key_sha256 or "8" * 64
+        if edge == "cloud-cdn":
+            log.update(cache_fill_bytes=0, origin_requests={})
+        records[request] = log
+    json_file(client_path.parent / CDN.GIT_PRODUCT_VIEWER_RECORD, proof)
+
+
 def write_git_measurements(inputs: Path, registration: dict, platform: str, sdk_native: dict | None = None,
                            hydration: dict | None = None, service: dict | None = None) -> None:
     provider = CDN.PROVIDER_FOR_EDGE[registration["scope"].split("/", 1)[0]]
@@ -403,7 +422,11 @@ class CdnQualificationTests(unittest.TestCase):
             "oid": fetch["publication_oid"], "sha256": fetch["expected_sha256"], "published": True,
             "visible_at_unix_ms": fetch["started_at_unix_ms"] - 50, "candidate": fetch["candidate"],
         })
-        json_file(records / "fetch.json", fetch | {"publication_sha256": receipt})
+        public = "publication_sha256" in self.registration
+        transition = {"transition_key_sha256": self.object_key} if public else {}
+        fetch_path = records / "fetch.json"
+        json_file(fetch_path, fetch | {"publication_sha256": receipt} | transition)
+        write_git_product_viewer_proof(fetch_path, transition.get("transition_key_sha256"))
         self.rollback_trace(fetch | dict.fromkeys(CDN.PRODUCT_COUNTERS, 0) | {
             "publication_sha256": receipt, "arm": "origin", "edge_responses": {},
             "started_at_unix_ms": fetch["finished_at_unix_ms"] + 5,
@@ -550,7 +573,8 @@ class CdnQualificationTests(unittest.TestCase):
         transition = {"transition_key_sha256": self.object_key} if export else {}
         binding = reader | {"binding_sha256": self.registration["viewer_binding_sha256"]}
         request = hashlib.sha256(b"public-sdk-transition-viewer").hexdigest()
-        snapshot = json_file(records / "snapshot.json", base | dict.fromkeys(
+        snapshot = records / "snapshot.json"
+        json_file(snapshot, base | dict.fromkeys(
             ("edge_attempts", "observed_edge_gets", "edge_hits", "edge_bytes", "verified_edge_payloads", "all_edge_attempts"), 1,
         ) | {
             "arm": "edge", "started_at_unix_ms": PUBLIC_SEAL + 10, "finished_at_unix_ms": PUBLIC_SEAL + 20,
@@ -560,15 +584,7 @@ class CdnQualificationTests(unittest.TestCase):
             request: {"status": 206, "cache": "hit", "bytes": 1, "complete": True},
         }} if export else {}))
         if export:
-            edge = self.scope.split("/", 1)[0]
-            log = {"status": 206, "cache": "hit", "response_bytes": 30, "key_sha256": self.object_key}
-            proof = {"schema": f"crab.{edge}-viewer-requests/v1", "client_report_sha256": snapshot,
-                     "records": {request: log}}
-            if edge == "cloud-cdn":
-                log.update(cache_fill_bytes=0, origin_requests={})
-            else:
-                proof["origin_requests"] = {}
-            json_file(records / CDN.SDK_PUBLIC_VIEWER_RECORD, proof)
+            write_git_product_viewer_proof(snapshot, self.object_key)
             prior = self.registration["previous_publication_sha256"]
             json_file(records / CDN.SDK_PRIOR_EXPORT_RECORD, base | transition | {
                 "arm": "prior_export", "started_at_unix_ms": PUBLIC_SEAL - 20, "finished_at_unix_ms": PUBLIC_SEAL - 10,
@@ -1208,6 +1224,25 @@ class CdnQualificationTests(unittest.TestCase):
         self.report["product_action"]["verified_edge_payloads"] += 1
         self.rejected("product action differs from the retained publication, fetch, and retirement evidence")
 
+    def test_cli_product_requires_logs_for_its_own_viewer_requests(self) -> None:
+        self.configure("s3", "private", "direct")
+        path = self.directory / CDN.GIT_PRODUCT_DIR / CDN.GIT_PRODUCT_VIEWER_RECORD
+        proof = json.loads(path.read_bytes())
+        records = {"0" * 64: next(iter(proof["records"].values()))}
+        json_file(path, proof | {"records": records})
+        self.rejected("CDN logs must cover each measured viewer attempt exactly once")
+        path.unlink()
+        self.rejected(CDN.GIT_PRODUCT_VIEWER_RECORD)
+
+    def test_public_cli_product_logs_must_confirm_the_new_export_key(self) -> None:
+        self.configure("gcs", "public", "direct")
+        path = self.directory / CDN.GIT_PRODUCT_DIR / CDN.GIT_PRODUCT_VIEWER_RECORD
+        proof = json.loads(path.read_bytes())
+        for record in proof["records"].values():
+            record["key_sha256"] = "0" * 64
+        json_file(path, proof)
+        self.rejected("CDN logs did not confirm the new export object")
+
     def test_product_record_requires_retirement_of_the_same_receipt_after_rollback(self) -> None:
         self.configure("gcs", "private", "direct")
         path = self.directory / CDN.GIT_PRODUCT_DIR / "retirement.json"
@@ -1436,7 +1471,7 @@ class CdnQualificationTests(unittest.TestCase):
         policy = self.directory / "qualified-scopes.txt"
         policy.write_text(self.scope + "\n", encoding="utf-8")
         args = ("--cdn-release-policy", str(policy))
-        path = self.directory / CDN.GIT_PRODUCT_DIR / CDN.SDK_PUBLIC_VIEWER_RECORD
+        path = self.directory / CDN.GIT_PRODUCT_DIR / CDN.GIT_PRODUCT_VIEWER_RECORD
         proof = json.loads(path.read_bytes())
         json_file(path, proof | {"client_report_sha256": "0" * 64})
         self.rejected("CDN viewer evidence differs from the measured fetch", *args)
@@ -1445,7 +1480,7 @@ class CdnQualificationTests(unittest.TestCase):
         json_file(path, proof)
         self.rejected("CDN logs did not confirm the new export object", *args)
         path.unlink()
-        self.rejected(CDN.SDK_PUBLIC_VIEWER_RECORD, *args)
+        self.rejected(CDN.GIT_PRODUCT_VIEWER_RECORD, *args)
 
     def test_sdk_rollback_requires_same_approved_build_and_blob_at_origin(self) -> None:
         self.configure("azure", "private", "direct", consumer="sdk")
