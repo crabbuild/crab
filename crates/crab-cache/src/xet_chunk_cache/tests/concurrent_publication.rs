@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
+use super::super::{ChunkRange, Key};
 use crate::{CacheCatalog, XetChunkCacheHandle};
 use tokio::sync::Barrier;
 use tokio::task::JoinSet;
-use xet_client::cas_types::{ChunkRange, Key};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_disjoint_ranges_survive_reopening() {
