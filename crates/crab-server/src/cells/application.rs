@@ -321,6 +321,7 @@ impl Cell for ApplicationCell {
                 Err(error) => {
                     let status = match error.downcast_ref::<Error>() {
                         Some(Error::Invalid(_) | Error::Json(_)) => 400,
+                        Some(Error::AttachmentUnavailable) => 422,
                         Some(Error::IndexUnavailable) => 424,
                         Some(Error::SchemaUnavailable) => 423,
                         Some(Error::NotInitialized) => 428,

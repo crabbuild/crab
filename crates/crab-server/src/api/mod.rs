@@ -1,11 +1,13 @@
 mod activity;
 mod archive;
+pub(crate) mod asset_transfer;
 mod assignees;
 mod branches;
 mod catalog;
 mod checks;
 mod contents;
 mod conversation;
+pub(crate) mod discussion_attachments;
 mod discussion_bulk;
 mod discussion_creation;
 mod discussion_search;
@@ -466,6 +468,7 @@ pub(crate) fn routes(server: Arc<Server>) -> axum::Router<Arc<Server>> {
         .merge(conversation::routes(Arc::clone(&server)))
         .merge(discussion_state::routes(Arc::clone(&server)))
         .merge(discussion_bulk::routes(Arc::clone(&server)))
+        .merge(discussion_attachments::routes())
         .merge(links::routes(Arc::clone(&server)))
         .merge(projects::routes(Arc::clone(&server)))
         .merge(results::routes(Arc::clone(&server)))

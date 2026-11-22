@@ -91,6 +91,12 @@ pub(in crate::cells::repository) fn append_comment(
         pull: record.pull,
         number: record.number,
     };
+    crate::cells::repository::collaboration::attachments::claim(
+        context,
+        target,
+        &record.author,
+        &record.body,
+    )?;
     super::super::search::contributions::project(context, target, &record.author, &record.body)?;
     activity::append(context, target, &record.author, Action::Created)?;
     Ok(record)
@@ -138,6 +144,12 @@ impl Mutation for UpdatePullComment {
                 pull: record.pull,
                 number: record.number,
             };
+            crate::cells::repository::collaboration::attachments::claim(
+                context,
+                target,
+                &input.actor,
+                &record.body,
+            )?;
             crate::cells::repository::search::contributions::edit(context, target, &record.body)?;
             activity::append(context, target, &input.actor, Action::Updated)?;
         }

@@ -1494,6 +1494,9 @@ owner label does not acquire ownership.
 | Merge | `POST /api/repos/{owner}/{name}/pulls/{number}/merge` |
 | Label search choices | `GET /api/repos/{owner}/{name}/discussion-search/labels` |
 | Milestone search choices | `GET /api/repos/{owner}/{name}/discussion-search/milestones` |
+| Markdown suggestions | `GET /api/repos/{owner}/{name}/discussion-search/{mentions,references}` |
+| Stable discussion links | `GET /api/discussion-references/{repository_id}/{kind}/{number}` |
+| Discussion attachments | `POST /api/repos/{owner}/{name}/discussion-attachments`, `GET /api/discussion-attachments/{repository_id}/{id}` |
 | Labels | `GET/POST /api/repos/{owner}/{name}/labels`, `PATCH/DELETE /api/repos/{owner}/{name}/labels/{number}` |
 | Assignees | `GET /api/repos/{owner}/{name}/assignees`; issue and pull `PATCH` requests replace assignments |
 | Milestones | `GET/POST /api/repos/{owner}/{name}/milestones`, `GET/PATCH /api/repos/{owner}/{name}/milestones/{number}`, `GET /api/repos/{owner}/{name}/milestones/{number}/items`; issue/pull `GET/PUT .../{number}/milestone` |
@@ -1503,6 +1506,35 @@ owner label does not acquire ownership.
 | Linked work | Issue/pull `GET .../{number}/links`; `GET/PUT /api/repos/{owner}/{name}/pulls/{pull}/linked-issues/{issue}` |
 
 Every route prefix is `/api/repos/{owner}/{name}`. Browser mutations require the session cookie, canonical `Origin`, and CSRF token.
+
+Mention suggestions require a matching `repository_id` UUID. Both suggestion endpoints
+accept an optional `search` of up to 80 characters and return up to 12 items.
+Mentions search handles and display names of current repository members with
+Crab profiles. References search issue and pull request titles or number
+prefixes across all states. Empty searches return collaborators or recent work.
+Reference items carry an explicit issue or pull request kind because the two
+sequences can share a number. Both reads recheck repository access before
+returning results.
+Reference lookups can resolve an independently authorized repository by name.
+The response supplies its UUID. With `exact=true`, only exact issue and pull
+numbers match. Selected cross-repository links persist the UUID and typed
+number. The resolver checks current access before redirecting.
+
+Account settings use `GET /api/profile/saved-replies` and versioned
+`PUT/DELETE /api/profile/saved-replies/{id}`. Version zero creates a new reply.
+The private Directory account owns up to 24 saved replies, independent of
+public profile enrollment or handle changes.
+
+Discussion attachment uploads accept a raw file body, a client-selected UUID
+`id`, and a `name`. Files are limited to 25 MiB. Resending an identical
+upload with the same ID recovers the same result. The uploader alone can read
+an unpublished draft. Issue, pull request, comment, and review writes claim
+linked drafts inside the same native transaction as the body. Current
+repository readers can open published attachments. PNG, JPEG, GIF, and WebP
+signatures allow inline display. Other files download as binary attachments.
+Unclaimed uploads expire after 24 hours and the background sweep removes
+their blobs. Removing a link from a published body keeps the uploaded file
+accessible to repository readers.
 
 ### Separate collaboration triage from code write access
 

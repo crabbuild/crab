@@ -361,6 +361,8 @@ pub async fn serve(config: Config) -> Result<()> {
                   background.spawn(async move { background::refresh_catalog(refresh).await; Ok(()) });
                   let projection = server.clone();
                   background.spawn(async move { background::sweep_projections(projection).await });
+                  let attachments = server.clone();
+                  background.spawn(async move { crate::api::discussion_attachments::sweep(attachments).await; Ok(()) });
                   let integrity = server.clone();
                   background.spawn(async move { crate::integrity::run(integrity).await; Ok(()) });
               },

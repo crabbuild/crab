@@ -1,9 +1,12 @@
-use super::collaboration::links::{GetLink, ListLinks, SetLink};
 use super::collaboration::milestones::{
     AssignMilestone, CreateMilestone, EditMilestone, GetAssignment, GetMilestone,
     ListMilestoneItems, ListMilestones,
 };
 use super::collaboration::reactions::{GetReactions, SetReaction};
+use super::collaboration::{
+    attachments,
+    links::{GetLink, ListLinks, SetLink},
+};
 use super::*;
 use crate::cells::application::{invoke_mutation, invoke_read};
 
@@ -40,6 +43,10 @@ pub(in crate::cells) fn dispatch_mutation(
         search::index::ensure_ready(context)?;
     }
     let result = match id {
+        attachments::Reserve::ID => invoke_mutation::<attachments::Reserve>(context, input),
+        attachments::Finish::ID => invoke_mutation::<attachments::Finish>(context, input),
+        attachments::Expire::ID => invoke_mutation::<attachments::Expire>(context, input),
+        attachments::Collect::ID => invoke_mutation::<attachments::Collect>(context, input),
         #[cfg(test)]
         projection::tests::Historical::ID => {
             invoke_mutation::<projection::tests::Historical>(context, input)
@@ -220,6 +227,8 @@ pub(in crate::cells) fn dispatch_read(
     input: serde_json::Value,
 ) -> crate::cells::Result<serde_json::Value> {
     match id {
+        attachments::Get::ID => invoke_read::<attachments::Get>(context, input),
+        attachments::Due::ID => invoke_read::<attachments::Due>(context, input),
         #[cfg(test)]
         projection::tests::Inspect::ID => invoke_read::<projection::tests::Inspect>(context, input),
         #[cfg(test)]
@@ -290,6 +299,9 @@ pub(in crate::cells) fn dispatch_read(
         }
         <search::labels::LabelOptions as Read>::ID => {
             invoke_read::<search::labels::LabelOptions>(context, input)
+        }
+        search::index::references::FindReferences::ID => {
+            invoke_read::<search::index::references::FindReferences>(context, input)
         }
         <search::milestones::MilestoneOptions as Read>::ID => {
             invoke_read::<search::milestones::MilestoneOptions>(context, input)

@@ -212,6 +212,7 @@ impl CellClient {
                 StatusCode::LOCKED => Err(Error::SchemaUnavailable),
                 StatusCode::RANGE_NOT_SATISFIABLE => Err(Error::StaleSearch),
                 StatusCode::BAD_REQUEST => Err(Error::Invalid("Cell rejected the request")),
+                StatusCode::UNPROCESSABLE_ENTITY => Err(Error::AttachmentUnavailable),
                 _ => Err(Error::Unavailable),
             }
         };
@@ -236,6 +237,7 @@ impl CellClient {
                 | Error::Expired
                 | Error::AccessDenied
                 | Error::Invalid(_)
+                | Error::AttachmentUnavailable
                 | Error::SchemaUnavailable
                 | Error::NotInitialized
                 | Error::IndexUnavailable

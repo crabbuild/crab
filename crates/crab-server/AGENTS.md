@@ -145,6 +145,15 @@ before native reads and composes public choices with final membership checks.
 Directory read for lists, details and conversation responses; handlers recheck
 durable membership afterward. `api/issues/view.rs` owns issue/comment JSON
 presentation.
+`cells/directory/saved_replies.rs` owns account-private versioned snippets.
+Its HTTP handlers derive the account from the browser session.
+`cells/repository/collaboration/attachments.rs` owns draft reservations,
+claims in the discussion transaction, and sealed cleanup records.
+`api/discussion_attachments/` owns current grants, bounded transfers,
+and expiry collection. It shares staging and hashing with release assets
+through `api/asset_transfer.rs`.
+`api/discussion_search/composer.rs` resolves cross-repository references
+against the target grant and opens UUID-bound typed links.
 `cells/organization/` owns native organization metadata, membership tombstones,
 versioned invitation decisions, indexed roster pages and transactional audit.
 `cells/organization/teams/` owns standalone teams, current-incarnation direct

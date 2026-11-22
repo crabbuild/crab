@@ -13,6 +13,7 @@ use axum::{
 use std::sync::Arc;
 mod assignees;
 mod authors;
+mod composer;
 mod people;
 mod reviews;
 pub(super) async fn resolve_people(
@@ -28,6 +29,18 @@ pub(super) async fn resolve_people(
 
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
+        .route(
+            "/api/repos/{owner}/{name}/discussion-search/mentions",
+            get(composer::mentions),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/discussion-search/references",
+            get(composer::references),
+        )
+        .route(
+            "/api/discussion-references/{repository_id}/{kind}/{number}",
+            get(composer::open_reference),
+        )
         .route(
             "/api/repos/{owner}/{name}/discussion-search/labels",
             get(labels),

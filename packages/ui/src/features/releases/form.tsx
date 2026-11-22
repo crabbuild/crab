@@ -61,6 +61,7 @@ function ReleaseNotesFields({
           disabled={pending}
         />
         <Editor
+          attachments={false}
           id="release-notes"
           label="Release notes"
           value={body}
