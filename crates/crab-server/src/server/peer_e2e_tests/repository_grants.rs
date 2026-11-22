@@ -356,6 +356,61 @@ async fn organization_team_removal_revokes_existing_browser_git_and_lfs_access_a
             .unwrap();
         assert_eq!(hidden["repositories"], json!([]));
     }
+    let deploy_path = "/api/repos/team/private/settings/deploy-tokens";
+    let created: Value = write(
+        &h,
+        &origin_a,
+        &alice,
+        Method::POST,
+        deploy_path,
+        json!({"expected_version":0,"edit":{"kind":"create","name":"CI checkout","days":1}}),
+    )
+    .await
+    .error_for_status()
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let deploy = created["token"].as_str().unwrap();
+    let checkout = |origin: &str| {
+        h.http
+            .get(format!(
+                "{origin}/git/team/private.git/info/refs?service=git-upload-pack"
+            ))
+            .header("Git-Protocol", "version=2")
+            .basic_auth("crab", Some(deploy))
+    };
+    let settings: Value = h
+        .http
+        .get(format!("{origin_b}{deploy_path}"))
+        .header("cookie", &alice)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        checkout(&origin_b).send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    write(
+        &h,
+        &origin_a,
+        &alice,
+        Method::POST,
+        deploy_path,
+        json!({"expected_version":1,"edit":{"kind":"revoke","id":settings["tokens"][0]["id"]}}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert_eq!(
+        checkout(&origin_b).send().await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
     for task in [task_a, task_b] {
         task.abort();
         let _ = task.await;

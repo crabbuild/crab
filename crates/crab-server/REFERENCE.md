@@ -1454,6 +1454,29 @@ Token rules:
   cleanup. Authentication rejects any token missing from the current index.
 - Revocation is enforced on the next request; an already admitted request drains
 
+### Create a deploy token for CI
+
+In **Settings → Deploy tokens**, a signed-in repository administrator can
+create a named, read-only credential that lasts 1, 7, or 30 days. Use the
+username `crab` and store the displayed password in the CI secret store.
+Deploy tokens allow Git fetch and Git LFS download. They cannot push, upload
+LFS objects, or publish status checks. The secret appears once on creation.
+If the reply is lost, reload the token list, revoke the new entry if present,
+and create another.
+
+Deploy tokens belong to a repository UUID. Signing out, changing the
+creator's access, renaming the repository, or transferring ownership leaves
+them active until expiry or revocation. An administrator can revoke each
+token individually, including on an archived repository. Revocation applies
+to new Git and LFS requests on every replica. An admitted transfer can finish.
+
+`GET /api/repos/{owner}/{name}/settings/deploy-tokens` lists active metadata
+and returns the current `version`. Use it as `expected_version` when posting
+`{"edit":{"kind":"create","name":"Nightly build","days":7},"expected_version":0}`
+to the same endpoint. Revoke with `edit.kind` set to `revoke` and `edit.id`
+set to the token's ID. A stale version returns HTTP 409. A repository can
+have up to 32 active deploy tokens.
+
 ### Fetch through smart HTTP
 
 The server rejects Git protocol versions older than version 2. Override a conflicting client configuration with `git -c protocol.version=2`.

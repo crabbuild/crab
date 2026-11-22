@@ -300,6 +300,11 @@ export function TransferPage({ id, csrf }: { id: string; csrf: string }) {
                     if (confirmation === offer.to.name) void decide("accept");
                   }}
                 >
+                  <p className="text-sm">
+                    Existing deploy tokens stay with the repository. You can
+                    review and revoke them in Settings after accepting
+                    ownership.
+                  </p>
                   <label className="grid gap-1 text-sm">
                     Type <strong>{offer.to.name}</strong> to accept ownership.
                     <Input

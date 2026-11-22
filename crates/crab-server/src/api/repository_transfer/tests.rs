@@ -107,6 +107,19 @@ async fn personal_transfer_requires_consent_and_preserves_repository_data() {
     let bob = member(&h).await;
     let old = h.server.repositories.by_id(id).unwrap();
     let original = git_remote(&h, &alice, "team", "private").await;
+    let deploy: Value = h
+        .write(
+            Method::POST,
+            "/api/repos/team/private/settings/deploy-tokens",
+            &alice,
+            json!({"expected_version":0,"edit":{"kind":"create","name":"Deployment","days":7}}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     let checkout = tempfile::tempdir().unwrap();
     let head = git::push_review_branches(checkout.path(), original.as_str()).await;
     h.write(
@@ -178,6 +191,25 @@ async fn personal_transfer_requires_consent_and_preserves_repository_data() {
     assert_eq!(
         redirect.headers()[header::LOCATION],
         format!("/{owner}/moved/issues/1")
+    );
+
+    let deploy_path = format!("/api/repos/{owner}/moved/settings/deploy-tokens");
+    let migrated = h.json(&deploy_path, &bob).await;
+    assert_eq!(migrated["tokens"][0]["name"], "Deployment");
+    let upload_pack = format!(
+        "{}/git/{owner}/moved.git/info/refs?service=git-upload-pack",
+        h.origin
+    );
+    assert_eq!(
+        h.http
+            .get(upload_pack)
+            .header("git-protocol", "version=2")
+            .basic_auth("crab", deploy["token"].as_str())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
     );
 
     let token = git_remote(&h, &bob, owner, "moved").await;

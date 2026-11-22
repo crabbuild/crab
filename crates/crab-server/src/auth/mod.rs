@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 mod accounts;
 mod backchannel_logout;
+pub(crate) mod deploy_tokens;
 mod git_tokens;
 mod http;
 mod state;

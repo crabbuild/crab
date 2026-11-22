@@ -24,6 +24,7 @@ pub(crate) use checks::{
     CreateCheckRunOutcome, GetCheckCreateSubmission, GetCheckRun, GetCheckUpdateSubmission,
     ListCheckRuns, ListCheckRunsInput, UpdateCheckRun, UpdateCheckRunInput, UpdateCheckRunOutcome,
 };
+pub(crate) mod deploy_tokens;
 pub(crate) mod integrations;
 pub(crate) mod webhooks;
 pub(crate) use issues::{ListComments, UpdateComment, UpdateIssue};

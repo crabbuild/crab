@@ -92,7 +92,8 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
     } else {
         match &server.auth {
             Some(auth) if git_request || token_request => {
-                auth.git_principal(request.headers()).await
+                auth.git_principal(&server, request.headers(), git_request)
+                    .await
             }
             Some(auth) => auth.principal(request.headers()).await,
             None => Principal::local(),
@@ -314,7 +315,7 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
                 "www-authenticate",
                 "Basic realm=\"Crab Git\", charset=\"UTF-8\"",
             )],
-            "Use a Git access token from your signed-in Crab account",
+            "Use a Crab Git access token or a repository deploy token",
         )
             .into_response()
     } else if denied {
@@ -426,6 +427,7 @@ async fn archived_mutation_response(
         || discussion_preference
         || path == format!("/api/repos/{owner}/{name}/settings/integrations")
         || path == format!("/api/repos/{owner}/{name}/settings/webhooks")
+        || path == format!("/api/repos/{owner}/{name}/settings/deploy-tokens")
     {
         return None;
     }

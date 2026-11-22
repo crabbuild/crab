@@ -21,6 +21,7 @@ enum Credential {
     Local,
     User(Arc<Session>),
     Git(Arc<GitToken>),
+    Deploy { expires_at: u64 },
     Import(Arc<crate::git_import::ReceiveGrant>),
     AutoMerge(Identity),
 }
@@ -74,6 +75,20 @@ impl Principal {
             grant: None,
             repository_scope: RepositoryScope::Unrestricted,
         }
+    }
+    pub(super) fn deploy(repository: Uuid, expires_at: u64) -> Self {
+        Self {
+            credential: Credential::Deploy { expires_at },
+            grant: Some(Grant {
+                repository,
+                access: RepositoryAccess::Read,
+                role: RepositoryAccess::Read,
+            }),
+            repository_scope: RepositoryScope::Target(repository),
+        }
+    }
+    pub(crate) fn is_deploy(&self) -> bool {
+        matches!(self.credential, Credential::Deploy { .. })
     }
     pub(crate) fn import(grant: Arc<crate::git_import::ReceiveGrant>) -> Self {
         let repository = grant.repository.id;
@@ -140,7 +155,10 @@ impl Principal {
         self.user_session().is_some()
     }
     pub(crate) fn is_git(&self) -> bool {
-        matches!(self.credential, Credential::Git(_))
+        matches!(
+            self.credential,
+            Credential::Git(_) | Credential::Deploy { .. }
+        )
     }
     pub(crate) fn is_anonymous(&self) -> bool {
         matches!(self.credential, Credential::Anonymous)
@@ -157,6 +175,9 @@ impl Principal {
             Credential::Local | Credential::Import(_) | Credential::AutoMerge(_) => true,
             Credential::User(session) => session.active(),
             Credential::Git(token) => token.active(),
+            Credential::Deploy { expires_at } => {
+                super::now_epoch().is_ok_and(|now| now < *expires_at)
+            }
         }
     }
     pub(crate) fn identity(&self) -> Option<Identity> {
@@ -198,7 +219,9 @@ impl Principal {
         renamed: bool,
     ) -> Self {
         let account = match &self.credential {
-            Credential::Local => return self.clone(),
+            // Deploy credentials are checked against the repository's Cell
+            // on each transport request. Catalog refresh cannot widen their UUID scope.
+            Credential::Local | Credential::Deploy { .. } => return self.clone(),
             Credential::User(session) if session.active() => Some((
                 &session.identity,
                 session.groups.as_slice(),

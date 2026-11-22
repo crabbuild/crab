@@ -604,6 +604,7 @@ export function RepositoryPage({
                       route?.section === "members" ||
                       route?.section === "integrations" ||
                       route?.section === "webhooks" ||
+                      route?.section === "deploy-tokens" ||
                       route?.section === "rulesets" ||
                       route?.section === "mentions" ||
                       route?.section === "team-access"

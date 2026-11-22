@@ -327,6 +327,7 @@ export function repositoryRoute(url: URL, refs?: Refs): RepositoryRoute | null {
           "team-access",
           "integrations",
           "webhooks",
+          "deploy-tokens",
           "rulesets",
         ].includes(tail[0]))
     )

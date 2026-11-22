@@ -541,6 +541,7 @@ pub(crate) fn routes(server: Arc<Server>) -> axum::Router<Arc<Server>> {
         .merge(milestones::routes(Arc::clone(&server)))
         .merge(activity::routes(Arc::clone(&server)))
         .merge(integrations::routes(Arc::clone(&server)))
+        .merge(crate::auth::deploy_tokens::routes(Arc::clone(&server)))
         .merge(conversation::routes(Arc::clone(&server)))
         .merge(discussion_state::routes(Arc::clone(&server)))
         .merge(discussion_bulk::routes(Arc::clone(&server)))

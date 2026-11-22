@@ -987,7 +987,9 @@ pub(crate) async fn membership_for_config(
     let teams = snapshot
         .organization
         .map_or_else(Vec::new, |access| access.teams);
-    let grant = if let Some(organization) = organization {
+    let grant = if let Some(organization) = organization
+        && !principal.is_deploy()
+    {
         crate::repository::access::organization_grants(
             server,
             principal,

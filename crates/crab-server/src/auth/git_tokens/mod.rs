@@ -36,7 +36,12 @@ enum GitTokenAccess {
 }
 
 impl Authentication {
-    pub(crate) async fn git_principal(&self, headers: &HeaderMap) -> Principal {
+    pub(crate) async fn git_principal(
+        &self,
+        server: &Server,
+        headers: &HeaderMap,
+        git_transport: bool,
+    ) -> Principal {
         let Some(header) = headers
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
@@ -59,6 +64,14 @@ impl Authentication {
         else {
             return Principal::anonymous();
         };
+        if super::deploy_tokens::recognizes(token) {
+            if git_transport {
+                return super::deploy_tokens::verify(server, token)
+                    .await
+                    .unwrap_or_else(Principal::anonymous);
+            }
+            return Principal::anonymous();
+        }
         self.load_git_token(key(token))
             .await
             .map(Principal::git)

@@ -2,6 +2,7 @@ import { Link } from "@/components/navigation/link";
 import type { OrganizationView, Session } from "@/lib/contracts";
 import { useRequest, type Refs, type Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
+import { DeployTokens } from "./deploy-tokens";
 import { DefaultBranchSettings } from "./general";
 import { MemberSettings } from "./members";
 import { MentionSettings } from "./mentions";
@@ -29,6 +30,7 @@ export function Settings({
     | "members"
     | "integrations"
     | "webhooks"
+    | "deploy-tokens"
     | "rulesets"
     | "mentions"
     | "team-access";
@@ -89,6 +91,18 @@ export function Settings({
         >
           Webhooks
         </Link>
+        {identity && (
+          <Link
+            className={section === "deploy-tokens" ? "active" : ""}
+            aria-current={section === "deploy-tokens" ? "page" : undefined}
+            href={repoHref(repo, {
+              view: "settings",
+              section: "deploy-tokens",
+            })}
+          >
+            Deploy tokens
+          </Link>
+        )}
         {ownership.data?.role === "owner" && (
           <Link
             className={teamSection ? "active" : ""}
@@ -112,6 +126,8 @@ export function Settings({
         <IntegrationSettings key={repo.id} repo={repo} csrf={csrf} />
       ) : section === "webhooks" ? (
         <OutboundWebhooks key={repo.id} repo={repo} csrf={csrf} />
+      ) : section === "deploy-tokens" ? (
+        <DeployTokens key={repo.id} repo={repo} csrf={csrf} />
       ) : teamSection ? (
         organization ? (
           <RepositoryTeamSettings
