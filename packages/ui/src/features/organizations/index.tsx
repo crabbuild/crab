@@ -2,8 +2,10 @@ import { useState } from "react";
 import {
   Building2Icon,
   SettingsIcon,
+  ShieldCheckIcon,
   UsersIcon,
   FolderKanbanIcon,
+  BookMarkedIcon,
 } from "lucide-react";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
@@ -27,6 +29,8 @@ import type {
 import { Teams } from "./teams";
 import type { Commands } from "./teams/commands";
 import { Invitations } from "./invitations";
+import { OrganizationRepositories } from "./repositories";
+import { OrganizationRulesets } from "@/features/settings/rulesets";
 export { OrganizationInvitation } from "./invitations";
 
 export function OrganizationPage({
@@ -74,6 +78,11 @@ export function OrganizationPage({
                 </Link>
               </Button>
               {[
+                {
+                  key: "repositories",
+                  label: "Repositories",
+                  icon: BookMarkedIcon,
+                },
                 { key: "people", label: "People", icon: UsersIcon },
                 { key: "teams", label: "Teams", icon: UsersIcon },
                 ...(role === "owner"
@@ -82,6 +91,11 @@ export function OrganizationPage({
                         key: "invitations",
                         label: "Invitations",
                         icon: UsersIcon,
+                      },
+                      {
+                        key: "rulesets",
+                        label: "Rulesets",
+                        icon: ShieldCheckIcon,
                       },
                       {
                         key: "settings",
@@ -114,7 +128,16 @@ export function OrganizationPage({
                 {notice}
               </p>
             )}
-            {tab === "teams" ? (
+            {tab === "repositories" ? (
+              <OrganizationRepositories
+                id={id}
+                name={organization.name}
+                actor={actor}
+                canCreate={role === "owner"}
+                requestedImport={url.searchParams.get("import") ?? undefined}
+                csrf={csrf}
+              />
+            ) : tab === "teams" ? (
               <Teams
                 id={id}
                 actor={actor}
@@ -133,6 +156,8 @@ export function OrganizationPage({
               />
             ) : role === "owner" && tab === "invitations" ? (
               <Invitations endpoint={endpoint} id={id} csrf={csrf} />
+            ) : role === "owner" && tab === "rulesets" ? (
+              <OrganizationRulesets key={id} organization={id} csrf={csrf} />
             ) : role === "owner" && tab === "settings" ? (
               <Settings
                 key={organization.version}

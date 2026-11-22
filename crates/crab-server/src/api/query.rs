@@ -8,7 +8,7 @@ use super::{
 use crate::{repository::projection, server::Server};
 use crab_remote_git::{
     Blob, EntryKind, Error, GitPath, HistoryTraversal, OperationKind, PageRequest,
-    RemoteGitRepository, RemoteGitSnapshot, Revision, RevisionError, TreeEntry,
+    RemoteGitRepository, RemoteGitSnapshot, Revision, RevisionError, TreeChange, TreeEntry,
 };
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -40,26 +40,7 @@ pub(super) async fn execute(
             "refs": refs.entries.iter().map(|entry| json!({"name":entry.name,"oid":entry.target.to_string(),"peeled":entry.peeled.map(|oid|oid.to_string())})).collect::<Vec<_>>(),
         })));
     }
-    let revision = match params.rev.as_deref() {
-        Some(value) => Revision::parse(value)?,
-        None => Revision::Reference(
-            repository
-                .refs()
-                .head
-                .as_ref()
-                .ok_or_else(|| {
-                    if repository.refs().is_empty() {
-                        Error::EmptyRepository
-                    } else {
-                        Error::Revision {
-                            reason: RevisionError::NotFound,
-                        }
-                    }
-                })?
-                .name
-                .clone(),
-        ),
-    };
+    let revision = revision(repository, params.rev.as_deref())?;
     let path_history = !path.is_root() && matches!(action, Action::Commit | Action::Commits);
     let kind = match action {
         Action::Refs => OperationKind::Repository,
@@ -277,10 +258,15 @@ pub(super) async fn execute(
             Action::Changes | Action::Diff => {
                 let base_revision = params.base.as_deref().map(Revision::parse).transpose()?
                     .or_else(|| commit.parents.first().copied().map(Revision::Commit));
-                let base = match base_revision {
+                let mut base = match base_revision {
                     Some(revision) => Some(repository.snapshot(&revision, &operation).await?),
                     None => None,
                 };
+                let mut base_tip = None;
+                if params.merge_base && let Some(tip) = &base {
+                    base_tip = Some(tip.commit_oid().to_string());
+                    base = Some(merge_base_snapshot(repository, tip, &snapshot, &operation).await?);
+                }
                 if matches!(action, Action::Diff) {
                     let blobs = comparison_blobs_for_snapshots(
                         base.as_ref(),
@@ -301,7 +287,7 @@ pub(super) async fn execute(
                     })
                 } else if let Some(base) = &base {
                     let result = snapshot.compare(base, &operation).await?;
-                    json!({"base":result.base.to_string(),"changes":result.changes.iter().map(|change|json!({"path":display_path(change.path.as_bytes()),"path_hex":encode_hex(change.path.as_bytes()),"kind":format!("{:?}",change.kind),"old":change.old.as_ref().map(entry_json),"new":change.new.as_ref().map(entry_json)})).collect::<Vec<_>>()})
+                    comparison_json(result, base_tip)
                 } else {
                     let mut pending = vec![GitPath::root()];
                     let mut changes = Vec::new();
@@ -346,10 +332,213 @@ async fn optional_blob(
     snapshot.read_blob(path, operation).await.map(Some)
 }
 
+pub(super) fn revision(
+    repository: &RemoteGitRepository,
+    requested: Option<&str>,
+) -> crab_remote_git::Result<Revision> {
+    if let Some(value) = requested {
+        return Revision::parse(value);
+    }
+    let refs = repository.refs();
+    let head = refs.head.as_ref().ok_or(if refs.is_empty() {
+        Error::EmptyRepository
+    } else {
+        Error::Revision {
+            reason: RevisionError::NotFound,
+        }
+    })?;
+    Ok(Revision::Reference(head.name.clone()))
+}
+
+fn comparison_change(change: &TreeChange, view_identity: bool) -> serde_json::Value {
+    let path = change.path.as_bytes();
+    let mut value = json!({
+        "path": display_path(path), "path_hex": encode_hex(path),
+        "kind": format!("{:?}", change.kind),
+        "old": change.old.as_ref().map(entry_json), "new": change.new.as_ref().map(entry_json),
+    });
+    if view_identity {
+        let mut path_id = blake3::Hasher::new_derive_key("crab review path identity v1");
+        path_id.update(path);
+        let mut revision = blake3::Hasher::new_derive_key("crab review diff identity v1");
+        for entry in [&change.old, &change.new] {
+            if let Some(entry) = entry {
+                revision.update(&[1]);
+                revision.update(&entry.mode.raw().to_be_bytes());
+                revision.update(entry.oid.as_bytes());
+            } else {
+                revision.update(&[0]);
+            }
+        }
+        // Keep viewed progress when other files or the branch tip change.
+        value["view_id"] = json!(format!(
+            "{}{}",
+            path_id.finalize().to_hex(),
+            revision.finalize().to_hex()
+        ));
+    }
+    value
+}
+
+fn comparison_json(
+    comparison: crab_remote_git::Comparison,
+    base_tip: Option<String>,
+) -> serde_json::Value {
+    let changes = comparison
+        .changes
+        .iter()
+        .map(|change| comparison_change(change, base_tip.is_some()))
+        .collect::<Vec<_>>();
+    let mut result = json!({"base":comparison.base.to_string(), "changes":changes});
+    if let Some(base_tip) = base_tip {
+        result["base_tip"] = json!(base_tip);
+    }
+    result
+}
+
+pub(super) async fn fork_comparison(
+    fork: &RemoteGitRepository,
+    source: &RemoteGitRepository,
+    params: &Parameters,
+    cancel: &CancellationToken,
+) -> crab_remote_git::Result<serde_json::Value> {
+    let operation = fork.operation(OperationKind::Compare, cancel).await?;
+    let result = async {
+        let head = fork
+            .snapshot(&revision(fork, params.rev.as_deref())?, &operation)
+            .await?;
+        let base_revision = revision(source, params.base.as_deref())?;
+        let (ancestor, base_tip) =
+            fork_ancestry(source, &base_revision, &head, &operation, cancel).await?;
+        // Both sides contain the merge base. Keep subsequent file reads in
+        // the fork so exact per-file diff URLs reuse the usual access checks.
+        let base = fork
+            .snapshot(&Revision::Commit(ancestor), &operation)
+            .await?;
+        let comparison = head.compare(&base, &operation).await?;
+        let mut result = comparison_json(comparison, Some(base_tip.to_string()));
+        result["commit"] = json!(head.commit_oid().to_string());
+        result["generation"] = json!(fork.generation());
+        Ok(result)
+    }
+    .await;
+    operation.finish(result).await
+}
+
+pub(super) async fn fork_commits(
+    fork: &RemoteGitRepository,
+    source: &RemoteGitRepository,
+    params: &Parameters,
+    page: &PageRequest,
+    cancel: &CancellationToken,
+) -> crab_remote_git::Result<crab_remote_git::Page<crab_remote_git::Commit>> {
+    let operation = fork.operation(OperationKind::History, cancel).await?;
+    let result = async {
+        let head = fork
+            .snapshot(&revision(fork, params.rev.as_deref())?, &operation)
+            .await?;
+        let upstream = source.operation(OperationKind::History, cancel).await?;
+        let result = async {
+            let base = source
+                .snapshot(&revision(source, params.base.as_deref())?, &upstream)
+                .await?;
+            head.ahead_history_across_captures(&base, page, &operation, &upstream)
+                .await
+        }
+        .await;
+        upstream.finish(result).await
+    }
+    .await;
+    operation.finish(result).await
+}
+
+pub(super) async fn fork_ancestry(
+    upstream: &RemoteGitRepository,
+    base: &Revision,
+    head: &RemoteGitSnapshot,
+    head_operation: &crab_remote_git::OperationContext,
+    cancel: &CancellationToken,
+) -> crab_remote_git::Result<(gix_hash::ObjectId, gix_hash::ObjectId)> {
+    let operation = upstream.operation(OperationKind::Compare, cancel).await?;
+    let result = async {
+        let base = upstream.snapshot(base, &operation).await?;
+        let ancestor = comparison_ancestor(head, &base, head_operation, &operation).await?;
+        Ok((ancestor, base.commit_oid()))
+    }
+    .await;
+    operation.finish(result).await
+}
+
+pub(super) async fn comparison_ancestor(
+    head: &RemoteGitSnapshot,
+    base: &RemoteGitSnapshot,
+    head_operation: &crab_remote_git::OperationContext,
+    base_operation: &crab_remote_git::OperationContext,
+) -> crab_remote_git::Result<gix_hash::ObjectId> {
+    first_merge_base(
+        head.merge_bases_across_captures(base, head_operation, base_operation)
+            .await?,
+    )
+}
+
+fn first_merge_base(
+    ancestors: Vec<gix_hash::ObjectId>,
+) -> crab_remote_git::Result<gix_hash::ObjectId> {
+    ancestors.into_iter().next().ok_or(Error::Revision {
+        reason: RevisionError::NoMergeBase,
+    })
+}
+
 pub(crate) struct ComparisonBlobs {
     pub old: Option<Blob>,
     pub new: Option<Blob>,
     pub changed: bool,
+}
+
+pub(super) async fn merge_base_snapshot(
+    repository: &RemoteGitRepository,
+    base: &RemoteGitSnapshot,
+    head: &RemoteGitSnapshot,
+    operation: &crab_remote_git::OperationContext,
+) -> crab_remote_git::Result<RemoteGitSnapshot> {
+    let ancestor = comparison_ancestor(head, base, operation, operation).await?;
+    if ancestor == base.commit_oid() {
+        return Ok(base.clone());
+    }
+    repository
+        .snapshot(&Revision::Commit(ancestor), operation)
+        .await
+}
+
+pub(super) async fn pull_comparison_base(
+    repository: &RemoteGitRepository,
+    fork: Option<&RemoteGitRepository>,
+    base: &str,
+    head: &str,
+    cancellation: &CancellationToken,
+) -> crab_remote_git::Result<String> {
+    let head_repository = fork.unwrap_or(repository);
+    let operation = head_repository
+        .operation(OperationKind::Compare, cancellation)
+        .await?;
+    let result = async {
+        let head = head_repository
+            .snapshot(&Revision::parse(head)?, &operation)
+            .await?;
+        let base = Revision::parse(base)?;
+        if fork.is_some() {
+            let (ancestor, _) =
+                fork_ancestry(repository, &base, &head, &operation, cancellation).await?;
+            return Ok(ancestor.to_string());
+        }
+        let base = repository.snapshot(&base, &operation).await?;
+        Ok(merge_base_snapshot(repository, &base, &head, &operation)
+            .await?
+            .commit_oid()
+            .to_string())
+    }
+    .await;
+    operation.finish(result).await
 }
 
 async fn comparison_blobs_for_snapshots(

@@ -286,7 +286,12 @@ async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
     external_rules.push(crate::BranchProtection {
         branch: "feature/policy".into(),
         required_approvals: 1,
+        required_code_owner_reviews: false,
+        require_conversation_resolution: false,
+        require_up_to_date: false,
+        require_merge_queue: false,
         required_checks: vec![],
+        required_integrations: vec![],
     });
     let external_policy = set_branch_protections(
         &h,

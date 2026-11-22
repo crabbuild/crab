@@ -13,8 +13,11 @@ pub(super) fn options(
     layout: crab_storage::StoreLayout<crab_storage::Store>,
     default_branch: Option<String>,
     max_ref_updates: usize,
+    rewritten_ref: Option<String>,
+    inspect_visible_tip: Option<gix_hash::ObjectId>,
 ) -> crab_remote::prepare::Options<impl Fn(&str) -> RefPolicy + Send + 'static> {
     crab_remote::prepare::Options {
+        inspect_visible_tip,
         layout,
         graph: GraphLimits {
             max_ref_updates,
@@ -33,7 +36,7 @@ pub(super) fn options(
         },
         policy: move |name: &str| RefPolicy {
             allow_delete: default_branch.as_deref() != Some(name),
-            allow_non_fast_forward: false,
+            allow_non_fast_forward: rewritten_ref.as_deref() == Some(name),
         },
     }
 }

@@ -2,6 +2,11 @@ use serde::{Deserialize, Serialize};
 
 use super::*;
 
+pub(crate) mod auto_merge;
+pub(crate) mod base;
+pub(crate) mod head;
+pub(crate) mod viewed;
+
 const MAX_REVIEW_DECISIONS: u64 = 96;
 const MAX_PAGE_BYTES: usize = 1024 * 1024;
 
@@ -69,6 +74,21 @@ impl ReviewState {
 pub(crate) enum MergeMethod {
     FastForward,
     MergeCommit,
+    Squash,
+    Rebase,
+}
+
+impl MergeMethod {
+    pub(crate) const ALL: [Self; 4] = [
+        Self::MergeCommit,
+        Self::Squash,
+        Self::Rebase,
+        Self::FastForward,
+    ];
+
+    pub(crate) fn supports_queue(self) -> bool {
+        matches!(self, Self::MergeCommit | Self::Squash | Self::Rebase)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -83,6 +103,12 @@ pub(crate) struct PullMerge {
     pub commit_oid: String,
     pub message: String,
     pub created_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication_plan: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bypass_rulesets: Vec<crate::cells::repository::rulesets::RulesetId>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tested_candidate: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -92,6 +118,23 @@ pub(crate) struct PullReviewDecision {
     pub author: RepositoryAuthor,
     pub state: ReviewState,
     pub commit_oid: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MergeReviewers {
+    pub issuer: String,
+    pub subjects: Vec<String>,
+}
+
+impl MergeReviewers {
+    pub(crate) fn contains(&self, issuer: &str, subject: &str) -> bool {
+        self.issuer == issuer
+            && self
+                .subjects
+                .binary_search_by(|entry| entry.as_str().cmp(subject))
+                .is_ok()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -109,7 +152,11 @@ pub(crate) struct PullRecord {
     pub state: PullState,
     pub base_ref: String,
     pub base_oid: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retargeted_base: Option<base::Snapshot>,
     pub head_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_repository: Option<uuid::Uuid>,
     pub head_oid: String,
     pub label_ids: Vec<u64>,
     pub assignees: Vec<super::assignments::Assignee>,
@@ -131,6 +178,8 @@ pub(crate) struct PullSummary {
     pub state: PullState,
     pub base_ref: String,
     pub head_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_repository: Option<uuid::Uuid>,
     pub label_ids: Vec<u64>,
     pub assignees: Vec<super::assignments::Assignee>,
     pub created_at_ms: u64,
@@ -213,6 +262,11 @@ pub(crate) struct PullReviewPage {
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreatePullInput {
     pub metadata: super::collaboration::creation::Input,
+    #[serde(
+        default,
+        skip_serializing_if = "review_requests::automatic::Plan::is_empty"
+    )]
+    pub code_owner_requests: review_requests::automatic::Plan,
     #[serde(default)]
     pub draft: bool,
     pub submission_id: [u8; 16],
@@ -222,6 +276,8 @@ pub(crate) struct CreatePullInput {
     pub base_ref: String,
     pub base_oid: String,
     pub head_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_repository: Option<uuid::Uuid>,
     pub head_oid: String,
 }
 
@@ -297,12 +353,16 @@ pub(crate) enum UpdatePullCommentOutcome {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreatePullReviewInput {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review_teams: Vec<uuid::Uuid>,
     pub pull: u64,
     pub submission_id: [u8; 16],
     pub author: RepositoryAuthor,
     pub body: String,
     pub state: ReviewState,
     pub commit_oid: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_revision: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -314,6 +374,7 @@ pub(crate) enum CreatePullReviewOutcome {
     MergePending,
     OwnReview,
     DecisionLimit,
+    ComparisonChanged,
     RequestConflict,
 }
 
@@ -376,7 +437,9 @@ pub(crate) enum TransitionPullMergeOutcome {
 }
 
 mod operations;
-pub(crate) use operations::{CreatePull, GetPull, GetPullSubmission, ListPulls, UpdatePull};
+pub(crate) use operations::{
+    CreatePull, GetPull, GetPullSubmission, ListPulls, RejectStalePullComparison, UpdatePull,
+};
 
 pub(in crate::cells::repository) mod comments;
 pub(crate) use comments::{CreatePullComment, GetPullComment, ListPullComments, UpdatePullComment};
@@ -390,12 +453,16 @@ pub(crate) use lifecycle::{
 
 mod reviews;
 pub(crate) use reviews::dismissals as review_dismissals;
+pub(crate) use reviews::pending as pending_reviews;
 pub(crate) use reviews::{
     CreatePullReview, GetPullReview, GetPullReviewSubmission, ListPullReviews, UpdatePullReview,
 };
 
 mod merge;
-pub(crate) use merge::{GetPullMergeSubmission, ReservePullMerge, TransitionPullMerge};
+pub(crate) use merge::{
+    CaptureIssueClosure, CaptureIssueClosureInput, GetPullMergeSubmission, ReservePullMerge,
+    TransitionPullMerge,
+};
 
 mod storage;
 use storage::{
@@ -431,9 +498,15 @@ pub(in crate::cells::repository) fn review_source(
         "pull review source is missing",
     ))?;
     let merged: Option<PullMerge> = storage::decode_optional_record(&row[2])?;
+    let head = result_text(row, 1)?;
+    let head = storage::head_repository(context, pull)?.map_or(head.clone(), |fork| {
+        // Projection epochs describe only this repository. A fork branch
+        // must never join a same-named upstream ref in review search.
+        format!("{fork}:{head}")
+    });
     Ok((
         result_text(row, 0)?,
-        result_text(row, 1)?,
+        head,
         merged.map(|value| value.head_oid),
     ))
 }

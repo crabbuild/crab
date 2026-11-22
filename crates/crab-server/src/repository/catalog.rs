@@ -145,38 +145,45 @@ pub(crate) async fn materialize(
     for record in document.repositories.into_iter().filter(|record| {
         record.application == crate::catalog::RepositoryApplicationState::CellReady
     }) {
-        let prefix = catalog.root().repository_prefix(&record.prefix)?;
-        let layout = catalog.root().repository_layout(prefix.clone());
-        let root = crab_metadata::capsule_protocol::load_root(&layout)
-            .await
-            .map_err(|source| crate::Error::Settings {
-                source: Box::new(source),
-            })?;
-        let default_branch = root
-            .record()
-            .root()
-            .head()
-            .strip_prefix("refs/heads/")
-            .ok_or(crate::Error::Config(
-                "catalog repository HEAD must name a branch",
-            ))?;
-        let entry = record.runtime_config(catalog.root(), default_branch)?;
-        let repository = Repository::new(
-            record.id,
-            entry.clone(),
-            layout,
-            RepositoryIdentity::new(
-                catalog.root().provider_namespace.clone(),
-                prefix,
-                record.placement_generation,
-            )?,
-        );
-        repositories.insert(
-            (entry.owner.clone(), entry.name.clone()),
-            Arc::new(repository),
-        );
+        let repository = materialize_record(catalog, &record).await?;
+        repositories.insert((record.owner, record.name), Arc::new(repository));
     }
     Ok(RepositoryIndex::new(version, repositories))
+}
+
+pub(crate) async fn materialize_record(
+    catalog: &CatalogStore,
+    record: &crate::catalog::CatalogRecord,
+) -> Result<Repository> {
+    let prefix = catalog.root().repository_prefix(&record.prefix)?;
+    let layout = catalog.root().repository_layout(prefix.clone());
+    let root = crab_metadata::capsule_protocol::load_root(&layout)
+        .await
+        .map_err(|source| crate::Error::Settings {
+            source: Box::new(source),
+        })?;
+    let default_branch = root
+        .record()
+        .root()
+        .head()
+        .strip_prefix("refs/heads/")
+        .ok_or(crate::Error::Config(
+            "catalog repository HEAD must name a branch",
+        ))?;
+    let entry = record.runtime_config(catalog.root(), default_branch)?;
+    let mut repository = Repository::new(
+        record.id,
+        entry.clone(),
+        layout,
+        RepositoryIdentity::new(
+            catalog.root().provider_namespace.clone(),
+            prefix,
+            record.placement_generation,
+        )?,
+    );
+    repository.organization = record.organization;
+    repository.forked_from = record.forked_from;
+    Ok(repository)
 }
 
 #[cfg(test)]

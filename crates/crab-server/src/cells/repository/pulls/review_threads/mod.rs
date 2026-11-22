@@ -155,6 +155,7 @@ pub(crate) struct CreatePullReviewThreadInput {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum CreatePullReviewThreadOutcome {
     Archived,
+    MergePending,
     Created(Box<PullReviewThreadRecord>),
     PullNotFound,
     PullClosed,
@@ -176,6 +177,7 @@ pub(crate) struct UpdatePullReviewThreadInput {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum UpdatePullReviewThreadOutcome {
     Archived,
+    MergePending,
     Updated(Box<PullReviewThreadRecord>),
     NotFound,
     Forbidden,
@@ -220,9 +222,10 @@ pub(crate) enum UpdatePullReviewReplyOutcome {
 
 mod operations;
 pub(crate) use operations::{
-    CreatePullReviewReply, CreatePullReviewThread, GetPullReviewReply,
-    GetPullReviewReplySubmission, GetPullReviewThread, GetPullReviewThreadSubmission,
-    ListPullReviewReplies, ListPullReviewThreads, UpdatePullReviewReply, UpdatePullReviewThread,
+    CountUnresolvedConversations, CreatePullReviewReply, CreatePullReviewThread,
+    GetPullReviewReply, GetPullReviewReplySubmission, GetPullReviewThread,
+    GetPullReviewThreadSubmission, ListPullReviewReplies, ListPullReviewThreads,
+    UpdatePullReviewReply, UpdatePullReviewThread,
 };
 
 mod validation;

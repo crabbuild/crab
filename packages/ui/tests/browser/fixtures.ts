@@ -23,6 +23,7 @@ export function emptyReviewers() {
     version: 1,
     can_manage: false,
     candidates: [],
+    teams: [],
   };
 }
 
@@ -41,3 +42,11 @@ export function emptyPullRollup(
       : null,
   };
 }
+export const emptyIssueTemplates = {
+  items: [],
+  contact_links: [],
+  unavailable: [],
+  truncated: false,
+  blank_allowed: true,
+  blank_maintainers_only: false,
+};

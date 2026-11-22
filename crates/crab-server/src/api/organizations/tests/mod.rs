@@ -9,6 +9,9 @@ use crate::{
 use axum::http::{StatusCode, header};
 use reqwest::Method;
 
+mod codeowners;
+mod repositories;
+
 #[tokio::test]
 async fn invitations_require_consent_and_current_qualified_authority_without_repository_grants() {
     let h = Harness::new(false).await;
@@ -314,3 +317,5 @@ async fn organization_accounts_are_issuer_qualified_and_git_tokens_cannot_manage
 
 #[cfg(unix)]
 mod browser;
+
+mod rulesets;

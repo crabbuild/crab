@@ -265,6 +265,21 @@ and profile settings use native organization APIs with version checks. Public
 username search selects stable accounts; invitations currently use a manually
 shared link, with no email delivery. Organization discovery and owner-name routing
 are still separate work. Standalone teams use native organization authority.
+In organization repositories, **Settings → Members → Team access** lets admins
+find visible teams and grant, change or revoke a repository role. Team and
+individual edits use the same catalog revision. Reload team access after a
+conflict to see the current grants before editing again.
+The pull request **Reviewers** picker searches people and visible teams with
+repository access. Team rows show pending requests or link to the submitted
+review. The notification inbox receives team review requests through the same
+route as individual requests.
+Enable code owner approvals under **Settings → Branches**. The PR merge panel
+shows pending owner approvals and links to the base commit's CODEOWNERS file.
+The Files changed tab shows which ownership rules apply.
+The Reviewers sidebar identifies requests sent automatically when opening a
+ready PR or marking a draft ready. Matching owners receive inbox notifications.
+The file toolbar’s **Code owners** control shows current eligible owners and a
+link to the matching rule in the CODEOWNERS file at the displayed commit.
 
 The shared composer retains one original comment/state intent through uncertain
 responses, metadata refresh and PR tabs. Retry original action recovers that

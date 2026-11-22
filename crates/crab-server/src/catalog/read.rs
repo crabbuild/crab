@@ -81,11 +81,6 @@ impl CatalogStore {
                 record.owner.eq_ignore_ascii_case(owner) && record.name.eq_ignore_ascii_case(name)
             })
             .ok_or(CatalogError::NotFound)?;
-        Ok(MembershipSnapshot {
-            repository_id: record.id,
-            revision: document.version,
-            members: record.members.clone(),
-            groups: record.groups.clone(),
-        })
+        document.membership_snapshot(record)
     }
 }

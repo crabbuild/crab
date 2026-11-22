@@ -9,23 +9,58 @@ use crate::{
 use axum::http::{StatusCode, header};
 use crab_remote_git::RepositoryIdentity;
 use crab_storage::{Store, StoreLayout};
+use hmac::{Hmac, Mac};
 use serde_json::Value;
+use sha2::Sha256;
 use std::{
     collections::BTreeMap,
-    sync::{Arc, atomic::Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use url::Url;
+use uuid::Uuid;
 
 mod provider;
 pub(crate) mod storage_proxy;
 pub(crate) use provider::{KEY_ONE, KEY_TWO, Provider, start_provider};
+
+type TestGitHubActions = Box<dyn FnOnce(Uuid) -> crate::api::GitHubActions + Send>;
 
 pub(crate) struct Harness {
     pub(crate) origin: String,
     pub(crate) http: reqwest::Client,
     pub(crate) provider: Arc<Provider>,
     pub(crate) server: Arc<Server>,
+    pub(crate) drop_next_import_reply: Arc<AtomicBool>,
+    pub(crate) drop_next_fork_sync_reply: Arc<AtomicBool>,
+    pub(crate) drop_next_merge_reply: Arc<AtomicBool>,
+    pub(crate) drop_next_branch_update_reply: Arc<AtomicBool>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+pub(crate) async fn github_workflow_delivery(
+    h: &Harness,
+    url: &str,
+    secret: &str,
+    delivery: Uuid,
+    signed: &Value,
+    body: &Value,
+) -> StatusCode {
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(&serde_json::to_vec(signed).unwrap());
+    let signature = blake3::Hash::from_bytes(mac.finalize().into_bytes().into());
+    h.http
+        .post(url)
+        .header("x-github-event", "workflow_run")
+        .header("x-github-delivery", delivery.to_string())
+        .header("x-hub-signature-256", format!("sha256={signature}"))
+        .json(body)
+        .send()
+        .await
+        .unwrap()
+        .status()
 }
 
 impl Harness {
@@ -159,6 +194,50 @@ impl Harness {
     }
 
     pub(crate) async fn new_with_store(confidential: bool, github: bool, store: Store) -> Self {
+        Self::new_with_store_and_prefix(confidential, github, store, "").await
+    }
+
+    pub(crate) async fn new_with_store_and_prefix(
+        confidential: bool,
+        github: bool,
+        store: Store,
+        catalog_prefix: &str,
+    ) -> Self {
+        Self::configured(confidential, github, store, catalog_prefix, None, None).await
+    }
+
+    pub(crate) async fn with_ci_key(catalog_prefix: &str) -> Self {
+        Self::with_ci_dispatch(catalog_prefix, None).await
+    }
+
+    pub(crate) async fn with_ci_dispatch(
+        catalog_prefix: &str,
+        github_actions: Option<TestGitHubActions>,
+    ) -> Self {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), [42_u8; 32]).unwrap();
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let harness = Self::configured(
+            false,
+            false,
+            store,
+            catalog_prefix,
+            Some(file.path().to_owned()),
+            github_actions,
+        )
+        .await;
+        harness.initialize_directory().await;
+        harness
+    }
+
+    async fn configured(
+        confidential: bool,
+        github: bool,
+        store: Store,
+        catalog_prefix: &str,
+        state_key_file: Option<std::path::PathBuf>,
+        github_actions: Option<TestGitHubActions>,
+    ) -> Self {
         let (provider, provider_task) = start_provider(0).await;
         provider.confidential.store(confidential, Ordering::SeqCst);
         let secret_file = confidential.then(|| {
@@ -169,7 +248,7 @@ impl Harness {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let origin = format!("http://{address}");
-        let root = crate::storage_root::StorageRoot::memory(store.clone(), "");
+        let root = crate::storage_root::StorageRoot::memory(store.clone(), catalog_prefix);
         let auth_config = if github {
             crate::OidcConfig {
                 provider: crate::AuthProvider::GitHub,
@@ -177,7 +256,7 @@ impl Harness {
                 public_url: Url::parse(&origin).unwrap(),
                 client_id: "crab-browser".into(),
                 client_secret_file: secret_file.as_ref().map(|file| file.path().to_owned()),
-                state_key_file: None,
+                state_key_file,
                 github: Some(crate::GitHubConfig {
                     authorize_url: format!("{}/github/authorize", provider.issuer),
                     token_url: format!("{}/github/token", provider.issuer),
@@ -191,7 +270,7 @@ impl Harness {
                 public_url: Url::parse(&origin).unwrap(),
                 client_id: "crab-browser".into(),
                 client_secret_file: secret_file.as_ref().map(|file| file.path().to_owned()),
-                state_key_file: None,
+                state_key_file,
                 github: None,
             }
         };
@@ -199,9 +278,22 @@ impl Harness {
         let protected_branches = vec![crate::BranchProtection {
             branch: "main".into(),
             required_approvals: 1,
+            required_code_owner_reviews: false,
+            require_conversation_resolution: false,
+            require_up_to_date: false,
+            require_merge_queue: false,
             required_checks: vec!["ci/test".into()],
+            required_integrations: vec![],
         }];
         let admission_store = store.clone();
+        // Most fixtures place their seed repo at the bucket root. Exercise
+        // catalog materialization and native Git with a deployed-style root.
+        let layout = if catalog_prefix.is_empty() {
+            StoreLayout::new(store, "test".into())
+        } else {
+            root.repository_layout(root.repository_prefix("test").unwrap())
+        };
+        let prefix = layout.repo_prefix().to_owned();
         let mut repository = Repository::new(
             uuid::Uuid::from_bytes([1; 16]),
             RepositoryConfig {
@@ -209,7 +301,7 @@ impl Harness {
                 owner: "team".into(),
                 name: "private".into(),
                 bucket: "test".into(),
-                prefix: "test".into(),
+                prefix: prefix.clone(),
                 default_branch: "main".into(),
                 description: "Private project".into(),
                 members: vec![
@@ -226,8 +318,8 @@ impl Harness {
                 ],
                 protected_branches: protected_branches.clone(),
             },
-            StoreLayout::new(store, "test".into()),
-            RepositoryIdentity::new("test", "test", 1).unwrap(),
+            layout,
+            RepositoryIdentity::new("test", prefix.as_str(), 1).unwrap(),
         );
         crab_write::capsule_protocol::initialize(
             &repository.layout,
@@ -270,10 +362,61 @@ impl Harness {
             server.cell_test_runtime = Some(cells);
             server.cursor_key = [7; 32];
             server.auth = Some(auth);
+            server.github_actions = github_actions.map(|configure| configure(record.id));
             server.catalog = Some(catalog);
+            server.git_import = Some(crate::git_import::ImportContext::for_test(address));
             server
         });
-        let app = router(Arc::clone(&server));
+        let drop_next_import_reply = Arc::new(AtomicBool::new(false));
+        let drop_next_fork_sync_reply = Arc::new(AtomicBool::new(false));
+        let drop_next_merge_reply = Arc::new(AtomicBool::new(false));
+        let drop_next_branch_update_reply = Arc::new(AtomicBool::new(false));
+        let app = router(Arc::clone(&server)).layer(axum::middleware::from_fn({
+            let drop_import = Arc::clone(&drop_next_import_reply);
+            let drop_sync = Arc::clone(&drop_next_fork_sync_reply);
+            let drop_merge = Arc::clone(&drop_next_merge_reply);
+            let drop_branch_update = Arc::clone(&drop_next_branch_update_reply);
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let drop_import = Arc::clone(&drop_import);
+                let drop_sync = Arc::clone(&drop_sync);
+                let drop_merge = Arc::clone(&drop_merge);
+                let drop_branch_update = Arc::clone(&drop_branch_update);
+                async move {
+                    let is_import = request.method() == axum::http::Method::POST
+                        && request.uri().path().ends_with("/git-receive-pack")
+                        && request.headers().contains_key("x-crab-internal-import");
+                    let is_sync = request.method() == axum::http::Method::POST
+                        && request.uri().path().ends_with("/fork-sync");
+                    let is_merge = request.method() == axum::http::Method::POST
+                        && request.uri().path().ends_with("/merge");
+                    let is_branch_update = request.method() == axum::http::Method::POST
+                        && request.uri().path().ends_with("/update-branch");
+                    let mut response = next.run(request).await;
+                    if response.status().is_success()
+                        && (is_branch_update && drop_branch_update.swap(false, Ordering::SeqCst)
+                            || is_merge && drop_merge.swap(false, Ordering::SeqCst))
+                    {
+                        // Deliver the headers so Chromium cannot retry an
+                        // interrupted connection before the app sees the loss.
+                        response.headers_mut().remove(header::CONTENT_LENGTH);
+                        *response.body_mut() = axum::body::Body::empty();
+                    }
+                    if response.status().is_success()
+                        && (is_import && drop_import.swap(false, Ordering::SeqCst)
+                            || is_sync && drop_sync.swap(false, Ordering::SeqCst))
+                    {
+                        response.headers_mut().remove(header::CONTENT_LENGTH);
+                        *response.body_mut() =
+                            axum::body::Body::from_stream(futures_util::stream::once(async {
+                                Err::<bytes::Bytes, _>(std::io::Error::other(
+                                    "test interrupted Git response",
+                                ))
+                            }));
+                    }
+                    response
+                }
+            }
+        }));
         let task = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
@@ -285,6 +428,10 @@ impl Harness {
                 .unwrap(),
             provider,
             server,
+            drop_next_import_reply,
+            drop_next_fork_sync_reply,
+            drop_next_merge_reply,
+            drop_next_branch_update_reply,
             tasks: vec![task, provider_task],
         }
     }

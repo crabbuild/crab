@@ -51,8 +51,10 @@ pub(crate) struct Server {
     pub(crate) cancellation: CancellationToken,
     pub(crate) receives: tokio_util::task::TaskTracker,
     pub(crate) auth: Option<Authentication>,
+    pub(crate) github_actions: Option<crate::api::GitHubActions>,
     pub(crate) git_import: Option<git_import::ImportContext>,
     pub(crate) catalog: Option<CatalogStore>,
+    repository_setup: Option<Arc<Config>>,
     pub(crate) catalog_healthy: AtomicBool,
     pub(crate) node_healthy: AtomicBool,
     pub(crate) cell_capacity: CellCapacityReport,
@@ -85,8 +87,10 @@ impl Server {
             cancellation: CancellationToken::new(),
             receives: tokio_util::task::TaskTracker::new(),
             auth: None,
+            github_actions: None,
             git_import: None,
             catalog: None,
+            repository_setup: None,
             catalog_healthy: AtomicBool::new(false),
             node_healthy: AtomicBool::new(false),
             cell_capacity: capacity::for_test(),
@@ -99,6 +103,43 @@ impl Server {
     }
     pub(crate) fn catalog(&self) -> Option<CatalogStore> {
         self.catalog.clone()
+    }
+
+    pub(crate) async fn initialize_catalog_repository(
+        &self,
+        id: Uuid,
+        pending: crate::catalog::RepositoryApplicationState,
+    ) -> Result<()> {
+        let catalog = self
+            .catalog()
+            .ok_or(crate::Error::Config("Repository setup requires a catalog"))?;
+        self.prepare_catalog_repository(&catalog, id, pending)
+            .await?;
+        catalog.mark_cell_ready(id).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn prepare_catalog_repository(
+        &self,
+        catalog: &CatalogStore,
+        id: Uuid,
+        pending: crate::catalog::RepositoryApplicationState,
+    ) -> Result<()> {
+        #[cfg(test)]
+        if self.cell_test_runtime.is_some() {
+            if catalog.needs_cell_initialization(id, pending).await? {
+                self.cells()
+                    .ok_or(crate::cells::Error::Unavailable)?
+                    .initialize(id)
+                    .await?;
+            }
+            return Ok(());
+        }
+        let config = self
+            .repository_setup
+            .as_deref()
+            .ok_or(crate::Error::Config("Repository setup is unavailable"))?;
+        crate::cells::prepare_repository(config, catalog, id, pending).await
     }
 
     pub(crate) async fn install_catalog(
@@ -193,6 +234,11 @@ pub async fn serve(config: Config) -> Result<()> {
         )?),
         None => None,
     };
+    let github_actions = config
+        .github_actions
+        .as_ref()
+        .map(crate::api::GitHubActions::load)
+        .transpose()?;
     std::fs::create_dir_all(&config.cells.data_dir)?;
     let capacity =
         CellCapacityReport::measure(&config.cells.data_dir, config.cells.local_disk_limit_bytes)?;
@@ -305,11 +351,10 @@ pub async fn serve(config: Config) -> Result<()> {
         cancellation: cancellation.clone(),
         receives: tokio_util::task::TaskTracker::new(),
         auth,
-        git_import: Some(git_import::ImportContext::new(
-            config.clone(),
-            public_address,
-        )),
+        github_actions,
+        git_import: Some(git_import::ImportContext::new(&config, public_address)),
         catalog: Some(catalog),
+        repository_setup: Some(Arc::new(config.clone())),
         catalog_healthy: AtomicBool::new(true),
         node_healthy: AtomicBool::new(false),
         cell_capacity: capacity,
@@ -361,6 +406,7 @@ pub async fn serve(config: Config) -> Result<()> {
                   background.spawn(async move { background::refresh_catalog(refresh).await; Ok(()) });
                   let projection = server.clone();
                   background.spawn(async move { background::sweep_projections(projection).await });
+                  background.spawn(crate::api::auto_merge::run(server.clone()));
                   let integrity = server.clone();
                   background.spawn(async move { crate::integrity::run(integrity).await; Ok(()) });
               },

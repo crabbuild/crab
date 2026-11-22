@@ -29,6 +29,8 @@ pub(crate) struct Query {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Page {
     pub items: Vec<Reviewer>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub teams: Vec<review_requests::teams::TeamRequest>,
     pub next: Option<String>,
     pub author: RepositoryAuthor,
     pub version: u64,
@@ -90,6 +92,7 @@ impl Read for ListReviewers {
         let merged: Option<PullMerge> = super::storage::decode_optional_record(&row[7])?;
         let mut page = Page {
             items: Vec::new(),
+            teams: review_requests::teams::load_teams(context, input.pull)?,
             next: None,
             author: author_from_row(row, 0)?,
             version: result_u64_from_row(row, 3)?,

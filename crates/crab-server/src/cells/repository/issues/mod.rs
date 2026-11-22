@@ -62,6 +62,7 @@ impl Mutation for CreateIssue {
             input.submission_id,
             payload_digest,
             None,
+            None,
         )? {
             creation::Resolution::Ready => {}
             creation::Resolution::Rejected(reason) => {
@@ -123,7 +124,13 @@ impl Mutation for CreateIssue {
         let target = Target::Issue {
             number: record.number,
         };
-        activity::append(context, target, &record.author, Action::Created)?;
+        activity::append_content(
+            context,
+            target,
+            &record.author,
+            Action::Created,
+            &record.body,
+        )?;
         creation::assign_milestone(
             context,
             Subject {
@@ -257,7 +264,13 @@ pub(in crate::cells::repository) fn append_comment(
         number: record.number,
     };
     search::contributions::project(context, target, &record.author, &record.body)?;
-    activity::append(context, target, &record.author, Action::Created)?;
+    activity::append_content(
+        context,
+        target,
+        &record.author,
+        Action::Created,
+        &record.body,
+    )?;
     Ok(record)
 }
 
@@ -324,16 +337,20 @@ impl Mutation for UpdateIssue {
             assignments::validate(assignees)?;
         }
 
-        let current = context.sql(&SqlBatch {
-            statements: vec![statement(
-                "SELECT number, author_issuer, author_subject, author_name, title, body, state, label_ids, assignees, version, created_at_ms, updated_at_ms FROM repository_issues WHERE number = ?",
-                vec![integer(input.number)?],
-            )],
-        })?;
-        let Some(row) = current[0].rows.first() else {
+        let Some(issue) = GetIssue::execute(context, input.number)? else {
             return Ok(MutationResult::Rejected(UpdateIssueOutcome::NotFound));
         };
-        let mut issue = issue_from_row(row)?;
+        Self::apply_update(context, issue, input, None)
+    }
+}
+
+impl UpdateIssue {
+    fn apply_update(
+        context: &Transaction<'_>,
+        mut issue: IssueRecord,
+        input: UpdateIssueInput,
+        closing_pull: Option<u64>,
+    ) -> crate::cells::Result<MutationResult<UpdateIssueOutcome>> {
         let was_closed = issue.state != 0;
         let edited = input
             .title
@@ -407,21 +424,21 @@ impl Mutation for UpdateIssue {
             ));
         };
         let updated = context.sql(&SqlBatch {
-            statements: vec![statement(
-                "UPDATE repository_issues SET title = ?, body = ?, state = ?, label_ids = ?, assignees = ?, version = ?, updated_at_ms = ? WHERE number = ? AND version = ?",
-                vec![
-                    SqlValue::Text(issue.title.clone()),
-                    SqlValue::Text(issue.body.clone()),
-                    SqlValue::Integer(i64::from(issue.state)),
-                    SqlValue::Blob(encode_label_ids(&issue.label_ids)?),
-                    SqlValue::Blob(assignments::encode(&issue.assignees)?),
-                    integer(issue.version)?,
-                    integer(issue.updated_at_ms)?,
-                    integer(issue.number)?,
-                    integer(input.version)?,
-                ],
-            )],
-        })?;
+                statements: vec![statement(
+                    "UPDATE repository_issues SET title = ?, body = ?, state = ?, label_ids = ?, assignees = ?, version = ?, updated_at_ms = ? WHERE number = ? AND version = ?",
+                    vec![
+                        SqlValue::Text(issue.title.clone()),
+                        SqlValue::Text(issue.body.clone()),
+                        SqlValue::Integer(i64::from(issue.state)),
+                        SqlValue::Blob(encode_label_ids(&issue.label_ids)?),
+                        SqlValue::Blob(assignments::encode(&issue.assignees)?),
+                        integer(issue.version)?,
+                        integer(issue.updated_at_ms)?,
+                        integer(issue.number)?,
+                        integer(input.version)?,
+                    ],
+                )],
+            })?;
         if updated[0].rows_affected != 1 {
             return Ok(MutationResult::Rejected(UpdateIssueOutcome::Conflict));
         }
@@ -436,7 +453,7 @@ impl Mutation for UpdateIssue {
             number: issue.number,
         };
         if edited {
-            activity::append(context, target, &input.actor, Action::Updated)?;
+            activity::append_content(context, target, &input.actor, Action::Updated, &issue.body)?;
         }
         if was_closed != (issue.state != 0) {
             let action = if issue.state == 0 {
@@ -446,6 +463,7 @@ impl Mutation for UpdateIssue {
                     reason: lifecycle
                         .state_reason
                         .ok_or(crate::cells::Error::Invalid("new closure has no reason"))?,
+                    pull: closing_pull,
                 }
             };
             activity::append(context, target, &input.actor, action)?;
@@ -470,6 +488,38 @@ impl Mutation for UpdateIssue {
             Box::new(issue),
         )))
     }
+}
+
+pub(in crate::cells::repository) fn close_by_pull(
+    context: &mut Transaction<'_>,
+    number: u64,
+    pull: u64,
+    actor: &RepositoryAuthor,
+) -> crate::cells::Result<()> {
+    let Some(issue) = GetIssue::execute(context, number)?.filter(|issue| issue.state == 0) else {
+        return Ok(());
+    };
+    let input = UpdateIssueInput {
+        number,
+        actor: actor.clone(),
+        can_triage: true,
+        version: issue.version,
+        title: None,
+        body: None,
+        state: Some(1),
+        state_reason: Some(lifecycle::Reason::Completed),
+        label_ids: None,
+        assignees: None,
+    };
+    if matches!(
+        UpdateIssue::apply_update(context, issue, input, Some(pull))?,
+        MutationResult::Rejected(_)
+    ) {
+        return Err(crate::cells::Error::Invalid(
+            "linked issue closure was rejected",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) struct UpdateComment;
@@ -541,7 +591,13 @@ impl Mutation for UpdateComment {
                 number: comment.number,
             };
             search::contributions::edit(context, target, &comment.body)?;
-            activity::append(context, target, &input.actor, Action::Updated)?;
+            activity::append_content(
+                context,
+                target,
+                &input.actor,
+                Action::Updated,
+                &comment.body,
+            )?;
         }
         Ok(MutationResult::Success(UpdateCommentOutcome::Updated(
             comment,

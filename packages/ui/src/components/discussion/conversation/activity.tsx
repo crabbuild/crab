@@ -47,10 +47,20 @@ function action(event: ActivityEvent): string {
       return "converted to draft";
     case "ready_for_review":
       return "marked ready for review";
+    case "base_changed":
+      return `changed the base from ${event.action.from.replace(/^refs\/heads\//, "")} to ${event.action.to.replace(/^refs\/heads\//, "")} on`;
+    case "head_changed":
+      return `changed the head from ${event.action.from.replace(/^refs\/heads\//, "")} to ${event.action.to.replace(/^refs\/heads\//, "")} on`;
     case "review_requested":
       return `requested a review from ${event.action.reviewer} on`;
     case "review_request_cancelled":
       return `cancelled the review request for ${event.action.reviewer} on`;
+    case "team_review_requested":
+      return "requested a team review on";
+    case "team_review_request_cancelled":
+      return "cancelled a team review request on";
+    case "code_owner_reviews_requested":
+      return "requested code owner reviews on";
     case "updated":
       return "updated";
     case "issue_closed":
@@ -166,6 +176,19 @@ export function ActivityItem({
         >
           #{parent.number} {event.title}
         </Link>
+        {event.action.kind === "issue_closed" && event.action.pull && (
+          <>
+            {" via "}
+            <Link
+              href={repoHref(repo, {
+                view: "pulls",
+                pull: String(event.action.pull),
+              })}
+            >
+              #{event.action.pull}
+            </Link>
+          </>
+        )}
         <Link
           className="muted"
           href={href ?? parentHref}

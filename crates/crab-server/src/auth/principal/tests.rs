@@ -48,7 +48,7 @@ fn oidc_groups_union_exact_current_grants_without_exceeding_the_token_scope() {
     let browser = Principal::user(session.clone());
     assert!(
         browser
-            .with_membership(id, &config, "https://identity.example")
+            .with_membership(id, &config, "https://identity.example", None)
             .can_admin(id)
     );
     let git = Principal::git(Arc::new(GitToken {
@@ -59,18 +59,18 @@ fn oidc_groups_union_exact_current_grants_without_exceeding_the_token_scope() {
         access: RepositoryAccess::Read,
         revoked: AtomicBool::new(false),
     }));
-    let scoped = git.with_membership(id, &config, "https://identity.example");
+    let scoped = git.with_membership(id, &config, "https://identity.example", None);
     assert!(scoped.can_read(id));
     assert!(!scoped.can_triage(id));
     config.groups[0].group = "/engineering".into();
     assert!(
         !browser
-            .with_membership(id, &config, "https://identity.example")
+            .with_membership(id, &config, "https://identity.example", None)
             .can_triage(id)
     );
     assert!(
         !browser
-            .with_membership(id, &config, "https://other.example")
+            .with_membership(id, &config, "https://other.example", None)
             .can_read(id)
     );
 }
@@ -82,11 +82,11 @@ fn request_scope_cannot_widen_when_browser_or_local_grants_refresh() {
     let config = member_repository(RepositoryAccess::Admin);
     for principal in [Principal::local(), Principal::user(active_session())] {
         let admitted = principal
-            .with_membership(original, &config, "https://identity.example")
+            .with_membership(original, &config, "https://identity.example", None)
             .scoped_to_repository(Some(original));
         assert!(admitted.can_admin(original));
         let rebound = admitted
-            .with_membership(replacement, &config, "https://identity.example")
+            .with_membership(replacement, &config, "https://identity.example", None)
             .scoped_to_repository(Some(replacement));
         assert!(!rebound.can_read(replacement));
     }
@@ -100,6 +100,7 @@ fn repository_administration_stays_out_of_write_scoped_git_tokens() {
         Uuid::from_u128(1),
         &repository,
         "https://identity.example",
+        None,
     );
     assert!(browser.can_read(Uuid::from_u128(1)));
     assert!(browser.can_write(Uuid::from_u128(1)));
@@ -113,7 +114,12 @@ fn repository_administration_stays_out_of_write_scoped_git_tokens() {
         access: RepositoryAccess::Write,
         revoked: AtomicBool::new(false),
     }));
-    let git = git.with_membership(Uuid::from_u128(1), &repository, "https://identity.example");
+    let git = git.with_membership(
+        Uuid::from_u128(1),
+        &repository,
+        "https://identity.example",
+        None,
+    );
     assert!(git.can_write(Uuid::from_u128(1)));
     assert!(!git.can_admin(Uuid::from_u128(1)));
     assert!(
@@ -121,7 +127,8 @@ fn repository_administration_stays_out_of_write_scoped_git_tokens() {
             .with_membership(
                 Uuid::from_u128(1),
                 &member_repository(RepositoryAccess::Write),
-                "https://identity.example"
+                "https://identity.example",
+                None
             )
             .can_admin(Uuid::from_u128(1))
     );
@@ -138,7 +145,7 @@ fn triage_manages_collaboration_without_code_write_or_repository_administration(
     ] {
         let repo = member_repository(access);
         let principal =
-            principal.with_membership(Uuid::from_u128(1), &repo, "https://identity.example");
+            principal.with_membership(Uuid::from_u128(1), &repo, "https://identity.example", None);
         assert_eq!(
             (
                 principal.can_read(Uuid::from_u128(1)),
@@ -163,7 +170,8 @@ fn triage_manages_collaboration_without_code_write_or_repository_administration(
             .with_membership(
                 Uuid::from_u128(1),
                 &member_repository(RepositoryAccess::Triage),
-                "https://identity.example"
+                "https://identity.example",
+                None
             )
             .can_triage(Uuid::from_u128(1))
     );
@@ -178,6 +186,7 @@ fn credentials_need_a_grant_and_grants_cannot_retarget_another_repository_uuid()
         id,
         &member_repository(RepositoryAccess::Admin),
         "https://identity.example",
+        None,
     );
     assert_eq!(
         (admitted.can_read(id), admitted.can_read(Uuid::from_u128(2))),
@@ -193,6 +202,7 @@ fn a_matching_subject_from_another_issuer_never_receives_a_repository_grant() {
         id,
         &member_repository(RepositoryAccess::Admin),
         "https://another.example",
+        None,
     );
     assert!(!admitted.can_read(id));
 }
@@ -212,6 +222,7 @@ fn a_write_token_cannot_raise_a_triage_member_to_code_write_access() {
         id,
         &member_repository(RepositoryAccess::Triage),
         "https://identity.example",
+        None,
     );
     assert_eq!(
         (
@@ -232,6 +243,7 @@ fn revoking_a_session_invalidates_its_already_admitted_grant() {
         id,
         &member_repository(RepositoryAccess::Admin),
         "https://identity.example",
+        None,
     );
     assert!(admitted.can_read(id));
     session.revoked.store(true, Ordering::Release);
@@ -253,6 +265,7 @@ fn a_token_cannot_resolve_new_scope_for_a_repository_that_reuses_its_name() {
         replacement,
         &member_repository(RepositoryAccess::Admin),
         "https://identity.example",
+        None,
     );
     assert!(!admitted.can_read(replacement));
 }

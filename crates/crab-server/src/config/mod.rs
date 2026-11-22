@@ -19,6 +19,27 @@ pub struct Config {
     #[serde(default)]
     pub import: ImportConfig,
     pub auth: Option<OidcConfig>,
+    pub github_actions: Option<GitHubActionsConfig>,
+}
+
+/// Credentials for the GitHub App that starts queue workflows.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubActionsConfig {
+    pub app_id: u64,
+    pub private_key_file: PathBuf,
+    pub bindings: Vec<GitHubActionsBinding>,
+}
+
+/// One provider workflow a Crab repository may start using the server's App.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubActionsBinding {
+    pub crab_repository: uuid::Uuid,
+    pub installation: u64,
+    pub github_repository: u64,
+    pub workflow: u64,
+    pub branch: String,
 }
 
 /// Outbound Git source policy for the browser import service.
@@ -113,8 +134,23 @@ pub struct BranchProtection {
     pub branch: String,
     #[serde(default)]
     pub required_approvals: u8,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub required_code_owner_reviews: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub require_conversation_resolution: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub require_up_to_date: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub require_merge_queue: bool,
     #[serde(default)]
     pub required_checks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub required_integrations: Vec<uuid::Uuid>,
 }
 
 /// A provider subject's explicit repository permission.
@@ -177,6 +213,47 @@ impl Config {
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
+        if let Some(actions) = &self.github_actions {
+            if actions.app_id == 0 || actions.private_key_file.as_os_str().is_empty() {
+                return Err(Error::Config(
+                    "GitHub Actions requires an app ID and private key file",
+                ));
+            }
+            let mut bindings = HashSet::new();
+            if actions.bindings.is_empty()
+                || !actions.bindings.iter().all(|binding| {
+                    !binding.crab_repository.is_nil()
+                        && [
+                            binding.installation,
+                            binding.github_repository,
+                            binding.workflow,
+                        ]
+                        .into_iter()
+                        .all(|value| crate::app::number(value).is_ok())
+                        && !binding.branch.starts_with("refs/")
+                        && binding.branch.len() <= 255
+                        && crab_git::validate_push_refname(&format!(
+                            "refs/heads/{}",
+                            binding.branch
+                        ))
+                        .is_ok()
+                        && bindings.insert(binding)
+                })
+            {
+                return Err(Error::Config(
+                    "GitHub Actions requires unique, exact repository workflow bindings",
+                ));
+            }
+            if self
+                .auth
+                .as_ref()
+                .is_none_or(|auth| auth.state_key_file.is_none())
+            {
+                return Err(Error::Config(
+                    "GitHub Actions dispatch requires a shared authentication state key",
+                ));
+            }
+        }
         if self.listen == self.management_listen {
             return Err(Error::Config(
                 "public and management listeners must be different",
@@ -386,13 +463,7 @@ pub(crate) fn validate_repository(repository: &RepositoryConfig) -> Result<()> {
         ));
     }
     for value in [&repository.owner, &repository.name] {
-        if value.is_empty()
-            || value.len() > 100
-            || !value
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
-            || matches!(value.as_str(), "." | "..")
-        {
+        if !valid_repository_component(value) {
             return Err(Error::Config(
                 "repository owner and name must be URL-safe identifiers",
             ));
@@ -412,6 +483,15 @@ pub(crate) fn validate_repository(repository: &RepositoryConfig) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn valid_repository_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 100
+        && !matches!(value, "." | "..")
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+}
+
 pub(crate) fn valid_group(group: &str) -> bool {
     !group.is_empty()
         && group.len() <= 512
@@ -426,21 +506,41 @@ pub(crate) fn valid_branch_protections(rules: &[BranchProtection]) -> bool {
     let mut protected = HashSet::new();
     rules.iter().all(|rule| {
         let reference = format!("refs/heads/{}", rule.branch);
-        let mut checks = HashSet::new();
         !rule.branch.is_empty()
             && !rule.branch.starts_with("refs/")
             && crab_git::validate_push_refname(&reference).is_ok()
-            && rule.required_approvals <= 20
-            && rule.required_checks.len() <= 50
-            && rule.required_checks.iter().all(|check| {
-                check.trim() == check
-                    && !check.is_empty()
-                    && check.chars().count() <= 100
-                    && !check.chars().any(char::is_control)
-                    && checks.insert(check.to_lowercase())
-            })
+            && valid_protection_requirements(
+                rule.required_approvals,
+                rule.require_up_to_date || rule.require_merge_queue,
+                &rule.required_checks,
+                &rule.required_integrations,
+            )
             && protected.insert(&rule.branch)
     })
+}
+
+pub(crate) fn valid_protection_requirements(
+    approvals: u8,
+    require_up_to_date: bool,
+    required_checks: &[String],
+    required_integrations: &[uuid::Uuid],
+) -> bool {
+    let mut checks = HashSet::new();
+    let mut integrations = HashSet::new();
+    approvals <= 20
+        && (!require_up_to_date || !required_checks.is_empty() || !required_integrations.is_empty())
+        && required_checks.len() <= 50
+        && required_checks.iter().all(|check| {
+            check.trim() == check
+                && !check.is_empty()
+                && check.chars().count() <= 100
+                && !check.chars().any(char::is_control)
+                && checks.insert(check.to_lowercase())
+        })
+        && required_integrations.len() <= 16
+        && required_integrations
+            .iter()
+            .all(|id| !id.is_nil() && integrations.insert(id))
 }
 
 fn default_repository_branch() -> String {

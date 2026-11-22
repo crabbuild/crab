@@ -27,10 +27,15 @@ use crate::{
 };
 
 mod pins;
+mod templates;
 pub(super) mod view;
 
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
+        .route(
+            "/api/repos/{owner}/{name}/issues/templates",
+            get(templates::list),
+        )
         .route(
             "/api/repos/{owner}/{name}/issues/pins",
             get(pins::list).put(pins::set),
@@ -171,6 +176,7 @@ struct NewIssue {
     request_id: String,
     title: String,
     body: String,
+    template_grant: Option<templates::Grant>,
 }
 
 async fn create(
@@ -184,9 +190,18 @@ async fn create(
     let author = actor(&principal)?;
     let title = title(&input.title)?;
     body(&input.body, false)?;
-    let metadata =
+    let mut metadata =
         super::discussion_creation::resolve(&server, &principal, &repo, input.metadata).await?;
-    let routed = crate::app::repository_cell(&server, &repo)?;
+    if !metadata.can_triage
+        && let Some(grant) = input.template_grant
+    {
+        // A signed template may supply only its exact default labels and
+        // assignees. The native creation transaction still checks eligibility.
+        metadata.can_triage = grant
+            .allows(&server, &repo, &principal, &metadata.selection)
+            .await?;
+    }
+    let routed = crate::api::mentions::cell(&server, &repo, [input.body.as_str()]).await?;
     let committed = routed
         .client
         .command::<CreateIssue>(
@@ -307,7 +322,7 @@ async fn edit(
     // Assignment eligibility and caller role must share the final current roster.
     let (can_triage, assignees) = if let Some(ids) = input.assignee_ids {
         let roster = crate::api::members::roster::Roster::load(&server, &principal, &repo).await?;
-        if !roster.principal.can_triage(repo.id) {
+        if !roster.membership.principal.can_triage(repo.id) {
             return Err(Error::AssigneePermission);
         }
         (true, Some(Selection::validate(&roster, ids)?))
@@ -315,7 +330,7 @@ async fn edit(
         let permissions = app::membership(&server, &principal, &repo).await?;
         (permissions.principal.can_triage(repo.id), None)
     };
-    let routed = crate::app::repository_cell(&server, &repo)?;
+    let routed = crate::api::mentions::cell(&server, &repo, input.body.as_deref()).await?;
     let committed = routed
         .client
         .command::<UpdateIssue>(
@@ -467,7 +482,7 @@ async fn comment(
     let Json(input) = input?;
     let author = actor(&principal)?;
     body(&input.body, true)?;
-    let routed = crate::app::repository_cell(&server, &repo)?;
+    let routed = crate::api::mentions::cell(&server, &repo, [input.body.as_str()]).await?;
     let output = crate::app::command_output(
         routed
             .client
@@ -561,7 +576,7 @@ async fn edit_comment(
     let Json(input) = input?;
     let author = actor(&principal)?;
     body(&input.body, true)?;
-    let routed = crate::app::repository_cell(&server, &repo)?;
+    let routed = crate::api::mentions::cell(&server, &repo, [input.body.as_str()]).await?;
     let output = crate::app::command_output(
         routed
             .client

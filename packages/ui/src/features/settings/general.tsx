@@ -5,6 +5,7 @@ import { short } from "@/lib/format";
 import { AlertIcon, GitBranchIcon, PencilIcon } from "@primer/octicons-react";
 import { useMemo, useState } from "react";
 import { ArchiveSettings } from "./archive";
+import { MergeMethodSettings } from "./merge-methods";
 
 const names = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
 
@@ -197,6 +198,7 @@ export function DefaultBranchSettings({
           </div>
         )}
       </section>
+      <MergeMethodSettings repo={repo} csrf={csrf} />
       <ArchiveSettings
         repo={repo}
         csrf={csrf}

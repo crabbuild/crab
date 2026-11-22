@@ -272,6 +272,7 @@ export function DiscussionMetadata({
   csrf,
   onSaved,
   children,
+  allowIssueClosure,
 }: {
   repo: Repository;
   assignees?: RepositoryAssignee[];
@@ -283,6 +284,7 @@ export function DiscussionMetadata({
   csrf: string;
   onSaved: () => void;
   children?: ReactNode;
+  allowIssueClosure?: boolean;
 }) {
   return (
     <aside className="discussion-metadata" aria-label="Metadata">
@@ -350,6 +352,7 @@ export function DiscussionMetadata({
         path={path}
         csrf={csrf}
         onSaved={onSaved}
+        allowIssueClosure={allowIssueClosure}
       />
       <DiscussionProjects repo={repo} path={path} />
       <MilestonePicker

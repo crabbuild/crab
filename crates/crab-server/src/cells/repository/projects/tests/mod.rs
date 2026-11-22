@@ -85,6 +85,7 @@ async fn page(cell: &RepositoryCell, project: Uuid) -> ItemPage {
                 query: String::new(),
                 status: None,
                 hide_closed: false,
+                default_ref: "refs/heads/main".into(),
             },
         )
         .await
@@ -513,6 +514,7 @@ async fn pages_count_all_matching_work_and_reject_stale_cursors() {
         query: String::new(),
         status: None,
         hide_closed: false,
+        default_ref: "refs/heads/main".into(),
     };
     let next = cell
         .client

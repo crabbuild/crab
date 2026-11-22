@@ -277,6 +277,7 @@ async fn native_label_choices_search_the_whole_catalog_and_follow_assignments_re
     write::<CreatePull>(
         &cell,
         CreatePullInput {
+            code_owner_requests: Default::default(),
             metadata: Default::default(),
             submission_id: *Uuid::now_v7().as_bytes(),
             author: author(),
@@ -285,6 +286,7 @@ async fn native_label_choices_search_the_whole_catalog_and_follow_assignments_re
             body: String::new(),
             base_ref: "refs/heads/main".into(),
             head_ref: "refs/heads/feature".into(),
+            head_repository: None,
             base_oid: "a".repeat(40),
             head_oid: "b".repeat(40),
         },

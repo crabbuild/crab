@@ -1,6 +1,6 @@
 mod read;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -46,6 +46,10 @@ pub enum CatalogError {
 pub struct CatalogRecord {
     pub id: Uuid,
     pub owner: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<Uuid>,
     pub name: String,
     pub prefix: String,
     pub placement_generation: u64,
@@ -54,6 +58,8 @@ pub struct CatalogRecord {
     pub members: Vec<RepositoryMember>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<RepositoryGroup>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub teams: Vec<RepositoryTeam>,
     pub protected_branches: Vec<BranchProtection>,
 }
 
@@ -61,6 +67,7 @@ pub struct CatalogRecord {
 #[serde(rename_all = "snake_case")]
 pub enum RepositoryApplicationState {
     EmptyCellPending,
+    GitImportPending,
     CellReady,
 }
 
@@ -76,7 +83,7 @@ pub struct CatalogDocument {
     pub pending_membership_audit: Option<MembershipAuditEvent>,
 }
 
-/// Revision-bound replacement of the complete repository access list.
+/// Revision-bound replacement of direct members and OIDC group grants.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -98,9 +105,23 @@ pub struct MembershipActor {
 pub struct MembershipSnapshot {
     pub repository_id: Uuid,
     pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization: Option<Uuid>,
     pub members: Vec<RepositoryMember>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<RepositoryGroup>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub teams: Vec<RepositoryTeam>,
+}
+
+pub(crate) const MAX_REPOSITORY_TEAMS: usize = 100;
+
+/// A direct repository role for a stable team in its owning organization.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryTeam {
+    pub team: Uuid,
+    pub access: crate::RepositoryAccess,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -130,6 +151,18 @@ impl Default for CatalogDocument {
 }
 
 impl CatalogDocument {
+    pub(crate) fn membership_snapshot(
+        &self,
+        record: &CatalogRecord,
+    ) -> Result<MembershipSnapshot, CatalogError> {
+        let source = record.access_record(
+            record
+                .forked_from
+                .and_then(|id| self.repositories.iter().find(|source| source.id == id)),
+        )?;
+        Ok(record.access_snapshot(self.version, source))
+    }
+
     fn validate(&self, root: &StorageRoot) -> Result<(), CatalogError> {
         if self.schema_version != SCHEMA_VERSION || self.repositories.len() > MAX_REPOSITORIES {
             return Err(CatalogError::Invalid(
@@ -156,7 +189,9 @@ impl CatalogDocument {
                 .iter()
                 .find(|record| record.id == event.repository_id)
                 .ok_or(CatalogError::Invalid("audit repository is missing"))?;
-            if membership_digest(&record.members, &record.groups)? != event.new_members_digest {
+            if membership_digest(&record.members, &record.groups, &record.teams)?
+                != event.new_members_digest
+            {
                 return Err(CatalogError::Invalid(
                     "membership audit digest does not match",
                 ));
@@ -169,18 +204,53 @@ impl CatalogDocument {
         {
             return Err(CatalogError::Invalid("membership audit chain is invalid"));
         }
-        let mut ids = HashSet::new();
+        let records: HashMap<_, _> = self
+            .repositories
+            .iter()
+            .map(|record| (record.id, record))
+            .collect();
+        if records.len() != self.repositories.len() {
+            return Err(CatalogError::Invalid("repository IDs must be unique"));
+        }
         let mut names = HashSet::new();
         let mut prefixes = HashSet::new();
         for record in &self.repositories {
+            if record
+                .organization
+                .is_some_and(|id| id.is_nil() || record.owner != organization_namespace(id))
+            {
+                return Err(CatalogError::Invalid(
+                    "organization repository namespace is invalid",
+                ));
+            }
             if record.placement_generation == 0
-                || !ids.insert(record.id)
                 || !names.insert((record.owner.to_lowercase(), record.name.to_lowercase()))
                 || !prefixes.insert(record.prefix.clone())
             {
                 return Err(CatalogError::Invalid(
                     "repository IDs, names, prefixes, and placement generations must be valid and unique",
                 ));
+            }
+            let mut teams = HashSet::new();
+            if record.teams.len() > MAX_REPOSITORY_TEAMS
+                || (!record.teams.is_empty() && record.organization.is_none())
+                || record
+                    .teams
+                    .iter()
+                    .any(|grant| grant.team.is_nil() || !teams.insert(grant.team))
+            {
+                return Err(CatalogError::Invalid("repository team grants are invalid"));
+            }
+            if let Some(upstream) = record.forked_from {
+                record.access_record(records.get(&upstream).copied())?;
+                if !record.members.is_empty()
+                    || !record.groups.is_empty()
+                    || !record.teams.is_empty()
+                {
+                    return Err(CatalogError::Invalid(
+                        "forks must inherit repository access",
+                    ));
+                }
             }
             let runtime = record.runtime_config(root, "main")?;
             crate::config::validate_repository(&runtime)
@@ -210,6 +280,53 @@ fn valid_actor(actor: &MembershipActor) -> bool {
     })
 }
 
+pub(crate) fn personal_namespace(issuer: &str, subject: &str) -> String {
+    let identity = format!("{issuer}\0{subject}");
+    let digest = blake3::derive_key("crab personal repository namespace v1", identity.as_bytes());
+    let hex = blake3::Hash::from_bytes(digest).to_hex();
+    format!("user-{}", &hex[..32])
+}
+
+pub(crate) fn is_personal_namespace(owner: &str) -> bool {
+    owner
+        .to_ascii_lowercase()
+        .strip_prefix("user-")
+        .is_some_and(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+pub(crate) fn organization_namespace(id: Uuid) -> String {
+    format!("org-{}", id.simple())
+}
+
+pub(crate) fn is_organization_namespace(owner: &str) -> bool {
+    owner
+        .to_ascii_lowercase()
+        .strip_prefix("org-")
+        .is_some_and(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+pub(crate) enum BrowserNamespace {
+    Personal(String),
+    Organization(Uuid),
+}
+
+impl BrowserNamespace {
+    fn catalog_owner(
+        self,
+        members: &[RepositoryMember],
+    ) -> Result<(String, Option<Uuid>), CatalogError> {
+        match self {
+            Self::Personal(owner) => Ok((owner, None)),
+            Self::Organization(id) if members.is_empty() => {
+                Ok((organization_namespace(id), Some(id)))
+            }
+            Self::Organization(_) => Err(CatalogError::Invalid(
+                "organization repositories inherit their initial administrators",
+            )),
+        }
+    }
+}
+
 fn valid_audit_path(path: &str) -> bool {
     let prefix = format!("{MEMBERSHIP_AUDIT_RELATIVE_PREFIX}/");
     let Some(file) = path
@@ -227,6 +344,7 @@ fn valid_audit_path(path: &str) -> bool {
 fn membership_digest(
     members: &[RepositoryMember],
     groups: &[RepositoryGroup],
+    teams: &[RepositoryTeam],
 ) -> Result<String, CatalogError> {
     let mut canonical = members.to_vec();
     canonical.sort_by(|a, b| (&a.subject, &a.name, a.access).cmp(&(&b.subject, &b.name, b.access)));
@@ -240,10 +358,49 @@ fn membership_digest(
         hasher.update(b"oidc-groups\0");
         hasher.update(&serde_json::to_vec(&groups)?);
     }
+    if !teams.is_empty() {
+        let mut teams = teams.to_vec();
+        teams.sort_by_key(|grant| grant.team);
+        hasher.update(b"organization-teams\0");
+        hasher.update(&serde_json::to_vec(&teams)?);
+    }
     Ok(hasher.finalize().to_hex().to_string())
 }
 
 impl CatalogRecord {
+    pub(crate) fn access_record<'a>(
+        &'a self,
+        source: Option<&'a Self>,
+    ) -> Result<&'a Self, CatalogError> {
+        let Some(upstream) = self.forked_from else {
+            return Ok(self);
+        };
+        // A fork stays in its source organization and shares its live ACL. A
+        // reused route or another fork cannot become its authority.
+        source
+            .filter(|source| {
+                source.id == upstream
+                    && source.forked_from.is_none()
+                    && source.organization.is_some()
+                    && source.organization == self.organization
+                    && source.application == RepositoryApplicationState::CellReady
+            })
+            .ok_or(CatalogError::Invalid(
+                "fork source is unavailable in its organization",
+            ))
+    }
+
+    pub(crate) fn access_snapshot(&self, revision: u64, source: &Self) -> MembershipSnapshot {
+        MembershipSnapshot {
+            repository_id: self.id,
+            revision,
+            organization: self.organization,
+            members: source.members.clone(),
+            groups: source.groups.clone(),
+            teams: source.teams.clone(),
+        }
+    }
+
     pub(crate) fn runtime_config(
         &self,
         root: &StorageRoot,
@@ -286,6 +443,11 @@ pub struct CatalogStore {
     latest: Arc<RwLock<Option<CachedCatalog>>>,
 }
 
+enum InsertMode {
+    ExistingPrefix,
+    Reserved(MembershipActor),
+}
+
 impl CatalogStore {
     pub(crate) fn new(root: StorageRoot) -> Self {
         let path = root.path(CATALOG_RELATIVE_PATH);
@@ -315,52 +477,16 @@ impl CatalogStore {
         description: String,
         members: Vec<RepositoryMember>,
     ) -> Result<CatalogRecord, CatalogError> {
-        self.create_repository_with_mode(
-            owner,
-            name,
-            prefix,
-            default_branch,
-            description,
-            members,
-            true,
-        )
-        .await
-    }
-
-    pub(crate) async fn create_repository_exclusive(
-        &self,
-        owner: String,
-        name: String,
-        prefix: String,
-        default_branch: String,
-        description: String,
-        members: Vec<RepositoryMember>,
-    ) -> Result<CatalogRecord, CatalogError> {
-        self.create_repository_with_mode(
-            owner,
-            name,
-            prefix,
-            default_branch,
-            description,
-            members,
-            false,
-        )
-        .await
-    }
-
-    async fn create_repository_with_mode(
-        &self,
-        owner: String,
-        name: String,
-        prefix: String,
-        default_branch: String,
-        description: String,
-        members: Vec<RepositoryMember>,
-        allow_existing: bool,
-    ) -> Result<CatalogRecord, CatalogError> {
+        if is_organization_namespace(&owner) {
+            return Err(CatalogError::Invalid(
+                "organization namespaces require organization authority",
+            ));
+        }
         let record = CatalogRecord {
             id: Uuid::now_v7(),
             owner,
+            organization: None,
+            forked_from: None,
             name,
             prefix,
             placement_generation: 1,
@@ -368,20 +494,106 @@ impl CatalogStore {
             description,
             members,
             groups: Vec::new(),
+            teams: Vec::new(),
             protected_branches: Vec::new(),
         };
-        let runtime = record.runtime_config(&self.root, &default_branch)?;
+        self.initialize_git(&record, &default_branch, false).await?;
+        self.insert_with_mode(record, InsertMode::ExistingPrefix)
+            .await
+    }
+
+    pub(crate) async fn reserve_browser_repository(
+        &self,
+        namespace: BrowserNamespace,
+        name: String,
+        description: String,
+        request: Uuid,
+        actor: MembershipActor,
+        members: Vec<RepositoryMember>,
+    ) -> Result<CatalogRecord, CatalogError> {
+        let (owner, organization) = namespace.catalog_owner(&members)?;
+        let mut hash = blake3::Hasher::new_derive_key("crab browser repository creation v1");
+        hash.update(owner.as_bytes());
+        hash.update(request.as_bytes());
+        let mut id = [0; 16];
+        id.copy_from_slice(&hash.finalize().as_bytes()[..16]);
+        let id = uuid::Builder::from_custom_bytes(id).into_uuid();
+        self.insert_with_mode(
+            CatalogRecord {
+                id,
+                owner,
+                organization,
+                forked_from: None,
+                name,
+                prefix: format!("browser-repositories/{id}"),
+                placement_generation: 1,
+                application: RepositoryApplicationState::EmptyCellPending,
+                description,
+                members,
+                groups: Vec::new(),
+                teams: Vec::new(),
+                protected_branches: Vec::new(),
+            },
+            InsertMode::Reserved(actor),
+        )
+        .await
+    }
+
+    pub(crate) async fn reserve_git_import(
+        &self,
+        id: Uuid,
+        namespace: BrowserNamespace,
+        name: String,
+        description: String,
+        actor: MembershipActor,
+        members: Vec<RepositoryMember>,
+        forked_from: Option<Uuid>,
+    ) -> Result<CatalogRecord, CatalogError> {
+        let (owner, organization) = namespace.catalog_owner(&members)?;
+        self.insert_with_mode(
+            CatalogRecord {
+                id,
+                owner,
+                organization,
+                forked_from,
+                name,
+                prefix: format!("git-imports/{id}"),
+                placement_generation: 1,
+                application: RepositoryApplicationState::GitImportPending,
+                description,
+                members,
+                groups: Vec::new(),
+                teams: Vec::new(),
+                protected_branches: Vec::new(),
+            },
+            InsertMode::Reserved(actor),
+        )
+        .await
+    }
+
+    pub(crate) async fn initialize_git(
+        &self,
+        record: &CatalogRecord,
+        default_branch: &str,
+        require_identity: bool,
+    ) -> Result<(), CatalogError> {
+        let runtime = record.runtime_config(&self.root, default_branch)?;
         crate::config::validate_repository(&runtime)
             .map_err(|_| CatalogError::Invalid("repository record failed validation"))?;
         let layout = self.root.repository_layout(runtime.prefix.clone());
-        crab_write::capsule_protocol::initialize(
+        let id = blake3::hash(record.id.as_bytes()).to_hex();
+        let root = crab_write::capsule_protocol::initialize(
             &layout,
-            blake3::hash(record.id.as_bytes()).to_hex().as_ref(),
+            id.as_ref(),
             &format!("refs/heads/{default_branch}"),
         )
         .await?;
-        crab_metadata::capsule_protocol::load_root(&layout).await?;
-        self.insert_with_mode(record, allow_existing).await
+        if require_identity && root.record().root().repository_id() != id.as_str() {
+            return Err(CatalogError::Invalid(
+                "reserved Git prefix contains another repository",
+            ));
+        }
+        Ok(())
     }
 
     pub async fn adopt_repository(
@@ -395,6 +607,8 @@ impl CatalogStore {
         let record = CatalogRecord {
             id: Uuid::now_v7(),
             owner,
+            organization: None,
+            forked_from: None,
             name,
             prefix,
             placement_generation: 1,
@@ -402,6 +616,7 @@ impl CatalogStore {
             description,
             members,
             groups: Vec::new(),
+            teams: Vec::new(),
             protected_branches: Vec::new(),
         };
         let runtime = record.runtime_config(&self.root, "main")?;
@@ -478,22 +693,25 @@ impl CatalogStore {
         actor: MembershipActor,
         require_administrator: bool,
     ) -> Result<CatalogRecord, CatalogError> {
-        let (mut document, etag) = self.load_for_mutation().await?;
+        let (document, etag) = self.load_for_mutation().await?;
         if document.version != input.expected_revision {
             return Err(CatalogError::Conflict);
         }
-        let Some(record) = document.repositories.iter_mut().find(|record| {
-            record.owner.eq_ignore_ascii_case(owner) && record.name.eq_ignore_ascii_case(name)
-        }) else {
-            return Err(CatalogError::NotFound);
-        };
+        let record = document
+            .repositories
+            .iter()
+            .find(|record| {
+                record.owner.eq_ignore_ascii_case(owner) && record.name.eq_ignore_ascii_case(name)
+            })
+            .ok_or(CatalogError::NotFound)?;
         let mut candidate = record.clone();
-        candidate.members = input.members.clone();
-        candidate.groups = input.groups.clone();
+        candidate.members = input.members;
+        candidate.groups = input.groups;
         crate::config::validate_repository(&candidate.runtime_config(&self.root, "main")?)
             .map_err(|_| CatalogError::Invalid("repository record failed validation"))?;
         if require_administrator
-            && !input
+            && record.organization.is_none()
+            && !candidate
                 .members
                 .iter()
                 .any(|member| member.access == crate::RepositoryAccess::Admin)
@@ -502,14 +720,67 @@ impl CatalogStore {
                 "at least one administrator is required",
             ));
         }
-        if record.members == input.members && record.groups == input.groups {
-            return Ok(record.clone());
+        self.save_access(document, etag, candidate, actor)
+            .await
+            .map(|(record, _)| record)
+    }
+
+    pub(crate) async fn set_team_access(
+        &self,
+        repository: Uuid,
+        expected_revision: u64,
+        team: Uuid,
+        access: Option<crate::RepositoryAccess>,
+        actor: MembershipActor,
+    ) -> Result<u64, CatalogError> {
+        let (document, etag) = self.load_for_mutation().await?;
+        if document.version != expected_revision {
+            return Err(CatalogError::Conflict);
         }
-        let previous_digest = membership_digest(&record.members, &record.groups)?;
-        let new_digest = membership_digest(&input.members, &input.groups)?;
-        record.members = input.members;
-        record.groups = input.groups;
-        let updated = record.clone();
+        let mut candidate = document
+            .repositories
+            .iter()
+            .find(|record| record.id == repository && record.organization.is_some())
+            .cloned()
+            .ok_or(CatalogError::NotFound)?;
+        candidate.teams.retain(|grant| grant.team != team);
+        if let Some(access) = access {
+            if candidate.teams.len() == MAX_REPOSITORY_TEAMS {
+                return Err(CatalogError::Invalid(
+                    "a repository can grant access to at most 100 teams",
+                ));
+            }
+            candidate.teams.push(RepositoryTeam { team, access });
+        }
+        candidate.teams.sort_by_key(|grant| grant.team);
+        self.save_access(document, etag, candidate, actor)
+            .await
+            .map(|(_, revision)| revision)
+    }
+
+    async fn save_access(
+        &self,
+        mut document: CatalogDocument,
+        etag: Option<ETag>,
+        updated: CatalogRecord,
+        actor: MembershipActor,
+    ) -> Result<(CatalogRecord, u64), CatalogError> {
+        let record = document
+            .repositories
+            .iter_mut()
+            .find(|record| record.id == updated.id)
+            .ok_or(CatalogError::NotFound)?;
+        if record.forked_from.is_some() {
+            return Err(CatalogError::Invalid(
+                "manage fork access on the source repository",
+            ));
+        }
+        if *record == updated {
+            return Ok((updated, document.version));
+        }
+        let previous_digest = membership_digest(&record.members, &record.groups, &record.teams)?;
+        let new_digest = membership_digest(&updated.members, &updated.groups, &updated.teams)?;
+        *record = updated.clone();
         document.version = document
             .version
             .checked_add(1)
@@ -530,7 +801,7 @@ impl CatalogStore {
         document.validate(&self.root)?;
         if self.write_document(&document, etag).await? {
             let _ = self.flush_membership_audit().await;
-            Ok(updated)
+            Ok((updated, document.version))
         } else {
             Err(CatalogError::Conflict)
         }
@@ -587,6 +858,29 @@ impl CatalogStore {
         Err(CatalogError::Conflict)
     }
 
+    pub(crate) async fn needs_cell_initialization(
+        &self,
+        repository: Uuid,
+        pending: RepositoryApplicationState,
+    ) -> Result<bool, CatalogError> {
+        let (document, _) = self.load().await?;
+        let state = document
+            .repositories
+            .iter()
+            .find(|record| record.id == repository)
+            .ok_or(CatalogError::NotFound)?
+            .application;
+        if state == RepositoryApplicationState::CellReady {
+            return Ok(false);
+        }
+        if state != pending {
+            return Err(CatalogError::Invalid(
+                "repository is reserved by another initialization workflow",
+            ));
+        }
+        Ok(true)
+    }
+
     pub(crate) async fn mark_cell_ready(
         &self,
         repository: Uuid,
@@ -616,13 +910,14 @@ impl CatalogStore {
     }
 
     async fn insert(&self, record: CatalogRecord) -> Result<CatalogRecord, CatalogError> {
-        self.insert_with_mode(record, true).await
+        self.insert_with_mode(record, InsertMode::ExistingPrefix)
+            .await
     }
 
     async fn insert_with_mode(
         &self,
         record: CatalogRecord,
-        allow_existing: bool,
+        mode: InsertMode,
     ) -> Result<CatalogRecord, CatalogError> {
         for _ in 0..MAX_CAS_ATTEMPTS {
             let (mut document, etag) = self.load_for_mutation().await?;
@@ -630,16 +925,43 @@ impl CatalogStore {
                 existing.owner.eq_ignore_ascii_case(&record.owner)
                     && existing.name.eq_ignore_ascii_case(&record.name)
             }) {
-                return if allow_existing && existing.prefix == record.prefix {
+                let same = existing.organization == record.organization
+                    && existing.forked_from == record.forked_from
+                    && match &mode {
+                        InsertMode::ExistingPrefix => existing.prefix == record.prefix,
+                        InsertMode::Reserved(_) => {
+                            existing.id == record.id
+                                && existing.prefix == record.prefix
+                                && existing.owner == record.owner
+                                && existing.name == record.name
+                                && existing.description == record.description
+                        }
+                    };
+                return if same {
                     Ok(existing.clone())
                 } else {
                     Err(CatalogError::Conflict)
                 };
             }
+            if is_organization_namespace(&record.owner) {
+                if record.organization.is_none() {
+                    return Err(CatalogError::Invalid(
+                        "organization namespaces require organization authority",
+                    ));
+                }
+                // A lookalike catalog owner from before managed accounts keeps
+                // its original access. It cannot share a managed namespace.
+                if document.repositories.iter().any(|existing| {
+                    existing.owner.eq_ignore_ascii_case(&record.owner)
+                        && existing.organization != record.organization
+                }) {
+                    return Err(CatalogError::Conflict);
+                }
+            }
             if document
                 .repositories
                 .iter()
-                .any(|existing| existing.prefix == record.prefix)
+                .any(|existing| existing.id == record.id || existing.prefix == record.prefix)
             {
                 return Err(CatalogError::Conflict);
             }
@@ -649,16 +971,23 @@ impl CatalogStore {
                 .ok_or(CatalogError::Invalid("catalog version overflowed"))?;
             document.repositories.push(record.clone());
             document.normalize();
-            if !record.members.is_empty() {
+            if !record.members.is_empty() || record.organization.is_some() {
                 document.pending_membership_audit = Some(MembershipAuditEvent {
                     id: Uuid::now_v7(),
                     repository_id: record.id,
-                    actor: MembershipActor {
-                        issuer: "urn:crab:local".into(),
-                        subject: "operator".into(),
+                    actor: match &mode {
+                        InsertMode::Reserved(actor) => actor.clone(),
+                        _ => MembershipActor {
+                            issuer: "urn:crab:local".into(),
+                            subject: "operator".into(),
+                        },
                     },
-                    previous_members_digest: membership_digest(&[], &[])?,
-                    new_members_digest: membership_digest(&record.members, &record.groups)?,
+                    previous_members_digest: membership_digest(&[], &[], &[])?,
+                    new_members_digest: membership_digest(
+                        &record.members,
+                        &record.groups,
+                        &record.teams,
+                    )?,
                     repository_version: document.version,
                     occurred_at: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)

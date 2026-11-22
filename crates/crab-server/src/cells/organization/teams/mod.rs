@@ -11,6 +11,7 @@ mod access;
 mod commands;
 mod preparation;
 mod reads;
+pub(crate) mod repository_access;
 pub(super) use access::{authorize, handles};
 pub(crate) use commands::{Cancel, Change, Command, Outcome, Request};
 pub use preparation::OrganizationTeamState;
@@ -121,7 +122,7 @@ pub(crate) struct MemberKey {
 
 const COLUMNS: &str = "id,name,description,visibility,version,created_at_ms,updated_at_ms";
 const ACTIVE_MEMBERSHIP: &str = "m.role IS NOT NULL AND o.active=1 AND m.membership_epoch=e.epoch";
-fn team(context: &Transaction<'_>, id: Uuid) -> Result<Option<Team>> {
+pub(super) fn team(context: &Transaction<'_>, id: Uuid) -> Result<Option<Team>> {
     actor(id)?;
     context
         .query(

@@ -10,12 +10,15 @@ enum Credential {
     Local,
     User(Arc<Session>),
     Git(Arc<GitToken>),
+    Import(Arc<crate::git_import::ReceiveGrant>),
+    AutoMerge(Identity),
 }
 
 #[derive(Clone, Copy)]
 struct Grant {
     repository: Uuid,
     access: RepositoryAccess,
+    role: RepositoryAccess,
 }
 
 #[derive(Clone, Copy)]
@@ -61,6 +64,34 @@ impl Principal {
             repository_scope: RepositoryScope::Unrestricted,
         }
     }
+    pub(crate) fn import(grant: Arc<crate::git_import::ReceiveGrant>) -> Self {
+        let repository = grant.repository.id;
+        Self {
+            credential: Credential::Import(grant),
+            grant: Some(Grant {
+                repository,
+                access: RepositoryAccess::Write,
+                role: RepositoryAccess::Write,
+            }),
+            repository_scope: RepositoryScope::Target(repository),
+        }
+    }
+    pub(crate) fn import_grant(&self) -> Option<&crate::git_import::ReceiveGrant> {
+        match &self.credential {
+            Credential::Import(grant) => Some(grant),
+            _ => None,
+        }
+    }
+    pub(crate) fn auto_merge(repository: Uuid, actor: Identity) -> Self {
+        Self {
+            credential: Credential::AutoMerge(actor),
+            grant: None,
+            repository_scope: RepositoryScope::Target(repository),
+        }
+    }
+    pub(crate) fn is_auto_merge(&self) -> bool {
+        matches!(self.credential, Credential::AutoMerge(_))
+    }
     pub(crate) fn is_local(&self) -> bool {
         matches!(self.credential, Credential::Local)
     }
@@ -77,6 +108,22 @@ impl Principal {
             _ => RepositoryScope::Denied,
         };
         self
+    }
+
+    pub(crate) fn related_read(&self, origin: Uuid, related: Uuid) -> Option<Self> {
+        if !self.can_read(origin) {
+            return None;
+        }
+        // Resolve an independent grant from the browser credential. A Git
+        // token or worker scoped to the origin cannot read another repository.
+        let reader = if let Some(session) = self.user_session() {
+            Self::user(Arc::clone(session))
+        } else if self.is_local() {
+            Self::local()
+        } else {
+            return None;
+        };
+        Some(reader.scoped_to_repository(Some(related)))
     }
     pub(crate) fn is_user(&self) -> bool {
         self.user_session().is_some()
@@ -96,7 +143,7 @@ impl Principal {
     pub(crate) fn authenticated(&self) -> bool {
         match &self.credential {
             Credential::Anonymous => false,
-            Credential::Local => true,
+            Credential::Local | Credential::Import(_) | Credential::AutoMerge(_) => true,
             Credential::User(session) => session.active(),
             Credential::Git(token) => token.active(),
         }
@@ -105,6 +152,12 @@ impl Principal {
         match &self.credential {
             Credential::User(session) if session.active() => Some(session.identity.clone()),
             Credential::Git(token) if token.active() => Some(token.session.identity.clone()),
+            Credential::AutoMerge(actor) => Some(actor.clone()),
+            Credential::Import(_) => Some(Identity {
+                issuer: "urn:crab:git-import".into(),
+                subject: "import-worker".into(),
+                name: "Git import worker".into(),
+            }),
             Credential::Local => Some(Identity {
                 issuer: "urn:crab:local".into(),
                 subject: "operator".into(),
@@ -119,44 +172,62 @@ impl Principal {
         repository: Uuid,
         config: &RepositoryConfig,
         issuer: &str,
+        organization_access: Option<RepositoryAccess>,
     ) -> Self {
         let account = match &self.credential {
             Credential::Local => return self.clone(),
-            Credential::User(session) => Some((session, RepositoryAccess::Admin)),
+            Credential::User(session) if session.active() => Some((
+                &session.identity,
+                session.groups.as_slice(),
+                RepositoryAccess::Admin,
+            )),
             Credential::Git(token)
                 if token.active()
                     && token.repository_id == repository
                     && token.owner == config.owner
-                    && token.repository == config.name =>
+                    && token.repository == config.name
+                    && token.session.active() =>
             {
-                Some((&token.session, token.access))
+                Some((
+                    &token.session.identity,
+                    token.session.groups.as_slice(),
+                    token.access,
+                ))
             }
+            // A stored auto-merge can outlive the scheduling session. Only
+            // current durable repository and organization grants qualify it.
+            Credential::AutoMerge(actor) => Some((actor, &[][..], RepositoryAccess::Write)),
             _ => None,
         };
-        let access = account.and_then(|(session, ceiling)| {
-            if !session.active() || session.identity.issuer != issuer {
+        let grant = account.and_then(|(identity, groups, ceiling)| {
+            if identity.issuer != issuer {
                 return None;
             }
             let individual = config
                 .members
                 .iter()
-                .find(|member| member.subject == session.identity.subject)
+                .find(|member| member.subject == identity.subject)
                 .map(|member| member.access);
             let group = config
                 .groups
                 .iter()
-                .filter(|grant| session.groups.binary_search(&grant.group).is_ok())
+                .filter(|grant| groups.binary_search(&grant.group).is_ok())
                 .map(|grant| grant.access)
                 .max();
             individual
                 .into_iter()
                 .chain(group)
+                .chain(organization_access)
                 .max()
-                .map(|access| std::cmp::min(access, ceiling))
+                .map(|role| Grant {
+                    repository,
+                    role,
+                    access: role.min(ceiling),
+                })
         });
         Self {
             credential: self.credential.clone(),
-            grant: access.map(|access| Grant { repository, access }),
+            grant,
             repository_scope: self.repository_scope,
         }
     }
@@ -176,6 +247,18 @@ impl Principal {
             .filter(|grant| grant.repository == repository && self.authenticated())
             .map(|grant| grant.access)
     }
+    pub(crate) fn write_role(&self, repository: Uuid) -> Option<RepositoryAccess> {
+        // A write-scoped Git token preserves the account role for rulesets
+        // without gaining access to repository administration endpoints.
+        if !self.can_write(repository) {
+            return None;
+        }
+        if self.is_local() {
+            return Some(RepositoryAccess::Admin);
+        }
+        self.grant.map(|grant| grant.role)
+    }
+
     pub(crate) fn can_read(&self, repository: Uuid) -> bool {
         self.access(repository).is_some()
     }

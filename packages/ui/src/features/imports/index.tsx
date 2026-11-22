@@ -6,10 +6,19 @@ import {
   AlertIcon,
   CheckCircleFillIcon,
   GitPullRequestIcon,
+  RepoForkedIcon,
   RepoIcon,
   XIcon,
 } from "@primer/octicons-react";
-import { gitImportStatus, startGitImport, type GitImportJob } from "@/lib/api";
+import {
+  gitImportStatus,
+  navigate,
+  resumeGitImport,
+  startGitImport,
+  startRepositoryFork,
+  type GitImportJob,
+  type Repository,
+} from "@/lib/api";
 import { parseGitRepository } from "./source";
 import { Link } from "@/components/navigation/link";
 
@@ -19,53 +28,99 @@ interface ImportedRepository {
 }
 
 export function GitImport({
+  account,
   csrf,
-  defaultOwner,
+  defaultOwner = "",
+  organization,
+  fork,
   onImported,
 }: {
+  account: string;
   csrf: string;
-  defaultOwner: string;
+  defaultOwner?: string;
+  organization?: { id: string; name: string; requestedJob?: string };
+  fork?: Pick<Repository, "id" | "owner" | "name">;
   onImported: (repository: ImportedRepository) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const organizationId = organization?.id;
+  const organizationPage = organizationId
+    ? `/-/organizations/${encodeURIComponent(organizationId)}?tab=repositories`
+    : undefined;
+  const storageKey = fork
+    ? `crab:fork:${account}:${fork.id}`
+    : organizationId
+      ? `crab:git-import:${account}:${organizationId}`
+      : `crab:git-import:${account}`;
+  const [jobId, setJobId] = useState<string>(() => {
+    if (organization?.requestedJob) return organization.requestedJob;
+    try {
+      return sessionStorage.getItem(storageKey) ?? "";
+    } catch {
+      return "";
+    }
+  });
+  const [open, setOpen] = useState(!!jobId);
   const [source, setSource] = useState("");
   const [owner, setOwner] = useState(defaultOwner);
-  const [name, setName] = useState("");
+  const defaultName = fork ? `${fork.name}-fork` : "";
+  const [name, setName] = useState(defaultName);
   const [description, setDescription] = useState("");
   const [token, setToken] = useState("");
   const [nameEdited, setNameEdited] = useState(false);
   const [job, setJob] = useState<GitImportJob>();
+  const forkJob = Boolean(fork || job?.fork_source);
+  const operation = forkJob ? "fork" : "import";
   const [error, setError] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
+  const [statusCheck, setStatusCheck] = useState(0);
+  const [attempt, setAttempt] = useState<{ id: string; intent: string }>();
   const notifiedJob = useRef<string | undefined>(undefined);
 
+  function remember(id: string) {
+    setJobId(id);
+    try {
+      if (id) sessionStorage.setItem(storageKey, id);
+      else sessionStorage.removeItem(storageKey);
+    } catch {
+      // The active page can still show status when browser storage is disabled.
+    }
+  }
+
   useEffect(() => {
-    if (!job || job.state === "succeeded" || job.state === "failed") return;
+    if (
+      !jobId ||
+      submitting ||
+      (job && job.state !== "queued" && job.state !== "running")
+    )
+      return;
     const controller = new AbortController();
-    const timer = window.setTimeout(() => {
-      void gitImportStatus(job.id, controller.signal)
-        .then((next) => {
-          setError(undefined);
-          setJob(next);
-        })
-        .catch((failure: unknown) => {
-          if (!controller.signal.aborted) {
-            setError(
-              failure instanceof Error
-                ? failure.message
-                : "Could not check import progress",
-            );
-            // Keep polling after a transient network failure; a single failed
-            // status request must not strand an otherwise healthy import.
-            setJob((current) => (current ? { ...current } : current));
-          }
-        });
-    }, 1_500);
+    const timer = window.setTimeout(
+      () => {
+        void gitImportStatus(jobId, controller.signal, organizationId)
+          .then((next) => {
+            setError(undefined);
+            setJob(next);
+          })
+          .catch((failure: unknown) => {
+            if (!controller.signal.aborted) {
+              setError(
+                failure instanceof Error
+                  ? failure.message
+                  : `Could not check ${operation} progress`,
+              );
+              // Keep polling after a transient network failure; a single failed
+              // status request must not strand an otherwise healthy import.
+              setJob((current) => (current ? { ...current } : current));
+            }
+          });
+      },
+      job ? 1_500 : 0,
+    );
     return () => {
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [job]);
+  }, [job, jobId, operation, organizationId, statusCheck, submitting]);
 
   useEffect(() => {
     if (
@@ -74,15 +129,23 @@ export function GitImport({
       notifiedJob.current !== job.id
     ) {
       notifiedJob.current = job.id;
+      try {
+        sessionStorage.removeItem(storageKey);
+      } catch {
+        // The catalog can still open the imported repository.
+      }
       onImported(job.repository);
     }
-  }, [job, onImported]);
+  }, [job, onImported, storageKey]);
 
   function reset() {
-    setOpen(false);
+    remember("");
+    if (organization?.requestedJob && organizationPage)
+      navigate(organizationPage);
+    setAttempt(undefined);
     setSource("");
     setOwner(defaultOwner);
-    setName("");
+    setName(defaultName);
     setDescription("");
     setToken("");
     setNameEdited(false);
@@ -93,38 +156,81 @@ export function GitImport({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (job?.resumable) {
+      setSubmitting(true);
+      setError(undefined);
+      try {
+        setJob(
+          await resumeGitImport(
+            job.id,
+            token || undefined,
+            csrf,
+            organizationId,
+          ),
+        );
+      } catch (failure) {
+        setError(
+          failure instanceof Error
+            ? failure.message
+            : `Could not resume ${operation}`,
+        );
+      } finally {
+        setToken("");
+        setSubmitting(false);
+      }
+      return;
+    }
+    if (job) return;
     const sourceValue = source.trim();
     const parsedName = parseGitRepository(sourceValue);
     const repositoryName = name.trim() || parsedName;
-    if (!sourceValue) {
+    if (!fork && !sourceValue) {
       setError("Enter a Git source URL or a GitHub owner/name.");
       return;
     }
-    if (!owner.trim() || !repositoryName) {
+    if ((!organizationId && !owner.trim()) || !repositoryName) {
       setError("Choose the Crab owner and repository name.");
       return;
     }
     setSubmitting(true);
     setError(undefined);
     setJob(undefined);
+    const fields = {
+      source: sourceValue,
+      owner: organizationId ? undefined : owner.trim(),
+      name: repositoryName.trim(),
+      description: description.trim() || undefined,
+    };
+    const intent = JSON.stringify(fields);
+    const request_id =
+      attempt?.intent === intent && !job ? attempt.id : crypto.randomUUID();
+    setAttempt({ id: request_id, intent });
+    remember(request_id);
     try {
-      const next = await startGitImport(
-        {
-          source: sourceValue,
-          owner: owner.trim(),
-          name: repositoryName.trim(),
-          description: description.trim() || undefined,
-          token: token || undefined,
-        },
-        csrf,
-      );
-      setToken("");
+      const next = fork
+        ? await startRepositoryFork(
+            fork,
+            { request_id, name: fields.name },
+            csrf,
+          )
+        : await startGitImport(
+            {
+              ...fields,
+              request_id,
+              token: token || undefined,
+            },
+            csrf,
+            organizationId,
+          );
       setJob(next);
     } catch (failure) {
       setError(
-        failure instanceof Error ? failure.message : "Could not start import",
+        failure instanceof Error
+          ? failure.message
+          : `Could not start ${operation}`,
       );
     } finally {
+      setToken("");
       setSubmitting(false);
     }
   }
@@ -132,101 +238,137 @@ export function GitImport({
   if (!open)
     return (
       <Button variant="outline" onClick={() => setOpen(true)}>
-        <GitPullRequestIcon data-icon="inline-start" />
-        Import from Git
+        {fork ? (
+          <RepoForkedIcon data-icon="inline-start" />
+        ) : (
+          <GitPullRequestIcon data-icon="inline-start" />
+        )}
+        {fork ? "Fork repository" : "Import from Git"}
       </Button>
     );
 
-  const running = job?.state === "queued" || job?.state === "running";
+  const running =
+    job?.state === "queued" ||
+    job?.state === "running" ||
+    (!!jobId && !job && !error);
   const importedHref = job?.repository
     ? `/${encodeURIComponent(job.repository.owner)}/${encodeURIComponent(job.repository.name)}`
     : undefined;
+  const fixedDestination = !!job || running || submitting;
   return (
     <section className="panel git-import" aria-labelledby="git-import-title">
       <header className="git-import-header">
         <div>
-          <p className="git-import-eyebrow">REMOTE IMPORT</p>
-          <h2 id="git-import-title">Bring a repository from Git</h2>
+          {!forkJob && <p className="git-import-eyebrow">REMOTE IMPORT</p>}
+          <h2 id="git-import-title">
+            {forkJob ? "Fork repository" : "Bring a repository from Git"}
+          </h2>
           <p className="muted">
-            Crab copies Git history and refs from an allowed Git host into your
-            object storage. An HTTPS token is only needed for private
-            repositories and is never stored.
+            {forkJob ? (
+              "The fork stays in this organization and inherits access from the source repository."
+            ) : (
+              <>
+                Crab copies Git history and refs from an allowed Git host into
+                your object storage. An HTTPS token is only needed for private
+                repositories and is never stored.
+              </>
+            )}
           </p>
         </div>
-        <Button variant="outline" aria-label="Close Git import" onClick={reset}>
+        <Button
+          variant="outline"
+          aria-label={forkJob ? "Close fork form" : "Close Git import"}
+          onClick={() => {
+            setOpen(false);
+            setToken("");
+          }}
+        >
           <XIcon data-icon="inline-start" />
           Close
         </Button>
       </header>
       <form className="git-import-form" onSubmit={submit}>
         <div className="git-import-grid">
-          <label>
-            Git source
-            <input
-              required
-              value={source}
-              onChange={(event) => {
-                const value = event.target.value;
-                setSource(value);
-                const parsedName = parseGitRepository(value);
-                if (!nameEdited && parsedName) setName(parsedName);
-              }}
-              placeholder="https://github.com/owner/repository.git"
-              autoComplete="url"
-              disabled={running || submitting}
-            />
-          </label>
-          <label>
-            Crab owner
-            <input
-              required
-              value={owner}
-              onChange={(event) => setOwner(event.target.value)}
-              placeholder="team"
-              autoComplete="organization"
-              disabled={running || submitting}
-            />
-          </label>
+          {!forkJob && (
+            <label>
+              Git source
+              <input
+                required
+                value={job?.source ?? source}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setSource(value);
+                  const parsedName = parseGitRepository(value);
+                  if (!nameEdited && parsedName) setName(parsedName);
+                }}
+                placeholder="https://github.com/owner/repository.git"
+                autoComplete="url"
+                disabled={fixedDestination}
+              />
+            </label>
+          )}
+          {!forkJob && (
+            <label>
+              {organization ? "Organization" : "Crab owner"}
+              <input
+                required
+                value={organization?.name ?? job?.owner ?? owner}
+                onChange={(event) => setOwner(event.target.value)}
+                placeholder="team"
+                autoComplete="organization"
+                disabled={!!organization || fixedDestination}
+              />
+            </label>
+          )}
           <label>
             Repository name
             <input
               required
-              value={name}
+              value={job?.name ?? name}
               onChange={(event) => {
                 setNameEdited(true);
                 setName(event.target.value);
               }}
               placeholder="repository"
               autoComplete="off"
-              disabled={running || submitting}
+              disabled={fixedDestination}
             />
           </label>
-          <label>
-            Source token <span className="muted">(HTTPS private repos)</span>
-            <input
-              type="password"
-              value={token}
-              onChange={(event) => setToken(event.target.value)}
-              placeholder="Optional personal access token"
-              autoComplete="new-password"
-              disabled={running || submitting}
-            />
-          </label>
-          <label className="git-import-description">
-            Description <span className="muted">(optional)</span>
-            <textarea
-              value={description}
-              onChange={(event) => setDescription(event.target.value)}
-              placeholder="What should people know about this repository?"
-              rows={2}
-              disabled={running || submitting}
-            />
-          </label>
+          {!forkJob && (!job || job.resumable) && (
+            <label>
+              Source token <span className="muted">(HTTPS private repos)</span>
+              <input
+                type="password"
+                value={token}
+                onChange={(event) => setToken(event.target.value)}
+                placeholder="Optional personal access token"
+                autoComplete="new-password"
+                disabled={running || submitting}
+              />
+            </label>
+          )}
+          {!forkJob && !job && (
+            <label className="git-import-description">
+              Description <span className="muted">(optional)</span>
+              <textarea
+                value={description}
+                onChange={(event) => setDescription(event.target.value)}
+                placeholder="What should people know about this repository?"
+                rows={2}
+                disabled={running || submitting}
+              />
+            </label>
+          )}
         </div>
         {error && (
           <div className="git-import-feedback error" role="alert">
             <AlertIcon aria-hidden="true" />
             <span>{error}</span>
+          </div>
+        )}
+        {!!jobId && !job && !error && (
+          <div className="git-import-feedback" role="status">
+            <Spinner /> Checking {operation} progress…
           </div>
         )}
         {job && (
@@ -243,6 +385,17 @@ export function GitImport({
               <AlertIcon aria-hidden="true" />
             )}
             <span>{job.message}</span>
+            <code>
+              {organization?.name ?? job.owner}/{job.name}
+            </code>
+            {organizationPage && !importedHref && (
+              <Link
+                href={`${organizationPage}&import=${encodeURIComponent(job.id)}`}
+                className="git-import-result"
+              >
+                {forkJob ? "Fork status link" : "Import status link"}
+              </Link>
+            )}
             {importedHref && (
               <Link href={importedHref} className="git-import-result">
                 <RepoIcon aria-hidden="true" /> Open repository
@@ -251,21 +404,44 @@ export function GitImport({
           </div>
         )}
         <div className="git-import-actions">
-          <Button
-            type="submit"
-            variant="default"
-            disabled={running || submitting}
-          >
-            {submitting || running ? "Importing…" : "Start import"}
-          </Button>
-          <Button
-            variant="outline"
-            type="button"
-            onClick={reset}
-            disabled={running}
-          >
-            Cancel
-          </Button>
+          {((jobId && !job && error) || job?.resumable) && (
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setJob(undefined);
+                setError(undefined);
+                setStatusCheck((value) => value + 1);
+              }}
+            >
+              Check {operation} status
+            </Button>
+          )}
+          {(!job || running || job.resumable) && (
+            <Button type="submit" disabled={running || submitting}>
+              {submitting || running
+                ? forkJob
+                  ? "Creating fork…"
+                  : "Importing…"
+                : job?.resumable
+                  ? forkJob
+                    ? "Resume fork"
+                    : "Resume import"
+                  : forkJob
+                    ? "Create fork"
+                    : "Start import"}
+            </Button>
+          )}
+          {(job || (organization?.requestedJob && error)) && !running && (
+            <Button
+              variant="outline"
+              type="button"
+              onClick={reset}
+              disabled={submitting}
+            >
+              {fork ? "Start another fork" : "Start another import"}
+            </Button>
+          )}
         </div>
       </form>
     </section>

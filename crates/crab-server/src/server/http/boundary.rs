@@ -63,12 +63,12 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
     let internal_import = server
         .git_import
         .as_ref()
-        .is_some_and(|context| context.authorizes_git(&request));
+        .and_then(|context| context.authorizes_git(&request));
     let management_probe = matches!(request.uri().path(), "/healthz" | "/readyz");
     let load_balancer_probe = request.uri().path() == "/livez";
     let valid_host = load_balancer_probe
         || (management_probe && local_host)
-        || internal_import
+        || internal_import.is_some()
         || server
             .auth
             .as_ref()
@@ -78,11 +78,15 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
         return StatusCode::FORBIDDEN.into_response();
     }
     let git_request = request.uri().path().starts_with("/git/");
+    let signed_webhook = crate::api::webhook_path(request.method(), request.uri().path())
+        || crate::api::ci_git_path(request.method(), request.uri().path());
     let integration_request = integration_api_path(request.uri().path());
     let token_request = integration_request && request.headers().contains_key("authorization");
     let authentication_started = Instant::now();
-    let mut principal = if internal_import {
-        Principal::local()
+    let mut principal = if signed_webhook {
+        Principal::anonymous()
+    } else if let Some(grant) = internal_import {
+        grant.principal(&server).await
     } else {
         match &server.auth {
             Some(auth) if git_request || token_request => {
@@ -126,6 +130,7 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
     );
     let backchannel_logout = request.uri().path() == "/auth/backchannel-logout";
     let rejected_mutation = !backchannel_logout
+        && !signed_webhook
         && !anonymous_membership
         && !git_request
         && unsafe_method
@@ -308,7 +313,7 @@ fn command_checks_archive(path: &str) -> bool {
     path.strip_prefix("/api/repos/").is_some_and(|path| {
         matches!(
             path.split('/').nth(2),
-            Some("issues" | "labels" | "pulls" | "discussions")
+            Some("issues" | "labels" | "pulls" | "discussions" | "fork-sync")
         )
     })
 }
@@ -324,7 +329,13 @@ async fn archived_mutation_response(
     let action = segments.next()?;
     // Membership belongs to the catalog, including archived repositories. Its
     // handler must authorize against that revision before any Cell response.
-    if action == "members" && segments.next().is_none() {
+    if (action == "members" && segments.next().is_none())
+        || (action == "settings"
+            && segments.next() == Some("team-access")
+            && segments.next().is_some()
+            && segments.next().is_none())
+        || path == format!("/api/repos/{owner}/{name}/settings/integrations")
+    {
         return None;
     }
     if owner.is_empty()

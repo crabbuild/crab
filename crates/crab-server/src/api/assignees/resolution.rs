@@ -31,11 +31,11 @@ impl Selection {
                 principal: initial.principal,
             });
         }
-        let initial_members = members(&initial);
+        let initial_members = members(server, &initial).await?;
         let keys = identities(principal, &initial_members)?;
         let (bound, profiles) = tokio::try_join!(accounts(server, &keys), profiles(server, &ids))?;
         let current = app::membership(server, principal, repo).await?;
-        let current_members = members(&current);
+        let current_members = members(server, &current).await?;
         // Profiles and names are presentation only. Final current membership
         // decides visibility and capabilities after the separate Directory reads.
         let names = initial_members

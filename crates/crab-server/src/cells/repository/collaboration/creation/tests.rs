@@ -58,6 +58,7 @@ async fn create(
                     &cell.target,
                     identity(),
                     CreatePullInput {
+                        code_owner_requests: Default::default(),
                         metadata,
                         draft: false,
                         submission_id: id,
@@ -67,6 +68,7 @@ async fn create(
                         base_ref: "refs/heads/main".into(),
                         base_oid: "a".repeat(40),
                         head_ref: "refs/heads/feature".into(),
+                        head_repository: None,
                         head_oid: "b".repeat(40),
                     },
                 )

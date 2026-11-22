@@ -3,13 +3,22 @@ import { endpoint, type Repository } from "@/lib/api";
 import { useMutation } from "../mutations";
 import type { CreationSelection } from "./metadata";
 
+export interface TemplateGrant {
+  expires_at_ms: number;
+  proof: string;
+  source?: string;
+}
+
 interface Input {
   title: string;
   body: string;
   metadata: CreationSelection;
+  template_grant?: TemplateGrant;
   draft?: boolean;
   base_ref?: string;
   head_ref?: string;
+  head_repository?: string;
+  expected?: { base_oid: string; head_oid: string };
 }
 export function useCreateSubmission<T>({
   repo,

@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { type Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 import { MergePanel } from "../merge";
+import { BranchUpdate } from "../branch-update";
 import type { PullRequest } from "../model";
 export function PullConversation({
   repo,
@@ -66,6 +67,16 @@ export function PullConversation({
         {(busy, posted) => (
           <>
             <MergePanel repo={repo} pull={pull} csrf={csrf} refresh={refresh} />
+            {pull.can_update_branch && (
+              <BranchUpdate
+                key={`${pull.version}:${pull.base_oid}:${pull.head_oid}`}
+                repo={repo}
+                pull={pull}
+                csrf={csrf}
+                active={active}
+                refresh={refresh}
+              />
+            )}
             {(!repo.archived || comment.body || comment.intent) && (
               <CommentComposer
                 href={href}

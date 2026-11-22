@@ -268,6 +268,7 @@ fn publication_error(error: ReceiveError) -> Error {
         ReceiveError::Archived => Error::Archived,
         ReceiveError::Busy => Error::ReleaseBusy,
         ReceiveError::Forbidden => Error::ReleasePermission,
+        ReceiveError::RefRule(message) => Error::RefRule(message),
         ReceiveError::Graph(crab_git::receive_plan::ReceivePlanError::Stale { .. })
         | ReceiveError::Graph(crab_git::receive_plan::ReceivePlanError::Namespace(_))
         | ReceiveError::Write(crab_write::WriteError::RefChanged { .. })

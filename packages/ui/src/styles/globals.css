@@ -6871,6 +6871,10 @@ main {
   display: grid;
   gap: --spacing(1.5);
 }
+.linked-work .linked-work-close {
+  display: flex;
+  align-items: start;
+}
 
 .pull-state.draft {
   background: var(--muted-foreground);

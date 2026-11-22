@@ -19,6 +19,11 @@ mod commands;
 mod invitations;
 pub(crate) mod projects;
 mod reads;
+pub(crate) mod repositories;
+pub(crate) mod rulesets;
+use teams::repository_access::{
+    CodeOwnerTeams, RepositoryTeamNames, RepositoryTeamRoster, RepositoryTeamsForActor,
+};
 pub(crate) mod teams;
 pub(crate) use commands::{
     Bootstrap, BootstrapInput, ChangeMember, ChangeOutcome, Edit, EditInput, MemberChange,
@@ -155,6 +160,9 @@ fn record(context: &Transaction<'_>) -> Result<Option<Organization>> {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Action {
     Created,
+    RulesetsChanged {
+        version: u64,
+    },
     ProjectChanged {
         project: Uuid,
     },
@@ -283,11 +291,30 @@ pub(in crate::cells) fn authorize(
         return teams::authorize(context, operation, mutation, input);
     }
     let owner = match (operation, mutation) {
+        // The private repository reads use catalog-bound team IDs. The public
+        // repository boundary authorizes their callers before it returns data.
+        (
+            repositories::Owners::ID
+            | RepositoryTeamsForActor::ID
+            | RepositoryTeamRoster::ID
+            | RepositoryTeamNames::ID
+            | CodeOwnerTeams::ID
+            | rulesets::Applicable::ID,
+            false,
+        ) => return Ok(()),
         (GetOrganization::ID | ListMembers::ID, false) => false,
-        (GetMember::ID | ListActivity::ID | ListInvitations::ID, false)
-        | (Bootstrap::ID | Edit::ID | ChangeMember::ID | Invite::ID | CancelInvitation::ID, true) => {
-            true
-        }
+        (GetMember::ID | ListActivity::ID | ListInvitations::ID | rulesets::Get::ID, false)
+        | (
+            Bootstrap::ID
+            | Edit::ID
+            | ChangeMember::ID
+            | Invite::ID
+            | CancelInvitation::ID
+            | repositories::AuthorizeCreation::ID
+            | repositories::AuthorizeImportPublication::ID
+            | rulesets::Replace::ID,
+            true,
+        ) => true,
         // Invitations belong to the organization. Their recipient can inspect
         // and decide an offer without already holding organization membership.
         (GetInvitation::ID, false) => {
@@ -346,6 +373,13 @@ pub(in crate::cells) fn dispatch_read(
         teams::GetMembership::ID => invoke_read::<teams::GetMembership>(context, input),
         teams::Candidates::ID => invoke_read::<teams::Candidates>(context, input),
         teams::GetPolicy::ID => invoke_read::<teams::GetPolicy>(context, input),
+        RepositoryTeamsForActor::ID => invoke_read::<RepositoryTeamsForActor>(context, input),
+        RepositoryTeamRoster::ID => invoke_read::<RepositoryTeamRoster>(context, input),
+        RepositoryTeamNames::ID => invoke_read::<RepositoryTeamNames>(context, input),
+        CodeOwnerTeams::ID => invoke_read::<CodeOwnerTeams>(context, input),
+        rulesets::Get::ID => invoke_read::<rulesets::Get>(context, input),
+        rulesets::Applicable::ID => invoke_read::<rulesets::Applicable>(context, input),
+        repositories::Owners::ID => invoke_read::<repositories::Owners>(context, input),
         GetOrganization::ID => invoke_read::<GetOrganization>(context, input),
         ListMembers::ID => invoke_read::<ListMembers>(context, input),
         GetMember::ID => invoke_read::<GetMember>(context, input),
@@ -377,6 +411,13 @@ pub(in crate::cells) fn dispatch_mutation(
         teams::Change::ID => invoke_mutation::<teams::Change>(context, input),
         teams::Cancel::ID => invoke_mutation::<teams::Cancel>(context, input),
         Bootstrap::ID => invoke_mutation::<Bootstrap>(context, input),
+        repositories::AuthorizeCreation::ID => {
+            invoke_mutation::<repositories::AuthorizeCreation>(context, input)
+        }
+        repositories::AuthorizeImportPublication::ID => {
+            invoke_mutation::<repositories::AuthorizeImportPublication>(context, input)
+        }
+        rulesets::Replace::ID => invoke_mutation::<rulesets::Replace>(context, input),
         Edit::ID => invoke_mutation::<Edit>(context, input),
         ChangeMember::ID => invoke_mutation::<ChangeMember>(context, input),
         Invite::ID => invoke_mutation::<Invite>(context, input),

@@ -21,15 +21,18 @@ pub(crate) struct Candidate {
     pub name: String,
     pub profile: Option<ActorSummary>,
 }
-pub(in crate::api) fn members(membership: &app::Membership) -> Vec<crate::RepositoryMember> {
+pub(in crate::api) async fn members(
+    server: &Server,
+    membership: &app::Membership,
+) -> Result<Vec<crate::RepositoryMember>> {
     if membership.principal.is_local() {
-        return vec![crate::RepositoryMember {
+        return Ok(vec![crate::RepositoryMember {
             subject: "operator".into(),
             name: "Local operator".into(),
             access: crate::RepositoryAccess::Admin,
-        }];
+        }]);
     }
-    membership.members.clone()
+    membership.durable_members(server).await
 }
 pub(in crate::api) fn identities(
     principal: &Principal,
@@ -97,12 +100,12 @@ pub(in crate::api) async fn profiles(
 pub(crate) struct Roster {
     identities: BTreeMap<Uuid, RepositoryAuthor>,
     pub items: Vec<Candidate>,
-    pub principal: Principal,
+    pub membership: app::Membership,
 }
 impl Roster {
     pub async fn load(server: &Server, principal: &Principal, repo: &Repository) -> Result<Self> {
         let initial = app::membership(server, principal, repo).await?;
-        let initial_members = members(&initial);
+        let initial_members = members(server, &initial).await?;
         let keys = identities(principal, &initial_members)?;
         let mut ids = accounts(server, &keys).await?;
         let missing: Vec<_> = ids
@@ -137,7 +140,7 @@ impl Roster {
         let current = app::membership(server, principal, repo).await?;
         let mut items = Vec::new();
         let mut identities = BTreeMap::new();
-        for member in members(&current) {
+        for member in members(server, &current).await? {
             let position = initial_members
                 .iter()
                 .position(|m| m.subject == member.subject)
@@ -160,7 +163,7 @@ impl Roster {
         Ok(Self {
             identities,
             items,
-            principal: current.principal,
+            membership: current,
         })
     }
     pub fn author(&self, id: Uuid) -> Option<&RepositoryAuthor> {

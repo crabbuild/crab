@@ -507,6 +507,7 @@ async fn triage_uses_durable_grants_for_issue_and_pull_management_without_git_wr
             repo.id,
             crate::app::mutation_identity().unwrap(),
             CreatePullInput {
+                code_owner_requests: Default::default(),
                 metadata: Default::default(),
                 submission_id: *uuid::Uuid::now_v7().as_bytes(),
                 author: RepositoryAuthor {
@@ -519,6 +520,7 @@ async fn triage_uses_durable_grants_for_issue_and_pull_management_without_git_wr
                 body: "Original pull".into(),
                 base_ref: "refs/heads/main".into(),
                 head_ref: "refs/heads/feature".into(),
+                head_repository: None,
                 base_oid: "a".repeat(40),
                 head_oid: "b".repeat(40),
             },

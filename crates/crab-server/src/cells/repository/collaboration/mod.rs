@@ -11,6 +11,7 @@ pub(crate) mod creation;
 pub(crate) mod lifecycle;
 pub(crate) mod links;
 pub(crate) mod milestones;
+pub(crate) mod notifications;
 pub(crate) mod reactions;
 pub(crate) mod state;
 pub(crate) mod submissions;

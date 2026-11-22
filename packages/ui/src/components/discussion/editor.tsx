@@ -3,6 +3,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
+  type ReactNode,
   type Ref,
 } from "react";
 import {
@@ -148,6 +149,7 @@ export function Editor({
   disabled,
   required = false,
   autoFocus = false,
+  hint,
   ref,
 }: {
   id: string;
@@ -157,6 +159,7 @@ export function Editor({
   disabled: boolean;
   required?: boolean;
   autoFocus?: boolean;
+  hint?: ReactNode;
   ref?: Ref<HTMLTextAreaElement>;
 }) {
   const [preview, setPreview] = useState(false);
@@ -278,6 +281,7 @@ export function Editor({
       </TabsContent>
       <p id={`${id}-help`} className="editor-help">
         Markdown is supported. External images appear as links.
+        {hint && <> {hint}</>}
       </p>
     </Tabs>
   );

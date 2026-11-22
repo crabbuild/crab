@@ -51,6 +51,11 @@ pub struct GraphLimits {
 pub trait GraphSource {
     fn trusted_kind(&mut self, oid: &ObjectId) -> std::result::Result<Option<Kind>, SourceError>;
     fn read(&mut self, oid: &ObjectId) -> std::result::Result<Option<BaseObject>, SourceError>;
+
+    /// Include changes in this visible commit when collecting paths for publication policy.
+    fn inspect_visible_tip(&self, _oid: &ObjectId) -> bool {
+        false
+    }
 }
 
 /// A recognized pointer whose backing content needs separate publication proof.

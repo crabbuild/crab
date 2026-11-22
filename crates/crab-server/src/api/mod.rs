@@ -10,6 +10,7 @@ mod discussion_bulk;
 mod discussion_creation;
 mod discussion_search;
 mod discussion_state;
+mod fork_sync;
 mod issues;
 mod labels;
 mod links;
@@ -22,20 +23,29 @@ mod pulls;
 mod reactions;
 mod releases;
 mod results;
+mod rulesets;
 mod statuses;
 mod write;
 
 #[cfg(test)]
 mod contracts;
 
+mod code_search;
+mod inbox;
+mod integrations;
+mod mentions;
 mod query;
 mod read_admission;
 mod representation;
 mod response_json;
 mod revalidation;
+pub(crate) use integrations::{GitHubActions, ci_git_path, webhook_path};
+pub(crate) use pulls::authorize_merge_publication;
+pub(crate) use pulls::authorize_suggestion_publication;
+pub(crate) use pulls::{authorize_branch_update, authorize_merge_candidate, auto_merge};
 pub(crate) use query::comparison_blobs;
 use query::execute;
-use representation::{asset_response, decode_cursor, decode_hex};
+use representation::{asset_response, commit_json, decode_cursor, decode_hex, encode_cursor};
 pub(crate) use representation::{display_path, encode_hex};
 
 use std::sync::Arc;
@@ -47,7 +57,9 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use crab_remote_git::{Blob, CorruptionStage, Error, GitPath, PageRequest, RevisionError};
+use crab_remote_git::{
+    Blob, CorruptionStage, Error, GitPath, PageRequest, Revision, RevisionError,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -106,6 +118,8 @@ pub(crate) struct Parameters {
     limit: Option<usize>,
     cursor: Option<String>,
     q: Option<String>,
+    merge_base: bool,
+    upstream: Option<uuid::Uuid>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -145,6 +159,13 @@ impl IntoResponse for ApiError {
                         StatusCode::NOT_FOUND,
                         "not_found",
                         "The requested path or revision is not available",
+                    ),
+                    Error::Revision {
+                        reason: RevisionError::NoMergeBase,
+                    } => (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "no_merge_base",
+                        "The selected branches do not share a Git ancestor",
                     ),
                     Error::InvalidCursor { .. } => (
                         StatusCode::CONFLICT,
@@ -301,11 +322,47 @@ pub(crate) async fn read(
         } else {
             None
         };
+        if params.merge_base
+            && (!matches!(action, Action::Changes | Action::Diff) || params.base.is_none())
+        {
+            return Err(ApiError::Input(
+                "Merge-base comparison requires an explicit base revision",
+            ));
+        }
+        let upstream = if let Some(id) = params.upstream {
+            let branch = |value: Option<&str>| {
+                value.and_then(|value| {
+                    value
+                        .strip_prefix("refs/heads/")
+                        .and_then(|short| branches::branch_ref(short).ok())
+                        .filter(|branch| branch == value)
+                })
+            };
+            let revision = |value: Option<&str>| value.is_some_and(|value| {
+                matches!(Revision::parse(value), Ok(Revision::Commit(_))) || branch(Some(value)).is_some()
+            });
+            if !(matches!(action, Action::Changes) && params.merge_base
+                    || matches!(action, Action::Commits) && path.is_root())
+                || !revision(params.base.as_deref()) || !revision(params.rev.as_deref()) {
+                return Err(ApiError::Input("Fork comparisons require two branch refs or commit IDs"));
+            }
+            let Some(source) = entry.fork_source(&server).filter(|source| source.id == id) else {
+                return Ok(crate::app::Error::NotFound.into_response());
+            };
+            // The fork's durable membership already resolves the upstream ACL.
+            // Keep the principal scoped to this fork while using its lineage.
+            if let Err(error) = crate::app::membership(&server, &principal, &entry).await {
+                return Ok(error.into_response());
+            }
+            Some(source)
+        } else {
+            None
+        };
         let timer = Instant::now();
         let conditional = matches!(action, Action::Blob | Action::FilePreview)
             && (headers.contains_key(axum::http::header::IF_NONE_MATCH)
                 || headers.contains_key(axum::http::header::IF_RANGE));
-        let opened = if conditional {
+        let opened = if conditional || params.merge_base || upstream.is_some() {
             entry.revalidate(&server, &cancellation).await
         } else {
             entry.open(&server, &cancellation).await
@@ -369,20 +426,35 @@ pub(crate) async fn read(
             None
         };
         let timer = Instant::now();
-        let payload = execute(
-            &server,
-            repository,
-            entry.id,
-            action,
-            &params,
-            path,
-            page,
-            search_query,
-            &cancellation,
-            projection_source.as_deref(),
-            &headers,
-        )
-        .await;
+        let payload = if let Some(source) = upstream {
+            let source = source.revalidate(&server, &cancellation).await?;
+            let comparison = if matches!(action, Action::Commits) {
+                query::fork_commits(repository, &source.git, &params, &page, &cancellation).await
+                    .map(|page| json!({"items":page.items.iter().map(commit_json).collect::<Vec<_>>(),
+                        "next":page.next.map(|cursor| encode_cursor(&server.cursor_key, entry.id, cursor))}))
+            } else {
+                query::fork_comparison(repository, &source.git, &params, &cancellation).await
+            };
+            if let Err(error) = crate::app::membership(&server, &principal, &entry).await {
+                return Ok(error.into_response());
+            }
+            comparison.map(Payload::Json)
+        } else {
+            execute(
+                &server,
+                repository,
+                entry.id,
+                action,
+                &params,
+                path,
+                page,
+                search_query,
+                &cancellation,
+                projection_source.as_deref(),
+                &headers,
+            )
+            .await
+        };
         read_ms = timer.elapsed().as_secs_f64() * 1000.0;
         let payload = payload?;
         let encoding = Instant::now();
@@ -463,6 +535,8 @@ pub(crate) fn routes(server: Arc<Server>) -> axum::Router<Arc<Server>> {
         .merge(members::routes())
         .merge(milestones::routes(Arc::clone(&server)))
         .merge(activity::routes(Arc::clone(&server)))
+        .merge(inbox::routes(Arc::clone(&server)))
+        .merge(integrations::routes(Arc::clone(&server)))
         .merge(conversation::routes(Arc::clone(&server)))
         .merge(discussion_state::routes(Arc::clone(&server)))
         .merge(discussion_bulk::routes(Arc::clone(&server)))
@@ -472,6 +546,8 @@ pub(crate) fn routes(server: Arc<Server>) -> axum::Router<Arc<Server>> {
         .merge(reactions::routes(Arc::clone(&server)))
         .merge(assignees::routes(Arc::clone(&server)))
         .merge(branches::routes())
+        .merge(fork_sync::routes(Arc::clone(&server)))
+        .merge(rulesets::routes())
         .merge(checks::routes(Arc::clone(&server)))
         .merge(contents::routes())
         .merge(issues::routes(Arc::clone(&server)))
@@ -480,7 +556,12 @@ pub(crate) fn routes(server: Arc<Server>) -> axum::Router<Arc<Server>> {
         .merge(releases::routes(Arc::clone(&server)))
         .merge(pulls::routes(Arc::clone(&server)))
         .merge(statuses::routes(Arc::clone(&server)))
+        .route(
+            "/api/repos/{owner}/{name}/code-search",
+            axum::routing::get(code_search::search),
+        )
         .route("/api/repos", axum::routing::get(catalog::list))
+        .merge(catalog::creation_routes(Arc::clone(&server)))
         .route(
             "/api/repos/{owner}/{name}/archive",
             axum::routing::get(archive::download),

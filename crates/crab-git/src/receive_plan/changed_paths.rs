@@ -37,14 +37,15 @@ impl<S: GraphSource, C: Fn() -> bool> Validator<'_, S, C> {
         let mut pending = Vec::new();
         for update in updates {
             let Some(mut oid) = update.new else { continue };
-            if self.trusted_kind(oid)?.is_some() {
+            let inspect_tip = self.source.inspect_visible_tip(&oid);
+            if !inspect_tip && self.trusted_kind(oid)?.is_some() {
                 continue;
             }
             loop {
                 let node = self.load(oid)?;
                 if node.kind != Kind::Tag {
                     if node.kind == Kind::Commit {
-                        pending.push(oid);
+                        pending.push((oid, inspect_tip));
                     }
                     break;
                 }
@@ -66,9 +67,9 @@ impl<S: GraphSource, C: Fn() -> bool> Validator<'_, S, C> {
         let mut commits = HashSet::new();
         // A final-tree comparison misses a changed path reverted by a later commit
         // in the same push. Inspect every commit until committed visibility begins.
-        while let Some(oid) = pending.pop() {
+        while let Some((oid, inspect_tip)) = pending.pop() {
             self.step()?;
-            if !commits.insert(oid) || self.trusted_kind(oid)?.is_some() {
+            if (!inspect_tip && self.trusted_kind(oid)?.is_some()) || !commits.insert(oid) {
                 continue;
             }
             let node = self.load(oid)?;
@@ -120,7 +121,7 @@ impl<S: GraphSource, C: Fn() -> bool> Validator<'_, S, C> {
                     )?;
                 }
             }
-            pending.extend(parents);
+            pending.extend(parents.into_iter().map(|parent| (parent, false)));
         }
         Ok(paths)
     }

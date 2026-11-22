@@ -39,7 +39,7 @@ pub(super) async fn resolve(
             })
             .collect();
         eligible.sort_unstable_by_key(|person| person.id);
-        (roster.principal, eligible)
+        (roster.membership.principal, eligible)
     };
     Ok(Input {
         selection,

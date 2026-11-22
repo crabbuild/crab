@@ -25,6 +25,14 @@ pub(super) fn acquire(server: &Server, action: Action) -> Result<Admission, TryA
         action,
         Action::Refs | Action::Tree | Action::Search | Action::FilePreview
     );
+    reserve(server, bulk)
+}
+
+pub(super) fn acquire_bulk(server: &Server) -> Result<Admission, TryAcquireError> {
+    reserve(server, true)
+}
+
+fn reserve(server: &Server, bulk: bool) -> Result<Admission, TryAcquireError> {
     let bulk = bulk
         .then(|| server.bulk_reads.clone().try_acquire_owned())
         .transpose()?;

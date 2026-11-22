@@ -31,16 +31,29 @@ pub(crate) enum Action {
     Created,
     Drafted,
     ReadyForReview,
+    BaseChanged {
+        from: String,
+        to: String,
+    },
+    HeadChanged {
+        from: String,
+        to: String,
+    },
     ReviewRequested {
         reviewer: String,
     },
     ReviewRequestCancelled {
         reviewer: String,
     },
+    TeamReviewRequested,
+    TeamReviewRequestCancelled,
+    CodeOwnerReviewsRequested,
     Updated,
     Closed,
     IssueClosed {
         reason: crate::cells::repository::issues::lifecycle::Reason,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pull: Option<u64>,
     },
     IssueCloseReasonChanged {
         from: Option<crate::cells::repository::issues::lifecycle::Reason>,
@@ -118,8 +131,13 @@ impl Action {
                     | Self::Merged
                     | Self::Drafted
                     | Self::ReadyForReview
+                    | Self::BaseChanged { .. }
+                    | Self::HeadChanged { .. }
                     | Self::ReviewRequested { .. }
                     | Self::ReviewRequestCancelled { .. }
+                    | Self::TeamReviewRequested
+                    | Self::TeamReviewRequestCancelled
+                    | Self::CodeOwnerReviewsRequested
                     | Self::IssueLinked { .. }
                     | Self::IssueUnlinked { .. }
                     | Self::MilestoneAssigned { .. }
@@ -166,7 +184,8 @@ impl Action {
         if matches!(
             self,
             Self::IssueClosed {
-                reason: super::super::issues::lifecycle::Reason::Reopened
+                reason: super::super::issues::lifecycle::Reason::Reopened,
+                ..
             } | Self::IssueCloseReasonChanged {
                 from: Some(super::super::issues::lifecycle::Reason::Reopened),
                 ..
@@ -178,6 +197,12 @@ impl Action {
             return Err(crate::cells::Error::Invalid(
                 "closure activity reason is invalid",
             ));
+        }
+        if let Self::IssueClosed {
+            pull: Some(pull), ..
+        } = self
+        {
+            validate_number(*pull)?;
         }
         if !valid {
             return Err(crate::cells::Error::Invalid(
@@ -211,7 +236,7 @@ pub(in crate::cells::repository) fn append(
     target: Target,
     actor: &RepositoryAuthor,
     action: Action,
-) -> crate::cells::Result<()> {
+) -> crate::cells::Result<Event> {
     validate_author(actor)?;
     action.validate(target)?;
     if !target.exists(context)? {
@@ -253,7 +278,25 @@ pub(in crate::cells::repository) fn append(
         context.put_document(&format!("{}{number:016x}", events(Some(related))), &true)?;
     }
     super::conversation::project_event(context, &event)?;
-    Ok(())
+    Ok(event)
+}
+
+pub(in crate::cells::repository) fn append_content(
+    context: &Transaction<'_>,
+    target: Target,
+    actor: &RepositoryAuthor,
+    action: Action,
+    body: &str,
+) -> crate::cells::Result<()> {
+    let event = append(context, target, actor, action)?;
+    super::notifications::mention(context, &event, body)
+}
+
+pub(super) fn load_event(context: &Transaction<'_>, event: u64) -> crate::cells::Result<Event> {
+    validate_number(event)?;
+    context
+        .document(&format!("{}{event:016x}", events(None)))?
+        .ok_or(crate::cells::Error::Invalid("activity event is missing"))
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

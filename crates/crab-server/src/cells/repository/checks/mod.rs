@@ -7,6 +7,14 @@ const MAX_CHECK_STEPS: usize = 50;
 const MAX_CHECK_ANNOTATIONS: usize = 50;
 const MAX_CHECK_OUTPUT_BYTES: u32 = 192 * 1024;
 
+pub(super) fn validate_name(name: &str) -> crate::cells::Result<()> {
+    validate_plain(name, 100, "repository check name is invalid")
+}
+
+pub(super) fn validate_commit(oid: &str) -> crate::cells::Result<()> {
+    validate_oid(oid)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CheckStepRecord {
     pub name: String,
@@ -140,7 +148,7 @@ impl Mutation for CreateCheckRun {
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         validate_author(&input.author)?;
         validate_oid(&input.oid)?;
-        validate_plain(&input.name, 100, "repository check name is invalid")?;
+        validate_name(&input.name)?;
         validate_check_report(&input.report)?;
         let digest = create_submission_digest(&input)?;
         let existing = context.sql(&SqlBatch {

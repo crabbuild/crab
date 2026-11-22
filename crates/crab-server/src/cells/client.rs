@@ -6,6 +6,7 @@ use axum::{
 };
 use cellar::sdk::IngressHandle;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use uuid::Uuid;
 
 use super::{
@@ -17,6 +18,7 @@ pub(super) const REQUEST_BUDGET: Duration = Duration::from_secs(30);
 #[derive(Clone)]
 pub(crate) struct CellClient {
     ingress: IngressHandle,
+    mentions: Arc<[super::repository::collaboration::notifications::Mentions]>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -43,7 +45,18 @@ pub(crate) struct RepositoryCell {
 
 impl CellClient {
     pub(crate) fn new(ingress: IngressHandle) -> Self {
-        Self { ingress }
+        Self {
+            ingress,
+            mentions: Arc::default(),
+        }
+    }
+
+    pub(crate) fn with_mentions(
+        mut self,
+        mentions: Vec<super::repository::collaboration::notifications::Mentions>,
+    ) -> Self {
+        self.mentions = mentions.into();
+        self
     }
 
     pub(crate) fn repository(&self, repository: Uuid) -> Result<RepositoryCell> {
@@ -186,6 +199,11 @@ impl CellClient {
             mutation,
             input: serde_json::to_value(input)?,
             minimum,
+            mentions: if mutation.is_some() {
+                self.mentions.to_vec()
+            } else {
+                Vec::new()
+            },
         };
         let bytes = bytes::Bytes::from(serde_json::to_vec(&request)?);
         if bytes.len() > 4 * 1024 * 1024 {

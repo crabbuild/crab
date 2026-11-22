@@ -140,6 +140,9 @@ pub(in crate::cells) fn dispatch_mutation(
         <review_requests::SetReviewRequest as Mutation>::ID => {
             invoke_mutation::<review_requests::SetReviewRequest>(context, input)
         }
+        <review_requests::teams::SetTeamReviewRequest as Mutation>::ID => {
+            invoke_mutation::<review_requests::teams::SetTeamReviewRequest>(context, input)
+        }
         <SetPullReadiness as Mutation>::ID => invoke_mutation::<SetPullReadiness>(context, input),
         <SetLink as Mutation>::ID => invoke_mutation::<SetLink>(context, input),
         <SetReaction as Mutation>::ID => invoke_mutation::<SetReaction>(context, input),
@@ -158,6 +161,12 @@ pub(in crate::cells) fn dispatch_mutation(
         }
         <CreateCheckRun as Mutation>::ID => invoke_mutation::<CreateCheckRun>(context, input),
         <UpdateCheckRun as Mutation>::ID => invoke_mutation::<UpdateCheckRun>(context, input),
+        <rulesets::ReplaceRulesets as Mutation>::ID => {
+            invoke_mutation::<rulesets::ReplaceRulesets>(context, input)
+        }
+        <ReplaceMergeMethods as Mutation>::ID => {
+            invoke_mutation::<ReplaceMergeMethods>(context, input)
+        }
         <ReplaceBranchProtections as Mutation>::ID => {
             invoke_mutation::<ReplaceBranchProtections>(context, input)
         }
@@ -165,7 +174,27 @@ pub(in crate::cells) fn dispatch_mutation(
             invoke_mutation::<ReplaceRepositoryLifecycle>(context, input)
         }
         <CreatePull as Mutation>::ID => invoke_mutation::<CreatePull>(context, input),
+        RejectStalePullComparison::ID => {
+            invoke_mutation::<RejectStalePullComparison>(context, input)
+        }
+        viewed::SetViewedFile::ID => invoke_mutation::<viewed::SetViewedFile>(context, input),
+        pending_reviews::Change::ID => invoke_mutation::<pending_reviews::Change>(context, input),
+        pending_reviews::Submit::ID => invoke_mutation::<pending_reviews::Submit>(context, input),
+        collaboration::notifications::SetRead::ID => {
+            invoke_mutation::<collaboration::notifications::SetRead>(context, input)
+        }
+        integrations::Edit::ID => invoke_mutation::<integrations::Edit>(context, input),
+        integrations::Record::ID => invoke_mutation::<integrations::Record>(context, input),
+        integrations::dispatches::Reserve::ID => {
+            invoke_mutation::<integrations::dispatches::Reserve>(context, input)
+        }
+        integrations::dispatches::Confirm::ID => {
+            invoke_mutation::<integrations::dispatches::Confirm>(context, input)
+        }
         <UpdatePull as Mutation>::ID => invoke_mutation::<UpdatePull>(context, input),
+        pull_base::Retarget::ID => invoke_mutation::<pull_base::Retarget>(context, input),
+        pull_head::Switch::ID => invoke_mutation::<pull_head::Switch>(context, input),
+        pull_auto_merge::Edit::ID => invoke_mutation::<pull_auto_merge::Edit>(context, input),
         <CreatePullComment as Mutation>::ID => invoke_mutation::<CreatePullComment>(context, input),
         <UpdatePullComment as Mutation>::ID => invoke_mutation::<UpdatePullComment>(context, input),
         <CreatePullReview as Mutation>::ID => invoke_mutation::<CreatePullReview>(context, input),
@@ -183,6 +212,7 @@ pub(in crate::cells) fn dispatch_mutation(
             invoke_mutation::<UpdatePullReviewReply>(context, input)
         }
         <ReservePullMerge as Mutation>::ID => invoke_mutation::<ReservePullMerge>(context, input),
+        CaptureIssueClosure::ID => invoke_mutation::<CaptureIssueClosure>(context, input),
         <TransitionPullMerge as Mutation>::ID => {
             invoke_mutation::<TransitionPullMerge>(context, input)
         }
@@ -329,10 +359,33 @@ pub(in crate::cells) fn dispatch_read(
             invoke_read::<GetCheckUpdateSubmission>(context, input)
         }
         <GetBranchProtections as Read>::ID => invoke_read::<GetBranchProtections>(context, input),
+        <rulesets::GetRulesets as Read>::ID => invoke_read::<rulesets::GetRulesets>(context, input),
+        <rulesets::GetRefPolicy as Read>::ID => {
+            invoke_read::<rulesets::GetRefPolicy>(context, input)
+        }
+        <GetMergeMethods as Read>::ID => invoke_read::<GetMergeMethods>(context, input),
+        <GetEffectiveMergeMethods as Read>::ID => {
+            invoke_read::<GetEffectiveMergeMethods>(context, input)
+        }
+        pull_auto_merge::Get::ID => invoke_read::<pull_auto_merge::Get>(context, input),
+        pull_auto_merge::Pending::ID => invoke_read::<pull_auto_merge::Pending>(context, input),
         <GetRepositoryLifecycle as Read>::ID => {
             invoke_read::<GetRepositoryLifecycle>(context, input)
         }
         <GetPull as Read>::ID => invoke_read::<GetPull>(context, input),
+        viewed::GetViewedFiles::ID => invoke_read::<viewed::GetViewedFiles>(context, input),
+        pending_reviews::Get::ID => invoke_read::<pending_reviews::Get>(context, input),
+        collaboration::notifications::List::ID => {
+            invoke_read::<collaboration::notifications::List>(context, input)
+        }
+        integrations::List::ID => invoke_read::<integrations::List>(context, input),
+        integrations::dispatches::Get::ID => {
+            invoke_read::<integrations::dispatches::Get>(context, input)
+        }
+        integrations::Receipt::ID => invoke_read::<integrations::Receipt>(context, input),
+        integrations::ReadRequirements::ID => {
+            invoke_read::<integrations::ReadRequirements>(context, input)
+        }
         <GetPullSubmission as Read>::ID => invoke_read::<GetPullSubmission>(context, input),
         <review_requests::GetReviewRequest as Read>::ID => {
             invoke_read::<review_requests::GetReviewRequest>(context, input)
@@ -348,6 +401,9 @@ pub(in crate::cells) fn dispatch_read(
         <ListPullReviews as Read>::ID => invoke_read::<ListPullReviews>(context, input),
         <GetPullReviewSubmission as Read>::ID => {
             invoke_read::<GetPullReviewSubmission>(context, input)
+        }
+        <CountUnresolvedConversations as Read>::ID => {
+            invoke_read::<CountUnresolvedConversations>(context, input)
         }
         <GetPullReviewThread as Read>::ID => invoke_read::<GetPullReviewThread>(context, input),
         <ListPullReviewThreads as Read>::ID => invoke_read::<ListPullReviewThreads>(context, input),

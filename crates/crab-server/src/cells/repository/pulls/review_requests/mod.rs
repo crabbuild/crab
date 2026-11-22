@@ -4,6 +4,9 @@ use crate::cells::repository::collaboration::{
     activity::{self, Action},
 };
 
+pub(crate) mod automatic;
+pub(crate) mod teams;
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum State {
@@ -17,6 +20,8 @@ pub(crate) enum State {
 pub(crate) struct Request {
     pub reviewer: RepositoryAuthor,
     pub requested_by: RepositoryAuthor,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub code_owner: bool,
     pub state: State,
     pub requested_at: u64,
     pub updated_at: u64,
@@ -77,6 +82,16 @@ fn store(context: &Transaction<'_>, pull: u64, request: &Request) -> crate::cell
     context.put_document(
         &format!("{}{}", prefix(pull), reviewer_id(&request.reviewer)),
         request,
+    )
+}
+
+fn project(context: &Transaction<'_>, pull: u64, request: &Request) -> crate::cells::Result<()> {
+    store(context, pull, request)?;
+    super::super::search::reviews::requested(
+        context,
+        pull,
+        &request.reviewer,
+        request.state == State::Requested,
     )
 }
 
@@ -152,6 +167,7 @@ impl Mutation for SetReviewRequest {
             Request {
                 reviewer: input.reviewer,
                 requested_by: input.actor.clone(),
+                code_owner: false,
                 state: State::Requested,
                 requested_at: now,
                 updated_at: now,
@@ -165,13 +181,7 @@ impl Mutation for SetReviewRequest {
             request
         };
         super::super::search::index::ensure_ready(context)?;
-        store(context, pull.number, &request)?;
-        super::super::search::reviews::requested(
-            context,
-            pull.number,
-            &request.reviewer,
-            request.state == State::Requested,
-        )?;
+        project(context, pull.number, &request)?;
         let old_version = pull.version;
         pull.version = next_version(pull.version)?;
         pull.updated_at_ms = now;
@@ -185,7 +195,7 @@ impl Mutation for SetReviewRequest {
                 reviewer: request.reviewer.name.clone(),
             }
         };
-        activity::append(
+        let event = activity::append(
             context,
             Target::Pull {
                 number: pull.number,
@@ -193,6 +203,14 @@ impl Mutation for SetReviewRequest {
             &input.actor,
             action,
         )?;
+        if input.requested {
+            super::super::collaboration::notifications::review_requested(
+                context,
+                &request.reviewer.issuer,
+                &request.reviewer.subject,
+                &event,
+            )?;
+        }
         advance_revision(context)?;
         Ok(MutationResult::Success(Outcome::Applied(request)))
     }

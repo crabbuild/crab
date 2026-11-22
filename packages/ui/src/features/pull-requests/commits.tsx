@@ -19,10 +19,12 @@ export function PullCommits({
   url: URL;
 }) {
   const cursor = url.searchParams.get("commit_after") ?? undefined;
+  const headRepo = pull.head_repository ?? repo;
   const commits = useRequest<Page<Commit, string>>(
-    endpoint(repo, "commits", {
+    endpoint(headRepo, "commits", {
       rev: pull.head_oid,
       base: pull.base_oid,
+      upstream: pull.head_repository ? repo.id : undefined,
       limit: "50",
       cursor,
     }),
@@ -46,7 +48,7 @@ export function PullCommits({
           <>
             {page.items.length ? (
               <section className="panel">
-                <CommitList repo={repo} commits={page.items} />
+                <CommitList repo={headRepo} commits={page.items} />
               </section>
             ) : (
               <div className="notice">

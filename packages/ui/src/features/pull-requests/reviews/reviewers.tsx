@@ -3,6 +3,7 @@ import {
   ClockIcon,
   CodeReviewIcon,
   CheckCircleFillIcon,
+  PeopleIcon,
   XCircleFillIcon,
 } from "@primer/octicons-react";
 import { RotateCwIcon, SettingsIcon, XIcon } from "lucide-react";
@@ -40,6 +41,7 @@ interface Reviewer {
   request: {
     id: string;
     requested_by: DiscussionAuthor;
+    code_owner?: boolean;
     state:
       | { kind: "requested" | "cancelled" }
       | { kind: "fulfilled"; review: number };
@@ -49,6 +51,13 @@ interface Reviewer {
 }
 interface Page {
   items: Reviewer[];
+  teams: {
+    id: string;
+    name: string | null;
+    state: NonNullable<Reviewer["request"]>["state"] | null;
+    can_request: boolean;
+    code_owner?: boolean;
+  }[];
   next: string | null;
   version: number;
   can_manage: boolean;
@@ -56,7 +65,8 @@ interface Page {
 }
 type Change =
   | { kind: "request"; actor_id: string }
-  | { kind: "cancel"; id: string };
+  | { kind: "cancel"; id: string }
+  | { kind: "request_team" | "cancel_team"; team_id: string };
 
 export function Reviewers({
   repo,
@@ -96,6 +106,7 @@ export function Reviewers({
     <Result state={resource} timingLabel="Reviewers">
       {(page) => {
         const reviewers = page.items;
+        const teams = page.teams.filter((team) => team.state);
         const canManage = page.can_manage && !repo.archived;
         const disabled = mutation.pending || mutation.conflict;
         const needle = query.trim().toLowerCase();
@@ -103,6 +114,12 @@ export function Reviewers({
           `${candidate.name} ${candidate.profile?.handle ?? ""}`
             .toLowerCase()
             .includes(needle),
+        );
+        const teamChoices = page.teams.filter(
+          (team) =>
+            team.can_request &&
+            team.state?.kind !== "requested" &&
+            team.name?.toLowerCase().includes(needle),
         );
         return (
           <section className="reviewers" aria-label="Reviewers">
@@ -154,7 +171,11 @@ export function Reviewers({
                         <Input
                           ref={search}
                           id={searchId}
-                          placeholder="Find people…"
+                          placeholder={
+                            page.teams.length
+                              ? "Find people or teams…"
+                              : "Find people…"
+                          }
                           value={query}
                           onChange={(event) => setQuery(event.target.value)}
                         />
@@ -189,14 +210,34 @@ export function Reviewers({
                             </span>
                           </Button>
                         ))}
-                        {!choices.length && (
+                        {teamChoices.map((team) => (
+                          <Button
+                            key={team.id}
+                            variant="ghost"
+                            className="h-auto min-h-10 justify-start"
+                            aria-label={`Request review from team ${team.name}`}
+                            disabled={disabled}
+                            onClick={() =>
+                              save(page.version, {
+                                kind: "request_team",
+                                team_id: team.id,
+                              })
+                            }
+                          >
+                            <PeopleIcon aria-hidden="true" />
+                            <span className="truncate">{team.name}</span>
+                          </Button>
+                        ))}
+                        {!choices.length && !teamChoices.length && (
                           <p
                             className="p-2 text-muted-foreground"
                             role="status"
                           >
-                            {page.candidates.length
-                              ? "No people match your search."
-                              : "No other repository members are available to review."}
+                            {page.teams.length
+                              ? "No available reviewers match your search."
+                              : page.candidates.length
+                                ? "No people match your search."
+                                : "No other repository members are available to review."}
                           </p>
                         )}
                       </div>
@@ -220,8 +261,53 @@ export function Reviewers({
                 </Popover>
               )}
             </header>
-            {reviewers.length ? (
+            {reviewers.length || teams.length ? (
               <ul className="m-0 flex list-none flex-col gap-3 p-0">
+                {teams.map((team) => {
+                  const name = team.name ?? "Deleted team";
+                  return (
+                    <li key={team.id} className="flex items-start gap-2">
+                      <PeopleIcon
+                        aria-hidden="true"
+                        className="mt-0.5 shrink-0"
+                      />
+                      <div className="flex min-w-0 flex-1 flex-col gap-1 wrap-anywhere">
+                        <strong>{name}</strong>
+                        {team.state?.kind === "fulfilled" ? (
+                          <Link
+                            href={`${repoHref(repo, { view: "pulls", pull: String(pull) })}#pullrequestreview-${team.state.review}`}
+                          >
+                            {team.code_owner
+                              ? "Code owner review submitted"
+                              : "Team review submitted"}
+                          </Link>
+                        ) : (
+                          <p className="m-0 text-muted-foreground">
+                            {team.code_owner
+                              ? "Team code owner review requested"
+                              : "Team review requested"}
+                          </p>
+                        )}
+                      </div>
+                      {canManage && (
+                        <Button
+                          size="icon-xs"
+                          variant="ghost"
+                          disabled={disabled}
+                          aria-label={`${team.state?.kind === "fulfilled" ? "Remove reviewed team" : "Cancel review request for team"} ${name}`}
+                          onClick={() =>
+                            save(page.version, {
+                              kind: "cancel_team",
+                              team_id: team.id,
+                            })
+                          }
+                        >
+                          <XIcon />
+                        </Button>
+                      )}
+                    </li>
+                  );
+                })}
                 {reviewers.map((reviewer) => {
                   const candidateId = reviewer.candidate_id;
                   const request = reviewer.request;
@@ -292,8 +378,14 @@ export function Reviewers({
                         )}
                         {requested && (
                           <p className="m-0 text-muted-foreground">
-                            Review requested by{" "}
-                            <Author author={request.requested_by} />
+                            {request.code_owner ? (
+                              "Code owner review requested"
+                            ) : (
+                              <>
+                                Review requested by{" "}
+                                <Author author={request.requested_by} />
+                              </>
+                            )}
                           </p>
                         )}
                         {reviewer.decision &&

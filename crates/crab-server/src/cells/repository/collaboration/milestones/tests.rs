@@ -572,6 +572,7 @@ async fn pull_close_reopen_and_merge_completion_update_milestone_progress() {
             &cell.target,
             identity(),
             CreatePullInput {
+                code_owner_requests: Default::default(),
                 metadata: Default::default(),
                 draft: false,
                 submission_id: *Uuid::now_v7().as_bytes(),
@@ -580,6 +581,7 @@ async fn pull_close_reopen_and_merge_completion_update_milestone_progress() {
                 body: String::new(),
                 base_ref: "refs/heads/main".into(),
                 head_ref: "refs/heads/feature".into(),
+                head_repository: None,
                 base_oid: "a".repeat(40),
                 head_oid: "b".repeat(40),
             },
@@ -644,6 +646,9 @@ async fn pull_close_reopen_and_merge_completion_update_milestone_progress() {
         commit_oid: pull.head_oid.clone(),
         message: "Merge".into(),
         created_at_ms: crate::cells::unix_now_ms().unwrap() as u64,
+        publication_plan: None,
+        bypass_rulesets: Vec::new(),
+        tested_candidate: false,
     };
     cell.client
         .command::<ReservePullMerge>(

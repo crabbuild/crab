@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     Extension, Json, Router,
-    extract::{Path, State, rejection::JsonRejection},
+    extract::{Path, Query, State, rejection::JsonRejection},
     http::StatusCode,
     middleware,
     response::IntoResponse,
@@ -123,6 +123,25 @@ pub(crate) fn validate_target(value: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+#[derive(Deserialize)]
+pub(super) struct CommitScope {
+    pub pull: Option<u64>,
+}
+
+impl CommitScope {
+    pub(super) async fn require_commit(
+        self,
+        server: &Server,
+        repo: &Repository,
+        oid: ObjectId,
+    ) -> Result<String> {
+        match self.pull {
+            Some(pull) => super::pulls::require_check_head(server, repo, pull, oid).await,
+            None => require_commit(server, repo, oid).await,
+        }
+    }
+}
+
 pub(crate) async fn require_commit(
     server: &Server,
     repo: &Repository,
@@ -216,10 +235,13 @@ async fn list(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path((owner, name, oid)): Path<(String, String, String)>,
+    Query(scope): Query<CommitScope>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let repo = repo.as_ref();
-    let oid = require_commit(&server, repo, parse_oid(&oid)?).await?;
+    let oid = scope
+        .require_commit(&server, repo, parse_oid(&oid)?)
+        .await?;
     app::actor(&principal)?;
     let statuses = latest(&server, repo, &oid).await?;
     Ok(Json(json!({
@@ -233,6 +255,7 @@ async fn create(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path((owner, name, oid)): Path<(String, String, String)>,
+    Query(scope): Query<CommitScope>,
     input: std::result::Result<Json<NewStatus>, JsonRejection>,
 ) -> Result<impl IntoResponse> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
@@ -299,7 +322,7 @@ async fn create(
         let status = created_status(outcome)?;
         return Ok((StatusCode::CREATED, Json(status_view(&status))));
     }
-    let oid = require_commit(&server, repo, parsed_oid).await?;
+    let oid = scope.require_commit(&server, repo, parsed_oid).await?;
     if !principal.can_write(repo.id) {
         return Err(Error::StatusPermission);
     }

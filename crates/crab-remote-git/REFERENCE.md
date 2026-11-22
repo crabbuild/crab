@@ -43,7 +43,7 @@ The supported entry points are:
 - `RemoteGitSnapshot::{entry,list_directory,list_tree_blobs,list_tree_recursive,blob_metadata,read_blob}`:
   browser navigation, bounded metadata-only tree traversal, seekable recursive
   blob pages, and Git-representation content;
-- `RemoteGitSnapshot::{history,path_history,compare,diff,blame}`: bounded Git
+- `RemoteGitSnapshot::{history,path_history,merge_bases,compare,diff,blame}`: bounded Git
   semantics without a checkout;
 - `RemoteGitSnapshot::{archive,archive_stream}`: bounded traversal, with the
   stream owning operation cleanup.

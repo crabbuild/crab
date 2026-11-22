@@ -1,3 +1,5 @@
+export type RulesetId = string | { organization: string; ruleset: string };
+
 import type { DiscussionTotals, ListLabel } from "@/components/discussion/list";
 import type { DiscussionAuthor } from "@/components/discussion/author";
 import type { RepositoryAssignee } from "@/lib/contracts";
@@ -29,6 +31,8 @@ export type PullListItem = Omit<PullSummary, "labels"> &
     labels: ListLabel[];
   };
 
+export type MergeMethod = "merge_commit" | "squash" | "rebase" | "fast_forward";
+
 export interface PullRequest extends PullSummary {
   reactions: ReactionSummary;
   body: string;
@@ -36,36 +40,56 @@ export interface PullRequest extends PullSummary {
   can_edit: boolean;
   can_label: boolean;
   can_assign: boolean;
+  can_apply_suggestions: boolean;
+  can_update_branch?: boolean;
   base_oid: string;
+  base_revision?: number | null;
+  can_change_base?: boolean;
   head_oid: string;
+  head_repository?: { id: string; owner: string; name: string } | null;
+  github_actions_ref?: string | null;
   original_base_oid: string | null;
   original_head_oid: string | null;
   can_manage: boolean;
   can_decide: boolean;
+  review_counts_for_merge?: boolean;
   can_merge: boolean;
+  auto_merge_configured?: boolean;
+  merge_queued?: boolean;
+  merge_queue_required?: boolean;
   branches_available: boolean;
   merge: {
     author: DiscussionAuthor;
-    method: "fast_forward" | "merge_commit";
+    method: MergeMethod;
     commit_oid: string;
     message: string;
     created_at: number;
+    bypass_rulesets?: RulesetId[];
+    tested_candidate_oid?: string | null;
   } | null;
   merge_pending: {
     request_id: string;
     author: DiscussionAuthor;
-    method: "fast_forward" | "merge_commit";
+    method: MergeMethod;
     pull_version: number;
     base_oid: string;
     head_oid: string;
     message: string;
     created_at: number;
+    bypass_rulesets?: RulesetId[];
+    tested_candidate_oid?: string | null;
   } | null;
+  merge_methods: MergeMethod[];
   merge_requirements: {
+    rulesets?: string[];
+    bypass_options?: { id: RulesetId; name: string }[];
     protected: boolean;
     required_approvals: number;
     approvals: number;
     changes_requested: number;
+    code_owners?: CodeOwnersReport | null;
+    unresolved_conversations?: number | null;
+    head_up_to_date?: boolean | null;
     checks_satisfied: boolean;
     checks: Array<{
       context: string;
@@ -75,9 +99,30 @@ export interface PullRequest extends PullSummary {
       author: string | null;
       updated_at: number | null;
       run_id: number | null;
+      provider?: "github_actions" | "crab_check_run" | "crab_status";
+      integration_id?: string | null;
+      head_sha?: string;
     }>;
     satisfied: boolean;
   };
+}
+
+export interface CodeOwnersReport {
+  path: string | null;
+  base_oid: string | null;
+  head_oid: string | null;
+  invalid_lines: number;
+  affected_paths: number;
+  missing_paths: number;
+  problem: string | null;
+  groups: {
+    line: number;
+    owners: string[];
+    paths: string[];
+    affected: number;
+    approved: boolean;
+    has_eligible_owner: boolean;
+  }[];
 }
 
 export interface PullReviewThread extends InlineDiffThread {

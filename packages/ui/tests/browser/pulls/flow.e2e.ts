@@ -171,6 +171,294 @@ test("pull creation and review navigation preserve GitHub-style controls", async
   await expectNoAccessibilityViolations(page);
 });
 
+for (const { address, missing, replacement } of [
+  {
+    address: "missing...feature%2Fdocs",
+    missing: "base:",
+    replacement: "refs/heads/main",
+  },
+  {
+    address: "main...missing",
+    missing: "compare:",
+    replacement: "refs/heads/feature/docs",
+  },
+]) {
+  test(`an unavailable ${missing.slice(0, -1)} branch needs an explicit replacement`, async ({
+    page,
+  }) => {
+    await mockPullRequest(page);
+    await page.goto(`/team/project/compare/${address}`);
+
+    await expect(
+      page.getByRole("heading", {
+        name: "A branch in this comparison is unavailable",
+      }),
+    ).toBeVisible();
+    const selector = page.getByLabel(missing);
+    await expect(selector).toHaveValue("");
+    await expect(
+      page.getByRole("button", { name: "Create pull request", exact: true }),
+    ).toHaveCount(0);
+
+    await selector.selectOption(replacement);
+    await expect(
+      page.getByText("1 changed file", { exact: true }),
+    ).toBeVisible();
+  });
+}
+
+test("a rejected stale comparison reloads before submitting a fresh pull request", async ({
+  page,
+}) => {
+  const fixture = await mockPullRequest(page);
+  await page.goto("/team/project/compare/main...feature%2Fdocs");
+  const title = page.getByRole("textbox", { name: "Title", exact: true });
+  const description = page.getByRole("textbox", {
+    name: "Description",
+    exact: true,
+  });
+  const submit = page.getByRole("button", {
+    name: "Create pull request",
+    exact: true,
+  });
+  await title.fill("Keep this draft");
+  await description.fill("Discuss the current branch.");
+  await expect(submit).toBeEnabled();
+
+  const { base_oid, head_oid } = fixture.pull();
+  fixture.lifecycle.head = "e".repeat(40);
+  await submit.click();
+  await expect(page.getByRole("alert")).toContainText("A branch moved");
+  await expect(submit).toBeDisabled();
+  await page
+    .getByRole("button", { name: "Review inputs", exact: true })
+    .click();
+  await expect(title).toHaveValue("Keep this draft");
+  await expect(description).toHaveValue("Discuss the current branch.");
+  await submit.click();
+
+  await expect(page).toHaveURL(/\/pull\/2$/);
+  const [initial, retried] = fixture.pullSubmissions;
+  expect(fixture.pullSubmissions).toHaveLength(2);
+  expect(initial.expected).toEqual({ base_oid, head_oid });
+  expect(retried).toEqual({
+    ...initial,
+    request_id: retried.request_id,
+    expected: { base_oid, head_oid: fixture.lifecycle.head },
+  });
+  expect(retried.request_id).not.toBe(initial.request_id);
+});
+
+test("viewed files survive reload and clear when the file changes", async ({
+  page,
+}) => {
+  const fixture = await mockPullRequest(page);
+  const path = "1".repeat(64);
+  let revision = "2".repeat(64);
+  let saved = { version: 0, files: {} as Record<string, string> };
+  await page.route("**/api/repos/team/project/changes?**", (route) => {
+    const { base_oid, head_oid } = fixture.pull();
+    return route.fulfill({
+      json: {
+        base: fixture.mergeBase,
+        base_tip: base_oid,
+        commit: head_oid,
+        changes: [
+          {
+            path: "README.md",
+            path_hex: "524541444d452e6d64",
+            kind: "Modified",
+            old: null,
+            new: null,
+            view_id: path + revision,
+          },
+        ],
+      },
+    });
+  });
+  await page.route(
+    (url) => url.pathname === "/api/repos/team/project/pulls/1/viewed",
+    (route) => {
+      if (route.request().method() === "PUT") {
+        expect(route.request().postDataJSON()).toEqual({
+          version: saved.version,
+          file: path + revision,
+          viewed: true,
+        });
+        saved = { version: saved.version + 1, files: { [path]: revision } };
+      }
+      return route.fulfill({ json: saved });
+    },
+  );
+  await page.goto("/team/project/pull/1/files");
+  const viewed = page.getByRole("checkbox", { name: "Viewed README.md" });
+  await expect(viewed).toBeVisible();
+  await expect(viewed).not.toBeChecked();
+  await viewed.check();
+  await expect(page.getByText("1 of 1 files viewed")).toBeVisible();
+  await page.reload();
+  await expect(viewed).toBeChecked();
+  revision = "3".repeat(64);
+  fixture.lifecycle.head = "e".repeat(40);
+  await page.reload();
+  await expect(viewed).not.toBeChecked();
+  await expect(page.getByText("0 of 1 files viewed")).toBeVisible();
+});
+
+test("pending review comments survive reload and retry the same submission", async ({
+  page,
+}) => {
+  const fixture = await mockPullRequest(page);
+  const resource = "/api/repos/team/project/pulls/1/pending-review";
+  const comments: Record<string, unknown>[] = [];
+  let version: string | null = null;
+  const submissions: object[] = [];
+  await page.route(
+    (url) => url.pathname === resource,
+    (route) => {
+      if (route.request().method() === "PUT") {
+        const input = route.request().postDataJSON();
+        expect(input.expected).toBe(version);
+        expect(input.edit.action).toBe("save");
+        expect(input.edit.comment).toMatchObject({
+          base_oid: fixture.mergeBase,
+          head_oid: fixture.pull().head_oid,
+          path_hex: "524541444d452e6d64",
+          side: "new",
+          start_line: 1,
+          end_line: 1,
+        });
+        version = input.request_id;
+        const next = {
+          ...input.edit.comment,
+          id: input.edit.replace ?? input.request_id,
+          path: "README.md",
+        };
+        if (input.edit.replace) {
+          expect(input.edit.replace).toBe(comments[0].id);
+          comments[0] = next;
+        } else {
+          comments.push(next);
+        }
+      }
+      return route.fulfill({ json: { version, comments } });
+    },
+  );
+  await page.route(
+    (url) => url.pathname === `${resource}/submit`,
+    (route) => {
+      const input = route.request().postDataJSON();
+      submissions.push(input);
+      if (submissions.length === 1) {
+        expect(input).toMatchObject({
+          expected: version,
+          body: "",
+          state: "commented",
+        });
+        expect(comments[0].body).toBe("Edited private comment");
+        version = input.request_id;
+        comments.length = 0;
+        return route.abort("failed");
+      }
+      expect(input).toEqual(submissions[0]);
+      return route.fulfill({ json: { review: 1, threads: [2] } });
+    },
+  );
+  await page.goto("/team/project/pull/1/files");
+  await page
+    .locator(
+      '.diff-panel [data-column-number="1"][data-line-type="change-addition"]',
+    )
+    .click();
+  const inline = page.getByRole("form", { name: "Comment on selected lines" });
+  await inline
+    .getByRole("textbox", { name: "Comment", exact: true })
+    .fill("Private draft comment");
+  await inline.getByRole("button", { name: "Add to review" }).click();
+  const pending = page.getByRole("region", { name: "Pending review comments" });
+  await expect(pending.getByText("Private draft comment")).toBeVisible();
+  await expect(page.locator(".inline-review-list")).not.toContainText(
+    "Private draft comment",
+  );
+  await page.reload();
+  await expect(pending.getByText("Private draft comment")).toBeVisible();
+  await pending.getByRole("button", { name: "Edit", exact: true }).click();
+  await pending
+    .getByRole("textbox", { name: "Pending comment", exact: true })
+    .fill("Edited private comment");
+  await pending.getByRole("button", { name: "Save comment" }).click();
+  await expect(pending.getByText("Edited private comment")).toBeVisible();
+
+  await page
+    .getByRole("button", { name: "Review changes", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Submit review", exact: true })
+    .click();
+  await expect(
+    page.getByText("The response was lost.", { exact: false }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Retry review submission" }).click();
+  await expect(page).toHaveURL(/\/pull\/1$/);
+  await page.getByRole("link", { name: "Files changed" }).click();
+  await expect(pending).toHaveCount(0);
+  expect(submissions).toHaveLength(2);
+});
+
+test("selected suggestions commit together on the inspected head", async ({
+  page,
+}) => {
+  const fixture = await mockPullRequest(page);
+  fixture.threads.push({
+    ...fixture.threads[0],
+    number: 2,
+    body: "Another suggestion",
+    suggested_text: "Replace line two",
+    start_line: 2,
+    end_line: 2,
+  });
+  let commits = 0;
+  await page.route(
+    (url) => url.pathname.endsWith("/pulls/1/suggestions"),
+    (route) => {
+      expect(route.request().postDataJSON()).toEqual({
+        expected_head: fixture.pull().head_oid,
+        message: "Polish the reviewed files",
+        threads: [
+          { number: 1, version: 1 },
+          { number: 2, version: 1 },
+        ],
+      });
+      commits += 1;
+      for (const thread of fixture.threads) thread.outdated = true;
+      return route.fulfill({ json: { commit: "d".repeat(40) } });
+    },
+  );
+  await page.goto("/team/project/pull/1/files");
+  await page
+    .getByRole("checkbox", { name: "Select suggestion from thread #1" })
+    .check();
+  await page
+    .getByRole("checkbox", { name: "Select suggestion from thread #2" })
+    .check();
+  await page
+    .getByRole("button", { name: "Commit suggestions (2)", exact: true })
+    .click();
+  const commitDialog = page.getByRole("dialog", {
+    name: "Commit 2 suggestions",
+  });
+  await expect(commitDialog).toContainText("team/project");
+  await commitDialog
+    .getByLabel("Commit message")
+    .fill("Polish the reviewed files");
+  await commitDialog.getByRole("button", { name: "Commit changes" }).click();
+  await expect(page.getByText("Committed suggestions in")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Commit suggestions", exact: false }),
+  ).toHaveCount(0);
+  expect(commits).toBe(1);
+});
+
 test("review conversations and ambiguous merge recovery preserve the pull workflow", async ({
   page,
 }) => {
@@ -215,6 +503,10 @@ test("review conversations and ambiguous merge recovery preserve the pull workfl
   await selectDarkTheme(page);
   await react(page.locator(".review-thread-card"));
   await page.getByRole("button", { name: "Apply suggestion" }).click();
+  await page
+    .getByRole("dialog", { name: "Commit suggestion", exact: true })
+    .getByRole("button", { name: "Commit changes" })
+    .click();
   await page.locator(".inline-review-outdated > summary").click();
   await expect(page.locator(".inline-review-outdated")).toContainText(
     "Outdated conversations (1)",
@@ -266,7 +558,7 @@ test("review conversations and ambiguous merge recovery preserve the pull workfl
     page.getByRole("button", { name: "Merge pull request", exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Create a merge commit", exact: true }),
+    page.getByRole("button", { name: "Select merge method", exact: true }),
   ).toBeVisible();
   await page
     .getByRole("textbox", { name: "Comment", exact: true })

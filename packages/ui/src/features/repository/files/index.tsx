@@ -14,6 +14,7 @@ import {
   type CodeSymbol,
 } from "@/features/repository/files/symbols";
 import { CodeSymbolsPanel } from "@/features/repository/files/symbols/panel";
+import { FileCodeOwners } from "./codeowners";
 import { FileWorkspace } from "./workspace";
 import {
   endpoint,
@@ -367,6 +368,12 @@ export function FileView({
                 </span>
               </div>
               <div className="file-actions">
+                <FileCodeOwners
+                  key={`${content.commit}:${path}`}
+                  repo={repo}
+                  commit={content.commit}
+                  path={path}
+                />
                 {view === "code" &&
                   text !== null &&
                   symbolLanguage &&

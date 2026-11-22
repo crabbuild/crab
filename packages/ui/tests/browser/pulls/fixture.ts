@@ -7,10 +7,20 @@ import { emptyReactions, emptyReviewers } from "../fixtures";
 
 const base = "a".repeat(40);
 const head = "b".repeat(40);
+const mergeBase = "f".repeat(40);
 const pathHex = "README.md"
   .split("")
   .map((character) => character.charCodeAt(0).toString(16).padStart(2, "0"))
   .join("");
+
+interface PullSubmission {
+  request_id: string;
+  title: string;
+  body: string;
+  base_ref: string;
+  head_ref: string;
+  expected: { base_oid: string; head_oid: string };
+}
 
 export async function mockPullRequest(
   page: Page,
@@ -52,7 +62,8 @@ export async function mockPullRequest(
     branchesAvailable: true,
     head,
   };
-  let created = false;
+  const pullSubmissions: PullSubmission[] = [];
+  let created: PullSubmission | undefined;
   let mergePending = false;
   let mergeRequest = "";
   let mergeMethod: "fast_forward" | "merge_commit" = "merge_commit";
@@ -96,8 +107,8 @@ export async function mockPullRequest(
     return {
       draft: false,
       number: created ? 2 : 1,
-      title: created ? "Document the feature" : "Improve the README",
-      body: created ? "This explains the **new behavior**." : "Please review.",
+      title: created?.title ?? "Improve the README",
+      body: created?.body ?? "Please review.",
       reactions: reactions(`pulls/${created ? 2 : 1}`),
       state: lifecycle.state,
       author: author("Alice"),
@@ -114,6 +125,10 @@ export async function mockPullRequest(
       updated_at: 1_700_000_000_000,
       can_edit: true,
       can_manage: !mergePending,
+      can_apply_suggestions:
+        lifecycle.state === "open" &&
+        !mergePending &&
+        lifecycle.branchesAvailable,
       can_decide: true,
       can_merge:
         lifecycle.state === "open" &&
@@ -123,6 +138,7 @@ export async function mockPullRequest(
             checkState === "success")),
       branches_available:
         lifecycle.state === "merged" || lifecycle.branchesAvailable,
+      merge_methods: ["merge_commit", "squash", "rebase", "fast_forward"],
       merge_requirements: {
         protected: true,
         required_approvals: 1,
@@ -225,6 +241,19 @@ export async function mockPullRequest(
       });
     if (path.endsWith("/reviewers"))
       return route.fulfill({ json: emptyReviewers() });
+    if (path.endsWith("/codeowners"))
+      return route.fulfill({
+        json: {
+          path: null,
+          base_oid: base,
+          head_oid: lifecycle.head,
+          groups: [],
+          affected_paths: 0,
+          missing_paths: 0,
+          problem: null,
+          invalid_lines: 0,
+        },
+      });
     if (path.endsWith("/links"))
       return route.fulfill({
         json: { items: [], next: null, can_manage: false },
@@ -275,11 +304,20 @@ export async function mockPullRequest(
           generation: 2,
         },
       });
-    if (path.endsWith("/changes"))
+    if (path.endsWith("/changes")) {
+      const revision = url.searchParams.get("rev") ?? "";
+      const compareByRef = revision.startsWith("refs/");
+      expect(url.searchParams.get("merge_base")).toBe("true");
+      expect(url.searchParams.get("base")).toBe(
+        compareByRef ? "refs/heads/main" : base,
+      );
+      if (compareByRef) expect(revision).toBe("refs/heads/feature/docs");
       return route.fulfill({
         json: {
-          base,
-          commit: lifecycle.head,
+          base: mergeBase,
+          base_tip: base,
+          commit: compareByRef ? lifecycle.head : revision,
+          generation: 2,
           changes: [
             {
               path: "README.md",
@@ -303,11 +341,15 @@ export async function mockPullRequest(
           ],
         },
       });
-    if (path.endsWith("/diff"))
+    }
+    if (path.endsWith("/diff")) {
+      const revision = url.searchParams.get("rev");
+      expect(revision).toMatch(/^[a-f0-9]{40}$/);
+      expect(url.searchParams.get("base")).toBe(mergeBase);
       return route.fulfill({
         json: {
-          base,
-          commit: lifecycle.head,
+          base: mergeBase,
+          commit: revision,
           path: "README.md",
           old: {
             oid: "c".repeat(40),
@@ -325,6 +367,7 @@ export async function mockPullRequest(
           },
         },
       });
+    }
     if (path === "/api/repos/team/project/file-preview") {
       expect(url.searchParams.get("rev")).toBe(lifecycle.head);
       expect(url.searchParams.get("path_hex")).toBe(pathHex);
@@ -341,19 +384,18 @@ export async function mockPullRequest(
       });
     }
     if (
-      path === "/api/repos/team/project/contents" &&
-      request.method() === "PATCH"
+      path === "/api/repos/team/project/pulls/2/suggestions" &&
+      request.method() === "POST"
     ) {
       const input = request.postDataJSON();
-      expect(input.branch).toBe("refs/heads/feature/docs");
-      expect(input.expected_head).toBe(lifecycle.head);
-      expect(input.expected_blob).toBe("d".repeat(40));
-      expect(input.path_hex).toBe(pathHex);
-      expect(input.content).toBe("Applied content\n");
-      expect(input.message).toBe("Apply suggestion from review thread #1");
+      expect(input).toEqual({
+        expected_head: lifecycle.head,
+        message: "Apply review suggestions from pull request #2",
+        threads: [{ number: 1, version: 1 }],
+      });
       threads[0].outdated = true;
       return route.fulfill({
-        json: { commit: "e".repeat(40), path_hex: pathHex },
+        json: { commit: "e".repeat(40) },
       });
     }
     if (path === "/api/repos/team/project/commits") {
@@ -449,7 +491,24 @@ export async function mockPullRequest(
       });
     if (path === "/api/repos/team/project/pulls") {
       if (request.method() === "POST") {
-        created = true;
+        const input = request.postDataJSON() as PullSubmission;
+        pullSubmissions.push(input);
+        expect(input.base_ref).toBe("refs/heads/main");
+        expect(input.head_ref).toBe("refs/heads/feature/docs");
+        expect(input.expected.base_oid).toBe(base);
+        if (input.expected.head_oid !== lifecycle.head)
+          return route.fulfill({
+            status: 409,
+            headers: { "X-Crab-Write-Outcome": "rejected" },
+            json: {
+              error: {
+                code: "comparison_changed",
+                message:
+                  "A branch moved or was deleted. Review the updated comparison before creating the pull request",
+              },
+            },
+          });
+        created = input;
         return route.fulfill({ status: 201, json: pull() });
       }
       const query = url.searchParams.get("q")?.toLowerCase();
@@ -557,6 +616,13 @@ export async function mockPullRequest(
       }
       return route.fulfill({ json: { items: comments, next: null } });
     }
+    if (
+      request.method() === "GET" &&
+      /\/pulls\/\d+\/pending-review$/.test(path)
+    ) {
+      await route.fulfill({ json: { version: null, comments: [] } });
+      return;
+    }
     if (/\/pulls\/\d+\/threads$/.test(path)) {
       if (request.method() === "POST") {
         const input = request.postDataJSON();
@@ -592,10 +658,13 @@ export async function mockPullRequest(
         return route.fulfill({ status: 201, json: thread });
       }
       const outdated = url.searchParams.get("outdated") === "true";
+      const resolved = url.searchParams.get("resolved");
       return route.fulfill({
         json: {
           items: threads.filter(
-            (thread) => Boolean(thread.outdated) === outdated,
+            (thread) =>
+              Boolean(thread.outdated) === outdated &&
+              (resolved === null || String(thread.resolved) === resolved),
           ),
           next: null,
         },
@@ -713,5 +782,13 @@ export async function mockPullRequest(
     });
   });
 
-  return { react, reactionWrites, lifecycle, pull };
+  return {
+    react,
+    reactionWrites,
+    lifecycle,
+    pull,
+    pullSubmissions,
+    mergeBase,
+    threads,
+  };
 }

@@ -31,8 +31,8 @@ The compiled application binds `REPOSITORIES` to one native `Repository` Cell
 per catalog UUID, `DIRECTORY` to a shared native `Directory` Cell, and
 `ORGANIZATIONS` to independent native `Organization` Cells. Directory stores
 private qualified account keys and chosen public actor profiles. Organization
-stores explicit membership, invitation and standalone team authority; repository grants remain
-in the catalog.
+stores explicit membership, invitation and team authority. Repository grants
+remain in the catalog. Team grants resolve against current Organization membership.
 `cells/client.rs` sends bounded typed requests through native ingress and checks
 the operation's class and read receipt's target before routing.
 `cells/application.rs` shares transaction, replay and output handling; each
@@ -41,7 +41,7 @@ is buffered before owner dispatch so Cellar can safely retry stale routes; it is
 not forwarded as a non-replayable upload stream. Successful HTTP output
 uses the SDK output gate, including its ownership and durability checks.
 
-Repository assignment format 2 and discussion index format 12 require the explicit
+Repository assignment format 2 and discussion index format 13 require the explicit
 preparation described below. Issue lifecycle metadata also requires explicit
 `cells prepare-issue-state` on existing repositories. Pull lifecycle metadata
 requires `cells prepare-pull-state`. Other canonical records
@@ -290,9 +290,13 @@ rejection releases it. Reload/closing warns while an intent is uncertain. A
 conflicted settings draft survives refresh until saved metadata is reviewed.
 The UI uses shadcn components and existing Geist/Vercel tokens.
 
-These teams do not yet own repository/project grants, nested membership, review
-requests or mention notifications. Catalog repository grants are unchanged, and
-there is still no atomic cross-Cell authority cutover.
+Repository team grants are stored by team UUID in the owning repository's catalog
+record. The Organization Cell resolves the current organization role and active
+team membership at admission. The existing organization membership epoch prevents
+an old team seat from reappearing when someone rejoins. Repository admin and
+team visibility checks guard grant edits, which share the catalog membership CAS
+and audit chain. There is no atomic cross-Cell authority fence. Project grants,
+nested membership and team mention notifications remain open.
 
 ## Repository collaboration
 
@@ -317,6 +321,32 @@ Review HTTP writes now require the inspected `commit_oid`; fresh writes verify
 the live head, while retries use the existing native immutable submission
 ledger. This adds no native field or schema change. Deploy the API and bundled
 UI together; old HTTP payloads have no fallback decoder.
+
+Team requests store stable team UUIDs and latest state in a bounded document per
+PR. The reviewer snapshot includes this document at the same version as the
+individual requests. The HTTP authority resolves current catalog grants and the
+Organization roster. The repository mutation atomically records the request,
+activity and qualified inbox deliveries. Both review submission paths pass
+current team memberships into the transaction. Submission replay precedes
+fulfillment so it cannot clear a later request. Team visibility gates names in
+the public response. Deploy peers and the UI together for these operations and
+activity kinds. No additional SQL schema preparation is required.
+
+The branch protection codec retains existing settings and provider-only records.
+Enabling required code owner reviews writes a new versioned record containing
+the code-owner flag per rule. Upgrade serving peers before enabling the flag.
+The merge service resolves the exact base policy and compares the pinned refs
+again at publication. Team ownership reads check the live team's visibility
+and approval membership epochs in one Organization Cell snapshot. The new rule
+requires no SQL preparation.
+
+Fresh ready PR creation and transitions out of draft share the base-comparison
+owner resolver. The application passes qualified accounts and stable team UUIDs
+to the native command. Requests, activity and deduplicated inbox deliveries
+commit with creation or the readiness change. Derived ownership stays outside
+the creation intent digest. Replay returns the committed PR before writing
+requests. The existing user request record and the team request history retain
+manual cancellation across later readiness changes. No preparation is needed.
 
 The Author list menu composes Directory handle completion with native query
 navigation. Directory read 8 returns a bounded `items`/`truncated` result, using
@@ -369,7 +399,7 @@ review key or exclusive KV bound. Both phases process at most eight source recor
 per transaction; unrelated pull metadata also advances the request cursor. Reads
 remain unavailable until all sources complete. Domain records, versions, request
 history, receipts and public submission mappings are unchanged. Older indexes
-require `cells rebuild-search`; fresh repositories initialize current format 12.
+require `cells rebuild-search`. Fresh repositories initialize format 13.
 
 Native list output adds `review_requested_from_me`. Author, reviewer and commenter
 names now share one ordered `people` binding collection, one Directory snapshot,
@@ -938,6 +968,12 @@ edits and exact merge retries preserve it. No search-index format change or
 rebuild is required. Update all peers and embedded UI together; mixed-version
 serving is unsupported.
 
+Fork pull requests store the immutable head repository UUID in a native
+document alongside the upstream pull row. The document, row, submission
+digest, and search projection commit in one Cell transaction. Existing pull
+rows already imply a head in the upstream repository when the document is
+absent. This addition requires no schema preparation or index rebuild.
+
 ### Prepare review dismissal storage
 
 ```sh
@@ -993,6 +1029,15 @@ Deploy serving peers and embedded UI together: private search inputs carry
 optional captured source context and private rollup inputs carry a source token.
 There is no old-input decoder, canonical review migration, new environment
 option, dependency override or implicit preparation.
+
+### Prepare pull request closing references
+
+Discussion index format 13 adds a derived reverse index for closing references
+in pull request descriptions. Use `cells rebuild-search --owner OWNER --name REPO`
+on each existing repository before opening traffic. The bounded Pulls phase
+indexes existing descriptions and any completed merge snapshots. Canonical
+description, manual link, lifecycle and receipt records retain their formats.
+Historical merges do not generate closure events during the rebuild.
 
 ## Initial discussion metadata
 

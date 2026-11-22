@@ -383,7 +383,7 @@ export function CommitList({
   repo,
   commits,
 }: {
-  repo: Repository;
+  repo: Pick<Repository, "owner" | "name">;
   commits: Commit[];
 }) {
   return (

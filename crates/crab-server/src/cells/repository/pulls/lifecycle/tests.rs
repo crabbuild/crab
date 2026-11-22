@@ -44,6 +44,7 @@ async fn create(cell: &RepositoryCell) -> PullRecord {
     let CreatePullOutcome::Created(pull) = write::<CreatePull>(
         cell,
         CreatePullInput {
+            code_owner_requests: Default::default(),
             metadata: Default::default(),
             draft: false,
             submission_id: *Uuid::now_v7().as_bytes(),
@@ -52,6 +53,7 @@ async fn create(cell: &RepositoryCell) -> PullRecord {
             body: "Original".into(),
             base_ref: "refs/heads/main".into(),
             head_ref: "refs/heads/feature".into(),
+            head_repository: None,
             base_oid: "a".repeat(40),
             head_oid: "b".repeat(40),
         },
@@ -160,6 +162,9 @@ async fn merge_completion_is_independent_of_reservation_edits_and_replay() {
         commit_oid: pull.head_oid.clone(),
         message: String::new(),
         created_at_ms: 1,
+        publication_plan: None,
+        bypass_rulesets: Vec::new(),
+        tested_candidate: false,
     };
     write::<ReservePullMerge>(
         &cell,
@@ -273,6 +278,9 @@ async fn preparation_is_bounded_atomic_and_preserves_original_receipts_and_unkno
         commit_oid: third.head_oid.clone(),
         message: String::new(),
         created_at_ms: 1,
+        publication_plan: None,
+        bypass_rulesets: Vec::new(),
+        tested_candidate: false,
     };
     for transition in [PullMergeTransition::Begin, PullMergeTransition::Complete] {
         write::<TransitionPullMerge>(

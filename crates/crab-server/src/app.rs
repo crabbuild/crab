@@ -23,7 +23,7 @@ pub(crate) const MAX_NUMBER: u64 = 9_007_199_254_740_991;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
-    #[error("Initial discussion metadata was rejected: {0:?}")]
+    #[error("Discussion creation was rejected: {0:?}")]
     CreationRejected(crate::cells::repository::collaboration::creation::Failure),
     #[error("Git references are being indexed. Retry shortly")]
     ReviewIndexPending,
@@ -55,10 +55,38 @@ pub(crate) enum Error {
         "This repository was replaced; reload before starting another action. An earlier action may have completed in the original repository"
     )]
     RepositoryChanged,
+    #[error("The repository name or creation request is already in use")]
+    RepositoryNameUnavailable,
+    #[error("Repository creation failed")]
+    RepositorySetup(#[source] Box<crate::Error>),
     #[error("This list changed; reload from the first page")]
     PageChanged,
     #[error("The pull request changes conflict or its branch tips changed")]
     MergeConflict,
+    #[error("Write access is required to update the head branch")]
+    BranchUpdatePermission,
+    #[error("The pull request branch comparison changed")]
+    BranchUpdateChanged,
+    #[error("The replacement branch name is already in use")]
+    BranchUpdateDestination,
+    #[error("The base changes do not merge cleanly into the head branch")]
+    BranchUpdateConflict,
+    #[error("The pull request cannot be safely rebased")]
+    UnsafeRebase,
+    #[error("Auto-merge is disabled for this repository or merge method")]
+    AutoMergeDisabled,
+    #[error("The pull request is in the merge queue")]
+    MergeQueued,
+    #[error("The base branch requires the merge queue")]
+    MergeQueueRequired,
+    #[error("The auto-merge request or comparison changed")]
+    AutoMergeChanged,
+    #[error("This merge method is disabled for the repository")]
+    MergeMethodDisabled,
+    #[error("Repository merge methods changed")]
+    MergeMethodsChanged,
+    #[error("Administrator access is required to manage merge methods")]
+    MergeSettingsPermission,
     #[error("Git writes are busy")]
     MergeBusy,
     #[error("Write access is required to merge pull requests")]
@@ -67,6 +95,14 @@ pub(crate) enum Error {
     MergePending,
     #[error("Protected branch review requirements are not satisfied")]
     MergeBlocked,
+    #[error("Required checks are not satisfied on the merge candidate")]
+    MergeCandidateChecks,
+    #[error("Unresolved review conversations block the merge")]
+    MergeUnresolvedConversations,
+    #[error("The head branch is behind the base branch")]
+    MergeHeadBehind,
+    #[error("Ruleset bypass is no longer available")]
+    MergeBypassUnavailable,
     #[error("Write access is required to report commit statuses")]
     StatusPermission,
     #[error("Write access is required to manage check runs")]
@@ -95,6 +131,8 @@ pub(crate) enum Error {
     AssigneePermission,
     #[error("Write access is required to manage releases")]
     ReleasePermission,
+    #[error("{0}")]
+    RefRule(&'static str),
     #[error("A release already exists for this tag or the tag points to another commit")]
     ReleaseConflict,
     #[error("Git writes are busy")]
@@ -285,6 +323,66 @@ impl IntoResponse for Error {
                 "merge_conflict",
                 "The branch tips changed or these changes conflict. Reload and review the latest commits",
             ),
+            Self::BranchUpdatePermission => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Write access is required to update the head branch",
+            ),
+            Self::BranchUpdateChanged => (
+                StatusCode::CONFLICT,
+                "branch_update_changed",
+                "The pull request or branch tips changed. Refresh the comparison before updating",
+            ),
+            Self::BranchUpdateDestination => (
+                StatusCode::CONFLICT,
+                "branch_update_destination",
+                "Choose an unused replacement branch name",
+            ),
+            Self::BranchUpdateConflict => (
+                StatusCode::CONFLICT,
+                "branch_update_conflict",
+                "The base changes conflict with the head branch",
+            ),
+            Self::UnsafeRebase => (
+                StatusCode::CONFLICT,
+                "unsafe_rebase",
+                "Crab could not replay these commits without changing the merge result. Rebase the topic branch in Git or choose another merge method",
+            ),
+            Self::MergeQueued => (
+                StatusCode::CONFLICT,
+                "merge_queued",
+                "Remove the pull request from the merge queue before editing its candidate or merging it directly",
+            ),
+            Self::MergeQueueRequired => (
+                StatusCode::CONFLICT,
+                "merge_queue_required",
+                "This branch requires the merge queue. Add the pull request to the queue to merge it",
+            ),
+            Self::AutoMergeDisabled => (
+                StatusCode::CONFLICT,
+                "auto_merge_disabled",
+                "Auto-merge is disabled for this repository or merge method",
+            ),
+            Self::AutoMergeChanged => (
+                StatusCode::CONFLICT,
+                "auto_merge_changed",
+                "The auto-merge request or comparison changed. Refresh the pull request",
+            ),
+            Self::MergeMethodDisabled => (
+                StatusCode::CONFLICT,
+                "merge_method_disabled",
+                "This merge method is disabled. Refresh to select an enabled method",
+            ),
+            Self::MergeMethodsChanged => (
+                StatusCode::CONFLICT,
+                "merge_methods_changed",
+                "Merge methods changed. Reload the settings and try again",
+            ),
+            Self::MergeSettingsPermission => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Administrator access is required to manage merge methods",
+            ),
             Self::MergeBusy => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "busy",
@@ -305,10 +403,30 @@ impl IntoResponse for Error {
                 "pull_draft",
                 "Draft pull requests must be marked ready before merging",
             ),
+            Self::MergeBypassUnavailable => (
+                StatusCode::CONFLICT,
+                "ruleset_bypass_unavailable",
+                "The requested ruleset bypass is unavailable. Refresh the pull request",
+            ),
+            Self::MergeUnresolvedConversations => (
+                StatusCode::CONFLICT,
+                "unresolved_conversations",
+                "Resolve all review conversations before merging",
+            ),
+            Self::MergeHeadBehind => (
+                StatusCode::CONFLICT,
+                "head_branch_behind",
+                "Update the head branch with the latest base commit before merging",
+            ),
             Self::MergeBlocked => (
                 StatusCode::CONFLICT,
                 "merge_blocked",
                 "Required reviews or status checks are not satisfied",
+            ),
+            Self::MergeCandidateChecks => (
+                StatusCode::CONFLICT,
+                "merge_candidate_checks",
+                "Configure required checks on the base branch and pass them on the merge candidate",
             ),
             Self::StatusPermission => (
                 StatusCode::FORBIDDEN,
@@ -371,6 +489,7 @@ impl IntoResponse for Error {
                 "forbidden",
                 "Triage access is required to manage assignees",
             ),
+            Self::RefRule(message) => (StatusCode::FORBIDDEN, "repository_ruleset", *message),
             Self::ReleasePermission => (
                 StatusCode::FORBIDDEN,
                 "forbidden",
@@ -430,6 +549,16 @@ impl IntoResponse for Error {
                 "repository_changed",
                 "This repository was replaced; reload before starting another action. An earlier action may have completed in the original repository",
             ),
+            Self::RepositoryNameUnavailable => (
+                StatusCode::CONFLICT,
+                "repository_name_unavailable",
+                "The repository name or creation request is already in use",
+            ),
+            Self::RepositorySetup(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "repository_setup",
+                "Repository setup is incomplete. Retry the same submission to continue",
+            ),
             Self::RequestConflict => (
                 StatusCode::CONFLICT,
                 "submission_conflict",
@@ -455,6 +584,11 @@ impl IntoResponse for Error {
                     StatusCode::BAD_REQUEST,
                     "creation_rejected",
                     "The initial milestone is no longer available",
+                ),
+                crate::cells::repository::collaboration::creation::Failure::ComparisonChanged => (
+                    StatusCode::CONFLICT,
+                    "comparison_changed",
+                    "A branch moved or was deleted. Review the updated comparison before creating the pull request",
                 ),
             },
             Self::ReviewIndexPending => (
@@ -606,6 +740,90 @@ pub(crate) fn repository(
 pub(crate) struct Membership {
     pub members: Vec<crate::RepositoryMember>,
     pub principal: Principal,
+    pub organization: Option<uuid::Uuid>,
+    pub(crate) teams: Vec<crate::catalog::RepositoryTeam>,
+    pub(crate) review_teams: Vec<uuid::Uuid>,
+    organization_owner: bool,
+    bypass_teams: Vec<uuid::Uuid>,
+    organization_bypass_teams: Vec<uuid::Uuid>,
+}
+
+impl Membership {
+    pub(crate) fn bypass_context(
+        &self,
+        repository: uuid::Uuid,
+    ) -> crate::cells::repository::rulesets::BypassContext<'_> {
+        crate::cells::repository::rulesets::BypassContext {
+            role: if self.organization_owner && self.principal.import_grant().is_some() {
+                // The intake credential writes only the pinned quarantine. Use
+                // the live owner role solely when evaluating inherited rules.
+                Some(crate::RepositoryAccess::Admin)
+            } else {
+                self.principal.write_role(repository)
+            },
+            organization_owner: self.organization_owner,
+            teams: &self.bypass_teams,
+            organization_teams: &self.organization_bypass_teams,
+        }
+    }
+
+    pub(crate) async fn durable_members(
+        &self,
+        server: &Server,
+    ) -> Result<Vec<crate::RepositoryMember>> {
+        let mut members = self.members.clone();
+        if let Some(organization) = self.organization {
+            for inherited in crate::repository::access::organization_members(
+                server,
+                organization,
+                &self.teams,
+                Some(&self.principal),
+            )
+            .await?
+            {
+                if let Some(member) = members
+                    .iter_mut()
+                    .find(|member| member.subject == inherited.subject)
+                {
+                    member.access = member.access.max(inherited.access);
+                } else {
+                    members.push(inherited);
+                }
+            }
+        }
+        Ok(members)
+    }
+
+    pub(crate) async fn merge_reviewers(
+        &self,
+        server: &Server,
+    ) -> Result<crate::cells::repository::MergeReviewers> {
+        use crate::cells::repository::MergeReviewers;
+        if self.principal.is_local() {
+            let operator = actor(&self.principal)?;
+            return Ok(MergeReviewers {
+                issuer: operator.issuer,
+                subjects: vec![operator.subject],
+            });
+        }
+        let issuer = server
+            .auth
+            .as_ref()
+            .ok_or(Error::NotFound)?
+            .issuer()
+            .to_owned();
+        // Only a current durable Write or Admin grant can qualify another
+        // actor. OIDC group claims are evidence local to their own session.
+        let mut subjects = self
+            .durable_members(server)
+            .await?
+            .into_iter()
+            .filter(|member| member.access >= crate::RepositoryAccess::Write)
+            .map(|member| member.subject)
+            .collect::<Vec<_>>();
+        subjects.sort_unstable();
+        Ok(MergeReviewers { issuer, subjects })
+    }
 }
 
 pub(crate) async fn membership(
@@ -613,16 +831,29 @@ pub(crate) async fn membership(
     principal: &Principal,
     repo: &Repository,
 ) -> Result<Membership> {
-    if principal.is_local() {
+    if principal.is_local() || principal.import_grant().is_some() {
         if !principal.can_read(repo.id) {
             return Err(Error::NotFound);
         }
+        let organization_owner = if let Some(grant) = principal.import_grant() {
+            if !grant.active(server).await {
+                return Err(Error::NotFound);
+            }
+            grant.has_organization_owner()
+        } else {
+            false
+        };
         return Ok(Membership {
             members: Vec::new(),
             principal: principal.clone(),
+            organization: repo.organization,
+            teams: Vec::new(),
+            review_teams: Vec::new(),
+            organization_owner,
+            bypass_teams: Vec::new(),
+            organization_bypass_teams: Vec::new(),
         });
     }
-    let issuer = server.auth.as_ref().ok_or(Error::NotFound)?.issuer();
     let snapshot = server
         .catalog()
         .ok_or(Error::NotFound)?
@@ -632,19 +863,69 @@ pub(crate) async fn membership(
             crate::catalog::CatalogError::NotFound => Error::NotFound,
             error => Error::Membership(Box::new(error)),
         })?;
-    if snapshot.repository_id != repo.id {
+    let current = membership_snapshot(server, principal, repo, snapshot).await?;
+    if !current.principal.can_read(repo.id) {
         return Err(Error::NotFound);
     }
+    Ok(current)
+}
+
+pub(crate) async fn membership_snapshot(
+    server: &Server,
+    principal: &Principal,
+    repo: &Repository,
+    snapshot: crate::catalog::MembershipSnapshot,
+) -> Result<Membership> {
+    if snapshot.repository_id != repo.id || snapshot.organization != repo.organization {
+        return Err(Error::NotFound);
+    }
+    if principal.is_local() {
+        return Ok(Membership {
+            members: snapshot.members,
+            principal: principal.clone(),
+            organization: None,
+            teams: Vec::new(),
+            review_teams: Vec::new(),
+            organization_owner: false,
+            bypass_teams: Vec::new(),
+            organization_bypass_teams: Vec::new(),
+        });
+    }
+    let issuer = server.auth.as_ref().ok_or(Error::NotFound)?.issuer();
+    let grant = if let Some(organization) = snapshot.organization {
+        crate::repository::access::organization_grants(
+            server,
+            principal,
+            [(organization, !snapshot.teams.is_empty())].into(),
+        )
+        .await?
+        .remove(&organization)
+    } else {
+        None
+    };
     let mut config = repo.config.clone();
     config.members = snapshot.members;
     config.groups = snapshot.groups;
-    let principal = principal.with_membership(repo.id, &config, issuer);
-    if !principal.can_read(repo.id) {
-        return Err(Error::NotFound);
-    }
+    let inherited = grant
+        .as_ref()
+        .and_then(|grant| crate::repository::access::organization_access(grant, &snapshot.teams));
+    let principal = principal.with_membership(repo.id, &config, issuer, inherited);
+    let grant = grant.unwrap_or_default();
+    let mut review_teams = grant.teams;
+    let mut bypass_teams = grant.bypass_teams.clone();
+    // A bypass actor still needs a current repository grant and active,
+    // non-secret membership. This applies to refreshed Git credentials too.
+    bypass_teams.retain(|id| snapshot.teams.iter().any(|grant| grant.team == *id));
+    review_teams.retain(|id| snapshot.teams.iter().any(|grant| grant.team == *id));
     Ok(Membership {
         members: config.members,
         principal,
+        organization: snapshot.organization,
+        teams: snapshot.teams,
+        review_teams,
+        organization_owner: grant.owner,
+        bypass_teams,
+        organization_bypass_teams: grant.bypass_teams,
     })
 }
 

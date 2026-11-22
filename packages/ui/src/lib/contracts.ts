@@ -11,7 +11,7 @@ export type SessionMode = "local" | "oidc" | "github";
 export type Session = { authenticated: boolean, mode: SessionMode, user: SessionIdentity | null, csrf: string | null, };
 
 // prettier-ignore
-export type BranchProtection = { branch: string, required_approvals: number, required_checks: Array<string>, };
+export type BranchProtection = { branch: string, required_approvals: number, required_code_owner_reviews?: boolean, require_conversation_resolution?: boolean, require_up_to_date?: boolean, require_merge_queue?: boolean, required_checks: Array<string>, required_integrations?: Array<string>, };
 
 // prettier-ignore
 export type FilePreviewState = { "state": "inline", text: string, } | { "state": "omitted_size" } | { "state": "binary" } | { "state": "unsupported_encoding" };

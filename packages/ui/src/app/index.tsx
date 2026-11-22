@@ -19,6 +19,8 @@ import { Spinner } from "@/components/ui/spinner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { GitAccess } from "@/features/git-access";
 import { GitImport } from "@/features/imports";
+import { Inbox } from "@/features/inbox";
+import { CreateRepository } from "@/features/repository/create";
 import { gitOwnerSuggestion } from "@/features/imports/source";
 import {
   OrganizationPage,
@@ -29,7 +31,7 @@ import {
   useTeamCommands,
 } from "@/features/organizations/teams/commands";
 import { ProfileSettings, UserProfile } from "@/features/profile";
-import { LogOutIcon, UserRoundIcon } from "lucide-react";
+import { BellIcon, LogOutIcon, UserRoundIcon } from "lucide-react";
 import { RepositoryPage } from "@/features/repository/page";
 import type { Session } from "@/lib/contracts";
 import { navigate, useLocation, useRequest, type Repository } from "@/lib/api";
@@ -116,6 +118,7 @@ export function App() {
   }, [codeTheme, resolved]);
   const url = new URL(location, window.location.origin);
   const profileSettings = url.pathname === "/-/profile";
+  const inboxRoute = url.pathname === "/-/inbox";
   const actorId =
     /^\/-\/users\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(
       url.pathname,
@@ -125,7 +128,7 @@ export function App() {
       url.pathname,
     );
   const route =
-    profileSettings || actorId || organizationRoute
+    profileSettings || inboxRoute || actorId || organizationRoute
       ? undefined
       : repositoryRoute(url);
   const projectWorkspace = organizationRoute?.[2]?.startsWith("/projects")
@@ -139,6 +142,7 @@ export function App() {
       : session.data.user
         ? JSON.stringify([session.data.user.issuer, session.data.user.subject])
         : null;
+  const importAccount = teamAccount ?? "local";
   const teamCommands = useTeamCommands(session.data?.csrf ?? "", teamAccount);
   const [signingOut, setSigningOut] = useState(false);
   const [sessionError, setSessionError] = useState<string>();
@@ -193,10 +197,12 @@ export function App() {
   useEffect(() => {
     document.title = repo
       ? `${repo.owner}/${repo.name} · Crab`
-      : projectWorkspace
-        ? "Projects · Crab"
-        : "Repositories · Crab";
-  }, [repo, projectWorkspace]);
+      : inboxRoute
+        ? "Notifications · Crab"
+        : projectWorkspace
+          ? "Projects · Crab"
+          : "Repositories · Crab";
+  }, [repo, inboxRoute, projectWorkspace]);
   useEffect(() => {
     if (!importedRepository || !catalog.data) return;
     if (
@@ -250,6 +256,22 @@ export function App() {
               </Link>
             )}
             <div className="header-actions">
+              {session.data?.authenticated && (
+                <Button
+                  asChild
+                  variant="ghost"
+                  size="icon"
+                  className="rounded-full"
+                >
+                  <Link
+                    href="/-/inbox"
+                    aria-label="Notifications"
+                    aria-current={inboxRoute ? "page" : undefined}
+                  >
+                    <BellIcon aria-hidden="true" />
+                  </Link>
+                </Button>
+              )}
               {session.data?.user && (
                 <GitAccess
                   session={session.data}
@@ -407,6 +429,8 @@ export function App() {
                   csrf={session.data.csrf ?? ""}
                 />
               )
+            ) : inboxRoute ? (
+              <Inbox csrf={session.data.csrf ?? ""} url={url} />
             ) : profileSettings ? (
               <ProfileSettings
                 csrf={session.data.csrf ?? ""}
@@ -431,24 +455,34 @@ export function App() {
                             {data.repositories.length}
                           </Badge>
                         </div>
-                        <GitImport
-                          csrf={session.data?.csrf ?? ""}
-                          defaultOwner={gitOwnerSuggestion(
-                            session.data?.user?.name,
-                          )}
-                          onImported={(repository) => {
-                            setImportedRepository(repository);
-                            catalog.retry();
-                          }}
-                        />
+                        <div className="flex flex-wrap items-start gap-2">
+                          <CreateRepository
+                            csrf={session.data?.csrf ?? ""}
+                            onCreated={(repository) =>
+                              navigate(repoHref(repository))
+                            }
+                          />
+                          <GitImport
+                            key={importAccount}
+                            account={importAccount}
+                            csrf={session.data?.csrf ?? ""}
+                            defaultOwner={gitOwnerSuggestion(
+                              session.data?.user?.name,
+                            )}
+                            onImported={(repository) => {
+                              setImportedRepository(repository);
+                              catalog.retry();
+                            }}
+                          />
+                        </div>
                       </div>
                       <p className="muted">Your code, in your storage.</p>
                       {data.repositories.length === 0 && (
                         <div className="notice">
                           <h2>No repositories available</h2>
                           <p>
-                            Ask your administrator to grant access to your
-                            account.
+                            Create a repository, import one from Git, or ask an
+                            administrator for access to an existing repository.
                           </p>
                           {session.data?.user && (
                             <p className="muted">

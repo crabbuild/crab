@@ -1,5 +1,24 @@
 use super::*;
 
+fn head_repository_key(number: u64) -> String {
+    format!("collaboration/v1/pulls/{number:016x}/head-repository")
+}
+
+pub(super) fn store_head_repository(
+    context: &Transaction<'_>,
+    number: u64,
+    repository: uuid::Uuid,
+) -> crate::cells::Result<()> {
+    context.put_document(&head_repository_key(number), &repository)
+}
+
+pub(super) fn head_repository(
+    context: &Transaction<'_>,
+    number: u64,
+) -> crate::cells::Result<Option<uuid::Uuid>> {
+    context.document(&head_repository_key(number))
+}
+
 pub(super) fn insert_pull_statement(record: &PullRecord) -> crate::cells::Result<SqlStatement> {
     Ok(statement(
         "INSERT INTO repository_pulls(number, create_request_id, author_issuer, author_subject, author_name, title, body, state, base_ref, base_oid, head_ref, head_oid, label_ids, assignees, pending_merge, completed_merge, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -133,7 +152,9 @@ fn pull_from_rows(
         state: PullState::from_code(result_u64_from_row(row, 7)?)?,
         base_ref: result_text(row, 8)?,
         base_oid: result_text(row, 9)?,
+        retargeted_base: base::snapshot(context, number)?,
         head_ref: result_text(row, 10)?,
+        head_repository: head_repository(context, number)?,
         head_oid: result_text(row, 11)?,
         label_ids: decode_label_ids(result_blob(row, 12)?)?,
         assignees: assignments::decode(result_blob(row, 13)?)?,

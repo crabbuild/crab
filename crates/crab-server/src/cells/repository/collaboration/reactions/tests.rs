@@ -178,6 +178,7 @@ async fn every_discussion_target_is_scoped_to_its_parent() {
     write::<CreatePull>(
         &cell,
         CreatePullInput {
+            code_owner_requests: Default::default(),
             metadata: Default::default(),
             draft: false,
             submission_id: *Uuid::now_v7().as_bytes(),
@@ -186,6 +187,7 @@ async fn every_discussion_target_is_scoped_to_its_parent() {
             body: String::new(),
             base_ref: "refs/heads/main".into(),
             head_ref: "refs/heads/feature".into(),
+            head_repository: None,
             base_oid: "a".repeat(40),
             head_oid: "b".repeat(40),
         },
@@ -204,6 +206,8 @@ async fn every_discussion_target_is_scoped_to_its_parent() {
     write::<CreatePullReview>(
         &cell,
         CreatePullReviewInput {
+            base_revision: None,
+            review_teams: Vec::new(),
             pull: 1,
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor("bob"),

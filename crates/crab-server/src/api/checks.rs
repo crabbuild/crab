@@ -139,6 +139,7 @@ struct CheckEdit {
 struct ListParams {
     limit: Option<usize>,
     before: Option<u64>,
+    pull: Option<u64>,
 }
 
 pub(crate) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
@@ -266,6 +267,8 @@ fn run_view(run: &CheckRun) -> Value {
         "details_url":run.details_url,
         "output_title":run.output_title,
         "author":run.author.name,
+        "provider":if run.integration_id().is_some() { "github_actions" } else { "crab" },
+        "integration_id":run.integration_id(),
         "version":run.version,
         "started_at":run.started_at,
         "completed_at":run.completed_at,
@@ -284,6 +287,7 @@ async fn create(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path(key): Path<(String, String)>,
+    Query(scope): Query<statuses::CommitScope>,
     input: std::result::Result<Json<NewCheckRun>, JsonRejection>,
 ) -> Result<impl IntoResponse> {
     let repo = app::repository(&server, &principal, &key)?;
@@ -336,7 +340,7 @@ async fn create(
         return Ok((StatusCode::CREATED, Json(detail_view(&run, &output)?)));
     }
 
-    input.head_sha = statuses::require_commit(&server, repo, parsed_oid).await?;
+    input.head_sha = scope.require_commit(&server, repo, parsed_oid).await?;
     if !principal.can_write(repo.id) {
         return Err(Error::CheckPermission);
     }
@@ -363,7 +367,9 @@ async fn list(
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let repo = repo.as_ref();
-    let oid = statuses::require_commit(&server, repo, statuses::parse_oid(&oid)?).await?;
+    let oid = statuses::CommitScope { pull: params.pull }
+        .require_commit(&server, repo, statuses::parse_oid(&oid)?)
+        .await?;
     let limit = params.limit.unwrap_or(30);
     if !(1..=50).contains(&limit)
         || params
@@ -407,10 +413,13 @@ async fn detail(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path((owner, name, oid, number)): Path<(String, String, String, u64)>,
+    Query(scope): Query<statuses::CommitScope>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let repo = repo.as_ref();
-    let oid = statuses::require_commit(&server, repo, statuses::parse_oid(&oid)?).await?;
+    let oid = scope
+        .require_commit(&server, repo, statuses::parse_oid(&oid)?)
+        .await?;
     app::actor(&principal)?;
     let routed = crate::app::repository_cell(&server, repo)?;
     let detail = crate::app::query_output(
@@ -435,6 +444,7 @@ async fn edit(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path((owner, name, oid, number)): Path<(String, String, String, u64)>,
+    Query(scope): Query<statuses::CommitScope>,
     input: std::result::Result<Json<CheckEdit>, JsonRejection>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
@@ -484,7 +494,7 @@ async fn edit(
         return Ok(Json(detail_view(&run, &output)?));
     }
 
-    let oid = statuses::require_commit(&server, repo, parsed_oid).await?;
+    let oid = scope.require_commit(&server, repo, parsed_oid).await?;
     if !principal.can_write(repo.id) {
         return Err(Error::CheckPermission);
     }
@@ -522,9 +532,10 @@ pub(crate) async fn latest(server: &Server, repo: &Repository, oid: &str) -> Res
     let mut latest = Vec::new();
     for record in page.runs {
         let run = check_run(record)?;
-        if latest
-            .iter()
-            .all(|current: &CheckRun| !statuses::same_context(&current.name, &run.name))
+        if run.integration_id().is_none()
+            && latest
+                .iter()
+                .all(|current: &CheckRun| !statuses::same_context(&current.name, &run.name))
         {
             latest.push(run);
         }
@@ -534,7 +545,21 @@ pub(crate) async fn latest(server: &Server, repo: &Repository, oid: &str) -> Res
 }
 
 impl CheckRun {
+    pub(crate) fn integration_id(&self) -> Option<Uuid> {
+        crate::cells::repository::integrations::github_connection(
+            &self.author.issuer,
+            &self.author.subject,
+        )
+    }
+
     pub(crate) fn requirement_state(&self) -> statuses::StatusState {
+        if self.integration_id().is_some() && self.status == CheckStatus::Completed {
+            return if self.conclusion == Some(CheckConclusion::Success) {
+                statuses::StatusState::Success
+            } else {
+                statuses::StatusState::Failure
+            };
+        }
         match (self.status, self.conclusion) {
             (CheckStatus::Queued | CheckStatus::InProgress, _) => statuses::StatusState::Pending,
             (
@@ -637,7 +662,7 @@ fn check_detail(detail: CheckRunDetail) -> Result<(CheckRun, CheckOutput)> {
     Ok((check_run(detail.run)?, check_output(detail.output)?))
 }
 
-fn check_run(record: CheckRunRecord) -> Result<CheckRun> {
+pub(super) fn check_run(record: CheckRunRecord) -> Result<CheckRun> {
     Ok(CheckRun {
         number: record.number,
         request_id: Uuid::from_bytes(record.create_submission_id).to_string(),
@@ -728,7 +753,7 @@ fn same_author(left: &Identity, right: &Identity) -> bool {
     left.issuer == right.issuer && left.subject == right.subject
 }
 
-fn status_code(status: CheckStatus) -> u8 {
+pub(super) fn status_code(status: CheckStatus) -> u8 {
     match status {
         CheckStatus::Queued => 0,
         CheckStatus::InProgress => 1,
@@ -745,7 +770,7 @@ fn check_status(status: u8) -> Result<CheckStatus> {
     }
 }
 
-fn conclusion_code(conclusion: CheckConclusion) -> u8 {
+pub(super) fn conclusion_code(conclusion: CheckConclusion) -> u8 {
     match conclusion {
         CheckConclusion::ActionRequired => 0,
         CheckConclusion::Cancelled => 1,

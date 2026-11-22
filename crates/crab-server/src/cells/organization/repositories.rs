@@ -1,0 +1,118 @@
+use super::*;
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Creation {
+    pub actor: Uuid,
+    pub request_id: Uuid,
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) enum Authorized {
+    Accepted,
+    Conflict,
+}
+
+pub(crate) struct AuthorizeCreation;
+impl Mutation for AuthorizeCreation {
+    const CLASS: &'static str = CLASS;
+    const ID: u32 = 40;
+    type Input = Creation;
+    type Output = Authorized;
+
+    fn execute(
+        context: &mut Transaction<'_>,
+        input: Creation,
+    ) -> Result<MutationResult<Authorized>> {
+        if input.request_id.is_nil() || !valid_creation(&input.name, &input.description) {
+            return Err(Error::Invalid("invalid repository creation request"));
+        }
+        let key = format!("organization/v1/repository-creations/{}", input.request_id);
+        let digest = *blake3::hash(&serde_json::to_vec(&(
+            input.actor,
+            input.name,
+            input.description,
+        ))?)
+        .as_bytes();
+        authorize_ticket(context, &key, digest)
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ImportPublication {
+    pub actor: Uuid,
+    pub repository: Uuid,
+    pub snapshot: [u8; 32],
+    pub expected_policy: u64,
+}
+
+pub(crate) struct AuthorizeImportPublication;
+impl Mutation for AuthorizeImportPublication {
+    const CLASS: &'static str = CLASS;
+    const ID: u32 = 41;
+    type Input = ImportPublication;
+    type Output = Authorized;
+
+    fn execute(
+        context: &mut Transaction<'_>,
+        input: ImportPublication,
+    ) -> Result<MutationResult<Authorized>> {
+        if input.repository.is_nil() {
+            return Err(Error::Invalid("invalid import destination"));
+        }
+        if input.expected_policy != super::rulesets::version(context)? {
+            return Err(Error::Invalid(
+                "organization rules changed during import publication",
+            ));
+        }
+        // Another current owner can recover this decision for the exact same
+        // repository and verified refs after the original owner leaves.
+        let key = format!("organization/v1/import-publications/{}", input.repository);
+        authorize_ticket(context, &key, input.snapshot)
+    }
+}
+
+fn authorize_ticket(
+    context: &mut Transaction<'_>,
+    key: &str,
+    digest: [u8; 32],
+) -> Result<MutationResult<Authorized>> {
+    if let Some(existing) = context.document::<[u8; 32]>(key)? {
+        return Ok(if existing == digest {
+            MutationResult::Success(Authorized::Accepted)
+        } else {
+            MutationResult::Rejected(Authorized::Conflict)
+        });
+    }
+    // The dispatcher checks current owner authority in this transaction,
+    // before the durable decision or a replay can authorize publication.
+    context.put_document(key, &digest)?;
+    Ok(MutationResult::Success(Authorized::Accepted))
+}
+
+pub(crate) fn valid_creation(name: &str, description: &str) -> bool {
+    crate::config::valid_repository_component(name)
+        && description.chars().count() <= 350
+        && !description.chars().any(char::is_control)
+}
+
+pub(crate) struct Owners;
+impl Read for Owners {
+    const CLASS: &'static str = CLASS;
+    const ID: u32 = 40;
+    type Input = ();
+    type Output = Vec<Uuid>;
+
+    fn execute(context: &mut Transaction<'_>, _: ()) -> Result<Self::Output> {
+        context.query("SELECT actor FROM organization_members WHERE role = 'owner' AND active = 1 ORDER BY actor", &[])?
+            .rows.iter().map(|row| {
+                let [id] = row.as_slice() else {
+                    return Err(Error::Invalid("invalid organization owner record"));
+                };
+                uuid(id)
+            }).collect()
+    }
+}

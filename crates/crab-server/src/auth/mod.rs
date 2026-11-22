@@ -224,6 +224,7 @@ pub(crate) struct Authentication {
     git_tokens: Mutex<HashMap<Key, Arc<GitToken>>>,
     state: AuthState,
     cursor_key: [u8; 32],
+    webhook_key: Option<[u8; 32]>,
     admission: Semaphore,
     logout_admission: Semaphore,
 }
@@ -253,15 +254,21 @@ impl Authentication {
                 Ok(ClientSecret::new(text.to_owned()))
             })
             .transpose()?;
-        let cursor_key = match &config.state_key_file {
+        let (cursor_key, webhook_key) = match &config.state_key_file {
             Some(path) => {
                 let secret = std::fs::read(path).map_err(AuthError::provider)?;
                 if secret.len() < 32 {
                     return Err(AuthError::Invalid);
                 }
-                blake3::derive_key("crab http server state key v1", &secret)
+                (
+                    blake3::derive_key("crab http server state key v1", &secret),
+                    Some(blake3::derive_key(
+                        "crab github actions webhook key v1",
+                        &secret,
+                    )),
+                )
             }
-            None => rand::random(),
+            None => (rand::random(), None),
         };
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -281,6 +288,7 @@ impl Authentication {
             git_tokens: Mutex::new(HashMap::new()),
             state,
             cursor_key,
+            webhook_key,
             admission: Semaphore::new(8),
             logout_admission: Semaphore::new(4),
         })
@@ -296,6 +304,10 @@ impl Authentication {
 
     pub(crate) fn cursor_key(&self) -> [u8; 32] {
         self.cursor_key
+    }
+
+    pub(crate) fn webhook_key(&self) -> Option<&[u8; 32]> {
+        self.webhook_key.as_ref()
     }
 
     pub fn origin(&self) -> String {

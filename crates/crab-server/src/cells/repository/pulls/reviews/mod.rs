@@ -16,12 +16,25 @@ impl Mutation for CreatePullReview {
         context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
+        Self::write(context, input, false)
+    }
+}
+
+impl CreatePullReview {
+    fn write(
+        context: &mut Transaction<'_>,
+        input: CreatePullReviewInput,
+        has_comments: bool,
+    ) -> crate::cells::Result<MutationResult<CreatePullReviewOutcome>> {
         if settings::archived(context)? {
             return Ok(MutationResult::Rejected(CreatePullReviewOutcome::Archived));
         }
         validate_number(input.pull)?;
         validate_author(&input.author)?;
-        validate_body(&input.body, input.state != ReviewState::Approved)?;
+        validate_body(
+            &input.body,
+            input.state != ReviewState::Approved && !has_comments,
+        )?;
         validate_oid(&input.commit_oid)?;
         let digest = pull_child_digest(
             b"crab.repository.pull-review-submission.v1\0",
@@ -31,6 +44,14 @@ impl Mutation for CreatePullReview {
             Some(input.state.code()),
             Some(&input.commit_oid),
         );
+        let digest = if let Some(revision) = input.base_revision {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(digest.as_bytes());
+            hasher.update(&revision.to_be_bytes());
+            hasher.finalize()
+        } else {
+            digest
+        };
         let existing = context.sql(&SqlBatch { statements: vec![statement("SELECT payload_digest, review_number FROM repository_pull_review_submissions WHERE pull_number = ? AND request_id = ?", vec![integer(input.pull)?, SqlValue::Blob(input.submission_id.to_vec())])] })?;
         if let Some(row) = existing[0].rows.first() {
             if result_blob(row, 0)? != digest.as_bytes() {
@@ -66,6 +87,11 @@ impl Mutation for CreatePullReview {
         if pull.merge_pending.is_some() {
             return Ok(MutationResult::Rejected(
                 CreatePullReviewOutcome::MergePending,
+            ));
+        }
+        if input.base_revision != pull.retargeted_base.as_ref().map(|base| base.revision) {
+            return Ok(MutationResult::Rejected(
+                CreatePullReviewOutcome::ComparisonChanged,
             ));
         }
         if input.state != ReviewState::Commented && same_author(&pull.author, &input.author) {
@@ -123,10 +149,12 @@ impl Mutation for CreatePullReview {
             ),
         ];
         let fulfilled_request = review_requests::fulfill(context, &record)?;
+        let fulfilled_team =
+            review_requests::teams::fulfill_teams(context, &pull, &record, &input.review_teams)?;
         if record.state != ReviewState::Commented {
             statements.push(statement("INSERT INTO repository_pull_review_decisions(pull_number, author_issuer, author_subject, review_number, author_name, state, commit_oid) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(pull_number, author_issuer, author_subject) DO UPDATE SET review_number = excluded.review_number, author_name = excluded.author_name, state = excluded.state, commit_oid = excluded.commit_oid", vec![integer(record.pull)?, SqlValue::Text(record.author.issuer.clone()), SqlValue::Text(record.author.subject.clone()), integer(record.number)?, SqlValue::Text(record.author.name.clone()), SqlValue::Integer(i64::from(record.state.code())), SqlValue::Text(record.commit_oid.clone())]));
         }
-        if record.state != ReviewState::Commented || fulfilled_request {
+        if record.state != ReviewState::Commented || fulfilled_request || fulfilled_team {
             pull.version = next_version(pull.version)?;
             pull.updated_at_ms = now;
             statements.push(statement("UPDATE repository_pulls SET version = ?, updated_at_ms = ? WHERE number = ? AND version = ?", vec![integer(pull.version)?, integer(now)?, integer(pull.number)?, integer(pull.version - 1)?]));
@@ -156,7 +184,7 @@ impl Mutation for CreatePullReview {
             &record.author,
             &record.body,
         )?;
-        activity::append(context, target, &record.author, action)?;
+        activity::append_content(context, target, &record.author, action, &record.body)?;
         Ok(MutationResult::Success(CreatePullReviewOutcome::Created(
             record,
         )))
@@ -204,7 +232,7 @@ impl Mutation for UpdatePullReview {
                 number: record.number,
             };
             crate::cells::repository::search::contributions::edit(context, target, &record.body)?;
-            activity::append(context, target, &input.actor, Action::Updated)?;
+            activity::append_content(context, target, &input.actor, Action::Updated, &record.body)?;
         }
         Ok(MutationResult::Success(UpdatePullReviewOutcome::Updated(
             record,
@@ -278,3 +306,4 @@ impl Read for GetPullReviewSubmission {
 }
 
 pub(crate) mod dismissals;
+pub(crate) mod pending;

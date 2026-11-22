@@ -159,7 +159,8 @@ async fn reasons_dates_history_and_receipt_replay_share_the_issue_transaction() 
     assert!(matches!(
         history[1].action,
         Action::IssueClosed {
-            reason: Reason::Completed
+            reason: Reason::Completed,
+            pull: None,
         }
     ));
     let reopened = changed(&cell, update(&closed, Some(0), None)).await;
@@ -403,6 +404,7 @@ async fn reason_search_counts_boolean_expressions_and_cursors_use_canonical_meta
     write::<CreatePull>(
         &cell,
         CreatePullInput {
+            code_owner_requests: Default::default(),
             metadata: Default::default(),
             draft: false,
             submission_id: *Uuid::now_v7().as_bytes(),
@@ -411,6 +413,7 @@ async fn reason_search_counts_boolean_expressions_and_cursors_use_canonical_meta
             body: "".into(),
             base_ref: "refs/heads/main".into(),
             head_ref: "refs/heads/feature".into(),
+            head_repository: None,
             base_oid: "a".repeat(40),
             head_oid: "b".repeat(40),
         },

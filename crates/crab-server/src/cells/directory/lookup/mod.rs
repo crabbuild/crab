@@ -94,6 +94,40 @@ impl Read for LookupProfiles {
     }
 }
 
+pub(crate) struct LookupIdentities;
+impl Read for LookupIdentities {
+    const CLASS: &'static str = super::CLASS;
+    const ID: u32 = 15;
+    type Input = Vec<Uuid>;
+    type Output = Vec<Option<IdentityKey>>;
+
+    fn execute(context: &mut Transaction<'_>, ids: Self::Input) -> Result<Self::Output> {
+        if ids.len() > 100 || ids.iter().any(Uuid::is_nil) {
+            return Err(Error::Invalid(
+                "Identity lookup requires at most 100 valid actor IDs",
+            ));
+        }
+        ids.into_iter()
+            .map(|id| {
+                let rows = context.query(
+                    "SELECT issuer, subject FROM accounts WHERE id = ?",
+                    &[SqlValue::Blob(id.as_bytes().to_vec())],
+                )?;
+                match rows.rows.first().map(Vec::as_slice) {
+                    Some([SqlValue::Text(issuer), SqlValue::Text(subject)]) => {
+                        Ok(Some(IdentityKey {
+                            issuer: issuer.clone(),
+                            subject: subject.clone(),
+                        }))
+                    }
+                    None => Ok(None),
+                    _ => Err(Error::Invalid("Account identity record is invalid")),
+                }
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests;
 

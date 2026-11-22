@@ -128,7 +128,7 @@ async fn token_permissions_intersect_repository_membership_and_requested_scope()
             .unwrap()
             .config
             .clone();
-        let resolved = principal.with_membership(repository_id, &config, &h.provider.issuer);
+        let resolved = principal.with_membership(repository_id, &config, &h.provider.issuer, None);
         assert_eq!(
             (
                 resolved.can_read(repository_id),
@@ -139,7 +139,7 @@ async fn token_permissions_intersect_repository_membership_and_requested_scope()
         for member in &mut config.members {
             member.access = crate::RepositoryAccess::Read;
         }
-        let resolved = principal.with_membership(repository_id, &config, &h.provider.issuer);
+        let resolved = principal.with_membership(repository_id, &config, &h.provider.issuer, None);
         assert_eq!(
             (
                 resolved.can_read(repository_id),
@@ -150,21 +150,21 @@ async fn token_permissions_intersect_repository_membership_and_requested_scope()
         config.name = "another".into();
         assert!(
             !principal
-                .with_membership(repository_id, &config, &h.provider.issuer)
+                .with_membership(repository_id, &config, &h.provider.issuer, None)
                 .can_read(repository_id)
         );
         config.name = "private".into();
         config.owner = "another".into();
         assert!(
             !principal
-                .with_membership(repository_id, &config, &h.provider.issuer)
+                .with_membership(repository_id, &config, &h.provider.issuer, None)
                 .can_read(repository_id)
         );
         config.owner = "team".into();
         config.members.clear();
         assert!(
             !principal
-                .with_membership(repository_id, &config, &h.provider.issuer)
+                .with_membership(repository_id, &config, &h.provider.issuer, None)
                 .can_read(repository_id)
         );
     }

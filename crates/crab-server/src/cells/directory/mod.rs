@@ -22,7 +22,7 @@ mod search;
 pub(crate) use search::{CompleteHandles, ResolveHandles, validate_handle_prefix};
 mod profiles;
 pub(crate) use lookup::{
-    AccountsExist, ActorSummary, LookupAccounts, LookupActors, LookupProfiles,
+    AccountsExist, ActorSummary, LookupAccounts, LookupActors, LookupIdentities, LookupProfiles,
 };
 pub(crate) use profiles::{
     CreateProfile, CreateProfileInput, EditProfile, EditProfileInput, ProfileOutcome,
@@ -220,6 +220,7 @@ pub(in crate::cells) fn dispatch_read(
         <AccountsExist as Read>::ID => invoke_read::<AccountsExist>(context, input),
         <LookupAccounts as Read>::ID => invoke_read::<LookupAccounts>(context, input),
         <LookupProfiles as Read>::ID => invoke_read::<LookupProfiles>(context, input),
+        <LookupIdentities as Read>::ID => invoke_read::<LookupIdentities>(context, input),
         #[cfg(test)]
         migration::tests::InspectSource::ID => {
             invoke_read::<migration::tests::InspectSource>(context, input)

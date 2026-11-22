@@ -89,6 +89,7 @@ fn shared_auth(store: Store) -> Authentication {
             pending_checks: Arc::default(),
         },
         cursor_key: [7; 32],
+        webhook_key: None,
         admission: Semaphore::new(1),
         logout_admission: Semaphore::new(1),
     }

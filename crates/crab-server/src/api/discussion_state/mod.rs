@@ -100,7 +100,9 @@ async fn change(
     let membership = app::membership(server, principal, &repo)
         .await
         .map_err(IntoResponse::into_response)?;
-    let routed = app::repository_cell(server, &repo).map_err(IntoResponse::into_response)?;
+    let routed = crate::api::mentions::cell(server, &repo, input.body.as_deref())
+        .await
+        .map_err(IntoResponse::into_response)?;
     let identity = app::mutation_identity().map_err(IntoResponse::into_response)?;
     let submission_id = app::submission_id(&input.request_id).map_err(rejected)?;
     let output = app::command_output(

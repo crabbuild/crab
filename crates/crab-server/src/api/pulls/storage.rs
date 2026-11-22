@@ -5,15 +5,16 @@ use crate::{
     app::{Error, Result},
     auth::Identity,
     cells::repository::{
-        CreatePull, CreatePullComment, CreatePullCommentInput, CreatePullCommentOutcome,
-        CreatePullInput, CreatePullOutcome, CreatePullReview, CreatePullReviewInput,
-        CreatePullReviewOutcome, GetPull, GetPullComment, GetPullMergeSubmission,
-        GetPullReviewSubmission, GetPullSubmission, ListPullComments, PullChildKey,
-        PullChildListInput, PullMergeTransition, PullRecord, PullSubmissionKey, ReservePullMerge,
-        ReservePullMergeInput, ReservePullMergeOutcome, TransitionPullMerge,
-        TransitionPullMergeInput, TransitionPullMergeOutcome, UpdatePull, UpdatePullComment,
-        UpdatePullCommentInput, UpdatePullCommentOutcome, UpdatePullInput, UpdatePullOutcome,
-        UpdatePullReview, UpdatePullReviewInput, UpdatePullReviewOutcome,
+        CaptureIssueClosure, CaptureIssueClosureInput, CreatePull, CreatePullComment,
+        CreatePullCommentInput, CreatePullCommentOutcome, CreatePullInput, CreatePullOutcome,
+        CreatePullReview, CreatePullReviewInput, CreatePullReviewOutcome, GetPull, GetPullComment,
+        GetPullMergeSubmission, GetPullReviewSubmission, GetPullSubmission, ListPullComments,
+        PullChildKey, PullChildListInput, PullMergeTransition, PullRecord, PullSubmissionKey,
+        RejectStalePullComparison, ReservePullMerge, ReservePullMergeInput,
+        ReservePullMergeOutcome, TransitionPullMerge, TransitionPullMergeInput,
+        TransitionPullMergeOutcome, UpdatePull, UpdatePullComment, UpdatePullCommentInput,
+        UpdatePullCommentOutcome, UpdatePullInput, UpdatePullOutcome, UpdatePullReview,
+        UpdatePullReviewInput, UpdatePullReviewOutcome,
     },
     repository::Repository,
     server::Server,
@@ -33,6 +34,10 @@ pub(super) struct PullMerge {
     pub commit_oid: String,
     pub message: String,
     pub created_at: u64,
+    pub publication_plan: Option<String>,
+    #[serde(default)]
+    pub tested_candidate: bool,
+    pub bypass_rulesets: Vec<crate::cells::repository::rulesets::RulesetId>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -57,6 +62,9 @@ pub(super) struct PullRequest {
     pub base_ref: String,
     pub base_oid: String,
     pub head_ref: String,
+    pub head_repository: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retargeted_base: Option<crate::cells::repository::pull_base::Snapshot>,
     pub head_oid: String,
     pub label_ids: Vec<u64>,
     pub assignees: Vec<crate::cells::repository::assignments::Assignee>,
@@ -81,6 +89,7 @@ pub(in crate::api) struct PullComment {
 
 pub(super) struct NewPullRequest {
     pub metadata: crate::cells::repository::collaboration::creation::Input,
+    pub code_owner_requests: crate::cells::repository::review_requests::automatic::Plan,
     pub draft: bool,
     pub author: Identity,
     pub request_id: String,
@@ -89,6 +98,7 @@ pub(super) struct NewPullRequest {
     pub base_ref: String,
     pub base_oid: String,
     pub head_ref: String,
+    pub head_repository: Option<Uuid>,
     pub head_oid: String,
 }
 
@@ -109,16 +119,29 @@ pub(super) struct NewPullReview {
     pub body: String,
     pub state: ReviewState,
     pub commit_oid: String,
+    pub base_revision: Option<u64>,
+}
+
+impl PullRequest {
+    pub(super) fn comparison_snapshot(&self) -> (&str, &str) {
+        self.retargeted_base
+            .as_ref()
+            .map_or((&self.base_oid, &self.head_oid), |base| {
+                (&base.base_oid, &base.head_oid)
+            })
+    }
 }
 
 pub(super) struct NewPullMerge {
     pub author: Identity,
     pub request_id: String,
     pub method: MergeMethod,
+    pub tested_candidate_oid: Option<String>,
     pub pull_version: u64,
     pub base_oid: String,
     pub head_oid: String,
     pub message: String,
+    pub bypass_rulesets: Vec<crate::cells::repository::rulesets::RulesetId>,
 }
 
 pub(super) struct PullDetail {
@@ -183,29 +206,36 @@ pub(super) async fn create_pull(
     server: &Server,
     repo: &Repository,
     input: NewPullRequest,
+    stale: bool,
 ) -> Result<PullRequest> {
-    let routed = crate::app::repository_cell(server, repo)?;
-    match crate::app::command_output(
+    let routed = crate::api::mentions::cell(server, repo, [input.body.as_str()]).await?;
+    let input = CreatePullInput {
+        metadata: input.metadata,
+        code_owner_requests: input.code_owner_requests,
+        draft: input.draft,
+        submission_id: submission_id(&input.request_id)?,
+        author: crate::cells::repository::RepositoryAuthor::from(&input.author),
+        title: input.title,
+        body: input.body,
+        base_ref: input.base_ref,
+        base_oid: input.base_oid,
+        head_ref: input.head_ref,
+        head_repository: input.head_repository,
+        head_oid: input.head_oid,
+    };
+    let identity = crate::app::mutation_identity()?;
+    let result = if stale {
         routed
             .client
-            .command::<CreatePull>(
-                &routed.target,
-                crate::app::mutation_identity()?,
-                CreatePullInput {
-                    metadata: input.metadata,
-                    draft: input.draft,
-                    submission_id: submission_id(&input.request_id)?,
-                    author: crate::cells::repository::RepositoryAuthor::from(&input.author),
-                    title: input.title,
-                    body: input.body,
-                    base_ref: input.base_ref,
-                    base_oid: input.base_oid,
-                    head_ref: input.head_ref,
-                    head_oid: input.head_oid,
-                },
-            )
-            .await,
-    )? {
+            .command::<RejectStalePullComparison>(&routed.target, identity, input)
+            .await
+    } else {
+        routed
+            .client
+            .command::<CreatePull>(&routed.target, identity, input)
+            .await
+    };
+    match crate::app::command_output(result)? {
         CreatePullOutcome::MetadataRejected(reason) => Err(Error::CreationRejected(reason)),
         CreatePullOutcome::Archived => Err(Error::Archived),
         CreatePullOutcome::Created(pull) => Ok(from_pull(*pull)),
@@ -219,7 +249,7 @@ pub(super) async fn update_pull(
     number: u64,
     input: PullEdit,
 ) -> Result<PullRequest> {
-    let routed = crate::app::repository_cell(server, repo)?;
+    let routed = crate::api::mentions::cell(server, repo, input.body.as_deref()).await?;
     match crate::app::command_output(
         routed
             .client
@@ -309,7 +339,7 @@ pub(super) async fn create_comment(
     request_id: String,
     body: String,
 ) -> Result<PullComment> {
-    let routed = crate::app::repository_cell(server, repo)?;
+    let routed = crate::api::mentions::cell(server, repo, [body.as_str()]).await?;
     match crate::app::command_output(
         routed
             .client
@@ -341,7 +371,7 @@ pub(super) async fn update_comment(
     version: u64,
     body: String,
 ) -> Result<PullComment> {
-    let routed = crate::app::repository_cell(server, repo)?;
+    let routed = crate::api::mentions::cell(server, repo, [body.as_str()]).await?;
     match crate::app::command_output(
         routed
             .client
@@ -439,27 +469,38 @@ pub(super) async fn review_submission(
 pub(super) async fn create_review(
     server: &Server,
     repo: &Repository,
+    principal: &crate::auth::Principal,
     pull: u64,
     input: NewPullReview,
 ) -> Result<crate::cells::repository::PullReviewRecord> {
-    let routed = crate::app::repository_cell(server, repo)?;
-    match crate::app::command_output(
+    let routed = crate::api::mentions::cell(server, repo, [input.body.as_str()]).await?;
+    let membership = crate::app::membership(server, principal, repo).await?;
+    let outcome = crate::app::command_output(
         routed
             .client
             .command::<CreatePullReview>(
                 &routed.target,
                 crate::app::mutation_identity()?,
                 CreatePullReviewInput {
+                    review_teams: membership.review_teams,
                     pull,
                     submission_id: submission_id(&input.request_id)?,
                     author: crate::cells::repository::RepositoryAuthor::from(&input.author),
                     body: input.body,
                     state: input.state,
                     commit_oid: input.commit_oid,
+                    base_revision: input.base_revision,
                 },
             )
             .await,
-    )? {
+    )?;
+    review_result(outcome)
+}
+
+pub(super) fn review_result(
+    outcome: CreatePullReviewOutcome,
+) -> Result<crate::cells::repository::PullReviewRecord> {
+    match outcome {
         CreatePullReviewOutcome::Archived => Err(Error::Archived),
         CreatePullReviewOutcome::Created(review) => Ok(review),
         CreatePullReviewOutcome::PullNotFound => Err(Error::NotFound),
@@ -472,6 +513,7 @@ pub(super) async fn create_review(
             "Pull requests support at most 96 review decisions",
         )),
         CreatePullReviewOutcome::RequestConflict => Err(Error::RequestConflict),
+        CreatePullReviewOutcome::ComparisonChanged => Err(Error::Conflict),
     }
 }
 
@@ -484,7 +526,7 @@ pub(super) async fn update_review(
     version: u64,
     body: String,
 ) -> Result<crate::cells::repository::PullReviewRecord> {
-    let routed = crate::app::repository_cell(server, repo)?;
+    let routed = crate::api::mentions::cell(server, repo, [body.as_str()]).await?;
     match crate::app::command_output(
         routed
             .client
@@ -542,9 +584,10 @@ pub(super) async fn reserve_merge(
     input: &NewPullMerge,
     commit_oid: gix_hash::ObjectId,
     created_at: u64,
+    publication_plan: String,
 ) -> Result<PullMerge> {
     let routed = crate::app::repository_cell(server, repo)?;
-    let merge = to_merge(input, commit_oid.to_string(), created_at)?;
+    let merge = to_merge(input, commit_oid.to_string(), created_at, publication_plan)?;
     match crate::app::command_output(
         routed
             .client
@@ -590,6 +633,33 @@ pub(super) async fn complete_merge(
     transition_merge(server, repo, pull, record, PullMergeTransition::Complete).await
 }
 
+pub(super) async fn capture_issue_closure(
+    server: &Server,
+    repo: &Repository,
+    pull: u64,
+    record: &PullMerge,
+    on_default: bool,
+) -> Result<()> {
+    let routed = crate::app::repository_cell(server, repo)?;
+    if !crate::app::command_output(
+        routed
+            .client
+            .command::<CaptureIssueClosure>(
+                &routed.target,
+                crate::app::mutation_identity()?,
+                CaptureIssueClosureInput {
+                    pull,
+                    request_id: submission_id(&record.request_id)?,
+                    on_default,
+                },
+            )
+            .await,
+    )? {
+        return Err(Error::MergeConflict);
+    }
+    Ok(())
+}
+
 async fn transition_merge(
     server: &Server,
     repo: &Repository,
@@ -627,6 +697,9 @@ fn merge_matches_cell(left: &crate::cells::repository::PullMerge, input: &NewPul
         && left.base_oid == input.base_oid
         && left.head_oid == input.head_oid
         && left.message == input.message
+        && left.bypass_rulesets == input.bypass_rulesets
+        && left.tested_candidate.then_some(left.commit_oid.as_str())
+            == input.tested_candidate_oid.as_deref()
 }
 
 pub(super) fn from_author(value: crate::cells::repository::RepositoryAuthor) -> Identity {
@@ -647,6 +720,9 @@ fn from_merge(value: crate::cells::repository::PullMerge) -> PullMerge {
         commit_oid: value.commit_oid,
         message: value.message,
         created_at: value.created_at_ms,
+        publication_plan: value.publication_plan,
+        bypass_rulesets: value.bypass_rulesets,
+        tested_candidate: value.tested_candidate,
     }
 }
 fn cell_merge(value: &PullMerge) -> Result<crate::cells::repository::PullMerge> {
@@ -660,12 +736,16 @@ fn cell_merge(value: &PullMerge) -> Result<crate::cells::repository::PullMerge> 
         commit_oid: value.commit_oid.clone(),
         message: value.message.clone(),
         created_at_ms: value.created_at,
+        publication_plan: value.publication_plan.clone(),
+        bypass_rulesets: value.bypass_rulesets.clone(),
+        tested_candidate: value.tested_candidate,
     })
 }
 fn to_merge(
     input: &NewPullMerge,
     commit_oid: String,
     created_at_ms: u64,
+    publication_plan: String,
 ) -> Result<crate::cells::repository::PullMerge> {
     Ok(crate::cells::repository::PullMerge {
         request_id: submission_id(&input.request_id)?,
@@ -677,6 +757,9 @@ fn to_merge(
         commit_oid,
         message: input.message.clone(),
         created_at_ms,
+        publication_plan: Some(publication_plan),
+        bypass_rulesets: input.bypass_rulesets.clone(),
+        tested_candidate: input.tested_candidate_oid.is_some(),
     })
 }
 pub(super) fn from_pull(value: PullRecord) -> PullRequest {
@@ -690,7 +773,9 @@ pub(super) fn from_pull(value: PullRecord) -> PullRequest {
         state: value.state,
         base_ref: value.base_ref,
         base_oid: value.base_oid,
+        retargeted_base: value.retargeted_base,
         head_ref: value.head_ref,
+        head_repository: value.head_repository,
         head_oid: value.head_oid,
         label_ids: value.label_ids,
         assignees: value.assignees,

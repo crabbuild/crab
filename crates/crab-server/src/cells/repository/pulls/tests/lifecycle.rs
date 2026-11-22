@@ -31,6 +31,7 @@ async fn write<M: Mutation>(cell: &RepositoryCell, input: M::Input) -> M::Output
 }
 fn input() -> CreatePullInput {
     CreatePullInput {
+        code_owner_requests: Default::default(),
         metadata: Default::default(),
         draft: false,
         submission_id: *Uuid::now_v7().as_bytes(),
@@ -39,6 +40,7 @@ fn input() -> CreatePullInput {
         body: "Original".into(),
         base_ref: "refs/heads/main".into(),
         head_ref: "refs/heads/feature".into(),
+        head_repository: None,
         base_oid: "a".repeat(40),
         head_oid: "b".repeat(40),
     }
@@ -71,6 +73,9 @@ fn merge(pull: &PullRecord) -> PullMerge {
         commit_oid: pull.head_oid.clone(),
         message: String::new(),
         created_at_ms: 1,
+        publication_plan: None,
+        bypass_rulesets: Vec::new(),
+        tested_candidate: false,
     }
 }
 fn edit(version: u64, title: &str) -> UpdatePullInput {
@@ -105,6 +110,51 @@ where
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn head_switch_requires_current_refs_until_the_switch_is_recorded() {
+    let server = fixtures::fixture().await;
+    let cell = cell(&server);
+    write::<CreatePull>(&cell, input()).await;
+    let change = async |comparison_current, plan_id: String| {
+        write::<pull_head::Switch>(
+            &cell,
+            pull_head::Input {
+                number: 1,
+                version: 1,
+                actor: actor("Alice"),
+                plan_id,
+                head_repository: None,
+                previous_ref: "refs/heads/feature".into(),
+                new_ref: "refs/heads/resolved".into(),
+                base_oid: "a".repeat(40),
+                new_oid: "c".repeat(40),
+                comparison_current,
+            },
+        )
+        .await
+    };
+    let pull = async || {
+        cell.client
+            .query::<GetPull>(&cell.target, None, 1)
+            .await
+            .unwrap()
+            .output
+            .unwrap()
+    };
+    let plan = "1".repeat(64);
+    assert!(!change(false, plan.clone()).await);
+    assert_eq!(pull().await.head_ref, "refs/heads/feature");
+    assert!(change(true, plan.clone()).await);
+    assert!(change(false, plan).await);
+    assert!(!change(true, "2".repeat(64)).await);
+    let saved = pull().await;
+    assert_eq!(
+        (saved.head_ref.as_str(), saved.version),
+        ("refs/heads/resolved", 2)
+    );
+    assert_eq!(saved.retargeted_base.unwrap().head_oid, "c".repeat(40));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn every_fresh_pull_mutation_obeys_archive_while_committed_receipts_replay() {
     let server = fixtures::fixture().await;
     let cell = cell(&server);
@@ -132,6 +182,8 @@ async fn every_fresh_pull_mutation_obeys_archive_while_committed_receipts_replay
         write::<CreatePullReview>(
             &cell,
             CreatePullReviewInput {
+                base_revision: None,
+                review_teams: Vec::new(),
                 pull: 1,
                 submission_id: *Uuid::now_v7().as_bytes(),
                 author: actor("Bob"),
@@ -230,6 +282,8 @@ async fn every_fresh_pull_mutation_obeys_archive_while_committed_receipts_replay
         &cell,
         revision,
         CreatePullReviewInput {
+            base_revision: None,
+            review_teams: Vec::new(),
             pull: 1,
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor("Bob"),
@@ -296,6 +350,7 @@ async fn every_fresh_pull_mutation_obeys_archive_while_committed_receipts_replay
         &cell,
         revision,
         SetPullReadinessInput {
+            code_owner_requests: Default::default(),
             number: 1,
             actor: actor("Alice"),
             can_manage: false,

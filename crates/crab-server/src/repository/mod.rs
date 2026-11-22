@@ -17,11 +17,14 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+pub(crate) mod access;
 pub(crate) mod catalog;
 pub(crate) const BROWSE_PROBE_INTERVAL: Duration = Duration::from_secs(2);
 
 pub(crate) struct Repository {
     pub(crate) id: Uuid,
+    pub(crate) organization: Option<Uuid>,
+    pub(crate) forked_from: Option<Uuid>,
     pub(crate) config: RepositoryConfig,
     pub(crate) store: Store,
     pub(crate) layout: StoreLayout<Store>,
@@ -67,6 +70,16 @@ pub(crate) struct BrowseRepository {
 }
 
 impl Repository {
+    pub(crate) fn fork_source(&self, server: &Server) -> Option<Arc<Self>> {
+        let organization = self.organization?;
+        server
+            .repositories
+            .by_id(self.forked_from?)
+            .filter(|source| {
+                source.organization == Some(organization) && source.forked_from.is_none()
+            })
+    }
+
     pub(crate) fn new(
         id: Uuid,
         config: RepositoryConfig,
@@ -75,6 +88,8 @@ impl Repository {
     ) -> Self {
         Self {
             id,
+            organization: None,
+            forked_from: None,
             config,
             store: layout.store().clone(),
             layout,
@@ -122,13 +137,6 @@ impl Repository {
         server: &Server,
         trigger: MaintenanceTrigger<'_>,
     ) -> Result<MaintenanceSchedule> {
-        if server
-            .git_import
-            .as_ref()
-            .is_some_and(|context| context.is_repository_importing(self.id))
-        {
-            return Ok(MaintenanceSchedule::Deferred);
-        }
         let mut state = self.maintenance.lock().await;
         if matches!(trigger, MaintenanceTrigger::Repair) {
             state.completed = None;
@@ -259,6 +267,35 @@ impl Repository {
             .map_err(Into::into)
     }
 
+    pub(crate) async fn default_ref(&self) -> Result<String> {
+        let root = crab_metadata::capsule_protocol::load_root(&self.layout)
+            .await
+            .map_err(|source| crate::Error::Settings {
+                source: Box::new(source),
+            })?;
+        Ok(root.record().root().head().to_owned())
+    }
+
+    pub(crate) async fn open_git_view(
+        &self,
+    ) -> Result<crab_read::capsule_protocol::CapsuleRepositoryView> {
+        let root = crab_metadata::capsule_protocol::load_root(&self.layout)
+            .await
+            .map_err(|source| crate::Error::Settings {
+                source: Box::new(source),
+            })?;
+        crab_read::capsule_protocol::open_git_view_from_root(
+            &self.layout,
+            root,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+                max_frontier_bytes: 2 * 1024 * 1024 * 1024,
+            },
+        )
+        .await
+        .map_err(Into::into)
+    }
+
     pub(crate) async fn open_capsule_repository(
         &self,
         server: &Server,
@@ -268,20 +305,7 @@ impl Repository {
         crab_read::capsule_protocol::CapsuleRepositoryView,
         RemoteGitRepository,
     )> {
-        let root = crab_metadata::capsule_protocol::load_root(&self.layout)
-            .await
-            .map_err(|source| crate::Error::Settings {
-                source: Box::new(source),
-            })?;
-        let view = crab_read::capsule_protocol::open_git_view_from_root(
-            &self.layout,
-            root,
-            crab_read::capsule_protocol::CapsuleReadLimits {
-                max_capsule_bytes: 2 * 1024 * 1024 * 1024,
-                max_frontier_bytes: 2 * 1024 * 1024 * 1024,
-            },
-        )
-        .await?;
+        let view = self.open_git_view().await?;
         let repository = view
             .git_repository_from_store(
                 self.layout.clone(),

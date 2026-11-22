@@ -5,6 +5,8 @@ import { repoHref } from "@/lib/repository-route";
 import { DefaultBranchSettings } from "./general";
 import { MemberSettings } from "./members";
 import { BranchProtectionSettings } from "./protections";
+import { IntegrationSettings } from "./integrations";
+import { RepositoryRulesets } from "./rulesets";
 
 export function Settings({
   repo,
@@ -18,7 +20,7 @@ export function Settings({
   repo: Repository;
   refs: Refs;
   csrf: string;
-  section: "general" | "branches" | "members";
+  section: "general" | "branches" | "members" | "integrations" | "rulesets";
   identity: Session["user"];
   onDefaultChanged: () => void;
   onRepositoryChanged: () => void;
@@ -42,15 +44,47 @@ export function Settings({
           Branches
         </Link>
         <Link
+          className={section === "rulesets" ? "active" : ""}
+          aria-current={section === "rulesets" ? "page" : undefined}
+          href={repoHref(repo, { view: "settings", section: "rulesets" })}
+        >
+          Rulesets
+        </Link>
+        <Link
           className={section === "members" ? "active" : ""}
           aria-current={section === "members" ? "page" : undefined}
           href={repoHref(repo, { view: "settings", section: "members" })}
         >
           Members
         </Link>
+        <Link
+          className={section === "integrations" ? "active" : ""}
+          aria-current={section === "integrations" ? "page" : undefined}
+          href={repoHref(repo, { view: "settings", section: "integrations" })}
+        >
+          Integrations
+        </Link>
       </nav>
-      {section === "members" ? (
-        <MemberSettings repo={repo} csrf={csrf} identity={identity} />
+      {section === "rulesets" ? (
+        <RepositoryRulesets key={repo.id} repo={repo} csrf={csrf} />
+      ) : section === "integrations" ? (
+        <IntegrationSettings key={repo.id} repo={repo} csrf={csrf} />
+      ) : section === "members" ? (
+        repo.forked_from ? (
+          <div className="notice">
+            This fork inherits access from the source repository.{" "}
+            <Link
+              href={repoHref(repo.forked_from, {
+                view: "settings",
+                section: "members",
+              })}
+            >
+              Manage source access
+            </Link>
+          </div>
+        ) : (
+          <MemberSettings repo={repo} csrf={csrf} identity={identity} />
+        )
       ) : section === "branches" ? (
         <BranchProtectionSettings
           repo={repo}

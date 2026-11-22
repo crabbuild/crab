@@ -1,4 +1,6 @@
 mod codec;
+pub(super) mod merge_methods;
+pub(crate) mod rulesets;
 
 use super::*;
 
@@ -20,7 +22,17 @@ pub(super) fn archived(context: &Transaction<'_>) -> crate::cells::Result<bool> 
 pub(crate) struct BranchProtectionRecord {
     pub branch: String,
     pub required_approvals: u8,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub required_code_owner_reviews: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_conversation_resolution: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_up_to_date: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_merge_queue: bool,
     pub required_checks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_integrations: Vec<uuid::Uuid>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -171,21 +183,45 @@ impl Read for GetBranchProtections {
         context: &mut Transaction<'_>,
         (): Self::Input,
     ) -> crate::cells::Result<Self::Output> {
-        let result = context.sql(&SqlBatch {
-            statements: vec![statement(
-                "SELECT protections_version, protections FROM repository_settings WHERE singleton = 1",
-                vec![],
-            )],
-        })?;
-        let version = result_u64(&result, 0, 0)?;
-        if version == 0 {
-            return Ok(None);
-        }
-        let rules = decode_protections(result_blob(&result[0].rows[0], 1)?)?;
-        let settings = BranchProtectionSettings { version, rules };
-        validate_settings(&settings)?;
-        Ok(Some(settings))
+        load_branch_protections(context)
     }
+}
+
+pub(super) fn load_branch_protections(
+    context: &Transaction<'_>,
+) -> crate::cells::Result<Option<BranchProtectionSettings>> {
+    let result = context.sql(&SqlBatch {
+        statements: vec![statement(
+            "SELECT protections_version, protections FROM repository_settings WHERE singleton = 1",
+            vec![],
+        )],
+    })?;
+    let version = result_u64(&result, 0, 0)?;
+    if version == 0 {
+        return Ok(None);
+    }
+    let rules = decode_protections(result_blob(&result[0].rows[0], 1)?)?;
+    let settings = BranchProtectionSettings { version, rules };
+    validate_settings(&settings)?;
+    Ok(Some(settings))
+}
+
+pub(super) fn requires_merge_queue(
+    context: &Transaction<'_>,
+    reference: &str,
+    configured: bool,
+) -> crate::cells::Result<bool> {
+    let Some(branch) = reference.strip_prefix("refs/heads/") else {
+        return Ok(false);
+    };
+    Ok(
+        load_branch_protections(context)?.map_or(configured, |stored| {
+            stored
+                .rules
+                .iter()
+                .any(|rule| rule.branch == branch && rule.require_merge_queue)
+        }),
+    )
 }
 
 pub(crate) struct GetRepositoryLifecycle;
@@ -237,7 +273,12 @@ pub(in crate::cells::repository) fn validate_protections(
         .map(|rule| crate::BranchProtection {
             branch: rule.branch.clone(),
             required_approvals: rule.required_approvals,
+            required_code_owner_reviews: rule.required_code_owner_reviews,
+            require_conversation_resolution: rule.require_conversation_resolution,
+            require_up_to_date: rule.require_up_to_date,
+            require_merge_queue: rule.require_merge_queue,
             required_checks: rule.required_checks.clone(),
+            required_integrations: rule.required_integrations.clone(),
         })
         .collect::<Vec<_>>();
     if !crate::config::valid_branch_protections(&rules) {
@@ -249,38 +290,12 @@ pub(in crate::cells::repository) fn validate_protections(
 }
 
 fn encode_protections(rules: &[BranchProtectionRecord]) -> crate::cells::Result<Vec<u8>> {
-    let mut encoder = RecordEncoder::new(MAX_PROTECTION_BYTES)
-        .map_err(|_| crate::cells::Error::Invalid("repository protections are too large"))?;
-    encoder
-        .write_count(rules.len())
-        .map_err(|_| crate::cells::Error::Invalid("repository protections are too large"))?;
-    for rule in rules {
-        rule.encode(&mut encoder)
-            .map_err(|_| crate::cells::Error::Invalid("repository protections are too large"))?;
-    }
-    Ok(encoder.finish())
+    codec::encode(rules)
+        .map_err(|_| crate::cells::Error::Invalid("repository protections are too large"))
 }
 
 fn decode_protections(bytes: &[u8]) -> crate::cells::Result<Vec<BranchProtectionRecord>> {
-    let mut decoder = RecordDecoder::new(bytes, MAX_PROTECTION_BYTES)
-        .map_err(|_| crate::cells::Error::Invalid("repository protections are invalid"))?;
-    let count = decoder
-        .read_count()
-        .map_err(|_| crate::cells::Error::Invalid("repository protections are invalid"))?;
-    if count > 100 {
-        return Err(crate::cells::Error::Invalid(
-            "repository protections are invalid",
-        ));
-    }
-    let mut rules = Vec::with_capacity(count);
-    for _ in 0..count {
-        rules.push(
-            BranchProtectionRecord::decode(&mut decoder)
-                .map_err(|_| crate::cells::Error::Invalid("repository protections are invalid"))?,
-        );
-    }
-    decoder
-        .finish()
+    let rules = codec::decode(bytes)
         .map_err(|_| crate::cells::Error::Invalid("repository protections are invalid"))?;
     validate_protections(&rules)?;
     Ok(rules)

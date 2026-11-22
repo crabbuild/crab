@@ -2,8 +2,9 @@ import type { BranchProtection } from "@/lib/contracts";
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 
 export interface GitImportInput {
+  request_id: string;
   source: string;
-  owner: string;
+  owner?: string;
   name: string;
   description?: string;
   token?: string;
@@ -12,14 +13,19 @@ export interface GitImportInput {
 export interface GitImportJob {
   id: string;
   source: string;
+  fork_source?: string;
   owner: string;
   name: string;
-  state: "queued" | "running" | "succeeded" | "failed";
+  state: "queued" | "running" | "succeeded" | "failed" | "interrupted";
   message: string;
+  resumable: boolean;
   repository?: { owner: string; name: string };
 }
 
 export interface Repository {
+  organization?: string;
+  forked_from?: { id: string; owner: string; name: string };
+  can_fork?: boolean;
   id: string;
   owner: string;
   name: string;
@@ -104,6 +110,7 @@ export interface Change {
   kind: string;
   old: Entry | null;
   new: Entry | null;
+  view_id?: string;
 }
 export interface Changes {
   base: string | null;
@@ -289,18 +296,75 @@ async function parseResponse<T>(response: Response): Promise<T> {
   return body as T;
 }
 
-export async function startGitImport(
+function gitImportPath(organization?: string): string {
+  return organization
+    ? `/api/organizations/${encodeURIComponent(organization)}/repositories/imports/git`
+    : "/api/imports/git";
+}
+
+export function startGitImport(
   input: GitImportInput,
   csrf: string,
-  signal?: AbortSignal,
+  organization?: string,
 ): Promise<GitImportJob> {
-  const response = await fetch("/api/imports/git", {
+  return postGitImport(gitImportPath(organization), input, csrf);
+}
+
+export function startRepositoryFork(
+  source: Pick<Repository, "id" | "owner" | "name">,
+  input: { request_id: string; name: string },
+  csrf: string,
+): Promise<GitImportJob> {
+  return postGitImport(endpoint(source, "forks"), input, csrf, source.id);
+}
+
+export async function updateForkBranch(
+  repo: Repository,
+  comparison: { branch: string; fork_oid: string; upstream_oid: string },
+  csrf: string,
+) {
+  const response = await fetch(endpoint(repo, "fork-sync"), {
     method: "POST",
-    signal,
     headers: {
       Accept: "application/json",
       "Content-Type": "application/json",
       "X-CSRF-Token": csrf,
+      "X-Crab-Repository-Id": repo.id,
+    },
+    body: JSON.stringify(comparison),
+  });
+  return parseResponse<{ branch: string; commit: string }>(response);
+}
+
+export function resumeGitImport(
+  id: string,
+  token: string | undefined,
+  csrf: string,
+  organization?: string,
+): Promise<GitImportJob> {
+  return postGitImport(
+    `${gitImportPath(organization)}/${encodeURIComponent(id)}/resume`,
+    { token },
+    csrf,
+  );
+}
+
+async function postGitImport(
+  path: string,
+  input:
+    | GitImportInput
+    | { token?: string }
+    | { request_id: string; name: string },
+  csrf: string,
+  repository?: string,
+): Promise<GitImportJob> {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "X-CSRF-Token": csrf,
+      ...(repository ? { "X-Crab-Repository-Id": repository } : {}),
     },
     body: JSON.stringify(input),
   });
@@ -310,9 +374,10 @@ export async function startGitImport(
 export async function gitImportStatus(
   id: string,
   signal: AbortSignal,
+  organization?: string,
 ): Promise<GitImportJob> {
   const result = await request<GitImportJob>(
-    `/api/imports/git/${encodeURIComponent(id)}`,
+    `${gitImportPath(organization)}/${encodeURIComponent(id)}`,
     signal,
   );
   return result.data;

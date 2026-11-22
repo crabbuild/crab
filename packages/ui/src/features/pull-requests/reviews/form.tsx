@@ -23,6 +23,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { repoHref } from "@/lib/repository-route";
 import { short } from "@/lib/format";
 import type { PullRequest } from "../model";
+import type { PendingReview } from "./pending";
 import type {
   Review,
   ReviewState,
@@ -32,6 +33,14 @@ export interface ReviewDraft {
   body: string;
   state: ReviewState;
   commit_oid: string;
+  base_revision?: number;
+  attempt?: {
+    expected: string;
+    request_id: string;
+    body: string;
+    state: ReviewState;
+    base_revision?: number;
+  };
 }
 const decisions: Array<{
   value: ReviewState;
@@ -64,6 +73,7 @@ export function ReviewChanges({
   onDraft,
   submission,
   disabled,
+  pendingReview,
 }: {
   repo: Repository;
   pull: PullRequest;
@@ -73,11 +83,40 @@ export function ReviewChanges({
   onDraft: (draft: ReviewDraft | undefined) => void;
   submission: (input: object) => string;
   disabled: boolean;
+  pendingReview: PendingReview;
 }) {
   const [open, setOpen] = useState(false);
   const id = useId();
   const mutation = useMutation(csrf, repo);
-  const stale = !!draft && draft.commit_oid !== pull.head_oid;
+  const pending = pendingReview.draft;
+  const count = pending?.comments.length ?? 0;
+  const anchoredHead = pending?.comments[0]?.head_oid;
+  const attempt = draft?.attempt;
+  const staleHead =
+    !!draft && (anchoredHead ?? draft.commit_oid) !== pull.head_oid;
+  const staleBase =
+    !!draft && draft.base_revision !== (pull.base_revision ?? undefined);
+  const stale = staleHead || staleBase;
+  const rejected =
+    !!attempt &&
+    (mutation.rejected ||
+      [400, 403, 404, 409, 413, 422].some(
+        (status) => status === mutation.status,
+      ));
+  const requiresSummary = !count && draft?.state !== "approved";
+  const inputsDisabled = mutation.pending || !!attempt;
+  const canSubmit =
+    !!draft &&
+    !mutation.pending &&
+    !mutation.conflict &&
+    !rejected &&
+    (!!attempt ||
+      (!disabled &&
+        pendingReview.ready &&
+        !pendingReview.pending &&
+        !stale &&
+        (draft.state === "commented" || pull.can_decide) &&
+        (!requiresSummary || !!draft.body.trim())));
   return (
     <div className="flex justify-end py-3">
       <Dialog
@@ -87,14 +126,25 @@ export function ReviewChanges({
             onDraft({
               body: "",
               state: "commented",
-              commit_oid: pull.head_oid,
+              commit_oid: anchoredHead ?? pull.head_oid,
+              base_revision: pull.base_revision ?? undefined,
             });
           setOpen(next);
         }}
       >
         <DialogTrigger asChild>
-          <Button disabled={disabled} aria-label="Review changes">
-            Review changes
+          <Button
+            disabled={
+              !attempt &&
+              (disabled || !pendingReview.ready || pendingReview.pending)
+            }
+            aria-label="Review changes"
+          >
+            {attempt
+              ? "Resume review submission"
+              : count
+                ? `Review changes (${count})`
+                : "Review changes"}
           </Button>
         </DialogTrigger>
         {open && draft && (
@@ -102,26 +152,43 @@ export function ReviewChanges({
             <DialogHeader>
               <DialogTitle>Submit your review</DialogTitle>
               <DialogDescription>
-                Reviewing commit <code>{short(draft.commit_oid)}</code>.
+                Reviewing commit{" "}
+                <code>{short(anchoredHead ?? draft.commit_oid)}</code>.
+                {count > 0 &&
+                  ` This will publish ${count} pending ${count === 1 ? "comment" : "comments"}.`}
               </DialogDescription>
             </DialogHeader>
             <form
               className="flex flex-col gap-4"
               onSubmit={async (event) => {
                 event.preventDefault();
-                if (disabled) return;
-                const input = {
-                  body: draft.body,
-                  state: draft.state,
-                  commit_oid: draft.commit_oid,
-                };
-                const created = await mutation.run<Review>(
-                  endpoint(repo, `pulls/${pull.number}/reviews`),
+                if (!canSubmit) return;
+                const { body, state, commit_oid, base_revision } = draft;
+                const version = count ? pending?.version : null;
+                const batch =
+                  attempt ??
+                  (version
+                    ? {
+                        expected: version,
+                        request_id: crypto.randomUUID(),
+                        body,
+                        state,
+                        base_revision,
+                      }
+                    : undefined);
+                if (batch && !attempt) onDraft({ ...draft, attempt: batch });
+                const input = { body, state, commit_oid, base_revision };
+                const resource = batch ? "pending-review/submit" : "reviews";
+                const created = await mutation.run<
+                  Review | { review: number; threads: number[] }
+                >(
+                  endpoint(repo, `pulls/${pull.number}/${resource}`),
                   "POST",
-                  { ...input, request_id: submission(input) },
+                  batch ?? { ...input, request_id: submission(input) },
                 );
                 if (created) {
                   onDraft(undefined);
+                  if (batch) pendingReview.reload();
                   setOpen(false);
                   refresh();
                   navigate(
@@ -138,14 +205,21 @@ export function ReviewChanges({
                 label="Review summary"
                 value={draft.body}
                 onChange={(body) => onDraft({ ...draft, body })}
-                disabled={mutation.pending}
-                required={draft.state !== "approved"}
+                disabled={inputsDisabled}
+                required={!attempt && requiresSummary}
                 autoFocus
               />
+              {pull.review_counts_for_merge === false &&
+                pull.merge_requirements.required_approvals > 0 && (
+                  <p className="muted">
+                    Required reviews count approvals from repository writers and
+                    administrators.
+                  </p>
+                )}
               <RadioGroup
                 aria-label="Review decision"
                 value={draft.state}
-                disabled={mutation.pending}
+                disabled={inputsDisabled}
                 onValueChange={(state) => {
                   if (
                     state === "commented" ||
@@ -168,7 +242,7 @@ export function ReviewChanges({
                       value={decision.value}
                       aria-label={decision.label}
                       disabled={
-                        mutation.pending ||
+                        inputsDisabled ||
                         (decision.value !== "commented" && !pull.can_decide)
                       }
                     />
@@ -189,21 +263,28 @@ export function ReviewChanges({
                 </p>
               )}
               {mutation.error && <FieldError>{mutation.error}</FieldError>}
-              {stale && (
+              {stale && !attempt && (
                 <Alert>
                   <AlertDescription>
-                    This draft targets an earlier commit. Review the updated
-                    comparison before applying your draft to the current commit.
+                    {staleBase
+                      ? "The base branch changed. Review the updated comparison before submitting."
+                      : count
+                        ? "The pending comments target an earlier commit. Review the updated diff before adding new comments."
+                        : "This draft targets an earlier commit. Review the updated comparison before applying your draft to the current commit."}
                   </AlertDescription>
                 </Alert>
               )}
               <div className="flex flex-wrap justify-end gap-2">
-                {mutation.conflict && (
+                {(mutation.conflict || (attempt && rejected)) && (
                   <Button
                     type="button"
                     variant="outline"
                     onClick={() => {
                       mutation.reset();
+                      if (attempt) {
+                        onDraft({ ...draft, attempt: undefined });
+                        pendingReview.reload();
+                      }
                       setOpen(false);
                       refresh();
                     }}
@@ -211,30 +292,28 @@ export function ReviewChanges({
                     Reload comparison
                   </Button>
                 )}
-                {stale && (
+                {stale && (!count || !staleHead) && !attempt && (
                   <Button
                     type="button"
                     variant="outline"
                     onClick={() => {
-                      onDraft({ ...draft, commit_oid: pull.head_oid });
+                      onDraft({
+                        ...draft,
+                        commit_oid: pull.head_oid,
+                        base_revision: pull.base_revision ?? undefined,
+                      });
                       mutation.reset();
                     }}
                   >
                     Use current comparison
                   </Button>
                 )}
-                <Button
-                  type="submit"
-                  disabled={
-                    disabled ||
-                    mutation.pending ||
-                    mutation.conflict ||
-                    stale ||
-                    (draft.state !== "commented" && !pull.can_decide) ||
-                    (draft.state !== "approved" && !draft.body.trim())
-                  }
-                >
-                  {mutation.pending ? "Submitting…" : "Submit review"}
+                <Button type="submit" disabled={!canSubmit}>
+                  {mutation.pending
+                    ? "Submitting…"
+                    : attempt
+                      ? "Retry review submission"
+                      : "Submit review"}
                 </Button>
               </div>
             </form>

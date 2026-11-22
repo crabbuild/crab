@@ -37,6 +37,11 @@ pub(super) fn store(
 #[serde(deny_unknown_fields)]
 pub(crate) struct SetPullReadinessInput {
     pub number: u64,
+    #[serde(
+        default,
+        skip_serializing_if = "review_requests::automatic::Plan::is_empty"
+    )]
+    pub code_owner_requests: review_requests::automatic::Plan,
     pub actor: RepositoryAuthor,
     pub can_manage: bool,
     pub version: u64,
@@ -111,6 +116,14 @@ impl Mutation for SetPullReadiness {
             &input.actor,
             action,
         )?;
+        if !draft {
+            review_requests::automatic::apply(
+                context,
+                &pull,
+                &input.actor,
+                input.code_owner_requests,
+            )?;
+        }
         advance_revision(context)?;
         Ok(MutationResult::Success(Outcome::Applied(Box::new(pull))))
     }

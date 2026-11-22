@@ -1,0 +1,217 @@
+import { expect, test, type Page } from "@playwright/test";
+
+const owner = "user-7456000bc221ab0a67cd7d50464b5393";
+
+async function session(page: Page) {
+  await page.route("**/api/session", (route) =>
+    route.fulfill({
+      json: {
+        authenticated: true,
+        csrf: "fixture-csrf",
+        user: {
+          issuer: "https://accounts.example",
+          name: "Alice",
+          subject: "alice",
+        },
+      },
+    }),
+  );
+}
+
+test("new repository recovers one submission after a reload", async ({
+  page,
+}) => {
+  await session(page);
+  let ready = false;
+  const repository = {
+    id: "6a1b1f4f-2681-458b-b872-6b329c6d79d9",
+    owner,
+    name: "my-library",
+    description: "First repository",
+    access: "write",
+    can_admin: true,
+    archive_version: 0,
+    archived: false,
+    protection_version: 0,
+    protected_branches: [],
+  };
+  let submission: unknown;
+  await page.route(
+    (url) => url.pathname === "/api/repos",
+    (route) =>
+      route.fulfill({ json: { repositories: ready ? [repository] : [] } }),
+  );
+  await page.route("**/api/repos/creation", (route) => {
+    const request = route.request();
+    if (request.method() === "GET") {
+      return route.fulfill({ json: { owner, default_branch: "main" } });
+    }
+    expect(request.headers()["x-csrf-token"]).toBe("fixture-csrf");
+    const body = request.postDataJSON();
+    if (!ready) {
+      expect(body).toMatchObject({
+        name: "my-library",
+        description: "First repository",
+      });
+      submission = body;
+      ready = true;
+      return route.abort("failed");
+    }
+    expect(body).toEqual(submission);
+    return route.fulfill({ status: 201, json: repository });
+  });
+  await page.route(
+    (url) => url.pathname === `/api/repos/${owner}/my-library/refs`,
+    (route) =>
+      route.fulfill({ json: { head: null, default_branch: "main", refs: [] } }),
+  );
+  await page.goto("/");
+  await page
+    .getByRole("button", { name: "New repository", exact: true })
+    .click();
+  await page.getByLabel("Repository name").fill("my-library");
+  await page.getByLabel("Description (optional)").fill("First repository");
+  await page
+    .getByRole("button", { name: "Create repository", exact: true })
+    .click();
+  await expect(
+    page.getByText("The response was lost.", { exact: false }),
+  ).toBeVisible();
+  await page.reload();
+  await page
+    .getByRole("button", { name: "New repository", exact: true })
+    .click();
+  await expect(page.getByLabel("Repository name")).toHaveValue("my-library");
+  await expect(page.getByLabel("Description (optional)")).toHaveValue(
+    "First repository",
+  );
+  await page
+    .getByRole("button", { name: "Create repository", exact: true })
+    .click();
+  await expect(page).toHaveURL(`/${owner}/my-library`);
+  await expect(page.locator(".global-repository h1")).toContainText(
+    "my-library",
+  );
+});
+
+test("a reloaded import resumes the same job with a fresh source token", async ({
+  page,
+}) => {
+  await session(page);
+  let saved: { id: string; source: string; owner: string; name: string };
+  let state = "running";
+  await page.route(
+    (url) => url.pathname === "/api/repos",
+    (route) =>
+      route.fulfill({
+        json: {
+          repositories:
+            state === "succeeded"
+              ? [
+                  {
+                    id: "6a1b1f4f-2681-458b-b872-6b329c6d79d9",
+                    owner: saved.owner,
+                    name: saved.name,
+                    description: "Imported repo",
+                    access: "write",
+                    can_admin: true,
+                    archive_version: 0,
+                    archived: false,
+                    protection_version: 0,
+                    protected_branches: [],
+                  },
+                ]
+              : [],
+        },
+      }),
+  );
+  await page.route("**/api/repos/team/repo/refs", (route) =>
+    route.fulfill({ json: { head: null, default_branch: "main", refs: [] } }),
+  );
+  await page.route("**/api/imports/git", (route) => {
+    const input = route.request().postDataJSON();
+    expect(input.token).toBe("fixture-token");
+    saved = {
+      id: input.request_id,
+      source: input.source,
+      owner: input.owner,
+      name: input.name,
+    };
+    return route.fulfill({
+      status: 202,
+      json: {
+        ...saved,
+        state: "queued",
+        message: "Queued for import",
+        resumable: false,
+      },
+    });
+  });
+  await page.route("**/api/imports/git/*", (route) => {
+    expect(route.request().url()).toContain(saved.id);
+    return route.fulfill({
+      json: {
+        ...saved,
+        state,
+        resumable: state === "interrupted",
+        repository:
+          state === "succeeded"
+            ? { owner: saved.owner, name: saved.name }
+            : undefined,
+        message:
+          state === "interrupted"
+            ? "The import worker stopped reporting progress."
+            : "Copying Git history",
+      },
+    });
+  });
+  await page.route("**/api/imports/git/*/resume", (route) => {
+    expect(route.request().url()).toContain(`/${saved.id}/resume`);
+    expect(route.request().headers()["x-csrf-token"]).toBe("fixture-csrf");
+    expect(route.request().postDataJSON()).toEqual({
+      token: "new-source-token",
+    });
+    state = "succeeded";
+    return route.fulfill({
+      status: 202,
+      json: {
+        ...saved,
+        state: "queued",
+        message: "Queued to resume import",
+        resumable: false,
+      },
+    });
+  });
+  await page.goto("/");
+  await page
+    .getByRole("button", { name: "Import from Git", exact: true })
+    .click();
+  await page
+    .getByLabel("Git source")
+    .fill("https://github.com/example/repo.git");
+  await page.getByLabel("Crab owner").fill("team");
+  await page.getByLabel("Source token").fill("fixture-token");
+  await page.getByRole("button", { name: "Start import", exact: true }).click();
+  await expect(page.getByText("Queued for import")).toBeVisible();
+  state = "interrupted";
+  await page.reload();
+  await expect(
+    page.getByText("The import worker stopped reporting progress."),
+  ).toBeVisible();
+  await expect(page.getByText("team/repo", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Source token")).toHaveValue("");
+  const savedImport = await page.evaluate(() =>
+    sessionStorage.getItem(
+      'crab:git-import:["https://accounts.example","alice"]',
+    ),
+  );
+  expect(savedImport).toBe(saved!.id);
+  await expect(page.getByLabel("Git source")).toBeDisabled();
+  await expect(page.getByLabel("Repository name")).toHaveValue("repo");
+  await page.getByLabel("Source token").fill("new-source-token");
+  await page
+    .getByRole("button", { name: "Resume import", exact: true })
+    .click();
+  await expect(page).toHaveURL("/team/repo");
+  await expect(page.locator(".global-repository h1")).toContainText("repo");
+});

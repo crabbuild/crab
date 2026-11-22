@@ -3,16 +3,18 @@ import { Button } from "@/components/ui/button";
 import { useRequest, type Repository } from "@/lib/api";
 import { Result } from "@/components/request/result";
 
-export function useMutation(csrf: string, repo: Repository | null) {
+export function useMutation(csrf: string, repo: Pick<Repository, "id"> | null) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string>();
   const [conflict, setConflict] = useState(false);
   const [status, setStatus] = useState<number>();
+  const [code, setCode] = useState<string>();
   const [rejected, setRejected] = useState(false);
   function reset() {
     setError(undefined);
     setConflict(false);
     setStatus(undefined);
+    setCode(undefined);
     setRejected(false);
   }
   const active = useRef(true);
@@ -56,10 +58,12 @@ export function useMutation(csrf: string, repo: Repository | null) {
         const failure = body as {
           error?: { message?: string; code?: string };
         } | null;
-        if (active.current)
+        if (active.current) {
+          setCode(failure?.error?.code);
           setConflict(
             response.status === 409 && failure?.error?.code === "conflict",
           );
+        }
         throw new Error(
           failure?.error?.message ?? `Request failed (${response.status})`,
         );
@@ -79,7 +83,7 @@ export function useMutation(csrf: string, repo: Repository | null) {
       if (active.current) setPending(false);
     }
   }
-  return { run, pending, error, conflict, status, rejected, reset };
+  return { run, pending, error, conflict, status, code, rejected, reset };
 }
 
 export function ConflictReview<

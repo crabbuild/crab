@@ -1,6 +1,10 @@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { endpoint, type Repository } from "@/lib/api";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Link } from "@/components/navigation/link";
+import { Result } from "@/components/request/result";
+import { endpoint, useRequest, type Repository } from "@/lib/api";
+import { repoHref } from "@/lib/repository-route";
 import {
   AlertIcon,
   PencilIcon,
@@ -9,6 +13,7 @@ import {
   TrashIcon,
 } from "@primer/octicons-react";
 import { useEffect, useState } from "react";
+import type { Connections } from "./integrations";
 
 type ProtectionRule = Repository["protected_branches"][number];
 
@@ -30,10 +35,28 @@ export function BranchProtectionSettings({
   const [editing, setEditing] = useState<number | "new">();
   const [branch, setBranch] = useState("");
   const [approvals, setApprovals] = useState("0");
+  const [codeOwners, setCodeOwners] = useState(false);
+  const [requireResolution, setRequireResolution] = useState(false);
+  const [requireUpToDate, setRequireUpToDate] = useState(false);
+  const [requireQueue, setRequireQueue] = useState(false);
   const [checks, setChecks] = useState("");
+  const [integrations, setIntegrations] = useState<string[]>([]);
+  const [chooseIntegrations, setChooseIntegrations] = useState(false);
+  const connections = useRequest<Connections>(
+    chooseIntegrations ||
+      state.rules.some((rule) => rule.required_integrations?.length)
+      ? endpoint(repo, "settings/integrations")
+      : null,
+  );
   const [deleting, setDeleting] = useState<number>();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
+  const requiredChecks = checks
+    .split(/\r?\n/)
+    .map((check) => check.trim())
+    .filter(Boolean);
+  const hasRequiredChecks =
+    requiredChecks.length > 0 || integrations.length > 0;
 
   useEffect(() => {
     setState({
@@ -46,7 +69,13 @@ export function BranchProtectionSettings({
     const rule = index === "new" ? undefined : state.rules[index];
     setBranch(rule?.branch ?? "");
     setApprovals(String(rule?.required_approvals ?? 0));
+    setCodeOwners(Boolean(rule?.required_code_owner_reviews));
+    setRequireResolution(Boolean(rule?.require_conversation_resolution));
+    setRequireUpToDate(Boolean(rule?.require_up_to_date));
+    setRequireQueue(Boolean(rule?.require_merge_queue));
     setChecks(rule?.required_checks.join("\n") ?? "");
+    setIntegrations(rule?.required_integrations ?? []);
+    setChooseIntegrations(!!rule?.required_integrations?.length);
     setEditing(index);
     setDeleting(undefined);
     setError(undefined);
@@ -110,10 +139,12 @@ export function BranchProtectionSettings({
     const rule: ProtectionRule = {
       branch: branch.trim(),
       required_approvals: Number(approvals),
-      required_checks: checks
-        .split(/\r?\n/)
-        .map((check) => check.trim())
-        .filter(Boolean),
+      ...(codeOwners ? { required_code_owner_reviews: true } : {}),
+      ...(requireResolution ? { require_conversation_resolution: true } : {}),
+      ...(requireUpToDate ? { require_up_to_date: true } : {}),
+      ...(requireQueue ? { require_merge_queue: true } : {}),
+      required_checks: requiredChecks,
+      ...(integrations.length ? { required_integrations: integrations } : {}),
     };
     const rules = [...state.rules];
     if (editing === "new") rules.push(rule);
@@ -143,8 +174,8 @@ export function BranchProtectionSettings({
           <div>
             <h3 id="protection-heading">Branch protection rules</h3>
             <p>
-              Direct changes are blocked. Pull requests must satisfy each
-              rule&apos;s approvals and status checks before merge.
+              Pull requests must satisfy the configured requirements before
+              merging into a protected branch.
             </p>
           </div>
         </header>
@@ -165,14 +196,36 @@ export function BranchProtectionSettings({
                   </strong>
                   <p>
                     {rule.required_approvals === 0
-                      ? "No approving reviews required"
+                      ? rule.required_code_owner_reviews
+                        ? "Code owner approval required"
+                        : "No approving reviews required"
                       : `${rule.required_approvals} approving review${rule.required_approvals === 1 ? "" : "s"} required`}
+                    {rule.required_approvals > 0 &&
+                    rule.required_code_owner_reviews
+                      ? " · Code owner approval required"
+                      : ""}
                   </p>
-                  {rule.required_checks.length > 0 && (
+                  {rule.require_conversation_resolution && (
+                    <p>Conversation resolution required</p>
+                  )}
+                  {rule.require_merge_queue && <p>Merge queue required</p>}
+                  {rule.require_up_to_date && !rule.require_merge_queue && (
+                    <p>Up-to-date head branch required</p>
+                  )}
+                  {(rule.required_checks.length > 0 ||
+                    !!rule.required_integrations?.length) && (
                     <div className="protection-checks">
                       {rule.required_checks.map((check) => (
                         <Badge variant="outline" key={check}>
                           {check}
+                        </Badge>
+                      ))}
+                      {rule.required_integrations?.map((id) => (
+                        <Badge variant="outline" key={id}>
+                          GitHub Actions ·{" "}
+                          {connections.data?.items.find(
+                            (item) => item.id === id,
+                          )?.name ?? "Workflow"}
                         </Badge>
                       ))}
                     </div>
@@ -286,6 +339,41 @@ export function BranchProtectionSettings({
                 </option>
               ))}
             </select>
+            <label className="flex items-center gap-2">
+              <Checkbox
+                checked={codeOwners}
+                onCheckedChange={(checked) => setCodeOwners(checked === true)}
+              />
+              Require review from code owners
+            </label>
+            <p className="settings-help-inline">
+              Require an approval for matching paths from an eligible owner in
+              the base branch&apos;s CODEOWNERS file.
+            </p>
+            <label className="flex items-center gap-2">
+              <Checkbox
+                checked={requireResolution}
+                onCheckedChange={(checked) =>
+                  setRequireResolution(checked === true)
+                }
+              />
+              Require conversation resolution
+            </label>
+            <p className="settings-help-inline">
+              Resolve every published review thread before merging.
+            </p>
+            <label className="flex items-center gap-2">
+              <Checkbox
+                checked={requireQueue}
+                disabled={saving || (!hasRequiredChecks && !requireQueue)}
+                onCheckedChange={(checked) => setRequireQueue(checked === true)}
+              />
+              Require merge queue
+            </label>
+            <p className="settings-help-inline">
+              Require every pull request to pass checks in the queue. Configure
+              at least one required check and enable merge commits.
+            </p>
             <label htmlFor="protection-checks">Required status checks</label>
             <textarea
               id="protection-checks"
@@ -297,6 +385,103 @@ export function BranchProtectionSettings({
             <p className="settings-help-inline">
               Enter one exact, case-insensitive check name per line.
             </p>
+            <label className="flex items-center gap-2">
+              <Checkbox
+                checked={requireUpToDate}
+                disabled={!hasRequiredChecks && !requireUpToDate}
+                onCheckedChange={(checked) =>
+                  setRequireUpToDate(checked === true)
+                }
+              />
+              Require branches to be up to date before merging
+            </label>
+            {!hasRequiredChecks && (
+              <p className="settings-help-inline">
+                Add a required check or workflow to use this setting.
+              </p>
+            )}
+            {chooseIntegrations ? (
+              <fieldset className="grid gap-2 rounded-md border p-3">
+                <legend className="text-sm font-semibold">
+                  Required GitHub Actions workflows
+                </legend>
+                <Result state={connections} timingLabel="Available workflows">
+                  {({ items, available }) => (
+                    <>
+                      {!available && (
+                        <p className="settings-help-inline">
+                          GitHub Actions is unavailable on this server.
+                        </p>
+                      )}
+                      {items.map((item) => (
+                        <label
+                          key={item.id}
+                          className="flex items-center gap-2 text-sm"
+                        >
+                          <Checkbox
+                            checked={integrations.includes(item.id)}
+                            disabled={
+                              saving ||
+                              (!available && !integrations.includes(item.id))
+                            }
+                            onCheckedChange={(checked) =>
+                              setIntegrations((current) =>
+                                checked === true
+                                  ? [...current, item.id]
+                                  : current.filter((id) => id !== item.id),
+                              )
+                            }
+                          />
+                          {item.name} · workflow {item.workflow}
+                        </label>
+                      ))}
+                      {integrations
+                        .filter((id) => !items.some((item) => item.id === id))
+                        .map((id) => (
+                          <label
+                            key={id}
+                            className="flex items-center gap-2 text-sm"
+                          >
+                            <Checkbox
+                              checked
+                              disabled={saving}
+                              onCheckedChange={() =>
+                                setIntegrations((current) =>
+                                  current.filter((item) => item !== id),
+                                )
+                              }
+                            />
+                            Disconnected workflow{" "}
+                            <code className="break-all">{id}</code>
+                          </label>
+                        ))}
+                      {items.length === 0 && available && (
+                        <p className="text-sm">
+                          <Link
+                            className="underline"
+                            href={repoHref(repo, {
+                              view: "settings",
+                              section: "integrations",
+                            })}
+                          >
+                            Connect a GitHub Actions workflow
+                          </Link>
+                        </p>
+                      )}
+                    </>
+                  )}
+                </Result>
+              </fieldset>
+            ) : (
+              <Button
+                className="w-fit"
+                variant="outline"
+                size="sm"
+                onClick={() => setChooseIntegrations(true)}
+              >
+                Require a GitHub Actions workflow
+              </Button>
+            )}
             {error && (
               <p className="error" role="alert">
                 {error}
@@ -314,7 +499,11 @@ export function BranchProtectionSettings({
               <Button
                 size="sm"
                 variant="default"
-                disabled={saving || branch.trim().length === 0}
+                disabled={
+                  saving ||
+                  branch.trim().length === 0 ||
+                  ((requireUpToDate || requireQueue) && !hasRequiredChecks)
+                }
                 onClick={saveRule}
               >
                 {saving ? "Saving…" : "Save changes"}
