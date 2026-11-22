@@ -2316,74 +2316,12 @@ struct CrabMountCatalogCapture {
 #[async_trait::async_trait]
 impl crate::vfs::MountCatalogCapture for CrabMountCatalogCapture {
     async fn capture(&self) -> crate::vfs::Result<std::sync::Arc<crab_read::ShardHydrator>> {
-        let admission = self
-            .retention
-            .capture()
-            .map_err(crab_read::ReadError::from)?;
-        let store = self.layout.store().inner();
-        let repository = crab_coordination::GcReadBarrier::observe(
-            std::sync::Arc::clone(store),
-            self.layout.repo_prefix(),
-        )
-        .await
-        .map_err(crab_read::ReadError::from)?;
-        let global = crab_coordination::GcReadBarrier::observe(
-            std::sync::Arc::clone(store),
-            self.layout.global_prefix(),
-        )
-        .await
-        .map_err(crab_read::ReadError::from)?;
-        let root = crab_metadata::capsule_protocol::load_root(&self.layout)
-            .await
-            .map_err(crab_read::ReadError::from)?;
-        // Capture catalog roots once per transition. Cloning the base shares
-        // cache, download and buffer admission across old and new read views.
-        let view = crab_read::capsule_protocol::open_git_view_from_root(
-            &self.layout,
-            root,
-            crab_read::capsule_protocol::CapsuleReadLimits {
-                max_capsule_bytes: self.maximum,
-                max_frontier_bytes: self.maximum,
-            },
-        )
-        .await?;
-        let catalog = view.pointer_catalog_lookup(&self.layout, self.maximum)?;
         let owner = blake3::hash(uuid::Uuid::now_v7().as_bytes())
             .to_hex()
             .to_string();
-        let (hash, size) = crab_metadata::capsule_protocol::store_read_capture(
-            &self.layout,
-            &owner,
-            view.root(),
-            view.capsule_run_pointers(),
-            &catalog,
-        )
-        .await
-        .map_err(crab_read::ReadError::from)?;
-        let root = crab_coordination::read_retention::RetainedReadRoot::new(hash, size)
-            .map_err(crab_read::ReadError::from)?;
-        let lease = crab_coordination::read_retention::ReadRetentionLease::create(
-            std::sync::Arc::clone(store),
-            self.layout.read_retention_claim_path(&owner),
-            root,
-        )
-        .await
-        .map_err(crab_read::ReadError::from)?;
-        let retention = admission
-            .retain(lease)
-            .map_err(crab_read::ReadError::from)?;
-        // A sweep crossing root capture may have omitted this new claim. Do not
-        // admit that view; dropping its owner drains and releases the claim.
-        repository
-            .validate()
-            .await
-            .map_err(crab_read::ReadError::from)?;
-        global
-            .validate()
-            .await
-            .map_err(crab_read::ReadError::from)?;
-        // Barrier reads can outlast renewal. Do not expose an already lost view.
-        let _ready = retention.pin().map_err(crab_read::ReadError::from)?;
+        let (catalog, retention) =
+            crab_read::retain_pointer_catalog(&self.layout, &owner, self.maximum, &self.retention)
+                .await?;
         let lookup = crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
             self.layout.clone(),
             catalog,

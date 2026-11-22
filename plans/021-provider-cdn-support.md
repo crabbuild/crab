@@ -863,13 +863,21 @@ session policy grants `GetObject`, its GCS access boundary grants Object Viewer,
 and Azure issues a read/list SAS. None can publish the capture or claim.
 The same native startup constraint applies when viewer approval is withdrawn.
 
-Resolve retention authority as part of mount admission, bound to the same
-principal, native placement, and materialized view. Bound mutation to one
-authorized owner directory under `v2/readers/`; keep the root, refs, payloads,
-source repository and sibling views inaccessible to that write capability.
-Preserve conditional creation and renewal, both GC barriers, and drain before
-release. Test denial or expiry during startup and renewal. A provider design
-must preserve the same boundary on S3, GCS and Azure before live collection.
+Resolve service-owned retention as part of mount admission, bound to the
+same principal, native placement, and materialized view. The GC collector
+validates the descriptor for every live claim before sweeping. Giving a
+viewer raw write access to even one reader directory would let it submit
+invalid capture metadata into that decision. The service must build the
+capture from the authorized view and own conditional claim creation, renewal,
+and release. Keep viewer storage credentials read-only. Preserve both GC
+barriers and drain before release. Test denial or expiry during startup and
+renewal on S3, GCS and Azure before live collection.
+
+`crab-read::retain_pointer_catalog` now owns the capture and both GC barriers
+shared by mount lifecycle callers. The issuer verifies the exact projected
+namespace against the authorized repository, scope hash, source generation,
+and source digest before granting credentials. The issuer-side lease
+lifecycle and its mount client are still required.
 
 The qualification guard leaves the native target check active in the Git clone
 child and checks the expected viewer binding and projected content prefix in

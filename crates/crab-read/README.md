@@ -26,7 +26,9 @@ Hydration can carry a caller-registered retained capture. Its read pin follows
 the shared Xet client through background source tasks, so cancellation cannot
 release remote dependencies while a worker still needs them. Closed or expired
 retention rejects new reconstruction, including warm cache hits; provider failures
-remain typed errors. Capture registration and authorization stay with the caller.
+remain typed errors. `retain_pointer_catalog` registers the catalog and claim
+under both GC barriers. Callers supply the authorized native store and keep the
+retention session alive through reader teardown.
 
 ## Why it exists
 
