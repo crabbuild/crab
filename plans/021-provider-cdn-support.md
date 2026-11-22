@@ -761,7 +761,13 @@ lifecycle verifier binds the edge and rollback records, provider viewer logs,
 distinct native retirement tombstone, and final storage inventories. Assembly
 and bundle verification derive the service product result from the retained
 records and the preregistered payload size, ETag, and storage fingerprints.
-Live regional records and warm-local evidence remain release requirements.
+Service Git fixture assembly rebuilds each benchmark pair from a native
+control, distinct cold and warm edge processes, and an exact re-read using
+the warm edge process's verified in-memory blob. The verifier joins provider
+requests and proves each arm used the same published fixture before
+retirement. Service LFS warm-local evidence, live regional measurements,
+public service transition proof, and service release build identity remain
+release requirements.
 
 The protected workflow or its dedicated workers own producing these raw
 observations. The assembly and release jobs own rejecting missing, mismatched

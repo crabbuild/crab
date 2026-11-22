@@ -19,7 +19,8 @@ from cdn_qualification import (  # noqa: E402
     PUBLIC_TRANSITION_CHECK, RUN_NUMBER, SCHEMA, SCOPED_VIEW_CHECK, SERVICE_PRODUCT_DIR, SHA256,
     benchmark_registration, collect_git_performance, collect_git_product_action, collect_sdk_hydration_evidence,
     collect_sdk_product_action, collect_service_product_action, decode, derive_sdk_public_transition, fields,
-    is_direct_sdk_git_scope, is_direct_sdk_hydration_scope, is_direct_service_scope, matches, read_trace, release_scopes, require,
+    is_direct_sdk_git_scope, is_direct_sdk_hydration_scope, is_direct_service_git_scope, is_direct_service_scope,
+    matches, read_trace, release_scopes, require,
     required_check_names, required_platform_rows, requires_cli_workload, scope_parts, verify_bundle_row,
     verify_cleanup_trace, verify_deployment_policy_trace,
 )
@@ -121,10 +122,11 @@ def assemble_bundle(
             sdk_workload = is_direct_sdk_git_scope(scope)
             sdk_hydration = is_direct_sdk_hydration_scope(scope)
             service = is_direct_service_scope(scope)
+            service_git = is_direct_service_git_scope(scope)
             expected = OBSERVATION_FIELDS.copy()
-            if cli_workload or sdk_workload or sdk_hydration:
+            if cli_workload or sdk_workload or sdk_hydration or service_git:
                 expected.difference_update({"product_action", "performance"})
-            if service:
+            elif service:
                 expected.remove("product_action")
             measured = fields(
                 decode((inputs / row / "observations.json").read_bytes()),
@@ -211,10 +213,11 @@ def assemble_bundle(
                     cleanup_at=cleanup_at, native_origin_sha256=cleanup["targets"]["native"]["origin_sha256"],
                     retain=destination / SERVICE_PRODUCT_DIR,
                 )
-            if cli_workload or sdk_workload:
+            if cli_workload or sdk_workload or service_git:
                 measured["performance"] = collect_git_performance(
                     inputs / row / GIT_BENCHMARK_DIR, registration, platform, run_id, attempt,
                     retain=destination / GIT_BENCHMARK_DIR, sdk_native=sdk_native,
+                    service_row=destination if service_git else None,
                 )
             report = measured | {
                 "schema": SCHEMA,

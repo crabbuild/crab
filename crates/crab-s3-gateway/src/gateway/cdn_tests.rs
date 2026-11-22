@@ -286,6 +286,20 @@ publication = {{ path = {receipt:?}, sha256 = {digest:?} }}
         "{edge_paths:?}"
     );
     requests.lock().unwrap().clear();
+    let mut full = request(true);
+    full.input.range = None;
+    let cached = gateway.get_object(full).await.unwrap().output;
+    let bytes = cached
+        .body
+        .unwrap()
+        .try_fold(Vec::new(), |mut body, bytes| async move {
+            body.extend_from_slice(&bytes);
+            Ok(body)
+        })
+        .await
+        .unwrap();
+    assert_eq!(bytes, b"original");
+    assert!(requests.lock().unwrap().is_empty());
     for range in [None, Some(Range::parse("bytes=0-7").unwrap())] {
         let full = range.is_none();
         let mut request = request(true);

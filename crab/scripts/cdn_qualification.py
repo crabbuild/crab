@@ -186,7 +186,7 @@ SDK_HYDRATION_READ_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | SDK_TIMIN
 SERVICE_READ_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | SDK_TIMING_FIELDS | {
     "schema", "arm", "platform", "workload_sha256", "publication_sha256", "commit", "payload_sha256",
     "payload_bytes", "etag_sha256", "git_blob_oid_sha256", "lfs_key_sha256", "reader", "native_traffic", "edge_responses",
-    "native_published_sha256",
+    "native_published_sha256", "service_instance_sha256",
 }
 GIT_MODES = {"origin": "origin", "cold_edge": "edge", "warm_edge": "edge", "warm_local": "warm_local"}
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -1248,6 +1248,10 @@ def is_direct_service_scope(scope: str) -> bool:
     return consumer in ("server", "s3-gateway") and family in ("git", "lfs") and profile == "direct"
 
 
+def is_direct_service_git_scope(scope: str) -> bool:
+    return is_direct_service_scope(scope) and scope_parts(scope)[3] == "git"
+
+
 def cli_action_name(scope: str) -> str:
     return "lfs-fetch" if requires_cli_lfs_workload(scope) else "git-fetch"
 
@@ -1381,28 +1385,33 @@ def verify_git_traffic(client: dict[str, Any], edge: str, label: str) -> None:
 
 
 def validate_service_read(value: Any, provenance: dict[str, Any], arm: str) -> dict[str, Any]:
-    client = fields(value, SERVICE_READ_FIELDS, "CDN service read")
+    local = arm == "warm_local"
+    client = fields(value, SERVICE_READ_FIELDS | ({"primer_sha256"} if local else set()), "CDN service read")
     edge, access, _, family, _ = scope_parts(provenance["scope"])
-    require(is_direct_service_scope(provenance["scope"]) and arm in ("edge", "origin")
+    require(is_direct_service_scope(provenance["scope"]) and (arm in ("edge", "origin") or (local and family == "git"))
             and client["schema"] == "crab.cdn-service-read/v1" and client["arm"] == arm
             and all(client[key] == provenance[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}),
             "CDN service read has mismatched workflow or product provenance")
     require(matches(GIT_OID, client["commit"]) and positive(client["payload_bytes"])
             and client["payload_bytes"] <= SERVICE_PAYLOAD_LIMIT
             and all(matches(SHA256, client[key]) for key in ("workload_sha256", "publication_sha256",
-                    "native_published_sha256", "payload_sha256", "etag_sha256")),
+                    "native_published_sha256", "payload_sha256", "etag_sha256", "service_instance_sha256")),
             "CDN service read has invalid publication or payload fingerprints")
     git, lfs = client["git_blob_oid_sha256"], client["lfs_key_sha256"]
     require((matches(SHA256, git) and lfs is None) if family == "git" else (matches(SHA256, lfs) and git is None),
             "CDN service read needs the exact Git blob or LFS object fingerprint")
     reader = fields(client["reader"], DIRECT_READ_TARGET_FIELDS, "CDN service read target")
     require(all(matches(SHA256, reader[key]) for key in CLI_NATIVE_FIELDS)
-            and (matches(SHA256, reader["binding_sha256"]) if arm == "edge" else reader["binding_sha256"] == "")
-            and (matches(SHA256, reader["public_export_sha256"]) if arm == "edge" and access == "public"
+            and (matches(SHA256, reader["binding_sha256"]) if arm != "origin" else reader["binding_sha256"] == "")
+            and (matches(SHA256, reader["public_export_sha256"]) if arm != "origin" and access == "public"
                  else reader["public_export_sha256"] == ""),
             "CDN service read has an invalid native target, viewer binding or public receipt")
     verify_git_traffic(client, edge, "CDN service read")
-    if arm == "origin":
+    if local:
+        require(matches(SHA256, client["primer_sha256"]) and positive(client["local_payload_hits"])
+                and all(client[key] == 0 for key in PRODUCT_COUNTERS - {"local_payload_hits"}),
+                "service warm-local read requires a verified cached blob without edge traffic")
+    elif arm == "origin":
         native = client["native_traffic"]
         require(all(client[key] == 0 for key in PRODUCT_COUNTERS)
                 and positive(native["get_responses"]) and positive(native["body_bytes"]),
@@ -1413,6 +1422,14 @@ def validate_service_read(value: Any, provenance: dict[str, Any], arm: str) -> d
                 and client["edge_attempts"] == client["all_edge_attempts"] == len(client["edge_responses"]),
                 "service read requires verified edge delivery and a fingerprint for every viewer attempt")
     return client
+
+
+def verify_service_repeat(local: dict[str, Any], primer: dict[str, Any], primer_sha256: str) -> None:
+    require(local["primer_sha256"] == primer_sha256 and all(local[key] == primer[key] for key in
+                ("service_instance_sha256", "publication_sha256", "native_published_sha256", "workload_sha256",
+                 "reader", "commit", "payload_sha256", "payload_bytes", "etag_sha256", "git_blob_oid_sha256"))
+            and primer["finished_at_unix_ms"] <= local["started_at_unix_ms"],
+            "service warm-local read must repeat its own edge primer in the same process")
 
 
 def verify_sdk_git_read(raw: bytes, row: dict[str, Any], spec: dict[str, Any], mode: str, *,
@@ -1585,7 +1602,7 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
 
 def verify_git_native_ref(
     value: Any, row: dict[str, Any], publication: dict[str, Any], publication_sha256: str,
-    phase: str, origin_sha256: str,
+    phase: str, origin_sha256: str, *, prefix_sha256: str | None = None,
 ) -> dict[str, Any]:
     trace = fields(value, CDN_PROVENANCE_FIELDS | {"schema", "phase", "platform", "publication_sha256",
                                                   "started_at_unix_ms", "observed_at_unix_ms", "native_ref"},
@@ -1595,10 +1612,12 @@ def verify_git_native_ref(
             and all(trace[key] == row[key] for key in CDN_PROVENANCE_FIELDS | {"platform"}),
             "native ref observation does not match the Git publication and workflow attempt")
     observed = fields(trace["native_ref"], GIT_NATIVE_REF_FIELDS, "provider ref head")
+    if prefix_sha256 is None:
+        prefix_sha256 = hashlib.sha256(f"{row['fixture_prefix']}/".encode()).hexdigest()
     require(all(matches(SHA256, observed[key]) for key in GIT_NATIVE_REF_FIELDS - {"oid", "probe_source_sha"})
             and observed["probe_source_sha"] == row["source_sha"]
             and observed["origin_sha256"] == origin_sha256
-            and observed["prefix_sha256"] == hashlib.sha256((row["fixture_prefix"] + "/").encode()).hexdigest()
+            and observed["prefix_sha256"] == prefix_sha256
             and observed["ref_sha256"] == hashlib.sha256(publication["ref"].encode()).hexdigest(),
             "provider ref head was observed for a different source, origin, prefix, or ref")
     expected_oid = publication["oid"] if phase == "published" else None
@@ -1676,6 +1695,8 @@ def verify_service_lifecycle(
             "public_export_sha256": spec.get("publication_sha256", "") if arm == "edge" else "",
         }, "service read used a different native target or viewer binding")
         require(read["lfs_key_sha256"] == lfs_key, "service lifecycle requires the approved LFS object")
+    require(edge["service_instance_sha256"] != origin["service_instance_sha256"],
+            "service rollback must use a separate process")
     require(edge["git_blob_oid_sha256"] == origin["git_blob_oid_sha256"]
             and edge["finished_at_unix_ms"] <= origin["started_at_unix_ms"],
             "service rollback must follow the edge read and verify the same published blob")
@@ -2006,14 +2027,17 @@ def collect_git_performance(
     inputs: Path, registration: dict[str, Any], platform: str, run_id: str, attempt: str,
     *, retain: Path | None = None, sdk_native: dict[str, str] | None = None,
     verify_hydration: Callable[[bytes, str], dict[str, Any]] | None = None,
+    service_row: Path | None = None,
 ) -> dict[str, Any]:
     spec = benchmark_registration(registration)
     scope = spec["scope"]
     hydration = is_direct_sdk_hydration_scope(scope)
     require(hydration == (verify_hydration is not None), "SDK hydration benchmarks require verified publication and placement")
     sdk = is_direct_sdk_git_scope(scope)
-    require(sdk or hydration or (requires_cli_workload(scope) and spec["workload"] == cli_action_name(scope)),
-            "benchmark must register a scoped direct Git, capsule, LFS or SDK hydration workload")
+    service = is_direct_service_git_scope(scope)
+    require(service == (service_row is not None), "service Git benchmarks require the retained lifecycle row")
+    require(sdk or hydration or service or (requires_cli_workload(scope) and spec["workload"] == cli_action_name(scope)),
+            "benchmark must register a supported direct CLI, SDK or service workload")
     if sdk:
         require(inputs.is_dir(), "direct SDK Git requires retained regional SDK benchmark records")
     if hydration:
@@ -2024,11 +2048,51 @@ def collect_git_performance(
     provider = PROVIDER_FOR_EDGE[scope.split("/", 1)[0]]
     provenance = {key: spec[key] for key in ("source_sha", "scope", "configuration_sha256")}
     provenance |= {"workflow_run_id": run_id, "workflow_run_attempt": attempt, "platform": platform}
-    if not (sdk or hydration):
+    if not (sdk or hydration or service):
         provenance["candidate"] = spec["candidate"]
+    service_anchor = None
+    service_instances = set()
+    provider_request_ids = set()
+    published_at, retired_at = 0, 0
+    if service_row is not None:
+        require(inputs.is_dir(), "direct service Git requires retained regional benchmark records")
+        product = service_row / SERVICE_PRODUCT_DIR
+        edge_raw = read_git_record(product / "edge.json", limit=GIT_FETCH_RECORD_LIMIT)
+        service_anchor = validate_service_read(
+            decode(edge_raw), provenance, "edge",
+        )
+        service_origin = validate_service_read(decode(read_trace(service_row / "traces/rollback.json", "rollback")),
+                                               provenance, "origin")
+        service_instances.update(record["service_instance_sha256"] for record in (service_anchor, service_origin))
+        workload = spec["service_workload"]
+        publication_raw = read_git_record(product / "publication.json")
+        publication = validate_git_publication(publication_raw, provenance)
+        receipt = hashlib.sha256(publication_raw).hexdigest()
+        observed_raw = read_git_record(product / GIT_NATIVE_REF_FILES["published"])
+        require(publication["published"] and service_anchor["publication_sha256"] == receipt
+                and service_anchor["native_published_sha256"] == hashlib.sha256(observed_raw).hexdigest(),
+                "regional service reads require the independently observed publication")
+        observed = verify_git_native_ref(decode(observed_raw), provenance, publication, receipt, "published",
+                                         workload["origin_sha256"], prefix_sha256=workload["prefix_sha256"])
+        published_at = observed["observed_at_unix_ms"]
+        require(publication["visible_at_unix_ms"] <= observed["started_at_unix_ms"],
+                "regional service reads require a valid publication interval")
+        retired_at = verify_git_retirement(read_git_record(product / "retirement.json"), provenance, receipt,
+                                           publication["candidate"], service_origin["finished_at_unix_ms"])
+        require(service_anchor["workload_sha256"] == workload["sha256"]
+                and service_anchor["commit"] == publication["oid"] and service_anchor["payload_sha256"] == publication["sha256"]
+                and service_anchor["payload_bytes"] == workload["payload_bytes"]
+                and service_anchor["etag_sha256"] == workload["etag_sha256"]
+                and service_anchor["reader"] == {
+                    "origin_sha256": workload["origin_sha256"], "prefix_sha256": workload["prefix_sha256"],
+                    "binding_sha256": spec["viewer_binding_sha256"], "public_export_sha256": spec.get("publication_sha256", ""),
+                }, "regional service reads require the approved lifecycle workload and viewer")
+        provider_request_ids, _, _ = verify_viewer_requests(
+            decode(read_trace(product / "viewer-requests.json", "service viewer requests")), service_anchor,
+            hashlib.sha256(edge_raw).hexdigest(), PROVIDERS[provider][0],
+        )
     seen = set()
     cache_roots = set()
-    provider_request_ids = set()
     performance = {}
     for location, region in spec["regions"].items():
         pairs = []
@@ -2039,6 +2103,7 @@ def collect_git_performance(
             windows = {}
             primer_digest = None
             primer_cache = None
+            service_primer = None
             for arm in ARMS:
                 slot = Path(location) / f"{index:04d}" / arm
                 label = f"{location} {index} {arm}"
@@ -2070,6 +2135,29 @@ def collect_git_performance(
                     if arm == "warm_local":
                         require(client["primer_sha256"] == primer_digest, f"{label} did not repeat its own warm edge snapshot")
                     payload = (client["commit"], client["sha256"], client["git_blob_oid_sha256"])
+                    receipt = client["publication_sha256"]
+                elif service_anchor is not None:
+                    client = validate_service_read(decode(client_raw), provenance, GIT_MODES[arm])
+                    reader = client["reader"]
+                    expected = service_anchor["reader"]
+                    if arm == "origin":
+                        expected = expected | {"binding_sha256": "", "public_export_sha256": ""}
+                    require(reader == expected and all(client[key] == service_anchor[key] for key in (
+                        "workload_sha256", "publication_sha256", "native_published_sha256", "commit",
+                        "payload_sha256", "payload_bytes", "etag_sha256", "git_blob_oid_sha256",
+                    )), f"{label} used a different service workload or read target")
+                    require(published_at <= client["started_at_unix_ms"] <= client["finished_at_unix_ms"] <= retired_at,
+                            f"{label} ran outside the independently observed publication interval")
+                    if arm == "warm_local":
+                        require(service_primer is not None, f"{label} has no warm edge primer")
+                        verify_service_repeat(client, service_primer, primer_digest)
+                    else:
+                        instance = client["service_instance_sha256"]
+                        require(instance not in service_instances, f"{label} must use a fresh service process")
+                        service_instances.add(instance)
+                    if arm == "warm_edge":
+                        service_primer, primer_digest = client, digest
+                    payload = (client["commit"], client["payload_sha256"], client["etag_sha256"], client["git_blob_oid_sha256"])
                     receipt = client["publication_sha256"]
                 else:
                     client = validate_git_fetch(client_raw, provenance, GIT_MODES[arm], label)
@@ -2104,7 +2192,7 @@ def collect_git_performance(
                 measured.update({key: external[key] for key in GIT_EXTERNAL_METRICS})
                 require(all(type(value) is int and value >= 0 for value in measured.values()),
                         f"{label} is missing measured metrics")
-                require(positive(measured["peak_memory_bytes"]) and (sdk or positive(measured["peak_disk_bytes"])),
+                require(positive(measured["peak_memory_bytes"]) and (sdk or service or positive(measured["peak_disk_bytes"])),
                         f"{label} is missing fetch memory or disk measurements")
                 incomplete = client["incomplete_edge_bytes"]
                 native = client["native_traffic"]
@@ -2116,7 +2204,7 @@ def collect_git_performance(
                         f"{label} has no logged CloudFront fill from the approved S3 origin")
                 require(provider != "azure" or arm != "cold_edge" or positive(cdn_fill_bytes),
                         f"{label} has no logged Front Door fill from the approved Blob origin")
-                require(not (sdk or hydration) or provider != "gcs" or arm != "cold_edge" or positive(cdn_fill_bytes),
+                require(not (sdk or hydration or service) or provider != "gcs" or arm != "cold_edge" or positive(cdn_fill_bytes),
                         f"{label} has no logged Cloud CDN fill from the approved GCS origin")
                 require(incomplete <= measured["rejected_bytes"]
                         and measured["client_bytes"] >= native["body_bytes"] + measured["edge_bytes"] + incomplete,
@@ -2184,7 +2272,7 @@ def verify_cdn_report(
     cli_workload = requires_cli_workload(scope)
     sdk_git = is_direct_sdk_git_scope(scope)
     sdk_hydration = is_direct_sdk_hydration_scope(scope)
-    # Service rows can prove the read lifecycle while their regional metrics remain fixture summaries.
+    # Service rows still need release build identity and complete public transition evidence.
     require(policy is None or cli_workload or sdk_git or sdk_hydration,
             "CDN promotion requires a product-specific workload and per-run regional evidence verifier")
     if cli_workload:
@@ -2233,5 +2321,9 @@ def verify_cdn_report(
         product = collect_service_product_action(directory / SERVICE_PRODUCT_DIR, row, registration, rollback,
                                                  cleanup_at=cleanup_at, native_origin_sha256=native_origin_sha256)
         require(row["product_action"] == product, "product action differs from the retained service lifecycle evidence")
+        if is_direct_service_git_scope(scope):
+            measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt,
+                                               service_row=directory)
+            require(row["performance"] == measured, "service performance summary differs from the retained measurements")
     return {"status": "verified", "scope": scope, "platform": platform, "deployment": row["deployment"],
             "checks": checks, "distant_median_savings_lower_bound_ms": lower}

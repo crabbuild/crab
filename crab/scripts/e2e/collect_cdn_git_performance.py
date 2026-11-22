@@ -24,6 +24,7 @@ def main() -> int:
     parser.add_argument("--row", required=True, metavar="SCOPE/PLATFORM")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--run-attempt", required=True)
+    parser.add_argument("--service-row", type=Path, help="row directory containing service-product and traces")
     args = parser.parse_args()
     try:
         raw = args.benchmarks.read_bytes()
@@ -36,7 +37,8 @@ def main() -> int:
         registration = benchmark_registration(registrations[args.row])
         require(matches(LABEL, platform) and registration["scope"] == scope,
                 "benchmark registration does not match its approved row")
-        performance = collect_git_performance(args.inputs, registration, platform, args.run_id, args.run_attempt)
+        performance = collect_git_performance(args.inputs, registration, platform, args.run_id, args.run_attempt,
+                                              service_row=args.service_row)
         verify_performance(performance, registration)
     except (OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)

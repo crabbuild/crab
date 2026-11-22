@@ -145,6 +145,17 @@ async fn ordinary_http_reads_use_verified_edge_bodies_and_keep_native_controls()
             .iter()
             .any(|object| object.location.as_ref() == request.location)
     }));
+    edge.reset();
+    let cached = read(&server, git_url, None).await;
+    assert_eq!(cached.status(), StatusCode::OK);
+    assert_eq!(cached.headers()[header::ETAG], git_etag);
+    assert_eq!(
+        axum::body::to_bytes(cached.into_body(), 1024)
+            .await
+            .unwrap(),
+        &git_body[..]
+    );
+    assert!(edge.requests().is_empty());
 
     let response = read(&server, &lfs_url, None).await;
     assert_eq!(response.status(), StatusCode::OK);

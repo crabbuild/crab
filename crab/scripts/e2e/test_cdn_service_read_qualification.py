@@ -80,7 +80,7 @@ class CdnServiceReadTests(unittest.TestCase):
             workload=root / "workload.json", workload_sha256=json_file(root / "workload.json", workload),
             credentials=root / "credentials.json", service_log=root / "server.log",
             publication=root / "publication.json", native_published=root / "native-published.json",
-            source_sha=COMMIT, run_id="123", run_attempt="2", arm="edge", export_approval=None)
+            source_sha=COMMIT, run_id="123", run_attempt="2", arm="edge", export_approval=None, primer=None)
 
     def request(self, args, provider, consumer, family, fault=""):
         config = json.loads(args.fixture.read_bytes())
@@ -111,14 +111,16 @@ class CdnServiceReadTests(unittest.TestCase):
                 edge[0]["consumer"] = "sdk"
             if fault == "missing-request":
                 edge[0]["request_sha256"] = ""
-            reading_at_edge = args.arm == "edge" or fault == "rollback-binding"
+            reading_at_edge = args.arm != "origin" or fault == "rollback-binding"
             export = "b" * 64 if reading_at_edge and access == "public" else ""
             reader = SERVICE.read_target_fingerprints(config, edge=reading_at_edge, export_sha256=export)
             for different in reader:
                 if fault == different:
                     reader[different] = "e" * 64
             target = {"target": SERVICE.READ_TARGET,
-                      "fields": reader | {"consumer": consumer, "message": "CDN service read target"}}
+                      "fields": reader | {"consumer": consumer, "message": "CDN service read target",
+                                          "service_instance_sha256": "f" * 64 if args.arm == "origin"
+                                          or fault == "another-process" else "a" * 64}}
             lines = [natives]
             if fault != "no-target":
                 lines.append(target)
@@ -126,6 +128,9 @@ class CdnServiceReadTests(unittest.TestCase):
                 lines.append(target)
             if args.arm == "edge" and fault != "no-edge" or fault == "origin-edge":
                 lines += [{"target": "crab_storage::cdn::transfer", "fields": event} for event in edge]
+            if args.arm == "warm_local" and fault != "no-local":
+                local = edge[1] | {"source": "local"}
+                lines.append({"target": "crab_storage::cdn::transfer", "fields": local})
             with args.service_log.open("a", encoding="utf-8") as log:
                 log.writelines(json.dumps(line) + "\n" for line in lines)
             output = Message()
@@ -210,6 +215,21 @@ class CdnServiceReadTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, message):
                         SERVICE.probe(args)
                     http.assert_not_called()
+
+    def test_repeats_the_exact_git_blob_in_the_edge_primers_process(self):
+        for consumer in ("server", "s3-gateway"):
+            with self.subTest(consumer=consumer), TemporaryDirectory() as directory:
+                root = Path(directory)
+                args = self.prepare(root, "cloudfront", consumer, "git")
+                edge = self.request(args, "cloudfront", consumer, "git")
+                args.arm, args.primer = "warm_local", root / "warm-edge.json"
+                digest = json_file(args.primer, edge)
+                local = self.request(args, "cloudfront", consumer, "git")
+                self.assertEqual((local["primer_sha256"], local["local_payload_hits"]), (digest, 1))
+                self.assertEqual(local["all_edge_attempts"], 0)
+                for fault, error in (("another-process", "same process"), ("no-local", "verified cached blob")):
+                    with self.subTest(fault=fault), self.assertRaisesRegex(ValueError, error):
+                        self.request(args, "cloudfront", consumer, "git", fault)
 
     def test_service_lifecycle_requires_edge_rollback_distinct_tombstone_and_matching_cleanup(self):
         provider, consumer, family = "cloud-cdn", "s3-gateway", "lfs"

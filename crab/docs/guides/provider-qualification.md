@@ -868,9 +868,23 @@ as assembly inputs for the service fixture row.
   `sha256`, the native origin hash in `origin_sha256`, the hash of the physical
   prefix with its trailing slash in `prefix_sha256`, and the approved
   `etag_sha256` and `payload_bytes`.
-- Provide the fixture performance summary in `observations.json`. Assembly
-  and bundle verification derive `product_action` from the retained records.
-  Promotion requires per-run regional verification and cache evidence.
+- Provide the fixture performance summary for service LFS in
+  `observations.json`. Assembly and bundle verification derive
+  `product_action` from the retained records. For service Git, they also
+  derive performance from the regional records described below.
+
+For each service Git pair, run the same commit between the observed
+publication and retirement. Use separate fresh service processes for the
+`origin`, `cold_edge`, and `warm_edge` arms. Wait for expiry or invalidate
+only the fixture objects before each cold edge sample. Keep the warm-edge service
+running and repeat the request with `warm_local --primer "$warm_edge_record"`
+and the same workload and service log. Retain each `client.json`, runner
+`measurement.json`, and provider viewer log proof for the edge arms under
+`git-benchmarks/<location>/<pair>/<arm>/`. The reducer requires a distinct
+service instance for each fresh arm and checks the exact verified Git blob
+and zero edge requests in the local repeat. To validate a service Git
+benchmark separately, pass `--service-row` to `collect_cdn_git_performance.py`
+with the row directory holding `service-product/` and `traces/`.
 
 ### Verify native publication and CDN Git fetch
 
@@ -1377,7 +1391,8 @@ cleanup traces. It derives `performance` from `git-benchmarks/`. Supply the
 measured `product_action` and `performance` fields in `observations.json`
 for fixture scopes with no product-specific collector. Direct Crab Server and
 S3 gateway rows derive `product_action` from `service-product/`, rollback,
-and cleanup. Release verification requires a
+and cleanup. Their Git rows also derive `performance` from `git-benchmarks/`.
+Release verification requires a
 product-specific verifier for each enabled row. Git and capsule scopes require
 `product_action.verified_edge_payloads` alongside the completed GET count.
 Each benchmark arm records `local_payload_hits`. The warm-local comparison

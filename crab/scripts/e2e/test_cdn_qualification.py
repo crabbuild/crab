@@ -79,7 +79,7 @@ def sdk_candidate(scope: str, platform: str) -> dict:
 
 
 def write_git_measurements(inputs: Path, registration: dict, platform: str, sdk_native: dict | None = None,
-                           hydration: dict | None = None) -> None:
+                           hydration: dict | None = None, service: dict | None = None) -> None:
     provider = CDN.PROVIDER_FOR_EDGE[registration["scope"].split("/", 1)[0]]
     sdk = CDN.is_direct_sdk_git_scope(registration["scope"])
     action = CDN.cli_action_name(registration["scope"])
@@ -94,6 +94,8 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, sdk_
                 started = 1_000_000 * (ordinal + 1) + index * 10_000 + sequence * 1_000
                 if hydration is not None:
                     started += 100_000
+                if service is not None:
+                    started += service["started_at_unix_ms"] - 3_000_000
                 edge = int(arm in ("cold_edge", "warm_edge"))
                 counters = dict.fromkeys(CDN.PRODUCT_COUNTERS, 0) | {
                     "verified_edge_payloads": edge, "edge_attempts": edge,
@@ -104,7 +106,7 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, sdk_
                     "source_sha": registration["source_sha"], "scope": registration["scope"],
                     "configuration_sha256": registration["configuration_sha256"],
                     "workflow_run_id": "123", "workflow_run_attempt": "2", "platform": platform,
-                    "candidate": registration["sdk_candidate" if sdk or hydration is not None else "candidate"],
+                    "candidate": registration.get("sdk_candidate" if sdk or hydration is not None else "candidate"),
                     "reader": {
                         "binding_sha256": "" if arm == "origin" else registration["viewer_binding_sha256"],
                         "cache_root_sha256": hashlib.sha256(f"{location}/{index}/{arm}/cache".encode()).hexdigest(),
@@ -142,7 +144,19 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, sdk_
                         proof[request_id]["key_sha256"] = key_sha256
                         for record in origin_requests.values():
                             record["key_sha256"] = key_sha256
-                if hydration is not None:
+                if service is not None:
+                    read_fields = CDN.PRODUCT_COUNTERS | CDN.SDK_TIMING_FIELDS | {"arm", "edge_responses", "native_traffic"}
+                    client = service | {key: client[key] for key in read_fields}
+                    client["reader"] = service["reader"]
+                    if arm == "origin":
+                        client["reader"] = service["reader"] | {"binding_sha256": "", "public_export_sha256": ""}
+                    instance_arm = "warm_edge" if arm == "warm_local" else arm
+                    client["service_instance_sha256"] = hashlib.sha256(f"{location}/{index}/{instance_arm}/process".encode()).hexdigest()
+                    if arm == "warm_local":
+                        client["primer_sha256"] = hashlib.sha256((directory.parent / "warm_edge/client.json").read_bytes()).hexdigest()
+                    if provider == "gcs" and arm == "cold_edge":
+                        client["native_traffic"] = {"get_responses": 0, "head_responses": 0, "body_bytes": 0}
+                elif hydration is not None:
                     root = client["reader"]["cache_root_sha256"]
                     read_fields = CDN.PRODUCT_COUNTERS | CDN.SDK_TIMING_FIELDS | {"arm", "edge_responses", "native_traffic"}
                     client = hydration | {key: client[key] for key in read_fields}
@@ -420,13 +434,13 @@ class CdnQualificationTests(unittest.TestCase):
         writer = cli_candidate(self.scope, platform)
         receipt = json_file(records / "publication.json", provenance | {
             "schema": "crab.cdn-git-publication/v1", "ref": ref, "oid": commit, "sha256": payload,
-            "published": True, "visible_at_unix_ms": cleanup_at - 90, "candidate": writer,
+            "published": True, "visible_at_unix_ms": cleanup_at - 3_000_010, "candidate": writer,
         })
         json_file(records / "retirement.json", provenance | {
             "schema": "crab.cdn-git-retirement/v1", "publication_sha256": receipt, "ref_retired": True,
             "retired_at_unix_ms": cleanup_at - 30, "candidate": writer,
         })
-        for phase, at, marker in (("published", cleanup_at - 80, "1"), ("retired", cleanup_at - 20, "2")):
+        for phase, at, marker in (("published", cleanup_at - 3_000_000, "1"), ("retired", cleanup_at - 20, "2")):
             digest = json_file(records / CDN.GIT_NATIVE_REF_FILES[phase], provenance | {
                 "schema": "crab.cdn-native-ref/v1", "phase": phase, "platform": platform,
                 "publication_sha256": receipt, "started_at_unix_ms": at, "observed_at_unix_ms": at + 5,
@@ -446,6 +460,7 @@ class CdnQualificationTests(unittest.TestCase):
             "publication_sha256": receipt, "native_published_sha256": published_digest, "commit": commit,
             "workload_sha256": spec["sha256"], "payload_sha256": payload, "payload_bytes": spec["payload_bytes"],
             "etag_sha256": spec["etag_sha256"], "git_blob_oid_sha256": "7" * 64 if family == "git" else None,
+            "service_instance_sha256": "1" * 64,
             "lfs_key_sha256": lfs_key, "elapsed_ms": 10, "edge_responses": {},
             "reader": reader | {"binding_sha256": "", "public_export_sha256": ""},
             "native_traffic": {"get_responses": 1, "head_responses": 0, "body_bytes": 8},
@@ -455,6 +470,7 @@ class CdnQualificationTests(unittest.TestCase):
         response = {"status": 206, "cache": "hit", "bytes": 8, "complete": True}
         client = json_file(records / "edge.json", common | {
             "arm": "edge", "started_at_unix_ms": cleanup_at - 70, "finished_at_unix_ms": cleanup_at - 60,
+            "service_instance_sha256": "2" * 64,
             "all_edge_attempts": 1, "edge_attempts": 1, "observed_edge_gets": 1, "verified_edge_payloads": 1,
             "edge_bytes": 8, "edge_hits": 1, "edge_responses": {request: response},
             "reader": reader | {"binding_sha256": "e" * 64,
@@ -469,6 +485,9 @@ class CdnQualificationTests(unittest.TestCase):
         else:
             proof["origin_requests"] = {}
         json_file(records / "viewer-requests.json", proof)
+        if family == "git":
+            edge_read = json.loads((records / "edge.json").read_bytes())
+            write_git_measurements(self.directory / CDN.GIT_BENCHMARK_DIR, self.registration, platform, service=edge_read)
 
     def record_sdk_product(self) -> None:
         records = self.directory / CDN.GIT_PRODUCT_DIR

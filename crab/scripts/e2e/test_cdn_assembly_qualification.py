@@ -53,6 +53,10 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
             observations.pop("product_action")
             name = fixture.CDN.SERVICE_PRODUCT_DIR
             (self.root / name).rename(row / name)
+            if family == "git":
+                observations.pop("performance")
+                name = fixture.CDN.GIT_BENCHMARK_DIR
+                (self.root / name).rename(row / name)
         if access == "public":
             name = fixture.CDN.PUBLIC_EXPORT_DIR
             (self.root / name).rename(row / name)
@@ -192,6 +196,34 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         self.assertFalse(self.output.exists())
         fixture.json_file(path, edge)
         self.assertEqual(self.assemble(digest), 1)
+
+    def test_regional_service_git_rejects_cross_process_primers_and_reused_workers(self) -> None:
+        digest = self.inputs("gcs", consumer="server")
+        pair = self.root / self.row / fixture.CDN.GIT_BENCHMARK_DIR / "near/0001"
+        slot = pair / "warm_local" / "client.json"
+        original = json.loads(slot.read_bytes())
+        for field, value in (("primer_sha256", "f" * 64), ("service_instance_sha256", "f" * 64)):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "repeat its own edge primer in the same process"):
+                fixture.json_file(slot, original | {field: value})
+                self.assemble(digest)
+        self.assertFalse(self.output.exists())
+        fixture.json_file(slot, original)
+
+        cold = pair / "cold_edge" / "client.json"
+        warm = json.loads((pair / "warm_edge" / "client.json").read_bytes())
+        cold_original = json.loads(cold.read_bytes())
+        for change, error in (
+            ({"started_at_unix_ms": 1, "finished_at_unix_ms": 2}, "outside the independently observed publication interval"),
+            ({"service_instance_sha256": warm["service_instance_sha256"]}, "must use a fresh service process"),
+        ):
+            with self.subTest(error=error), self.assertRaisesRegex(ValueError, error):
+                replacement = fixture.json_file(cold, cold_original | change)
+                for name in ("measurement.json", fixture.CDN.VIEWER_REQUEST_FILES["gcs"]):
+                    path = cold.parent / name
+                    previous = json.loads(path.read_bytes())
+                    fixture.json_file(path, previous | {"client_report_sha256": replacement})
+                self.assemble(digest)
+        self.assertFalse(self.output.exists())
 
     def test_failed_operational_check_leaves_no_artifact(self) -> None:
         self.inputs("gcs")

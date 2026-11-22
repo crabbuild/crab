@@ -499,6 +499,13 @@ fn service_read_target_reports_fingerprints_of_the_selected_layout() {
     let native = &events[1].0;
     assert_eq!(edge["consumer"], "\"s3-gateway\"");
     assert_eq!(native["consumer"], "\"server\"");
+    let instance = edge["service_instance_sha256"].trim_matches('"');
+    assert_eq!(instance.len(), 64);
+    assert!(instance.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert_eq!(
+        edge["service_instance_sha256"],
+        native["service_instance_sha256"]
+    );
     for event in [edge, native] {
         assert_eq!(
             event["origin_sha256"],
