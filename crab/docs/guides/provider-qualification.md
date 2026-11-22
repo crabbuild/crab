@@ -1472,26 +1472,37 @@ and viewer records in `xorb-product`.
 Assembly derives the product result from these records, the transport and
 scoped view observations, and the cleanup trace.
 
-#### Measure sparse reads through the SDK
+#### Qualify sparse reads through the SDK
 
-For a sparse pilot, keep the published source ref and approved projected view
-live until all samples finish. Use a separate workload with schema
+Keep the published source ref and approved projected view live until the sparse
+reads finish. Use a separate workload with schema
 `crab.cdn-sdk-xorb-range-workload/v1`. Keep the full file length and digest,
 and add `projected_oid` for the exact projected Git commit, `sdk_sha256` for
 the SDK probe executable, and `read_range` with `offset`, `bytes`, and `sha256`
-for the approved file window.
+for the approved file window. Preregister its digest as `sparse_workload_sha256`
+and retain the document at `xorb-product/sparse-workload.json`. Use the same
+publication, pointer, and physical namespace as the full workload.
 
 Run the same SDK worker with `--receipt` pointing to the native publication
 record in place of `--git` and `--crab`. The probe opens the remote snapshot,
 verifies the commit and Git pointer, and consumes `Snapshot::open_file`
 through successful EOF with the approved range. Deploy the issuer with support
 for `fetch` retention. The SDK compares the acknowledged claim digest with its
-capture and holds the claim through stream cleanup. Run separate native, cold
-edge, and warm edge invocations without `--warm-local-output`. Join each
-edge record to provider logs and compare xorb viewer bytes with xorb origin
-fill. The worker rejects whole xorb GETs and verifies fewer viewer bytes
-than the approved xorb size. Retain these pilot records alongside the
-complete hydration evidence used for release qualification.
+capture and holds the claim through stream cleanup. Run native, cold edge,
+and warm edge invocations in that order, each with a fresh local cache and
+without `--warm-local-output`. Invalidate only the test xorb before the cold
+invocation, then run the warm invocation against the same edge. Keep the
+CloudFront cold and warm invocations in separate S3 log seconds. Save the
+client records in `xorb-product/` as `sparse-origin.json`,
+`sparse-cold-edge.json`, and `sparse-warm-edge.json`. Join each edge
+record to provider logs with `collect_cdn_viewer_requests.py`. Use
+`--require-origin-fill` for the cold invocation and save the joins as
+`sparse-cold-edge-viewer-requests.json` and `sparse-warm-edge-viewer-requests.json`.
+The release verifier requires a cold miss and observed xorb origin fill, a
+warm hit on every xorb range, and fewer viewer bytes than the approved xorb
+size in both edge arms. Compare xorb viewer bytes with origin fill bytes to
+measure the provider's fill amplification. Keep the full hydration lifecycle
+and regional benchmarks for the same fixture.
 
 Crab skips the xorb size HEAD if the file lookup already authenticated the
 encoded size. The native-origin counters still include other metadata reads.
@@ -1531,28 +1542,25 @@ hits and zero edge attempts for that arm. The timer covers startup, the
 filesystem read, and clean detach. The xorb transfer counters cover the
 filesystem read after the live commit and pointer checks.
 
-#### Measure sparse mounted reads
+#### Qualify sparse mounted reads
 
 Use a file reconstructed from one approved xorb with enough distinct,
 compressible chunks to span several 8 MiB mount read windows while the
 serialized xorb stays within the transport fixture's 1 MiB limit. Use the
-same mount command with a separate, digest-pinned workload. Set its
+same mount command with the workload pinned by `sparse_workload_sha256`. Set its
 schema to `crab.cdn-mount-xorb-range-workload/v1` and add `read_range` with
 `offset`, `bytes`, and `sha256` for a proper subrange of the original file.
-Keep `payload_bytes` and `payload_sha256` for the entire file. The worker
+Keep the full workload fields, including the exact mounted commit and the
+entire file's `payload_bytes` and `payload_sha256`. The worker
 checks the mounted file size, reads the chosen range without userspace
 read-ahead, and verifies its digest. It counts transport through detach.
 The worker rejects complete xorb GETs, incomplete range responses, and xorb
 viewer bytes that total a complete xorb.
 
-Run separate native, cold edge, and warm edge mounts using the same workload
-digest. Join both edge records using `collect_cdn_viewer_requests.py`. Use
-`--require-origin-fill` for the cold edge and confirm that all xorb requests
-hit in the warm edge sample. Compare the client xorb `edge_bytes` with the
-joined provider origin records for that xorb. Keep the sparse records as
-pilot evidence alongside the complete hydration and remount evidence used
-for release qualification. The sparse workload uses a fresh mount each time
-and omits `--warm-local-output`.
+Use the same ordered native, cold edge, and warm edge invocations, record
+names, and provider log joins as the SDK sparse workload. Use a fresh mount
+for each invocation and omit `--warm-local-output`. Release qualification
+requires the sparse records and the complete hydration and remount evidence.
 
 ### Verify fixture cleanup
 

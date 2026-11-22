@@ -1304,15 +1304,16 @@ def benchmark_registration(registration: Any) -> dict[str, Any]:
     if is_direct_xorb_read_scope(registration["scope"]):
         mount = is_direct_mount_xorb_scope(registration["scope"])
         expected.update(("candidate" if mount else "sdk_candidate", "viewer_binding_sha256", "viewer_approval_sha256",
-                         "hydration_workload_sha256"))
+                         "hydration_workload_sha256", "sparse_workload_sha256"))
         if mount:
             verify_read_candidate(registration.get("candidate"), registration.get("source_sha"))
         else:
             verify_sdk_candidate(registration.get("sdk_candidate"), registration.get("source_sha"))
         require(registration.get("workload") == (MOUNT_XORB_ACTION if mount else SDK_HYDRATION_ACTION)
                 and all(matches(SHA256, registration.get(key)) for key in
-                        ("viewer_binding_sha256", "viewer_approval_sha256", "hydration_workload_sha256")),
-                "xorb read benchmark needs the approved workload and viewer binding")
+                        ("viewer_binding_sha256", "viewer_approval_sha256", "hydration_workload_sha256",
+                         "sparse_workload_sha256")),
+                "xorb read benchmark needs the approved full and sparse workloads and viewer binding")
     if is_direct_service_scope(registration["scope"]):
         expected.update(("service_workload", "viewer_binding_sha256", "service_candidate"))
         verify_service_candidate(registration.get("service_candidate"), registration.get("source_sha"))
@@ -2160,7 +2161,7 @@ def validate_xorb_workload(raw: bytes, approval: str, configuration: str, *, mou
 
 def verify_sparse_xorb_traffic(read: dict[str, Any], object_bytes: int) -> None:
     # Related catalog and shard requests still need a provider log join.
-    # Only xorb responses can prove the mounted byte window was sparse.
+    # Only xorb responses can prove the file window was sparse.
     transfers = [response for response in read["edge_responses"].values() if response["family"] == "xorb"]
     require(0 < read["edge_bytes"] == sum(response["bytes"] for response in transfers) < object_bytes
             and read["edge_attempts"] == read["observed_edge_gets"] == len(transfers)
@@ -2250,6 +2251,57 @@ def verify_xorb_read(
     return read
 
 
+def verify_sparse_xorb_product(
+    inputs: Path, row: dict[str, Any], registration: dict[str, Any], placement: dict[str, Any],
+    full_spec: dict[str, Any], published: int, retired: int, cache_roots: set[str], viewer_ids: set[str],
+    *, limits: ReleaseReadLimits | None,
+) -> dict[str, bytes]:
+    edge = scope_parts(row["scope"])[0]
+    mount = is_direct_mount_xorb_scope(row["scope"])
+    records = {"sparse-workload.json": read_git_record(inputs / "sparse-workload.json")}
+    approval = registration["sparse_workload_sha256"]
+    spec = validate_xorb_workload(records["sparse-workload.json"], approval, row["configuration_sha256"],
+                                  mount=mount, allow_sparse=True)
+    require("read_range" in spec and all(spec[key] == full_spec[key] for key in full_spec if key != "schema"),
+            "sparse xorb read must use the complete hydration workload's publication and projection")
+    sparse_registration = registration | {"hydration_workload_sha256": approval}
+    previous_end = published
+    for arm in ("origin", "cold-edge", "warm-edge"):
+        name = f"sparse-{arm}"
+        client_name = f"{name}.json"
+        raw = records[client_name] = read_git_record(inputs / client_name, limit=GIT_FETCH_RECORD_LIMIT)
+        read = verify_xorb_read(raw, row, sparse_registration, "origin" if arm == "origin" else "edge", spec, placement)
+        require(previous_end <= read["started_at_unix_ms"] <= read["finished_at_unix_ms"] <= retired,
+                "sparse xorb reads must run in order within the observed publication lifetime")
+        if arm == "warm-edge" and edge == "cloudfront":
+            require(previous_end // 1000 < read["started_at_unix_ms"] // 1000,
+                    "CloudFront sparse reads need distinct cold and warm S3 log seconds")
+        previous_end = read["finished_at_unix_ms"]
+        root = read["reader"]["cache_root_sha256"]
+        require(root not in cache_roots, "sparse xorb read reused a local cache")
+        cache_roots.add(root)
+        if arm == "origin":
+            continue
+        verify_sparse_xorb_traffic(read, placement["views"]["target"]["bytes"])
+        requests = read["edge_responses"]
+        if limits is not None:
+            require(all(limits.admits(response) for response in requests.values() if response["family"] == "xorb"),
+                    "sparse xorb read exceeded its compiled CDN read limits")
+        log_name = f"{name}-viewer-requests.json"
+        log = records[log_name] = read_git_record(inputs / log_name, limit=GIT_FETCH_RECORD_LIMIT)
+        metrics = verify_viewer_requests(decode(log), read, hashlib.sha256(raw).hexdigest(), edge)
+        require(viewer_ids.isdisjoint(requests), "sparse xorb read reused a CDN viewer request")
+        viewer_ids.update(requests)
+        if arm == "cold-edge":
+            require("miss" in metrics.completed_cache.values() and metrics.successful_fill,
+                    "cold sparse xorb read needs a provider-confirmed miss and origin fill")
+        else:
+            require(len(metrics.completed_cache) == read["edge_attempts"]
+                    and all(result == "hit" for result in metrics.completed_cache.values()),
+                    "warm sparse xorb read needs provider-confirmed hits for every xorb range")
+    return records
+
+
 def collect_xorb_read_evidence(
     directory: Path, row: dict[str, Any], registration: dict[str, Any], rollback_raw: bytes, *,
     placement: dict[str, Any], cleanup_at: int, native_origin_sha256: str,
@@ -2293,6 +2345,11 @@ def collect_xorb_read_evidence(
                                      retired, cleanup_at, native_origin_sha256)
     viewer_raw = read_git_record(inputs / PRODUCT_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
     product_request_ids = verify_product_viewer_requests(viewer_raw, edge, edge_raw, scope_parts(row["scope"])[0])
+    limits = release_read_limits(policy).get(row["scope"]) if policy is not None else None
+    sparse_records = verify_sparse_xorb_product(
+        inputs, row, registration, placement, spec, published, retired, product_caches, product_request_ids,
+        limits=limits,
+    )
 
     def verify_measurement(raw: bytes, arm: str) -> dict[str, Any]:
         read = verify_read(raw, arm)
@@ -2311,7 +2368,7 @@ def collect_xorb_read_evidence(
         product = retain / XORB_PRODUCT_DIR
         product.mkdir()
         records = {"workload.json": workload_raw, "publication.json": publication_raw, read_name: edge_raw,
-                   "retirement.json": retirement_raw, PRODUCT_VIEWER_RECORD: viewer_raw}
+                   "retirement.json": retirement_raw, PRODUCT_VIEWER_RECORD: viewer_raw} | sparse_records
         records.update({filename: observations[phase] for phase, filename in GIT_NATIVE_REF_FILES.items()})
         for name, raw in records.items():
             (product / name).write_bytes(raw)

@@ -142,9 +142,17 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         product = row / fixture.CDN.XORB_PRODUCT_DIR
         self.assertEqual({entry.name for entry in product.iterdir()},
                          {"hydration.json", "workload.json", "publication.json", "retirement.json",
+                          "sparse-workload.json", "sparse-origin.json", "sparse-cold-edge.json", "sparse-warm-edge.json",
+                          "sparse-cold-edge-viewer-requests.json", "sparse-warm-edge-viewer-requests.json",
                           fixture.CDN.PRODUCT_VIEWER_RECORD, *fixture.CDN.GIT_NATIVE_REF_FILES.values()})
         # Recheck retained files using the same verifier that consumes the release bundle.
         fixture.CDN.verify_bundle_row(self.output, self.row, self.example.registration, fixture.COMMIT, "123", "2")
+        sparse_proof = product / "sparse-warm-edge-viewer-requests.json"
+        saved = sparse_proof.read_bytes()
+        sparse_proof.unlink()
+        with self.assertRaises(subprocess.CalledProcessError):
+            fixture.CDN.verify_bundle_row(self.output, self.row, self.example.registration, fixture.COMMIT, "123", "2")
+        sparse_proof.write_bytes(saved)
         edge = product / "hydration.json"
         original = json.loads(edge.read_bytes())
         fixture.json_file(edge, original | {"xorb_key_sha256": "0" * 64})

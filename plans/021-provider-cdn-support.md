@@ -319,9 +319,12 @@ SDK and mount range hydration can use authenticated compressed xorb spans
 from the edge. Keep the selected source through footer, metadata and payload
 verification. Qualify sparse access and provider fill amplification separately
 from complete hydration. The native SDK stream and NFS mount workers verify a
-preregistered file window and join range responses to provider logs. They
-measure xorb fill separately from adjacent Git, shard, and catalog fetches.
-Live sparse reports remain open.
+preregistered file window and join range responses to provider logs. Release
+qualification also requires the native, cold edge, and warm edge sparse
+reads for the same approved publication and projection as the full hydration
+workload. It verifies one cold miss with xorb origin fill and warm hits
+for every delivered xorb range. Xorb fill is measured separately from
+adjacent Git, shard, and catalog fetches. Live sparse reports remain open.
 Record each qualified profile's full-object, range and duration limits and
 enforce them before sending the first edge request. Xorb hydration reuses
 encoded sizes already verified during captured file dependency lookup to

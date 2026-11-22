@@ -811,8 +811,60 @@ class CdnQualificationTests(unittest.TestCase):
                                        self.report["platform"], hydration=evidence)
             else:
                 self.rollback_trace(evidence)
+        self.record_sparse_xorb_reads(records, traces, mount, target["bytes"])
         self.report["product_action"].update(expected_sha256="c" * 64, observed_sha256="c" * 64,
                                              expected_bytes=1024, observed_bytes=1024)
+
+    def record_sparse_xorb_reads(self, records: Path, traces: Path, mount: bool, object_bytes: int) -> None:
+        spec = json.loads((records / "workload.json").read_bytes())
+        edge = json.loads((records / ("mount.json" if mount else "hydration.json")).read_bytes())
+        origin = json.loads((traces / "rollback.json").read_bytes())
+        window = {"offset": 128, "bytes": 32, "sha256": "d" * 64}
+        projected = {} if mount else {"projected_oid": "f" * 40, "sdk_sha256": edge["candidate"]["binary_sha256"]}
+        approval = json_file(records / "sparse-workload.json", spec | projected | {
+            "schema": CDN.MOUNT_XORB_RANGE_WORKLOAD if mount else CDN.SDK_XORB_RANGE_WORKLOAD,
+            "read_range": window,
+        })
+        self.registration["sparse_workload_sha256"] = approval
+        for index, arm in enumerate(("origin", "cold-edge", "warm-edge")):
+            start = 2_000_000 + index * 2_000
+            name = f"sparse-{arm}"
+            path = records / f"{name}.json"
+            read = (origin if arm == "origin" else edge) | {
+                "schema": CDN.MOUNT_XORB_RANGE_READ if mount else CDN.SDK_XORB_RANGE_READ,
+                "workload_sha256": approval, "range_offset": window["offset"],
+                "payload": {key: window[key] for key in ("bytes", "sha256")},
+                "started_at_unix_ms": start, "finished_at_unix_ms": start + 10, "elapsed_ms": 10,
+                "reader": edge["reader"] | {"cache_root_sha256": hashlib.sha256(name.encode()).hexdigest()},
+            } | ({} if mount else {"commit": projected["projected_oid"]})
+            if arm == "origin":
+                json_file(path, read | {"reader": origin["reader"] | {
+                    "cache_root_sha256": read["reader"]["cache_root_sha256"],
+                }})
+                continue
+            cold = arm == "cold-edge"
+            cache = "miss" if cold else "hit"
+            request = hashlib.sha256(name.encode()).hexdigest()
+            response = range_response("xorb", object_bytes // 2, cache)
+            json_file(path, read | {
+                "edge_hits": int(not cold), "edge_misses": int(cold), "edge_bytes": response["bytes"],
+                "edge_responses": {request: response},
+            })
+            filename = f"{name}-viewer-requests.json"
+            write_product_viewer_proof(path, self.object_key, filename=filename)
+            if cold:
+                proof_path = records / filename
+                proof = json.loads(proof_path.read_bytes())
+                if proof["schema"] == "crab.cloud-cdn-viewer-requests/v1":
+                    proof["records"][request]["cache_fill_bytes"] = object_bytes
+                else:
+                    timestamp = {"at_unix_s": start // 1000} if proof["schema"] == "crab.cloudfront-viewer-requests/v1" else {
+                        "at_unix_ms": start,
+                    }
+                    proof["origin_requests"]["c" * 64] = timestamp | {
+                        "key_sha256": self.object_key, "status": 206, "response_body_bytes": object_bytes,
+                    }
+                json_file(proof_path, proof)
 
     def rollback_trace(self, evidence: dict[str, Any]) -> None:
         path = self.directory / "traces/rollback.json"
@@ -1671,6 +1723,49 @@ class CdnQualificationTests(unittest.TestCase):
         publication.write_bytes(approved_publication)
         (records / CDN.GIT_NATIVE_REF_FILES["published"]).unlink()
         self.rejected(CDN.GIT_NATIVE_REF_FILES["published"])
+
+    def test_sparse_xorb_release_requires_verified_ranges_and_provider_observations(self) -> None:
+        self.configure("gcs", "private", "direct", consumer="sdk", family="xorb")
+        records = self.directory / CDN.XORB_PRODUCT_DIR
+        cold = records / "sparse-cold-edge.json"
+        warm = records / "sparse-warm-edge.json"
+        warm_log = records / "sparse-warm-edge-viewer-requests.json"
+        cold_log = records / "sparse-cold-edge-viewer-requests.json"
+        raw = warm.read_bytes()
+        warm_data = json.loads(raw)
+        cold_data = json.loads(cold.read_bytes())
+        cold_proof = json.loads(cold_log.read_bytes())
+        request, response = next(iter(warm_data["edge_responses"].items()))
+        failures = (
+            (warm, warm_data | {"range_offset": 0}, "approved file offset"),
+            (warm, warm_data | {"reader": cold_data["reader"]}, "reused a local cache"),
+            (warm, warm_data | {"edge_responses": {request: response | {
+                "range": False, "status": 200, "object_bytes": response["bytes"],
+            }}}, "sparse read must verify xorb ranges"),
+            (cold_log, cold_proof | {"records": {
+                key: record | {"cache_fill_bytes": 0} for key, record in cold_proof["records"].items()
+            }}, "provider-confirmed miss and origin fill"),
+        )
+        for path, data, message in failures:
+            with self.subTest(message=message):
+                original = path.read_bytes()
+                json_file(path, data)
+                self.rejected(message)
+                path.write_bytes(original)
+        log = json.loads(warm_log.read_bytes())
+        replayed = next(iter(cold_data["edge_responses"]))
+        digest = json_file(warm, warm_data | {"edge_responses": {replayed: response}})
+        json_file(warm_log, log | {"client_report_sha256": digest, "records": {replayed: log["records"][request]}})
+        self.rejected("reused a CDN viewer request")
+        warm.write_bytes(raw)
+        unknown = response | {"cache": "unknown"}
+        digest = json_file(warm, warm_data | {"edge_hits": 0, "edge_unknown": 1, "edge_responses": {request: unknown}})
+        json_file(warm_log, log | {"client_report_sha256": digest, "records": {
+            request: log["records"][request] | {"cache": "unknown"},
+        }})
+        self.rejected("provider-confirmed hits for every xorb range")
+        warm_log.unlink()
+        self.rejected(warm_log.name)
 
     def test_sdk_hydration_benchmarks_require_their_own_cache_and_provider_requests(self) -> None:
         for provider in ("s3", "gcs", "azure"):
