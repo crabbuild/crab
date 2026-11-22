@@ -313,8 +313,12 @@ bounded page after commit, applies current repository grants, and pages current
 closed-team members for team mentions.
 Deduplicated delivery writes to private, bounded Directory inboxes before
 acknowledging the Repository event. Separate bounded retention protects
-explicit grants from being displaced by pending SSO group notices. Retries
-preserve read state. The inbox rechecks the current signed-in account and
+explicit grants from being displaced by pending SSO group notices. The
+Directory retains 100 conversations per collection. It folds existing event
+rows per repository and typed subject, selecting the latest contribution and
+strongest reason before applying pagination. A replay of the current activity
+preserves read state across both collections. A read mutation compares the
+latest activity before updating the conversation in both collections. The inbox rechecks the current signed-in account and
 repository access before disclosing unread state, titles, or links. Team
 bindings, queued events, and inbox entries use native document records and
 require no SQL preparation.

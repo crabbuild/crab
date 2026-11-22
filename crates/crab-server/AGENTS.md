@@ -178,8 +178,10 @@ and their active watcher indexes. Activity writes enroll participants under
 their qualified identity before scheduling delivery. Watch outbox events carry
 the activity number and advance by bounded pages after Directory delivery.
 The mention outbox pins enrollment sources to committed activity and gates
-later watch pages until the inbox delivery and follow commit. `api/notifications/` checks repository access
-and mute state when reading inbox entries.
+later watch pages until the inbox delivery and follow commit. The Directory
+groups inbox entries by typed discussion and binds read changes to the
+observed activity position. `api/notifications/` checks repository access and
+mute state before listing entries or changing their read state.
 
 The native runtime lives in `src/cells/runtime.rs`; `src/cells/client.rs` owns
 the authority-checked `CellClient` and target-bound read receipts.

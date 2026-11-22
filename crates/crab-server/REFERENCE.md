@@ -2549,8 +2549,11 @@ and its source path. Missing file paths and inaccessible repositories return
 ### Read the notification inbox
 
 Signed-in users open **Notifications** from the global header. The inbox has
-Unread and All views, repository and reason filters, and links to the relevant issue,
-pull request, comment, review, or inline conversation.
+Unread and All views with repository and reason filters. Each issue or pull
+request has one row, ordered by its latest activity. The link opens the latest
+contribution and the strongest retained notification reason stays visible.
+A personal mention takes precedence over a team mention, review request,
+assignment, or watch update.
 
 Assignments, individual and team review requests, Markdown `@handle` mentions,
 and configured closed-team mentions enqueue a notification with the source
@@ -2560,16 +2563,21 @@ review comments enqueue mentions when the reviewer publishes the review.
 
 A newly added assignee on an issue or pull request receives an assignment
 notification. Creation, individual edits, and bulk edits use the same rule.
-Unchanged assignees, removals, and self-assignment leave the inbox unchanged.
+Unchanged assignees, removals, and self-assignment produce no new assignment
+reason. Subscribers can still receive discussion updates.
 
 `GET /api/notifications` accepts `repository` (repository UUID), `unread`
 (default false), `reason` (`assigned`, `review_requested`, `mention`,
 `team_mention`, or `subscribed`), `limit` (1–50, default 20), and the `before`
-cursor from `next`.
-`PUT /api/notifications/{id}/read` accepts `{"created_at_ms":<timestamp in ms>}`
-and optional `read:false` to mark an entry unread. The CSRF-protected write
-sets private read state and can be retried after a lost response. The inbox
-rechecks repository access before presenting titles, links or unread status.
+cursor from `next`. The row has a stable `id` and an `updated` activity
+stamp with `id` and `created_at_ms`. Issue and pull request numbers address
+distinct conversations.
+
+`PUT /api/notifications/{id}/read` accepts the row's `repository_id` and its
+`updated` stamp as `expected`, with optional `read:false` to mark it unread.
+The CSRF-protected write can be retried after a lost response. A missing or
+changed row returns 409 so the client can refresh. A newer contribution remains
+unread. Reads and writes require current repository access.
 
 Open **Watch** in a repository to choose direct notifications, new issue
 activity, new pull request activity, both kinds, or mute. Watching adds
@@ -3318,7 +3326,7 @@ namespace and immutable asset bodies in backups. Restoring visible records
 without counters, claims, request ledgers,
 control and immutable roots loses numbering, ownership and retry guarantees.
 
-Discussion deletion, moderation, edit history, conversation-level inbox grouping, broad activity feeds, and
+Discussion deletion, moderation, edit history, inbox completion and saved views, broad activity feeds, and
 email delivery remain unimplemented. Native backup restore, cross-provider
 export, and complete product-root restore qualification remain pending.
 
@@ -3623,7 +3631,7 @@ The server is complete only when a real account can perform the workflow and obs
 | GitHub-quality design | Themes, responsive layouts, accessible controls, navigation, and loading/error behavior across workflows | In progress |
 | Team identity and authorization | OIDC, sessions, membership, permissions, isolation, revocation, CSRF, and administration | In progress; browser and CLI membership replacement are audited, and back-channel logout revokes delivered exact-identity sessions |
 | Git hosting | Authenticated fetch and push, exact branch/tag lifecycle, protection, publication, and independent-client proof | In progress; additional crash phases and coexistence qualification remain |
-| Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; moderation, edit history, conversation-level inbox grouping, release subscriptions, and external notification delivery remain |
+| Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; moderation, edit history, saved and completed inbox views, release subscriptions, and external notification delivery remain |
 | Repository management | CLI create/adopt/list, archive, settings, search, import, and audited administration | In progress; browser creation/import and audit history remain |
 | Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Native process restart and owner handoff tested; native metrics and shutdown wiring implemented. Backup restore, crash matrices, upgrades, and provider qualification remain |
 | Quality gates | API, UI, accessibility, realistic repositories, security, package smoke, and measured performance | In progress |

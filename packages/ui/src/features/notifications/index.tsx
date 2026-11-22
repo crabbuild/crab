@@ -27,23 +27,23 @@ function titleOf(repo: Pick<Address, "owner" | "name">) {
 const reasons = {
   subscribed: {
     label: "Watched updates",
-    message: "updated a watched discussion",
+    summary: "Watched discussion",
     icon: BellIcon,
   },
   assigned: {
     label: "Assignments",
-    message: "assigned you",
+    summary: "Assignment",
     icon: UserRoundIcon,
   },
   review_requested: {
     label: "Review requests",
-    message: "requested your review",
+    summary: "Review request",
     icon: GitPullRequestIcon,
   },
-  mention: { label: "Mentions", message: "mentioned you", icon: AtSignIcon },
+  mention: { label: "Mentions", summary: "Mention", icon: AtSignIcon },
   team_mention: {
     label: "Team mentions",
-    message: "mentioned your team",
+    summary: "Team mention",
     icon: AtSignIcon,
   },
 };
@@ -56,13 +56,13 @@ function isReason(value: string | null): value is Reason {
 
 type Notice = {
   id: string;
-  repository: Pick<Address, "owner" | "name">;
+  repository: Address;
   title: string;
   href: string;
   sender: string;
   reason: Reason;
   read: boolean;
-  created_at_ms: number;
+  updated: { id: string; created_at_ms: number };
 };
 
 const INBOX_CHANGED = "crab-inbox-changed";
@@ -207,10 +207,17 @@ function NotificationList({
   return (
     <Result state={initial} timingLabel="Notification inbox">
       {(first) => {
-        const items = [...first.items, ...older, ...(page.data?.items ?? [])];
+        const threads = new Map<string, Notice>();
+        for (const item of [
+          ...first.items,
+          ...older,
+          ...(page.data?.items ?? []),
+        ]) {
+          if (!threads.has(item.id)) threads.set(item.id, item);
+        }
         const next = (cursor ? page.data : first)?.next;
-        const visible = items.filter(
-          (item) => !unread || !(marked[item.id] ?? item.read),
+        const visible = Array.from(threads.values()).filter(
+          (item) => !unread || !(marked[item.updated.id] ?? item.read),
         );
         return (
           <div className="grid gap-4">
@@ -268,8 +275,14 @@ function NotificationList({
                   <NotificationRow
                     key={item.id}
                     item={item}
-                    read={marked[item.id] ?? item.read}
+                    read={marked[item.updated.id] ?? item.read}
                     csrf={csrf}
+                    onRefresh={() => {
+                      setOlder([]);
+                      setCursor(undefined);
+                      setMarked({});
+                      initial.retry();
+                    }}
                     onMarked={(read) => {
                       if (unread && read) repositoryFilter.current?.focus();
                       setAnnouncement(
@@ -277,7 +290,7 @@ function NotificationList({
                       );
                       setMarked((current) => ({
                         ...current,
-                        [item.id]: read,
+                        [item.updated.id]: read,
                       }));
                     }}
                   />
@@ -321,14 +334,16 @@ function NotificationRow({
   read,
   csrf,
   onMarked,
+  onRefresh,
 }: {
   item: Notice;
   read: boolean;
   csrf: string;
   onMarked: (read: boolean) => void;
+  onRefresh: () => void;
 }) {
   const mutation = useMutation(csrf, null);
-  const { icon: Icon, message } = reasons[item.reason];
+  const { icon: Icon, summary } = reasons[item.reason];
   return (
     <li
       className={`grid grid-cols-[auto_1fr] items-start gap-3 px-3 py-4 sm:grid-cols-[auto_1fr_auto] sm:px-4${read ? "" : " bg-muted/50"}`}
@@ -345,8 +360,9 @@ function NotificationRow({
           {item.title}
         </Link>
         <p className="text-muted-foreground">
-          {item.sender} {message} <span aria-hidden="true">·</span>{" "}
-          <RelativeTime value={item.created_at_ms} />
+          {summary} <span aria-hidden="true">·</span> Updated by {item.sender}{" "}
+          <span aria-hidden="true">·</span>{" "}
+          <RelativeTime value={item.updated.created_at_ms} />
         </p>
         {mutation.error && <p role="alert">{mutation.error}</p>}
       </div>
@@ -356,10 +372,19 @@ function NotificationRow({
         size="sm"
         disabled={mutation.pending}
         onClick={async () => {
+          if (mutation.status === 409) {
+            mutation.reset();
+            onRefresh();
+            return;
+          }
           const result = await mutation.run<null>(
             `/api/notifications/${item.id}/read`,
             "PUT",
-            { created_at_ms: item.created_at_ms, read: !read },
+            {
+              repository_id: item.repository.id,
+              expected: item.updated,
+              read: !read,
+            },
           );
           if (result !== undefined) {
             onMarked(!read);
@@ -367,7 +392,11 @@ function NotificationRow({
           }
         }}
       >
-        {read ? "Mark as unread" : "Mark as read"}
+        {mutation.status === 409
+          ? "Refresh inbox"
+          : read
+            ? "Mark as unread"
+            : "Mark as read"}
       </Button>
     </li>
   );

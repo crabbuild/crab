@@ -78,7 +78,7 @@ async fn committed_mentions_deliver_once_and_inbox_hides_revoked_repository() {
     assert_eq!(notice["title"], "Review the contribution");
     assert_eq!(
         notice["repository"],
-        json!({"owner":"team","name":"private"})
+        json!({"id":repo.id,"owner":"team","name":"private"})
     );
     assert_eq!(
         notice["href"],
@@ -89,14 +89,14 @@ async fn committed_mentions_deliver_once_and_inbox_hides_revoked_repository() {
         Method::PUT,
         &path,
         &bob,
-        json!({"created_at_ms":notice["created_at_ms"]}),
+        json!({"repository_id":repo.id,"expected":notice["updated"]}),
     )
     .await
     .error_for_status()
     .unwrap();
 
     // Another envelope replays the permanent issue creation. Changing prose
-    // and adding a picker link to the same actor must preserve the read notice.
+    // and adding a picker link update the same conversation with its original reason.
     assert_eq!(issue(&h, &alice, input).await["number"], number);
     h.write(
         Method::PATCH,
@@ -114,9 +114,8 @@ async fn committed_mentions_deliver_once_and_inbox_hides_revoked_repository() {
         panic!("replay and equivalent mention spellings must not add a mention")
     };
     assert_eq!(current["id"], notice["id"]);
-    assert_eq!(current["read"], true);
-    let updates = h.json(&format!("{INBOX}?reason=subscribed"), &bob).await;
-    assert_eq!(updates["items"].as_array().unwrap().len(), 1);
+    assert_eq!(current["read"], false);
+    assert_ne!(current["updated"], notice["updated"]);
     assert_eq!(h.json(INBOX, &alice).await["items"], json!([]));
 
     let mut members = repo.config.members.clone();
@@ -263,7 +262,7 @@ async fn team_notifications(group_only: bool) {
             Method::PUT,
             &format!("{INBOX}/{}/read", item["id"].as_str().unwrap()),
             &bob,
-            json!({"created_at_ms":item["created_at_ms"]}),
+            json!({"repository_id":repo.id,"expected":item["updated"]}),
         )
         .await
         .error_for_status()

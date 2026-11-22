@@ -62,6 +62,7 @@ struct Parameters {
 
 #[derive(Serialize)]
 struct RepositoryLabel {
+    id: Uuid,
     owner: String,
     name: String,
 }
@@ -75,7 +76,7 @@ struct Item {
     sender: String,
     reason: Reason,
     read: bool,
-    created_at_ms: u64,
+    updated: Position,
 }
 
 #[derive(Serialize)]
@@ -152,7 +153,7 @@ async fn list(
     // timestamps, IDs, counts, or empty pages with private continuations.
     let next = (items.len() > limit).then(|| {
         let last = &items[limit - 1].1;
-        format!("{}:{}", last.created_at_ms, last.id)
+        format!("{}:{}", last.updated.created_at_ms, last.updated.id)
     });
     let items = items
         .into_iter()
@@ -274,8 +275,10 @@ async fn repository_items(
         items.push((
             order,
             Item {
-                id: notice.id,
+                id: notice.thread_id(),
+                updated: notice.position(),
                 repository: RepositoryLabel {
+                    id,
                     owner: owner.clone(),
                     name: name.clone(),
                 },
@@ -286,7 +289,6 @@ async fn repository_items(
                 sender: notice.sender,
                 reason: entry.reason,
                 read: entry.read,
-                created_at_ms: notice.created_at_ms,
             },
         ));
     }
@@ -342,7 +344,8 @@ fn location(target: Target) -> (SubjectKind, u64, &'static str, String) {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReadRequest {
-    created_at_ms: u64,
+    repository_id: Uuid,
+    expected: Position,
     read: Option<bool>,
 }
 
@@ -354,28 +357,35 @@ async fn mark_read(
 ) -> Result<Json<()>> {
     let identity = app::account(&principal)?;
     let Json(input) = input.map_err(Error::Body)?;
-    let position = Position {
-        id,
-        created_at_ms: input.created_at_ms,
-    };
-    valid_position(position)?;
+    valid_position(input.expected)?;
+    let repo = server
+        .repositories
+        .by_id(input.repository_id)
+        .ok_or(Error::NotFound)?;
+    if !may_notify(&server, &principal, &repo, &identity).await? {
+        return Err(Error::NotFound);
+    }
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
-    app::command_output(
+    let marked = app::command_output(
         cells
             .command::<MarkRead>(
                 Address::Directory,
                 app::mutation_identity()?,
                 MarkReadInput {
-                    identity,
-                    position,
+                    identity: identity.clone(),
+                    thread: id,
+                    repository: repo.id,
+                    expected: input.expected,
                     read: input.read.unwrap_or(true),
                 },
             )
             .await,
     )?;
+    if !may_read(&server, &principal, &repo).await? {
+        return Err(Error::NotFound);
+    }
     app::account(&principal)?;
-    // Unknown and already-read notices have the same response as a change.
-    Ok(Json(()))
+    marked.then_some(Json(())).ok_or(Error::PageChanged)
 }
 
 #[cfg(test)]
@@ -459,7 +469,8 @@ mod tests {
                 access: Access::Direct,
             }],
         };
-        let put_read = format!("/api/notifications/{}/read", notice.id);
+        let put_read = format!("/api/notifications/{}/read", notice.thread_id());
+        let expected = json!({"repository_id":repo.id,"expected":notice.position()});
         for (attempt, access) in [Access::Direct, Access::Group, Access::Direct]
             .into_iter()
             .enumerate()
@@ -485,20 +496,71 @@ mod tests {
             assert_eq!(
                 items,
                 json!({"next": null, "items": [{
-                    "id": notice.id, "repository": {"owner": "team", "name": "private"},
+                    "id": notice.thread_id(), "repository": {"id":repo.id, "owner": "team", "name": "private"},
                     "title": "Issue mentioned",
                     "href": format!("/team/private/issues/1?repository_id={}", repo.id),
                     "sender": "Alice", "reason": "mention", "read": attempt > 0,
-                    "created_at_ms": notice.created_at_ms
+                    "updated": notice.position()
                 }]})
             );
             assert_eq!(
-                h.write(Method::PUT, &put_read, &bob, json!({"created_at_ms": 100}))
+                h.write(Method::PUT, &put_read, &bob, expected.clone())
                     .await
                     .status(),
                 StatusCode::OK
             );
         }
+        delivery.notice = Notice {
+            id: Uuid::now_v7(),
+            target: Target::IssueComment {
+                issue: 1,
+                number: 9,
+            },
+            created_at_ms: 101,
+            ..notice
+        };
+        delivery.recipients[0].reason = Reason::Subscribed;
+        client
+            .command::<Deliver>(
+                Address::Directory,
+                app::mutation_identity().unwrap(),
+                delivery.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            h.write(Method::PUT, &put_read, &bob, expected)
+                .await
+                .status(),
+            StatusCode::CONFLICT
+        );
+        let row = h
+            .json("/api/notifications?reason=mention&unread=true", &bob)
+            .await;
+        let [item] = row["items"].as_array().unwrap().as_slice() else {
+            panic!("a new update must leave one unread conversation");
+        };
+        assert_eq!(item["id"], json!(delivery.notice.thread_id()));
+        assert_eq!(item["updated"], json!(delivery.notice.position()));
+        assert!(item["href"].as_str().unwrap().ends_with("#issuecomment-9"));
+        let before_update = format!("/api/notifications?before=101:{}", delivery.notice.id);
+        assert_eq!(h.json(&before_update, &bob).await["items"], json!([]));
+        assert_eq!(
+            h.write(
+                Method::PUT,
+                &put_read,
+                &bob,
+                json!({"repository_id":repo.id,"expected":item["updated"]})
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            h.json("/api/notifications/unread", &bob).await,
+            json!({"unread":false})
+        );
+
         let mut members = repo.config.members.clone();
         members.retain(|member| member.subject != "bob-id");
         h.server

@@ -166,12 +166,15 @@ test("the private inbox links to the source and persists read state", async ({
   const { lifecycle } = await mockPullRequest(page);
   const notice = {
     id: "ba3633c5-7c00-4542-bf14-282eb2c91b0f",
-    repository: { owner: "team", name: "project" },
+    repository: { owner: "team", name: "project", id: lifecycle.repositoryId },
     title: "Plan rollout",
     href: `/team/project/pull/2/files?repository_id=${lifecycle.repositoryId}#review-thread-1`,
     sender: "Alice",
     reason: "team_mention",
-    created_at_ms: Date.now() - 60_000,
+    updated: {
+      id: "team-mention-activity",
+      created_at_ms: Date.now() - 60_000,
+    },
     read: false,
   };
   await page.route("**/api/session", (route) =>
@@ -207,7 +210,8 @@ test("the private inbox links to the source and persists read state", async ({
     expect(route.request().method()).toBe("PUT");
     expect(route.request().headers()["x-csrf-token"]).toBe("csrf");
     expect(route.request().postDataJSON()).toEqual({
-      created_at_ms: notice.created_at_ms,
+      repository_id: lifecycle.repositoryId,
+      expected: notice.updated,
       read: true,
     });
     notice.read = true;
@@ -223,7 +227,7 @@ test("the private inbox links to the source and persists read state", async ({
   const row = page
     .getByRole("list", { name: "Notifications" })
     .getByRole("listitem");
-  await expect(row.getByText("Alice mentioned your team")).toBeVisible();
+  await expect(row.getByText(/Team mention · Updated by Alice/)).toBeVisible();
   await expect(row.getByRole("link", { name: "Plan rollout" })).toHaveAttribute(
     "href",
     notice.href,

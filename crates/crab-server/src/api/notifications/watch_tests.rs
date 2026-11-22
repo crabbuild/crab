@@ -332,27 +332,24 @@ async fn discussion_preferences_override_repository_watch_and_mentions_restore_f
     h.deliver_notifications("team", "private").await;
     let watched = h.json(WATCHED, &bob).await;
     let notices = watched["items"].as_array().unwrap();
-    assert_eq!(notices.len(), 3);
-    assert_eq!(
-        notices
-            .iter()
-            .filter(|item| item["title"] == "Followed discussion")
-            .count(),
-        2
-    );
+    assert_eq!(notices.len(), 2);
+    let first_thread = &followed["items"][0];
+    let closed = notices
+        .iter()
+        .find(|item| item["title"] == "Followed discussion")
+        .unwrap();
+    assert_eq!(closed["id"], first_thread["id"]);
+    assert_ne!(closed["updated"], first_thread["updated"]);
 
     choose("unsubscribed", 2).await.error_for_status().unwrap();
     comment(&first, "A direct question for @bob-watch.").await;
     h.deliver_notifications("team", "private").await;
-    assert_eq!(h.json(WATCHED, &bob).await, watched);
-    assert_eq!(
-        h.json("/api/notifications?reason=mention", &bob).await["items"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
-
+    let mention = h.json("/api/notifications?reason=mention", &bob).await;
+    let [item] = mention["items"].as_array().unwrap().as_slice() else {
+        panic!("the subscribed issue moved into the mention filter");
+    };
+    assert_eq!(item["id"], first_thread["id"]);
+    assert!(item["href"].as_str().unwrap().ends_with("#issuecomment-3"));
     assert_eq!(
         h.json(&preference, &bob).await,
         json!({"mode":"follow","version":4})
@@ -360,12 +357,14 @@ async fn discussion_preferences_override_repository_watch_and_mentions_restore_f
     choose("inherit", 4).await.error_for_status().unwrap();
     comment(&first, "Back to the repository setting").await;
     h.deliver_notifications("team", "private").await;
-    assert_eq!(
-        h.json(WATCHED, &bob).await["items"]
-            .as_array()
+    let all = h.json("/api/notifications", &bob).await;
+    assert_eq!(all["items"].as_array().unwrap().len(), 2);
+    assert_eq!(all["items"][0]["id"], first_thread["id"]);
+    assert!(
+        all["items"][0]["href"]
+            .as_str()
             .unwrap()
-            .len(),
-        4
+            .ends_with("#issuecomment-4")
     );
     h.close().await;
 }
@@ -442,7 +441,8 @@ async fn participation_follows_before_delivery_and_fences_a_newer_choice() {
     comment(&alice, "A reply after following again").await;
     h.deliver_notifications("team", "private").await;
     let replayed = h.json(WATCHED, &bob).await;
-    assert_eq!(replayed["items"].as_array().unwrap().len(), 2);
+    assert_eq!(replayed["items"].as_array().unwrap().len(), 1);
+    assert_eq!(replayed["items"][0]["id"], bob_notices["items"][0]["id"]);
     assert!(
         replayed["items"][0]["href"]
             .as_str()
@@ -547,13 +547,18 @@ async fn a_reply_waits_for_the_mention_that_subscribes_its_recipient() {
         .unwrap();
     h.write(
         Method::PUT,
-        &format!("/api/notifications/{}/read", notice.id),
+        &format!("/api/notifications/{}/read", notice.thread_id()),
         &bob,
-        json!({"created_at_ms":notice.created_at_ms}),
+        json!({"repository_id":repo.id,"expected":notice.position()}),
     )
     .await
     .error_for_status()
     .unwrap();
+
+    assert_eq!(
+        h.json("/api/notifications", &bob).await["items"][0]["read"],
+        true
+    );
 
     h.deliver_notifications("team", "private").await;
     assert_eq!(
@@ -562,16 +567,16 @@ async fn a_reply_waits_for_the_mention_that_subscribes_its_recipient() {
     );
     let inbox = h.json("/api/notifications", &bob).await;
     let items = inbox["items"].as_array().unwrap();
-    assert_eq!(items.len(), 2);
-    assert_eq!(items[0]["reason"], "subscribed");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["reason"], "mention");
+    assert_eq!(items[0]["id"], json!(notice.thread_id()));
     assert!(
         items[0]["href"]
             .as_str()
             .unwrap()
             .ends_with("#issuecomment-1")
     );
-    assert_eq!(items[1]["reason"], "mention");
-    assert_eq!(items[1]["read"], true);
+    assert_eq!(items[0]["read"], false);
     h.deliver_notifications("team", "private").await;
     assert_eq!(h.json("/api/notifications", &bob).await, inbox);
     h.close().await;
@@ -642,20 +647,10 @@ async fn a_newer_unsubscribe_survives_assignment_delivery_and_reassignment_follo
         h.json(&preference, &bob).await,
         json!({"mode":"follow","version":2})
     );
-    let watched = h.json(WATCHED, &bob).await;
-    assert_eq!(watched["items"].as_array().unwrap().len(), 1);
-    assert!(
-        watched["items"][0]["href"]
-            .as_str()
-            .unwrap()
-            .ends_with("#issuecomment-1")
-    );
-    assert_eq!(
-        h.json(assigned, &bob).await["items"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
+    let assigned = h.json(assigned, &bob).await;
+    let [item] = assigned["items"].as_array().unwrap().as_slice() else {
+        panic!("reassignment keeps one thread and its reason");
+    };
+    assert!(item["href"].as_str().unwrap().ends_with("#issuecomment-1"));
     h.close().await;
 }

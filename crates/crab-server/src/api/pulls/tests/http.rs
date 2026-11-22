@@ -371,26 +371,15 @@ async fn pending_review_keeps_comments_private_and_recovers_a_published_batch() 
     assert_eq!(submitted, json!({"review":1,"threads":[1,2]}));
     h.deliver_notifications("team", "private").await;
     let inbox = h.json("/api/notifications", &alice).await;
-    let mentions = h.json("/api/notifications?reason=mention", &alice).await;
-    let notified = mentions["items"].as_array().unwrap();
-    let followed = h.json("/api/notifications?reason=subscribed", &alice).await;
-    assert_eq!(followed["items"].as_array().unwrap().len(), 3);
+    let [row] = inbox["items"].as_array().unwrap().as_slice() else {
+        panic!("one published pull request should occupy one inbox row");
+    };
+    assert_eq!(row["reason"], "mention");
+    assert!(row["href"].as_str().unwrap().contains("/pull/1"));
     assert_eq!(
         h.json(&subscription, &bob).await,
         json!({"mode":"follow","version":1})
     );
-    assert_eq!(notified.len(), 2);
-    assert!(
-        notified
-            .iter()
-            .any(|item| item["href"].as_str().unwrap().ends_with("#review-thread-1"))
-    );
-    assert!(notified.iter().any(|item| {
-        item["href"]
-            .as_str()
-            .unwrap()
-            .ends_with("#pullrequestreview-1")
-    }));
     assert_eq!(h.json(&draft, &bob).await["comments"], json!([]));
     assert_eq!(
         h.json(&reviews, &alice).await["items"][0]["commit_oid"],

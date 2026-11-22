@@ -23,8 +23,8 @@ test("notifications preserve unread state and open the exact review reply", asyn
       repository,
       sender: actor.name,
       id: "notice-14",
-      href: "/team/project/pull/1",
-      created_at_ms: 1_700_000_100_000,
+      href: "/team/project/pull/2",
+      updated: { id: "activity-14", created_at_ms: 1_700_000_100_000 },
       read: false,
       title: "Review the README",
       reason: "review_requested",
@@ -34,7 +34,7 @@ test("notifications preserve unread state and open the exact review reply", asyn
       sender: actor.name,
       id: "notice-13",
       href: "/team/project/pull/1/files?thread=1&reply=86",
-      created_at_ms: 1_700_000_060_000,
+      updated: { id: "activity-13", created_at_ms: 1_700_000_060_000 },
       read: false,
       title: "Reply about the README",
       reason: "mention",
@@ -44,7 +44,7 @@ test("notifications preserve unread state and open the exact review reply", asyn
       sender: actor.name,
       id: "notice-3",
       href: "/team/library/issues/2#issuecomment-9",
-      created_at_ms: 1_700_000_000_000,
+      updated: { id: "activity-3", created_at_ms: 1_700_000_000_000 },
       read: false,
       title: "Library issue",
       reason: "mention",
@@ -54,7 +54,7 @@ test("notifications preserve unread state and open the exact review reply", asyn
       sender: actor.name,
       id: "notice-2",
       href: "/team/project/issues/3",
-      created_at_ms: 1_699_999_900_000,
+      updated: { id: "activity-2", created_at_ms: 1_699_999_900_000 },
       read: false,
       title: "Assigned issue",
       reason: "assigned",
@@ -112,8 +112,21 @@ test("notifications preserve unread state and open the exact review reply", asyn
     expect(request.method()).toBe("PUT");
     expect(request.headers()["x-csrf-token"]).toBe("fixture-csrf");
     const body = request.postDataJSON();
+    expect(body.repository_id).toBe(repository.id);
+    if (body.expected.id !== notices[0].updated.id) {
+      return route.fulfill({
+        status: 409,
+        json: {
+          error: {
+            code: "page_changed",
+            message: "This list changed; reload from the first page",
+          },
+        },
+      });
+    }
     expect(body).toEqual({
-      created_at_ms: notices[0].created_at_ms,
+      repository_id: repository.id,
+      expected: notices[0].updated,
       read: true,
     });
     notices[0].read = body.read;
@@ -137,8 +150,8 @@ test("notifications preserve unread state and open the exact review reply", asyn
           body: "@bob This is the specific reply.",
           reactions: emptyReactions(),
           version: 1,
-          created_at: notices[1].created_at_ms,
-          updated_at: notices[1].created_at_ms,
+          created_at: notices[1].updated.created_at_ms,
+          updated_at: notices[1].updated.created_at_ms,
           can_edit: false,
         },
       }),
@@ -150,10 +163,10 @@ test("notifications preserve unread state and open the exact review reply", asyn
     page.getByRole("heading", { name: "Notifications" }),
   ).toBeVisible();
   const review = page.getByRole("link", { name: "Review the README" });
-  await expect(review).toHaveAttribute("href", "/team/project/pull/1");
+  await expect(review).toHaveAttribute("href", "/team/project/pull/2");
   const reason = page.getByLabel("Reason", { exact: true });
   await reason.selectOption("assigned");
-  await expect(page.getByText("Alice assigned you")).toBeVisible();
+  await expect(page.getByText(/Assignment · Updated by Alice/)).toBeVisible();
   await expect(
     page.getByRole("link", { name: "Assigned issue" }),
   ).toHaveAttribute("href", "/team/project/issues/3");
@@ -180,6 +193,18 @@ test("notifications preserve unread state and open the exact review reply", asyn
   await expect(review).toHaveCount(0);
 
   await page.getByRole("link", { name: "All", exact: true }).click();
+  await expect(
+    reviewRow.getByRole("button", { name: "Mark as unread" }),
+  ).toBeVisible();
+  notices[0].updated = { id: "activity-15", created_at_ms: 1_700_000_200_000 };
+  notices[0].read = false;
+  await reviewRow.getByRole("button", { name: "Mark as unread" }).click();
+  await expect(reviewRow.getByRole("alert")).toContainText("This list changed");
+  await reviewRow.getByRole("button", { name: "Refresh inbox" }).click();
+  await expect(
+    reviewRow.getByRole("button", { name: "Mark as read" }),
+  ).toBeVisible();
+  await reviewRow.getByRole("button", { name: "Mark as read" }).click();
   await expect(
     reviewRow.getByRole("button", { name: "Mark as unread" }),
   ).toBeVisible();

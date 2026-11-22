@@ -96,10 +96,9 @@ async fn inbox_delivers_a_review_request_and_mention_to_the_current_member() {
     );
     let remaining = h.json(&next, &bob).await;
     assert_eq!(remaining["next"], Value::Null);
-    let [update, mention] = remaining["items"].as_array().unwrap().as_slice() else {
-        panic!("the issue edit and original mention should remain on one page")
+    let [mention] = remaining["items"].as_array().unwrap().as_slice() else {
+        panic!("the issue edit and original mention share a conversation");
     };
-    assert_eq!(update["reason"], "subscribed");
     assert_eq!(mention["reason"], "mention");
     assert!(
         mention["href"]
@@ -123,17 +122,19 @@ async fn inbox_delivers_a_review_request_and_mention_to_the_current_member() {
         .nth(1)
         .unwrap();
     let mark = format!("/api/notifications/{}/read", review["id"].as_str().unwrap());
-    let read = json!({"created_at_ms":review["created_at_ms"],"read":true});
-    h.write(Method::PUT, &mark, &alice, read.clone())
-        .await
-        .error_for_status()
-        .unwrap();
+    let read = json!({"repository_id":id,"expected":review["updated"],"read":true});
+    assert_eq!(
+        h.write(Method::PUT, &mark, &alice, read.clone())
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
     assert_eq!(
         h.json("/api/notifications?unread=true", &bob).await["items"]
             .as_array()
             .unwrap()
             .len(),
-        3
+        2
     );
     assert_eq!(
         h.http
@@ -163,7 +164,7 @@ async fn inbox_delivers_a_review_request_and_mention_to_the_current_member() {
         Method::PUT,
         &mark,
         &bob,
-        json!({"created_at_ms":review["created_at_ms"],"read":false}),
+        json!({"repository_id":id,"expected":review["updated"],"read":false}),
     )
     .await
     .error_for_status()
@@ -173,7 +174,7 @@ async fn inbox_delivers_a_review_request_and_mention_to_the_current_member() {
             .as_array()
             .unwrap()
             .len(),
-        3
+        2
     );
 
     h.server
@@ -206,10 +207,10 @@ async fn inbox_delivers_a_review_request_and_mention_to_the_current_member() {
             .status(),
         StatusCode::NOT_FOUND
     );
-    h.write(Method::PUT, &mark, &bob, read)
-        .await
-        .error_for_status()
-        .unwrap();
+    assert_eq!(
+        h.write(Method::PUT, &mark, &bob, read).await.status(),
+        StatusCode::NOT_FOUND
+    );
     h.close().await;
 }
 
@@ -336,7 +337,7 @@ async fn assignment_notices_track_committed_additions_and_current_access() {
     hrefs.sort_unstable();
     let issue = format!("/team/private/issues/1?repository_id={repository}");
     let pull = format!("/team/private/pull/1?repository_id={repository}");
-    assert_eq!(hrefs, [&issue, &issue, &pull, &pull]);
+    assert_eq!(hrefs, [&issue, &pull]);
     assert_eq!(h.json(INBOX, &alice).await["items"], json!([]));
     assert_eq!(
         h.json("/api/notifications?reason=mention", &bob).await["items"],

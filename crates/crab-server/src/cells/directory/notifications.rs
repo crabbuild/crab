@@ -29,6 +29,15 @@ impl Notice {
         }
     }
 
+    pub(crate) fn thread_id(&self) -> Uuid {
+        let mut hash = blake3::Hasher::new_derive_key("crab inbox conversation v1");
+        hash.update(self.repository.as_bytes());
+        hash.update(self.target.subject().key().as_bytes());
+        let mut bytes = [0; 16];
+        bytes.copy_from_slice(&hash.finalize().as_bytes()[..16]);
+        uuid::Builder::from_custom_bytes(bytes).into_uuid()
+    }
+
     fn validate(&self) -> Result<()> {
         self.position().validate()?;
         if self.repository.is_nil()
@@ -59,14 +68,15 @@ impl Notice {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+// Direct reasons persist when more routine activity updates a thread.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Reason {
-    Mention,
-    TeamMention,
-    ReviewRequested,
-    Assigned,
     Subscribed,
+    Assigned,
+    ReviewRequested,
+    TeamMention,
+    Mention,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -86,6 +96,13 @@ pub(crate) enum Access {
 
 impl Access {
     const CHANNELS: [Self; 2] = [Self::Direct, Self::Group];
+
+    fn other(self) -> Self {
+        match self {
+            Self::Group => Self::Direct,
+            Self::Direct => Self::Group,
+        }
+    }
 
     fn inbox(self, actor: Uuid) -> String {
         match self {
@@ -118,12 +135,42 @@ impl Position {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Entry {
     pub notice: Notice,
     pub reason: Reason,
     pub read: bool,
+}
+
+impl Entry {
+    fn merge(&mut self, incoming: Self) {
+        let reason = self.reason.max(incoming.reason);
+        match self.notice.position().cmp(&incoming.notice.position()) {
+            std::cmp::Ordering::Less => *self = incoming,
+            std::cmp::Ordering::Equal => self.read |= incoming.read,
+            std::cmp::Ordering::Greater => {}
+        }
+        self.reason = reason;
+    }
+}
+
+fn conversations(entries: impl IntoIterator<Item = Entry>) -> Vec<Entry> {
+    let mut threads = BTreeMap::<Uuid, Entry>::new();
+    for entry in entries {
+        let id = entry.notice.thread_id();
+        match threads.entry(id) {
+            std::collections::btree_map::Entry::Occupied(mut current) => {
+                current.get_mut().merge(entry)
+            }
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(entry);
+            }
+        }
+    }
+    let mut entries: Vec<_> = threads.into_values().collect();
+    entries.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.notice.position()));
+    entries
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -134,43 +181,43 @@ struct Inbox {
 }
 
 impl Inbox {
-    fn deliver(&mut self, notice: &Notice, reason: Reason) -> Result<bool> {
+    fn deliver(&mut self, incoming: Entry) -> Result<bool> {
+        let position = incoming.notice.position();
+        let thread = incoming.notice.thread_id();
+        // Existing histories contain event rows. Fold them before counting
+        // capacity, so a busy conversation cannot evict quieter ones.
+        self.entries = conversations(std::mem::take(&mut self.entries));
         if let Some(current) = self
             .entries
             .iter_mut()
-            .find(|item| item.notice.id == notice.id)
+            .find(|entry| entry.notice.thread_id() == thread)
         {
-            if current.notice != *notice {
+            if current.notice.id == incoming.notice.id && current.notice != incoming.notice {
                 return Err(Error::RequestConflict);
             }
-            if current.reason == Reason::TeamMention && reason == Reason::Mention {
-                current.reason = reason;
-                return Ok(true);
+            let previous = current.clone();
+            current.merge(incoming);
+            if *current == previous {
+                return Ok(false);
             }
-            return Ok(false);
+            self.entries
+                .sort_unstable_by_key(|entry| std::cmp::Reverse(entry.notice.position()));
+            return Ok(true);
         }
-        let position = notice.position();
         if self.evicted_through.is_some_and(|floor| position <= floor) {
             return Ok(false);
         }
         let index = self
             .entries
             .partition_point(|entry| entry.notice.position() > position);
-        if index < MAX_HISTORY {
-            self.entries.insert(
-                index,
-                Entry {
-                    notice: notice.clone(),
-                    reason,
-                    read: false,
-                },
-            );
+        if index >= MAX_HISTORY {
+            return Ok(false);
         }
+        self.entries.insert(index, incoming);
         if self.entries.len() > MAX_HISTORY {
             self.evicted_through = self.entries.pop().map(|entry| entry.notice.position());
         }
-        // A replay delayed past eviction must not restore old notifications.
-        Ok(index < MAX_HISTORY)
+        Ok(true)
     }
 }
 
@@ -201,9 +248,7 @@ impl Mutation for Deliver {
         } in input.recipients
         {
             let (current, route) = recipients.entry(actor).or_insert((reason, access));
-            if reason == Reason::Mention {
-                *current = reason;
-            }
+            *current = (*current).max(reason);
             *route = (*route).max(access);
         }
         let exists = AccountsExist::execute(context, recipients.keys().copied().collect())?;
@@ -214,7 +259,20 @@ impl Mutation for Deliver {
         for (actor, (reason, access)) in recipients {
             let key = access.inbox(actor);
             let mut inbox: Inbox = context.document(&key)?.unwrap_or_default();
-            if inbox.deliver(&input.notice, reason)? {
+            let peer: Inbox = context
+                .document(&access.other().inbox(actor))?
+                .unwrap_or_default();
+            // If this replay moved retention classes, carry the exact
+            // activity's read state into the new copy.
+            let read = peer
+                .entries
+                .iter()
+                .any(|entry| entry.read && entry.notice.position() == input.notice.position());
+            if inbox.deliver(Entry {
+                notice: input.notice.clone(),
+                reason,
+                read,
+            })? {
                 context.put_document(&key, &inbox)?;
                 changed = true;
             }
@@ -246,35 +304,30 @@ impl Read for List {
         let Some(actor) = active_account(context, input.identity)? else {
             return Ok(Vec::new());
         };
-        // A retry after an ACL change can move an event between collections.
-        // Present one entry and keep read state from either delivery.
-        let mut entries = BTreeMap::<Position, Entry>::new();
+        let mut entries = Vec::new();
         for access in Access::CHANNELS {
             let inbox: Inbox = context.document(&access.inbox(actor))?.unwrap_or_default();
-            for entry in inbox.entries.into_iter().filter(|entry| {
+            entries.extend(inbox.entries);
+        }
+        // Fold both queues before slicing. Applying the cursor to the raw
+        // events would make the same discussion reappear on older pages.
+        Ok(conversations(entries)
+            .into_iter()
+            .filter(|entry| {
                 input
                     .before
                     .is_none_or(|before| entry.notice.position() < before)
-            }) {
-                entries
-                    .entry(entry.notice.position())
-                    .and_modify(|existing| {
-                        existing.read |= entry.read;
-                        if entry.reason == Reason::Mention {
-                            existing.reason = Reason::Mention;
-                        }
-                    })
-                    .or_insert(entry);
-            }
-        }
-        Ok(entries.into_values().rev().collect())
+            })
+            .collect())
     }
 }
 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct MarkReadInput {
     pub identity: IdentityKey,
-    pub position: Position,
+    pub thread: Uuid,
+    pub repository: Uuid,
+    pub expected: Position,
     pub read: bool,
 }
 
@@ -283,30 +336,56 @@ impl Mutation for MarkRead {
     const CLASS: &'static str = CLASS;
     const ID: u32 = 20;
     type Input = MarkReadInput;
-    type Output = ();
+    type Output = bool;
 
-    fn execute(context: &mut Transaction<'_>, input: MarkReadInput) -> Result<MutationResult<()>> {
-        input.position.validate()?;
-        if let Some(actor) = active_account(context, input.identity)? {
-            let mut changed = false;
-            for access in Access::CHANNELS {
-                let key = access.inbox(actor);
-                let Some(mut inbox) = context.document::<Inbox>(&key)? else {
-                    continue;
-                };
-                if let Some(entry) = inbox.entries.iter_mut().find(|entry| {
-                    entry.notice.position() == input.position && entry.read != input.read
-                }) {
+    fn execute(
+        context: &mut Transaction<'_>,
+        input: MarkReadInput,
+    ) -> Result<MutationResult<bool>> {
+        input.expected.validate()?;
+        let Some(actor) = active_account(context, input.identity)? else {
+            return Ok(MutationResult::Rejected(false));
+        };
+        let mut inboxes = Vec::new();
+        let mut latest = None;
+        for access in Access::CHANNELS {
+            let key = access.inbox(actor);
+            let inbox: Inbox = context.document(&key)?.unwrap_or_default();
+            for entry in inbox.entries.iter().filter(|entry| {
+                entry.notice.repository == input.repository
+                    && entry.notice.thread_id() == input.thread
+            }) {
+                latest = latest.max(Some(entry.notice.position()));
+            }
+            inboxes.push((key, inbox));
+        }
+        // An old page must not clear activity that arrived after the user
+        // saw the row. Missing and moved rows have the same private outcome.
+        if latest != Some(input.expected) {
+            return Ok(MutationResult::Rejected(false));
+        }
+        let mut changed = false;
+        for (key, mut inbox) in inboxes {
+            let mut updates = false;
+            for entry in &mut inbox.entries {
+                if entry.notice.repository == input.repository
+                    && entry.notice.thread_id() == input.thread
+                    && entry.read != input.read
+                {
                     entry.read = input.read;
-                    context.put_document(&key, &inbox)?;
-                    changed = true;
+                    updates = true;
                 }
             }
-            if changed {
-                advance(context)?;
+            if updates {
+                inbox.entries = conversations(inbox.entries);
+                context.put_document(&key, &inbox)?;
+                changed = true;
             }
         }
-        Ok(MutationResult::Success(()))
+        if changed {
+            advance(context)?;
+        }
+        Ok(MutationResult::Success(true))
     }
 }
 
@@ -359,27 +438,66 @@ impl Read for ResolveHandlesAt {
 mod tests {
     use super::*;
 
+    fn activity(number: u64, target: Target, reason: Reason) -> Entry {
+        Entry {
+            notice: Notice {
+                id: Uuid::from_u128(u128::from(number)),
+                repository: Uuid::from_u128(1000),
+                target,
+                created_at_ms: number,
+                sender: "Alice".into(),
+            },
+            reason,
+            read: false,
+        }
+    }
+
     #[test]
     fn delivery_preserves_read_state_and_does_not_restore_evicted_history() {
-        let notice = |number: u64| Notice {
-            id: Uuid::from_u128(u128::from(number)),
-            repository: Uuid::from_u128(1000),
-            target: Target::Issue { number: 1 },
-            created_at_ms: number,
-            sender: "Alice".into(),
-        };
         let mut inbox = Inbox::default();
-        let first = notice(1);
-        assert!(inbox.deliver(&first, Reason::TeamMention).unwrap());
+        let mut first = activity(1, Target::Issue { number: 1 }, Reason::TeamMention);
+        assert!(inbox.deliver(first.clone()).unwrap());
         inbox.entries[0].read = true;
-        assert!(inbox.deliver(&first, Reason::Mention).unwrap());
+        first.reason = Reason::Mention;
+        assert!(inbox.deliver(first.clone()).unwrap());
         assert!(inbox.entries[0].read);
         assert_eq!(inbox.entries[0].reason, Reason::Mention);
         for number in 2..=(MAX_HISTORY as u64 + 1) {
-            assert!(inbox.deliver(&notice(number), Reason::Mention).unwrap());
+            assert!(
+                inbox
+                    .deliver(activity(number, Target::Issue { number }, Reason::Mention))
+                    .unwrap()
+            );
         }
         assert_eq!(inbox.entries.len(), MAX_HISTORY);
-        assert_eq!(inbox.evicted_through, Some(first.position()));
-        assert!(!inbox.deliver(&first, Reason::Mention).unwrap());
+        assert_eq!(inbox.evicted_through, Some(first.notice.position()));
+        assert!(!inbox.deliver(first).unwrap());
+    }
+
+    #[test]
+    fn busy_conversations_keep_other_threads_and_the_strongest_reason() {
+        let mut inbox = Inbox::default();
+        let issue = Target::Issue { number: 1 };
+        let pull = Target::Pull { number: 1 };
+        let first = activity(2, issue, Reason::Mention);
+        let id = first.notice.thread_id();
+        assert!(inbox.deliver(activity(1, pull, Reason::Assigned)).unwrap());
+        assert!(inbox.deliver(first.clone()).unwrap());
+        for number in 3..=(MAX_HISTORY as u64 + 4) {
+            assert!(
+                inbox
+                    .deliver(activity(number, issue, Reason::Subscribed))
+                    .unwrap()
+            );
+        }
+        let [latest, remaining] = inbox.entries.as_mut_slice() else {
+            panic!("a busy issue and the same-numbered pull remain distinct");
+        };
+        assert_eq!(latest.notice.thread_id(), id);
+        assert_eq!(latest.reason, Reason::Mention);
+        assert_ne!(remaining.notice.thread_id(), id);
+        latest.read = true;
+        assert!(!inbox.deliver(first).unwrap());
+        assert!(inbox.entries[0].read);
     }
 }
