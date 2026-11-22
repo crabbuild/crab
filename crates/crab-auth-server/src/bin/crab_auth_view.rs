@@ -48,6 +48,11 @@ enum HelperOutput {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args = Args::parse();
+    let policy = if matches!(args.command, CommandKind::Retention) {
+        HelperOutputPolicy::ViewRetention
+    } else {
+        HelperOutputPolicy::View
+    };
     let result = match args.command {
         CommandKind::Doctor => git_version().map(|version| {
             HelperOutput::Doctor(DoctorOutput {
@@ -70,5 +75,5 @@ async fn main() {
             .map(HelperOutput::View),
     };
 
-    std::process::exit(emit_json_result(HelperOutputPolicy::View, result));
+    std::process::exit(emit_json_result(policy, result));
 }

@@ -47,16 +47,7 @@ struct SourceViewIdentity {
 }
 
 async fn read_source_view_identity(router: &StoreLayout) -> Result<SourceViewIdentity> {
-    let root = crab_metadata::capsule_protocol::load_root(router).await?;
-    let view = crab_read::capsule_protocol::open_view_from_root_with_control(
-        router,
-        root,
-        crab_read::capsule_protocol::CapsuleReadLimits {
-            max_capsule_bytes: 2 * 1024 * 1024 * 1024,
-            max_frontier_bytes: 2 * 1024 * 1024 * 1024,
-        },
-    )
-    .await?;
+    let view = capture_source_view(router).await?;
     let catalog = view.pointer_catalog_lookup(router, 2 * 1024 * 1024 * 1024)?;
     let lookup = SharedFileIndexLookup::for_pointer_catalog(router.clone(), catalog);
     Ok(SourceViewIdentity {
@@ -65,6 +56,23 @@ async fn read_source_view_identity(router: &StoreLayout) -> Result<SourceViewIde
         view,
         lookup,
     })
+}
+
+async fn capture_source_view(
+    router: &StoreLayout,
+) -> Result<crab_read::capsule_protocol::CapsuleRepositoryView> {
+    let root = crab_metadata::capsule_protocol::load_root(router).await?;
+    Ok(
+        crab_read::capsule_protocol::open_view_from_root_with_control(
+            router,
+            root,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+                max_frontier_bytes: 2 * 1024 * 1024 * 1024,
+            },
+        )
+        .await?,
+    )
 }
 
 #[derive(Debug, Clone, Serialize)]

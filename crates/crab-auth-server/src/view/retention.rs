@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
 use super::{
-    AuthServerError, CrabUrl, Result, Store, build_view_store, capsule, view_prefix,
-    view_store_layout,
+    AuthServerError, CrabUrl, Result, Store, StoreLayout, build_view_store, capsule,
+    capture_source_view, view_prefix, view_store_layout,
 };
 
 const MAX_REQUEST_BYTES: usize = 8 * 1024;
@@ -99,13 +99,23 @@ async fn retain_with_store(
     let native = Arc::clone(layout.store().inner());
     match request.operation {
         Operation::Acquire => {
+            let source = StoreLayout::new(store.clone(), source_repo.to_owned());
+            let captured = capture_source_view(&source).await?;
+            if captured.root().root().generation() != request.source_generation
+                || captured.state_digest() != request.source_digest
+            {
+                return Err(AuthServerError::CasConflict {
+                    path: source.capsule_root_path().to_string(),
+                    expected_etag: None,
+                });
+            }
             capsule::verify_ready_record(&layout, &request.source_digest).await?;
             let (view_state_digest, lease) =
                 crab_read::acquire_pointer_retention(&layout, &owner, MAX_CAPTURE_BYTES).await?;
             Ok(ViewRetentionResponse::Acquired {
                 repo_prefix,
                 view_state_digest,
-                revision: lease.revision()?,
+                revision: lease.revision().map_err(crab_read::ReadError::from)?,
                 remaining_ms: remaining_ms(&lease)?,
             })
         }
@@ -115,7 +125,7 @@ async fn retain_with_store(
                     .await
                     .map_err(crab_read::ReadError::from)?;
             Ok(ViewRetentionResponse::Renewed {
-                revision: lease.revision()?,
+                revision: lease.revision().map_err(crab_read::ReadError::from)?,
                 remaining_ms: remaining_ms(&lease)?,
             })
         }
@@ -143,7 +153,8 @@ fn owner_for_target(store: &Store, reader: &str) -> Result<String> {
 fn remaining_ms(lease: &ReadRetentionLease) -> Result<u64> {
     let remaining = u64::try_from(
         lease
-            .deadline()?
+            .deadline()
+            .map_err(crab_read::ReadError::from)?
             .saturating_duration_since(Instant::now())
             .as_millis(),
     )
@@ -164,22 +175,25 @@ mod tests {
 
     use super::*;
 
-    fn request(operation: Operation) -> ViewRetentionRequest {
-        ViewRetentionRequest {
-            repo_url: "crab://bucket/org/repo".into(),
-            provider: "aws".into(),
-            scope_hash: "a".repeat(64),
-            source_generation: 7,
-            source_digest: "b".repeat(64),
-            reader: "c".repeat(64),
-            operation,
-        }
-    }
-
     #[tokio::test]
     async fn issuer_retention_transitions_only_the_confirmed_view_claim() {
         let source_repo = "org/repo";
         let store = Store::new(Arc::new(InMemory::new())).with_target_identity([1; 32]);
+        let source = StoreLayout::new(store.clone(), source_repo.to_owned());
+        crab_write::capsule_protocol::initialize(&source, &"a".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let captured = capture_source_view(&source).await.unwrap();
+        let digest = captured.state_digest();
+        let request = |operation| ViewRetentionRequest {
+            repo_url: "crab://bucket/org/repo".into(),
+            provider: "aws".into(),
+            scope_hash: "a".repeat(64),
+            source_generation: captured.root().root().generation(),
+            source_digest: digest.clone(),
+            reader: "c".repeat(64),
+            operation,
+        };
         let acquire = request(Operation::Acquire);
         let prefix = view_prefix(
             source_repo,
@@ -207,6 +221,13 @@ mod tests {
             )
             .await
             .unwrap();
+
+        let mut stale = request(Operation::Acquire);
+        stale.source_generation += 1;
+        assert!(matches!(
+            retain_with_store(stale, source_repo, &store).await,
+            Err(AuthServerError::CasConflict { .. })
+        ));
 
         let ViewRetentionResponse::Acquired {
             repo_prefix,
