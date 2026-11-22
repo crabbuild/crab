@@ -97,6 +97,13 @@ the protected worker. Only the collector's redacted output belongs in the
 bundle. The log bucket expires raw logs after 14 days.
 [S3 access logging](https://docs.aws.amazon.com/AmazonS3/latest/userguide/enable-server-access-logging.html)
 
+To collect from the companion directly, pass `--aws-log-stack` to the
+collector in place of the local log flags. Use the read-only identity that
+can describe the given stack, read the origin bucket's logging configuration,
+and list and read both prefixes of its log bucket. The worker checks the
+stack's distribution and bucket against the approved fixture, then removes
+raw downloads when collection exits.
+
 To retire a fixture, stop its origin log delivery before removing the
 companion. Retain the redacted report and empty only the dedicated log
 bucket named in the companion's output.

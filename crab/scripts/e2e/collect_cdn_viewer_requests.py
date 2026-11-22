@@ -11,6 +11,7 @@ import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -23,6 +24,7 @@ from cdn_qualification import (  # noqa: E402
     verify_git_traffic, verify_viewer_requests,
 )
 from collect_front_door_deployment_policy import FRONT_DOOR_HOST, SUBSCRIPTION  # noqa: E402
+from collect_cloudfront_access_logs import download_logs  # noqa: E402
 from run_cdn_git_workload import read_target_fingerprints  # noqa: E402
 from run_cdn_transport_checks import approved_fixture, deployment_target, fixture_base, fixture_object_key, origin_bucket  # noqa: E402
 
@@ -397,7 +399,7 @@ def main() -> int:
     parser.add_argument("--fixture", required=True, type=Path)
     parser.add_argument("--configuration-sha256", required=True)
     parser.add_argument("--client", required=True, type=Path, help="exact timed client.json")
-    parser.add_argument("--log", required=True, action="append", type=Path,
+    parser.add_argument("--log", action="append", type=Path, default=[],
                         help="CloudFront W3C access log, Cloud Logging JSON export or Azure Monitor Front Door archive")
     parser.add_argument("--s3-origin-log", action="append", type=Path, default=[],
                         help="plain-text S3 server access log from the approved CloudFront origin")
@@ -405,14 +407,21 @@ def main() -> int:
                         help="Azure Monitor StorageRead archive from the approved Blob origin")
     parser.add_argument("--azure-origin-authority", type=Path,
                         help="ARM Front Door profile JSON for private rows, Azure Public service tags JSON for public rows")
+    parser.add_argument("--aws-log-stack", help="download CloudFront and S3 logs from the approved companion stack")
+    parser.add_argument("--aws-profile", help="AWS CLI profile used for read-only companion log collection")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     try:
         fixture = approved_fixture(args.fixture, args.configuration_sha256)
         edge, access, _, family, _ = scope_parts(fixture["scope"])
         require(PROVIDER_FOR_EDGE[edge] in VIEWER_REQUEST_FILES, "no viewer log collector is defined for this CDN fixture")
-        require(bool(args.s3_origin_log) == (edge == "cloudfront"),
-                "CloudFront viewer evidence requires S3 origin access logs")
+        if args.aws_log_stack is not None:
+            require(edge == "cloudfront" and not args.log and not args.s3_origin_log,
+                    "AWS log stack collection requires a CloudFront fixture and no local viewer or origin files")
+        else:
+            require(args.aws_profile is None and args.log, "viewer evidence needs log files or an AWS log stack")
+            require(bool(args.s3_origin_log) == (edge == "cloudfront"),
+                    "CloudFront viewer evidence requires S3 origin access logs")
         require(bool(args.azure_blob_log) == bool(args.azure_origin_authority) == (edge == "front-door"),
                 "Front Door viewer evidence requires Blob origin logs and Azure origin authority")
         raw = read_git_record(args.client, limit=GIT_FETCH_RECORD_LIMIT)
@@ -450,11 +459,19 @@ def main() -> int:
         require(client["all_edge_attempts"] > 0 and len(client["edge_responses"]) == client["all_edge_attempts"],
                 "the timed fetch lacks a CDN request fingerprint for each viewer attempt")
         loaders = {"cloudfront": cloudfront_logs, "cloud-cdn": cloud_cdn_logs, "front-door": front_door_logs}
-        records = loaders[edge](args.log, client, fixture)
+        if args.aws_log_stack is not None:
+            with TemporaryDirectory(prefix="crab-cdn-aws-logs-") as temporary:
+                viewer_logs, origin_logs = download_logs(fixture, client, args.aws_log_stack, args.aws_profile, Path(temporary))
+                records = cloudfront_logs(viewer_logs, client, fixture)
+                s3_records = s3_cloudfront_reads(origin_logs, records, fixture, client)
+        else:
+            records = loaders[edge](args.log, client, fixture)
+            if edge == "cloudfront":
+                s3_records = s3_cloudfront_reads(args.s3_origin_log, records, fixture, client)
         digest = hashlib.sha256(raw).hexdigest()
         proof = {"schema": f"crab.{edge}-viewer-requests/v1", "client_report_sha256": digest, "records": records}
         if edge == "cloudfront":
-            proof["origin_requests"] = s3_cloudfront_reads(args.s3_origin_log, records, fixture, client)
+            proof["origin_requests"] = s3_records
         if edge == "front-door":
             proof["origin_requests"] = azure_blob_front_door_reads(args.azure_blob_log, args.azure_origin_authority,
                                                                   records, fixture, client)

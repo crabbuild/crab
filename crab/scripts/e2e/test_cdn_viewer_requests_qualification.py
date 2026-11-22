@@ -1,5 +1,6 @@
 """Exercise provider log joins for timed fetch evidence."""
 
+import gzip
 import hashlib
 import json
 import subprocess
@@ -8,13 +9,99 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import collect_cdn_viewer_requests as COLLECT
+import collect_cloudfront_access_logs as AWS_LOGS
 import test_cdn_qualification as examples
 from test_cdn_transport_qualification import PACK, fixture
 
 
 class CdnViewerRequestQualificationTests(unittest.TestCase):
+    def test_cloudfront_companion_collects_only_its_timed_logs(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = fixture(access="private") | {"deployment": {"distribution_id": "EDIST12345", "region": "us-east-1"}}
+            fixture_path, output = root / "fixture.json", root / "cloudfront-requests.json"
+            configuration = examples.json_file(fixture_path, config)
+            registration = {"scope": config["scope"], "source_sha": examples.COMMIT, "configuration_sha256": configuration,
+                            "regions": {"near": "near"}, "samples": 1, "viewer_binding_sha256": "e" * 64,
+                            "candidate": examples.cli_candidate(config["scope"], "linux-x86_64")}
+            examples.write_git_measurements(root, registration, "linux-x86_64")
+            client = root / "near/0001/cold_edge/client.json"
+            report = json.loads(client.read_bytes())
+            viewer_id = "raw-viewer-id"
+            viewer_digest = hashlib.sha256(viewer_id.encode()).hexdigest()
+            response = next(iter(report["edge_responses"].values()))
+            examples.json_file(client, report | {"edge_responses": {viewer_digest: response}})
+            started = datetime.fromtimestamp(report["started_at_unix_ms"] // 1000, timezone.utc)
+            timestamp = started.strftime("%d/%b/%Y:%H:%M:%S +0000")
+            key = f"{config['fixture_prefix']}/{PACK}"
+            viewer_prefix = "AWSLogs/123456789012/CloudFront/"
+            viewer_key, origin_key = viewer_prefix + "viewer.gz", "origin/origin-log"
+            viewer = gzip.compress(
+                ("#Fields: x-edge-request-id x-host-header cs-method cs-uri-stem cs-protocol sc-status sc-bytes "
+                 "x-edge-response-result-type\n"
+                 f"{viewer_id}\tfixture.example.com\tGET\t/crab/{key}\thttps\t206\t620\tMiss\n").encode(),
+            )
+            origin = (f'owner fixture-bucket [{timestamp}] 192.0.2.1 fixture-principal raw-origin-id '
+                      f'REST.GET.OBJECT {key} "GET /{key} HTTP/1.1" 206 - 4096 5000 4 1 "-" "Amazon CloudFront" '
+                      '- extended-id SigV4 cipher AuthHeader fixture-bucket.s3.us-east-1.amazonaws.com TLSv1.3 - - us-east-1\n').encode()
+            objects = {viewer_key: viewer, origin_key: origin}
+            values = {"LogBucket": "fixture-logs", "ViewerLogPrefix": viewer_prefix, "OriginLogPrefix": "origin/",
+                      "OriginBucket": "fixture-bucket", "DistributionId": "EDIST12345"}
+            etag = '"snapshot"'
+            downloaded = []
+            arguments = ["collect", "--fixture", str(fixture_path), "--client", str(client),
+                         "--configuration-sha256", configuration, "--output", str(output),
+                         "--aws-log-stack", "crab-logs", "--aws-profile", "crab"]
+
+            def aws(profile, region, service, operation, *args):
+                self.assertEqual((profile, region), ("crab", "us-east-1"))
+                if service == "s3api":
+                    self.assertEqual(args[args.index("--expected-bucket-owner") + 1], "123456789012")
+                if operation == "describe-stacks":
+                    self.assertEqual(args, ("--stack-name", "crab-logs"))
+                    return {"Stacks": [{"StackName": "crab-logs", "StackStatus": "CREATE_COMPLETE",
+                                        "StackId": "arn:aws:cloudformation:us-east-1:123456789012:stack/crab-logs/a-b",
+                                        "Outputs": [{"OutputKey": k, "OutputValue": v} for k, v in values.items()]}]}
+                if operation == "get-bucket-logging":
+                    self.assertIn("fixture-bucket", args)
+                    return {"LoggingEnabled": {"TargetPrefix": "origin/", "TargetBucket": "fixture-logs"}}
+                self.assertIn("fixture-logs", args)
+                if operation == "list-objects-v2":
+                    prefix = args[args.index("--prefix") + 1]
+                    log = viewer_key if prefix == viewer_prefix else origin_key
+                    return {"IsTruncated": False, "Contents": [
+                        {"Key": prefix + "older", "Size": 100, "ETag": etag, "LastModified": "1970-01-01T00:00:01Z"},
+                        {"Key": log, "Size": len(objects[log]), "ETag": etag, "LastModified": started.isoformat()},
+                    ]}
+                self.assertEqual(operation, "get-object")
+                self.assertEqual(args[args.index("--if-match") + 1], etag)
+                key = args[args.index("--key") + 1]
+                raw = Path(args[-1])
+                raw.write_bytes(objects[key])
+                downloaded.append(raw)
+                return {"ContentLength": len(objects[key]), "ETag": etag}
+
+            with patch.object(AWS_LOGS, "aws", aws), patch.object(sys, "argv", arguments):
+                with patch.dict(values, {"DistributionId": "OTHER1234"}):
+                    self.assertEqual(COLLECT.main(), 1)
+                    self.assertFalse(output.exists())
+                self.assertFalse(downloaded)
+                with patch.object(AWS_LOGS, "LOG_BYTES", len(viewer) + len(origin)):
+                    self.assertEqual(COLLECT.main(), 1)
+                    self.assertFalse(output.exists())
+                    self.assertTrue(all(not raw.parent.exists() for raw in downloaded))
+                downloaded.clear()
+                self.assertEqual(COLLECT.main(), 0)
+            proof = json.loads(output.read_bytes())
+            self.assertEqual(set(proof["records"]), {viewer_digest})
+            self.assertEqual(next(iter(proof["origin_requests"].values()))["response_body_bytes"], 4096)
+            self.assertEqual(len(downloaded), 2)
+            self.assertTrue(all(not raw.parent.exists() for raw in downloaded))
+            self.assertNotIn("raw-origin-id", output.read_text())
+
     def test_cloudfront_matches_only_the_timed_request_and_redacts_the_raw_export(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)

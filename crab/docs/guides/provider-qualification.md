@@ -1321,6 +1321,15 @@ python3 -B crab/scripts/e2e/collect_cdn_viewer_requests.py \
   --output "$arm_directory/cloudfront-requests.json"
 ```
 
+For the AWS companion, replace `--log` and `--s3-origin-log` with
+`--aws-log-stack "$approved_logs_stack"`. Add `--aws-profile` for local
+inspection or use the protected worker's default AWS credentials. The
+collector checks the companion outputs and the origin logging target. It
+fetches only from the two private log prefixes, using expected-owner and
+ETag checks, and retains only the redacted proof. Retry after log delivery
+if the viewer records are incomplete. Use time-filtered local exports
+when a log prefix exceeds the collector's download bounds.
+
 For Cloud CDN, export a JSON array from Cloud Logging and write
 `cloud-cdn-requests.json` with the same collector. Query the approved GCP
 project and forwarding rule for the measurement window. The workload sends

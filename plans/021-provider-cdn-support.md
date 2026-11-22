@@ -495,6 +495,9 @@ logs in `us-east-1`. It selects the exact CloudFront fields needed by the
 collector, gives the fixture's S3 origin its own log prefix, and expires
 raw logs after the qualification window. Verify delivery before the first
 benchmark sample.
+The viewer evidence collector can read both feeds from that approved stack
+using a read-only AWS role. It checks the distribution, origin, log bucket
+owner, logging target, and object validators before joining the records.
 
 The scripted Git workload guards the native origin and effective repository
 prefix in both fixture and ordinary builds. The guard runs before repository
