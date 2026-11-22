@@ -40,7 +40,7 @@ fn exact_immutable_read_families() {
             CdnReadFamily::Capsule,
         ),
         (
-            layout.repo_path(&format!("lfs/objects/ab/cd/{hash}")),
+            Path::from_iter(["org", "repo", "lfs", "objects", "ab", "cd", &hash]),
             CdnReadFamily::Lfs,
         ),
         (layout.global_path("xorbs", &hash), CdnReadFamily::Xorb),
@@ -63,7 +63,7 @@ fn exact_immutable_read_families() {
         layout.repo_path(&format!("v2/capsules/ff/{hash}")),
         layout.repo_path(&format!("v2/capsules/ab/{hash}/extra")),
         layout.repo_path(&format!("v2/capsules/AB/{}", hash.to_ascii_uppercase())),
-        layout.repo_path(&format!("lfs/objects/ab/ab/{hash}")),
+        Path::from_iter(["org", "repo", "lfs", "objects", "ab", "ab", &hash]),
         Path::from(format!("org/repository/v2/capsules/ab/{hash}")),
         Path::from(format!(".crab/xorbs/ab/{hash}")),
     ] {

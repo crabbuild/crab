@@ -179,7 +179,6 @@ fn duplicate_insertion_keeps_the_verified_original() {
 
 #[tokio::test]
 async fn verified_xorb_chunks_report_their_delivery_source() {
-    use axum::{Router, body::Body, http::HeaderMap, response::Response};
     use crab_storage::cdn::{CdnAccess, CdnConsumer, CdnProfile, CdnRoute, CdnTransport};
     use crab_xet::xorb::{
         builder::{RunId, XorbBuilder},
@@ -190,6 +189,7 @@ async fn verified_xorb_chunks_report_their_delivery_source() {
         sync::{Arc, Mutex},
         time::Duration,
     };
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tracing::{
         Event, Metadata, Subscriber,
         field::{Field, Visit},
@@ -260,33 +260,52 @@ async fn verified_xorb_chunks_report_their_delivery_source() {
         } else {
             (corrupt.clone(), xorb.bytes.clone())
         };
-        let app = Router::new().fallback(move |headers: HeaderMap| {
-            let edge = edge.clone();
-            async move {
-                let Some(range) = headers.get("range") else {
-                    return Response::new(Body::from(edge));
-                };
-                let (start, end) = range
-                    .to_str()
-                    .unwrap()
-                    .strip_prefix("bytes=")
-                    .unwrap()
-                    .split_once('-')
-                    .unwrap();
-                let (start, end): (usize, usize) = (start.parse().unwrap(), end.parse().unwrap());
-                Response::builder()
-                    .status(206)
-                    .header(
-                        "content-range",
-                        format!("bytes {start}-{end}/{}", edge.len()),
-                    )
-                    .body(Body::from(edge.slice(start..=end)))
-                    .unwrap()
-            }
-        });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let transport = CdnTransport::loopback_fixture(listener.local_addr().unwrap()).unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let server = tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let mut socket = BufReader::new(socket);
+                let mut range = None;
+                let mut line = String::new();
+                while socket.read_line(&mut line).await.unwrap() > 0 && line != "\r\n" {
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("range")
+                    {
+                        let (start, end) = value
+                            .trim()
+                            .strip_prefix("bytes=")
+                            .unwrap()
+                            .split_once('-')
+                            .unwrap();
+                        range = Some((
+                            start.parse::<usize>().unwrap(),
+                            end.parse::<usize>().unwrap(),
+                        ));
+                    }
+                    line.clear();
+                }
+                let (status, body) = match range {
+                    Some((start, end)) => (
+                        format!(
+                            "206 Partial Content\r\nContent-Range: bytes {start}-{end}/{}",
+                            edge.len()
+                        ),
+                        &edge[start..=end],
+                    ),
+                    None => ("200 OK".to_owned(), edge.as_ref()),
+                };
+                let headers = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                socket
+                    .get_mut()
+                    .write_all(headers.as_bytes())
+                    .await
+                    .unwrap();
+                socket.get_mut().write_all(body).await.unwrap();
+            }
+        });
         let temp = tempfile::tempdir().unwrap();
         let local = Arc::new(crab_cache::LocalCache::new(temp.path().join("cache")));
         let inner = Arc::new(InMemory::new());
