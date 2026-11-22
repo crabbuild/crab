@@ -4,6 +4,8 @@
 pub mod aws_oidc;
 #[cfg(feature = "azure-entra-client")]
 pub mod azure_entra;
+#[cfg(feature = "azure-management")]
+pub mod azure_management;
 pub mod cdn;
 #[cfg(feature = "crab-auth-client")]
 pub mod cdn_checkout;

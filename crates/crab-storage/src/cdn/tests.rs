@@ -129,7 +129,7 @@ async fn provider_https_route_requires_an_exact_policy_context() {
         .clone()
         .with_cdn_route(
             route()
-                .with_publication(&store, &file, "s3://export")
+                .with_publication(&store, &file, "s3://export", None)
                 .await
                 .unwrap(),
         )
@@ -146,7 +146,7 @@ async fn provider_https_route_requires_an_exact_policy_context() {
         .any(|row| row == "cloudfront/public/cli/git/direct");
     let authorized_route = route()
         .for_consumer(CdnConsumer::Cli, CdnProfile::Direct)
-        .with_publication(&store, &file, "s3://export")
+        .with_publication(&store, &file, "s3://export", None)
         .await
         .unwrap();
     if qualification_enabled() || approved {
@@ -155,7 +155,7 @@ async fn provider_https_route_requires_an_exact_policy_context() {
             .with_native_cdn_origin(Some("s3://origin".into()));
         let reusing_route = route()
             .for_consumer(CdnConsumer::Cli, CdnProfile::Direct)
-            .with_publication(&store, &file, "s3://export")
+            .with_publication(&store, &file, "s3://export", None)
             .await
             .unwrap();
         assert!(matches!(
@@ -199,18 +199,18 @@ async fn public_export_approval_pins_digest_origin_and_viewer() {
         .with_target_identity([4; 32])
         .with_native_cdn_origin(Some("s3://source".into()));
     let wrong_host = route("https://other.example.com")
-        .with_publication(&source, &file, "s3://export")
+        .with_publication(&source, &file, "s3://export", None)
         .await;
     assert!(wrong_host.is_err());
     let wrong_export = route(base)
-        .with_publication(&source, &file, "s3://other")
+        .with_publication(&source, &file, "s3://other", None)
         .await;
     assert!(wrong_export.is_err());
     let other = Store::new(Arc::new(InMemory::new()))
         .with_target_identity([4; 32])
         .with_native_cdn_origin(Some("s3://other".into()));
     let wrong_source = route(base)
-        .with_publication(&other, &file, "s3://export")
+        .with_publication(&other, &file, "s3://export", None)
         .await;
     assert!(matches!(wrong_source, Err(StorageError::Forbidden { .. })));
     let mut receipt: serde_json::Value =
@@ -228,13 +228,13 @@ async fn public_export_approval_pins_digest_origin_and_viewer() {
     };
     assert!(
         route(base)
-            .with_publication(&source, &repinned, "s3://export")
+            .with_publication(&source, &repinned, "s3://export", None)
             .await
             .is_err()
     );
     std::fs::write(path, b"tampered").unwrap();
     let tampered = route(base)
-        .with_publication(&source, &file, "s3://export")
+        .with_publication(&source, &file, "s3://export", None)
         .await;
     assert!(matches!(
         tampered,
@@ -283,7 +283,7 @@ async fn public_azure_receipt_requires_a_separate_storage_account() {
             CdnTransport::new(viewer).unwrap(),
             Duration::from_secs(5),
         )
-        .with_publication(&origin, &file, export)
+        .with_publication(&origin, &file, export, None)
         .await;
         assert_eq!(result.is_ok(), valid, "{name}");
     }
@@ -332,7 +332,7 @@ async fn public_s3_activation_rejects_the_selected_store_in_another_region() {
     }
     .enabled();
     let activation = route
-        .with_publication(&store, &file, "s3://public-export")
+        .with_publication(&store, &file, "s3://public-export", None)
         .await;
     assert_eq!(
         matches!(activation, Err(StorageError::Forbidden { .. })),
@@ -369,7 +369,7 @@ async fn public_export_admits_only_the_approved_key_and_object_size() {
         transport,
         Duration::from_secs(5),
     )
-    .with_publication(&store, &file, "s3://export")
+    .with_publication(&store, &file, "s3://export", None)
     .await
     .unwrap();
     let store = store.with_cdn_route(route).unwrap();
@@ -560,7 +560,7 @@ async fn product_read_records_one_redacted_transfer_for_its_actual_scope() {
         Duration::from_secs(5),
     )
     .for_consumer(CdnConsumer::Cli, CdnProfile::Direct)
-    .with_publication(&store, &approval, "s3://export")
+    .with_publication(&store, &approval, "s3://export", None)
     .await
     .unwrap();
     let store = store.with_cdn_route(route).unwrap();

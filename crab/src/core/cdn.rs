@@ -322,7 +322,12 @@ impl CdnBinding {
             timeout,
         )
         .for_consumer(consumer, CdnProfile::Direct)
-        .with_publication(&store, publication, export)
+        .with_publication(
+            &store,
+            publication,
+            export,
+            Some(&crab_auth_store::azure_cdn::AzureCdnAuthority),
+        )
         .await?;
         Ok(store.with_cdn_route(route)?)
     }

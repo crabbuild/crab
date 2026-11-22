@@ -156,7 +156,12 @@ impl OperatorCdn {
                         timeout,
                     )
                     .for_consumer(consumer, CdnProfile::Direct)
-                    .with_publication(origin, publication, export)
+                    .with_publication(
+                        origin,
+                        publication,
+                        export,
+                        Some(&crate::azure_cdn::AzureCdnAuthority),
+                    )
                     .await?,
                 )?)
             }

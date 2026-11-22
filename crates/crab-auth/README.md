@@ -135,6 +135,8 @@ keys and temporary directories; they do not qualify live Keychain integration.
 
 ## Boundaries
 
+- `azure-management` acquires a sensitive bearer header for Azure Resource
+  Manager. Public CDN placement reads use this opt-in credential path.
 - Use [`crab-types`](../crab-types/README.md) for shared storage and scope
   types, not ad-hoc provider strings.
 - Use [`crab-auth-store`](../crab-auth-store/README.md) to turn a resolution

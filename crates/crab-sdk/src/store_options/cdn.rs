@@ -268,7 +268,12 @@ impl DirectCdnOptions {
                     timeout,
                 )
                 .for_consumer(consumer, CdnProfile::Direct)
-                .with_publication(&selected.store, publication, export)
+                .with_publication(
+                    &selected.store,
+                    publication,
+                    export,
+                    Some(&crab_auth_store::azure_cdn::AzureCdnAuthority),
+                )
                 .await
                 .map_err(|source| {
                     Error::with_source(

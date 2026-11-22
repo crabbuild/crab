@@ -32,7 +32,8 @@ managed-service = [
     "dep:tokio-util",
     "dep:uuid",
 ]
-operator-cdn = ["refreshing-store", "crab-auth/crab-auth-client", "crab-storage/azure-cdn-placement", "dep:serde"]
+azure-cdn-placement = ["crab-auth/azure-management", "dep:async-trait", "dep:reqwest"]
+operator-cdn = ["refreshing-store", "crab-auth/crab-auth-client", "azure-cdn-placement", "dep:serde"]
 
 [dependencies]
 async-trait = { workspace = true, optional = true }

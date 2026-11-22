@@ -17,7 +17,7 @@ default = []
 remote = ["dep:crab-read", "dep:tokio", "dep:tokio-util", "dep:crab-remote-git", "dep:crab-storage", "dep:crab-metadata", "dep:object_store", "dep:blake3"]
 publish = ["remote", "crab-read/hydration", "dep:crab-remote", "crab-remote/publication", "dep:crab-write", "dep:crab-coordination", "dep:crab-git", "dep:crab-lfs", "dep:crab-staging", "dep:crab-xet", "crab-xet/chunker", "dep:crab-types", "dep:serde", "dep:serde_json", "dep:uuid", "dep:tempfile", "dep:gix-object"]
 local = ["publish", "files", "crab-remote/local", "dep:dunce", "dep:toml"]
-service = ["remote", "dep:crab-auth", "crab-auth/crab-auth-client", "dep:crab-auth-store", "crab-storage/azure-cdn-placement", "dep:crab-git", "dep:sha2", "dep:tracing", "dep:uuid"]
+service = ["remote", "dep:crab-auth", "crab-auth/crab-auth-client", "dep:crab-auth-store", "crab-auth-store/azure-cdn-placement", "dep:crab-git", "dep:sha2", "dep:tracing", "dep:uuid"]
 provider-cdn-qualification = ["service", "crab-storage/provider-cdn-qualification"]
 
 results = ["remote", "dep:crab-workflow", "dep:serde", "dep:serde_json"]

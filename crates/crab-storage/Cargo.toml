@@ -15,12 +15,10 @@ path = "src/lib.rs"
 [features]
 default = []
 test-support = []
-azure-cdn-placement = ["dep:azure_identity"]
-provider-cdn-qualification = ["azure-cdn-placement"]
+provider-cdn-qualification = []
 
 [dependencies]
 async-trait = { workspace = true }
-azure_identity = { workspace = true, optional = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
 crab-types = { workspace = true }

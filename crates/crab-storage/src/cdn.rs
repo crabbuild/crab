@@ -22,7 +22,7 @@ mod telemetry;
 
 pub use crab_types::storage::CdnPublicationFile;
 pub(crate) use placement::NativeAuthority;
-pub use placement::NativeCdnOrigin;
+pub use placement::{AzureManagementAuthorization, NativeCdnOrigin};
 pub use policy::{
     CdnConsumer, CdnPolicy, CdnProfile, CdnReadFamily, CdnVisibility, release_policy_sha256,
 };
@@ -97,6 +97,7 @@ impl CdnRoute {
         origin: &Store,
         file: &CdnPublicationFile,
         export_origin: &str,
+        azure_authority: Option<&dyn AzureManagementAuthorization>,
     ) -> Result<Self> {
         if !matches!(self.access, CdnAccess::Public) {
             return Err(publication::invalid(
@@ -134,7 +135,11 @@ impl CdnRoute {
                 .is_some_and(|policy| !policy.families().is_empty())
         {
             authority
-                .verify(&publication.source_placement, self.edge_timeout())
+                .verify(
+                    &publication.source_placement,
+                    self.edge_timeout(),
+                    azure_authority,
+                )
                 .await?;
             self.publication_origin = Some(Arc::clone(authority));
         }

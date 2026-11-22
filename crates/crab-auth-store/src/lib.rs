@@ -1,5 +1,7 @@
 //! Auth credential to storage-store adapter.
 
+#[cfg(feature = "azure-cdn-placement")]
+pub mod azure_cdn;
 #[cfg(feature = "refreshing-store")]
 pub mod cdn;
 #[cfg(feature = "refreshing-store")]

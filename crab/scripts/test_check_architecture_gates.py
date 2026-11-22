@@ -84,7 +84,74 @@ class StorageScopeTests(unittest.TestCase):
                     self.assertEqual(result, expected)
 
 
+class AuthScopeTests(unittest.TestCase):
+    def test_arm_sdk_remains_optional_and_confined_to_the_auth_provider(self):
+        required = ("crab-coordination", "crab-types", "serde", "serde_json", "thiserror", "tracing")
+        azure = {"name": "azure_identity", "kind": None, "optional": True, "uses_default_features": False,
+                 "features": GATES.WORKSPACE_PROVIDER_SDK_DEPENDENCIES["azure_identity"]["features"]}
+        arm = {"azure-management": ["dep:azure_identity", "dep:reqwest"]}
+        provider = "src/azure_management.rs"
+        import_statement = "let credential = azure_identity::create_credential();"
+        for file, line, dependency, features, expected in (
+            (provider, import_statement, azure, arm, True),
+            (provider, import_statement, azure | {"optional": False}, arm, False),
+            (provider, import_statement, azure | {"kind": "dev"}, arm, False),
+            (provider, import_statement, azure | {"features": ["enable_reqwest"]}, arm, False),
+            (provider, import_statement, azure, arm | {"azure-entra-client": ["azure-management"]}, False),
+            (provider, "use crab_storage::Store;", azure, arm, False),
+            ("src/token_cache.rs", import_statement, azure, arm, False),
+        ):
+            with self.subTest(file=file, dependency=dependency, features=features), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source = root / "crates/crab-auth" / file
+                source.parent.mkdir(parents=True)
+                source.write_text(line, encoding="utf-8")
+                metadata = {"packages": [{"name": "crab-auth", "features": features, "dependencies": [
+                    {"name": name, "kind": None, "optional": False, "features": []} for name in required
+                ] + [dependency]}]}
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(GATES.check_auth_module_scope(root, metadata), expected)
+
+
 class WorkspaceDependencyTests(unittest.TestCase):
+    def workspace_policy(self, owner, dependencies, features=None):
+        packages = [{"name": name, "dependencies": []} for name in GATES.WORKSPACE_DEPENDENCY_POLICY]
+        package = next(package for package in packages if package["name"] == owner)
+        package.update(dependencies=dependencies, features=features or {})
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return GATES.check_workspace_dependency_policy({"packages": packages})
+
+    def test_storage_fixture_overlay_is_dev_only_on_an_existing_allowed_edge(self):
+        native = {"name": "crab-storage", "kind": None, "features": [], "uses_default_features": False}
+        fixture = native | {"kind": "dev", "features": ["test-support"]}
+        cases = (
+            ("crab-read", [native, fixture], {}, True),
+            ("crab-read", [fixture], {}, False),
+            ("crab-read", [native, fixture | {"kind": None}], {}, False),
+            ("crab-read", [native, fixture | {"features": ["test-support", "provider-cdn-qualification"]}], {}, False),
+            ("crab-read", [native, fixture | {"uses_default_features": True}], {}, False),
+            ("crab-read", [native, fixture], {"qualification": ["crab-storage?/test-support"]}, False),
+            ("crab-types", [native, fixture], {}, False),
+        )
+        for owner, dependencies, features, expected in cases:
+            with self.subTest(owner=owner, dependencies=dependencies, features=features):
+                self.assertEqual(self.workspace_policy(owner, dependencies, features), expected)
+
+    def test_server_cdn_adapter_is_only_reachable_through_explicit_cdn_features(self):
+        edge = {"name": "crab-auth-store", "kind": None, "optional": True,
+                "uses_default_features": False, "features": []}
+        features = {"provider-cdn": ["dep:crab-auth-store", "crab-auth-store/operator-cdn"],
+                    "provider-cdn-qualification": ["provider-cdn", "crab-storage/provider-cdn-qualification"]}
+        for owner in ("crab-server", "crab-s3-gateway"):
+            with self.subTest(owner=owner):
+                self.assertTrue(self.workspace_policy(owner, [edge], features))
+                self.assertFalse(self.workspace_policy(owner, [edge | {"optional": False}], features))
+                self.assertFalse(self.workspace_policy(owner, [edge | {"features": ["operator-cdn"]}], features))
+                self.assertFalse(self.workspace_policy(owner, [edge], features | {"default": ["provider-cdn"]}))
+                self.assertFalse(self.workspace_policy(owner, [edge], features | {"internal": ["provider-cdn-qualification"]}))
+                self.assertFalse(self.workspace_policy(owner, [edge], features | {"internal": ["crab-auth-store?/operator-cdn"]}))
+        self.assertFalse(self.workspace_policy("crab-read", [edge], features))
+
     def test_package_dependencies_cannot_require_private_crates_even_when_optional(self):
         classified = (GATES.PRIVATE_INTERNAL_PACKAGES | GATES.PUBLISHED_LIBRARY_PACKAGES
                       | set(GATES.SHIPPED_BINARY_PACKAGES))

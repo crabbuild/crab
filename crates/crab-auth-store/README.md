@@ -85,6 +85,10 @@ compares the issuer's placement and full-repository scope before attaching
 viewer authority to a read store. The service keeps its own native origin
 credentials.
 
+For public Azure exports, the `azure-cdn-placement` feature supplies the
+operator's Azure Resource Manager authorization to storage. Storage checks
+the receipt's account, container, primary location, and Blob endpoint.
+
 ## Usage
 
 Build a canonical store from a resolution produced by `crab-auth`:

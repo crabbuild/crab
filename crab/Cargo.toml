@@ -153,7 +153,7 @@ gix-all = [
 [dependencies]
 # Shared cross-crate contracts.
 crab-auth = { workspace = true, features = ["aws-oidc-client", "azure-entra-client", "crab-auth-client", "gcp-workload-identity-client"] }
-crab-auth-store = { workspace = true, features = ["managed-service"] }
+crab-auth-store = { workspace = true, features = ["azure-cdn-placement", "managed-service"] }
 crab-cache = { workspace = true, features = ["local-cache", "remote-client", "xet-chunk-cache"] }
 crab-cache-store = { workspace = true, features = ["remote-client"] }
 crab-coordination = { workspace = true, features = ["object-store-lock"] }
@@ -166,7 +166,7 @@ crab-write = { workspace = true }
 crab-remote = { workspace = true, features = ["local", "publication"] }
 crab-remote-git = { workspace = true }
 crab-staging = { workspace = true }
-crab-storage = { workspace = true, features = ["azure-cdn-placement"] }
+crab-storage = { workspace = true }
 crab-types = { workspace = true }
 crab-vfs = { workspace = true }
 crab-workflow = { workspace = true, features = ["schema"] }

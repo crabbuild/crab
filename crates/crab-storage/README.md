@@ -154,6 +154,10 @@ This digest is separate from the established `BucketIdentity` used for logical
 cross-scheme comparison and cache keys. Raw `Store::new` wrappers have no target
 identity; integrity callers must not infer one from their display text.
 
+Public Azure CDN activation accepts management-plane authorization from its
+caller. Storage verifies the ARM resource documents against the sealed receipt
+and the selected data-plane endpoint before installing the route.
+
 ### Upload integrity and multipart transfer
 
 Official AWS S3 builders send an explicit SHA-256 upload checksum and expose

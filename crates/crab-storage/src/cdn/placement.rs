@@ -1,4 +1,4 @@
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, StatusCode, header};
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -9,6 +9,13 @@ use object_store::gcp::GcpCredentialProvider;
 use crate::{Result, StorageError};
 
 use super::publication::Placement;
+
+/// Provides a sensitive authorization header for Azure Resource Manager requests.
+#[async_trait::async_trait]
+pub trait AzureManagementAuthorization: Send + Sync {
+    /// Resolve the operator's management-plane identity when a receipt is activated.
+    async fn authorization(&self) -> Result<header::HeaderValue>;
+}
 
 /// Canonical CDN origin and its selected native credential authority.
 #[derive(Clone)]
@@ -44,7 +51,12 @@ impl NativeCdnOrigin {
         }
     }
 
-    pub(crate) async fn verify(&self, placement: &Placement, timeout: Duration) -> Result<()> {
+    pub(crate) async fn verify(
+        &self,
+        placement: &Placement,
+        timeout: Duration,
+        azure_authority: Option<&dyn AzureManagementAuthorization>,
+    ) -> Result<()> {
         #[cfg(any(test, feature = "test-support"))]
         if matches!(self.authority, NativeAuthority::Fixture) {
             return Ok(());
@@ -97,16 +109,16 @@ impl NativeCdnOrigin {
                     let body = bounded_response(response, 4096).await?;
                     verify_gcs_bucket(&body, bucket, placement)
                 }
-                #[cfg(feature = "azure-cdn-placement")]
                 NativeAuthority::Azure => {
-                    verify_azure_placement(&client, &self.address, placement).await
+                    let authority = azure_authority.ok_or_else(|| StorageError::Forbidden {
+                        path:
+                            "Azure Resource Manager identity is required for public CDN placement"
+                                .into(),
+                    })?;
+                    let mut authorization = authority.authorization().await?;
+                    authorization.set_sensitive(true);
+                    verify_azure_placement(&client, &self.address, placement, authorization).await
                 }
-                #[cfg(not(feature = "azure-cdn-placement"))]
-                NativeAuthority::Azure => Err(StorageError::Forbidden {
-                    path:
-                        "this build lacks Azure Resource Manager support for public CDN placement"
-                            .into(),
-                }),
                 #[cfg(any(test, feature = "test-support"))]
                 NativeAuthority::Fixture => Ok(()),
             }
@@ -134,28 +146,18 @@ async fn bounded_response(mut response: reqwest::Response, limit: usize) -> Resu
     Ok(body)
 }
 
-#[cfg(feature = "azure-cdn-placement")]
 async fn verify_azure_placement(
     client: &Client,
     address: &str,
     placement: &Placement,
+    authorization: header::HeaderValue,
 ) -> Result<()> {
-    // Blob credentials authorize the selected data plane. ARM independently verifies
-    // its account and subscription with an Entra token for the management audience.
-    let unauthorized = |_| StorageError::AuthFailed {
-        path: "Azure Resource Manager credentials for public CDN placement".into(),
-    };
-    let credential = azure_identity::create_credential().map_err(unauthorized)?;
-    let token = credential
-        .get_token(&["https://management.azure.com/.default"])
-        .await
-        .map_err(unauthorized)?;
     let get = |resource: &str| {
         let url = format!("https://management.azure.com{resource}");
         client
             .get(url)
             .query(&[("api-version", "2025-08-01")])
-            .bearer_auth(token.token.secret())
+            .header(header::AUTHORIZATION, authorization.clone())
     };
     let (account_id, _) = placement
         .resource
@@ -170,7 +172,6 @@ async fn verify_azure_placement(
     verify_azure_resources(&account, &container, address, placement)
 }
 
-#[cfg(feature = "azure-cdn-placement")]
 fn verify_azure_resources(
     account: &[u8],
     container: &[u8],
@@ -352,7 +353,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "azure-cdn-placement")]
     #[test]
     fn azure_native_proof_binds_arm_ids_primary_location_and_blob_endpoint() {
         let account_id = "/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/fixture/providers/microsoft.storage/storageaccounts/fixtureacct";
@@ -396,5 +396,37 @@ mod tests {
         }
         let sibling = serde_json::json!({"id": format!("{account_id}/blobservices/default/containers/sibling")});
         assert!(verify(&account, &sibling).is_err());
+    }
+
+    #[tokio::test]
+    async fn azure_placement_requires_the_injected_management_identity() {
+        struct Denied;
+
+        #[async_trait::async_trait]
+        impl AzureManagementAuthorization for Denied {
+            async fn authorization(&self) -> Result<header::HeaderValue> {
+                Err(StorageError::AuthFailed {
+                    path: "fixture ARM authorization denied".into(),
+                })
+            }
+        }
+
+        let origin = NativeCdnOrigin {
+            address: "https://fixtureacct.blob.core.windows.net/repo".into(),
+            authority: NativeAuthority::Azure,
+        };
+        let placement = Placement {
+            resource: "/subscriptions/11111111-2222-3333-4444-555555555555/resourcegroups/fixture/providers/microsoft.storage/storageaccounts/fixtureacct/blobservices/default/containers/repo".into(),
+            location: "westus2".into(),
+        };
+        let deadline = Duration::from_secs(1);
+        assert!(matches!(
+            origin.verify(&placement, deadline, None).await,
+            Err(StorageError::Forbidden { .. })
+        ));
+        assert!(
+            matches!(origin.verify(&placement, deadline, Some(&Denied)).await,
+                         Err(StorageError::AuthFailed { path }) if path == "fixture ARM authorization denied")
+        );
     }
 }

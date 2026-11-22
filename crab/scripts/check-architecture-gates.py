@@ -593,6 +593,7 @@ METADATA_DEFAULT_FORBIDDEN_PACKAGES = {
     "tokio",
 }
 AUTH_DEFAULT_FORBIDDEN_PACKAGES = {
+    "azure_identity",
     "crab-auth-server",
     "crab-cache-server",
     "crab-storage",
@@ -608,14 +609,16 @@ AUTH_CLIENT_FEATURE_FORBIDDEN_PACKAGES = {
 AUTH_CLIENT_FEATURE_DEFINITIONS = {
     "aws-oidc-client": ["dep:sha2", "dep:tokio", "oidc-client"],
     "azure-entra-client": ["dep:tokio", "oidc-client"],
-    "crab-auth-client": ["dep:tokio", "oidc-client"],
+    "azure-management": ["dep:azure_identity", "dep:reqwest"],
+    # Private CDN checkout pins an issuer and subject fingerprint across processes.
+    "crab-auth-client": ["dep:sha2", "dep:tokio", "oidc-client"],
     "gcp-workload-identity-client": ["dep:tokio", "oidc-client"],
     "oidc-client": ["dep:reqwest", "dep:tokio"],
 }
 AUTH_CLIENT_FEATURE_REQUIRED_PACKAGES = {
     "aws-oidc-client": {"reqwest", "sha2", "tokio"},
     "azure-entra-client": {"reqwest", "tokio"},
-    "crab-auth-client": {"reqwest", "tokio"},
+    "crab-auth-client": {"reqwest", "sha2", "tokio"},
     "gcp-workload-identity-client": {"reqwest", "tokio"},
     "oidc-client": {"reqwest", "tokio"},
 }
@@ -2556,6 +2559,26 @@ def dependency_kind(dependency: dict) -> str:
     return dependency["kind"] or "normal"
 
 
+def is_optional_cdn_composition(package: dict, dependency: dict) -> bool:
+    if (package["name"] not in {"crab-server", "crab-s3-gateway"}
+            or dependency["name"] != "crab-auth-store" or dependency_kind(dependency) != "normal"
+            or not dependency.get("optional") or dependency.get("uses_default_features", True)
+            or dependency.get("features") != [] or dependency.get("rename") is not None):
+        return False
+    features = package.get("features", {})
+    if set(features.get("provider-cdn", [])) != {"dep:crab-auth-store", "crab-auth-store/operator-cdn"}:
+        return False
+    qualification = {"provider-cdn", "crab-storage/provider-cdn-qualification"}
+    if set(features.get("provider-cdn-qualification", [])) != qualification:
+        return False
+    # Any additional path into these features could activate the adapter on an
+    # ordinary build, including through an intermediate feature.
+    protected = {"provider-cdn", "provider-cdn-qualification", "dep:crab-auth-store", "crab-auth-store"}
+    return all(item not in protected and not item.startswith(("crab-auth-store/", "crab-auth-store?/"))
+               for name, enabled in features.items() if name not in {"provider-cdn", "provider-cdn-qualification"}
+               for item in enabled)
+
+
 def check_workspace_dependency_policy(metadata: dict) -> bool:
     violations: list[str] = []
     workspace_packages = {package["name"] for package in metadata["packages"]}
@@ -2572,6 +2595,9 @@ def check_workspace_dependency_policy(metadata: dict) -> bool:
     for package in sorted(metadata["packages"], key=lambda package: package["name"]):
         package_name = package["name"]
         allowed_by_kind = WORKSPACE_DEPENDENCY_POLICY.get(package_name, {})
+        for feature, enabled in package.get("features", {}).items():
+            if {"crab-storage/test-support", "crab-storage?/test-support"} & set(enabled):
+                violations.append(f"{package_name}/{feature}: cannot enable storage test-support outside dev dependencies")
         for dependency in package["dependencies"]:
             dependency_name = dependency["name"]
             if dependency_name not in workspace_packages:
@@ -2579,7 +2605,17 @@ def check_workspace_dependency_policy(metadata: dict) -> bool:
             checked_edges += 1
             kind = dependency_kind(dependency)
             allowed = allowed_by_kind.get(kind, set())
-            if dependency_name not in allowed:
+            if dependency_name == "crab-storage" and "test-support" in dependency.get("features", []):
+                if (kind != "dev" or dependency["features"] != ["test-support"]
+                        or dependency.get("uses_default_features", True) or dependency.get("rename") is not None):
+                    violations.append(f"{package_name}: storage test-support requires a dev-only feature overlay")
+                    continue
+                # A feature overlay on an admitted production dependency adds
+                # test hooks without introducing another crate to the graph.
+                if (dependency_name in allowed_by_kind.get("normal", set())
+                        and normal_dependency(package, dependency_name) is not None):
+                    continue
+            if dependency_name not in allowed and not is_optional_cdn_composition(package, dependency):
                 expected = {
                     allowed_kind: sorted(dependencies)
                     for allowed_kind, dependencies in sorted(allowed_by_kind.items())
@@ -3726,7 +3762,20 @@ def check_auth_module_scope(root: Path, metadata: dict) -> bool:
         name = dependency["name"]
         if name in AUTH_MODULE_DIRECT_FORBIDDEN_PACKAGES:
             kind = dependency_kind(dependency)
+            if (name == "azure_identity" and kind == "normal" and dependency["optional"]
+                    and not dependency.get("uses_default_features", True)
+                    and set(dependency["features"]) == set(WORKSPACE_PROVIDER_SDK_DEPENDENCIES[name]["features"])
+                    and dependency.get("rename") is None):
+                continue
             violations.append(f"crab-auth: {kind}-depends on forbidden package {name}")
+
+    # Restrict the credential SDK to the explicit ARM authentication feature.
+    for feature, enabled in package.get("features", {}).items():
+        if feature != "azure-management" and any(
+            item in {"azure-management", "azure_identity", "dep:azure_identity"}
+            or item.startswith(("azure_identity/", "azure_identity?/")) for item in enabled
+        ):
+            violations.append(f"crab-auth/{feature}: Azure SDK is reserved for ARM authentication")
 
     for scan_path in AUTH_MODULE_SCAN_PATHS:
         path = root / scan_path
@@ -3746,9 +3795,15 @@ def check_auth_module_scope(root: Path, metadata: dict) -> bool:
                 text = candidate.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 continue
+            relative = rel(root, candidate)
             for index, line in enumerate(text.splitlines(), start=1):
-                if any(pattern in line for pattern in AUTH_MODULE_SOURCE_FORBIDDEN_PATTERNS):
-                    violations.append(f"{rel(root, candidate)}:{index}: {line.strip()}")
+                patterns = AUTH_MODULE_SOURCE_FORBIDDEN_PATTERNS
+                if relative == "crates/crab-auth/src/azure_management.rs" or (
+                    relative == "crates/crab-auth/Cargo.toml" and line.split(" = ", 1)[0] in {"azure-management", "azure_identity"}
+                ):
+                    patterns = patterns - {"azure_identity"}
+                if any(pattern in line for pattern in patterns):
+                    violations.append(f"{relative}:{index}: {line.strip()}")
 
     if not violations:
         print("ok: crab-auth stays client/shared auth without server or storage policy")
@@ -3814,10 +3869,16 @@ def check_auth_client_feature_budget(root: Path, cargo: str, metadata: dict) -> 
                 "2",
             ],
             required=required,
-            forbidden=AUTH_CLIENT_FEATURE_FORBIDDEN_PACKAGES,
+            forbidden=AUTH_CLIENT_FEATURE_FORBIDDEN_PACKAGES | {"azure_identity"},
         )
         for feature_name, required in sorted(AUTH_CLIENT_FEATURE_REQUIRED_PACKAGES.items())
     ]
+    checks.append(check_tree_packages(
+        root, cargo, "crab-auth/azure-management includes only the Azure identity SDK for ARM authentication",
+        ["-p", "crab-auth", "--features", "azure-management", "--edges", "normal", "--depth", "2"],
+        required={"azure_identity", "reqwest"},
+        forbidden=AUTH_CLIENT_FEATURE_FORBIDDEN_PACKAGES | {"azure_mgmt_storage", "azure_storage", "azure_storage_blobs"},
+    ))
 
     if not violations:
         print("ok: crab-auth client feature costs are explicit")
