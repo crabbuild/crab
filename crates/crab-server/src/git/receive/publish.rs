@@ -1067,11 +1067,15 @@ async fn commit_prepared(
             .updates
             .iter()
             .any(|update| update.name.starts_with("refs/heads/"));
-    let commit = |cancel| async move {
-        commit_authorized(
-            server, principal, entry, artifacts, mutation, plan_id, &cancel,
-        )
-        .await
+    // The policy and LFS leases nest this callback. Boxing it leaves room
+    // for object-store I/O on a default debug worker stack.
+    let commit = |cancel| {
+        Box::pin(async move {
+            commit_authorized(
+                server, principal, entry, artifacts, mutation, plan_id, &cancel,
+            )
+            .await
+        })
     };
     if checks_branch_policy {
         settings::with_ruleset_lease(

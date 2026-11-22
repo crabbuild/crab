@@ -249,6 +249,15 @@ Prove one private repository from an author’s browser and stock Git through a 
 
 ## Verification and release claims
 
+- The standalone macOS debug server passed the RustFS process gate at
+  its default worker stack after boxing the commit callback under the
+  publication leases. The gate verified stock Git push, PR merge and
+  replay, clean restart, SIGKILL, and full-root restoration into an empty
+  cache. It compared Git refs, application state, and object hashes and
+  metadata, and verified an 8 MiB Git LFS object and range resumption.
+  Separate RustFS tests passed for mTLS peer handoff and access revocation
+  after a stale catalog refresh. Cloud and IdP qualification remain open.
+
 - Browser Git webhooks passed the production UI build, 120 UI unit tests,
   six Playwright cases and 37 focused native tests. Native delivery covered
   repeated branch creation, tag publication, private candidate refs,
