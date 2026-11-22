@@ -210,3 +210,15 @@ def verify_body(obj, path):
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
     if path.stat().st_size != obj.size or digest != obj.sha256:
         raise ExportError(f"inventory digest mismatch for {obj.path}")
+
+
+def spool_part(source, path, size, body_digest, part_digest):
+    with path.open("wb") as output:
+        while size:
+            block = source.read(min(size, 1024 * 1024))
+            if not block:
+                raise ExportError("source spool ended before the approved size")
+            output.write(block)
+            part_digest.update(block)
+            body_digest.update(block)
+            size -= len(block)

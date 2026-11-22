@@ -28,11 +28,12 @@ misses. [Azure anonymous Blob access](https://learn.microsoft.com/en-us/azure/st
    ARM resource ID ending in `/blobservices/default/containers/<container>`
    and `location` to the source account's primary location. The operator
    needs ARM read permission for both storage accounts and containers.
-   Use Python 3.11 or later and the Azure CLI.
+   Use Python 3.11 or later and Azure CLI 2.54 or later.
    The publisher accepts three local Azure CLI configuration directories
    for the deployment operator, source reader and dedicated Entra writer.
    The writer needs read and write data access scoped to the export
-   container. Provide private scratch space for one object at a time.
+   container. Provide private scratch space for one object plus one upload
+   block at a time.
 
    ```sh
    python3 crab/deploy/cdn/azure/public-export/publish_export.py approved.json \
@@ -43,12 +44,16 @@ misses. [Azure anonymous Blob access](https://learn.microsoft.com/en-us/azure/st
    ```
 
    It verifies the disabled Front Door route, viewer hostname and both native
-   placements before and after copying the approved immutable keys. It uses
-   conditional block blob creation and reads back destination bytes and public
-   metadata. Retain the exact receipt and its printed SHA-256. Confirm that
-   the receipt covers the accelerated objects before activation. The
-   publisher admits objects through 50,000 blocks of
-   4 MiB each. [Azure CLI Blob authorization](https://learn.microsoft.com/en-us/azure/storage/blobs/authorize-data-operations-cli) · [Azure Blob transfer limits](https://learn.microsoft.com/en-us/azure/storage/blobs/storage-blobs-tune-upload-download-python)
+   placements before and after copying the approved immutable keys. For
+   large objects, it stages checksummed blocks under unique upload IDs,
+   verifies the whole approved SHA-256, then commits the block list with
+   `If-None-Match: *`. Azure collects abandoned blocks after a week without
+   a successful block operation on the blob. The publisher supports 50,000
+   blocks of up to 4,000 MiB each. It reads back the destination bytes and
+   public metadata before sealing the receipt, including when a matching
+   object already exists. Retain the exact receipt and its printed SHA-256.
+   Confirm that the receipt covers the accelerated objects before activation.
+   [Azure block limits and retention](https://learn.microsoft.com/en-us/rest/api/storageservices/put-block-list) · [Azure CLI token expiration](https://learn.microsoft.com/en-us/cli/azure/account#az-account-get-access-token)
 3. Check the deployment's `publicDeliveryEnabled` output after activation.
    Qualify warm GETs and exact ranges on the default hostname and check
    denial for every other method, hostname, mutable key and alternate query.

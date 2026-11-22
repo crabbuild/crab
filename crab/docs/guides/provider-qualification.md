@@ -1498,8 +1498,9 @@ uploads before checking committed versions and delete markers. GCS lists
 generations and checks soft-deleted objects when the bucket
 policy enables recovery. Use GCS cleanup fixtures with soft delete disabled
 before test writes or allow the applicable retention period to elapse.
-Azure lists current and soft-deleted paths on hierarchical accounts, or
-versions and snapshots on flat accounts. All listings must complete with an
+Azure includes uncommitted blobs when listing current paths on hierarchical
+accounts or versions and snapshots on flat accounts. It checks soft-deleted
+paths on hierarchical accounts separately. All listings must complete with an
 empty result. The retained trace contains scope fingerprints and inventory
 outcomes. Retain CDN deployment and purge evidence under the deployment and
 rollback checks. [S3 multipart listing](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListMultipartUploads.html) · [S3 version listing](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html) · [GCS object listing](https://docs.cloud.google.com/storage/docs/json_api/v1/objects/list) · [Azure Blob listing](https://learn.microsoft.com/en-us/rest/api/storageservices/list-blobs)

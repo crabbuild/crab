@@ -1424,7 +1424,7 @@ class CdnQualificationTests(unittest.TestCase):
         self.configure("azure", "public", "direct")
         self.cleanup_trace("public", "front-door", prefix_sha256="f" * 64)
         self.rejected("cleanup inventory must observe the approved fixture prefix")
-        target = {"origin_sha256": "1" * 64, "inventories": {"versions_and_snapshots": "empty"}}
+        target = {"origin_sha256": "1" * 64, "inventories": {"versions_and_snapshots": "empty", "uncommitted_blobs": "empty"}}
         self.cleanup_trace("public", "front-door", targets={"native": target, "export": target})
         self.rejected("cleanup must check the live origin and export independently")
 

@@ -103,9 +103,11 @@ def azure_inventory(origin: str, prefix: str, authorization: str) -> dict[str, s
         namespace = response.getheader("x-ms-is-hns-enabled")
     require(namespace in ("true", "false"), "Azure did not report its account namespace type")
     if namespace == "true":
-        inventories = {"blobs": {}, "soft_deleted": {"showonly": "deleted"}}
+        inventories = {"blobs": {"include": "uncommittedblobs"}, "soft_deleted": {"showonly": "deleted"}}
     else:
-        inventories = {"versions_and_snapshots": {"include": "snapshots,versions,deleted,deletedwithversions"}}
+        inventories = {
+            "versions_and_snapshots": {"include": "uncommittedblobs,snapshots,versions,deleted,deletedwithversions"},
+        }
     for name, selector in inventories.items():
         query = urlencode({"restype": "container", "comp": "list", "prefix": prefix, "maxresults": 1} | selector)
         raw = api_body(base, f"{base.path}?{query}", headers, f"Azure {name} cleanup")
@@ -117,7 +119,7 @@ def azure_inventory(origin: str, prefix: str, authorization: str) -> dict[str, s
         require(result.tag == "EnumerationResults" and result.findtext("Prefix") == prefix
                 and blobs is not None and len(blobs) == 0 and marker is not None and not marker.text,
                 f"Azure fixture prefix still contains {name} or its inventory is incomplete")
-    return dict.fromkeys(inventories, "empty")
+    return dict.fromkeys(inventories, "empty") | {"uncommitted_blobs": "empty"}
 
 
 def collect(fixture: dict) -> dict:

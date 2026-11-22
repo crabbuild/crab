@@ -99,11 +99,22 @@ class CdnCleanupQualificationTests(unittest.TestCase):
             queries = [parse_qs(urlsplit(call.args[1]).query) for call in get.call_args_list]
             self.assertTrue(all(query["prefix"] == [PREFIX] and query["maxresults"] == ["1"] for query in queries))
             if namespace == "true":
+                self.assertEqual(queries[0]["include"], ["uncommittedblobs"])
                 self.assertEqual(queries[1]["showonly"], ["deleted"])
-                self.assertEqual(result, {"blobs": "empty", "soft_deleted": "empty"})
+                self.assertEqual(result, {"blobs": "empty", "soft_deleted": "empty", "uncommitted_blobs": "empty"})
             else:
-                self.assertEqual(queries[0]["include"], ["snapshots,versions,deleted,deletedwithversions"])
-                self.assertEqual(result, {"versions_and_snapshots": "empty"})
+                self.assertEqual(queries[0]["include"], ["uncommittedblobs,snapshots,versions,deleted,deletedwithversions"])
+                self.assertEqual(result, {"versions_and_snapshots": "empty", "uncommitted_blobs": "empty"})
+
+    def test_azure_cleanup_rejects_an_uncommitted_blob(self) -> None:
+        xml = (f"<EnumerationResults><Prefix>{PREFIX}</Prefix><Blobs><Blob><Name>{PREFIX}pending</Name>"
+               "</Blob></Blobs><NextMarker/></EnumerationResults>").encode()
+        response = Mock(status=200)
+        response.getheader.return_value = "true"
+        with (patch.object(cleanup, "https_response", return_value=nullcontext(response)),
+              patch.object(cleanup, "api_body", return_value=xml)):
+            with self.assertRaisesRegex(ValueError, "inventory is incomplete"):
+                cleanup.azure_inventory(fixture("front-door")["native_origin"], PREFIX, "Bearer test-token")
 
     def test_public_trace_records_both_origins_and_redacts_targets(self) -> None:
         sample = fixture()

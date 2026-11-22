@@ -190,7 +190,7 @@ class ExportTest(unittest.TestCase):
 
     def enable_multipart_fixture(self):
         self.enterContext(patch.object(publisher, "aws", self.aws))
-        self.enterContext(patch.multiple(publisher, SINGLE_PUT_LIMIT=8, DEFAULT_PART_BYTES=5, COPY_BUFFER_BYTES=2))
+        self.enterContext(patch.multiple(publisher, SINGLE_PUT_LIMIT=8, DEFAULT_PART_BYTES=5))
 
     def test_multipart_creates_once_and_rechecks_existing_destination_on_retry(self):
         self.enable_multipart_fixture()

@@ -113,7 +113,8 @@ CLEANUP_INVENTORIES = {
     "cloudfront": ({"multipart_uploads": "empty", "versions_and_delete_markers": "empty"},),
     "cloud-cdn": ({"generations": "empty", "soft_deleted": "empty"},
                   {"generations": "empty", "soft_deleted": "disabled"}),
-    "front-door": ({"blobs": "empty", "soft_deleted": "empty"}, {"versions_and_snapshots": "empty"}),
+    "front-door": ({"blobs": "empty", "soft_deleted": "empty", "uncommitted_blobs": "empty"},
+                   {"versions_and_snapshots": "empty", "uncommitted_blobs": "empty"}),
 }
 ARMS = ("origin", "cold_edge", "warm_edge", "warm_local")
 METRICS = {

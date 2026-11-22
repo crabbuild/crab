@@ -15,7 +15,7 @@ import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from public_inventory import (
-    CACHE_CONTROL, CONTENT_TYPE, ExportError, publication_receipt, read_inventory, verify_body, viewer_url,
+    CACHE_CONTROL, CONTENT_TYPE, ExportError, publication_receipt, read_inventory, spool_part, verify_body, viewer_url,
     write_publication,
 )
 
@@ -25,7 +25,6 @@ SINGLE_PUT_LIMIT = 5_000_000_000
 MAX_OBJECT = 50_000_000_000_000
 MAX_PARTS = 10_000
 DEFAULT_PART_BYTES = 64 * 1024 * 1024
-COPY_BUFFER_BYTES = 1024 * 1024
 
 
 class AwsError(ExportError):
@@ -132,16 +131,7 @@ def upload_multipart(profile, region, destination, obj, path):
         with path.open("rb") as source:
             for index, offset in enumerate(range(0, obj.size, part_bytes), 1):
                 part_digest = hashlib.sha256()
-                remaining = min(part_bytes, obj.size - offset)
-                with part_file.open("wb") as output:
-                    while remaining:
-                        block = source.read(min(remaining, COPY_BUFFER_BYTES))
-                        if not block:
-                            raise ExportError(f"source spool ended before the approved size for {obj.path}")
-                        output.write(block)
-                        part_digest.update(block)
-                        body_digest.update(block)
-                        remaining -= len(block)
+                spool_part(source, part_file, min(part_bytes, obj.size - offset), body_digest, part_digest)
                 checksum = base64.b64encode(part_digest.digest()).decode("ascii")
                 response = aws(profile, region, "s3api", "upload-part", *location,
                                "--part-number", str(index), "--body", str(part_file), "--checksum-sha256", checksum)
