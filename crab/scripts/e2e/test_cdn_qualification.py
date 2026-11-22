@@ -84,8 +84,8 @@ def service_candidate(scope: str, platform: str) -> dict:
     }
 
 
-def write_git_product_viewer_proof(client_path: Path, key_sha256: str | None = None, *,
-                                   filename: str = CDN.GIT_PRODUCT_VIEWER_RECORD) -> None:
+def write_product_viewer_proof(client_path: Path, key_sha256: str | None = None, *,
+                                   filename: str = CDN.PRODUCT_VIEWER_RECORD) -> None:
     raw = client_path.read_bytes()
     client = json.loads(raw)
     edge = client["scope"].split("/", 1)[0]
@@ -427,7 +427,7 @@ class CdnQualificationTests(unittest.TestCase):
         transition = {"transition_key_sha256": self.object_key} if public else {}
         fetch_path = records / "fetch.json"
         json_file(fetch_path, fetch | {"publication_sha256": receipt} | transition)
-        write_git_product_viewer_proof(fetch_path, transition.get("transition_key_sha256"))
+        write_product_viewer_proof(fetch_path, transition.get("transition_key_sha256"))
         self.rollback_trace(fetch | dict.fromkeys(CDN.PRODUCT_COUNTERS, 0) | {
             "publication_sha256": receipt, "arm": "origin", "edge_responses": {},
             "started_at_unix_ms": fetch["finished_at_unix_ms"] + 5,
@@ -584,7 +584,7 @@ class CdnQualificationTests(unittest.TestCase):
             "reader": binding | {"public_export_sha256": export},
             "edge_responses": {request: response},
         } | transition)
-        write_git_product_viewer_proof(snapshot, transition.get("transition_key_sha256"))
+        write_product_viewer_proof(snapshot, transition.get("transition_key_sha256"))
         if export:
             prior = self.registration["previous_publication_sha256"]
             json_file(records / CDN.SDK_PRIOR_EXPORT_RECORD, base | transition | {
@@ -616,7 +616,7 @@ class CdnQualificationTests(unittest.TestCase):
             })
             if arm == "edge":
                 for action, client in (("clone", clone), ("fetch", fetch)):
-                    write_git_product_viewer_proof(client, filename=CDN.SDK_WORKTREE_VIEWER_FILES[action])
+                    write_product_viewer_proof(client, filename=CDN.SDK_WORKTREE_VIEWER_FILES[action])
         json_file(records / "retirement.json", provenance | {
             "schema": "crab.cdn-git-retirement/v1", "publication_sha256": receipt, "ref_retired": True,
             "retired_at_unix_ms": PUBLIC_SEAL + 59, "candidate": writer,
@@ -695,6 +695,7 @@ class CdnQualificationTests(unittest.TestCase):
             }
             if arm == "edge":
                 json_file(destination, evidence)
+                write_product_viewer_proof(destination, self.object_key)
                 write_git_measurements(self.directory / CDN.GIT_BENCHMARK_DIR, self.registration,
                                        self.report["platform"], hydration=evidence)
             else:
@@ -1233,17 +1234,17 @@ class CdnQualificationTests(unittest.TestCase):
 
     def test_cli_product_requires_logs_for_its_own_viewer_requests(self) -> None:
         self.configure("s3", "private", "direct")
-        path = self.directory / CDN.GIT_PRODUCT_DIR / CDN.GIT_PRODUCT_VIEWER_RECORD
+        path = self.directory / CDN.GIT_PRODUCT_DIR / CDN.PRODUCT_VIEWER_RECORD
         proof = json.loads(path.read_bytes())
         records = {"0" * 64: next(iter(proof["records"].values()))}
         json_file(path, proof | {"records": records})
         self.rejected("CDN logs must cover each measured viewer attempt exactly once")
         path.unlink()
-        self.rejected(CDN.GIT_PRODUCT_VIEWER_RECORD)
+        self.rejected(CDN.PRODUCT_VIEWER_RECORD)
 
     def test_public_cli_product_logs_must_confirm_the_new_export_key(self) -> None:
         self.configure("gcs", "public", "direct")
-        path = self.directory / CDN.GIT_PRODUCT_DIR / CDN.GIT_PRODUCT_VIEWER_RECORD
+        path = self.directory / CDN.GIT_PRODUCT_DIR / CDN.PRODUCT_VIEWER_RECORD
         proof = json.loads(path.read_bytes())
         for record in proof["records"].values():
             record["key_sha256"] = "0" * 64
@@ -1383,7 +1384,7 @@ class CdnQualificationTests(unittest.TestCase):
     def test_private_sdk_release_requires_provider_logs_for_each_product_action(self) -> None:
         self.configure("s3", "private", "direct", consumer="sdk")
         product = self.directory / CDN.GIT_PRODUCT_DIR
-        for name in (CDN.GIT_PRODUCT_VIEWER_RECORD, *CDN.SDK_WORKTREE_VIEWER_FILES.values()):
+        for name in (CDN.PRODUCT_VIEWER_RECORD, *CDN.SDK_WORKTREE_VIEWER_FILES.values()):
             with self.subTest(name=name):
                 path = product / name
                 raw = path.read_bytes()
@@ -1398,7 +1399,7 @@ class CdnQualificationTests(unittest.TestCase):
         fetch = product / CDN.SDK_FETCH_FILES["edge"]
         responses = json.loads(clone.read_bytes())["edge_responses"]
         json_file(fetch, json.loads(fetch.read_bytes()) | {"edge_responses": responses})
-        write_git_product_viewer_proof(fetch, filename=CDN.SDK_WORKTREE_VIEWER_FILES["fetch"])
+        write_product_viewer_proof(fetch, filename=CDN.SDK_WORKTREE_VIEWER_FILES["fetch"])
         self.rejected("SDK product actions reused provider requests")
 
     def test_sdk_distinct_viewer_reads_can_share_an_s3_fill_with_second_precision(self) -> None:
@@ -1406,7 +1407,7 @@ class CdnQualificationTests(unittest.TestCase):
         product = self.directory / CDN.GIT_PRODUCT_DIR
         snapshot = json.loads((product / "snapshot.json").read_bytes())
         at = snapshot["started_at_unix_ms"] // 1000
-        for name in (CDN.GIT_PRODUCT_VIEWER_RECORD, *CDN.SDK_WORKTREE_VIEWER_FILES.values()):
+        for name in (CDN.PRODUCT_VIEWER_RECORD, *CDN.SDK_WORKTREE_VIEWER_FILES.values()):
             path = product / name
             proof = json.loads(path.read_bytes())
             key = next(iter(proof["records"].values()))["key_sha256"]
@@ -1417,18 +1418,33 @@ class CdnQualificationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_sdk_regional_pair_cannot_reuse_a_product_request(self) -> None:
-        self.configure("gcs", "private", "direct", consumer="sdk")
-        snapshot = self.directory / CDN.GIT_PRODUCT_DIR / "snapshot.json"
-        request = next(iter(json.loads(snapshot.read_bytes())["edge_responses"]))
-        arm = self.directory / CDN.GIT_BENCHMARK_DIR / "near/0001/cold_edge"
-        client = json.loads((arm / "client.json").read_bytes())
-        response = next(iter(client["edge_responses"].values()))
-        digest = json_file(arm / "client.json", client | {"edge_responses": {request: response}})
-        log = arm / CDN.VIEWER_REQUEST_FILES["gcs"]
-        proof = json.loads(log.read_bytes())
-        record = next(iter(proof["records"].values()))
-        json_file(log, proof | {"client_report_sha256": digest, "records": {request: record}})
-        self.rejected("CDN log requests were reused across arms")
+        for family, product, action in (
+            ("git", CDN.GIT_PRODUCT_DIR, "snapshot.json"),
+            ("xorb", CDN.SDK_HYDRATION_DIR, "hydration.json"),
+        ):
+            with self.subTest(family=family), TemporaryDirectory() as directory:
+                self.directory = Path(directory)
+                (self.directory / "traces").mkdir()
+                self.configure("gcs", "private", "direct", consumer="sdk", family=family)
+                path = self.directory / product / action
+                request = next(iter(json.loads(path.read_bytes())["edge_responses"]))
+                arm = self.directory / CDN.GIT_BENCHMARK_DIR / "near/0001/cold_edge"
+                client = json.loads((arm / "client.json").read_bytes())
+                response = next(iter(client["edge_responses"].values()))
+                digest = json_file(arm / "client.json", client | {"edge_responses": {request: response}})
+                log = arm / CDN.VIEWER_REQUEST_FILES["gcs"]
+                proof = json.loads(log.read_bytes())
+                record = next(iter(proof["records"].values()))
+                json_file(log, proof | {"client_report_sha256": digest, "records": {request: record}})
+                self.rejected("CDN log requests were reused across arms")
+
+    def test_sdk_hydration_product_proof_must_identify_the_approved_xorb(self) -> None:
+        self.configure("gcs", "private", "direct", consumer="sdk", family="xorb")
+        path = self.directory / CDN.SDK_HYDRATION_DIR / CDN.PRODUCT_VIEWER_RECORD
+        proof = json.loads(path.read_bytes())
+        next(iter(proof["records"].values()))["key_sha256"] = "0" * 64
+        json_file(path, proof)
+        self.rejected("did not read the approved hydration xorb")
 
     def test_sdk_hydration_requires_the_exact_lifecycle(self) -> None:
         self.configure("s3", "private", "direct", consumer="sdk", family="xorb")
@@ -1528,7 +1544,7 @@ class CdnQualificationTests(unittest.TestCase):
         policy = self.directory / "qualified-scopes.txt"
         policy.write_text(self.scope + "\n", encoding="utf-8")
         args = ("--cdn-release-policy", str(policy))
-        path = self.directory / CDN.GIT_PRODUCT_DIR / CDN.GIT_PRODUCT_VIEWER_RECORD
+        path = self.directory / CDN.GIT_PRODUCT_DIR / CDN.PRODUCT_VIEWER_RECORD
         proof = json.loads(path.read_bytes())
         json_file(path, proof | {"client_report_sha256": "0" * 64})
         self.rejected("CDN viewer evidence differs from the measured fetch", *args)
@@ -1537,7 +1553,7 @@ class CdnQualificationTests(unittest.TestCase):
         json_file(path, proof)
         self.rejected("CDN logs did not confirm the new export object", *args)
         path.unlink()
-        self.rejected(CDN.GIT_PRODUCT_VIEWER_RECORD, *args)
+        self.rejected(CDN.PRODUCT_VIEWER_RECORD, *args)
 
     def test_sdk_rollback_requires_same_approved_build_and_blob_at_origin(self) -> None:
         self.configure("azure", "private", "direct", consumer="sdk")

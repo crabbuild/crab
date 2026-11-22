@@ -128,7 +128,7 @@ METRICS = {
 }
 GIT_BENCHMARK_DIR = "git-benchmarks"
 GIT_PRODUCT_DIR = "git-product"
-GIT_PRODUCT_VIEWER_RECORD = "viewer-requests.json"
+PRODUCT_VIEWER_RECORD = "viewer-requests.json"
 SERVICE_PRODUCT_DIR = "service-product"
 SERVICE_READ_ACTION = "service-http-read"
 SERVICE_PUBLIC_PRIOR_RECORD = "before-export.json"
@@ -143,7 +143,7 @@ GIT_FETCH_RECORD_LIMIT = 256 * 1024
 GIT_NATIVE_REF_FILES = {"published": "provider-published.json", "retired": "provider-retired.json"}
 SERVICE_PRODUCT_FILES = {
     "publication": "publication.json", "retirement": "retirement.json", "edge": "edge.json",
-    "viewer_requests": "viewer-requests.json", **GIT_NATIVE_REF_FILES,
+    "viewer_requests": PRODUCT_VIEWER_RECORD, **GIT_NATIVE_REF_FILES,
 }
 GIT_NATIVE_REF_FIELDS = {
     "origin_sha256", "prefix_sha256", "ref_sha256", "repository_sha256", "epoch_sha256",
@@ -1914,6 +1914,8 @@ def collect_sdk_hydration_evidence(
     source = {"origin_sha256": placement["origin_sha256"], "prefix_sha256": placement["source_prefix_sha256"]}
     published = verify_git_lifecycle(observations, row, publication, receipt, edge["started_at_unix_ms"], source,
                                      retired, cleanup_at, native_origin_sha256)
+    viewer_raw = read_git_record(inputs / PRODUCT_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
+    product_request_ids = verify_product_viewer_requests(viewer_raw, edge, edge_raw, scope_parts(row["scope"])[0])
 
     def verify_measurement(raw: bytes, arm: str) -> dict[str, Any]:
         read = verify_read(raw, arm)
@@ -1926,12 +1928,13 @@ def collect_sdk_hydration_evidence(
     performance = collect_git_performance(
         directory / GIT_BENCHMARK_DIR, registration, row["platform"], row["workflow_run_id"], row["workflow_run_attempt"],
         retain=retain / GIT_BENCHMARK_DIR if retain is not None else None, verify_hydration=verify_measurement,
+        product_request_ids=product_request_ids,
     )
     if retain is not None:
         product = retain / SDK_HYDRATION_DIR
         product.mkdir()
         records = {"workload.json": workload_raw, "publication.json": publication_raw, "hydration.json": edge_raw,
-                   "retirement.json": retirement_raw}
+                   "retirement.json": retirement_raw, PRODUCT_VIEWER_RECORD: viewer_raw}
         records.update({filename: observations[phase] for phase, filename in GIT_NATIVE_REF_FILES.items()})
         for name, raw in records.items():
             (product / name).write_bytes(raw)
@@ -1984,12 +1987,12 @@ def collect_git_product_action(
         require(cleanup_at is not None, "native ref observations require a verified cleanup")
         verify_git_lifecycle(observations, row, publication, digest, fetch["started_at_unix_ms"], fetch["reader"],
                              retired_at, cleanup_at, native_origin_sha256)
-    viewer_raw = read_git_record(inputs / GIT_PRODUCT_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
+    viewer_raw = read_git_record(inputs / PRODUCT_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
     verify_product_viewer_requests(viewer_raw, fetch, fetch_raw, scope_parts(row["scope"])[0])
     if retain is not None:
         retain.mkdir()
         for filename, raw in (("publication.json", publication_raw), ("fetch.json", fetch_raw),
-                              ("retirement.json", retirement_raw), (GIT_PRODUCT_VIEWER_RECORD, viewer_raw)):
+                              ("retirement.json", retirement_raw), (PRODUCT_VIEWER_RECORD, viewer_raw)):
             (retain / filename).write_bytes(raw)
         for phase, raw in observations.items():
             (retain / GIT_NATIVE_REF_FILES[phase]).write_bytes(raw)
@@ -2021,9 +2024,9 @@ def collect_sdk_product_action(
     require(edge["finished_at_unix_ms"] <= origin["started_at_unix_ms"],
             "SDK rollback must follow the verified edge snapshot")
     retained = {"publication.json": publication_raw, "snapshot.json": edge_raw}
-    viewer_raw = read_git_record(inputs / GIT_PRODUCT_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
+    viewer_raw = read_git_record(inputs / PRODUCT_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
     viewer_ids = verify_product_viewer_requests(viewer_raw, edge, edge_raw, provider_edge)
-    retained[GIT_PRODUCT_VIEWER_RECORD] = viewer_raw
+    retained[PRODUCT_VIEWER_RECORD] = viewer_raw
     previous_end = origin["finished_at_unix_ms"]
     for action, files in (("clone", SDK_CLONE_FILES), ("fetch", SDK_FETCH_FILES)):
         pair = {}
@@ -2087,7 +2090,7 @@ def derive_sdk_public_transition(inputs: Path, row: dict[str, Any], spec: dict[s
     edge = verify_sdk_git_read(edge_raw, row, spec, "edge")
     key = prior["transition_key_sha256"]
     require(key == edge.get("transition_key_sha256"), "SDK export transition did not verify the same pack-layer key")
-    viewer_raw = read_git_record(inputs / GIT_PRODUCT_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
+    viewer_raw = read_git_record(inputs / PRODUCT_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
     verify_viewer_requests(decode(viewer_raw), edge, hashlib.sha256(edge_raw).hexdigest(), scope_parts(row["scope"])[0])
     require(publication["published"] and
             all(read["publication_sha256"] == digest and read["commit"] == publication["oid"]
@@ -2233,7 +2236,7 @@ def collect_git_performance(
             service_instances.add(prior["service_instance_sha256"])
             _, _, export_ready_at = verified_publication(service_row / PUBLIC_EXPORT_DIR, spec["publication_sha256"])
         provider_request_ids, _, _ = verify_viewer_requests(
-            decode(read_trace(product / "viewer-requests.json", "service viewer requests")), service_anchor,
+            decode(read_trace(product / PRODUCT_VIEWER_RECORD, "service viewer requests")), service_anchor,
             hashlib.sha256(edge_raw).hexdigest(), PROVIDERS[provider][0],
         )
     seen = set()

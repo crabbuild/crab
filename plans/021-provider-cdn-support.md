@@ -745,7 +745,9 @@ view, exact xorb, local cache and file digest to the approved fixture.
 The native control keeps the same issuer and withdraws viewer approval.
 Assembly derives the SDK xorb product result from the independently
 observed native pointer publication and retirement, both SDK hydration
-records, and the scope and cleanup observations. Release verification
+records, provider viewer evidence for the exact xorb, and the scope and
+cleanup observations. Regional samples cannot reuse the lifecycle viewer
+requests. Release verification
 recomputes that result and requires both arms to use the same approved
 view and separate caches. The source pointer is published before the
 projected view is materialized, then the xorb workload pins that publication

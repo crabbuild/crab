@@ -1206,6 +1206,10 @@ origin and physical view, and the xorb chunk verification event. The origin
 arm withdraws viewer approval, keeps native issuer authorization, and
 requires zero edge attempts. Keep the edge record at
 `xorb-product/hydration.json` and the native record at `traces/rollback.json`.
+Pass the edge record as `--client` to `collect_cdn_viewer_requests.py`
+and save its output as `xorb-product/viewer-requests.json`. The verifier
+requires successful delivery of the approved xorb and rejects regional
+samples that reuse a lifecycle viewer request.
 
 Collect the preregistered `origin`, `cold_edge`, `warm_edge`, and `warm_local`
 arms in each region before retiring the ref. Use separate invocations for
@@ -1228,7 +1232,8 @@ logs to the benchmark's exact xorb and rebuild the regional summary.
 Retire the same ref after rollback and the regional measurements with the
 native source fixture. Observe its tombstone with the xorb fixture before
 cleanup. Keep `workload.json`, `publication.json`, `retirement.json`,
-`provider-published.json`, and `provider-retired.json` in `xorb-product`.
+`provider-published.json`, and `provider-retired.json` with the hydration
+and viewer records in `xorb-product`.
 Assembly derives the product result from these records, the transport and
 scoped view observations, and the cleanup trace.
 

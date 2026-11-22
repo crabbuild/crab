@@ -107,7 +107,7 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         self.assertEqual({path.name for path in sdk_product.iterdir()},
                          {"publication.json", "snapshot.json", "retirement.json", *fixture.CDN.GIT_NATIVE_REF_FILES.values(),
                           *fixture.CDN.SDK_CLONE_FILES.values(), *fixture.CDN.SDK_FETCH_FILES.values(),
-                          fixture.CDN.GIT_PRODUCT_VIEWER_RECORD, *fixture.CDN.SDK_WORKTREE_VIEWER_FILES.values()})
+                          fixture.CDN.PRODUCT_VIEWER_RECORD, *fixture.CDN.SDK_WORKTREE_VIEWER_FILES.values()})
         self.assertEqual(report["product_action"], self.example.report["product_action"])
         self.assertEqual(
             release.RELEASE.verify_bundle(
@@ -122,7 +122,15 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
 
     def test_sdk_hydration_assembly_derives_product_from_the_native_lifecycle_and_pair(self) -> None:
         digest = self.inputs("s3", family="xorb")
+        relative = Path(self.row) / fixture.CDN.SDK_HYDRATION_DIR / fixture.CDN.PRODUCT_VIEWER_RECORD
+        proof = (self.root / relative).read_bytes()
+        (self.root / relative).unlink()
+        with self.assertRaisesRegex(FileNotFoundError, fixture.CDN.PRODUCT_VIEWER_RECORD):
+            self.assemble(digest)
+        self.assertFalse(self.output.exists())
+        (self.root / relative).write_bytes(proof)
         self.assertEqual(self.assemble(digest), 1)
+        self.assertEqual((self.output / relative).read_bytes(), proof)
         row = self.output / self.row
         report = json.loads((row / "cdn-report.json").read_bytes())
         self.assertEqual(report["product_action"], self.example.report["product_action"])
@@ -130,7 +138,7 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         product = row / fixture.CDN.SDK_HYDRATION_DIR
         self.assertEqual({entry.name for entry in product.iterdir()},
                          {"hydration.json", "workload.json", "publication.json", "retirement.json",
-                          *fixture.CDN.GIT_NATIVE_REF_FILES.values()})
+                          fixture.CDN.PRODUCT_VIEWER_RECORD, *fixture.CDN.GIT_NATIVE_REF_FILES.values()})
         # Recheck retained files using the same verifier that consumes the release bundle.
         fixture.CDN.verify_bundle_row(self.output, self.row, self.example.registration, fixture.COMMIT, "123", "2")
         edge = product / "hydration.json"
@@ -154,7 +162,7 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
 
     def test_public_sdk_assembly_requires_and_retains_the_transition_viewer_proof(self) -> None:
         digest = self.inputs("azure", access="public")
-        relative = Path(self.row) / fixture.CDN.GIT_PRODUCT_DIR / fixture.CDN.GIT_PRODUCT_VIEWER_RECORD
+        relative = Path(self.row) / fixture.CDN.GIT_PRODUCT_DIR / fixture.CDN.PRODUCT_VIEWER_RECORD
         proof = (self.root / relative).read_bytes()
         (self.root / relative).unlink()
         with self.assertRaises(FileNotFoundError):
@@ -371,7 +379,7 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
         self.assertEqual(report["performance"], self.example.report["performance"])
         self.assertEqual(report["product_action"], self.example.report["product_action"])
         self.assertEqual({path.name for path in (row / fixture.CDN.GIT_PRODUCT_DIR).iterdir()},
-                         {"publication.json", "fetch.json", "retirement.json", fixture.CDN.GIT_PRODUCT_VIEWER_RECORD,
+                         {"publication.json", "fetch.json", "retirement.json", fixture.CDN.PRODUCT_VIEWER_RECORD,
                           *fixture.CDN.GIT_NATIVE_REF_FILES.values()})
 
     def test_missing_git_measurement_prevents_artifact_publication(self) -> None:
