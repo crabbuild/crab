@@ -239,6 +239,10 @@ pub(in crate::cells) fn dispatch_read(
         CompleteHandles::ID => invoke_read::<CompleteHandles>(context, input),
         MentionCandidates::ID => invoke_read::<MentionCandidates>(context, input),
         notifications::List::ID => invoke_read::<notifications::List>(context, input),
+        #[cfg(test)]
+        notifications::InspectFiled::ID => {
+            invoke_read::<notifications::InspectFiled>(context, input)
+        }
         notifications::CheckSelection::ID => {
             invoke_read::<notifications::CheckSelection>(context, input)
         }
@@ -267,6 +271,11 @@ pub(in crate::cells) fn dispatch_mutation(
         EditProfile::ID => invoke_mutation::<EditProfile>(context, input),
         notifications::Deliver::ID => invoke_mutation::<notifications::Deliver>(context, input),
         notifications::SetState::ID => invoke_mutation::<notifications::SetState>(context, input),
+        notifications::SweepFiling::ID => {
+            invoke_mutation::<notifications::SweepFiling>(context, input)
+        }
+        #[cfg(test)]
+        notifications::AgeFiled::ID => invoke_mutation::<notifications::AgeFiled>(context, input),
         saved_replies::PutSavedReply::ID => {
             invoke_mutation::<saved_replies::PutSavedReply>(context, input)
         }

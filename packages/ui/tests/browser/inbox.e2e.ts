@@ -329,6 +329,9 @@ test("saved and done views persist and restore a conversation", async ({
   ).toBeVisible();
   await page.getByRole("link", { name: "Done", exact: true }).click();
   await expect(
+    page.getByText("Done shows the last 90 days.", { exact: false }),
+  ).toBeVisible();
+  await expect(
     row.getByRole("button", { name: "Move to inbox" }),
   ).toBeVisible();
   await expectNoAccessibilityViolations(page);

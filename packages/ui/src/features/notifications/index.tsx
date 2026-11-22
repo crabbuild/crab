@@ -204,6 +204,12 @@ export function Notifications({
           <Link href="/-/notifications/watched">Watched repositories</Link>
         </Button>
       </div>
+      {view === "done" && (
+        <p className="text-sm text-muted-foreground">
+          Done shows the last 90 days. Bookmarks remain in Saved until you
+          unsave them.
+        </p>
+      )}
       {repository && (
         <Link className="w-fit underline" href={inboxHref(view, "", reason)}>
           Clear repository filter

@@ -8,8 +8,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 mod filing;
+mod retention;
 mod triage;
 use filing::Filed;
+#[cfg(test)]
+pub(super) use retention::tests::{AgeFiled, InspectFiled};
+pub(crate) use retention::{FilingSweep, SweepFiling};
 pub(crate) use triage::{
     Action, Changed, CheckSelection, Selected, Selection, SetState, SetStateInput,
     validate_selection,
@@ -323,6 +327,12 @@ impl Mutation for Deliver {
         }
         let mut changed = false;
         for (actor, (reason, access)) in recipients {
+            let thread = input.notice.thread_id();
+            if retention::completed_through(context, actor, thread)?
+                .is_some_and(|position| input.notice.position() <= position)
+            {
+                continue;
+            }
             let key = access.inbox(actor);
             let mut inbox: Inbox = context.document(&key)?.unwrap_or_default();
             let peer: Inbox = context
@@ -334,7 +344,6 @@ impl Mutation for Deliver {
                 .entries
                 .iter()
                 .any(|entry| entry.read && entry.notice.position() == input.notice.position());
-            let thread = input.notice.thread_id();
             let previous = filing::load(context, actor, thread)?;
             let mut incoming = Entry {
                 notice: input.notice.clone(),

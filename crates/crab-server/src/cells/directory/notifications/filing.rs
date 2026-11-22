@@ -2,10 +2,10 @@ use super::{Entry, Position, Result, Transaction, View};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-const RETENTION_MS: i64 = 90 * 24 * 60 * 60 * 1_000;
+pub(super) const RETENTION_MS: i64 = 90 * 24 * 60 * 60 * 1_000;
 const FRAME: usize = 50;
 
-fn within_retention(now: i64, at: i64) -> bool {
+pub(super) fn within_retention(now: i64, at: i64) -> bool {
     now.saturating_sub(at) < RETENTION_MS
 }
 
@@ -64,17 +64,19 @@ impl Filed {
         }
     }
 
-    fn id(&self) -> Uuid {
+    pub(super) fn id(&self) -> Uuid {
         self.entry.notice.thread_id()
     }
 
-    fn position(&self) -> Position {
+    pub(super) fn position(&self) -> Position {
         self.entry.notice.position()
     }
 }
 
-fn item_key(actor: Uuid, thread: Uuid) -> String {
-    format!("notifications/v1/filed/{actor}/{thread}")
+pub(super) const ITEM_PREFIX: &str = "notifications/v1/filed/";
+
+pub(super) fn item_key(actor: Uuid, thread: Uuid) -> String {
+    format!("{ITEM_PREFIX}{actor}/{thread}")
 }
 
 fn index_prefix(actor: Uuid, view: View) -> String {
@@ -132,6 +134,17 @@ pub(super) fn store(
         context.delete_document(&key)?;
     }
     Ok(true)
+}
+
+pub(super) fn remove_done_index(
+    context: &Transaction<'_>,
+    actor: Uuid,
+    record: &Filed,
+) -> Result<bool> {
+    context.delete_document(&index_key(
+        &index_prefix(actor, View::Done),
+        record.position(),
+    ))
 }
 
 pub(super) fn page(

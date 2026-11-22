@@ -324,8 +324,10 @@ with the exact submission payload. Saved and Done
 records use per-account documents keyed by conversation plus activity-order
 indexes for each view. The indexes, recent read flags, and triage document
 update in the same native transaction. Completed rows stay out of the recent inbox. The
-Done view covers 90 days. Expired completion records can still suppress
-older copies in recent retention. Saving keeps a row beyond recent retention. A newer
+Done view covers 90 days. A bounded Directory sweep removes expired completion
+indexes. Unsaved completions and their recent copies are replaced by a compact
+activity cutoff that suppresses delayed delivery in either access channel.
+Saved rows retain their filing state beyond recent retention. A newer
 delivery reopens it while preserving any bookmark. The inbox walks private
 archive pages and emits cursors from visible rows after account, grant, and mute
 checks. These native document records require no SQL preparation. Drain and

@@ -412,6 +412,7 @@ pub async fn serve(config: Config) -> Result<()> {
                   background.spawn(async move { crate::api::discussion_attachments::sweep(attachments).await; Ok(()) });
                   let mentions = server.clone();
                   background.spawn(async move { self::mentions::sweep(mentions).await; Ok(()) });
+                  background.spawn(background::sweep_notification_filing(server.clone()));
                   let integrity = server.clone();
                   background.spawn(async move { crate::integrity::run(integrity).await; Ok(()) });
               },

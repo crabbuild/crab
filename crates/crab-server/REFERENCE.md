@@ -2558,8 +2558,10 @@ assignment, or watch update.
 
 **Save** keeps a conversation beyond rolling inbox history and through later
 activity. **Mark as done** reads the current activity and removes it from
-Unread and All. Done shows activity completed in the last 90 days. Saved
-conversations stay in Saved until you unsave them. A newer contribution
+Unread and All. Done shows activity completed in the last 90 days. Crab
+cleans up expired completions in the background and keeps a compact activity
+cutoff so delayed copies cannot bring them back. Saved conversations stay in
+Saved until you unsave them. A newer contribution
 reopens the conversation as unread and keeps any bookmark. **Move to inbox**
 restores the current activity with its read state.
 
