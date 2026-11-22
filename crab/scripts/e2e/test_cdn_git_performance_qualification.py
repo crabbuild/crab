@@ -86,7 +86,7 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         arm = "near/0001/origin"
         reader = json.loads((self.root / arm / "client.json").read_bytes())["reader"]
         self.amend_client(arm, reader=reader | {"binding_sha256": self.registration["viewer_binding_sha256"]})
-        with self.assertRaisesRegex(ValueError, "did not use the required viewer configuration"):
+        with self.assertRaisesRegex(ValueError, "requires an inactive viewer binding"):
             self.collect()
 
     def test_rejects_reusing_a_local_cache_across_arms(self) -> None:

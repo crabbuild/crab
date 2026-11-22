@@ -161,8 +161,9 @@ def assemble_bundle(
                 checks[check] = {"passed": True, "trace_sha256": hashlib.sha256(trace).hexdigest()}
             if cli_workload:
                 registered_read = {key: registration.get(key) for key in ("candidate", "viewer_binding_sha256")}
+                rollback = read_trace(destination / "traces/rollback.json", "rollback")
                 product = collect_git_product_action(inputs / row / GIT_PRODUCT_DIR, measured | registered_read,
-                                                     retain=destination / GIT_PRODUCT_DIR)
+                                                     rollback, retain=destination / GIT_PRODUCT_DIR)
                 measured["product_action"] = product | {"fixture_cleanup_verified": True}
             if git_workload:
                 measured["performance"] = collect_git_performance(

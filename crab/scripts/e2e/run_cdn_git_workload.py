@@ -20,7 +20,8 @@ from collect_cdn_product_metrics import ROUTE, ROUTE_FIELDS, TARGET, measure
 from run_cdn_transport_checks import approved_fixture, fixture_base, fixture_object_key, native_remote
 
 from cdn_qualification import (
-    CLI_BUILD_FIELDS, CLI_READ_FIELDS, COMMIT, GIT_OID, GIT_PAYLOAD_SIZE, PROVIDER_FOR_EDGE, RUN_NUMBER, cli_action_name, decode, deployment_component_digest,
+    CLI_BUILD_FIELDS, CLI_NATIVE_FIELDS, COMMIT, GIT_OID, GIT_PAYLOAD_SIZE, PROVIDER_FOR_EDGE, RUN_NUMBER,
+    cli_action_name, decode, deployment_component_digest,
     fields, lfs_object_path, matches, read_git_record, require, requires_cli_lfs_workload, requires_cli_workload, scope_parts,
     validate_git_publication, verified_publication, verify_cli_candidate,
 )
@@ -33,7 +34,6 @@ QUALIFICATION_MESSAGE = "CDN qualification verified native target"
 QUALIFICATION_TARGET_ENV = "CRAB_INTERNAL_CDN_QUALIFICATION_TARGET"
 READ_LOG = "crab::cdn::qualification_read"
 READ_MESSAGE = "CDN qualification verified read configuration"
-NATIVE_TARGET_FIELDS = {"origin_sha256", "prefix_sha256"}
 PUBLIC_TRANSITION_TARGET = "crab_storage::cdn::public_transition"
 
 
@@ -74,8 +74,8 @@ def verified_read(lines: list[bytes], expected: dict) -> dict:
         event = decode(line)
         if not isinstance(event, dict) or event.get("target") != READ_LOG:
             continue
-        observed = fields(event.get("fields"), CLI_READ_FIELDS | {"message"}, "read configuration observation")
-        require(observed["message"] == READ_MESSAGE and all(observed[key] == expected[key] for key in CLI_READ_FIELDS),
+        observed = fields(event.get("fields"), expected.keys() | {"message"}, "read configuration observation")
+        require(observed["message"] == READ_MESSAGE and all(observed[key] == expected[key] for key in expected),
                 "fetch selected a different CDN binding or local cache root")
         found = True
     require(found, "fetch did not confirm its CDN binding and local cache root")
@@ -104,7 +104,7 @@ class NativeTargetGuard:
             event = decode(line)
             if not isinstance(event, dict) or event.get("target") != QUALIFICATION_LOG:
                 continue
-            record = fields(event.get("fields"), CLI_BUILD_FIELDS | NATIVE_TARGET_FIELDS | {"message"}, "native target observation")
+            record = fields(event.get("fields"), CLI_BUILD_FIELDS | CLI_NATIVE_FIELDS | {"message"}, "native target observation")
             require(record["message"] == QUALIFICATION_MESSAGE
                     and all(record[key] == value for key, value in self.fingerprints.items()),
                     f"{label} did not confirm the approved native origin and repository prefix")
@@ -335,7 +335,8 @@ def fetch_once(
         "observed_sha256": observed, "expected_bytes": GIT_PAYLOAD_SIZE, "observed_bytes": len(blob),
         "native_writes": 1, "visible_new_ref": True, "elapsed_ms": elapsed,
         "publication_oid": record["oid"], "started_at_unix_ms": started_at, "finished_at_unix_ms": finished_at,
-        "platform": guard.platform, "candidate": guard.candidate, "reader": verified_read(lines, read),
+        "platform": guard.platform, "candidate": guard.candidate,
+        "reader": verified_read(lines, read) | guard.fingerprints,
     } | metrics
 
 

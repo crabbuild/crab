@@ -93,6 +93,7 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str) -> N
                     "reader": {
                         "binding_sha256": "" if arm == "origin" else registration["viewer_binding_sha256"],
                         "cache_root_sha256": hashlib.sha256(f"{location}/{index}/{arm}/cache".encode()).hexdigest(),
+                        "origin_sha256": "7" * 64, "prefix_sha256": "8" * 64,
                     },
                     "publication_oid": oid, "expected_sha256": blob, "observed_sha256": blob,
                     "publication_sha256": publication_digest,
@@ -201,6 +202,8 @@ class CdnQualificationTests(unittest.TestCase):
                 self.historical_origin_trace(edge)
             elif check == CDN.PUBLIC_TRANSITION_CHECK:
                 continue
+            elif check == "rollback" and CDN.requires_cli_workload(self.scope):
+                continue
             else:
                 self.trace(check, observations.get(check, [edge_hit]))
         if CDN.requires_git_workload(self.scope):
@@ -270,6 +273,9 @@ class CdnQualificationTests(unittest.TestCase):
         records = self.directory / CDN.GIT_PRODUCT_DIR
         records.mkdir(exist_ok=True)
         provenance = {key: fetch[key] for key in CDN.CDN_PROVENANCE_FIELDS}
+        cleanup = json.loads((self.directory / "traces/cleanup.json").read_bytes())
+        fetch["reader"].update({"origin_sha256": cleanup["targets"]["native"]["origin_sha256"],
+                                "prefix_sha256": cleanup["prefix_sha256"]})
         ref = "refs/heads/crab-cdn-qualification-123-2-abcdefabcdef"
         receipt = json_file(records / "publication.json", provenance | {
             "schema": "crab.cdn-git-publication/v1", "ref": ref,
@@ -277,11 +283,16 @@ class CdnQualificationTests(unittest.TestCase):
             "visible_at_unix_ms": fetch["started_at_unix_ms"] - 50, "candidate": fetch["candidate"],
         })
         json_file(records / "fetch.json", fetch | {"publication_sha256": receipt})
+        self.rollback_trace(fetch | dict.fromkeys(CDN.PRODUCT_COUNTERS, 0) | {
+            "publication_sha256": receipt, "arm": "origin",
+            "started_at_unix_ms": fetch["finished_at_unix_ms"] + 5,
+            "finished_at_unix_ms": fetch["finished_at_unix_ms"] + 10,
+            "reader": fetch["reader"] | {"binding_sha256": "", "cache_root_sha256": "1" * 64},
+        })
         json_file(records / "retirement.json", provenance | {
             "schema": "crab.cdn-git-retirement/v1", "publication_sha256": receipt, "ref_retired": True,
             "retired_at_unix_ms": fetch["finished_at_unix_ms"] + 50, "candidate": fetch["candidate"],
         })
-        cleanup = json.loads((self.directory / "traces/cleanup.json").read_bytes())
         for phase, timestamp, marker in (
             ("published", fetch["started_at_unix_ms"] - 40, "5"),
             ("retired", fetch["finished_at_unix_ms"] + 60, "6"),
@@ -298,6 +309,10 @@ class CdnQualificationTests(unittest.TestCase):
                 },
             })
         self.report["product_action"].update({key: fetch[key] for key in self.report["product_action"] if key in fetch})
+
+    def rollback_trace(self, evidence: dict[str, Any]) -> None:
+        path = self.directory / "traces/rollback.json"
+        self.report["checks"]["rollback"] = {"passed": True, "trace_sha256": json_file(path, evidence)}
 
     def request(self, source: str, status: int, cache: str = "unknown") -> dict[str, Any]:
         return {"source": source, "status": status, "bytes": 0 if status in (401, 403) else 8,
@@ -772,14 +787,15 @@ class CdnQualificationTests(unittest.TestCase):
         self.report["product_action"]["verified_edge_payloads"] += 1
         self.rejected("product action differs from the retained publication, fetch, and retirement evidence")
 
-    def test_product_record_requires_retirement_of_the_same_receipt_after_fetch(self) -> None:
+    def test_product_record_requires_retirement_of_the_same_receipt_after_rollback(self) -> None:
         self.configure("gcs", "private", "direct")
         path = self.directory / CDN.GIT_PRODUCT_DIR / "retirement.json"
         retirement = json.loads(path.read_bytes())
-        for changes in ({"publication_sha256": "f" * 64}, {"retired_at_unix_ms": 1}):
+        edge = json.loads((path.parent / "fetch.json").read_bytes())
+        for changes in ({"publication_sha256": "f" * 64}, {"retired_at_unix_ms": edge["finished_at_unix_ms"]}):
             with self.subTest(changes=changes):
                 json_file(path, retirement | changes)
-                self.rejected("requires retirement of the same published ref after the fetch")
+                self.rejected("requires retirement of the same published ref after rollback")
 
     def test_cleanup_inventory_must_be_captured_after_git_retirement(self) -> None:
         self.configure("gcs", "private", "direct")
@@ -829,9 +845,42 @@ class CdnQualificationTests(unittest.TestCase):
         self.rejected("cold edge sample must prove a miss, origin fill and delivered bytes")
 
     def test_rollback_rejects_native_read_for_a_different_key(self) -> None:
-        self.configure("azure", "private", "direct")
+        self.configure("azure", "private", "direct", consumer="sdk")
         self.trace("rollback", [self.request("edge", 200), self.request("origin", 200) | {"key_sha256": "c" * 64}])
         self.rejected("rollback requires an edge read followed by a native read of the same complete object")
+
+    def test_cli_rollback_requires_an_ordered_native_fetch_of_the_same_publication(self) -> None:
+        self.configure("azure", "private", "direct")
+        trace = json.loads((self.directory / "traces/rollback.json").read_bytes())
+        edge = json.loads((self.directory / CDN.GIT_PRODUCT_DIR / "fetch.json").read_bytes())
+        reader = trace["reader"]
+        for changes, reason in (
+            ({"started_at_unix_ms": edge["started_at_unix_ms"]}, "must follow the verified edge fetch"),
+            ({"publication_oid": "f" * 40}, "must verify the same published payload"),
+            ({"reader": reader | {"prefix_sha256": "f" * 64}}, "changed the selected native target"),
+            ({"reader": reader | {"cache_root_sha256": edge["reader"]["cache_root_sha256"]}}, "reused the edge fetch cache"),
+            ({"reader": reader | {"binding_sha256": edge["reader"]["binding_sha256"]}}, "requires an inactive viewer binding"),
+            ({"all_edge_attempts": 1}, "zero edge or local payload reads"),
+            ({"local_payload_hits": 1}, "zero edge or local payload reads"),
+        ):
+            with self.subTest(changes=changes):
+                self.rollback_trace(trace | changes)
+                self.rejected(reason)
+
+    def test_cli_rollback_rejects_an_http_only_trace(self) -> None:
+        self.configure("s3", "private", "direct")
+        self.trace("rollback", [self.request("edge", 200), self.request("origin", 200)])
+        self.rejected("invalid fields in redacted Git fetch")
+
+    def test_cli_rollback_checks_the_native_target_against_the_independent_provider_observation(self) -> None:
+        self.configure("gcs", "private", "direct")
+        fetch_path = self.directory / CDN.GIT_PRODUCT_DIR / "fetch.json"
+        fetch = json.loads(fetch_path.read_bytes())
+        rollback = json.loads((self.directory / "traces/rollback.json").read_bytes())
+        other_origin = {"origin_sha256": "f" * 64}
+        json_file(fetch_path, fetch | {"reader": fetch["reader"] | other_origin})
+        self.rollback_trace(rollback | {"reader": rollback["reader"] | other_origin})
+        self.rejected("must use the independently observed native target")
 
     def test_cache_reuse_requires_a_hit_after_the_miss(self) -> None:
         self.configure("s3", "private", "direct")
@@ -921,7 +970,7 @@ class CdnQualificationTests(unittest.TestCase):
         self.rejected("edge route policy requires same-object cache hits before and after denials")
 
     def test_rejects_trace_with_no_observations(self) -> None:
-        self.configure("s3", "private", "direct")
+        self.configure("s3", "private", "direct", consumer="sdk")
         self.trace("rollback", [])
         self.rejected("trace has no observations: rollback")
 

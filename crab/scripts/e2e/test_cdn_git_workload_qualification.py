@@ -161,6 +161,9 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         self.assertEqual(fetched["observed_edge_gets"], 1)
         self.assertEqual(fetched["verified_edge_payloads"], 1)
         self.assertNotIn("fixture_cleanup_verified", fetched)
+        (self.root / "binding-off").touch()
+        (self.root / "origin-only").touch()
+        rollback = self.run_phase("fetch-origin")
         retired = self.run_phase("retire")
         self.assertTrue(retired["ref_retired"])
         records = self.root / "git-product"
@@ -169,9 +172,10 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         (records / "fetch.json").write_text(json.dumps(fetched), encoding="utf-8")
         (records / "retirement.json").write_text(json.dumps(retired), encoding="utf-8")
         viewer = WORKLOAD.viewer_binding_sha256(json.loads(self.fixture.read_bytes()))
-        measured = collect_git_product_action(records, fetched | {"viewer_binding_sha256": viewer})
+        rollback_raw = json.dumps(rollback).encode()
+        measured = collect_git_product_action(records, fetched | {"viewer_binding_sha256": viewer}, rollback_raw)
         with self.assertRaisesRegex(ValueError, "product fetch did not use the registered viewer binding"):
-            collect_git_product_action(records, fetched | {"viewer_binding_sha256": "0" * 64})
+            collect_git_product_action(records, fetched | {"viewer_binding_sha256": "0" * 64}, rollback_raw)
         self.assertEqual(measured["observed_sha256"], fetched["expected_sha256"])
         self.assertEqual(measured["verified_edge_payloads"], 1)
 
@@ -336,6 +340,9 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         self.assertEqual(retained["after"]["verified_edge_key_sha256"], key)
         self.assertEqual(retained["before"]["result_sha256"], fetched["observed_sha256"])
         self.assertEqual(retained["before"]["edge_attempts"], 0)
+        (self.root / "binding-off").touch()
+        (self.root / "origin-only").touch()
+        rollback = self.run_phase("fetch-origin")
         retired = self.run_phase("retire")
         self.assertTrue(retired["ref_retired"])
         if family == "lfs":
@@ -345,7 +352,8 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             (records / "fetch.json").write_text(json.dumps(fetched), encoding="utf-8")
             (records / "retirement.json").write_text(json.dumps(retired), encoding="utf-8")
             viewer = WORKLOAD.viewer_binding_sha256(sample)
-            product = collect_git_product_action(records, fetched | {"viewer_binding_sha256": viewer})
+            product = collect_git_product_action(records, fetched | {"viewer_binding_sha256": viewer},
+                                                 json.dumps(rollback).encode())
             self.assertEqual(product["name"], "lfs-fetch")
             export = self.root / "public-export"
             copytree(new, export)

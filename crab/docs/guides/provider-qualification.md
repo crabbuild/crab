@@ -810,7 +810,17 @@ registered scope. Native metadata and sidecar reads still run. The benchmark
 collector rejects a local cache root reused across any two measured arms.
 Join the results with provider request and fill measurements before assembly.
 
-Run `retire` with the same arguments after the workload. It verifies the
+For the direct CLI rollback check, withdraw the CDN binding on the same
+worker after retaining the successful edge fetch. Keep the same native
+origin, prefix, reader authorization, and unretired publication receipt. Run
+`fetch-origin` with the same workload arguments and save its stdout as
+`traces/rollback.json`. For a public row, omit the transition options so the
+worker verifies that the binding is absent. The verifier checks the same
+payload and native target before and after the change, separate local cache
+roots, and zero edge requests and cached payload hits after rollback. It
+matches the selected native target to the independent ref observation.
+
+Run `retire` with the same arguments after the rollback fetch. It verifies the
 exact ref is absent after retirement and refuses to remove a ref whose tip
 changed. Retain the publication receipt unchanged as `git-product/publication.json`
 under the measured row, and capture the `fetch` and `retire` stdout as

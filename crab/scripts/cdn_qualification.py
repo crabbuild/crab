@@ -128,7 +128,8 @@ GIT_PUBLICATION_FIELDS = CDN_PROVENANCE_FIELDS | {"schema", "ref", "oid", "sha25
 GIT_RETIREMENT_FIELDS = CDN_PROVENANCE_FIELDS | {"schema", "publication_sha256", "ref_retired", "retired_at_unix_ms", "candidate"}
 CLI_BUILD_FIELDS = {"source_sha", "target_triple", "cargo_profile", "cargo_features", "qualification_feature", "release_policy_sha256"}
 CLI_CANDIDATE_FIELDS = CLI_BUILD_FIELDS | {"binary_sha256"}
-CLI_READ_FIELDS = {"binding_sha256", "cache_root_sha256"}
+CLI_NATIVE_FIELDS = {"origin_sha256", "prefix_sha256"}
+CLI_READ_FIELDS = CLI_NATIVE_FIELDS | {"binding_sha256", "cache_root_sha256"}
 CLI_TARGET = re.compile(r"(aarch64|x86_64)-(apple-darwin|unknown-linux-(?:gnu|musl)|pc-windows-(?:msvc|gnu|gnullvm))")
 PRODUCT_COUNTERS = {
     "edge_attempts", "observed_edge_gets", "edge_bytes", "edge_hits", "edge_misses", "edge_unknown",
@@ -547,6 +548,8 @@ def verify_public_transition(
                 and after["edge_attempts"] == fetch["all_edge_attempts"]
                 and after["reader"] == fetch["reader"],
                 "the public transition must use the retained Git product fetch")
+        require(all(before["reader"][key] == after["reader"][key] for key in CLI_NATIVE_FIELDS),
+                "the public transition changed the selected native target")
         require(before["reader"]["cache_root_sha256"] != after["reader"]["cache_root_sha256"],
                 "the public transition reused the native-only fetch cache")
 
@@ -656,7 +659,7 @@ def verify_managed_issuer(
 
 def verify_check_evidence(
     report: dict[str, Any], edge: str, access: str, profile: str, directory: Path, *, registration: dict[str, Any],
-) -> tuple[int, int, str]:
+) -> tuple[int, int, str, bytes | None]:
     required = required_check_names(access, profile)
     checks = fields(report["checks"], required, "checks")
     origin_denial = "private_origin_denied" if access == "private" else "live_origin_denied"
@@ -672,6 +675,7 @@ def verify_check_evidence(
     managed_issuer = None
     history = None
     transition = None
+    rollback = None
     deployment_policy_sha256 = registration["deployment_policy_sha256"]
     for name, value in checks.items():
         check = fields(value, {"passed", "trace_sha256"}, name)
@@ -682,6 +686,9 @@ def verify_check_evidence(
             and check["trace_sha256"] == hashlib.sha256(raw).hexdigest(),
             f"trace digest mismatch: {name}",
         )
+        if name == "rollback" and requires_cli_workload(report["scope"]):
+            rollback = raw
+            continue
         decoded = decode(raw)
         if name == "cleanup":
             cleanup_at = verify_cleanup_trace(decoded, report, edge, access)
@@ -777,7 +784,7 @@ def verify_check_evidence(
                 "export access must use the same object key as the live source")
         verify_public_export(directory, report, registration, policy, fixture_reads, native_reads, cleanup_targets,
                              history, transition)
-    return len(checks), cleanup_at, cleanup_targets["native"]["origin_sha256"]
+    return len(checks), cleanup_at, cleanup_targets["native"]["origin_sha256"], rollback
 
 
 def anonymous_origin_denial(row: dict[str, Any]) -> bool:
@@ -1112,10 +1119,10 @@ def validate_git_fetch(raw: bytes, provenance: dict[str, Any], mode: str, label:
             f"{label} has mismatched Git fetch provenance")
     verify_cli_candidate(client["candidate"], provenance["source_sha"], client["platform"])
     reader = fields(client["reader"], CLI_READ_FIELDS, "verified CLI read configuration")
-    require(matches(SHA256, reader["cache_root_sha256"])
+    require(all(matches(SHA256, reader[key]) for key in CLI_NATIVE_FIELDS | {"cache_root_sha256"})
             and (matches(SHA256, reader["binding_sha256"])
                  or (mode == "origin" and reader["binding_sha256"] == "")),
-            f"{label} has an invalid CDN binding or local cache fingerprint")
+            f"{label} has an invalid CDN binding, native target or local cache fingerprint")
     if "candidate" in provenance:
         require(client["candidate"] == provenance["candidate"], f"{label} did not run the registered CLI build")
     require(matches(GIT_OID, client["publication_oid"]) and matches(SHA256, client["publication_sha256"])
@@ -1130,6 +1137,9 @@ def validate_git_fetch(raw: bytes, provenance: dict[str, Any], mode: str, label:
             f"{label} has invalid Git transfer counters")
     require(client["edge_hits"] + client["edge_misses"] + client["edge_unknown"] == client["observed_edge_gets"]
             <= client["edge_attempts"] <= client["all_edge_attempts"], f"{label} has inconsistent edge counts")
+    if mode == "origin":
+        require(reader["binding_sha256"] == "" and all(client[key] == 0 for key in PRODUCT_COUNTERS),
+                f"{label} requires an inactive viewer binding and zero edge or local payload reads")
     if mode == "edge":
         require(positive(client["observed_edge_gets"]) and positive(client["verified_edge_payloads"]),
                 f"{label} accepted no verified edge payload")
@@ -1163,17 +1173,17 @@ def verify_git_native_ref(
 
 
 def collect_git_product_action(
-    inputs: Path, row: dict[str, Any], *, retain: Path | None = None, cleanup_at: int | None = None,
+    inputs: Path, row: dict[str, Any], rollback_raw: bytes, *, retain: Path | None = None, cleanup_at: int | None = None,
     native_origin_sha256: str | None = None,
 ) -> dict[str, Any]:
     publication_raw = read_git_record(inputs / "publication.json")
     publication = validate_git_publication(publication_raw, row)
     require(publication["published"], "Git product action requires a ref confirmed after native push")
     provenance = {key: row[key] for key in CDN_PROVENANCE_FIELDS}
+    fetch_provenance = provenance | {"platform": row["platform"], "candidate": row["candidate"]}
     require(publication["candidate"] == row["candidate"], "publication did not run the registered CLI build")
     fetch_raw = read_git_record(inputs / "fetch.json")
-    fetch = validate_git_fetch(fetch_raw, provenance | {"platform": row["platform"], "candidate": row["candidate"]},
-                               "edge", "Git product action")
+    fetch = validate_git_fetch(fetch_raw, fetch_provenance, "edge", "Git product action")
     require(fetch["reader"]["binding_sha256"] == row.get("viewer_binding_sha256"),
             "product fetch did not use the registered viewer binding")
     digest = hashlib.sha256(publication_raw).hexdigest()
@@ -1181,6 +1191,15 @@ def collect_git_product_action(
             and fetch["expected_sha256"] == publication["sha256"]
             and fetch["started_at_unix_ms"] >= publication["visible_at_unix_ms"],
             "Git product fetch did not verify this native publication after the ref became visible")
+    rollback = validate_git_fetch(rollback_raw, fetch_provenance, "origin", "CDN rollback")
+    require(all(rollback[key] == fetch[key] for key in ("publication_sha256", "publication_oid", "observed_sha256")),
+            "CDN rollback must verify the same published payload as the edge fetch")
+    require(all(rollback["reader"][key] == fetch["reader"][key] for key in CLI_NATIVE_FIELDS),
+            "CDN rollback changed the selected native target")
+    require(rollback["reader"]["cache_root_sha256"] != fetch["reader"]["cache_root_sha256"],
+            "CDN rollback reused the edge fetch cache")
+    require(fetch["finished_at_unix_ms"] <= rollback["started_at_unix_ms"],
+            "CDN rollback must follow the verified edge fetch")
     retirement_raw = read_git_record(inputs / "retirement.json")
     retirement = fields(decode(retirement_raw), GIT_RETIREMENT_FIELDS, "Git retirement report")
     require(retirement["schema"] == "crab.cdn-git-retirement/v1"
@@ -1188,8 +1207,8 @@ def collect_git_product_action(
             and retirement["publication_sha256"] == digest and retirement["ref_retired"] is True
             and retirement["candidate"] == row["candidate"]
             and positive(retirement["retired_at_unix_ms"])
-            and retirement["retired_at_unix_ms"] >= fetch["finished_at_unix_ms"],
-            "Git product action requires retirement of the same published ref after the fetch")
+            and retirement["retired_at_unix_ms"] >= rollback["finished_at_unix_ms"],
+            "Git product action requires retirement of the same published ref after rollback")
     if cleanup_at is not None:
         require(cleanup_at >= retirement["retired_at_unix_ms"], "fixture cleanup must be verified after Git ref retirement")
     observations = {}
@@ -1206,6 +1225,8 @@ def collect_git_product_action(
                 <= retired["observed_at_unix_ms"] <= cleanup_at,
                 "native ref observations must bracket the fetch and precede fixture cleanup")
         before, after = published["native_ref"], retired["native_ref"]
+        require(all(fetch["reader"][key] == before[key] for key in CLI_NATIVE_FIELDS),
+                "Git product fetch and rollback must use the independently observed native target")
         require(all(before[key] == after[key] for key in ("repository_sha256", "epoch_sha256"))
                 and all(before[key] != after[key] for key in ("transaction_id", "head_sha256", "revision_sha256")),
                 "native ref retirement must commit a distinct tombstone in the same repository epoch")
@@ -1256,16 +1277,14 @@ def collect_git_performance(
                 seen.add(digest)
                 client = validate_git_fetch(client_raw, provenance, GIT_MODES[arm], label)
                 reader = client["reader"]
-                expected_binding = "" if arm == "origin" else spec["viewer_binding_sha256"]
-                require(reader["binding_sha256"] == expected_binding,
+                require(arm == "origin" or reader["binding_sha256"] == spec["viewer_binding_sha256"],
                         f"{label} did not use the required viewer configuration")
                 cache_root = reader["cache_root_sha256"]
                 require(cache_root not in cache_roots, "benchmark arms reused a local cache root")
                 cache_roots.add(cache_root)
-                fixtures.add((client["publication_oid"], client["expected_sha256"], client["publication_sha256"]))
+                fixtures.add((client["publication_oid"], client["expected_sha256"], client["publication_sha256"],
+                              reader["origin_sha256"], reader["prefix_sha256"]))
                 windows[arm] = (client["started_at_unix_ms"], client["finished_at_unix_ms"])
-                if arm == "origin":
-                    require(client["all_edge_attempts"] == 0, "origin control observed edge requests")
                 if arm == "warm_local":
                     require(client["edge_attempts"] == 0, "warm-local control observed edge requests")
                 external_raw = read_git_record(inputs / slot / "measurement.json")
@@ -1343,14 +1362,17 @@ def verify_cdn_report(
     verify_product_action(row["product_action"], family)
     require(row["product_action"]["name"] == registration["workload"],
             "product action does not match the registered workload")
-    checks, cleanup_at, native_origin_sha256 = verify_check_evidence(row, edge, access, profile, directory, registration=registration)
+    checks, cleanup_at, native_origin_sha256, rollback = verify_check_evidence(
+        row, edge, access, profile, directory, registration=registration,
+    )
     if requires_git_workload(scope):
         measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt)
         require(measured == row["performance"], "Git performance summary differs from the retained measurements")
     if requires_cli_workload(scope):
+        require(rollback is not None, "direct CLI qualification requires a product rollback fetch")
         registered_read = {key: registration[key] for key in ("candidate", "viewer_binding_sha256")}
         product = collect_git_product_action(
-            directory / GIT_PRODUCT_DIR, row | registered_read, cleanup_at=cleanup_at,
+            directory / GIT_PRODUCT_DIR, row | registered_read, rollback, cleanup_at=cleanup_at,
             native_origin_sha256=native_origin_sha256,
         )
         require(row["product_action"] == product | {"fixture_cleanup_verified": True},
