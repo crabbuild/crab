@@ -7,7 +7,7 @@ import json
 import sys
 import unittest
 from contextlib import redirect_stderr
-from io import StringIO
+from io import BytesIO, StringIO, TextIOWrapper
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -37,7 +37,7 @@ class DesktopQualificationTests(unittest.TestCase):
         sidecar.write_bytes(b"registered executable")
         self.args = argparse.Namespace(arm="edge", fixture=self.root / "fixture.json", receipt=self.root / "receipt.json",
             sidecar=sidecar, sidecar_sha256=hashlib.sha256(sidecar.read_bytes()).hexdigest(), scratch=self.root,
-            source_sha=COMMIT, run_id="123", run_attempt="2", private_reader=reader, export_approval=None)
+            source_sha=COMMIT, run_id="123", run_attempt="2", private_reader=reader, export_approval=None, warm_local_output=None)
         self.oid = "a" * 40
         self.stamp = {key: value for key, value in cli_candidate("cloudfront/private/desktop/git/direct",
                       desktop.runner_platform()).items() if key in CLI_BUILD_FIELDS}
@@ -76,22 +76,27 @@ base_url = "{config['base_url']}"
         return config
 
     def emulate(self, config: dict, edge: str, arm: str, *, reported_bytes: bytes | None = None,
-                transfer: bool = True, capsule: bool = False):
+                transfer: bool = True, capsule: bool = False, repeat_source: str | None = None):
         route = {"provider": PROVIDER_FOR_EDGE[edge], "access": "private", "consumer": "desktop",
                  "family": "git", "profile": "direct"}
         events = [{"target": desktop.READ_TARGET, "fields": read_target_fingerprints(config, edge=arm == "edge", export_sha256="")
                    | {"message": "SDK captured CDN read target"}},
                   {"target": desktop.NATIVE_TARGET, "fields": {"message": "Native object store read", "provider": route["provider"],
                    "method": "get", "status": 200, "bytes": 8}}]
+        oid = hashlib.sha1(f"blob {len(self.body)}\0".encode() + self.body, usedforsecurity=False).digest()
+        verified = route | {"message": "CDN verified Git payload", "git_blob_oid_sha256": hashlib.sha256(oid).hexdigest()}
+        response = route | {"message": "CDN immutable GET", "status": 206, "bytes": 64, "elapsed_ms": 4,
+                            "cache": "hit", "range": True, "complete": True, "request_sha256": "d" * 64}
         if arm == "edge" and transfer:
-            oid = hashlib.sha1(f"blob {len(self.body)}\0".encode() + self.body, usedforsecurity=False).digest()
-            response = route | {"message": "CDN immutable GET", "status": 206, "bytes": 64, "elapsed_ms": 4,
-                                "cache": "hit", "range": True, "complete": True, "request_sha256": "d" * 64}
             if capsule:
                 events.append({"target": desktop.TARGET, "fields": response | {"family": "capsule", "request_sha256": "c" * 64}})
             events += [{"target": desktop.TARGET, "fields": response},
-                       {"target": desktop.TARGET, "fields": route | {"message": "CDN verified Git payload", "source": "edge",
-                        "git_blob_oid_sha256": hashlib.sha256(oid).hexdigest()}}]
+                       {"target": desktop.TARGET, "fields": verified | {"source": "edge"}}]
+        repeat_events = []
+        if repeat_source:
+            repeat_events.append({"target": desktop.TARGET, "fields": verified | {"source": repeat_source}})
+            if repeat_source == "edge":
+                repeat_events.append({"target": desktop.TARGET, "fields": response})
         payload = base64.b64encode(self.body if reported_bytes is None else reported_bytes).decode()
         request_body = self.root / "payload.b64"
         request_body.write_text(payload, encoding="ascii")
@@ -113,17 +118,25 @@ read = expect(2, 'read_bytes')
 assert read['rev'] == {self.oid!r} and read['path'] == 'cdn-qualification.bin'
 for event in {events!r}:
     print(json.dumps(event), file=sys.stderr, flush=True)
-reply(2, {{'size': {len(self.body)}, 'truncated': False, 'bytes_b64': Path({str(request_body)!r}).read_text()}})
-expect(3, 'close')
+payload = {{'size': {len(self.body)}, 'truncated': False, 'bytes_b64': Path({str(request_body)!r}).read_text()}}
+reply(2, payload)
+close = 3
+if {bool(repeat_events)!r}:
+    assert read == expect(3, 'read_bytes')
+    for event in {repeat_events!r}:
+        print(json.dumps(event), file=sys.stderr, flush=True)
+    reply(3, payload)
+    close = 4
+expect(close, 'close')
 print(json.dumps({{'target': {desktop.TARGET!r}, 'fields': {{'message': 'post-close diagnostic'}}}}), file=sys.stderr, flush=True)
-reply(3, {{'closed': 'cdn-qualification'}})
+reply(close, {{'closed': 'cdn-qualification'}})
 assert not sys.stdin.read()
 ''', encoding="utf-8")
         run = desktop.run_sidecar
 
-        async def launch(command, *params):
+        async def launch(command, *params, **options):
             self.assertEqual(command, [str(self.args.sidecar), "--log-json"])
-            return await run([sys.executable, str(fake)], *params)
+            return await run([sys.executable, str(fake)], *params, **options)
 
         return patch.object(desktop, "run_sidecar", launch)
 
@@ -134,7 +147,8 @@ assert not sys.stdin.read()
                 for arm in ("edge", "origin"):
                     config = self.configure(edge, arm)
                     with self.emulate(config, edge, arm, capsule=True):
-                        records[arm] = desktop.fetch(self.args)
+                        records[arm], local = desktop.fetch(self.args)
+                        self.assertIsNone(local)
                 routed, native = records["edge"], records["origin"]
                 self.assertEqual(routed["sha256"], native["sha256"])
                 self.assertEqual(routed["candidate"], self.stamp | {"binary_sha256": self.args.sidecar_sha256})
@@ -153,6 +167,33 @@ assert not sys.stdin.read()
         with self.emulate(config, "cloudfront", "edge", reported_bytes=b"different"):
             with self.assertRaisesRegex(ValueError, "different bytes"):
                 desktop.fetch(self.args)
+
+    def test_repeat_proves_the_same_verified_blob_in_the_primed_desktop_session(self) -> None:
+        config = self.configure("cloudfront", "edge")
+        self.args.warm_local_output = self.root / "repeat.json"
+        with self.emulate(config, "cloudfront", "edge", repeat_source="local"):
+            edge, local = desktop.fetch(self.args)
+        self.assertEqual((local["primer_sha256"], local["cache_root_sha256"], local["git_blob_oid_sha256"]), (
+            hashlib.sha256(desktop.json_record(edge).encode()).hexdigest(), edge["cache_root_sha256"], edge["git_blob_oid_sha256"],
+        ))
+        self.assertEqual((local["local_payload_hits"], local["all_edge_attempts"]), (1, 0))
+        with self.emulate(config, "cloudfront", "edge", repeat_source="edge"):
+            with self.assertRaisesRegex(ValueError, "verified local Git blob without edge traffic"):
+                desktop.fetch(self.args)
+
+    def test_stdout_preserves_the_primer_digest_under_crlf_text_output(self) -> None:
+        primary = {"arm": "edge"}
+        expected = hashlib.sha256(desktop.json_record(primary).encode()).hexdigest()
+        local = {"arm": "warm_local", "primer_sha256": expected}
+        destination = self.root / "repeat.json"
+        with TextIOWrapper(BytesIO(), newline="\r\n") as stdout:
+            arguments = argparse.Namespace(warm_local_output=destination)
+            with (patch.object(desktop.argparse.ArgumentParser, "parse_args", return_value=arguments),
+                  patch.object(desktop, "fetch", return_value=(primary, local)), patch.object(sys, "stdout", stdout)):
+                self.assertEqual(desktop.main(), 0)
+            stdout.flush()
+            self.assertEqual(hashlib.sha256(stdout.buffer.getvalue()).hexdigest(), expected)
+        self.assertEqual(json.loads(destination.read_bytes()), local)
 
     def test_preregistered_binary_and_withdrawn_binding_are_checked_before_rpc(self) -> None:
         self.configure("cloudfront", "edge")
@@ -203,7 +244,7 @@ sha256 = "{self.approval}"
     def test_joins_an_edge_read_to_the_matching_cloudfront_request(self) -> None:
         config = self.configure("cloudfront", "edge")
         with self.emulate(config, "cloudfront", "edge"):
-            record = desktop.fetch(self.args)
+            record, _ = desktop.fetch(self.args)
         client, output = self.root / "client.json", self.root / "cloudfront-requests.json"
         logs, origin_logs = self.root / "viewer.w3c", self.root / "origin.log"
         origin_logs.touch()

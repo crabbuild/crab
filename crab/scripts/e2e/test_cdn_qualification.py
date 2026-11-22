@@ -108,6 +108,7 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, nati
                            hydration: dict | None = None, service: dict | None = None) -> None:
     provider = CDN.PROVIDER_FOR_EDGE[registration["scope"].split("/", 1)[0]]
     sdk = CDN.is_direct_sdk_git_scope(registration["scope"])
+    desktop = CDN.is_direct_desktop_git_scope(registration["scope"])
     cli = CDN.requires_cli_workload(registration["scope"])
     action = CDN.cli_action_name(registration["scope"])
     for ordinal, (location, region) in enumerate(registration["regions"].items()):
@@ -118,15 +119,26 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, nati
             pair.mkdir(parents=True, exist_ok=True)
             start = 1_000_000 * (ordinal + 1) + index * 10_000
             publication_digest = hashlib.sha256(f"{location}/{index}/receipt".encode()).hexdigest()
-            if cli:
-                publication_digest = json_file(pair / "publication.json", {
+            if cli or desktop:
+                publication = {
                     "schema": "crab.cdn-git-publication/v1", "oid": oid, "sha256": blob, "published": True,
                     "ref": f"refs/heads/crab-cdn-qualification-123-2-{oid[:12]}",
-                    "visible_at_unix_ms": start - 1, "candidate": registration["candidate"],
+                    "visible_at_unix_ms": start - (3 if desktop else 1), "candidate": registration["candidate"],
                     "source_sha": registration["source_sha"], "scope": registration["scope"],
                     "configuration_sha256": registration["configuration_sha256"],
                     "workflow_run_id": "123", "workflow_run_attempt": "2",
-                })
+                }
+                publication_digest = json_file(pair / "publication.json", publication)
+                if desktop:
+                    observed = dict.fromkeys(CDN.GIT_NATIVE_REF_FIELDS, "4" * 64) | registration["desktop_native_target"] | {
+                        "ref_sha256": hashlib.sha256(publication["ref"].encode()).hexdigest(),
+                        "oid": oid, "probe_source_sha": publication["source_sha"],
+                    }
+                    json_file(pair / CDN.GIT_NATIVE_REF_FILES["published"], {
+                        key: publication[key] for key in CDN.CDN_PROVENANCE_FIELDS
+                    } | {"schema": "crab.cdn-native-ref/v1", "phase": "published", "platform": platform,
+                         "publication_sha256": publication_digest, "started_at_unix_ms": start - 2,
+                         "observed_at_unix_ms": start - 1, "native_ref": observed})
             for sequence, (arm, metrics) in enumerate(sample(provider).items()):
                 directory = pair / arm
                 directory.mkdir(exist_ok=True)
@@ -213,8 +225,8 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, nati
                         client["primer_sha256"] = hashlib.sha256(primer).hexdigest()
                         reader["cache_root_sha256"] = json.loads(primer)["reader"]["cache_root_sha256"]
                     client["reader"] = reader
-                elif sdk:
-                    client["reader"].pop("cache_root_sha256")
+                elif sdk or desktop:
+                    cache = client["reader"].pop("cache_root_sha256")
                     client = {key: value for key, value in client.items() if key in CDN.SDK_GIT_READ_FIELDS} | {
                         "schema": "crab.cdn-sdk-git-read/v1", "commit": oid, "sha256": blob,
                         "git_blob_oid_sha256": hashlib.sha256(f"{blob}/git".encode()).hexdigest(),
@@ -222,8 +234,16 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, nati
                             "viewer_approval_sha256", registration.get("publication_sha256", ""),
                         ),
                     }
+                    if desktop:
+                        client["schema"] = "crab.cdn-desktop-git-read/v1"
+                        client["candidate"] = registration["desktop_candidate"]
+                        client["reader"] |= registration["desktop_native_target"]
+                        client["cache_root_sha256"] = cache
                     if arm == "warm_local":
-                        client["primer_sha256"] = hashlib.sha256((directory.parent / "warm_edge/client.json").read_bytes()).hexdigest()
+                        primer = (directory.parent / "warm_edge/client.json").read_bytes()
+                        client["primer_sha256"] = hashlib.sha256(primer).hexdigest()
+                        if desktop:
+                            client["cache_root_sha256"] = json.loads(primer)["cache_root_sha256"]
                 digest = json_file(directory / "client.json", client)
                 if proof:
                     edge_name = CDN.PROVIDERS[provider][0]

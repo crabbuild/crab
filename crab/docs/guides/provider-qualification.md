@@ -1197,8 +1197,27 @@ receipt with `cdn.publication` for the edge arm. Omit both for the origin arm.
 Keep the same sidecar, native origin, repository and commit for both reads.
 Each invocation starts a fresh cache and verifies the actual RPC payload and
 read target. Retain the redacted records and pass the edge record as `--client`
-to `collect_cdn_viewer_requests.py`. Desktop regional and release evidence
-still require separate qualification.
+to `collect_cdn_viewer_requests.py`.
+
+For regional measurements, register the `desktop-git-read` workload with
+the writer's `candidate`, the `desktop_candidate`, and `desktop_native_target`.
+The target contains `origin_sha256` and `prefix_sha256` from the approved
+native origin and effective repository prefix, including its trailing slash.
+Register the viewer binding and private issuer approval or public export as
+for other direct workloads. Follow the [paired measurements layout](#pair-regional-cli-fetch-measurements)
+and keep `publication.json` and `provider-published.json` at the root of each
+pair. Publish and independently observe a fresh commit before either timed
+read path starts.
+
+Use a fresh invocation for the native, cold edge, and warm edge arms. On the
+warm edge invocation, add `--warm-local-output "$pair/warm_local/client.json"`
+and write stdout to `warm_edge/client.json` without reformatting it. The
+worker repeats the read in the same open sidecar and records its verified
+local Git blob and zero edge requests. The local record pins that exact warm
+edge record. Collect provider logs for the edge arms and runner measurements
+for all four arms. `collect_cdn_git_performance.py` recomputes the regional
+pairs and checks the registered latency and cost budgets. Live samples and
+desktop release assembly remain open.
 
 ### Capture protected SDK hydration evidence
 

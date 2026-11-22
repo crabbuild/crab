@@ -336,5 +336,89 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
             self.collect()
 
 
+class DesktopGitPerformanceQualificationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = TemporaryDirectory(prefix="crab-desktop-benchmark-test-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    def write_benchmark(self, edge: str = "cloudfront") -> tuple[Path, dict]:
+        scope = f"{edge}/private/desktop/git/direct"
+        writer = fixture.cli_candidate(scope, PLATFORM)
+        spec = {
+            "schema": "crab.cdn-benchmark/v1", "source_sha": fixture.COMMIT, "scope": scope,
+            "configuration_sha256": fixture.CONFIGURATION, "workload": fixture.CDN.DESKTOP_GIT_ACTION,
+            "samples": 30, "p95_budget_ms": 150, "cost_budget_microusd": 10, "regions": REGIONS,
+            "deployment_policy_sha256": "d" * 64, "viewer_binding_sha256": "e" * 64,
+            "viewer_approval_sha256": "9" * 64, "scoped_view_sha256": "c" * 64, "cache_reuse_sha256": "b" * 64,
+            "candidate": writer, "desktop_candidate": writer | {"cargo_features": "", "binary_sha256": "a" * 64},
+            "desktop_native_target": {"origin_sha256": "7" * 64, "prefix_sha256": "8" * 64},
+        }
+        inputs = self.root / edge
+        fixture.write_git_measurements(inputs, spec, PLATFORM)
+        return inputs, spec
+
+    def test_recomputes_and_retains_paired_desktop_samples_for_each_provider(self) -> None:
+        for edge in fixture.CDN.PROVIDER_FOR_EDGE:
+            with self.subTest(edge=edge):
+                inputs, spec = self.write_benchmark(edge)
+                retained = self.root / f"retained-{edge}"
+                performance = fixture.CDN.collect_git_performance(inputs, spec, PLATFORM, RUN_ID, ATTEMPT, retain=retained)
+                self.assertEqual(BENCHMARK.verify_performance(performance, spec), 180)
+                for name in ("publication.json", "provider-published.json"):
+                    self.assertEqual((retained / "near/0001" / name).read_bytes(), (inputs / "near/0001" / name).read_bytes())
+                self.assertEqual(fixture.CDN.collect_git_performance(retained, spec, PLATFORM, RUN_ID, ATTEMPT), performance)
+
+    def test_rejects_a_repeat_with_another_primer_or_cache(self) -> None:
+        inputs, spec = self.write_benchmark()
+        repeat = inputs / "near/0001/warm_local/client.json"
+        original = json.loads(repeat.read_bytes())
+        for field in ("primer_sha256", "cache_root_sha256"):
+            with self.subTest(field=field):
+                fixture.json_file(repeat, original | {field: "f" * 64})
+                with self.assertRaisesRegex(ValueError, "did not repeat its own warm edge desktop read"):
+                    fixture.CDN.collect_git_performance(inputs, spec, PLATFORM, RUN_ID, ATTEMPT)
+
+    def test_generic_desktop_canary_cannot_supply_raw_benchmark_records(self) -> None:
+        inputs, spec = self.write_benchmark()
+        generic = {key: value for key, value in spec.items() if key not in {
+            "candidate", "desktop_candidate", "desktop_native_target", "viewer_binding_sha256", "viewer_approval_sha256",
+        }} | {"workload": "git-fetch"}
+        with self.assertRaisesRegex(ValueError, "benchmark must register a supported direct"):
+            fixture.CDN.collect_git_performance(inputs, generic, PLATFORM, RUN_ID, ATTEMPT)
+
+    def test_requires_the_independent_observation_of_the_published_commit_before_reading(self) -> None:
+        inputs, spec = self.write_benchmark()
+        proof = inputs / "near/0001/provider-published.json"
+        original = json.loads(proof.read_bytes())
+        first = json.loads((inputs / "near/0001/origin/client.json").read_bytes())["started_at_unix_ms"]
+        for change, message in (
+            ({"native_ref": original["native_ref"] | {"oid": "f" * 40}}, "unexpected committed tip"),
+            ({"observed_at_unix_ms": first + 1}, "independently observed native publication"),
+        ):
+            with self.subTest(message=message):
+                fixture.json_file(proof, original | change)
+                with self.assertRaisesRegex(ValueError, message):
+                    fixture.CDN.collect_git_performance(inputs, spec, PLATFORM, RUN_ID, ATTEMPT)
+
+    def test_regional_bandwidth_needs_the_related_immutable_metadata_bytes(self) -> None:
+        inputs, spec = self.write_benchmark()
+        arm = inputs / "near/0001/cold_edge"
+        client_path = arm / "client.json"
+        client = json.loads(client_path.read_bytes())
+        client["all_edge_attempts"] += 1
+        new_id = "c" * 64
+        client["edge_responses"][new_id] = {"status": 206, "complete": True, "cache": "hit", "bytes": 500}
+        digest = fixture.json_file(client_path, client)
+        viewer_path = arm / "cloudfront-requests.json"
+        proof = json.loads(viewer_path.read_bytes())
+        proof["records"][new_id] = {"status": 206, "cache": "hit", "response_bytes": 512, "key_sha256": "d" * 64}
+        fixture.json_file(viewer_path, proof | {"client_report_sha256": digest})
+        external = arm / "measurement.json"
+        fixture.json_file(external, json.loads(external.read_bytes()) | {"client_report_sha256": digest})
+        with self.assertRaisesRegex(ValueError, "undercounts observed client bytes"):
+            fixture.CDN.collect_git_performance(inputs, spec, PLATFORM, RUN_ID, ATTEMPT)
+
+
 if __name__ == "__main__":
     unittest.main()

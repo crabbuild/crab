@@ -80,7 +80,7 @@ def desktop_url(fixture: dict) -> str:
 
 
 async def run_sidecar(command: list[str], root: Path, env: dict[str, str], open_request: tuple[str, dict],
-                      read_request: dict) -> tuple[dict, dict, list[bytes]]:
+                      read_request: dict, *, repeat: bool = False) -> list[tuple[dict, dict, list[bytes]]]:
     with TemporaryFile(dir=root) as trace:
         process = await asyncio.create_subprocess_exec(*command, cwd=root, env=env,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=trace, limit=RPC_FRAME_LIMIT)
@@ -101,6 +101,15 @@ async def run_sidecar(command: list[str], root: Path, env: dict[str, str], open_
                 return frame["result"]
             raise ValueError(f"desktop sidecar stopped during {method}")
 
+        async def timed_read(sequence: int, started: int, timer: int) -> tuple[dict, dict, int]:
+            result = await rpc(sequence, "read_bytes", read_request)
+            timing = {"started_at_unix_ms": started // 1_000_000, "finished_at_unix_ms": time.time_ns() // 1_000_000,
+                      "elapsed_ms": (time.monotonic_ns() - timer + 999_999) // 1_000_000}
+            # Read events precede the response. Each arm consumes only its trace segment.
+            trace_end = os.fstat(trace.fileno()).st_size
+            require(trace_end <= MAX_TRACE_BYTES, "desktop read trace exceeds the collection limit")
+            return result, timing, trace_end
+
         try:
             async with asyncio.timeout(300):
                 method, params = open_request
@@ -110,14 +119,10 @@ async def run_sidecar(command: list[str], root: Path, env: dict[str, str], open_
                 require(opened.get("repo_id") == repo_id and opened.get("is_remote") is (method == "open_url")
                         and (method != "open_url" or opened.get("url") == params["url"]),
                         "desktop sidecar opened a different repository")
-                result = await rpc(2, "read_bytes", read_request)
-                timing = {"started_at_unix_ms": started // 1_000_000, "finished_at_unix_ms": time.time_ns() // 1_000_000,
-                          "elapsed_ms": (time.monotonic_ns() - timer + 999_999) // 1_000_000}
-                # The sidecar emits read events before its response. Snapshot the trace length
-                # after that response so close and shutdown cannot add traffic to the sample.
-                trace_end = os.fstat(trace.fileno()).st_size
-                require(trace_end <= MAX_TRACE_BYTES, "desktop read trace exceeds the collection limit")
-                require(await rpc(3, "close", {"repo_id": repo_id}) == {"closed": repo_id},
+                samples = [await timed_read(2, started, timer)]
+                if repeat:
+                    samples.append(await timed_read(3, time.time_ns(), time.monotonic_ns()))
+                require(await rpc(len(samples) + 2, "close", {"repo_id": repo_id}) == {"closed": repo_id},
                         "desktop sidecar did not close the captured repository")
                 stdin.close()
                 while line := await stdout.readline():
@@ -137,16 +142,46 @@ async def run_sidecar(command: list[str], root: Path, env: dict[str, str], open_
                             process.kill()
                     await process.communicate()
         trace.seek(0)
-        return result, timing, trace.read(trace_end).splitlines()
+        captured = []
+        start = 0
+        for result, timing, end in samples:
+            captured.append((result, timing, trace.read(end - start).splitlines()))
+            start = end
+        return captured
 
 
-def fetch(args: argparse.Namespace) -> dict:
+def verified_payload(observed: dict, publication: dict) -> dict:
+    require(type(observed.get("size")) is int and observed["size"] == GIT_PAYLOAD_SIZE and observed.get("truncated") is False
+            and isinstance(observed.get("bytes_b64"), str), "desktop read did not return the complete published file")
+    try:
+        body = base64.b64decode(observed["bytes_b64"], validate=True)
+    except ValueError:
+        raise ValueError("desktop read returned invalid byte encoding") from None
+    payload_sha256 = hashlib.sha256(body).hexdigest()
+    require(len(body) == GIT_PAYLOAD_SIZE and payload_sha256 == publication["sha256"],
+            "desktop read returned different bytes from the native publication")
+    git_oid = hashlib.sha1(f"blob {len(body)}\0".encode() + body, usedforsecurity=False).digest()
+    return {"sha256": payload_sha256, "bytes": len(body), "git_blob_oid_sha256": hashlib.sha256(git_oid).hexdigest()}
+
+
+def measured_read(context: dict, timing: dict, lines: list[bytes], arm: str) -> dict:
+    responses: dict = {}
+    scope = context["scope"]
+    counters = measure(lines, scope, edge_responses=responses, expected_git_blob=context["git_blob_oid_sha256"])
+    return validate_desktop_git_read(context | timing | counters | {
+        "arm": arm, "edge_responses": responses, "native_traffic": measure_native(lines, scope),
+    }, scope, arm)
+
+
+def fetch(args: argparse.Namespace) -> tuple[dict, dict | None]:
     require(matches(COMMIT, args.source_sha) and matches(RUN_NUMBER, args.run_id) and matches(RUN_NUMBER, args.run_attempt),
             "exact workflow run provenance is required")
     fixture = approved_fixture(args.fixture, args.configuration_sha256)
     scope = fixture["scope"]
     require(is_direct_desktop_git_scope(scope) and fixture["view_suffix"] == "",
             "desktop Git qualification uses a direct fixture on the repository prefix")
+    repeat = args.warm_local_output is not None
+    require(not repeat or args.arm == "edge", "desktop warm-local reads must repeat an edge primer")
     provenance = {"scope": scope, "configuration_sha256": args.configuration_sha256, "source_sha": args.source_sha,
                   "workflow_run_id": args.run_id, "workflow_run_attempt": args.run_attempt}
     raw = read_git_record(args.receipt)
@@ -167,35 +202,31 @@ def fetch(args: argparse.Namespace) -> dict:
                 "CRAB_CACHE_DIR": str(cache), "CRAB_DESKTOP_LOG": (
                     f"{READ_TARGET}=debug,{TARGET}=debug,{NATIVE_TARGET}=debug,{GCS_VIEWER_LOG_TARGET}=trace"
                 )}
-        observed, timing, lines = asyncio.run(run_sidecar(
+        samples = asyncio.run(run_sidecar(
             [str(sidecar), "--log-json"], scratch, env,
             ("open_url", identity | {"url": desktop_url(fixture)}),
-            identity | {"path": PAYLOAD, "rev": publication["oid"], "max_bytes": GIT_PAYLOAD_SIZE},
+            identity | {"path": PAYLOAD, "rev": publication["oid"], "max_bytes": GIT_PAYLOAD_SIZE}, repeat=repeat,
         ))
-    require(type(observed.get("size")) is int and observed["size"] == GIT_PAYLOAD_SIZE and observed.get("truncated") is False
-            and isinstance(observed.get("bytes_b64"), str), "desktop read did not return the complete published file")
+    observed, timing, lines = samples[0]
+    payload = verified_payload(observed, publication)
     require(publication["visible_at_unix_ms"] <= timing["started_at_unix_ms"],
             "desktop read started before the confirmed publication")
-    try:
-        body = base64.b64decode(observed["bytes_b64"], validate=True)
-    except ValueError:
-        raise ValueError("desktop read returned invalid byte encoding") from None
-    payload_sha256 = hashlib.sha256(body).hexdigest()
-    require(len(body) == GIT_PAYLOAD_SIZE and payload_sha256 == publication["sha256"],
-            "desktop read returned different bytes from the native publication")
-    git_oid = hashlib.sha1(f"blob {len(body)}\0".encode() + body, usedforsecurity=False).digest()
-    blob_sha256 = hashlib.sha256(git_oid).hexdigest()
     reader = verified_target(lines, fixture, args.arm, approval)
-    responses: dict = {}
-    counters = measure(lines, scope, edge_responses=responses, expected_git_blob=blob_sha256)
-    client = provenance | timing | counters | {
-        "schema": "crab.cdn-desktop-git-read/v1", "arm": args.arm, "platform": platform,
-        "publication_sha256": hashlib.sha256(raw).hexdigest(), "commit": publication["oid"], "sha256": payload_sha256,
-        "bytes": len(body), "git_blob_oid_sha256": blob_sha256, "candidate": candidate,
+    context = provenance | payload | {
+        "schema": "crab.cdn-desktop-git-read/v1", "platform": platform,
+        "publication_sha256": hashlib.sha256(raw).hexdigest(), "commit": publication["oid"], "candidate": candidate,
         "cache_root_sha256": hashlib.sha256(os.fsencode(cache)).hexdigest(), "reader": reader, "approval_sha256": approval,
-        "edge_responses": responses, "native_traffic": measure_native(lines, scope),
     }
-    return validate_desktop_git_read(client, scope, args.arm)
+    primary = measured_read(context, timing, lines, args.arm)
+    local = None
+    if repeat:
+        observed, local_timing, local_lines = samples[1]
+        require(verified_payload(observed, publication) == payload
+                and timing["finished_at_unix_ms"] <= local_timing["started_at_unix_ms"],
+                "desktop repeat did not read the published blob after its primer")
+        local = measured_read(context | {"primer_sha256": hashlib.sha256(json_record(primary).encode()).hexdigest()},
+                              local_timing, local_lines, "warm_local")
+    return primary, local
 
 
 def main() -> int:
@@ -212,15 +243,21 @@ def main() -> int:
     parser.add_argument("--run-attempt", required=True)
     parser.add_argument("--private-reader", type=Path)
     parser.add_argument("--export-approval", type=Path)
+    parser.add_argument("--warm-local-output", type=Path, help="write the timed repeat in the same open sidecar repository")
     try:
-        result = fetch(parser.parse_args())
+        args = parser.parse_args()
+        result, repeat = fetch(args)
+        if repeat is not None:
+            with args.warm_local_output.open("x", encoding="utf-8", newline="\n") as output:
+                output.write(json_record(repeat))
     except (TimeoutError, subprocess.TimeoutExpired):
         print("error: desktop sidecar qualification timed out", file=sys.stderr)
         return 1
     except (ExportError, OSError, ValueError):
         print("error: desktop CDN read could not verify the fixture, sidecar or observations", file=sys.stderr)
         return 1
-    print(json_record(result), end="")
+    # The repeat pins these exact bytes, including the LF used on Windows.
+    sys.stdout.buffer.write(json_record(result).encode())
     return 0
 
 

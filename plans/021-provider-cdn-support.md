@@ -830,11 +830,15 @@ close. `crab/scripts/e2e/run_cdn_desktop_workload.py` checks the registered
 sidecar digest, compiled source and platform, and the worker's user binding
 before opening the remote through RPC. Its record retains the build profile,
 features and compiled release policy digest. It reads the published commit
-in a fresh cache and verifies the returned
-bytes, captured native target, and edge request fingerprints. Its native arm
+in a fresh cache and verifies the returned bytes, captured native target,
+and edge request fingerprints. Its native arm
 checks that the same user binding has its viewer approval withdrawn. The
 provider log collector can join the desktop edge read to the actual responses.
-Cloud-backed runs, matching regional samples and release assembly remain open.
+The regional collector verifies each fresh desktop publication against the
+independent native ref observation, the preregistered candidate and target,
+and provider logs. The warm-local arm repeats the verified blob in the same
+open sidecar without edge requests and pins its warm edge primer's record.
+Cloud-backed samples and desktop release assembly remain open.
 
 The protected workflow or its dedicated workers own producing these raw
 observations. The assembly and release jobs own rejecting missing, mismatched

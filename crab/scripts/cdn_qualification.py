@@ -174,6 +174,7 @@ GIT_FETCH_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | {
     "platform", "publication_sha256", "candidate", "reader", "edge_responses", "native_traffic",
 }
 SDK_GIT_ACTION = "sdk-git-snapshot"
+DESKTOP_GIT_ACTION = "desktop-git-read"
 DIRECT_READ_TARGET_FIELDS = CLI_NATIVE_FIELDS | {"binding_sha256", "public_export_sha256"}
 SDK_PAYLOAD_FIELDS = {"sha256", "bytes", "git_blob_oid_sha256"}
 SDK_TIMING_FIELDS = {"started_at_unix_ms", "finished_at_unix_ms", "elapsed_ms"}
@@ -1141,6 +1142,20 @@ def benchmark_registration(registration: Any) -> dict[str, Any]:
             expected.add("viewer_approval_sha256")
             require(matches(SHA256, registration.get("viewer_approval_sha256")),
                     "private SDK benchmark needs the approved issuer binding")
+    # A transport canary can report a fixture summary. Only the desktop
+    # product workload can feed the regional raw evidence collector.
+    if is_direct_desktop_git_scope(registration["scope"]) and registration.get("workload") == DESKTOP_GIT_ACTION:
+        expected.update(("candidate", "desktop_candidate", "desktop_native_target", "viewer_binding_sha256"))
+        verify_read_candidate(registration.get("candidate"), registration.get("source_sha"))
+        verify_read_candidate(registration.get("desktop_candidate"), registration.get("source_sha"), consumer="desktop sidecar")
+        target = fields(registration.get("desktop_native_target"), CLI_NATIVE_FIELDS, "registered desktop native target")
+        require(matches(SHA256, registration.get("viewer_binding_sha256"))
+                and all(matches(SHA256, value) for value in target.values()),
+                "desktop benchmark needs the read workload and approved native target and viewer binding")
+        if access == "private":
+            expected.add("viewer_approval_sha256")
+            require(matches(SHA256, registration.get("viewer_approval_sha256")),
+                    "private desktop benchmark needs the approved issuer binding")
     if is_direct_sdk_hydration_scope(registration["scope"]):
         expected.update(("sdk_candidate", "viewer_binding_sha256", "viewer_approval_sha256",
                          "hydration_workload_sha256"))
@@ -1416,8 +1431,9 @@ def verify_git_traffic(client: dict[str, Any], edge: str, label: str) -> None:
 
 def validate_desktop_git_read(value: Any, scope: str, arm: str) -> dict[str, Any]:
     edge, access, _, _, _ = scope_parts(scope)
-    client = fields(value, DESKTOP_GIT_READ_FIELDS, "desktop Git read")
-    require(is_direct_desktop_git_scope(scope) and client["scope"] == scope and arm in ("edge", "origin")
+    expected = DESKTOP_GIT_READ_FIELDS | ({"primer_sha256"} if arm == "warm_local" else set())
+    client = fields(value, expected, "desktop Git read")
+    require(is_direct_desktop_git_scope(scope) and client["scope"] == scope and arm in ("edge", "origin", "warm_local")
             and client["schema"] == "crab.cdn-desktop-git-read/v1" and client["arm"] == arm
             and matches(COMMIT, client["source_sha"]) and matches(LABEL, client["platform"])
             and all(matches(RUN_NUMBER, client[key]) for key in ("workflow_run_id", "workflow_run_attempt")),
@@ -1431,10 +1447,15 @@ def validate_desktop_git_read(value: Any, scope: str, arm: str) -> dict[str, Any
     reader = fields(client["reader"], DIRECT_READ_TARGET_FIELDS, "desktop read target")
     require(all(matches(SHA256, reader[key]) for key in CLI_NATIVE_FIELDS), "invalid desktop native placement")
     verify_git_traffic(client, edge, "desktop Git read")
-    if arm == "edge":
+    if arm != "origin":
         require(matches(SHA256, reader["binding_sha256"]) and matches(SHA256, client["approval_sha256"])
                 and reader["public_export_sha256"] == (client["approval_sha256"] if access == "public" else ""),
                 "desktop edge read requires the approved binding")
+    if arm == "warm_local":
+        require(matches(SHA256, client["primer_sha256"]) and positive(client["local_payload_hits"])
+                and all(client[key] == 0 for key in PRODUCT_COUNTERS - {"local_payload_hits"}),
+                "desktop repeat requires its own primer and a verified local Git blob without edge traffic")
+    elif arm == "edge":
         require(all(positive(client[key]) for key in ("observed_edge_gets", "verified_edge_payloads", "edge_bytes"))
                 and client["local_payload_hits"] == 0
                 # A fixture build may serve related immutable metadata through the edge.
@@ -1447,6 +1468,20 @@ def validate_desktop_git_read(value: Any, scope: str, arm: str) -> dict[str, Any
                 and all(client[key] == 0 for key in PRODUCT_COUNTERS)
                 and positive(native["get_responses"]) and positive(native["body_bytes"]),
                 "desktop origin control requires native payload reads without edge or cached payload activity")
+    return client
+
+
+def verify_desktop_benchmark_read(raw: bytes, provenance: dict[str, Any], spec: dict[str, Any], arm: str) -> dict[str, Any]:
+    client = validate_desktop_git_read(decode(raw), spec["scope"], arm)
+    require(all(client[key] == provenance[key] for key in CDN_PROVENANCE_FIELDS | {"platform"})
+            and client["candidate"] == spec["desktop_candidate"],
+            "desktop benchmark did not run the registered desktop build for this workflow")
+    binding = "" if arm == "origin" else spec["viewer_binding_sha256"]
+    export = "" if arm == "origin" else spec.get("publication_sha256", "")
+    approval = "" if arm == "origin" else spec.get("viewer_approval_sha256", export)
+    reader = spec["desktop_native_target"] | {"binding_sha256": binding, "public_export_sha256": export}
+    require(client["reader"] == reader
+            and client["approval_sha256"] == approval, "desktop benchmark changed its registered target or viewer approval")
     return client
 
 
@@ -2228,11 +2263,12 @@ def collect_git_performance(
     hydration = is_direct_sdk_hydration_scope(scope)
     require(hydration == (verify_hydration is not None), "SDK hydration benchmarks require verified publication and placement")
     sdk = is_direct_sdk_git_scope(scope)
+    desktop = is_direct_desktop_git_scope(scope) and spec["workload"] == DESKTOP_GIT_ACTION
     service = is_direct_service_scope(scope)
     cli_workload = requires_cli_workload(scope)
     require(service == (service_row is not None), "service benchmarks require the retained lifecycle row")
-    require(sdk or hydration or service or (cli_workload and spec["workload"] == cli_action_name(scope)),
-            "benchmark must register a supported direct CLI, SDK or service workload")
+    require(sdk or desktop or hydration or service or (cli_workload and spec["workload"] == cli_action_name(scope)),
+            "benchmark must register a supported direct CLI, SDK, desktop or service workload")
     if sdk:
         require(inputs.is_dir(), "direct SDK Git requires retained regional SDK benchmark records")
     if hydration:
@@ -2254,6 +2290,7 @@ def collect_git_performance(
     service_instances = set()
     provider_request_ids = set(product_request_ids or ())
     cache_roots = set()
+    desktop_commits = set()
     published_at, retired_at, export_ready_at = 0, 0, 0
     if service_row is not None:
         require(inputs.is_dir(), "direct service reads require retained regional benchmark records")
@@ -2344,6 +2381,20 @@ def collect_git_performance(
                         require(client["primer_sha256"] == primer_digest, f"{label} did not repeat its own warm edge snapshot")
                     payload = (client["commit"], client["sha256"], client["git_blob_oid_sha256"])
                     receipt = client["publication_sha256"]
+                elif desktop:
+                    client = verify_desktop_benchmark_read(client_raw, provenance, spec, GIT_MODES[arm])
+                    reader = client["reader"]
+                    cache_root = client["cache_root_sha256"]
+                    if arm == "warm_local":
+                        require(client["primer_sha256"] == primer_digest and cache_root == primer_cache,
+                                f"{label} did not repeat its own warm edge desktop read in the same cache")
+                    else:
+                        require(cache_root not in cache_roots, f"{label} reused a desktop cache root")
+                        cache_roots.add(cache_root)
+                    if arm == "warm_edge":
+                        primer_digest, primer_cache = digest, cache_root
+                    payload = (client["commit"], client["sha256"], client["git_blob_oid_sha256"])
+                    receipt = client["publication_sha256"]
                 elif service_anchor is not None:
                     client = validate_service_read(decode(client_raw), provenance, GIT_MODES[arm])
                     reader = client["reader"]
@@ -2389,7 +2440,7 @@ def collect_git_performance(
                 if native_target is not None:
                     require(all(reader[key] == native_target[key] for key in CLI_NATIVE_FIELDS),
                             f"{label} changed the independently observed native target")
-                fixtures.add((*payload, receipt, reader["origin_sha256"], reader["prefix_sha256"]))
+                fixtures.add((payload, receipt, reader["origin_sha256"], reader["prefix_sha256"]))
                 windows[arm] = (client["started_at_unix_ms"], client["finished_at_unix_ms"])
                 viewer_log = None
                 traffic = ViewerRequestMetrics(set(), 0, 0, False)
@@ -2410,9 +2461,16 @@ def collect_git_performance(
                 measured.update({key: external[key] for key in GIT_EXTERNAL_METRICS})
                 require(all(type(value) is int and value >= 0 for value in measured.values()),
                         f"{label} is missing measured metrics")
-                require(positive(measured["peak_memory_bytes"]) and (sdk or service or positive(measured["peak_disk_bytes"])),
+                require(positive(measured["peak_memory_bytes"])
+                        and (sdk or desktop or service or positive(measured["peak_disk_bytes"])),
                         f"{label} is missing fetch memory or disk measurements")
                 incomplete = client["incomplete_edge_bytes"]
+                transferred = measured["edge_bytes"] + incomplete
+                if desktop:
+                    # Product counters select Git. Cost and bandwidth cover every viewer request.
+                    responses = client["edge_responses"].values()
+                    transferred = max(transferred, sum(row["bytes"] for row in responses))
+                    incomplete = max(incomplete, sum(row["bytes"] for row in responses if not row["complete"]))
                 native = client["native_traffic"]
                 require(measured["origin_gets"] >= native["get_responses"] + traffic.origin_gets,
                         f"{label} undercounts observed native GET responses or logged CDN origin GETs")
@@ -2420,7 +2478,7 @@ def collect_git_performance(
                         f"{label} undercounts logged CDN cache fill bytes")
                 require(arm != "cold_edge" or traffic.successful_fill, f"{label} has no logged {fill_source}")
                 require(incomplete <= measured["rejected_bytes"]
-                        and measured["client_bytes"] >= native["body_bytes"] + measured["edge_bytes"] + incomplete,
+                        and measured["client_bytes"] >= native["body_bytes"] + transferred,
                         f"{label} undercounts observed client bytes")
                 pair[arm] = measured
                 if retain is not None:
@@ -2441,18 +2499,32 @@ def collect_git_performance(
             if provider == "s3":
                 require(windows["cold_edge"][1] // 1000 < windows["warm_edge"][0] // 1000,
                         f"{location} {index} CloudFront edge arms must use disjoint S3 log seconds")
-            if cli_workload:
+            if cli_workload or desktop:
                 publication_path = pair_path / "publication.json"
                 raw = read_git_record(inputs / publication_path)
                 publication = validate_git_publication(raw, provenance)
-                oid, payload_sha256, receipt, _, _ = next(iter(fixtures))
+                payload, receipt, _, _ = next(iter(fixtures))
+                oid, payload_sha256 = payload[:2]
                 require(publication["published"] and publication["candidate"] == spec["candidate"]
                         and receipt == hashlib.sha256(raw).hexdigest()
                         and (oid, payload_sha256) == (publication["oid"], publication["sha256"])
                         and publication["visible_at_unix_ms"] <= intervals[0][0],
-                        f"{location} {index} must verify the retained CLI publication after the ref became visible")
+                        f"{location} {index} must verify the retained {'desktop' if desktop else 'CLI'} publication after the ref became visible")
                 if retain is not None:
                     (retain / publication_path).write_bytes(raw)
+                if desktop:
+                    require(oid not in desktop_commits, f"{location} {index} reused a desktop benchmark commit")
+                    desktop_commits.add(oid)
+                    native_path = pair_path / GIT_NATIVE_REF_FILES["published"]
+                    native_raw = read_git_record(inputs / native_path)
+                    target = spec["desktop_native_target"]
+                    observed = verify_git_native_ref(decode(native_raw), provenance, publication, receipt, "published",
+                                                     target["origin_sha256"], prefix_sha256=target["prefix_sha256"])
+                    require(publication["visible_at_unix_ms"] <= observed["started_at_unix_ms"]
+                            <= observed["observed_at_unix_ms"] <= intervals[0][0],
+                            f"{location} {index} desktop reads require an independently observed native publication")
+                    if retain is not None:
+                        (retain / native_path).write_bytes(native_raw)
             previous_end = intervals[-1][1]
             pairs.append(pair)
         performance[location] = {"region": region, "pairs": pairs}
