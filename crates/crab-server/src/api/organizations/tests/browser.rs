@@ -1279,23 +1279,22 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
     assert_eq!(h.json(preference, &bob).await["busy"], false);
     let repository_rulesets = format!("{}/{owner}/library/rulesets", h.origin);
     let property_values = format!("/api/repos/{owner}/library/properties");
-    let members = format!("/api/repos/{owner}/library/members");
-    let replace_members = async |members_list| {
-        let revision = h.json(&members, &alice).await["revision"].clone();
+    let change_team_access = async |access: &str| {
+        let revision = h.json(&endpoint, &alice).await["revision"].clone();
         super::repositories::repository_write(
             &h,
             Method::PUT,
-            &members,
+            &endpoint,
             &alice,
             repo_id,
-            json!({"expected_revision":revision,"members":members_list,"groups":[]}),
+            json!({"expected_revision":revision,"teams":[{"team":team,"access":access}]}),
         )
         .await
         .error_for_status()
         .unwrap();
     };
     assert_eq!(h.json(&property_values, &bob).await["editable"], json!([]));
-    replace_members(json!([{"subject":"bob-id","name":"Bob","access":"admin"}])).await;
+    change_team_access("admin").await;
     assert_eq!(
         h.json(&property_values, &bob).await["editable"],
         json!([property])
@@ -1345,7 +1344,7 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
         h.json(&property_values, &alice).await["values"]["overrides"][property],
         true
     );
-    replace_members(json!([])).await;
+    change_team_access("write").await;
     bob_browser.run(&["reload"]).await;
     bob_browser.run(&["wait", "--text", "native-policy"]).await;
     let after_revocation = bob_browser.run(&["snapshot"]).await;

@@ -240,28 +240,23 @@ async fn organization_team_removal_revokes_existing_browser_git_and_lfs_access_a
         .await
         .unwrap()
         .revision;
-    for grant in [
-        json!({"team":team,"access":"admin"}),
-        json!({"team":Uuid::now_v7(),"access":"write"}),
-    ] {
-        let denied = write(
-            &h,
-            &origin_a,
-            &alice,
-            Method::PUT,
-            team_access,
-            json!({"expected_revision":revision,"teams":[grant]}),
-        )
-        .await;
-        assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
-    }
+    let denied = write(
+        &h,
+        &origin_a,
+        &alice,
+        Method::PUT,
+        team_access,
+        json!({"expected_revision":revision,"teams":[{"team":Uuid::now_v7(),"access":"admin"}]}),
+    )
+    .await;
+    assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
     write(
         &h,
         &origin_a,
         &alice,
         Method::PUT,
         team_access,
-        json!({"expected_revision":revision,"teams":[{"team":team,"access":"write"}]}),
+        json!({"expected_revision":revision,"teams":[{"team":team,"access":"admin"}]}),
     )
     .await
     .error_for_status()
@@ -286,6 +281,9 @@ async fn organization_team_removal_revokes_existing_browser_git_and_lfs_access_a
         [
             h.http
                 .get(format!("{origin}/api/repos/team/private/labels"))
+                .header("cookie", &bob),
+            h.http
+                .get(format!("{origin}/api/repos/team/private/members"))
                 .header("cookie", &bob),
             h.http
                 .get(format!(
@@ -318,6 +316,7 @@ async fn organization_team_removal_revokes_existing_browser_git_and_lfs_access_a
             .await
             .unwrap();
         assert_eq!(visible["repositories"][0]["access"], "write");
+        assert_eq!(visible["repositories"][0]["can_admin"], true);
         assert_eq!(
             visible["repositories"][0]["organization_id"],
             json!(organization)
@@ -332,6 +331,20 @@ async fn organization_team_removal_revokes_existing_browser_git_and_lfs_access_a
             .unwrap()
             .status(),
         StatusCode::NOT_FOUND
+    );
+    let current = catalog.membership("team", "private").await.unwrap();
+    assert_eq!(
+        write(
+            &h,
+            &origin_b,
+            &bob,
+            Method::PUT,
+            team_access,
+            json!({"expected_revision":current.revision,"teams":[]})
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND,
     );
     write(&h, &origin_a, &alice, Method::POST, &commands,
         json!({"request_id":Uuid::now_v7(),"command":{"kind":"member","team":team,"member":member,"version":1,"role":null}}))

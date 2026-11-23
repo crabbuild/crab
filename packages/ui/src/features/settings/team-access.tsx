@@ -20,6 +20,7 @@ const roles = [
   { value: "read", label: "Read" },
   { value: "triage", label: "Triage" },
   { value: "write", label: "Write" },
+  { value: "admin", label: "Admin" },
 ] as const;
 
 export function RepositoryTeamSettings({
@@ -263,6 +264,8 @@ function GrantEditor({
           <dd>Manage issues and pull requests without pushing code.</dd>
           <dt className="font-medium">Write</dt>
           <dd>Push changes and collaborate on the repository.</dd>
+          <dt className="font-medium">Admin</dt>
+          <dd>Manage repository settings and direct collaborator access.</dd>
         </dl>
       </details>
       {error && (

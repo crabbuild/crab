@@ -96,14 +96,13 @@ impl OrganizationAccess {
         let mut unique = HashSet::new();
         if self.id.is_nil()
             || self.teams.len() > MAX_TEAM_GRANTS
-            || self.teams.iter().any(|grant| {
-                grant.team.is_nil()
-                    || grant.access == crate::RepositoryAccess::Admin
-                    || !unique.insert(grant.team)
-            })
+            || self
+                .teams
+                .iter()
+                .any(|grant| grant.team.is_nil() || !unique.insert(grant.team))
         {
             return Err(CatalogError::Invalid(
-                "team grants need a valid organization and at most 100 unique teams with read, triage, or write access",
+                "team grants need a valid organization and at most 100 unique teams",
             ));
         }
         Ok(())

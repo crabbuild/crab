@@ -1203,7 +1203,8 @@ original receipt. Repository readers can open
 **Repository properties** from the repository's **Rulesets** page.
 Organization owners manage definitions and overrides. Enable **Allow repository
 administrators to set this property** on a definition to delegate its value
-to each repository's current administrators. On **Repository properties**,
+to each repository's current administrators, including members of teams with an
+Admin grant. On **Repository properties**,
 **Edit properties** shows the fields the signed-in account can edit. Delegation
 includes restoring defaults. Changes to a delegated value can change which
 organization rulesets apply.
@@ -1577,9 +1578,11 @@ crab-server --config server.toml repository set-organization \
 Use an empty `teams` array to bind ownership before granting access. The binding
 preserves the repository UUID, path, and existing individual and signed-group
 grants. Organization owners get repository Admin access. Team grants accept
-Read, Triage, or Write for up to 100 distinct live team UUIDs in the owning
-organization. The operator can replace grants for the existing owner using the
-same command. Transfer to another organization requires a separate operation.
+Read, Triage, Write, or Admin for up to 100 distinct live team UUIDs in the
+owning organization. Update all serving peers before assigning Admin to a team,
+since earlier servers reject catalog documents containing that role. The
+operator can replace grants for the existing owner using the same command.
+Transfer to another organization requires a separate operation.
 
 Organization owners can open **Settings → Team access** on the bound repository
 to find teams by name, add grants, change roles, and remove grants. **Save team
@@ -1593,9 +1596,12 @@ grant list with `PUT` and `{expected_revision, teams}`. Both responses include
 `team_names` keyed by the current team UUIDs. The mutation requires the session
 CSRF token and repository UUID header. A stale change returns 409. Grant changes
 use the catalog audit outbox. Direct member and team changes share the same
-revision. Repository admins without organization ownership cannot see or edit
-the grant list. Forks inherit access from their source. Authenticated catalog responses include
-`organization_id` for visible organization-owned repositories.
+revision. Organization owners control the team grant list. Team-derived Admin
+authorizes repository settings and direct collaborator management. A downgrade
+removes those permissions on the next
+request unless another grant provides Admin. Forks inherit access from their
+source. Authenticated catalog responses include `organization_id` for visible
+organization-owned repositories.
 
 Each protected request resolves current organization and team membership.
 Effective access is the highest valid grant, subject to the Git token's ceiling.
