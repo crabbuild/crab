@@ -1992,9 +1992,12 @@ digest as `benchmarks_sha256`. The release job checks the run via GitHub and
 compares the downloaded registration file to the separately approved digest.
 
 Every published CLI platform requires its own CLI and mount evidence when the
-corresponding scope is enabled. Desktop requires evidence for the published
-installers and remote runtimes, including Linux arm64. SDK, Server and S3
-gateway scopes currently require Linux x86_64 evidence in this gate. Each
+corresponding scope is enabled. All enabled CLI scopes on one platform must
+use the same measured executable digest. The release jobs package and publish
+from the source commit verified during release preparation. Desktop requires
+evidence for the published installers and remote runtimes, including Linux
+arm64. SDK, Server and S3 gateway scopes currently require Linux x86_64
+evidence in this gate. Each
 future product release must cover its own published platform matrix.
 
 ## Explicit development reset

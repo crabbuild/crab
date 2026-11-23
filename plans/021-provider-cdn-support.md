@@ -734,6 +734,9 @@ and edge payload through redacted observations.
   before the CLI and desktop jobs. It uses the exact successful workflow run
   attempt and the previously approved benchmark digest, then verifies every
   enabled row on the required platforms against the compiled scope inventory.
+  Enabled CLI scopes on the same platform share the measured executable
+  digest. The release jobs use the verified source commit for packaging and
+  publication.
   The provider workflow can qualify native S3 using a dedicated OIDC role.
   `crab/scripts/e2e/run_cdn_transport_checks.py` records the exact GET and range,
   mutable and neighbor denial, and signed viewer expiry traces from an

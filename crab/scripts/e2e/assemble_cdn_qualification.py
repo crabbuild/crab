@@ -26,7 +26,7 @@ from cdn_qualification import (  # noqa: E402
     matches, read_trace, release_scopes, require,
     is_managed_cli_git_scope, required_check_names, required_platform_rows, requires_cli_workload, requires_desktop_workload,
     scope_parts, verify_bundle_row,
-    verify_cleanup_trace, verify_deployment_policy_trace,
+    verify_cleanup_trace, verify_deployment_policy_trace, verify_release_cli_binaries,
 )
 from public_inventory import ExportError, read_document
 
@@ -107,6 +107,7 @@ def assemble_bundle(
     release_rows = required_platform_rows(scopes)
     missing = release_rows - registrations.keys()
     require(not missing, f"missing required CDN platform registrations: {', '.join(sorted(missing))}")
+    verify_release_cli_binaries(registrations, release_rows)
     origin_inputs = inputs if native_reports is None else native_reports
     canaries = load_canary_traces(transport_traces, source, run_id, attempt) if transport_traces is not None else {}
 

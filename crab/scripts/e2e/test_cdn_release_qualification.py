@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -81,6 +82,33 @@ class CdnReleaseQualificationTests(unittest.TestCase):
             self.directory, self.policy, RELEASE.release_scopes(self.policy), fixture.COMMIT,
             RUN_ID, ATTEMPT, digest,
         ), len(fixture.CDN.CLI_PLATFORMS))
+
+    def test_cli_scopes_require_one_measured_binary_per_platform(self) -> None:
+        scopes = {"cloudfront/private/cli/git/direct", "cloudfront/private/cli/lfs/direct"}
+        self.policy.write_text("".join(map(fixture.release_policy_row, sorted(scopes))), encoding="utf-8")
+        policy_digest = hashlib.sha256(self.policy.read_bytes()).hexdigest()
+        registrations = {
+            f"{scope}/{platform}": {
+                "candidate": fixture.cli_candidate(scope, platform) | {"release_policy_sha256": policy_digest},
+            }
+            for scope in scopes for platform in fixture.CDN.CLI_PLATFORMS
+        }
+        path = self.directory / "benchmarks.json"
+        with patch.object(RELEASE, "verify_bundle_row") as individual_row:
+            digest = fixture.json_file(path, registrations)
+            self.assertEqual(RELEASE.verify_bundle(
+                self.directory, self.policy, scopes, fixture.COMMIT, RUN_ID, ATTEMPT, digest,
+            ), len(registrations))
+            individual_row.reset_mock()
+
+            lfs = registrations["cloudfront/private/cli/lfs/direct/linux-x86_64"]
+            lfs["candidate"]["binary_sha256"] = "f" * 64
+            digest = fixture.json_file(path, registrations)
+            with self.assertRaisesRegex(ValueError, "same measured CLI binary.*linux-x86_64"):
+                RELEASE.verify_bundle(
+                    self.directory, self.policy, scopes, fixture.COMMIT, RUN_ID, ATTEMPT, digest,
+                )
+            individual_row.assert_not_called()
 
     def test_complete_mount_xorb_bundle_verifies_every_release_platform(self) -> None:
         digest = self.bundle("mount", *fixture.CDN.CLI_PLATFORMS, family="xorb")

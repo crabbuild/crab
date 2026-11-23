@@ -324,6 +324,23 @@ def required_platform_rows(scopes: set[str]) -> set[str]:
     return rows
 
 
+def verify_release_cli_binaries(registrations: dict[str, Any], rows: set[str]) -> None:
+    """Require one measured executable per platform across enabled CLI scopes."""
+    binaries = {}
+    for row in sorted(rows):
+        scope, platform = row.rsplit("/", 1)
+        if not requires_cli_workload(scope):
+            continue
+        registration = registrations.get(row)
+        require(isinstance(registration, dict), f"missing approved CDN benchmark registration for {row}")
+        candidate = registration.get("candidate")
+        require(isinstance(candidate, dict) and matches(SHA256, candidate.get("binary_sha256")),
+                f"missing measured CLI binary digest for {row}")
+        digest = candidate["binary_sha256"]
+        require(binaries.setdefault(platform, digest) == digest,
+                f"enabled CDN scopes must use the same measured CLI binary for {platform}")
+
+
 def verify_bundle_row(
     directory: Path, row: str, registration: Any, source: str, run_id: str, attempt: str,
     *, policy: Path | None = None,

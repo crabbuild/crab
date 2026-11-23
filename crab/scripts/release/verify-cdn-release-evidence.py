@@ -19,6 +19,7 @@ sys.path.insert(0, str(SCRIPTS))
 from cdn_qualification import (  # noqa: E402
     COMMIT, RUN_NUMBER, SHA256, decode, fields, matches, release_scopes, require,
     required_platform_rows, verify_bundle_row,
+    verify_release_cli_binaries,
 )
 
 
@@ -51,6 +52,7 @@ def verify_bundle(
     registrations = decode(raw)
     require(isinstance(registrations, dict), "CDN benchmark registrations must be an object")
     rows = required_platform_rows(scopes)
+    verify_release_cli_binaries(registrations, rows)
     for row in sorted(rows):
         verify_bundle_row(directory, row, registrations.get(row), source, run_id, attempt, policy=policy)
     return len(rows)

@@ -201,6 +201,20 @@ def check_release_workflow(root: Path) -> list[str]:
     path = root / ".github" / "workflows" / "release.yml"
     text = read_text(path)
     errors: list[str] = []
+    prepared_checkout = re.compile(
+        r"(?m)^      - uses: actions/checkout@[^\n]+\n"
+        r"        with:\n"
+        r"(?:          [^\n]+\n)*?"
+        r"          ref: \$\{\{ needs\.prepare\.outputs\.source_sha \}\}$"
+    )
+    for job_name in ("build", "publish"):
+        try:
+            job = workflow_job(text, job_name)
+        except ValueError as error:
+            errors.append(f"release.yml: {error}")
+        else:
+            if not prepared_checkout.search(job):
+                errors.append(f"release.yml {job_name}: checkout must use the verified source SHA")
 
     # Rollback reads are qualified against a tagged artifact, never a mutable
     # rebuilt checkout. Keep its identity and verification part of this gate.
