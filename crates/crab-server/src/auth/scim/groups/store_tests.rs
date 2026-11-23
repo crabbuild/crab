@@ -338,20 +338,7 @@ async fn native_browser_filters_and_exports_scim_team_sync_events() {
     let browser = Browser::new("scim-audit");
     let url = format!("{}/-/organizations/{org}?tab=audit", h.origin);
     browser.run(&["open", &url]).await;
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    browser
-        .run(&[
-            "find",
-            "role",
-            "button",
-            "click",
-            "--name",
-            "Continue to sign in",
-            "--exact",
-        ])
-        .await;
+    browser.sign_in().await;
     browser.run(&["wait", "#audit-action"]).await;
     browser
         .run(&["select", "#audit-action", "team_group_sync"])

@@ -348,20 +348,7 @@ async fn workspace_search_indexes_and_checks_a_real_repository_corpus() {
     browser
         .run(&["open", &format!("{}/-/code-search", h.origin)])
         .await;
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    browser
-        .run(&[
-            "find",
-            "role",
-            "button",
-            "click",
-            "--name",
-            "Continue to sign in",
-            "--exact",
-        ])
-        .await;
+    browser.sign_in().await;
     browser.run(&["wait", "#workspace-search-text"]).await;
     browser
         .run(&[

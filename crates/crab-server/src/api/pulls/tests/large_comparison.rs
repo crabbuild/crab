@@ -218,20 +218,7 @@ async fn native_large_pull_opens_a_file_and_publishes_an_exact_review_anchor() {
     browser
         .run(&["open", &format!("{}/team/private/pull/1/files", h.origin)])
         .await;
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    browser
-        .run(&[
-            "find",
-            "role",
-            "button",
-            "click",
-            "--name",
-            "Continue to sign in",
-            "--exact",
-        ])
-        .await;
+    browser.sign_in().await;
     browser.run(&["wait", "--text", "516 files"]).await;
     browser
         .run(&["wait", "[data-change-path='README.md'] diffs-container"])
@@ -495,10 +482,7 @@ async fn commit_suggestions_across_pages(
             &format!("{}/team/private/pull/1/files#review-diff-36", h.origin),
         ])
         .await;
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    click(&browser, "button", "Continue to sign in").await;
+    browser.sign_in().await;
     browser
         .run(&["wait", "--url", "**/pull/1/files#review-diff-36"])
         .await;

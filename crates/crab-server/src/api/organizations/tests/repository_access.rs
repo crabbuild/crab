@@ -237,20 +237,7 @@ async fn native_browser_inspects_the_member_and_refreshes_after_a_team_revocatio
     let browser = Browser::new("member-access");
     let root = format!("{}/-/organizations/{}", f.h.origin, f.organization);
     browser.run(&["open", &root]).await;
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    browser
-        .run(&[
-            "find",
-            "role",
-            "button",
-            "click",
-            "--name",
-            "Continue to sign in",
-            "--exact",
-        ])
-        .await;
+    browser.sign_in().await;
     let action = format!("View repository access for {}", f.member);
     browser
         .run(&["wait", "--text", "Organization members"])

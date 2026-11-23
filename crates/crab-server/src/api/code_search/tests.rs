@@ -715,19 +715,7 @@ async fn native_browser_finds_symbols_across_repositories_and_opens_the_definiti
     }
     let browser = crate::test_support::http::browser::Browser::new("workspace-code-search");
     browser.run(&["open", &h.origin]).await;
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    browser
-        .run(&[
-            "find",
-            "role",
-            "button",
-            "click",
-            "--name",
-            "Continue to sign in",
-        ])
-        .await;
+    browser.sign_in().await;
     browser.run(&["wait", "a[href='/-/code-search']"]).await;
     browser
         .run(&[

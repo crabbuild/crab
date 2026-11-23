@@ -222,20 +222,7 @@ async fn deep_pull_commit_pages_match_git_and_render_in_the_browser() {
     browser
         .run(&["open", &format!("{}/team/private/pull/1", h.origin)])
         .await;
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    browser
-        .run(&[
-            "find",
-            "role",
-            "button",
-            "click",
-            "--name",
-            "Continue to sign in",
-            "--exact",
-        ])
-        .await;
+    browser.sign_in().await;
     browser.run(&["wait", "--text", "Deep branch review"]).await;
     browser
         .run(&[

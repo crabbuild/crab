@@ -193,7 +193,7 @@ async fn native_browser_moderator_edits_another_authors_issue_and_comment() {
             .run(&["find", "role", "button", "click", "--name", name, "--exact"])
             .await;
     };
-    click("Continue to sign in").await;
+    browser.sign_in().await;
     click("Edit issue").await;
     browser
         .run(&["fill", "#edit-issue-title", "Moderated in the browser"])

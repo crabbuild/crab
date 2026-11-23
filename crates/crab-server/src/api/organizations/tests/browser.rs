@@ -69,7 +69,7 @@ async fn native_browser_schedules_auto_merge_and_checks_release_it() {
             .run(&["find", "role", "button", "click", "--name", text, "--exact"])
             .await;
     };
-    click("Continue to sign in").await;
+    browser.sign_in().await;
     browser.run(&["wait", "--text", "Allow auto-merge"]).await;
     browser
         .run(&[
@@ -221,7 +221,8 @@ async fn native_browser_squashes_a_protected_private_fork_pull_request() {
     browser
         .run(&["open", &format!("{}/{owner}/library", h.origin)])
         .await;
-    for action in ["Continue to sign in", "Fork repository", "Create fork"] {
+    browser.sign_in().await;
+    for action in ["Fork repository", "Create fork"] {
         browser.run(&["wait", "--text", action]).await;
         browser
             .run(&[
@@ -846,11 +847,8 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
     let url = format!("{}/{owner}/library/settings/team-access", h.origin);
     let browser = Browser::new("team-access");
     browser.run(&["open", &url]).await;
-    let actions: [(&[&str], &str); 3] = [
-        (
-            &["wait", "--text", "Continue to sign in"],
-            "Continue to sign in",
-        ),
+    browser.sign_in().await;
+    let actions: [(&[&str], &str); 2] = [
         (&["wait", "--text", "Add team"], "Add team"),
         (
             &["wait", "[aria-label='Add Engineering']"],
@@ -1408,20 +1406,7 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
             &format!("{}/-/settings/review-availability", h.origin),
         ])
         .await;
-    bob_browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    bob_browser
-        .run(&[
-            "find",
-            "role",
-            "button",
-            "click",
-            "--name",
-            "Continue to sign in",
-            "--exact",
-        ])
-        .await;
+    bob_browser.sign_in().await;
     let status = "#review-availability-choice";
     let save = [
         "find",
@@ -1762,33 +1747,13 @@ async fn native_browser_invitation_consent_and_removed_member_privacy() {
     let invitee = Browser::new("invitee");
     let root = format!("{}/-/organizations/{id}", h.origin);
     owner.run(&["open", &root]).await;
-    owner
-        .run(&[
-            "find",
-            "role",
-            "button",
-            "click",
-            "--name",
-            "Continue to sign in",
-            "--exact",
-        ])
-        .await;
+    owner.sign_in().await;
     owner.run(&["wait", "--text", "Organization members"]).await;
     *h.provider.mode.lock().await = "member".into();
     invitee
         .run(&["open", &format!("{}/-/profile", h.origin)])
         .await;
-    invitee
-        .run(&[
-            "find",
-            "role",
-            "button",
-            "click",
-            "--name",
-            "Continue to sign in",
-            "--exact",
-        ])
-        .await;
+    invitee.sign_in().await;
     invitee.run(&["wait", "--text", "Public profile"]).await;
     invitee
         .run(&["find", "label", "Username", "fill", "bob-qualification"])

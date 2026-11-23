@@ -559,20 +559,7 @@ async fn commit_issue_closure_recovers_from_a_committed_default_ref_receipt() {
     browser
         .run(&["open", &format!("{}/team/private/issues/1", h.origin)])
         .await;
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    browser
-        .run(&[
-            "find",
-            "role",
-            "button",
-            "click",
-            "--name",
-            "Continue to sign in",
-            "--exact",
-        ])
-        .await;
+    browser.sign_in().await;
     browser.run(&["wait", "--fn", &format!(
         "[...document.querySelectorAll('.conversation-activity')].some(event => event.textContent.includes('closed as completed') && event.querySelector('a[href=\"/team/private/commit/{closing}\"]')?.textContent === '{}')", &closing[..7]
     )]).await;

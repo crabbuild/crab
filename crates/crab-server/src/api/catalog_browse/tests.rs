@@ -309,20 +309,7 @@ async fn native_browser_searches_and_opens_an_authorized_repository() {
     *h.provider.mode.lock().await = "member".into();
     let browser = Browser::new("repository-search");
     browser.run(&["open", &h.origin]).await;
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    browser
-        .run(&[
-            "find",
-            "role",
-            "button",
-            "click",
-            "--name",
-            "Continue to sign in",
-            "--exact",
-        ])
-        .await;
+    browser.sign_in().await;
     browser.run(&["wait", "--text", "Your repositories"]).await;
     browser
         .run(&["wait", "select[aria-label='Archive status']"])

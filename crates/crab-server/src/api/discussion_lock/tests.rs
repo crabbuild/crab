@@ -304,7 +304,7 @@ async fn moderator_can_lock_and_unlock_from_the_browser() {
             .run(&["find", "role", "button", "click", "--name", name, "--exact"])
             .await;
     };
-    click("Continue to sign in").await;
+    browser.sign_in().await;
     click("Lock conversation").await;
     browser
         .run(&["select", "[role=dialog] select", "off_topic"])

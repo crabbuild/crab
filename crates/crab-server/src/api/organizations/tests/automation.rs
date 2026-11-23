@@ -206,20 +206,7 @@ async fn native_browser_issues_an_organization_automation_credential() {
             ),
         ])
         .await;
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    browser
-        .run(&[
-            "find",
-            "role",
-            "button",
-            "click",
-            "--name",
-            "Continue to sign in",
-            "--exact",
-        ])
-        .await;
+    browser.sign_in().await;
     let click = async |name: &str| {
         browser
             .run(&["find", "role", "button", "click", "--name", name, "--exact"])

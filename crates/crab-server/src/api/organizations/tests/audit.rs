@@ -111,20 +111,7 @@ async fn native_browser_filters_and_downloads_the_organization_audit_log() {
     let browser = Browser::new("audit-log");
     let url = format!("{}/-/organizations/{}", f.h.origin, f.organization);
     browser.run(&["open", &url]).await;
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    browser
-        .run(&[
-            "find",
-            "role",
-            "button",
-            "click",
-            "--name",
-            "Continue to sign in",
-            "--exact",
-        ])
-        .await;
+    browser.sign_in().await;
     browser
         .run(&["wait", "[aria-label='Organization'] a[href$='tab=audit']"])
         .await;

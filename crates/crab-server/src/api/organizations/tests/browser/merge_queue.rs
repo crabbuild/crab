@@ -101,7 +101,7 @@ async fn native_browser_queue_publishes_tested_commits_in_admission_order() {
     browser
         .run(&["open", &format!("{}/team/private/settings", h.origin)])
         .await;
-    click("Continue to sign in").await;
+    browser.sign_in().await;
     browser.run(&["wait", "--text", "Allow merge queue"]).await;
     browser
         .run(&[
@@ -473,10 +473,7 @@ async fn native_browser_requires_the_queue_only_on_the_configured_branch() {
             &format!("{}/team/private/settings/branches", h.origin),
         ])
         .await;
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    click("Continue to sign in").await;
+    browser.sign_in().await;
     browser
         .run(&["wait", "button[aria-label='Edit main']"])
         .await;

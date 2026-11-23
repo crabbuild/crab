@@ -232,20 +232,7 @@ async fn browser_previews_and_downloads_the_displayed_lfs_commit_after_the_branc
             &format!("{}/team/private/blob/main/{NAME}", f.h.origin),
         ])
         .await;
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    browser
-        .run(&[
-            "find",
-            "role",
-            "button",
-            "click",
-            "--name",
-            "Continue to sign in",
-            "--exact",
-        ])
-        .await;
+    browser.sign_in().await;
     let download = "a[aria-label='Download Git LFS file']";
     browser.run(&["wait", download]).await;
     browser.run(&["wait", "--text", "Raw pointer"]).await;

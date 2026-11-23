@@ -275,19 +275,7 @@ async fn native_browser_isolates_subscriptions_and_delivery_history_by_destinati
             &format!("{}/team/private/settings/webhooks", h.origin),
         ])
         .await;
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    browser
-        .run(&[
-            "find",
-            "role",
-            "button",
-            "click",
-            "--name",
-            "Continue to sign in",
-        ])
-        .await;
+    browser.sign_in().await;
     let picker = "#webhook-destination-picker";
     let select = async |key: &str| {
         browser.run(&["wait", picker]).await;
@@ -426,19 +414,7 @@ async fn native_browser_enables_an_outbound_webhook_and_reads_the_delivered_pull
             &format!("{}/team/private/settings/webhooks", h.origin),
         ])
         .await;
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    browser
-        .run(&[
-            "find",
-            "role",
-            "button",
-            "click",
-            "--name",
-            "Continue to sign in",
-        ])
-        .await;
+    browser.sign_in().await;
     browser.run(&["wait", "--text", "Enable webhook"]).await;
     browser
         .run(&[
@@ -760,19 +736,7 @@ async fn native_browser_file_edit_triggers_a_push_webhook() {
             &format!("{}/team/private/edit/feature/README.md", h.origin),
         ])
         .await;
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    browser
-        .run(&[
-            "find",
-            "role",
-            "button",
-            "click",
-            "--name",
-            "Continue to sign in",
-        ])
-        .await;
+    browser.sign_in().await;
     let editor = "[aria-label='File content']";
     browser.run(&["wait", editor]).await;
     browser.run(&["fill", editor, "Browser edit for CI"]).await;

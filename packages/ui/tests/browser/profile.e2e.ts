@@ -446,7 +446,7 @@ test("account menu keeps sign-out failures recoverable and clears the session af
   await expectNoAccessibilityViolations(page);
   await page.getByRole("menuitem", { name: "Sign out", exact: true }).click();
   await expect(
-    page.getByRole("button", { name: "Continue to sign in", exact: true }),
+    page.getByRole("link", { name: "Continue to sign in", exact: true }),
   ).toBeVisible();
   await expect(account).toHaveCount(0);
 });

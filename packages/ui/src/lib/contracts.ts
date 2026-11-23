@@ -8,7 +8,7 @@ export type SessionIdentity = { issuer: string, subject: string, name: string, }
 export type SessionMode = "local" | "oidc" | "github";
 
 // prettier-ignore
-export type Session = { authenticated: boolean, mode: SessionMode, user: SessionIdentity | null, csrf: string | null, };
+export type Session = { authenticated: boolean, mode: SessionMode, user: SessionIdentity | null, csrf: string | null, can_sign_up: boolean, };
 
 // prettier-ignore
 export type MergeQueueState = "waiting" | "preparing" | "candidate_scheduled" | "publishing";

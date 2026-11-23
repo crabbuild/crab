@@ -338,7 +338,7 @@ async fn native_browser_previews_inserts_and_publishes_generated_release_notes()
             .run(&["find", "role", role, "click", "--name", name, "--exact"])
             .await;
     };
-    click("button", "Continue to sign in").await;
+    browser.sign_in().await;
     browser.run(&["wait", "#release-notes"]).await;
     browser.run(&["fill", "#release-tag", "release/v2"]).await;
     browser

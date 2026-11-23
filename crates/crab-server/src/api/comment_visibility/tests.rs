@@ -283,7 +283,7 @@ async fn embedded_browser_hides_reveals_and_restores_an_issue_comment() {
             .run(&["find", "role", "button", "click", "--name", name, "--exact"])
             .await;
     };
-    click("Continue to sign in").await;
+    browser.sign_in().await;
     click("Hide comment").await;
     browser
         .run(&["select", "[role=dialog] select", "spam"])

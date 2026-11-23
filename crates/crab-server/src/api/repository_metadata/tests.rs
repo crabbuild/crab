@@ -47,7 +47,7 @@ async fn native_browser_maintainer_edits_topics_description_and_merge_options() 
             .run(&["find", "role", "button", "click", "--name", name, "--exact"])
             .await;
     };
-    click("Continue to sign in").await;
+    browser.sign_in().await;
     click("Edit description").await;
     browser.run(&["wait", "--text", "Save description"]).await;
     browser

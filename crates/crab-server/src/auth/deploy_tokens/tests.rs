@@ -236,19 +236,7 @@ async fn native_browser_creates_and_revokes_ci_checkout_credentials() {
     browser
         .run(&["open", &format!("{}/team/private/settings", h.origin)])
         .await;
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    browser
-        .run(&[
-            "find",
-            "role",
-            "button",
-            "click",
-            "--name",
-            "Continue to sign in",
-        ])
-        .await;
+    browser.sign_in().await;
     browser
         .run(&["wait", "a[href$='/settings/deploy-tokens']"])
         .await;

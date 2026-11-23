@@ -1,18 +1,55 @@
 use super::{AuthError, Client};
 use crate::{OidcConfig, config::validate_identity_url};
 use axum::http;
-use openidconnect::{ClientId, ClientSecret, RedirectUrl, core::CoreProviderMetadata};
+use openidconnect::{
+    AdditionalProviderMetadata, ClientId, ClientSecret, ProviderMetadata, RedirectUrl,
+    core::{
+        CoreAuthDisplay, CoreClaimName, CoreClaimType, CoreClientAuthMethod, CoreGrantType,
+        CoreJsonWebKey, CoreJweContentEncryptionAlgorithm, CoreJweKeyManagementAlgorithm,
+        CoreResponseMode, CoreResponseType, CoreSubjectIdentifierType,
+    },
+};
+use serde::{Deserialize, Serialize};
 use url::Url;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct RegistrationMetadata {
+    #[serde(default)]
+    prompt_values_supported: Vec<String>,
+}
+
+impl AdditionalProviderMetadata for RegistrationMetadata {}
+
+type OidcProvider = ProviderMetadata<
+    RegistrationMetadata,
+    CoreAuthDisplay,
+    CoreClientAuthMethod,
+    CoreClaimName,
+    CoreClaimType,
+    CoreGrantType,
+    CoreJweContentEncryptionAlgorithm,
+    CoreJweKeyManagementAlgorithm,
+    CoreJsonWebKey,
+    CoreResponseMode,
+    CoreResponseType,
+    CoreSubjectIdentifierType,
+>;
+
+pub(super) struct DiscoveredOidc {
+    pub client: Client,
+    pub groups_scope: bool,
+    pub can_sign_up: bool,
+}
 
 pub(super) async fn discover(
     config: &OidcConfig,
     secret: Option<ClientSecret>,
     http: &reqwest::Client,
-) -> Result<(Client, bool), AuthError> {
+) -> Result<DiscoveredOidc, AuthError> {
     let transport =
         |request| bounded_http(http.clone(), request, config.public_url.scheme() == "http");
     let issuer = config.issuer.clone();
-    let metadata = CoreProviderMetadata::discover_async(issuer, &transport)
+    let metadata = OidcProvider::discover_async(issuer, &transport)
         .await
         .map_err(AuthError::provider)?;
     validate_identity_url(
@@ -30,10 +67,19 @@ pub(super) async fn discover(
     let groups_scope = metadata
         .scopes_supported()
         .is_some_and(|scopes| scopes.iter().any(|scope| scope.as_str() == "groups"));
+    let can_sign_up = metadata
+        .additional_metadata()
+        .prompt_values_supported
+        .iter()
+        .any(|prompt| prompt == "create");
     let client =
         Client::from_provider_metadata(metadata, ClientId::new(config.client_id.clone()), secret)
             .set_redirect_uri(RedirectUrl::new(redirect.to_string()).map_err(AuthError::provider)?);
-    Ok((client, groups_scope))
+    Ok(DiscoveredOidc {
+        client,
+        groups_scope,
+        can_sign_up,
+    })
 }
 
 pub(super) async fn bounded_http(

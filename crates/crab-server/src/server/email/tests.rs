@@ -187,7 +187,7 @@ async fn native_browser_opts_in_and_delivers_a_real_mention() {
             .run(&["find", "role", role, "click", "--name", label, "--exact"])
             .await;
     };
-    click("button", "Continue to sign in").await;
+    browser.sign_in().await;
     click("button", "Email settings").await;
     browser.run(&["wait", "--text", "bob@example.test"]).await;
     click("checkbox", "Send me notification emails").await;

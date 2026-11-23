@@ -365,20 +365,7 @@ async fn browser_previews_and_downloads_native_crab_artifacts() {
             &format!("{}/team/private/blob/main/asset.md", h.origin),
         ])
         .await;
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    browser
-        .run(&[
-            "find",
-            "role",
-            "button",
-            "click",
-            "--name",
-            "Continue to sign in",
-            "--exact",
-        ])
-        .await;
+    browser.sign_in().await;
     let download = "a[aria-label='Download Crab file']";
     browser.run(&["wait", download]).await;
     let href = browser.run(&["get", "attr", download, "href"]).await;

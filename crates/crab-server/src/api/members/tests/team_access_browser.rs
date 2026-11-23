@@ -199,8 +199,5 @@ async fn click(browser: &Browser, role: &str, name: &str) {
 
 async fn sign_in(browser: &Browser, url: &str) {
     browser.run(&["open", url]).await;
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    click(browser, "button", "Continue to sign in").await;
+    browser.sign_in().await;
 }

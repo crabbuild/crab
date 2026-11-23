@@ -260,20 +260,7 @@ async fn qualify(h: &Harness, alice: &str, case: &Case, root: &Path, scratch: &P
             &format!("{}{address}/compare/main...feature", h.origin),
         ])
         .await;
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    browser
-        .run(&[
-            "find",
-            "role",
-            "button",
-            "click",
-            "--name",
-            "Continue to sign in",
-            "--exact",
-        ])
-        .await;
+    browser.sign_in().await;
     let files_changed = format!("{} changed files", case.paths);
     browser.run(&["wait", "--text", &files_changed]).await;
     let title = format!("Review the {} tree", case.name);
