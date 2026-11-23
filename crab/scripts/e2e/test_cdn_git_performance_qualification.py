@@ -77,7 +77,8 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         digest = fixture.json_file(directory / "client.json", client)
         external = json.loads((directory / "measurement.json").read_bytes())
         fixture.json_file(directory / "measurement.json", external | {"client_report_sha256": digest})
-        proof_path = directory / fixture.CDN.VIEWER_REQUEST_FILES["s3"]
+        edge = fixture.CDN.scope_parts(client["scope"])[0]
+        proof_path = directory / fixture.CDN.VIEWER_REQUEST_FILES[fixture.CDN.PROVIDER_FOR_EDGE[edge]]
         if proof_path.exists():
             proof = json.loads(proof_path.read_bytes())
             fixture.json_file(proof_path, proof | {"client_report_sha256": digest})
@@ -142,7 +143,7 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         fixture.json_file(log, proof)
         report = arm / "measurement.json"
         fixture.json_file(report, json.loads(report.read_bytes()) | {"origin_gets": 2, "origin_fill_bytes": 8})
-        with self.assertRaisesRegex(ValueError, "warm edge hit at its compiled ranged GET size limit"):
+        with self.assertRaisesRegex(ValueError, "provider-confirmed hits for every request"):
             self.collect(policy=policy)
 
     def test_cold_full_transfer_does_not_prove_cache_delivery_at_limit(self) -> None:
@@ -444,6 +445,42 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
                 fixture.json_file(path, proof)
                 with self.assertRaisesRegex(ValueError, "undercounts observed client bytes"):
                     self.collect()
+
+    def test_warm_edge_cannot_credit_a_hit_alongside_a_selected_origin_fill(self) -> None:
+        slot = "near/0001/warm_edge"
+        arm = self.root / slot
+        viewer_id, key, origin_id = "c" * 64, "d" * 64, "e" * 64
+        for edge, provider in fixture.CDN.PROVIDER_FOR_EDGE.items():
+            with self.subTest(provider=provider):
+                scope = f"{edge}/private/cli/git/direct"
+                self.registration.update(scope=scope, candidate=fixture.cli_candidate(scope, PLATFORM))
+                fixture.write_git_measurements(self.root, self.registration, PLATFORM)
+                client = json.loads((arm / "client.json").read_bytes())
+                extra = fixture.range_response(scope, 8)
+                self.amend_client(slot, all_edge_attempts=2, edge_attempts=2, observed_edge_gets=2,
+                                  edge_hits=2, edge_bytes=16, edge_responses=client["edge_responses"] | {viewer_id: extra})
+                log = arm / fixture.CDN.VIEWER_REQUEST_FILES[provider]
+                proof = json.loads(log.read_bytes())
+                records = proof["records"]
+                records[viewer_id] = {"status": 206, "cache": "hit", "response_bytes": 8, "key_sha256": key}
+                start = client["started_at_unix_ms"]
+                if provider == "gcs":
+                    records[viewer_id].update(cache_fill_bytes=0, origin_requests={
+                        origin_id: {"method": "GET", "status": 206, "cache_fill_bytes": 8},
+                    })
+                else:
+                    time = {"at_unix_s": start // 1000} if provider == "s3" else {"at_unix_ms": start}
+                    proof["origin_requests"][origin_id] = time | {"key_sha256": key, "status": 206, "response_body_bytes": 8}
+                fixture.json_file(log, proof)
+                report = arm / "measurement.json"
+                fixture.json_file(report, json.loads(report.read_bytes()) | {"origin_gets": 2, "origin_fill_bytes": 8})
+                with self.assertRaisesRegex(ValueError, "provider-confirmed hits for every request"):
+                    self.collect()
+
+                extra = fixture.range_response(scope.replace("/git/", "/capsule/"), 8)
+                self.amend_client(slot, edge_attempts=1, observed_edge_gets=1, edge_hits=1, edge_bytes=8,
+                                  edge_responses=client["edge_responses"] | {viewer_id: extra})
+                self.collect()
 
     def test_cloudfront_warm_and_cold_arms_must_use_distinct_s3_log_seconds(self) -> None:
         self.amend_client("near/0001/warm_edge", started_at_unix_ms=1_011_500, finished_at_unix_ms=1_011_620)

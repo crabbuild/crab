@@ -1384,8 +1384,10 @@ def verify_performance(value: Any, registration: Any) -> int:
             require(arms["cold_edge"]["edge_misses"] > 0 and arms["cold_edge"]["origin_fill_bytes"] > 0
                     and arms["cold_edge"]["edge_bytes"] > 0,
                     "cold edge sample must prove a miss, origin fill and delivered bytes")
-            require(arms["warm_edge"]["edge_hits"] > 0 and arms["warm_edge"]["edge_bytes"] > 0,
-                    "warm edge sample must prove a hit and delivered bytes")
+            warm_edge = arms["warm_edge"]
+            require(positive(warm_edge["edge_hits"]) and positive(warm_edge["edge_bytes"])
+                    and warm_edge["edge_misses"] == warm_edge["edge_unknown"] == 0,
+                    "warm edge sample needs only provider-confirmed hits for its payload")
             require(arms["warm_local"]["local_payload_hits"] > 0 and
                     all(arms["warm_local"][metric] == 0
                         for metric in ("edge_hits", "edge_misses", "edge_unknown", "edge_bytes")),
@@ -3059,6 +3061,10 @@ def collect_git_performance(
                     provider_request_ids.update(traffic.request_ids)
                     responses = {request_id: row for request_id, row in client["edge_responses"].items()
                                  if row["scope"] == scope}
+                    if arm == "warm_edge":
+                        require(responses and len(responses) == client["edge_attempts"]
+                                and all(traffic.completed_cache.get(request_id) == "hit" for request_id in responses),
+                                f"{label} needs provider-confirmed hits for every request in the registered scope")
                     for request_id, row in responses.items():
                         if not row["complete"] or not row["bytes"]:
                             continue

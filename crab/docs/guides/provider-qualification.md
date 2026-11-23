@@ -1647,6 +1647,10 @@ starts after Git fetches and verifies the pointer, so the recorded interval
 measures LFS payload delivery and its native metadata reads.
 Assembly and release verification match the native origin and repository
 prefix of every CLI arm to the independently verified product fixture.
+The warm edge arm needs a completed, provider-confirmed hit for every
+viewer request in the registered read scope. A confirmed origin fill,
+revalidation, or incomplete response in that scope invalidates the warm
+sample. Adjacent reads count toward the transfer and origin budgets.
 
 For private managed Git, use the registered managed URL for the timed reads.
 Use the approved v2 grant for edge and warm-local arms and the direct v1
