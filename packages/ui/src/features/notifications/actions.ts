@@ -1,4 +1,9 @@
 export type Address = { id: string; owner: string; name: string };
+export const INBOX_CHANGED = "crab-inbox-changed";
+
+export function refreshNotificationBadge() {
+  window.dispatchEvent(new Event(INBOX_CHANGED));
+}
 export type NoticeState = { read: boolean; saved: boolean; done: boolean };
 export type Action = { read: boolean } | { save: boolean } | { done: boolean };
 export type Subject = { kind: "issue" | "pull" | "release"; number: number };

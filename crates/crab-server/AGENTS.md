@@ -198,6 +198,8 @@ the durable catalog reservation and shared Git and Cell initializer.
 `cells/organization/repositories.rs` records owner-authorized submissions.
 The catalog's explicit organization UUID owns the repository relationship.
 `api/repository_transfer/` checks the current source and destination authorities.
+Its incoming view reads pending offers from the current catalog and applies
+recipient and organization-owner checks independently of source access.
 `catalog/transfer.rs` commits consent, the complete address and grant change,
 and the membership audit together. `catalog/rename.rs` owns historical addresses.
 `repository/access.rs` resolves current owner grants, and `app::membership`

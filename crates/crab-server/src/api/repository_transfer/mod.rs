@@ -33,9 +33,12 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
             get(current).post(propose),
         )
         .route("/api/repository-transfers/{id}", get(read).put(decide))
+        .route("/api/repository-transfers/incoming", get(incoming::list))
         .layer(DefaultBodyLimit::max(2_048))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
+
+pub(super) mod incoming;
 
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]

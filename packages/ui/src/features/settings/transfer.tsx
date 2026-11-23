@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/dialog";
 import { useRequest, type Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
+import { refreshNotificationBadge } from "@/features/notifications/actions";
 
 type Location = Pick<Repository, "owner" | "name">;
 type Offer = {
@@ -49,7 +50,7 @@ const status = {
   declined: "Transfer declined",
   cancelled: "Transfer cancelled",
 };
-const offerHref = (id: string) =>
+export const offerHref = (id: string) =>
   `/-/repository-transfers/${encodeURIComponent(id)}`;
 const offerApi = (id: string) =>
   `/api/repository-transfers/${encodeURIComponent(id)}`;
@@ -146,8 +147,8 @@ function TransferForm({ repo, csrf }: { repo: Repository; csrf: string }) {
           <div className="grid gap-3">
             <p role="status">Awaiting acceptance from {current.recipient}.</p>
             <p className="text-sm">
-              Share this transfer link with the recipient. It expires in 24
-              hours.
+              The recipient can review this offer in Notifications for 24 hours.
+              You can also share the link directly.
             </p>
             <Input
               aria-label="Transfer link"
@@ -269,7 +270,10 @@ export function TransferPage({ id, csrf }: { id: string; csrf: string }) {
           const offer = confirmed ?? loaded;
           async function decide(decision: "accept" | "decline" | "cancel") {
             const result = await mutation.run<Offer>(path, "PUT", { decision });
-            if (result) setConfirmed(result);
+            if (result) {
+              setConfirmed(result);
+              refreshNotificationBadge();
+            }
           }
           return (
             <div className="grid gap-4 rounded-lg border p-5">

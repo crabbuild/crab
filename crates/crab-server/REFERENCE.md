@@ -752,8 +752,10 @@ and the current URL.
 In **Settings → General**, a repository administrator can create an offer for a
 personal account by profile handle or for an organization by link or ID. Share
 the private offer link with the recipient. The named account or a current owner
-of the destination organization must sign in and accept within 24 hours. A
-current source administrator can cancel a pending offer. The recipient can
+of the destination organization sees eligible offers in **Notifications →
+Repository transfers** and must sign in and accept within 24 hours. The bell
+also signals a pending offer. A current source administrator can cancel a
+pending offer. The recipient can
 also decline it. Crab rechecks the requester's authority and destination access
 at acceptance. Archived repositories and repositories in a private fork network
 are ineligible for transfer.
@@ -771,7 +773,11 @@ and offer to a repository administrator. A `POST` to that route submits `version
 `request_id`, destination `name`, and `recipient` (`{kind:"account",handle}` or
 `{kind:"organization",id}`). `GET /api/repository-transfers/{id}` reads the
 private offer. `PUT` on that path takes `decision` (`accept`, `decline`, or
-`cancel`). The browser endpoints use the session and the usual CSRF protection.
+`cancel`). `GET /api/repository-transfers/incoming` returns up to 20
+recipient-authorized pending offers and a `next` cursor to pass as `before`.
+Resolved, expired, and superseded offers leave the incoming list. The bell
+reports `pending_transfers: true` when there is a pending offer and no unread
+discussion notification is taking priority. The browser endpoints use the session and the usual CSRF protection.
 Retry a lost response with the same request ID or decision. A changed source
 address, a competing catalog update, or a claimed destination blocks acceptance.
 
