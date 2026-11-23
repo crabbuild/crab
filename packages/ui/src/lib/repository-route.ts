@@ -355,6 +355,7 @@ export function repositoryRoute(url: URL, refs?: Refs): RepositoryRoute | null {
         "activity",
         "code-search",
         "rulesets",
+        "properties",
       ].includes(page) &&
       !tail.length
     )

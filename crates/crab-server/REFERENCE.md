@@ -1164,8 +1164,8 @@ limit direct object-store writes through storage IAM.
 
 Organization owners can open **Rulesets** on the organization page to manage
 branch and tag policy. Target every repository, a set of repository UUIDs, or
-repository names using include and exclude patterns. A pattern-based rule also
-applies to future repositories with matching names.
+repository names using include and exclude patterns, or repositories matching
+custom property conditions. Dynamic targets also evaluate newly created repositories.
 
 Repository readers see matching active rulesets under **Inherited from
 organization**. Repository administrators can edit local policies. Organization
@@ -1179,13 +1179,41 @@ Organization rules can require the merge queue with a named status check.
 replace the collection, send those entries with `expected_version` to `PUT`
 on the same route. Each entry contains a `ruleset` and `repositories`. The
 repository selector is `{"kind":"all"}`, `{"kind":"selected","ids":[...]}`,
-or `{"kind":"name","include":[...],"exclude":[...]}`. A stale write
-returns HTTP 409.
+`{"kind":"name","include":[...],"exclude":[...]}`, or
+`{"kind":"properties","conditions":[{"property":"<uuid>","value":true}]}`.
+Property conditions use all-match semantics. A multi-select condition tests
+for one selected value. An `exclude: true` condition matches when the value is
+absent or different. A stale write returns HTTP 409.
 
 An explicit PR bypass references a local rule by UUID and an inherited rule
 by `{"organization":"<uuid>","ruleset":"<uuid>"}`. The scopes are independent.
 Organization team bypass requires active membership in the non-secret team
 and current write access to the repository.
+
+### Manage repository properties
+
+Open **Organization → Properties** to define text, boolean, single-select, or
+multi-select fields and set values for an individual repository. A default
+applies to repositories with no override, including new repositories.
+Clear an override to restore the default. Repository readers can open
+**Repository properties** from the repository's **Rulesets** page.
+Organization owners manage definitions and overrides.
+
+Select **Matching repository properties** in an organization ruleset and add
+the conditions that repositories must satisfy. Property changes and Git
+publication share the organization policy lease. Imports hold that lease
+while rechecking creation restrictions and publishing the catalog entry.
+A repository transfer starts
+a new set of explicit overrides under the destination's property definitions.
+Organization audit events record changes to definitions and repository values.
+
+Use `GET /api/organizations/{id}/repository-properties` for the versioned
+definitions and `PUT` with `expected_version` and `definitions` to replace
+them. Use `GET /api/repos/{owner}/{name}/properties` for the definitions and
+versioned overrides. A repository `PUT` accepts `schema_version`,
+`expected_version`, and the complete `overrides` object keyed by property UUID.
+Remove a rule's reference before deleting a definition. Retained definitions
+keep their type and allow existing select values to remain valid.
 
 ### Grant ruleset bypass access
 

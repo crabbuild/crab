@@ -1,6 +1,8 @@
 use super::{repositories::repository_write, *};
 use crate::test_support::git;
 
+mod properties;
+
 fn rule(id: Uuid, name: &str, target: &str, refs: Value) -> Value {
     let branch = target == "branch";
     json!({

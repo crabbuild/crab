@@ -1,19 +1,34 @@
 import { useState } from "react";
 import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { useRequest, type Repository } from "@/lib/api";
+import {
+  PropertyInput,
+  type PropertyDefinition,
+} from "@/features/organizations/repository-properties";
+
+interface Condition {
+  property: string;
+  value: string | boolean | null;
+  exclude?: boolean;
+}
 
 export type RepositoryTarget =
   | { kind: "all" }
   | { kind: "selected"; ids: string[] }
-  | { kind: "name"; include: string[]; exclude: string[] };
+  | { kind: "name"; include: string[]; exclude: string[] }
+  | { kind: "properties"; conditions: Condition[] };
 
 export const allRepositories = { kind: "all" } satisfies RepositoryTarget;
 
 export function RepositoryTargetSummary({
   target,
+  definitions = [],
 }: {
   target: RepositoryTarget;
+  definitions?: PropertyDefinition[];
 }) {
   switch (target.kind) {
     case "all":
@@ -37,6 +52,20 @@ export function RepositoryTargetSummary({
           )}
         </p>
       );
+    case "properties":
+      return (
+        <ul className="text-sm">
+          {target.conditions.map(({ property, value, exclude }, index) => (
+            <li className="break-words" key={index}>
+              <strong>
+                {definitions.find((item) => item.id === property)?.name ??
+                  "Repository property"}
+              </strong>{" "}
+              {exclude ? "excludes" : "matches"} <code>{String(value)}</code>
+            </li>
+          ))}
+        </ul>
+      );
   }
 }
 
@@ -44,10 +73,12 @@ export function RepositoryTargetEditor({
   organization,
   target,
   onChange,
+  definitions = [],
 }: {
   organization: string;
   target: RepositoryTarget;
   onChange: (target: RepositoryTarget) => void;
+  definitions?: PropertyDefinition[];
 }) {
   const [search, setSearch] = useState("");
   const choices = useRequest<{ repositories: Repository[] }>(
@@ -88,6 +119,9 @@ export function RepositoryTargetEditor({
               case "selected":
                 onChange({ kind: "selected", ids: [] });
                 break;
+              case "properties":
+                onChange({ kind: "properties", conditions: [] });
+                break;
               default:
                 onChange(allRepositories);
             }
@@ -96,6 +130,7 @@ export function RepositoryTargetEditor({
           <option value="all">All repositories</option>
           <option value="selected">Selected repositories</option>
           <option value="name">Matching repository names</option>
+          <option value="properties">Matching repository properties</option>
         </select>
       </label>
       {target.kind === "name" && (
@@ -189,6 +224,112 @@ export function RepositoryTargetEditor({
           </Result>
           <RepositoryTargetSummary target={target} />
         </>
+      )}
+      {target.kind === "properties" && (
+        <div className="grid gap-3">
+          <p className="text-sm text-muted-foreground">
+            Repositories must match every condition.
+          </p>
+          {!definitions.length && (
+            <Link href={`/-/organizations/${organization}?tab=properties`}>
+              Manage property definitions
+            </Link>
+          )}
+          {target.conditions.map((condition, index) => {
+            const definition = definitions.find(
+              (item) => item.id === condition.property,
+            );
+            const change = (update: Partial<Condition>) =>
+              onChange({
+                ...target,
+                conditions: target.conditions.map((item, position) =>
+                  position === index ? { ...item, ...update } : item,
+                ),
+              });
+            return (
+              <fieldset
+                key={index}
+                className="grid gap-2 rounded-md border p-3"
+              >
+                <legend>Condition {index + 1}</legend>
+                <label className="grid gap-1">
+                  Property
+                  <select
+                    className={styles}
+                    value={condition.property}
+                    onChange={(event) =>
+                      change({ property: event.target.value, value: null })
+                    }
+                  >
+                    <option value="">Choose a property</option>
+                    {definitions.map(({ id, name }) => (
+                      <option key={id} value={id}>
+                        {name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {definition && (
+                  <PropertyInput
+                    label="Matching value"
+                    definition={
+                      definition.kind === "multi_select"
+                        ? { ...definition, kind: "single_select" }
+                        : definition
+                    }
+                    value={condition.value}
+                    unset="Specify a value"
+                    onChange={(next) =>
+                      change({ value: Array.isArray(next) ? null : next })
+                    }
+                  />
+                )}
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={!!condition.exclude}
+                    onChange={(event) =>
+                      change({ exclude: event.target.checked || undefined })
+                    }
+                  />
+                  Exclude repositories with this value
+                </label>
+                <Button
+                  className="justify-self-start"
+                  type="button"
+                  variant="outline"
+                  onClick={() =>
+                    onChange({
+                      ...target,
+                      conditions: target.conditions.filter(
+                        (_, position) => position !== index,
+                      ),
+                    })
+                  }
+                >
+                  Remove condition
+                </Button>
+              </fieldset>
+            );
+          })}
+          <Button
+            className="justify-self-start"
+            type="button"
+            variant="outline"
+            disabled={!definitions.length || target.conditions.length >= 20}
+            onClick={() =>
+              onChange({
+                ...target,
+                conditions: [
+                  ...target.conditions,
+                  { property: "", value: null },
+                ],
+              })
+            }
+          >
+            Add condition
+          </Button>
+        </div>
       )}
     </fieldset>
   );

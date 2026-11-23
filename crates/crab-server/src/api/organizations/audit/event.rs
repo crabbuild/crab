@@ -19,6 +19,7 @@ pub(in crate::api) enum AuditAction {
     OrganizationMembership,
     OrganizationInvitation,
     RulesetsChanged,
+    RepositoryPropertiesChanged,
     ProjectChanged,
     TeamCreated,
     TeamEdited,
@@ -129,6 +130,16 @@ impl From<organization::Event> for RawEvent {
             Action::RulesetsChanged { version } => {
                 event.detail = Some(format!("Revision {version}"));
                 AuditAction::RulesetsChanged
+            }
+            Action::RepositoryPropertiesChanged {
+                repository,
+                version,
+            } => {
+                event.detail = Some(match repository {
+                    Some(id) => format!("Repository {id} · Revision {version}"),
+                    None => format!("Definitions · Revision {version}"),
+                });
+                AuditAction::RepositoryPropertiesChanged
             }
             Action::ProjectChanged { project } => {
                 event.project = Some(project);

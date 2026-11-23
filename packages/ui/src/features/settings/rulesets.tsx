@@ -8,6 +8,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
+import {
+  propertySchemaPath,
+  type PropertyDefinition,
+  type PropertySchema,
+} from "@/features/organizations/repository-properties";
 import { type Connections } from "./integrations";
 import {
   RulesetBypassEditor,
@@ -80,6 +85,9 @@ export function OrganizationRulesets({
 }) {
   const path = `/api/organizations/${encodeURIComponent(organization)}/rulesets`;
   const request = useRequest<OrganizationRuleCollection>(path);
+  const properties = useRequest<PropertySchema>(
+    propertySchemaPath(organization),
+  );
   return (
     <section className="grid gap-4" aria-labelledby="organization-rulesets">
       <h2 id="organization-rulesets" className="text-lg font-semibold">
@@ -90,6 +98,7 @@ export function OrganizationRulesets({
           <RulesetsList
             key={value.version}
             organization={organization}
+            definitions={properties.data?.definitions}
             initial={organizationRulesets(value)}
             csrf={csrf}
             editable
@@ -150,6 +159,11 @@ export function RepositoryRulesets({
             Manage rulesets
           </Link>
         )}
+        {csrf === undefined && repo.organization_id && (
+          <Link href={repoHref(repo, { view: "properties" })}>
+            Repository properties
+          </Link>
+        )}
       </div>
       <Result state={request} timingLabel="Repository rulesets">
         {(data) => (
@@ -171,6 +185,7 @@ export function RepositoryRulesets({
 function RulesetsList({
   repo,
   organization,
+  definitions,
   initial,
   csrf,
   editable,
@@ -179,6 +194,7 @@ function RulesetsList({
 }: {
   repo?: Repository;
   organization?: string;
+  definitions?: PropertyDefinition[];
   initial: RulesetsState;
   csrf: string;
   editable: boolean;
@@ -250,6 +266,7 @@ function RulesetsList({
           key={editing.id}
           initial={editing}
           organization={organization}
+          definitions={definitions}
           workflows={workflows.data?.items}
           workflowsError={workflows.error}
           bypassOptions={state.bypass_options}
@@ -298,7 +315,7 @@ function RulesetsList({
         !state.inherited?.rulesets.length &&
         !editing && <p className="notice">No rulesets to display.</p>}
       {rulesets.map((rule) => (
-        <RulesetSummary key={rule.id} rule={rule}>
+        <RulesetSummary key={rule.id} rule={rule} definitions={definitions}>
           {editable && !editing && !deleting && (
             <div className="flex gap-2">
               <Button
@@ -341,9 +358,11 @@ function RulesetsList({
 function RulesetSummary({
   rule,
   children,
+  definitions,
 }: {
   rule: Ruleset;
   children?: ReactNode;
+  definitions?: PropertyDefinition[];
 }) {
   return (
     <article className="settings-section grid gap-2 p-4">
@@ -416,7 +435,10 @@ function RulesetSummary({
         )}
       </ul>
       {rule.repositories && (
-        <RepositoryTargetSummary target={rule.repositories} />
+        <RepositoryTargetSummary
+          target={rule.repositories}
+          definitions={definitions}
+        />
       )}
       {children}
     </article>
@@ -432,6 +454,7 @@ const lineValues = (text: string) =>
 function RulesetForm({
   initial,
   organization,
+  definitions,
   workflows,
   workflowsError,
   bypassOptions,
@@ -441,6 +464,7 @@ function RulesetForm({
 }: {
   initial: Ruleset;
   organization?: string;
+  definitions?: PropertyDefinition[];
   workflows: Connections["items"] | undefined;
   workflowsError?: string | null;
   bypassOptions?: BypassOptions;
@@ -459,8 +483,18 @@ function RulesetForm({
   const requiredChecks = lineValues(checks);
   const hasRequiredChecks =
     requiredChecks.length > 0 || rule.required_integrations.length > 0;
+  const repositories = rule.repositories;
   const invalidRepositories =
-    rule.repositories?.kind === "selected" && !rule.repositories.ids.length;
+    (repositories?.kind === "selected" && !repositories.ids.length) ||
+    (repositories?.kind === "properties" &&
+      (!repositories.conditions.length ||
+        repositories.conditions.some(
+          (condition) =>
+            condition.value === null ||
+            !definitions?.some(
+              (property) => property.id === condition.property,
+            ),
+        )));
   const invalidBypass =
     !branch && rule.bypass_actors?.some(({ mode }) => mode === "pull_request");
   function change(update: Partial<Ruleset>) {
@@ -544,6 +578,7 @@ function RulesetForm({
         {organization && rule.repositories && (
           <RepositoryTargetEditor
             organization={organization}
+            definitions={definitions}
             target={rule.repositories}
             onChange={(repositories) => change({ repositories })}
           />

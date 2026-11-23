@@ -890,6 +890,80 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
         .run(&["wait", "[aria-label='Role for Engineering']"])
         .await;
 
+    let properties = format!("{}/-/organizations/{organization}?tab=properties", h.origin);
+    browser.run(&["open", &properties]).await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "New property",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&[
+            "fill",
+            "#repository-property-definition input",
+            "native-policy",
+        ])
+        .await;
+    browser
+        .run(&[
+            "select",
+            "#repository-property-definition select",
+            "boolean",
+        ])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Save property",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", "[aria-label='Edit native-policy']"])
+        .await;
+    browser
+        .run(&[
+            "select",
+            "#repository-property-target",
+            repository["id"].as_str().unwrap(),
+        ])
+        .await;
+    browser
+        .run(&["wait", "#repository-property-values select"])
+        .await;
+    browser
+        .run(&["select", "#repository-property-values select", "false"])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Save repository values",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", "--text", "Repository values saved."])
+        .await;
+    let saved = h
+        .json(&format!("/api/repos/{owner}/library/properties"), &alice)
+        .await;
+    let property = saved["schema"]["definitions"][0]["id"].as_str().unwrap();
+    assert_eq!(saved["values"]["overrides"][property], false);
+
     let team_settings = format!(
         "{}/-/organizations/{organization}?tab=teams&team={team}&view=settings",
         h.origin

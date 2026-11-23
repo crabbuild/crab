@@ -1,5 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
+use super::properties::{self, PropertyValue, Schema};
 use super::*;
 use crate::cells::repository::rulesets::{
     BypassActor, Enforcement, MAX_RULESETS, Pattern, Ruleset, Rulesets, Target,
@@ -19,6 +20,18 @@ pub(crate) enum Repositories {
         include: Vec<String>,
         exclude: Vec<String>,
     },
+    Properties {
+        conditions: Vec<PropertyCondition>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PropertyCondition {
+    pub property: Uuid,
+    pub value: PropertyValue,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exclude: bool,
 }
 
 impl Repositories {
@@ -43,10 +56,22 @@ impl Repositories {
                             })
                     })
             }
+            Self::Properties { conditions } => {
+                !conditions.is_empty()
+                    && conditions.len() <= 20
+                    && conditions.iter().enumerate().all(|(index, condition)| {
+                        !condition.property.is_nil() && !conditions[..index].contains(condition)
+                    })
+            }
         }
     }
 
-    fn matches(&self, id: Uuid, name: &str) -> Result<bool> {
+    fn matches(
+        &self,
+        id: Uuid,
+        name: &str,
+        values: &BTreeMap<Uuid, PropertyValue>,
+    ) -> Result<bool> {
         match self {
             Self::All => Ok(true),
             Self::Selected { ids } => Ok(ids.contains(&id)),
@@ -63,7 +88,24 @@ impl Repositories {
                 };
                 Ok(matches(include)? && !matches(exclude)?)
             }
+            Self::Properties { conditions } => Ok(conditions.iter().all(|condition| {
+                values
+                    .get(&condition.property)
+                    .is_some_and(|value| value.matches(&condition.value))
+                    != condition.exclude
+            })),
         }
+    }
+
+    fn defined_by(&self, schema: &Schema) -> bool {
+        let Self::Properties { conditions } = self else {
+            return true;
+        };
+        conditions.iter().all(|term| {
+            schema
+                .definition(term.property)
+                .is_some_and(|definition| definition.accepts_term(&term.value))
+        })
     }
 }
 
@@ -111,6 +153,7 @@ pub(crate) enum ReplaceOutcome {
     Saved(Settings),
     Conflict,
     UnavailableTeam,
+    UnavailableProperty,
 }
 
 pub(crate) struct Replace;
@@ -130,6 +173,22 @@ impl Mutation for Replace {
         let current = load(context)?;
         if current.version != input.expected_version || current.version >= MAX_VERSION - 1 {
             return Ok(MutationResult::Rejected(ReplaceOutcome::Conflict));
+        }
+        if input
+            .rulesets
+            .iter()
+            .any(|entry| matches!(entry.repositories, Repositories::Properties { .. }))
+        {
+            let schema = properties::schema(context)?;
+            if !input
+                .rulesets
+                .iter()
+                .all(|entry| entry.repositories.defined_by(&schema))
+            {
+                return Ok(MutationResult::Rejected(
+                    ReplaceOutcome::UnavailableProperty,
+                ));
+            }
         }
         let old_teams = team_ids(&current.rulesets);
         for id in team_ids(&input.rulesets).difference(&old_teams) {
@@ -173,6 +232,13 @@ fn load(context: &Transaction<'_>) -> Result<Settings> {
     Ok(context.document(KEY)?.unwrap_or_default())
 }
 
+pub(super) fn properties_valid(context: &Transaction<'_>, schema: &Schema) -> Result<bool> {
+    Ok(load(context)?
+        .rulesets
+        .iter()
+        .all(|entry| entry.repositories.defined_by(schema)))
+}
+
 pub(super) fn version(context: &Transaction<'_>) -> Result<u64> {
     Ok(load(context)?.version)
 }
@@ -194,6 +260,7 @@ impl Read for Get {
 pub(crate) struct Repository {
     pub id: Uuid,
     pub name: String,
+    pub ownership_epoch: u32,
 }
 
 pub(crate) struct Applicable;
@@ -208,12 +275,26 @@ impl Read for Applicable {
             return Err(Error::Invalid("invalid ruleset repository"));
         }
         let settings = load(context)?;
+        let values = if settings.rulesets.iter().any(|entry| {
+            entry.ruleset.enforcement == Enforcement::Active
+                && matches!(entry.repositories, Repositories::Properties { .. })
+        }) {
+            properties::effective(
+                context,
+                properties::Repository {
+                    id: repository.id,
+                    ownership_epoch: repository.ownership_epoch,
+                },
+            )?
+        } else {
+            BTreeMap::new()
+        };
         let mut rulesets = Vec::new();
         for entry in settings.rulesets {
             if entry.ruleset.enforcement == Enforcement::Active
                 && entry
                     .repositories
-                    .matches(repository.id, &repository.name)?
+                    .matches(repository.id, &repository.name, &values)?
             {
                 rulesets.push(entry.ruleset);
             }

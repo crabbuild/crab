@@ -978,7 +978,10 @@ pub(crate) async fn membership_snapshot(
     snapshot: crate::catalog::MembershipSnapshot,
 ) -> Result<Membership> {
     let organization = snapshot.organization.as_ref().map(|access| access.id);
-    if snapshot.repository_id != repo.id || organization != repo.organization {
+    if snapshot.repository_id != repo.id
+        || organization != repo.organization
+        || snapshot.ownership_epoch != repo.ownership_epoch
+    {
         return Err(Error::NotFound);
     }
     membership_for_config(server, principal, &repo.config, snapshot).await

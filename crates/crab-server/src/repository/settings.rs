@@ -213,6 +213,7 @@ pub(crate) async fn inherited_rulesets(server: &Server, repo: &Repository) -> Re
                 Selector {
                     id: repo.id,
                     name: repo.config.name.clone(),
+                    ownership_epoch: repo.ownership_epoch,
                 },
             )
             .await,

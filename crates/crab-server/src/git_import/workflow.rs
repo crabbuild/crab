@@ -13,7 +13,10 @@ use super::{
 use crate::{
     RepositoryAccess, RepositoryMember,
     catalog::{CatalogRecord, CatalogStore, MembershipActor, RepositoryApplicationState},
-    repository::{MaintenanceTrigger, Repository},
+    repository::{
+        MaintenanceTrigger, Repository,
+        settings::{RulesetScope, with_ruleset_lease},
+    },
     server::Server,
 };
 
@@ -384,18 +387,45 @@ pub(super) async fn finish_destination(
         .await
         .map_err(ImportError::Setup)?;
     job.verify().await?;
+    let mark_ready = || async {
+        catalog
+            .mark_cell_ready(id)
+            .await
+            .map(|_| ())
+            .map_err(ImportError::Catalog)
+    };
     if let Some(owner) = organization {
-        // Cell initialization can take longer than an owner grant. Serialize
-        // the decision to expose this verified snapshot with membership changes.
-        let policy = validate_destination_policy(server, catalog, id, owner, snapshot).await?;
-        owner
-            .authorize_publication(server, id, snapshot, policy)
-            .await?;
+        // The quarantine stays private until the catalog commit. Hold the
+        // policy lease through that commit so a default or ruleset edit
+        // cannot retarget the repository after the last policy check.
+        let published: crate::app::Result<_> = with_ruleset_lease(
+            server,
+            RulesetScope::Organization(owner.id),
+            &server.cancellation,
+            |cancel| async move {
+                let outcome = async {
+                    if cancel.is_cancelled() {
+                        return Err(ImportError::Cancelled);
+                    }
+                    let policy =
+                        validate_destination_policy(server, catalog, id, owner, snapshot).await?;
+                    owner
+                        .authorize_publication(server, id, snapshot, policy)
+                        .await?;
+                    if cancel.is_cancelled() {
+                        return Err(ImportError::Cancelled);
+                    }
+                    mark_ready().await
+                }
+                .await;
+                Ok(outcome)
+            },
+        )
+        .await;
+        published.map_err(ImportError::organization)??;
+    } else {
+        mark_ready().await?;
     }
-    catalog
-        .mark_cell_ready(id)
-        .await
-        .map_err(ImportError::Catalog)?;
     install_destination(server, catalog, id).await
 }
 

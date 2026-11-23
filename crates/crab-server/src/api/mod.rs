@@ -560,6 +560,7 @@ pub(crate) fn routes(server: Arc<Server>) -> axum::Router<Arc<Server>> {
         .merge(branches::routes())
         .merge(fork_sync::routes(Arc::clone(&server)))
         .merge(rulesets::routes())
+        .merge(organizations::properties::repository_routes())
         .merge(checks::routes(Arc::clone(&server)))
         .merge(contents::routes())
         .merge(issues::routes(Arc::clone(&server)))

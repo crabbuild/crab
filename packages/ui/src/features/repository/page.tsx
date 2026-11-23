@@ -97,6 +97,11 @@ const RepositoryRulesets = lazy(() =>
     default: module.RepositoryRulesets,
   })),
 );
+const RepositoryProperties = lazy(() =>
+  import("@/features/organizations/repository-properties").then((module) => ({
+    default: module.RepositoryProperties,
+  })),
+);
 const Settings = lazy(() =>
   import("@/features/settings").then((module) => ({
     default: module.Settings,
@@ -585,6 +590,19 @@ export function RepositoryPage({
           >
             <RepositoryRulesets key={repo.id} repo={repo} />
           </Suspense>
+        ) : view === "properties" && repo.organization_id ? (
+          <section className="settings-section grid gap-4 p-4">
+            <h2 className="text-lg font-semibold">Repository properties</h2>
+            <Suspense
+              fallback={
+                <div role="status">
+                  <Spinner /> Loading properties…
+                </div>
+              }
+            >
+              <RepositoryProperties key={repo.id} repo={repo} />
+            </Suspense>
+          </section>
         ) : view === "settings" ? (
           repo.can_admin ? (
             <Result state={visibleRefState} timingLabel="Repository references">

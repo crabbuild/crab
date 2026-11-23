@@ -353,6 +353,18 @@ async fn organization_import_requires_current_ownership_and_resumes_under_anothe
         json!([])
     );
     let policy = format!("{root}/rulesets");
+    let property = Uuid::now_v7();
+    h.write(
+        Method::PUT,
+        &format!("{root}/repository-properties"),
+        &bob,
+        json!({"expected_version":0,"definitions":[
+            {"id":property,"name":"regulated","description":"","kind":"boolean","options":[],"default":true}
+        ]}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
     let rule = json!({
         "id":Uuid::now_v7(),"name":"Block imported branch creation","target":"branch","enforcement":"active",
         "include":["~ALL"],"exclude":[],"restrict_creations":true,"restrict_deletions":false,
@@ -364,7 +376,7 @@ async fn organization_import_requires_current_ownership_and_resumes_under_anothe
         &policy,
         &bob,
         json!({"expected_version":0,"rulesets":[
-            {"ruleset":rule,"repositories":{"kind":"all"}}
+            {"ruleset":rule,"repositories":{"kind":"properties","conditions":[{"property":property,"value":true}]}}
         ]}),
     )
     .await

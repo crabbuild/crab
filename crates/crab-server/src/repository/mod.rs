@@ -26,6 +26,7 @@ pub(crate) const BROWSE_PROBE_INTERVAL: Duration = Duration::from_secs(2);
 pub(crate) struct Repository {
     pub(crate) id: Uuid,
     pub(crate) organization: Option<Uuid>,
+    pub(crate) ownership_epoch: u32,
     pub(crate) forked_from: Option<Uuid>,
     pub(crate) config: RepositoryConfig,
     pub(crate) store: Store,
@@ -91,6 +92,7 @@ impl Repository {
         Self {
             id,
             organization: None,
+            ownership_epoch: 0,
             forked_from: None,
             config,
             store: layout.store().clone(),

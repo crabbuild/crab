@@ -19,6 +19,7 @@ pub(crate) mod automation;
 mod commands;
 mod invitations;
 pub(crate) mod projects;
+pub(crate) mod properties;
 mod reads;
 pub(crate) mod repositories;
 pub(crate) mod rulesets;
@@ -167,6 +168,10 @@ pub(crate) enum Action {
         action: automation::Audit,
     },
     RulesetsChanged {
+        version: u64,
+    },
+    RepositoryPropertiesChanged {
+        repository: Option<Uuid>,
         version: u64,
     },
     ProjectChanged {
@@ -328,6 +333,7 @@ pub(in crate::cells) fn authorize(
             | RepositoryTeamNames::ID
             | CodeOwnerTeams::ID
             | rulesets::Applicable::ID
+            | properties::GetValues::ID
             | automation::Verify::ID,
             false,
         ) => return Ok(()),
@@ -337,6 +343,7 @@ pub(in crate::cells) fn authorize(
             | ListActivity::ID
             | ListInvitations::ID
             | rulesets::Get::ID
+            | properties::GetSchema::ID
             | InspectMemberRepositoryRoles::ID
             | automation::List::ID,
             false,
@@ -350,6 +357,8 @@ pub(in crate::cells) fn authorize(
             | repositories::AuthorizeCreation::ID
             | repositories::AuthorizeImportPublication::ID
             | rulesets::Replace::ID
+            | properties::SetSchema::ID
+            | properties::SetValues::ID
             | automation::Change::ID,
             true,
         ) => true,
@@ -431,6 +440,8 @@ pub(in crate::cells) fn dispatch_read(
         }
         rulesets::Get::ID => invoke_read::<rulesets::Get>(context, input),
         rulesets::Applicable::ID => invoke_read::<rulesets::Applicable>(context, input),
+        properties::GetSchema::ID => invoke_read::<properties::GetSchema>(context, input),
+        properties::GetValues::ID => invoke_read::<properties::GetValues>(context, input),
         repositories::Owners::ID => invoke_read::<repositories::Owners>(context, input),
         teams::MentionMembers::ID => invoke_read::<teams::MentionMembers>(context, input),
         automation::List::ID => invoke_read::<automation::List>(context, input),
@@ -474,6 +485,8 @@ pub(in crate::cells) fn dispatch_mutation(
             invoke_mutation::<repositories::AuthorizeImportPublication>(context, input)
         }
         rulesets::Replace::ID => invoke_mutation::<rulesets::Replace>(context, input),
+        properties::SetSchema::ID => invoke_mutation::<properties::SetSchema>(context, input),
+        properties::SetValues::ID => invoke_mutation::<properties::SetValues>(context, input),
         automation::Change::ID => invoke_mutation::<automation::Change>(context, input),
         Edit::ID => invoke_mutation::<Edit>(context, input),
         ChangeMember::ID => invoke_mutation::<ChangeMember>(context, input),
