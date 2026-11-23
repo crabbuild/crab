@@ -81,6 +81,22 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         if proof_path.exists():
             proof = json.loads(proof_path.read_bytes())
             fixture.json_file(proof_path, proof | {"client_report_sha256": digest})
+        if directory.name == "warm_edge":
+            repeat = (directory.parent / "warm_local").relative_to(self.root)
+            self.amend_client(repeat.as_posix(), primer_sha256=digest)
+
+    def test_cli_warm_local_uses_its_own_logged_edge_fetch_and_cache(self) -> None:
+        slot = "near/0001/warm_local"
+        original = json.loads((self.root / slot / "client.json").read_bytes())
+        other_primer = self.root / "near/0002/warm_edge/client.json"
+        digest = hashlib.sha256(other_primer.read_bytes()).hexdigest()
+        self.amend_client(slot, primer_sha256=digest)
+        with self.assertRaisesRegex(ValueError, "did not repeat its own warm edge fetch"):
+            self.collect()
+        self.amend_client(slot, primer_sha256=original["primer_sha256"],
+                          reader=original["reader"] | {"cache_root_sha256": "f" * 64})
+        with self.assertRaisesRegex(ValueError, "did not repeat its own warm edge fetch"):
+            self.collect()
 
     def test_cli_produces_a_report_that_the_release_contract_accepts(self) -> None:
         benchmarks = self.root / "benchmarks.json"

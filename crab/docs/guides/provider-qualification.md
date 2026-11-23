@@ -1167,8 +1167,8 @@ Prepare any checkpoint, protected view, or public export required by the registe
 read family after publication. For public runs, add the export publisher's
 receipt and SHA-256 to the worker's trusted CDN binding before measuring the
 edge arm. Supply the same receipt directory with `--export-approval` on public
-`fetch` and `fetch-warm-local` calls. Crab compares the loaded receipt digest
-with the worker's approved digest, even when the viewer endpoint is unchanged.
+`fetch` calls, including any warm-local repeat. Crab compares the loaded
+receipt digest with the approval in the worker's trusted binding.
 The workload's separate receipt records the native Git publication.
 Then run `fetch` with the same arguments and
 the configured reader credentials. The workload verifies the advertised
@@ -1184,15 +1184,15 @@ local cache root before the fetch, and Crab rejects a configured shared
 cache service. The origin arm rejects edge traffic for any scope. The public
 export transition uses the previous active binding in its native-only phase
 and proves the approved CDN skips the unlisted object.
-`fetch-warm-local` primes a fresh Crab cache with a verified edge fetch,
-then measures a second fetch from an empty Git object database against that
-cache. LFS keeps the primed worktree and runs a second `crab lfs fetch` for the
-same verified pointer. It verifies the SHA-256 and length of the local LFS
-object and records the local hit. Both controls require zero edge requests
-for the registered payload. Native metadata and sidecar reads still run.
-The benchmark collector rejects a local cache root reused across any two
-measured arms. Join the results with provider request and fill measurements
-before assembly.
+For the regional warm edge arm, pass `--warm-local-output` to `fetch` with
+the path to `warm_local/client.json` and retain the same command's stdout as
+`warm_edge/client.json`. The second fetch uses the same Crab cache with a fresh
+Git object database. LFS repeats `crab lfs fetch` in the primed worktree for the
+same verified pointer. Keep separate runner measurements for the two recorded
+windows and join the warm edge fetch with provider logs. The verifier matches
+the repeat's primer fingerprint and cache root to that exact edge record.
+The repeat requires a verified local hit and zero edge requests for the
+registered payload. Native metadata and sidecar reads still run.
 
 For the direct CLI rollback check, withdraw the CDN binding on the same
 worker after retaining the successful edge fetch. Keep the same native

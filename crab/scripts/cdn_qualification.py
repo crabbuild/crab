@@ -1532,6 +1532,8 @@ def validate_git_fetch(
     expected = GIT_FETCH_FIELDS
     prior = mode == "prior_export"
     managed = is_managed_cli_git_scope(provenance["scope"])
+    if mode == "warm_local":
+        expected = expected | {"primer_sha256"}
     if managed:
         expected = expected | {"managed_grant"}
     if prior or (isinstance(value, dict) and "transition_key_sha256" in value):
@@ -1597,7 +1599,8 @@ def validate_git_fetch(
         require(positive(client["observed_edge_gets"]) and positive(client["verified_edge_payloads"]),
                 f"{label} accepted no verified edge payload")
     if mode == "warm_local":
-        require(positive(client["local_payload_hits"]) and client["edge_attempts"] == client["verified_edge_payloads"] == 0
+        require(matches(SHA256, client["primer_sha256"]) and positive(client["local_payload_hits"])
+                and client["edge_attempts"] == client["verified_edge_payloads"] == 0
                 and (action != "lfs-fetch" or client["all_edge_attempts"] == 0),
                 f"{label} requires a verified local payload without an edge read for this scope")
     return client
@@ -3007,8 +3010,14 @@ def collect_git_performance(
                     require(arm == "origin" or reader["public_export_sha256"] == spec.get("publication_sha256", ""),
                             f"{label} did not use the registered public export approval")
                     cache_root = reader["cache_root_sha256"]
-                    require(cache_root not in cache_roots, "benchmark arms reused a local cache root")
-                    cache_roots.add(cache_root)
+                    if arm == "warm_local":
+                        require(client["primer_sha256"] == primer_digest and cache_root == primer_cache,
+                                f"{label} did not repeat its own warm edge fetch in the same cache")
+                    else:
+                        require(cache_root not in cache_roots, "benchmark arms reused a local cache root")
+                        cache_roots.add(cache_root)
+                    if arm == "warm_edge":
+                        primer_digest, primer_cache = digest, cache_root
                     payload = (client["publication_oid"], client["expected_sha256"])
                     receipt = client["publication_sha256"]
                 if native_target is not None:

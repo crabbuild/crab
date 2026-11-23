@@ -483,7 +483,9 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             edge = self.run_phase("fetch", "--export-approval", str(new))
             self.assertEqual(edge["reader"]["public_export_sha256"], current)
             (self.root / "warm-cache").touch()
-            warm = self.run_phase("fetch-warm-local", "--export-approval", str(new))
+            repeat = self.root / "repeat.json"
+            self.run_phase("fetch", "--export-approval", str(new), "--warm-local-output", str(repeat))
+            warm = json.loads(repeat.read_bytes())
             self.assertEqual(warm["reader"]["public_export_sha256"], current)
         (self.root / "binding-off").touch()
         (self.root / "origin-only").touch()
@@ -549,11 +551,17 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
 
     def test_warm_local_requires_a_verified_cache_hit_in_the_second_client(self) -> None:
         self.run_phase("publish")
-        missed = self.call("fetch-warm-local")
+        output = self.root / "repeat.json"
+        missed = self.call("fetch", "--warm-local-output", str(output))
         self.assertEqual(missed.returncode, 1, missed.stdout)
         self.assertIn("warm-local fetch must use a verified local payload", missed.stderr)
+        self.assertFalse(output.exists())
         (self.root / "warm-cache").touch()
-        warm = self.run_phase("fetch-warm-local")
+        result = self.call("fetch", "--warm-local-output", str(output))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        edge, warm = json.loads(result.stdout), json.loads(output.read_bytes())
+        self.assertEqual(warm["primer_sha256"], hashlib.sha256(result.stdout.encode()).hexdigest())
+        self.assertEqual(warm["reader"], edge["reader"])
         self.assertEqual(warm["arm"], "warm_local")
         self.assertEqual(warm["local_payload_hits"], 1)
         self.assertEqual(warm["edge_attempts"], 0)
@@ -569,12 +577,14 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         self.fixture.write_bytes(raw)
         self.digest = hashlib.sha256(raw).hexdigest()
         self.run_phase("publish")
-        warm = self.run_phase("fetch-warm-local")
+        output = self.root / "repeat.json"
+        self.run_phase("fetch", "--warm-local-output", str(output))
+        warm = json.loads(output.read_bytes())
         self.assertEqual(warm["observed_bytes"], payload_bytes)
         self.assertEqual((warm["name"], warm["arm"], warm["local_payload_hits"], warm["all_edge_attempts"]),
                          ("lfs-fetch", "warm_local", 1, 0))
         (self.root / "unverified-local").touch()
-        missed = self.call("fetch-warm-local")
+        missed = self.call("fetch", "--warm-local-output", str(self.root / "missed-repeat.json"))
         self.assertNotEqual(missed.returncode, 0)
         self.assertIn("warm-local fetch must use a verified local payload", missed.stderr)
         self.assertTrue(self.run_phase("retire")["ref_retired"])

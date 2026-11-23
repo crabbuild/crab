@@ -287,9 +287,9 @@ def prepare_public_export(args: argparse.Namespace, fixture: dict, record: dict 
     if transition:
         require(record is not None and access == "public" and args.action in ("fetch", "fetch-origin"),
                 "public transition requires a publication receipt and an ordinary public fetch")
-    approved = access == "public" and (transition or args.action in ("fetch", "fetch-warm-local"))
+    approved = access == "public" and (transition or args.action == "fetch")
     require((args.export_approval is not None) == approved,
-            "an export approval is required for a public edge fetch, warm-local fetch or transition")
+            "an export approval is required for a public edge fetch or transition")
     if not approved:
         return "", None
     digest, objects, sealed_at = approved_public_export(args.export_approval, fixture)
@@ -464,21 +464,6 @@ def fetch(
     crab: Path | None, guard: NativeTargetGuard, approved_binding: str, public_export: str,
     *, managed: dict | None = None, managed_capture: Path | None = None,
 ) -> dict:
-    if action == "fetch-warm-local":
-        primer = root / "primer"
-        primer.mkdir()
-        require_edge_fetch(fetch_once(remote, record, primer, env, None, crab, guard, approved_binding, public_export, managed=managed))
-        # LFS stores verified payloads in the worktree's Git common directory.
-        # The Git pack benchmark still starts with a fresh object database.
-        measured = primer if crab is not None else root / "measured"
-        if crab is None:
-            measured.mkdir()
-        result = fetch_once(remote, record, measured, env, None, crab, guard, approved_binding, public_export,
-                            primed=True, managed=managed)
-        require(result["edge_attempts"] == 0 and result["verified_edge_payloads"] == 0
-                and result["local_payload_hits"] > 0 and (crab is None or result["all_edge_attempts"] == 0),
-                "warm-local fetch must use a verified local payload without an edge request for this scope")
-        return result | {"arm": "warm_local"}
     binding = "" if action == "fetch-origin" and proof is None else approved_binding
     rejected = action == "fetch-rejected"
     result = fetch_once(remote, record, root, env, proof, crab, guard, binding, public_export,
@@ -490,6 +475,23 @@ def fetch(
         return result | {"arm": "prior_export" if proof is not None else "origin"}
     require_edge_fetch(result)
     return result | {"arm": "edge"}
+
+
+def repeat_fetch(
+    remote: str, record: dict[str, Any], root: Path, primer: Path, env: dict[str, str], crab: Path | None,
+    guard: NativeTargetGuard, approved_binding: str, public_export: str, *, managed: dict | None,
+) -> dict:
+    # LFS keeps the primed worktree. Git opens a fresh object database that
+    # can only reuse the Crab payload cache from the measured edge fetch.
+    measured = primer if crab is not None else root / "measured"
+    if crab is None:
+        measured.mkdir()
+    result = fetch_once(remote, record, measured, env, None, crab, guard, approved_binding, public_export,
+                        primed=True, managed=managed)
+    require(result["edge_attempts"] == 0 and result["verified_edge_payloads"] == 0
+            and result["local_payload_hits"] > 0 and (crab is None or result["all_edge_attempts"] == 0),
+            "warm-local fetch must use a verified local payload without an edge request for this scope")
+    return result | {"arm": "warm_local"}
 
 
 def retire(remote: str, record: dict[str, Any], root: Path, env: dict[str, str], guard: NativeTargetGuard) -> dict:
@@ -506,7 +508,7 @@ def retire(remote: str, record: dict[str, Any], root: Path, env: dict[str, str],
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("inspect", "publish", "fetch", "fetch-origin", "fetch-warm-local", "fetch-rejected", "retire"))
+    parser.add_argument("action", choices=("inspect", "publish", "fetch", "fetch-origin", "fetch-rejected", "retire"))
     parser.add_argument("--fixture", required=True, type=Path)
     parser.add_argument("--configuration-sha256", required=True)
     parser.add_argument("--receipt", type=Path, help="required for publication, fetch and retirement")
@@ -521,11 +523,14 @@ def main() -> int:
     parser.add_argument("--hydration-pointer-sha256")
     parser.add_argument("--service-lfs-payload", type=Path, help="fixture-pinned LFS bytes for native service publication")
     parser.add_argument("--managed-issuer-capture", type=Path, help="new private directory for the managed product observation")
+    parser.add_argument("--warm-local-output", type=Path, help="new file for the measured edge fetch's local repeat")
     args = parser.parse_args()
     try:
         require(matches(COMMIT, args.source_sha) and matches(RUN_NUMBER, args.run_id)
                 and matches(RUN_NUMBER, args.run_attempt), "exact workflow run provenance is required")
         require(args.action == "inspect" or args.receipt is not None, "this action requires a publication receipt path")
+        require(args.warm_local_output is None or (args.action == "fetch" and args.transition_object is None
+                and args.managed_issuer_capture is None), "warm-local repeat requires a standalone benchmark edge fetch")
         fixture = approved_fixture(args.fixture, args.configuration_sha256)
         scope = fixture["scope"]
         edge, access, _, family, _ = scope_parts(scope)
@@ -564,6 +569,7 @@ def main() -> int:
             "scope": fixture["scope"], "configuration_sha256": args.configuration_sha256,
             "source_sha": args.source_sha, "workflow_run_id": args.run_id, "workflow_run_attempt": args.run_attempt,
         }
+        repeat = None
         with TemporaryDirectory(prefix="crab-cdn-git-", dir=args.scratch) as temporary:
             root = Path(temporary).resolve()
             target = {"origin": fixture["native_origin"], "repository_prefix": fixture["fixture_prefix"]}
@@ -597,18 +603,30 @@ def main() -> int:
                 if args.action == "retire":
                     result = retire(remote, record, root, env, guard)
                 else:
-                    result = fetch(args.action, remote, record, root, env, proof, crab, guard, approved_binding, public_export,
+                    fetch_root = root
+                    if args.warm_local_output is not None:
+                        fetch_root = root / "primer"
+                        fetch_root.mkdir()
+                    result = fetch(args.action, remote, record, fetch_root, env, proof, crab, guard, approved_binding, public_export,
                                    managed=fixture if managed_read else None, managed_capture=args.managed_issuer_capture)
                     if proof is not None:
                         result["transition_key_sha256"] = proof["key_sha256"]
+                    if args.warm_local_output is not None:
+                        repeat = repeat_fetch(remote, record, root, fetch_root, env, crab, guard, approved_binding, public_export,
+                                              managed=fixture if managed_read else None)
                 result["publication_sha256"] = hashlib.sha256(raw).hexdigest()
-        output = json.dumps(provenance | result, sort_keys=True) + "\n"
+        output = (json.dumps(provenance | result, sort_keys=True) + "\n").encode()
+        if repeat is not None:
+            repeat |= {"publication_sha256": result["publication_sha256"],
+                       "primer_sha256": hashlib.sha256(output).hexdigest()}
+            with args.warm_local_output.open("x", encoding="utf-8", newline="\n") as stream:
+                stream.write(json.dumps(provenance | repeat, sort_keys=True) + "\n")
         if args.managed_issuer_capture is not None:
-            (args.managed_issuer_capture / "client.json").write_bytes(output.encode())
+            (args.managed_issuer_capture / "client.json").write_bytes(output)
     except (ExportError, OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
-    sys.stdout.write(output)
+    sys.stdout.buffer.write(output)
     return 0
 
 

@@ -264,6 +264,10 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, nati
                         client["primer_sha256"] = hashlib.sha256(primer).hexdigest()
                         if desktop:
                             client["cache_root_sha256"] = json.loads(primer)["cache_root_sha256"]
+                elif cli and arm == "warm_local":
+                    primer = (directory.parent / "warm_edge/client.json").read_bytes()
+                    client["primer_sha256"] = hashlib.sha256(primer).hexdigest()
+                    client["reader"]["cache_root_sha256"] = json.loads(primer)["reader"]["cache_root_sha256"]
                 digest = json_file(directory / "client.json", client)
                 if proof:
                     edge_name = CDN.PROVIDERS[provider][0]
@@ -1231,6 +1235,11 @@ class CdnQualificationTests(unittest.TestCase):
             for name in (CDN.VIEWER_REQUEST_FILES["azure"], "measurement.json"):
                 path = arm / name
                 json_file(path, json.loads(path.read_bytes()) | {"client_report_sha256": digest})
+            if label == "warm_edge":
+                repeat = arm.parent / "warm_local/client.json"
+                repeat_digest = json_file(repeat, json.loads(repeat.read_bytes()) | {"primer_sha256": digest})
+                measurement = repeat.parent / "measurement.json"
+                json_file(measurement, json.loads(measurement.read_bytes()) | {"client_report_sha256": repeat_digest})
         result = self.command("--cdn-release-policy", str(policy))
         self.assertEqual(result.returncode, 0, result.stderr)
 

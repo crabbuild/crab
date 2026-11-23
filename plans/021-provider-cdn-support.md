@@ -671,9 +671,10 @@ and edge payload through redacted observations.
   rejects a configured shared cache. Public edge and warm-local arms pin the
   active sealed export receipt alongside the viewer URL. Stage their immutable
   benchmark objects before sealing the preregistered receipt. The warm-local
-  arm requires a verified pack cache hit from a fresh Git client sharing the
-  cache of its own edge primer, or a SHA-256-verified LFS cache hit in the
-  primed worktree.
+  arm pins the pair's measured warm-edge record and shares its isolated
+  Crab cache. A fresh Git client must prove a verified cache hit, and LFS
+  repeats its SHA-256-verified read in the primed worktree. Keep separate
+  runner measurements for the two timed windows.
   `crab/scripts/e2e/collect_cdn_git_performance.py` binds each timed fetch to its
   measured provider and runner metrics, checks ordered same-publication pairs
   across two preregistered regions, and applies the release budgets. Assembly
