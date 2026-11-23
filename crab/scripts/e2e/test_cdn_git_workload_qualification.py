@@ -507,7 +507,8 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             write_product_viewer_proof(fetch_path, key)
             (records / "retirement.json").write_text(json.dumps(retired), encoding="utf-8")
             viewer = WORKLOAD.viewer_binding_sha256(sample)
-            product, _ = collect_git_product_action(records, fetched | {"viewer_binding_sha256": viewer},
+            product, _ = collect_git_product_action(records, fetched | {"viewer_binding_sha256": viewer,
+                                                                       "fixture_prefix": sample["fixture_prefix"]},
                                                     json.dumps(rollback).encode(), public_export_sha256=current)
             self.assertEqual(product["name"], "lfs-fetch")
             export = self.root / "public-export"

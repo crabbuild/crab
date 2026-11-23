@@ -13,7 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cdn_qualification import (  # noqa: E402
     GIT_PRODUCT_DIR, LABEL, benchmark_registration, collect_git_performance, collect_git_product_action, decode,
-    is_managed_cli_git_scope, matches, read_trace, require, scope_parts, verify_cleanup_trace, verify_performance,
+    is_managed_cli_git_scope, matches, read_trace, require, requires_cli_lfs_workload, scope_parts, verify_cleanup_trace,
+    verify_performance,
 )
 from run_cdn_transport_checks import approved_fixture  # noqa: E402
 
@@ -28,7 +29,7 @@ def main() -> int:
     parser.add_argument("--run-attempt", required=True)
     parser.add_argument("--service-row", type=Path, help="row directory containing service-product and traces")
     parser.add_argument("--managed-row", type=Path, help="managed Git row directory containing git-product and traces")
-    parser.add_argument("--fixture", type=Path, help="approved fixture JSON for the managed Git row")
+    parser.add_argument("--fixture", type=Path, help="approved fixture JSON for managed Git or direct CLI LFS")
     args = parser.parse_args()
     try:
         raw = args.benchmarks.read_bytes()
@@ -42,23 +43,28 @@ def main() -> int:
         require(matches(LABEL, platform) and registration["scope"] == scope,
                 "benchmark registration does not match its approved row")
         managed = is_managed_cli_git_scope(scope)
-        require(managed == (args.managed_row is not None) == (args.fixture is not None),
-                "managed Git performance requires the measured row and approved fixture")
+        cli_lfs = requires_cli_lfs_workload(scope)
+        require(managed == (args.managed_row is not None) and (managed or cli_lfs) == (args.fixture is not None),
+                "managed Git needs its measured row and approved fixture; direct CLI LFS needs its approved fixture")
         native_target = None
+        fixture_prefix = None
         product_request_ids = None
-        if managed:
+        if args.fixture is not None:
             fixture = approved_fixture(args.fixture, registration["configuration_sha256"])
-            require(fixture["scope"] == scope, "managed Git performance fixture differs from the approved row")
+            require(fixture["scope"] == scope, "performance fixture differs from the approved row")
+            fixture_prefix = fixture["fixture_prefix"]
+            native_target = {"origin_sha256": hashlib.sha256(fixture["native_origin"].encode()).hexdigest(),
+                             "prefix_sha256": hashlib.sha256(f"{fixture_prefix}/".encode()).hexdigest()}
+        if managed:
             edge, access, *_ = scope_parts(scope)
             cleanup = decode(read_trace(args.managed_row / "traces/cleanup.json", "cleanup"))
             row = registration | {
                 "platform": platform, "workflow_run_id": args.run_id, "workflow_run_attempt": args.run_attempt,
-                "fixture_prefix": fixture["fixture_prefix"],
+                "fixture_prefix": fixture_prefix,
             }
             cleanup_at = verify_cleanup_trace(cleanup, row, edge, access)
-            native_target = {"origin_sha256": hashlib.sha256(fixture["native_origin"].encode()).hexdigest(),
-                             "prefix_sha256": cleanup["prefix_sha256"]}
-            require(native_target["origin_sha256"] == cleanup["targets"]["native"]["origin_sha256"],
+            require(native_target["origin_sha256"] == cleanup["targets"]["native"]["origin_sha256"]
+                    and native_target["prefix_sha256"] == cleanup["prefix_sha256"],
                     "managed Git cleanup did not observe the approved native target")
             rollback = read_trace(args.managed_row / "traces/rollback.json", "rollback")
             _, product_request_ids = collect_git_product_action(
@@ -67,7 +73,8 @@ def main() -> int:
             )
         performance = collect_git_performance(args.inputs, registration, platform, args.run_id, args.run_attempt,
                                               service_row=args.service_row, managed_row=args.managed_row,
-                                              native_target=native_target, product_request_ids=product_request_ids)
+                                              native_target=native_target, product_request_ids=product_request_ids,
+                                              cli_lfs_prefix=fixture_prefix)
         verify_performance(performance, registration)
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f"error: {error}", file=sys.stderr)

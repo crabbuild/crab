@@ -132,6 +132,7 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, nati
     desktop = CDN.is_direct_desktop_git_scope(registration["scope"])
     managed = CDN.is_managed_cli_git_scope(registration["scope"])
     cli = CDN.requires_cli_workload(registration["scope"])
+    cli_lfs = CDN.requires_cli_lfs_workload(registration["scope"])
     capsule = cli and CDN.scope_parts(registration["scope"])[3] == "capsule"
     payload_bytes = CDN.cli_payload_bytes(registration)
     action = CDN.cli_action_name(registration["scope"])
@@ -216,6 +217,8 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, nati
                     cache = "miss" if arm == "cold_edge" else "hit"
                     client["edge_responses"][request_id] = range_response(registration["scope"], metrics["edge_bytes"], cache)
                     key_sha256 = hashlib.sha256(f"{location}/{index}/key".encode()).hexdigest()
+                    if cli_lfs:
+                        key_sha256 = hashlib.sha256(f"{FIXTURE_PREFIX}/{CDN.lfs_object_path(blob)}".encode()).hexdigest()
                     proof[request_id] = {"status": 206, "response_bytes": 800, "cache": cache, "key_sha256": key_sha256}
                     if provider == "s3":
                         proof[request_id].update(cloudfront_framing(metrics["edge_bytes"]))
@@ -533,7 +536,9 @@ class CdnQualificationTests(unittest.TestCase):
         fetch_path = records / "fetch.json"
         native_scopes = ["cloudfront/private/cli/capsule/direct"] if self.scope == "cloudfront/private/cli/git/direct" else []
         json_file(fetch_path, fetch | {"publication_sha256": receipt, "origin_only_scopes": native_scopes} | transition)
-        write_product_viewer_proof(fetch_path, transition.get("transition_key_sha256"))
+        observed_key = (hashlib.sha256(f"{FIXTURE_PREFIX}/{CDN.lfs_object_path(fetch['observed_sha256'])}".encode()).hexdigest()
+                        if CDN.requires_cli_lfs_workload(self.scope) else transition.get("transition_key_sha256"))
+        write_product_viewer_proof(fetch_path, observed_key)
         rollback = fetch | dict.fromkeys(CDN.PRODUCT_COUNTERS, 0) | {
             "publication_sha256": receipt, "arm": "origin", "edge_responses": {},
             "started_at_unix_ms": fetch["finished_at_unix_ms"] + 5,
@@ -1135,6 +1140,26 @@ class CdnQualificationTests(unittest.TestCase):
                 cdn = json.loads(result.stdout)["cdn"]
                 self.assertEqual(cdn["scope"], self.scope)
                 self.assertEqual(cdn["distant_median_savings_lower_bound_ms"], 180)
+
+    def test_cli_lfs_provider_logs_must_identify_the_verified_object(self) -> None:
+        self.configure("s3", "private", "direct", family="lfs")
+        result = self.command()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        benchmark = self.directory / CDN.GIT_BENCHMARK_DIR / "near/0001"
+        for group, paths in (
+            ("product", [self.directory / CDN.GIT_PRODUCT_DIR / CDN.PRODUCT_VIEWER_RECORD]),
+            ("benchmark", [benchmark / arm / CDN.VIEWER_REQUEST_FILES["s3"] for arm in ("cold_edge", "warm_edge")]),
+        ):
+            with self.subTest(group=group):
+                records = {path: path.read_bytes() for path in paths}
+                for path, raw in records.items():
+                    proof = json.loads(raw)
+                    for request in (*proof["records"].values(), *proof["origin_requests"].values()):
+                        request["key_sha256"] = "0" * 64
+                    json_file(path, proof)
+                self.rejected("CDN viewer request did not read the approved LFS object")
+                for path, raw in records.items():
+                    path.write_bytes(raw)
 
     def test_rejects_generic_rotation_trace(self) -> None:
         self.configure("s3", "private", "direct")

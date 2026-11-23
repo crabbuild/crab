@@ -239,6 +239,7 @@ def assemble_bundle(
                     retain=destination / GIT_BENCHMARK_DIR, native_target=native_target,
                     service_row=destination if service else None, product_request_ids=product_request_ids,
                     desktop_product=desktop_product, managed_row=destination if managed_git else None,
+                    cli_lfs_prefix=measured["fixture_prefix"],
                 )
             report = measured | {
                 "schema": SCHEMA,

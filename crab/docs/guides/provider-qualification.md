@@ -1893,6 +1893,9 @@ This command previews the summary and applies the release verifier's sample,
 latency, cost, and paired savings rules. Assembly uses the underlying files
 and derives the summary. The collector checks the source, workflow attempt,
 runner platform, preregistered region, published commit, and verified payload.
+For CLI LFS, also pass `--fixture "$approved_fixture_json"`. The collector
+and release verifier match every scoped viewer request to the object key
+derived from the approved repository prefix and verified payload digest.
 
 ### Assemble the release artifact
 

@@ -1987,11 +1987,16 @@ def verify_cloudfront_framing(row: dict[str, Any], response: dict[str, Any]) -> 
 
 def verify_viewer_requests(
     value: Any, client: dict[str, Any], client_digest: str, edge: str, *, include_adjacent_origin: bool = False,
+    cli_lfs_prefix: str | None = None,
 ) -> ViewerRequestMetrics:
     keyed_origin = edge in ("cloudfront", "front-door")
     xorb_key = client.get("xorb_key_sha256")
     lfs_key = client.get("lfs_key_sha256")
-    service = client.get("schema") == "crab.cdn-service-read/v1"
+    if requires_cli_lfs_workload(client["scope"]):
+        require(matches(PREFIX, cli_lfs_prefix), "CLI LFS evidence requires the approved repository prefix")
+        path = lfs_object_path(client["observed_sha256"])
+        lfs_key = hashlib.sha256(f"{cli_lfs_prefix}/{path}".encode()).hexdigest()
+    service_read = client.get("schema") == "crab.cdn-service-read/v1"
     transition_key = client.get("transition_key_sha256")
     verified_transition = False
     proof_fields = {"schema", "client_report_sha256", "records"}
@@ -2035,12 +2040,14 @@ def verify_viewer_requests(
         require(matches(SHA256, key), "invalid CDN object key fingerprint")
         require(xorb_key is None or (key == xorb_key) == selected,
                 "CDN viewer request did not read the approved hydration xorb")
-        require(lfs_key is None or key == lfs_key, "CDN viewer request did not read the approved service LFS object")
+        require(lfs_key is None or (key == lfs_key) == (service_read or selected),
+                "CDN viewer request did not read the approved service LFS object" if service_read
+                else "CDN viewer request did not read the approved LFS object")
         viewer_keys.add(key)
         if selected and served_payload:
             selected_payload_keys.add(key)
             verified_transition |= key == transition_key
-        if (xorb_key is not None or service) and selected:
+        if (xorb_key is not None or lfs_key is not None or service_read) and selected:
             if response["complete"]:
                 require(response["status"] in (200, 206), "completed CDN response did not return object bytes")
                 if response["bytes"]:
@@ -2080,7 +2087,7 @@ def verify_viewer_requests(
             require(response["cache"] in (row["cache"], cache), "CDN log cache result disagrees with the completed response")
         if selected and served_payload and cache in ("hit", "miss"):
             completed_cache[request_id] = cache
-    if xorb_key is not None or service:
+    if xorb_key is not None or lfs_key is not None or service_read:
         attempts = sum(response["scope"] == client["scope"] for response in expected.values())
         require(client["edge_attempts"] == attempts and all(client[key] == count for key, count in observed_transfer.items()),
                 "CDN transfer totals disagree with the logged responses")
@@ -2127,11 +2134,12 @@ def verify_viewer_requests(
 
 def verify_product_viewer_requests(
     raw: bytes, client: dict[str, Any], client_raw: bytes, edge: str, *,
-    policies: dict[str, ReleaseReadLimits] | None = None,
+    policies: dict[str, ReleaseReadLimits] | None = None, cli_lfs_prefix: str | None = None,
 ) -> set[str]:
     if policies is not None:
         verify_compiled_edge_limits(client, policies, "CDN product read")
-    verify_viewer_requests(decode(raw), client, hashlib.sha256(client_raw).hexdigest(), edge)
+    verify_viewer_requests(decode(raw), client, hashlib.sha256(client_raw).hexdigest(), edge,
+                           cli_lfs_prefix=cli_lfs_prefix)
     require(any(response["scope"] == client["scope"] and response["status"] in (200, 206)
                 and response["complete"] and response["bytes"] > 0
                 for response in client["edge_responses"].values()), "provider logs confirm no completed product response")
@@ -2600,7 +2608,7 @@ def collect_git_product_action(
                              retired_at, cleanup_at, native_origin_sha256)
     viewer_raw = read_git_record(inputs / PRODUCT_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
     viewer_ids = verify_product_viewer_requests(viewer_raw, fetch, fetch_raw, scope_parts(row["scope"])[0],
-                                                 policies=policies)
+                                                 policies=policies, cli_lfs_prefix=row.get("fixture_prefix"))
     if retain is not None:
         retain.mkdir()
         retained = {"publication.json": publication_raw, "fetch.json": fetch_raw,
@@ -2896,6 +2904,7 @@ def collect_git_performance(
     service_row: Path | None = None, product_request_ids: set[str] | None = None,
     desktop_product: DesktopProductEvidence | None = None,
     managed_row: Path | None = None, policy: Path | None = None, sparse_xorb_hit: tuple[int, int] | None = None,
+    cli_lfs_prefix: str | None = None,
 ) -> dict[str, Any]:
     spec = benchmark_registration(registration)
     scope = spec["scope"]
@@ -3151,7 +3160,7 @@ def collect_git_performance(
                     viewer_log = read_git_record(inputs / slot / log_name, limit=GIT_FETCH_RECORD_LIMIT)
                     traffic = verify_viewer_requests(
                         decode(viewer_log), client, digest, PROVIDERS[provider][0],
-                        include_adjacent_origin=True,
+                        include_adjacent_origin=True, cli_lfs_prefix=cli_lfs_prefix,
                     )
                     require(provider_request_ids.isdisjoint(traffic.request_ids), "CDN log requests were reused across arms")
                     provider_request_ids.update(traffic.request_ids)
@@ -3361,7 +3370,7 @@ def verify_cdn_report(
         measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt,
                                           native_target=native_target, product_request_ids=request_ids,
                                           managed_row=directory if is_managed_cli_git_scope(scope) else None,
-                                          policy=policy)
+                                          policy=policy, cli_lfs_prefix=row["fixture_prefix"])
         require(measured == row["performance"], "CLI performance summary differs from the retained measurements")
     if sdk_git:
         require(rollback is not None, "direct SDK qualification requires an ordinary SDK rollback read")

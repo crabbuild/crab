@@ -539,7 +539,7 @@ def viewer_evidence(fixture: dict, client: dict, digest: str, edge: str, args: a
         proof = viewer_log_snapshot(fixture, client, digest, edge, args)
         records = proof["records"]
         if records.keys() == client["edge_responses"].keys():
-            observed = verify_viewer_requests(proof, client, digest, edge)
+            observed = verify_viewer_requests(proof, client, digest, edge, cli_lfs_prefix=fixture["fixture_prefix"])
             if observed.successful_fill or not args.require_origin_fill:
                 return proof
             missing = "no logged fill from the approved CDN origin"

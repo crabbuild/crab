@@ -626,8 +626,8 @@ and edge payload through redacted observations.
   the commit. The release gate derives direct CLI Git, capsule, and LFS
   product evidence from the exact publication receipt and its
   ordered fetch and retirement records. The retained product fetch must
-  match provider viewer logs, including delivery of the exact new object
-  for public transitions. The fixture owner separately proves
+  match provider viewer logs, including the exact LFS object and delivery of
+  the exact new object for public transitions. The fixture owner separately proves
   storage and export cleanup. The read-only cleanup collector verifies empty
   native inventories for the exact test prefix, records live and historical
   inventory results, and binds public exports separately. The release gate

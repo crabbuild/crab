@@ -13,6 +13,7 @@ from tempfile import TemporaryDirectory
 import collect_cdn_git_performance as BENCHMARK
 from collect_cdn_product_metrics import NATIVE_TARGET, measure_native
 import test_cdn_qualification as fixture
+from test_cdn_transport_qualification import fixture as transport_fixture
 
 
 REGIONS = fixture.REGIONS
@@ -162,6 +163,31 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         self.assertEqual(BENCHMARK.verify_performance(performance, self.registration), 180)
         self.assertEqual(performance["near"]["pairs"][0]["cold_edge"]["origin_fill_bytes"], 8)
         self.assertEqual(performance["near"]["pairs"][0]["warm_local"]["local_payload_hits"], 1)
+
+    def test_cli_lfs_preview_uses_the_approved_fixture(self) -> None:
+        scope = "cloudfront/private/cli/lfs/direct"
+        config = transport_fixture(access="private") | {"scope": scope, "fixture_prefix": fixture.FIXTURE_PREFIX}
+        config["object_path"] = fixture.CDN.lfs_object_path(config["sha256"])
+        config_path = self.root / "fixture.json"
+        configuration = fixture.json_file(config_path, config)
+        self.registration.update(scope=scope, workload="lfs-fetch", configuration_sha256=configuration,
+                                 candidate=fixture.cli_candidate(scope, PLATFORM))
+        native_target = {"origin_sha256": hashlib.sha256(config["native_origin"].encode()).hexdigest(),
+                         "prefix_sha256": hashlib.sha256(f"{config['fixture_prefix']}/".encode()).hexdigest()}
+        fixture.write_git_measurements(self.root, self.registration, PLATFORM, native_target=native_target)
+        benchmarks = self.root / "benchmarks.json"
+        row = f"{scope}/{PLATFORM}"
+        digest = fixture.json_file(benchmarks, {row: self.registration})
+        command = [
+            sys.executable, "-B", str(Path(BENCHMARK.__file__)),
+            "--inputs", str(self.root), "--benchmarks", str(benchmarks), "--benchmarks-sha256", digest, "--row", row,
+            "--run-id", RUN_ID, "--run-attempt", ATTEMPT,
+        ]
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("direct CLI LFS needs its approved fixture", result.stderr)
+        result = subprocess.run(command + ["--fixture", str(config_path)], capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_release_requires_one_range_at_both_size_limits(self) -> None:
         policy = self.root / "release-policy.txt"
