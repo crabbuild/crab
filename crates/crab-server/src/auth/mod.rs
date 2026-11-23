@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 mod accounts;
+pub(crate) mod automation;
 mod backchannel_logout;
 pub(crate) mod deploy_tokens;
 mod git_tokens;

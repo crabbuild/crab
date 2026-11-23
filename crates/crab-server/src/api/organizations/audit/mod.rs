@@ -11,15 +11,11 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{actor, read_error, target};
+use super::{actor, require_owner, target};
 use crate::{
     api::read_admission,
     app::{self, Error, Result},
     auth::Principal,
-    cells::{
-        Address, CellClient,
-        organization::{Caller, GetOrganization, Role},
-    },
     server::Server,
 };
 
@@ -182,19 +178,6 @@ async fn list(
         .into_response()
     };
     Ok(read_admission::retain(response, admission))
-}
-
-async fn require_owner(cells: &CellClient, address: Address, owner: Uuid) -> Result<()> {
-    let role = cells
-        .query::<GetOrganization>(address, None, Caller { actor: owner })
-        .await
-        .map_err(read_error)?
-        .output
-        .map(|result| result.role);
-    if role != Some(Role::Owner) {
-        return Err(Error::NotFound);
-    }
-    Ok(())
 }
 
 fn encode(key: &blake3::Hasher, cursor: Cursor) -> Result<String> {

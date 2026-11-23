@@ -255,6 +255,15 @@ Prove one private repository from an author’s browser and stock Git through a 
 
 ## Verification and release claims
 
+- Organization automation passed the standalone server and production UI
+  builds, generated contract check, 36 focused native tests, 120 UI unit
+  tests, and four organization Playwright cases. The browser issued a
+  credential that stock Git accepted and then disabled it. Native coverage
+  exercised Git push and clone, Git LFS upload and download, protected
+  branches, repository rename and transfer, grant downgrades, individual
+  revocation, and disable across two native replicas. The standalone RustFS
+  gate also verified ordinary Git publication and process restart.
+
 - Organization audit history passed the server and production UI builds,
   generated contract check, 31 focused native tests, 120 UI unit tests,
   and four organization Playwright cases. Embedded Chromium filtered an
