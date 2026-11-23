@@ -1003,16 +1003,30 @@ mod tests {
         corrupt_origin: bool,
         origin: crab_storage::Store,
     ) -> (super::ShardHydrator, crab_types::pointer::Pointer, Vec<u8>) {
+        reconstruction_fixture_with_recipe(root, corrupt_origin, origin, &[(0, 4)]).await
+    }
+
+    async fn reconstruction_fixture_with_recipe(
+        root: &std::path::Path,
+        corrupt_origin: bool,
+        origin: crab_storage::Store,
+        recipe: &[(u32, u32)],
+    ) -> (super::ShardHydrator, crab_types::pointer::Pointer, Vec<u8>) {
         use crab_xet::shard::{
             FileDataSequenceEntry, FileDataSequenceHeader, MDBFileInfo, MDBXorbInfo, ShardWriter,
             XorbChunkSequenceEntry, XorbChunkSequenceHeader,
         };
         use crab_xet::xorb::builder::{RunId, XorbBuilder};
 
+        const CHUNK_SIZE: usize = 32 * 1024;
         let payloads = (0_u8..4)
-            .map(|value| vec![42 + value; 32 * 1024])
+            .map(|value| vec![42 + value; CHUNK_SIZE])
             .collect::<Vec<_>>();
-        let data = payloads.concat();
+        let data = recipe
+            .iter()
+            .flat_map(|&(start, end)| payloads[start as usize..end as usize].iter().flatten())
+            .copied()
+            .collect::<Vec<_>>();
         let chunks = payloads
             .into_iter()
             .map(|payload| crab_xet::xorb::format::Chunk::new(bytes::Bytes::from(payload)))
@@ -1026,7 +1040,11 @@ mod tests {
         let mut shard = ShardWriter::new();
         shard
             .add_xorb(Arc::new(MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb.hash, chunks.len() as u32, data.len()),
+                metadata: XorbChunkSequenceHeader::new(
+                    xorb.hash,
+                    chunks.len() as u32,
+                    chunks.len() * CHUNK_SIZE,
+                ),
                 chunks: chunks
                     .iter()
                     .scan(0_u32, |offset, chunk| {
@@ -1043,13 +1061,19 @@ mod tests {
             .unwrap();
         shard
             .add_file(MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash.into(), 1, false, false),
-                segments: vec![FileDataSequenceEntry::new(
-                    xorb.hash,
-                    data.len() as u32,
-                    0,
-                    chunks.len() as u32,
-                )],
+                metadata: FileDataSequenceHeader::new(
+                    file_hash.into(),
+                    recipe.len() as u32,
+                    false,
+                    false,
+                ),
+                segments: recipe
+                    .iter()
+                    .map(|&(start, end)| {
+                        let bytes = (end - start) * CHUNK_SIZE as u32;
+                        FileDataSequenceEntry::new(xorb.hash, bytes, start, end)
+                    })
+                    .collect(),
                 verification: vec![],
                 metadata_ext: None,
             })
@@ -1360,6 +1384,33 @@ mod tests {
                 .await
                 .unwrap(),
             original
+        );
+    }
+
+    #[tokio::test]
+    async fn reconstruction_handles_repeated_xorb_starts_with_different_lengths() {
+        let directory = tempfile::tempdir().unwrap();
+        let origin = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let (hydrator, pointer, original) = reconstruction_fixture_with_recipe(
+            &directory.path().join("cache"),
+            false,
+            origin,
+            &[(0, 1), (0, 3)],
+        )
+        .await;
+        let pointer = pointer.serialize();
+        let start = 1024;
+        let end = 3 * 32 * 1024 + 1024;
+        assert_eq!(
+            hydrator
+                .reconstruct_range_from_pointer(&pointer, start as u64, end as u64)
+                .await
+                .unwrap(),
+            original[start..end],
+        );
+        assert_eq!(
+            hydrator.reconstruct_from_pointer(&pointer).await.unwrap(),
+            original,
         );
     }
 

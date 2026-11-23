@@ -451,6 +451,21 @@ fn parse_xorb_url(url: &str) -> ClientResult<(MerkleHash, Vec<ChunkRange>, Optio
     Ok((hash, ranges, chunk_count))
 }
 
+fn retain_longest_fetches<T>(
+    xorbs: &mut HashMap<HexMerkleHash, Vec<T>>,
+    chunk_range: impl Fn(&T) -> ChunkRange,
+) {
+    // Xet reuses each download by xorb and start chunk. The shared
+    // fetch must cover every term with that start.
+    for fetches in xorbs.values_mut() {
+        fetches.sort_unstable_by_key(|fetch| {
+            let range = chunk_range(fetch);
+            (range.start, std::cmp::Reverse(range.end))
+        });
+        fetches.dedup_by_key(|fetch| chunk_range(fetch).start);
+    }
+}
+
 fn build_response_v2(file_info: &MDBFileInfo) -> QueryReconstructionResponseV2 {
     let mut terms = Vec::with_capacity(file_info.segments.len());
     let mut xorbs: HashMap<HexMerkleHash, Vec<XorbMultiRangeFetch>> = HashMap::new();
@@ -476,6 +491,7 @@ fn build_response_v2(file_info: &MDBFileInfo) -> QueryReconstructionResponseV2 {
             .push(fetch);
     }
 
+    retain_longest_fetches(&mut xorbs, |fetch| fetch.ranges[0].chunks);
     QueryReconstructionResponseV2 {
         offset_into_first_range: 0,
         terms,
@@ -627,6 +643,7 @@ fn build_range_response_v2(
         segment_start = segment_end;
     }
 
+    retain_longest_fetches(&mut xorbs, |fetch| fetch.ranges[0].chunks);
     Ok(Some(QueryReconstructionResponseV2 {
         offset_into_first_range: offset_into_first_range.unwrap_or(0),
         terms,
@@ -747,6 +764,7 @@ impl Client for StoreClient {
             }
         }
 
+        retain_longest_fetches(&mut fetch_info, |fetch| fetch.range);
         Ok(BatchQueryReconstructionResponse { files, fetch_info })
     }
 
