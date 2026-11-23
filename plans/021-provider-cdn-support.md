@@ -630,9 +630,11 @@ and edge payload through redacted observations.
   headers plus origin fill evidence. Product edge attempts emit redacted,
   scope-specific transfer events. The qualification reducer counts completed
   bodies and incomplete bytes separately. The product record retains each
-  correlated request's read family, expected object and request sizes, range
-  flag, and elapsed time for sizing qualification. Release evidence requires
-  completed requests to agree with those sizes. Redact cookies, JWTs, signed
+  correlated request's full scope, expected object and request sizes, range
+  flag, and elapsed time for sizing qualification. Completed requests must
+  agree with those sizes. Ordinary-build regional and CLI lifecycle evidence
+  requires every correlated request, including adjacent reads, to match a
+  compiled scope and its limits. Redact cookies, JWTs, signed
   URLs and sensitive headers in all client and infrastructure logs. An
   operator can stop issuance, remove the target binding and revert to
   authorized origin reads.

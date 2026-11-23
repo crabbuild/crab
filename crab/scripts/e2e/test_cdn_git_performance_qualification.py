@@ -129,6 +129,34 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         self.amend_edge_response("near/0001/warm_edge", status=200, range=False, object_bytes=8)
         self.collect(policy=policy)
 
+    def test_release_benchmark_requires_the_exact_compiled_scope_for_adjacent_reads(self) -> None:
+        slot = "near/0001/cold_edge"
+        directory = self.root / slot
+        client = json.loads((directory / "client.json").read_bytes())
+        capsule_scope = "cloudfront/private/cli/capsule/direct"
+        request = "c" * 64
+        responses = client["edge_responses"] | {request: fixture.range_response(capsule_scope, 8)}
+        self.amend_client(slot, edge_responses=responses, all_edge_attempts=2)
+        log = directory / fixture.CDN.VIEWER_REQUEST_FILES["s3"]
+        proof = json.loads(log.read_bytes())
+        proof["records"][request] = {"status": 206, "cache": "hit", "response_bytes": 8, "key_sha256": "d" * 64}
+        fixture.json_file(log, proof)
+        self.collect()
+
+        policy = self.root / "release-policy.txt"
+        git_row = f"{self.registration['scope']} 0 16 8 5000\n"
+        for rows in ("", f"{capsule_scope.replace('/cli/', '/sdk/')} 0 16 8 5000\n"):
+            with self.subTest(rows=rows):
+                policy.write_text(git_row + rows)
+                with self.assertRaisesRegex(ValueError, "outside its compiled release scopes"):
+                    self.collect(policy=policy)
+
+        policy.write_text(git_row + f"{capsule_scope} 0 16 7 5000\n")
+        with self.assertRaisesRegex(ValueError, "disagrees with its compiled CDN read limits"):
+            self.collect(policy=policy)
+        policy.write_text(git_row + f"{capsule_scope} 0 16 8 5000\n")
+        self.collect(policy=policy)
+
     def test_rejects_a_different_commit_with_the_same_content(self) -> None:
         self.amend_client("near/0001/warm_edge", publication_oid="b" * 40)
         with self.assertRaisesRegex(ValueError, "fetched different published fixtures"):
@@ -496,7 +524,8 @@ class DesktopGitPerformanceQualificationTests(unittest.TestCase):
         client = json.loads(client_path.read_bytes())
         client["all_edge_attempts"] += 1
         new_id = "c" * 64
-        client["edge_responses"][new_id] = fixture.range_response("capsule", 500)
+        capsule_scope = spec["scope"].replace("/git/", "/capsule/")
+        client["edge_responses"][new_id] = fixture.range_response(capsule_scope, 500)
         digest = fixture.json_file(client_path, client)
         viewer_path = arm / "cloudfront-requests.json"
         proof = json.loads(viewer_path.read_bytes())

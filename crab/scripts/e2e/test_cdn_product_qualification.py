@@ -121,11 +121,11 @@ class CdnProductQualificationTests(unittest.TestCase):
             event(family="capsule", request_sha256="b" * 64, status=206, range=True, object_bytes=24),
         ], SCOPE, edge_responses=responses)
         self.assertEqual(responses["a" * 64], {
-            "family": "git", "status": 200, "cache": "hit", "range": False, "object_bytes": 8,
+            "scope": SCOPE, "family": "git", "status": 200, "cache": "hit", "range": False, "object_bytes": 8,
             "requested_bytes": 8, "bytes": 8, "complete": True, "elapsed_ms": 10,
         })
         self.assertEqual(responses["b" * 64], responses["a" * 64] | {
-            "family": "capsule", "status": 206, "range": True, "object_bytes": 24,
+            "scope": SCOPE.replace("/git/", "/capsule/"), "family": "capsule", "status": 206, "range": True, "object_bytes": 24,
         })
         self.assertEqual(observed["observed_edge_gets"], 1)
         with self.assertRaisesRegex(ValueError, "duplicate CDN viewer request fingerprint"):

@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cdn_qualification import (  # noqa: E402
-    EDGE_RESPONSE_FIELDS, NATIVE_TRAFFIC_FIELDS, PRODUCT_COUNTERS, PROVIDER_FOR_EDGE, SHA256,
+    EDGE_RESPONSE_FIELDS, NATIVE_TRAFFIC_FIELDS, PRODUCT_COUNTERS, PROVIDERS, PROVIDER_FOR_EDGE, SHA256,
     VIEWER_REQUEST_FILES, decode, fields, matches, require, scope_parts, verify_edge_response,
 )
 
@@ -121,10 +121,13 @@ def measure(lines: Iterable[bytes], scope: str, *, edge_responses: dict | None =
         require(request_id == "" or (event["status"] != 0 and isinstance(provider, str)
                 and provider in VIEWER_REQUEST_FILES and matches(SHA256, request_id)),
                 "invalid CDN viewer request fingerprint")
+        route = tuple(event[name] for name in ROUTE)
         if edge_responses is not None and request_id:
             require(request_id not in edge_responses, "duplicate CDN viewer request fingerprint")
-            edge_responses[request_id] = {key: event[key] for key in EDGE_RESPONSE_FIELDS}
-        route = tuple(event[name] for name in ROUTE)
+            require(all(isinstance(part, str) for part in route), "invalid CDN transfer scope")
+            response_scope = "/".join((PROVIDERS[provider][0], *route[1:]))
+            scope_parts(response_scope)
+            edge_responses[request_id] = {key: event[key] for key in EDGE_RESPONSE_FIELDS} | {"scope": response_scope}
         if route != selected:
             continue
         body = event["bytes"]

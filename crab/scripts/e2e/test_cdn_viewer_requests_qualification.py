@@ -42,10 +42,10 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
         cdn = examples.CDN
         xorb_key = "a" * 64
         shard_key = "b" * 64
-        xorb_response = {"family": "xorb", "status": 206, "range": True, "complete": True, "cache": "hit",
-                         "elapsed_ms": 1, "object_bytes": 1024, "bytes": 64, "requested_bytes": 64}
-        shard_response = xorb_response | {"family": "shard", "status": 200, "range": False, "cache": "miss",
-                                         "object_bytes": 64}
+        xorb_response = examples.range_response("cloudfront/private/mount/xorb/direct", 64) | {"object_bytes": 1024}
+        shard_response = examples.range_response("cloudfront/private/mount/shard/direct", 64, "miss") | {
+            "status": 200, "range": False, "object_bytes": 64,
+        }
         read = dict.fromkeys(cdn.PRODUCT_COUNTERS, 0) | {
             "schema": cdn.MOUNT_XORB_RANGE_READ, "xorb_key_sha256": xorb_key, "started_at_unix_ms": 1000,
             "finished_at_unix_ms": 1001, "all_edge_attempts": 2, "edge_attempts": 1, "observed_edge_gets": 1,
@@ -457,7 +457,8 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
             key_sha256 = hashlib.sha256(key.encode()).hexdigest()
             hydration = {key: report[key] for key in examples.CDN.SDK_HYDRATION_READ_FIELDS & report.keys()} | {
                 "schema": "crab.cdn-sdk-hydration/v1", "scope": config["scope"], "xorb_key_sha256": key_sha256,
-                "configuration_sha256": hydration_config, "edge_responses": {fingerprint: response | {"family": "xorb"}},
+                "configuration_sha256": hydration_config,
+                "edge_responses": {fingerprint: response | {"scope": config["scope"], "family": "xorb"}},
                 "workload_sha256": "1" * 64, "crab_sha256": "2" * 64, "pointer_sha256": "3" * 64,
                 "payload": {"sha256": "4" * 64, "bytes": 8},
             }

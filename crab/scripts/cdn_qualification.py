@@ -1627,11 +1627,28 @@ def verify_git_traffic(client: dict[str, Any], edge: str, label: str) -> None:
             and (not responses or provider in VIEWER_REQUEST_FILES),
             f"{label} has invalid CDN viewer response evidence")
     for request_id, evidence in responses.items():
-        response = fields(evidence, EDGE_RESPONSE_FIELDS, "CDN viewer response")
+        response = fields(evidence, EDGE_RESPONSE_FIELDS | {"scope"}, "CDN viewer response")
         verify_edge_response(response)
         require(matches(SHA256, request_id) and response["status"] != 0, f"{label} has an invalid CDN viewer response")
+        require(isinstance(response["scope"], str), f"{label} has an invalid CDN viewer scope")
+        observed_edge, _, _, observed_family, _ = scope_parts(response["scope"])
+        require(observed_edge == edge and observed_family == response["family"],
+                f"{label} has a CDN viewer scope inconsistent with its provider or family")
     require(client["edge_hits"] + client["edge_misses"] + client["edge_unknown"] == client["observed_edge_gets"]
             <= client["edge_attempts"] <= client["all_edge_attempts"], f"{label} has inconsistent edge counts")
+
+
+def verify_compiled_edge_limits(
+    client: dict[str, Any], policies: dict[str, ReleaseReadLimits], label: str,
+) -> None:
+    responses = client["edge_responses"].values()
+    for response in responses:
+        scope = response["scope"]
+        require(scope in policies, f"{label} contacted the CDN outside its compiled release scopes: {scope}")
+        require(policies[scope].admits(response), f"{label} disagrees with its compiled CDN read limits: {scope}")
+    require(not client["observed_edge_gets"]
+            or any(row["scope"] == client["scope"] and row["complete"] and row["bytes"] for row in responses),
+            f"{label} reports edge delivery without a completed response for {client['scope']}")
 
 
 def validate_desktop_git_read(value: Any, scope: str, arm: str) -> dict[str, Any]:
@@ -2405,7 +2422,7 @@ def collect_xorb_read_evidence(
 
 def collect_git_product_action(
     inputs: Path, row: dict[str, Any], rollback_raw: bytes, *, retain: Path | None = None, cleanup_at: int | None = None,
-    native_origin_sha256: str | None = None, public_export_sha256: str = "",
+    native_origin_sha256: str | None = None, public_export_sha256: str = "", policy: Path | None = None,
 ) -> dict[str, Any]:
     publication_raw = read_git_record(inputs / "publication.json")
     publication = validate_git_publication(publication_raw, row)
@@ -2416,6 +2433,8 @@ def collect_git_product_action(
     fetch_raw = read_git_record(inputs / "fetch.json", limit=GIT_FETCH_RECORD_LIMIT)
     issuer = row.get("managed_issuer")
     fetch = validate_git_fetch(fetch_raw, fetch_provenance, "edge", "Git product action", managed_issuer=issuer)
+    if policy is not None:
+        verify_compiled_edge_limits(fetch, release_read_limits(policy), "Git product action")
     require(fetch["reader"]["binding_sha256"] == row.get("viewer_binding_sha256"),
             "product fetch did not use the registered viewer binding")
     require(fetch["reader"]["public_export_sha256"] == public_export_sha256,
@@ -2741,7 +2760,8 @@ def collect_git_performance(
 ) -> dict[str, Any]:
     spec = benchmark_registration(registration)
     scope = spec["scope"]
-    limits = release_read_limits(policy).get(scope) if policy is not None else None
+    policies = release_read_limits(policy) if policy is not None else {}
+    limits = policies.get(scope)
     missing_boundaries = {}
     if limits is not None:
         if limits.full_bytes:
@@ -2750,7 +2770,6 @@ def collect_git_performance(
         # Its separate sparse read can witness the same xorb's ranged limit.
         if limits.range_bytes and sparse_xorb_hit != (limits.ranged_object_bytes, limits.range_bytes):
             missing_boundaries["ranged GET"] = (limits.ranged_object_bytes, limits.range_bytes)
-    family = scope_parts(scope)[3]
     hydration = is_direct_xorb_read_scope(scope)
     require(hydration == (verify_xorb is not None), "xorb read benchmarks require verified publication and placement")
     require(hydration or sparse_xorb_hit is None, "sparse size evidence requires an xorb read workload")
@@ -2975,6 +2994,8 @@ def collect_git_performance(
                 viewer_log = None
                 traffic = ViewerRequestMetrics(set(), 0, 0, False, {})
                 cache_corrections = dict.fromkeys(("hit", "miss", "unknown"), 0)
+                if policy is not None:
+                    verify_compiled_edge_limits(client, policies, label)
                 if provider in VIEWER_REQUEST_FILES and client["all_edge_attempts"]:
                     log_name = VIEWER_REQUEST_FILES[provider]
                     viewer_log = read_git_record(inputs / slot / log_name, limit=GIT_FETCH_RECORD_LIMIT)
@@ -2985,12 +3006,7 @@ def collect_git_performance(
                     require(provider_request_ids.isdisjoint(traffic.request_ids), "CDN log requests were reused across arms")
                     provider_request_ids.update(traffic.request_ids)
                     responses = {request_id: row for request_id, row in client["edge_responses"].items()
-                                 if row["family"] == family}
-                    if limits is not None:
-                        require((not client["observed_edge_gets"]
-                                 or any(row["complete"] and row["bytes"] for row in responses.values()))
-                                and all(limits.admits(row) for row in responses.values()),
-                                f"{label} disagrees with its compiled CDN read limits")
+                                 if row["scope"] == scope}
                     for request_id, row in responses.items():
                         if not row["complete"] or not row["bytes"]:
                             continue
@@ -3175,6 +3191,7 @@ def verify_cdn_report(
         product = collect_git_product_action(
             directory / GIT_PRODUCT_DIR, row | registered_read, rollback, cleanup_at=cleanup_at,
             native_origin_sha256=native_origin_sha256, public_export_sha256=registration.get("publication_sha256", ""),
+            policy=policy,
         )
         require(row["product_action"] == product | {"fixture_cleanup_verified": True},
                 "product action differs from the retained publication, fetch, and retirement evidence")

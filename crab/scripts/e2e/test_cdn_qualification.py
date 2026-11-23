@@ -89,8 +89,8 @@ def service_candidate(scope: str, platform: str) -> dict:
     }
 
 
-def range_response(family: str, size: int, cache: str = "hit") -> dict:
-    return {"family": family, "status": 206, "cache": cache, "bytes": size, "complete": True,
+def range_response(scope: str, size: int, cache: str = "hit") -> dict:
+    return {"scope": scope, "family": CDN.scope_parts(scope)[3], "status": 206, "cache": cache, "bytes": size, "complete": True,
             "range": True, "object_bytes": 2 * size, "requested_bytes": size, "elapsed_ms": 1}
 
 
@@ -197,8 +197,7 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, nati
                 if provider in CDN.VIEWER_REQUEST_FILES and edge:
                     request_id = hashlib.sha256(f"{location}/{index}/{arm}/viewer".encode()).hexdigest()
                     cache = "miss" if arm == "cold_edge" else "hit"
-                    family = CDN.scope_parts(registration["scope"])[3]
-                    client["edge_responses"][request_id] = range_response(family, metrics["edge_bytes"], cache)
+                    client["edge_responses"][request_id] = range_response(registration["scope"], metrics["edge_bytes"], cache)
                     key_sha256 = hashlib.sha256(f"{location}/{index}/key".encode()).hexdigest()
                     proof[request_id] = {"status": 206, "response_bytes": 800, "cache": cache, "key_sha256": key_sha256}
                     if provider in ("s3", "azure"):
@@ -285,7 +284,7 @@ class CdnQualificationTests(unittest.TestCase):
         client = dict.fromkeys(CDN.PRODUCT_COUNTERS, 0) | {
             "started_at_unix_ms": 1, "finished_at_unix_ms": 2, "elapsed_ms": 1,
             "all_edge_attempts": 1, "native_traffic": dict.fromkeys(CDN.NATIVE_TRAFFIC_FIELDS, 0),
-            "edge_responses": {"1" * 64: range_response("xorb", 8) | {"requested_bytes": 7}},
+            "edge_responses": {"1" * 64: range_response("cloudfront/private/sdk/xorb/direct", 8) | {"requested_bytes": 7}},
         }
         with self.assertRaisesRegex(ValueError, "inconsistent completed CDN response"):
             CDN.verify_git_traffic(client, "cloudfront", "product read")
@@ -622,7 +621,7 @@ class CdnQualificationTests(unittest.TestCase):
                                     "public_export_sha256": self.registration["previous_publication_sha256"]},
             })
         request = "d" * 64
-        response = range_response("lfs" if lfs_key is not None else "git", 8)
+        response = range_response(self.scope, 8)
         cache = {"cache_root_sha256": "5" * 64} if lfs_key is not None else {}
         client = json_file(records / "edge.json", common | transition | cache | {
             "arm": "edge", "started_at_unix_ms": edge_at, "finished_at_unix_ms": edge_at + 10,
@@ -686,7 +685,7 @@ class CdnQualificationTests(unittest.TestCase):
         transition = {"transition_key_sha256": self.object_key} if export else {}
         binding = reader | {"binding_sha256": self.registration["viewer_binding_sha256"]}
         request = hashlib.sha256(b"product-git-blob-viewer").hexdigest()
-        response = range_response("git", 1)
+        response = range_response(self.scope, 1)
         snapshot = records / (CDN.DESKTOP_READ_RECORD if desktop else "snapshot.json")
         if desktop:
             base["cache_root_sha256"] = "1" * 64
@@ -814,7 +813,7 @@ class CdnQualificationTests(unittest.TestCase):
             } | (mounted | {"unmounted": True} if mount else {})
             if arm == "edge":
                 for response in evidence["edge_responses"].values():
-                    response.update(family="xorb", object_bytes=target["bytes"])
+                    response.update(object_bytes=target["bytes"])
                 json_file(destination, evidence)
                 write_product_viewer_proof(destination, self.object_key)
                 write_git_measurements(self.directory / CDN.GIT_BENCHMARK_DIR, self.registration,
@@ -855,7 +854,7 @@ class CdnQualificationTests(unittest.TestCase):
             cold = arm == "cold-edge"
             cache = "miss" if cold else "hit"
             request = hashlib.sha256(name.encode()).hexdigest()
-            response = range_response("xorb", object_bytes // 2, cache)
+            response = range_response(self.scope, object_bytes // 2, cache)
             json_file(path, read | {
                 "edge_hits": int(not cold), "edge_misses": int(cold), "edge_bytes": response["bytes"],
                 "edge_responses": {request: response},
@@ -1865,7 +1864,7 @@ class CdnQualificationTests(unittest.TestCase):
         client = cold / "client.json"
         read = json.loads(client.read_bytes())
         shard_request, shard_key = "8" * 64, "9" * 64
-        read["edge_responses"][shard_request] = range_response("shard", 12, "miss") | {
+        read["edge_responses"][shard_request] = range_response(self.scope.replace("/xorb/", "/shard/"), 12, "miss") | {
             "status": 200, "range": False, "object_bytes": 12,
         }
         digest = json_file(client, read | {"all_edge_attempts": 2})

@@ -926,7 +926,10 @@ batched xorb reads use the smaller of the single-range limit and Crab's 8 MiB
 transport buffer. Complete xorb hydration can use ranges when an xorb
 exceeds the full-GET limit. The verifier checks the candidate's compiled
 policy digest and compares its provider-correlated benchmark requests with
-the row's limits.
+the limits for each request's exact scope. The ordinary-build CLI lifecycle
+fetch has the same requirement. Adjacent reads, such as capsule reads during
+a Git fetch, can use the edge only after their own scope appears in the
+compiled policy.
 On every release platform, retain a provider-confirmed warm cache hit that
 completed at the exact byte limit for each enabled form. A ranged hit must
 reach both the object-size and single-range limits in the same request. A hit
