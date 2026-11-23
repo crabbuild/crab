@@ -1,8 +1,18 @@
-use std::{collections::BTreeMap, path::Path, sync::Arc, time::Instant};
+use std::{
+    collections::BTreeMap,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Instant,
+};
+
+use crab_storage::{StorageObservation, StorageObserver, StorageOperation};
 
 use super::*;
 
-const CORPUS: [(&str, &str, &str); 3] = [
+const CORPUS: [(&str, &str, &str); 5] = [
     (
         "nextjs",
         "vercel/next.js.git",
@@ -18,7 +28,42 @@ const CORPUS: [(&str, &str, &str); 3] = [
         "BurntSushi/ripgrep",
         "3fce3b5bb0236da2df6d99672afb8a719642eca7",
     ),
+    (
+        "tanstack-query",
+        "TanStack/query",
+        "ee47993724e5b71e65d9f38ae416367d2dd18395",
+    ),
+    (
+        "zod",
+        "colinhacks/zod",
+        "d2b135cfb7a3582b9eb515756b9166bcb9521f4a",
+    ),
 ];
+
+#[derive(Default)]
+struct StorageReads(AtomicU64);
+
+impl StorageObserver for StorageReads {
+    fn started(&self, _: StorageOperation) {}
+
+    fn finished(&self, observation: StorageObservation) {
+        if matches!(
+            observation.operation,
+            StorageOperation::Get
+                | StorageOperation::Head
+                | StorageOperation::Range
+                | StorageOperation::List
+        ) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+impl StorageReads {
+    fn total(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+}
 
 async fn publish(
     h: &Harness,
@@ -73,18 +118,8 @@ async fn publish(
         .await,
         "could not publish the pinned {name} tree"
     );
-    let repo = h
-        .server
-        .repositories
-        .get(&("team".into(), name.into()))
-        .unwrap();
-    let published = started.elapsed().as_millis();
-    let started = Instant::now();
-    code_index::reconcile(&h.server, &repo, &h.server.cancellation)
-        .await
-        .unwrap();
     eprintln!(
-        "corpus {name} {pin} tree={tree} push_ms={published} build_ms={}",
+        "corpus {name} {pin} tree={tree} push_ms={}",
         started.elapsed().as_millis()
     );
     head
@@ -106,6 +141,7 @@ struct Evidence {
     first_cursor: Option<String>,
     scanned: u64,
     verified: u64,
+    scanning: u64,
     durations_ms: Vec<u128>,
 }
 
@@ -120,8 +156,8 @@ async fn query(h: &Harness, account: &str, url: &str, heads: &BTreeMap<&str, Str
         let started = Instant::now();
         let response = h.json(&path, account).await;
         proof.durations_ms.push(started.elapsed().as_millis());
-        assert_eq!(response["scanning_repositories"], 0);
         assert_eq!(response["limited_repositories"], 0);
+        proof.scanning += response["scanning_repositories"].as_u64().unwrap();
         proof.scanned += response["scanned"].as_u64().unwrap();
         proof.verified += response["verified"].as_u64().unwrap();
         for group in response["groups"].as_array().unwrap() {
@@ -145,17 +181,45 @@ async fn query(h: &Harness, account: &str, url: &str, heads: &BTreeMap<&str, Str
         proof.first_cursor.get_or_insert_with(|| cursor.to_owned());
         path = format!("{url}&cursor={cursor}");
     }
-    proof.durations_ms.sort_unstable();
-    eprintln!(
-        "search pages={} median_ms={} max_ms={} scanned={} verified={} hits={}",
-        proof.durations_ms.len(),
-        proof.durations_ms[proof.durations_ms.len() / 2],
-        proof.durations_ms.last().unwrap(),
-        proof.scanned,
-        proof.verified,
-        proof.locations.len(),
-    );
     proof
+}
+
+fn latency(label: &str, mut pages: Vec<u128>) {
+    pages.sort_unstable();
+    let percentile = |rank: usize| pages[(rank * pages.len()).div_ceil(100) - 1];
+    eprintln!(
+        "search {label} pages={} p50_ms={} p95_ms={} max_ms={}",
+        pages.len(),
+        percentile(50),
+        percentile(95),
+        pages.last().unwrap(),
+    );
+}
+
+async fn warm_query(
+    h: &Harness,
+    account: &str,
+    label: &str,
+    url: &str,
+    heads: &BTreeMap<&str, String>,
+) -> Evidence {
+    let first = query(h, account, url, heads).await;
+    assert_eq!(first.scanning, 0, "{label}");
+    let mut samples = first.durations_ms.clone();
+    for _ in 0..2 {
+        let repeat = query(h, account, url, heads).await;
+        assert_eq!(repeat.scanning, 0, "{label}");
+        assert_eq!(repeat.locations, first.locations, "{label}");
+        samples.extend(repeat.durations_ms);
+    }
+    latency(label, samples);
+    eprintln!(
+        "search {label} scanned={} verified={} hits={}",
+        first.scanned,
+        first.verified,
+        first.locations.len(),
+    );
+    first
 }
 
 fn locations(items: &[(&str, &str, Option<u64>)]) -> BTreeMap<(String, String), Option<u64>> {
@@ -193,7 +257,9 @@ async fn workspace_search_indexes_and_checks_a_real_repository_corpus() {
         uuid::Uuid::now_v7()
     );
     let store = object_store::prefix::PrefixStore::new(Arc::clone(store.inner()), prefix);
-    let h = Harness::new_with_store(false, false, crab_storage::Store::new(Arc::new(store))).await;
+    let reads = Arc::new(StorageReads::default());
+    let store = crab_storage::Store::new(Arc::new(store)).with_storage_observer(reads.clone());
+    let h = Harness::new_with_store(false, false, store).await;
     // Exercise the search index without starting unrelated browse projection
     // builds, which compete with the measurement and have smaller fixture limits.
     let maintenance = &h.server.maintenance_admission;
@@ -215,37 +281,100 @@ async fn workspace_search_indexes_and_checks_a_real_repository_corpus() {
     let next = ("nextjs", next_path, Some(12));
     let nvim = ("neovim", "src/nvim/api/vim.c", Some(714));
     let rg = ("ripgrep", "crates/core/main.rs", Some(78));
-    for (name, term) in [
-        ("path", format!("path:{next_path}")),
-        (
-            "literal",
-            r#"content:"export default function resolveRewrites(""#.to_owned(),
-        ),
-        (
-            "regex",
-            r"content:/export default function resolveRewrit(?:es)\(/".to_owned(),
-        ),
-    ] {
-        eprintln!("query {name}");
-        let result = query(&h, &bob, &endpoint(&term), &heads).await;
-        if name == "path" {
-            assert_eq!(result.locations, locations(&[("nextjs", next_path, None)]));
-            assert_eq!(result.verified, 0);
-        } else {
-            assert_eq!(result.locations, locations(&[next]));
-            assert!(
-                result.verified < 128,
-                "the selective query verified too many blobs"
-            );
-        }
-    }
+    let directory = "packages/next/src/shared/lib/router/utils";
+    let path = format!("path:{next_path}");
+    let literal = r#"content:"export default function resolveRewrites(""#;
+    let regex = r"content:/export default function resolveRewrit(?:es)\(/";
+    let symbol = "symbol:resolveRewrites";
     let boolean = endpoint(
         r#"symbol:resolveRewrites OR symbol:nvim_set_current_line OR content:"fn run(result: crate::flags::ParseResult<HiArgs>""#,
     );
-    eprintln!("query boolean and symbols");
-    let before = query(&h, &bob, &boolean, &heads).await;
+    let scoped = |term: &str| {
+        let route = endpoint(&format!("repo:team/nextjs {term}"));
+        format!("{route}&directory={directory}")
+    };
+    let initial_reads = reads.total();
+    let cold = query(&h, &bob, &scoped(symbol), &heads).await;
+    assert_eq!(cold.locations, locations(&[next]));
+    assert!(
+        cold.scanning > 0,
+        "expected a scan before building the index"
+    );
+    latency("before-index", cold.durations_ms);
+    eprintln!(
+        "search before-index storage_reads={}",
+        reads.total() - initial_reads
+    );
+
+    let during_reads = reads.total();
+    let ((), during) = tokio::join!(
+        async {
+            for name in heads.keys() {
+                let repo = h
+                    .server
+                    .repositories
+                    .get(&("team".into(), (*name).into()))
+                    .unwrap();
+                let started = Instant::now();
+                code_index::reconcile(&h.server, &repo, &h.server.cancellation)
+                    .await
+                    .unwrap();
+                eprintln!("corpus {name} build_ms={}", started.elapsed().as_millis());
+            }
+        },
+        async {
+            let path = scoped(&path);
+            let literal = scoped(literal);
+            let regex = scoped(regex);
+            let symbol = scoped(symbol);
+            tokio::join!(
+                query(&h, &bob, &path, &heads),
+                query(&h, &bob, &literal, &heads),
+                query(&h, &bob, &regex, &heads),
+                query(&h, &bob, &symbol, &heads),
+            )
+        }
+    );
+    assert_eq!(
+        during.0.locations,
+        locations(&[("nextjs", next_path, None)])
+    );
+    let mut build_samples = during.0.durations_ms;
+    for result in [during.1, during.2, during.3] {
+        assert_eq!(result.locations, locations(&[next]));
+        build_samples.extend(result.durations_ms);
+    }
+    latency("during-index-build", build_samples);
+    eprintln!(
+        "search and build storage_reads={}",
+        reads.total() - during_reads
+    );
+
+    let path = endpoint(&path);
+    let literal = endpoint(literal);
+    let regex = endpoint(regex);
+    let warm_reads = reads.total();
+    let (by_path, by_literal, by_regex, before) = tokio::join!(
+        warm_query(&h, &bob, "path", &path, &heads),
+        warm_query(&h, &bob, "literal", &literal, &heads),
+        warm_query(&h, &bob, "regex", &regex, &heads),
+        warm_query(&h, &bob, "boolean+symbols", &boolean, &heads),
+    );
+    eprintln!(
+        "search warm-mixed storage_reads={}",
+        reads.total() - warm_reads
+    );
+    assert_eq!(by_path.locations, locations(&[("nextjs", next_path, None)]));
+    assert_eq!(by_path.verified, 0);
+    for result in [by_literal, by_regex] {
+        assert_eq!(result.locations, locations(&[next]));
+        assert!(
+            result.verified < 160,
+            "the selective query verified too many blobs"
+        );
+    }
     assert_eq!(before.locations, locations(&[next, nvim, rg]));
-    assert!(before.scanned >= 34_000);
+    assert!(before.scanned >= 38_000);
     assert!(before.verified < 256);
     let cursor = format!("{boolean}&cursor={}", before.first_cursor.unwrap());
 
@@ -336,6 +465,7 @@ async fn workspace_search_indexes_and_checks_a_real_repository_corpus() {
         .unwrap();
     assert_eq!(denied.status(), StatusCode::CONFLICT);
     let after = query(&h, &bob, &boolean, &heads).await;
+    assert_eq!(after.scanning, 0);
     assert_eq!(after.locations, locations(&[nvim, rg]));
     h.close().await;
     drop(permit);

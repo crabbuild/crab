@@ -672,24 +672,37 @@ returning excerpts or a cursor. A continuation binds the account, filters,
 and readable repository set. A grant or address change in that scope returns
 HTTP 409, and **Start over** opens a new search.
 
-The opt-in search corpus test uses pinned snapshots of Next.js, Neovim, and
-ripgrep. It publishes their trees with stock Git, exhausts result pages,
-opens a commit-pinned result in Chromium, and checks continuation invalidation
-after grant removal. With `agent-browser` and the built UI available, set
+The opt-in search corpus test uses pinned snapshots of Next.js, Neovim,
+ripgrep, TanStack Query, and Zod. It publishes their trees with stock Git,
+checks search before and during index builds, and runs four concurrent
+path, literal, regex, and Boolean content-and-symbol searches after the indexes
+are ready. It exhausts result pages, opens a commit-pinned result in Chromium,
+and checks continuation invalidation after grant removal. With
+`agent-browser` and the built UI available, set
 `CRAB_SEARCH_CORPUS_DIR` to the directory containing the source repositories
 and `CARGO_TARGET_DIR` to the per-checkout build directory. Provide
 `CRAB_HTTP_CELL_TEST_BUCKET`, `CRAB_HTTP_CELL_TEST_ENDPOINT`,
 `CRAB_HTTP_CELL_TEST_PREFIX`, and fixture-only AWS credentials for an isolated
 RustFS bucket on loopback. Run the test with
 `cargo test -p crab-server --lib --locked workspace_search_indexes_and_checks_a_real_repository_corpus -- --ignored --nocapture`.
-The test reports indexing time, latency per page, and Git content
-verifications. The fixture pauses unrelated browse indexing while it measures
-search. A local RustFS run examined 38,135 path rows across three
-repositories. A selective literal went from 1,235 content verifications over
-38 pages to 110 over four pages. Its regex equivalent verified 110 files,
+The test reports index build time, p50 and p95 page latency, observed backend
+read operations, and Git content verifications. The fixture pauses unrelated
+browse indexing while it measures search. An earlier local RustFS run examined
+38,135 path rows across three repositories. A selective literal went from
+1,235 content verifications over 38 pages to 110 over four pages.
+Its regex equivalent verified 110 files,
 the Boolean content-and-symbol query verified five, and the path-only query
-read zero file bodies. These measurements cover the pinned corpus on one
-server with the indexes already built.
+read zero file bodies.
+
+The five-repository run covered 42,479 paths. The first scoped search while
+the index was absent took 78 and 405 ms across two pages. The largest index
+built in 152 seconds after publication. Search and construction together
+accounted for 57,511 observed backend reads during the build phase. Once the
+indexes were ready, four concurrent query streams completed 81 pages without
+an HTTP error and used 1,325 observed backend reads. Per-mode p95 page
+latency was 87 ms for path, 168 ms for literal, 101 ms for regex, and 116 ms
+for Boolean content and symbols. These are measurements from one unoptimized
+server on arm64 macOS with loopback RustFS.
 
 ### Create a repository in the browser
 
