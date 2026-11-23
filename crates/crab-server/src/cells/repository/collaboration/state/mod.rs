@@ -162,6 +162,7 @@ fn apply(context: &mut Transaction<'_>, input: Input) -> Result<MutationResult<O
                 number: input.subject.number,
                 actor: input.actor,
                 can_triage: input.can_triage,
+                can_moderate: false,
                 version: input.version,
                 state: Some(u8::from(input.state == State::Closed)),
                 state_reason: input.reason,

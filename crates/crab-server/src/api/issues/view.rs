@@ -17,9 +17,10 @@ pub(super) fn issue(
     author: &Identity,
     labels: &[Label],
     assignees: &Selection,
-    can_triage: bool,
+    repository: uuid::Uuid,
     reactions: &reactions::View,
 ) -> Value {
+    let can_triage = assignees.principal.can_triage(repository);
     json!({
         "number": issue.number,
         "title": issue.title,
@@ -34,7 +35,7 @@ pub(super) fn issue(
         "updated_at": issue.updated_at_ms,
         "labels": labels::selection_view(&issue.label_ids, labels),
         "assignees": assignees.view(&issue.assignees),
-        "can_edit": same_author(&issue.author, author),
+        "can_edit": same_author(&issue.author, author) || assignees.principal.can_moderate(repository),
         "can_close": same_author(&issue.author, author) || can_triage,
         "can_label": can_triage,
         "can_assign": can_triage,
@@ -69,6 +70,7 @@ pub(in crate::api) fn comment(
     authors: &Authors,
     comment: &CommentRecord,
     author: &Identity,
+    can_moderate: bool,
     reactions: &reactions::View,
 ) -> Value {
     json!({
@@ -79,7 +81,7 @@ pub(in crate::api) fn comment(
         "version": comment.version,
         "created_at": comment.created_at_ms,
         "updated_at": comment.updated_at_ms,
-        "can_edit": same_author(&comment.author, author),
+        "can_edit": same_author(&comment.author, author) || can_moderate,
     })
 }
 

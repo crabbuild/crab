@@ -68,6 +68,7 @@ fn update(issue: &IssueRecord, state: Option<u8>, reason: Option<Reason>) -> Upd
         number: issue.number,
         actor: actor(),
         can_triage: false,
+        can_moderate: false,
         version: issue.version,
         title: None,
         body: None,

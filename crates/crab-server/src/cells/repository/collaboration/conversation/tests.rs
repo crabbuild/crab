@@ -132,6 +132,7 @@ async fn one_ordered_stream_contains_contributions_and_lifecycle_without_duplica
                 number: 1,
                 actor: actor("Alice"),
                 can_triage: true,
+                can_moderate: false,
                 version,
                 title: None,
                 body: None,

@@ -103,6 +103,7 @@ async fn assignment_progress_tracks_issue_state_and_duplicate_commands() {
         number: issue.number,
         actor: actor(),
         can_triage: true,
+        can_moderate: false,
         version: issue.version,
         title: None,
         body: None,

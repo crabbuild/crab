@@ -213,6 +213,7 @@ pub struct RepositoryGroup {
 pub enum RepositoryAccess {
     Read,
     Triage,
+    Moderate,
     Write,
     Maintain,
     Admin,

@@ -1562,8 +1562,10 @@ kubectl --namespace crab exec --stdin deployment/crab-server -- \
 | --- | --- |
 | `read` | Browse, fetch, download LFS, and participate in issues, pull requests, comments, and reviews |
 | `triage` | Read actions plus closing/reopening discussions, assigning existing labels, assignees and milestones, and requesting reviews; no code writes or definition management |
-| `write` | All Triage actions plus Git writes, LFS upload, merge, releases, labels, assignees, statuses, checks, and scoped write-token issuance |
-| `admin` | All write actions plus repository settings and branch protections |
+| `moderate` | Triage actions plus editing issue content and creating and editing label and milestone definitions |
+| `write` | Moderate actions plus Git writes, LFS upload, merge, releases, label deletion, statuses, checks, and scoped write-token issuance |
+| `maintain` | Write actions plus editing repository descriptions and topics and configuring ordinary PR merge settings |
+| `admin` | Maintain actions plus access management, protected settings, archival, and transfer |
 
 Subjects can contain at most 512 characters. Names can contain at most 160 characters. Subjects and case-insensitive names must be unique within a repository.
 
@@ -1583,7 +1585,7 @@ snapshot.
 
 Administrators can make the same full replacement in **Settings → Members**.
 The browser loads membership only when that section opens, presents stable
-subject, display name, and `read`/`triage`/`write`/`maintain`/`admin` access, and sends the session
+subject, display name, and `read`/`triage`/`moderate`/`write`/`maintain`/`admin` access, and sends the session
 CSRF token with a single revision-guarded replacement. Add, edit, and remove
 are staged locally; removal requires an explicit confirmation. A conflict keeps
 the unsaved draft and requires **Reload members** before another save; it never
@@ -1660,11 +1662,11 @@ crab-server --config server.toml repository set-organization \
 Use an empty `teams` array to bind ownership before granting access. The binding
 preserves the repository UUID, path, and existing individual and signed-group
 grants. Organization owners get repository Admin access. Team grants accept
-Read, Triage, Write, Maintain, or Admin for up to 100 distinct live team UUIDs in the
-owning organization. Update all serving peers before assigning Maintain or using
-the new description editor, since earlier servers reject the new catalog fields
-and role value. The
-operator can replace grants for the existing owner using the same command.
+Read, Triage, Moderate, Write, Maintain, or Admin for up to 100 distinct live
+team UUIDs in the owning organization. Update all serving peers before
+assigning Moderate or Maintain or editing repository descriptions and topics.
+Earlier servers reject the new catalog fields and role values. The operator
+can replace grants for the existing owner using the same command.
 Transfer to another organization requires a separate operation.
 
 Organization owners can open **Settings → Team access** on the bound repository
@@ -2582,13 +2584,13 @@ accessible to repository readers.
 
 ### Separate collaboration triage from code write access
 
-Repository membership supports `read`, `triage`, `write`, `maintain` and `admin` roles.
+Repository membership supports `read`, `triage`, `moderate`, `write`, `maintain` and `admin` roles.
 The collaboration split follows [GitHub’s repository-role reference](https://docs.github.com/en/organizations/managing-user-access-to-your-organizations-repositories/managing-repository-roles/repository-roles-for-an-organization); full role parity remains incomplete.
 Triage can close/reopen other authors’ issues and PRs, apply/remove existing
 labels and assignees, apply milestones, and request/cancel reviews. It cannot
 push code, issue write-scoped Git tokens, merge, change draft readiness on
 another author’s PR, edit another author’s title/body, create/edit label or
-milestone definitions, publish releases, or administer members/settings. Write
+milestone definitions, publish releases, or administer members/settings. Moderate
 and higher roles retain Triage capabilities. Authors retain their existing description
 and own-item state controls; archive, pending-merge and version guards still
 apply inside native commands.
@@ -2601,6 +2603,12 @@ edit admission read durable membership instead of inferring it from a public
 profile or delayed routing snapshot. Rechecks across awaited reads are not an
 atomic cross-authority fence. Complete moderation and required-review
 permission parity remain delivery work.
+
+Moderate inherits Triage. It can edit any issue title, body, or comment, and
+create and edit repository labels and milestones. The conversation records the
+editor in its activity and keeps the original author on the issue and comment.
+The label catalog exposes edit and delete capabilities separately. Label
+deletion, Git write, merge, and required approval eligibility start at Write.
 
 Maintain inherits Write and can edit the repository description and configure
 ordinary merge methods and auto-merge. Assign it directly or through a team

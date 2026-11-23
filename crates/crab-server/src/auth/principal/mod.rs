@@ -342,6 +342,10 @@ impl Principal {
         self.access(repository)
             .is_some_and(|access| access >= RepositoryAccess::Triage)
     }
+    pub(crate) fn can_moderate(&self, repository: Uuid) -> bool {
+        self.access(repository)
+            .is_some_and(|access| access >= RepositoryAccess::Moderate)
+    }
     pub(crate) fn can_write(&self, repository: Uuid) -> bool {
         self.access(repository)
             .is_some_and(|access| access >= RepositoryAccess::Write)

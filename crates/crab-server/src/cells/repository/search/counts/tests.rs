@@ -295,6 +295,7 @@ async fn count_filters_share_live_issue_and_pull_projections_navigation_and_curs
                 number: 2,
                 actor,
                 can_triage: true,
+                can_moderate: false,
                 version: 1,
                 title: None,
                 body: None,

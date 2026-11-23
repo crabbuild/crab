@@ -109,6 +109,7 @@ export function LabelsPage({ repo, csrf }: { repo: Repository; csrf: string }) {
                     key={label.id}
                     label={label}
                     canManage={data.can_manage && !repo.archived}
+                    canDelete={data.can_delete && !repo.archived}
                     editing={editing === label.id}
                     setEditing={setEditing}
                     csrf={csrf}
@@ -133,6 +134,7 @@ export function LabelsPage({ repo, csrf }: { repo: Repository; csrf: string }) {
 function LabelRow({
   label,
   canManage,
+  canDelete,
   editing,
   setEditing,
   csrf,
@@ -141,6 +143,7 @@ function LabelRow({
 }: {
   label: RepositoryLabel;
   canManage: boolean;
+  canDelete: boolean;
   editing: boolean;
   setEditing: (id?: number) => void;
   csrf: string;
@@ -240,20 +243,23 @@ function LabelRow({
           >
             Edit
           </Button>
-          <Button
-            size="sm"
-            variant="destructive"
-            disabled={mutation.pending}
-            onClick={async () => {
-              if (!window.confirm(`Delete the “${label.name}” label?`)) return;
-              const deleted = await mutation.run<null>(path, "DELETE", {
-                version: label.version,
-              });
-              if (deleted === null) refresh();
-            }}
-          >
-            Delete
-          </Button>
+          {canDelete && (
+            <Button
+              size="sm"
+              variant="destructive"
+              disabled={mutation.pending}
+              onClick={async () => {
+                if (!window.confirm(`Delete the “${label.name}” label?`))
+                  return;
+                const deleted = await mutation.run<null>(path, "DELETE", {
+                  version: label.version,
+                });
+                if (deleted === null) refresh();
+              }}
+            >
+              Delete
+            </Button>
+          )}
         </div>
       )}
       {mutation.error && (

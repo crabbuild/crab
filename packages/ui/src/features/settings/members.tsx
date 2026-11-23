@@ -64,6 +64,10 @@ const memberAccess = {
     description: "Can manage issues and pull requests without pushing code.",
     Icon: IssueOpenedIcon,
   },
+  moderate: {
+    description: "Can edit issues, issue comments, labels, and milestones.",
+    Icon: IssueOpenedIcon,
+  },
   write: {
     description: "Can push changes and collaborate on the repository.",
     Icon: PencilIcon,

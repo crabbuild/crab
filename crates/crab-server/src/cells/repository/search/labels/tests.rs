@@ -214,6 +214,7 @@ async fn native_label_choices_search_the_whole_catalog_and_follow_assignments_re
                 number,
                 actor: author(),
                 can_triage: true,
+                can_moderate: false,
                 version: 1,
                 title: None,
                 body: None,

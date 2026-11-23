@@ -313,6 +313,7 @@ async fn field_search_covers_all_contribution_bodies_and_keeps_edits_deletion_an
                 },
                 actor: actor(),
                 version: 1,
+                can_moderate: false,
                 body: "replacementissueword".into(),
             }
         )

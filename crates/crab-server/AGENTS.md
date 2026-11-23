@@ -284,7 +284,9 @@ before native reads and composes public choices with final membership checks.
 `api/discussion_search/authors/` and `reviews/` own their filter endpoints. `api/profiles/attribution/` deduplicates discussion authors into one
 Directory read for lists, details and conversation responses; handlers recheck
 durable membership afterward. `api/issues/view.rs` owns issue/comment JSON
-presentation.
+presentation. Issue content edit admission separates author or Moderate
+authority from Triage state changes. The native transaction attributes edits
+to the current editor while preserving the original author.
 `cells/directory/saved_replies.rs` owns account-private versioned snippets.
 Its HTTP handlers derive the account from the browser session.
 `cells/repository/collaboration/attachments.rs` owns draft reservations,

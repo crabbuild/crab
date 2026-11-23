@@ -170,7 +170,13 @@ async fn page(
             let (kind, value) = match entry {
                 Entry::IssueComment(comment) => (
                     "comment",
-                    issues::view::comment(&authors, &comment, &actor, &reaction),
+                    issues::view::comment(
+                        &authors,
+                        &comment,
+                        &actor,
+                        principal.can_moderate(repo.id),
+                        &reaction,
+                    ),
                 ),
                 Entry::PullComment(comment) => {
                     let comment = pulls::storage::from_comment(comment);

@@ -3,6 +3,7 @@ import type { RepositoryAccess } from "./contracts";
 export const repositoryRoleLabels: Record<RepositoryAccess, string> = {
   read: "Read",
   triage: "Triage",
+  moderate: "Moderate",
   write: "Write",
   maintain: "Maintain",
   admin: "Admin",

@@ -365,7 +365,7 @@ impl UpdateIssue {
                 .as_ref()
                 .is_some_and(|value| value != &issue.assignees);
         let author = same_author(&issue.author, &input.actor);
-        if (input.title.is_some() || input.body.is_some()) && !author
+        if (input.title.is_some() || input.body.is_some()) && !(author || input.can_moderate)
             || (input.state.is_some() || input.state_reason.is_some())
                 && !(author || input.can_triage)
         {
@@ -523,6 +523,7 @@ pub(in crate::cells::repository) fn close_linked_issue(
         number,
         actor: actor.clone(),
         can_triage: true,
+        can_moderate: false,
         version: issue.version,
         title: None,
         body: None,
@@ -572,7 +573,7 @@ impl Mutation for UpdateComment {
             return Ok(MutationResult::Rejected(UpdateCommentOutcome::NotFound));
         };
         let mut comment = comment_from_row(row)?;
-        if !same_author(&comment.author, &input.actor) {
+        if !(same_author(&comment.author, &input.actor) || input.can_moderate) {
             return Ok(MutationResult::Rejected(UpdateCommentOutcome::Forbidden));
         }
         if comment.version != input.version {

@@ -173,7 +173,7 @@ async fn change(
             .map_err(IntoResponse::into_response)?;
         match comment {
             state::Comment::Issue(value) => {
-                issues::view::comment(&authors, &value, &author, &reaction)
+                issues::view::comment(&authors, &value, &author, false, &reaction)
             }
             state::Comment::Pull(value) => pulls::comments::comment_view(
                 &authors,

@@ -363,6 +363,7 @@ async fn hierarchy_reparents_atomically_rejects_cycles_and_counts_live_child_sta
                 version: 1,
                 actor: actor(),
                 can_triage: true,
+                can_moderate: false,
                 title: None,
                 body: None,
                 state: Some(1),

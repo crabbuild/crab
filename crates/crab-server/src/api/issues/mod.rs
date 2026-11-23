@@ -324,15 +324,16 @@ async fn edit(
         .map(|value| labels::validate_selection(value, &labels))
         .transpose()?;
     // Assignment eligibility and caller role must share the final current roster.
-    let (can_triage, assignees) = if let Some(ids) = input.assignee_ids {
+    let (editor, assignees) = if let Some(ids) = input.assignee_ids {
         let roster = crate::api::members::roster::Roster::load(&server, &principal, &repo).await?;
         if !roster.membership.principal.can_triage(repo.id) {
             return Err(Error::AssigneePermission);
         }
-        (true, Some(Selection::validate(&roster, ids)?))
+        let assignees = Selection::validate(&roster, ids)?;
+        (roster.membership.principal, Some(assignees))
     } else {
         let permissions = app::membership(&server, &principal, &repo).await?;
-        (permissions.principal.can_triage(repo.id), None)
+        (permissions.principal, None)
     };
     let routed = app::repository_cell(&server, &repo)?;
     let committed = routed
@@ -344,7 +345,8 @@ async fn edit(
                 state_reason: input.state_reason,
                 number: number(id)?,
                 actor: crate::cells::repository::RepositoryAuthor::from(&author),
-                can_triage,
+                can_triage: editor.can_triage(repo.id),
+                can_moderate: editor.can_moderate(repo.id),
                 version: input.version,
                 title,
                 body: input.body,
@@ -366,7 +368,7 @@ async fn edit(
         UpdateIssueOutcome::Archived => return Err(Error::Archived),
         UpdateIssueOutcome::Updated(issue) => issue,
         UpdateIssueOutcome::NotFound => return Err(Error::NotFound),
-        UpdateIssueOutcome::Forbidden => return Err(Error::Forbidden),
+        UpdateIssueOutcome::Forbidden => return Err(Error::IssueEditPermission),
         UpdateIssueOutcome::LabelForbidden => return Err(Error::LabelPermission),
         UpdateIssueOutcome::LabelInvalid => {
             return Err(Error::Invalid(
@@ -410,7 +412,7 @@ async fn rendered(
         &author,
         &detail.labels.labels,
         &assignees,
-        assignees.principal.can_triage(repo.id),
+        repo.id,
         &reaction,
     )))
 }
@@ -458,12 +460,12 @@ async fn comments(
         items.iter().map(|comment| &comment.author),
     )
     .await?;
-    app::membership(&server, &principal, &repo).await?;
+    let editor = app::membership(&server, &principal, &repo).await?;
     Ok(Json(json!({
         "items": items
             .iter()
             .zip(reactions)
-            .map(|(comment, reactions)| view::comment(&authors, comment, &author, &reactions))
+            .map(|(comment, reactions)| view::comment(&authors, comment, &author, editor.principal.can_moderate(repo.id), &reactions))
             .collect::<Vec<_>>(),
         "next": next,
     })))
@@ -522,7 +524,7 @@ async fn comment(
     app::membership(&server, &principal, &repo).await?;
     Ok((
         StatusCode::CREATED,
-        Json(view::comment(&authors, &comment, &author, &reaction)),
+        Json(view::comment(&authors, &comment, &author, false, &reaction)),
     ))
 }
 
@@ -559,8 +561,14 @@ async fn comment_detail(
     )
     .await?;
     let authors = Authors::load(&server, &principal, std::iter::once(&comment.author)).await?;
-    app::membership(&server, &principal, &repo).await?;
-    Ok(Json(view::comment(&authors, &comment, &author, &reaction)))
+    let editor = app::membership(&server, &principal, &repo).await?;
+    Ok(Json(view::comment(
+        &authors,
+        &comment,
+        &author,
+        editor.principal.can_moderate(repo.id),
+        &reaction,
+    )))
 }
 
 #[derive(Deserialize)]
@@ -580,6 +588,7 @@ async fn edit_comment(
     let Json(input) = input?;
     let author = actor(&principal)?;
     body(&input.body, true)?;
+    let editor = app::membership(&server, &principal, &repo).await?;
     let routed = app::repository_cell(&server, &repo)?;
     let output = crate::app::command_output(
         routed
@@ -593,6 +602,7 @@ async fn edit_comment(
                         number: number(comment)?,
                     },
                     actor: crate::cells::repository::RepositoryAuthor::from(&author),
+                    can_moderate: editor.principal.can_moderate(repo.id),
                     version: input.version,
                     body: input.body,
                 },
@@ -603,7 +613,7 @@ async fn edit_comment(
         UpdateCommentOutcome::Archived => return Err(Error::Archived),
         UpdateCommentOutcome::Updated(comment) => comment,
         UpdateCommentOutcome::NotFound => return Err(Error::NotFound),
-        UpdateCommentOutcome::Forbidden => return Err(Error::Forbidden),
+        UpdateCommentOutcome::Forbidden => return Err(Error::IssueEditPermission),
         UpdateCommentOutcome::Conflict => return Err(Error::Conflict),
     };
     let reaction = reactions::one(
@@ -617,8 +627,14 @@ async fn edit_comment(
     )
     .await?;
     let authors = Authors::load(&server, &principal, std::iter::once(&comment.author)).await?;
-    app::membership(&server, &principal, &repo).await?;
-    Ok(Json(view::comment(&authors, &comment, &author, &reaction)))
+    let editor = app::membership(&server, &principal, &repo).await?;
+    Ok(Json(view::comment(
+        &authors,
+        &comment,
+        &author,
+        editor.principal.can_moderate(repo.id),
+        &reaction,
+    )))
 }
 
 #[cfg(test)]

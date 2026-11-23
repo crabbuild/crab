@@ -188,6 +188,8 @@ pub(crate) struct UpdateIssueInput {
     pub number: u64,
     pub actor: RepositoryAuthor,
     pub can_triage: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_moderate: bool,
     pub version: u64,
     pub title: Option<String>,
     pub body: Option<String>,
@@ -213,6 +215,8 @@ pub(crate) enum UpdateIssueOutcome {
 pub(crate) struct UpdateCommentInput {
     pub key: CommentKey,
     pub actor: RepositoryAuthor,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_moderate: bool,
     pub version: u64,
     pub body: String,
 }

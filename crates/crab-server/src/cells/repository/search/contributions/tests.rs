@@ -318,6 +318,7 @@ async fn qualified_commenters_cover_all_sources_survive_rebuild_and_follow_sourc
                 number: 1,
                 actor: owner.clone(),
                 can_triage: true,
+                can_moderate: false,
                 version: 1,
                 title: Some("Edited".into()),
                 body: None,

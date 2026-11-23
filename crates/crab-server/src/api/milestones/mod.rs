@@ -176,8 +176,9 @@ async fn list(
             )
             .await,
     )?;
+    let current = app::membership(&server, &principal, &repo).await?.principal;
     Ok(Json(
-        json!({"items":page.items.iter().map(view).collect::<Vec<_>>(),"next":page.next,"can_manage":principal.can_write(repo.id)}),
+        json!({"items":page.items.iter().map(view).collect::<Vec<_>>(),"next":page.next,"can_manage":current.can_moderate(repo.id)}),
     ))
 }
 
@@ -196,8 +197,9 @@ async fn detail(
             .await,
     )?
     .ok_or(Error::NotFound)?;
+    let current = app::membership(&server, &principal, &repo).await?.principal;
     Ok(Json(
-        json!({"milestone":view(&value),"can_manage":principal.can_write(repo.id)}),
+        json!({"milestone":view(&value),"can_manage":current.can_moderate(repo.id)}),
     ))
 }
 
@@ -208,7 +210,7 @@ async fn create(
     input: std::result::Result<Json<NewMilestone>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Value>)> {
     let repo = app::repository(&server, &principal, &key)?;
-    if !principal.can_write(repo.id) {
+    if !principal.can_moderate(repo.id) {
         return Err(Error::MilestonePermission);
     }
     let author = app::actor(&principal)?;
@@ -242,7 +244,7 @@ async fn edit(
     input: std::result::Result<Json<MilestoneEdit>, JsonRejection>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
-    if !principal.can_write(repo.id) {
+    if !principal.can_moderate(repo.id) {
         return Err(Error::MilestonePermission);
     }
     let actor = app::actor(&principal)?;

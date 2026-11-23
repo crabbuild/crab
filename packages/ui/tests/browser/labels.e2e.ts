@@ -95,7 +95,9 @@ test("repository metadata can be managed and assigned to an issue", async ({
         ];
         return route.fulfill({ status: 201, json: labels[0] });
       }
-      return route.fulfill({ json: { items: labels, can_manage: true } });
+      return route.fulfill({
+        json: { items: labels, can_manage: true, can_delete: true },
+      });
     }
     if (path === "/api/repos/team/project/assignees")
       return route.fulfill({
