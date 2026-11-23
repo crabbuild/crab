@@ -7,6 +7,8 @@ description = "Self-hosted repository web application backed by Crab object stor
 publish = false
 
 [dependencies]
+crab-cache = { workspace = true, features = ["local-cache"] }
+crab-cache-store.workspace = true
 crab-workflow = { workspace = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 bytes = { workspace = true }
@@ -35,6 +37,8 @@ hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 crab-remote-git = { workspace = true }
 crab-storage = { workspace = true }
+crab-types = { workspace = true }
+crab-xet = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["pkcs8"] }
 rand = "0.9"
 regex = "1.12.3"

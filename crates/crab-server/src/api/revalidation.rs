@@ -20,7 +20,7 @@ fn validator(snapshot: &RemoteGitSnapshot, metadata: &BlobMetadata, preview: boo
     // Identity coding is the only representation served on these routes. A
     // coding or serialization/policy change must version this namespace too.
     if preview {
-        digest.update(b"crab-file-preview-json-v2:identity");
+        digest.update(b"crab-file-preview-json-v3:identity");
         digest.update(&(representation::MAX_INLINE_TEXT_BYTES as u64).to_le_bytes());
         digest.update(snapshot.commit_oid().as_bytes());
         digest.update(&snapshot.generation().to_le_bytes());

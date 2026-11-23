@@ -1,5 +1,6 @@
 mod activity;
 mod archive;
+mod artifact_content;
 pub(crate) mod asset_transfer;
 mod assignees;
 mod branches;
@@ -16,7 +17,6 @@ mod discussion_state;
 mod fork_sync;
 mod issues;
 mod labels;
-mod lfs_content;
 mod links;
 mod members;
 mod milestones;
@@ -137,6 +137,8 @@ enum ApiError {
     Service(#[from] crate::Error),
     #[error("JSON response encoding failed")]
     Json(#[from] serde_json::Error),
+    #[error("stored file read failed")]
+    Artifact(#[from] crab_read::ReadError),
 }
 
 impl IntoResponse for ApiError {
@@ -240,6 +242,14 @@ impl IntoResponse for ApiError {
                 "encoding",
                 "The response could not be encoded",
             ),
+            Self::Artifact(error) => {
+                tracing::warn!(?error, "stored file read failed");
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "artifact_unavailable",
+                    "The stored file could not be read. Check repository storage and retry",
+                )
+            }
         };
         (
             status,
@@ -576,7 +586,13 @@ pub(crate) fn routes(server: Arc<Server>) -> axum::Router<Arc<Server>> {
         )
         .route(
             "/api/repos/{owner}/{name}/lfs-content",
-            axum::routing::get(lfs_content::download),
+            axum::routing::get(artifact_content::download)
+                .layer(Extension(artifact_content::Kind::Lfs)),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/crab-content",
+            axum::routing::get(artifact_content::download)
+                .layer(Extension(artifact_content::Kind::Crab)),
         )
         .route(
             "/api/repos/{owner}/{name}/{action}",

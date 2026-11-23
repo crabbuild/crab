@@ -113,24 +113,32 @@ export function FileView({
   const state = useRequest<FilePreviewContent>(
     endpoint(repo, "file-preview", { rev, path_hex: path }),
   );
-  const lfsCommit =
-    state.data?.classification === "LfsPointer" ? state.data.commit : null;
-  const lfs = lfsCommit !== null;
-  const payloadSize = lfs ? state.data?.lfs_size : state.data?.size;
-  const fileParams = { rev: lfsCommit ?? rev, path_hex: path };
+  const storedFile =
+    state.data?.classification === "LfsPointer"
+      ? { label: "Git LFS", route: "lfs-content", commit: state.data.commit }
+      : state.data?.classification === "CrabPointer"
+        ? { label: "Crab", route: "crab-content", commit: state.data.commit }
+        : null;
+  const payloadSize = storedFile ? state.data?.stored_size : state.data?.size;
+  const fileParams = { rev: storedFile?.commit ?? rev, path_hex: path };
   const rawUrl = endpoint(repo, "blob", fileParams);
-  const contentUrl = lfs ? endpoint(repo, "lfs-content", fileParams) : rawUrl;
-  const copyLabel = lfs ? "Copy pointer" : "Copy file contents";
-  const copiedLabel = lfs ? "Pointer copied" : "File contents copied";
+  const contentUrl = storedFile
+    ? endpoint(repo, storedFile.route, fileParams)
+    : rawUrl;
+  const downloadLabel = storedFile
+    ? `Download ${storedFile.label} file`
+    : "Download raw file";
+  const copyLabel = storedFile ? "Copy pointer" : "Copy file contents";
+  const copiedLabel = storedFile ? "Pointer copied" : "File contents copied";
   const previewState = state.data?.preview.state;
   const text =
     state.data?.preview.state === "inline" ? state.data.preview.text : null;
   const [presentation, setView] = useState<"code" | "preview">(
     previewFirst ? "preview" : "code",
   );
-  const [lfsPreviewCommit, setLfsPreviewCommit] = useState<string | null>(null);
-  const view = lfs
-    ? lfsPreviewCommit === lfsCommit
+  const [storedPreviewUrl, setStoredPreviewUrl] = useState<string | null>(null);
+  const view = storedFile
+    ? storedPreviewUrl === contentUrl
       ? "preview"
       : "code"
     : blameView
@@ -299,7 +307,7 @@ export function FileView({
     payloadSize === undefined
       ? null
       : (preview ??
-        (!lfs && state.data && state.data.preview.state !== "inline"
+        (!storedFile && state.data && state.data.preview.state !== "inline"
           ? { kind: "generic", label: "File inspector" }
           : null));
   const symbols =
@@ -336,9 +344,9 @@ export function FileView({
                       next !== "blame"
                     )
                       return;
-                    if (lfs) {
-                      setLfsPreviewCommit(
-                        next === "preview" ? lfsCommit : null,
+                    if (storedFile) {
+                      setStoredPreviewUrl(
+                        next === "preview" ? contentUrl : null,
                       );
                       return;
                     }
@@ -360,7 +368,7 @@ export function FileView({
                     aria-pressed={view === "code"}
                     aria-checked={undefined}
                   >
-                    {lfs ? "Pointer" : text === null ? "Info" : "Code"}
+                    {storedFile ? "Pointer" : text === null ? "Info" : "Code"}
                   </ToggleGroupItem>
                   {activePreview && (
                     <ToggleGroupItem
@@ -385,11 +393,10 @@ export function FileView({
                     )}
                 </ToggleGroup>
                 <span className="file-metadata muted">
-                  {lfs
-                    ? "Git LFS"
-                    : content.preview.state !== "inline"
+                  {storedFile?.label ??
+                    (content.preview.state !== "inline"
                       ? unavailablePreview[content.preview.state].title
-                      : `${content.preview.text === "" ? 0 : content.preview.text.split("\n").length - Number(content.preview.text.endsWith("\n"))} lines`}
+                      : `${content.preview.text === "" ? 0 : content.preview.text.split("\n").length - Number(content.preview.text.endsWith("\n"))} lines`)}
                   {payloadSize !== undefined && (
                     <>
                       {" "}
@@ -420,7 +427,7 @@ export function FileView({
                     </Button>
                   )}
                 <Button asChild variant="outline" size="sm">
-                  <a href={rawUrl}>{lfs ? "Raw pointer" : "Raw"}</a>
+                  <a href={rawUrl}>{storedFile ? "Raw pointer" : "Raw"}</a>
                 </Button>
                 {text !== null && (
                   <Button
@@ -443,10 +450,8 @@ export function FileView({
                   <a
                     href={contentUrl}
                     download={name.split("/").pop()}
-                    aria-label={
-                      lfs ? "Download Git LFS file" : "Download raw file"
-                    }
-                    title={lfs ? "Download Git LFS file" : "Download raw file"}
+                    aria-label={downloadLabel}
+                    title={downloadLabel}
                   >
                     <DownloadIcon data-icon="inline-start" />
                   </a>
@@ -495,12 +500,6 @@ export function FileView({
             </div>
           </div>
           <div className="file-body">
-            {content.classification === "CrabPointer" && (
-              <div className="file-note">
-                Git object classification: {content.classification}. Downloads
-                contain the exact stored Git blob.
-              </div>
-            )}
             {view === "blame" && (blame.loading || blame.error) && (
               <Result state={blame}>{() => null}</Result>
             )}
@@ -519,13 +518,13 @@ export function FileView({
                   descriptor={activePreview}
                   repo={repo}
                   rev={fileParams.rev}
-                  revision={lfsCommit ?? revision}
+                  revision={storedFile?.commit ?? revision}
                   directory={parentHex(path)}
                   name={name}
-                  text={lfs ? null : text}
+                  text={storedFile ? null : text}
                   size={payloadSize}
                   blobUrl={contentUrl}
-                  stored={lfs}
+                  stored={storedFile !== null}
                   theme={theme}
                   codeThemes={codeThemes}
                 />

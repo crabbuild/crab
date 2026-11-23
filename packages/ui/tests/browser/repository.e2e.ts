@@ -2453,7 +2453,7 @@ test("Git LFS previews load on request and respect the stored file size", async 
         json: {
           oid: pathOid,
           size: pointer.length,
-          lfs_size: file[1],
+          stored_size: file[1],
           mode: "100644",
           classification: "LfsPointer",
           preview: { state: "inline", text: pointer },

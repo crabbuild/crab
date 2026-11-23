@@ -13,7 +13,7 @@ mod output;
 mod range_tests;
 mod stream;
 use buffer::ReconstructionBuffer;
-pub use stream::ReconstructionStream;
+pub use stream::{ReconstructionStream, ReconstructionWork, verify_reconstruction_stream};
 
 use crab_cache_store::CachingStore;
 use crab_types::pointer::Pointer;
@@ -436,6 +436,29 @@ impl ShardHydrator {
         range: std::ops::Range<u64>,
     ) -> Result<ReconstructionStream> {
         stream::reconstruct_range(self.clone(), ptr.clone(), range)
+    }
+
+    /// Prepare a verified content stream and its worker for a retained catalog.
+    ///
+    /// The worker owns and closes the selected lookup. The caller must run and
+    /// drain it with the transfer's admission. Dropping the stream cancels it.
+    pub fn prepare_captured_range_stream(
+        &self,
+        pointer: &Pointer,
+        range: std::ops::Range<u64>,
+        lookup: SharedFileIndexLookup,
+        cancel: &CancellationToken,
+    ) -> Result<(ReconstructionStream, ReconstructionWork)> {
+        let mut pointer = pointer.clone();
+        // A pointer hint can name any shard in the physical store. The captured
+        // repository catalog is the only source allowed for this read.
+        pointer.shard_hint = None;
+        let full = range == (0..pointer.size);
+        let size = range.end.saturating_sub(range.start);
+        let hash = pointer.file_hash;
+        let (stream, work) =
+            stream::prepare(self.clone(), pointer, range, Some(lookup), cancel.clone())?;
+        Ok((verify_reconstruction_stream(stream, size, hash, full), work))
     }
 
     async fn reconstruct_writer<W>(

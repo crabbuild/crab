@@ -965,20 +965,27 @@ Preview parsers are loaded only for the selected format and run in the signed-in
 
 Relative links stay inside the selected repository revision. Relative raster images load through the signature-checked `asset` endpoint. SVG, other local formats, and external images remain links. This prevents repository content from becoming same-origin active content or forcing signed-in browsers to contact third-party hosts.
 
-The file view shows the declared size of Git LFS files. **Download Git LFS
-file** streams the stored object for the displayed commit. **Raw pointer**
-downloads the committed pointer text. The ordinary `/blob` endpoint and ZIP
-archives still serve the exact Git representation of pointer blobs.
+The file view shows the logical size of Git LFS and native Crab files.
+**Download Git LFS file** or **Download Crab file** streams the payload for the
+displayed commit. **Raw pointer**, the ordinary `/blob` endpoint, and ZIP
+archives serve the committed pointer text.
 
 `GET /api/repos/{owner}/{name}/lfs-content?rev=COMMIT&path_hex=PATH` requires
 read access, a reachable full SHA-1 commit, and a valid Git LFS pointer at
 that path. The server selects the object ID and size from the verified blob
 and streams through the Git LFS transfer budget and integrity checks. The
 response supports single byte ranges and `If-Range` with the object ETag.
-Native Crab pointers continue to use the raw Git download action.
 
-For recognized Git LFS formats, choose **Preview** to read the stored bytes
-at the displayed commit. **Pointer** returns to the Git representation.
+`GET /api/repos/{owner}/{name}/crab-content?rev=COMMIT&path_hex=PATH` requires
+the same repository access and commit identity and a native Crab pointer.
+The server checks the file hash and logical size against the captured repository
+catalog. It retains that catalog against garbage collection during reconstruction
+and verifies the selected chunks and output length. Full reads also verify
+the file's BLAKE3 hash. This endpoint accepts single byte ranges and
+`If-Range`. `HEAD` validates Git visibility and catalog metadata.
+
+For recognized formats, choose **Preview** to read the stored bytes at the
+displayed commit. **Pointer** returns to the Git representation.
 Parquet uses the range-backed SQL workbench. Whole-file previews are
 limited to 50 MiB, with a 1 MiB limit for Markdown and notebooks. Larger
 files remain available through the download action.

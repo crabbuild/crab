@@ -1138,6 +1138,7 @@ impl From<crab_read::ReadError> for CrabError {
             crab_read::ReadError::Cancelled => Self::Cancelled,
             error @ (crab_read::ReadError::Availability { .. }
             | crab_read::ReadError::Retention(_)
+            | crab_read::ReadError::CapturedLookupClose { .. }
             | crab_read::ReadError::GitPack(_)
             | crab_read::ReadError::Runtime(_)
             | crab_read::ReadError::ResolutionTask(_)

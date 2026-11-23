@@ -133,7 +133,7 @@ async fn lfs_content_streams_only_the_authenticated_pinned_file() {
     .json()
     .await
     .unwrap();
-    assert_eq!(preview["lfs_size"], ORIGINAL.len());
+    assert_eq!(preview["stored_size"], ORIGINAL.len());
     assert_eq!(preview["size"], pointer.len());
 
     let response = get(&old_path)
