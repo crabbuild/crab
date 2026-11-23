@@ -547,8 +547,10 @@ A small capsule leaf can supply its footer and admission counts in one
 verified range. The verifier authenticates the footer and selected count
 pages from the same response. On corruption, it retries the entire range
 from the native target within the original deadline. Unrequested OID pages
-remain lazy. Capsule promotion still needs a qualifying warm-local workload
-and live provider measurements.
+stay undecoded. The CLI retains verified capsule ranges up to 64 KiB in its
+private disk cache. A fresh fetch checks its current grant and authenticates
+cached bytes against the selected pointer before recording a local hit.
+Capsule promotion still needs live warm-local and provider measurements.
 
 Start with the dedicated S3 repository and CloudFront distribution. Configure
 `provider-qualification-s3` for the native contract job and

@@ -85,7 +85,7 @@ pub enum CdnConsumer {
 }
 
 impl CdnConsumer {
-    pub(super) const fn label(self) -> &'static str {
+    pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Cli => "cli",
             Self::Sdk => "sdk",
@@ -105,7 +105,7 @@ pub enum CdnProfile {
 }
 
 impl CdnProfile {
-    pub(super) const fn label(self) -> &'static str {
+    pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Direct => "direct",
             Self::Managed => "managed",

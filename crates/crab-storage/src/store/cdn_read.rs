@@ -20,8 +20,8 @@ use super::{StorageReadKind, Store};
 use crate::{
     Result, StorageError,
     cdn::{
-        CdnAccess, CdnGet, CdnReadFamily, CdnRoute, CdnViewer, PayloadObservation,
-        PublicTransitionObservation, ReadLimits, observe_origin_only_read,
+        CapsuleControlCache, CdnAccess, CdnGet, CdnReadFamily, CdnRoute, CdnViewer,
+        PayloadObservation, PublicTransitionObservation, ReadLimits, observe_origin_only_read,
     },
     transport_read_admission,
 };
@@ -63,6 +63,7 @@ fn cdn_deadline_exceeded() -> StorageError {
 
 /// Upper limit for one repository-owned immutable object in a diagnostic probe.
 pub const CDN_PROBE_MAX_BYTES: u64 = 1024 * 1024;
+const CAPSULE_CACHE_MAX_BYTES: u64 = 64 * 1024;
 
 /// Redacted routing info for an attached CDN binding.
 pub struct CdnBindingInfo<'a> {
@@ -142,6 +143,8 @@ impl Store {
             && self.storage_scope == origin.storage_scope
         {
             self.cdn = origin.cdn.clone();
+            self.capsule_control_cache
+                .clone_from(&origin.capsule_control_cache);
             self.read_authorization
                 .clone_from(&origin.read_authorization);
             self.direct_read_admissions
@@ -150,10 +153,20 @@ impl Store {
         self
     }
 
+    /// Attach the private cache for qualified capsule control ranges.
+    #[must_use]
+    pub fn with_capsule_control_cache(mut self, cache: Arc<dyn CapsuleControlCache>) -> Self {
+        if self.cdn.is_some() {
+            self.capsule_control_cache = Some(cache);
+        }
+        self
+    }
+
     /// Use the canonical provider for strict origin proofs or target selection.
     #[must_use]
     pub fn without_cdn_route(mut self) -> Self {
         self.cdn = None;
+        self.capsule_control_cache = None;
         self
     }
 
@@ -269,7 +282,7 @@ impl Store {
                 if nonempty {
                     self.observe_verified_origin_only_read(path);
                 }
-                Ok(value)
+                Ok::<T, E>(value)
             };
             let range_bytes = range
                 .as_ref()
@@ -281,11 +294,30 @@ impl Store {
                 return origin.await;
             };
 
+            let cache = self.capsule_control_cache.as_deref().zip(
+                range
+                    .as_ref()
+                    .and_then(|range| attempt.capsule_control_key(size, range)),
+            );
             let tail = async {
+                if let Some((cache, (key, length))) = cache {
+                    self.check_cached_read(path).await?;
+                    if let Some(bytes) = cache.read(&key, length).await
+                        && bytes.len() as u64 == length
+                        && attempt.authorizes_cached_control().await?
+                        && let Ok(value) = verify(bytes).await
+                    {
+                        if let Some(observation) = attempt.payload_observation() {
+                            observation.record_local();
+                        }
+                        return Ok::<(T, Option<Bytes>), E>((value, None));
+                    }
+                }
                 let Some(bytes) = attempt.get(size, range.clone()).await? else {
-                    return origin.await;
+                    return origin.await.map(|value| (value, None));
                 };
                 let nonempty = !bytes.is_empty();
+                let retained = cache.map(|_| bytes.clone());
                 match verify(bytes).await {
                     Ok(value) => {
                         // Other families report at their owning payload
@@ -296,17 +328,23 @@ impl Store {
                         {
                             observation.record_verified();
                         }
-                        Ok(value)
+                        Ok((value, retained))
                     }
                     Err(_) => {
                         tracing::warn!(
                             "CDN immutable bytes failed verification; reading from origin"
                         );
-                        origin.await
+                        origin.await.map(|value| (value, None))
                     }
                 }
             };
-            attempt.within_deadline(tail).await
+            let (value, retained) = attempt.within_deadline(tail).await?;
+            if let (Some((cache, (key, _))), Some(bytes)) = (cache, retained) {
+                // Disposable retention cannot fail a completed verified read.
+                let _ =
+                    tokio::time::timeout_at(attempt.deadline(), cache.retain(&key, &bytes)).await;
+            }
+            Ok(value)
         })
     }
 
@@ -496,6 +534,47 @@ impl CdnReadAttempt {
             PublicTransitionObservation::new(receipt.approval_digest, self.path.as_ref())
         });
         PayloadObservation::new(self.route.policy()?, self.family, public)
+    }
+
+    fn capsule_control_key(&self, size: u64, range: &Range<u64>) -> Option<(blake3::Hash, u64)> {
+        let length = range.end.checked_sub(range.start)?;
+        let private = matches!(self.route.access, CdnAccess::Private(_));
+        let namespace = self.store.authorized_cache_namespace();
+        if self.family != CdnReadFamily::Capsule
+            || length == 0
+            || length > CAPSULE_CACHE_MAX_BYTES
+            || (private && namespace.is_none())
+        {
+            return None;
+        }
+        let policy = self.route.policy()?;
+        let mut hash = blake3::Hasher::new_derive_key("Crab capsule control cache key v1");
+        hash.update(&self.route.target);
+        hash.update(self.route.transport.binding_sha256(private).as_bytes());
+        hash.update(policy.consumer.label().as_bytes());
+        hash.update(b"\0");
+        hash.update(policy.profile.label().as_bytes());
+        hash.update(b"\0");
+        if let Some(namespace) = namespace {
+            hash.update(b"view\0");
+            hash.update(namespace);
+        }
+        if let Some(publication) = &self.route.publication {
+            hash.update(b"export\0");
+            hash.update(&publication.approval_digest);
+        }
+        for coordinate in [size, range.start, range.end] {
+            hash.update(&coordinate.to_be_bytes());
+        }
+        hash.update(self.path.as_ref().as_bytes());
+        Some((hash.finalize(), length))
+    }
+
+    async fn authorizes_cached_control(&self) -> Result<bool> {
+        match &self.route.access {
+            CdnAccess::Public => Ok(true),
+            CdnAccess::Private(viewer) => Ok(viewer.credential(&self.path, None).await?.is_some()),
+        }
     }
 
     /// Report the exact edge LFS object after validating its full SHA-256 and size.

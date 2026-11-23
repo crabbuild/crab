@@ -55,6 +55,13 @@ GET. Complete reads can also assemble a bounded xorb from admitted CDN
 ranges and verify the full body before returning chunks. SDK and mount
 range hydration keeps its decoded-chunk cache policy.
 
+Small qualified capsule ranges accepted from the CDN are retained in the
+private disk catalog. The next reader checks its active authority and
+authenticates the retained range against the current capsule pointer.
+Keys bind the physical target, binding, authorized view, publication and
+exact range. Cache validation and failure handling use the same budget and
+file ownership as other local payloads.
+
 The optional `lfs` feature composes full CDN-eligible LFS reads with the
 caller's bounded disk cache. Repositories, viewer bindings, and public
 receipts have separate namespaces under the shared budget. Local delivery

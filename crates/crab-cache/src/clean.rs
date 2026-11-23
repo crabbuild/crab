@@ -139,7 +139,7 @@ pub(crate) fn object_entry_kind(parts: &[&str]) -> EntryKind {
     match parts {
         [
             "chunks" | "xorbs" | "shards" | "ref-transactions" | "git-packs" | "lfs" | "stages"
-            | "manifests" | "hints" | "responses",
+            | "capsule-controls" | "manifests" | "hints" | "responses",
         ] => EntryKind::Directory,
         ["hints", "clean-bloom.bin"] => EntryKind::Payload,
         ["manifests", name]
@@ -151,11 +151,13 @@ pub(crate) fn object_entry_kind(parts: &[&str]) -> EntryKind {
             EntryKind::Payload
         }
         [
-            "chunks" | "xorbs" | "shards" | "ref-transactions" | "git-packs" | "lfs" | "stages",
+            "chunks" | "xorbs" | "shards" | "ref-transactions" | "git-packs" | "lfs" | "stages"
+            | "capsule-controls",
             prefix,
         ] if hex(prefix, 2) => EntryKind::Directory,
         [
-            "chunks" | "xorbs" | "shards" | "ref-transactions" | "git-packs" | "lfs" | "stages",
+            "chunks" | "xorbs" | "shards" | "ref-transactions" | "git-packs" | "lfs" | "stages"
+            | "capsule-controls",
             prefix,
             hash,
         ] if hex(prefix, 2) && hex(hash, 64) && hash.starts_with(prefix) => EntryKind::Payload,

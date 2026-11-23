@@ -44,12 +44,14 @@ use crab_storage::{ETag, StorageError, Store};
 use crab_xet::hash::MerkleHash;
 use crab_xet::xorb::format::MAX_XORB_SIZE;
 
+mod capsule_control;
 pub mod git_pack;
 #[cfg(feature = "lfs")]
 pub mod lfs;
 mod observation;
 mod shard_read;
 mod xorb_read;
+pub use capsule_control::cache_capsule_controls;
 use observation::NoopCacheObserver;
 pub use observation::{CacheObserver, CacheReadObservation, CacheReadOutcome, CacheSource};
 pub use xorb_read::XorbReadMode;
@@ -377,7 +379,10 @@ impl CachingStore {
         if let Some(scope) = self.origin.storage_scope().cloned() {
             storage = storage.with_storage_scope(scope);
         }
-        storage.inherit_cdn_route(&self.origin)
+        capsule_control::attach(
+            storage.inherit_cdn_route(&self.origin),
+            Arc::clone(&self.local_cache),
+        )
     }
 
     /// Scope origin-body admission while preserving shared cache state.

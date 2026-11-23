@@ -942,6 +942,7 @@ pub(crate) fn classify_family(relative: &str) -> &'static str {
         "xorbs" => "xorb",
         "shards" => "shard",
         "git-packs" => "git-pack",
+        "capsule-controls" => "capsule-control",
         "lfs" => "lfs",
         "manifests" => "manifest",
         "stages" => "stage",

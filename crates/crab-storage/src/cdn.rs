@@ -50,6 +50,17 @@ pub const fn qualification_enabled() -> bool {
     cfg!(feature = "provider-cdn-qualification")
 }
 
+/// Local storage for small capsule ranges. The reader revalidates cached bytes
+/// against the same authenticated descriptor used for an edge response.
+#[async_trait::async_trait]
+pub trait CapsuleControlCache: Send + Sync {
+    /// Read the exact window, returning a miss when local retention is unavailable.
+    async fn read(&self, key: &blake3::Hash, bytes: u64) -> Option<Bytes>;
+
+    /// Retain a verified response within the caller's local cache budget.
+    async fn retain(&self, key: &blake3::Hash, bytes: &Bytes);
+}
+
 /// A CDN route for one selected storage target and physical repository view.
 pub struct CdnRoute {
     pub(crate) target: [u8; 32],

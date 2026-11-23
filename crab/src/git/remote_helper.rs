@@ -1341,7 +1341,13 @@ async fn dispatch_capabilities<W: tokio::io::AsyncWrite + Unpin>(
         let captured_before_probe = cache.read_capture.is_some();
         let maximum = capsule_fetch_maximum(cache.config());
         let probe = async {
-            let capture = capsule_read_capture(&mut cache.read_capture, router, root).await?;
+            let capture = capsule_read_capture(
+                &mut cache.read_capture,
+                router,
+                root,
+                cache.config.cache.max_bytes,
+            )
+            .await?;
             if !capture.may_have_layered_cold_clone_packs() {
                 return Ok::<_, CrabError>(None);
             }
@@ -1533,6 +1539,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                         &mut cache.read_capture,
                         &selected.router,
                         &selected.capsule_root,
+                        cache.config.cache.max_bytes,
                     )
                     .await
                     .map_err(map_missing_capsule_root)?;
@@ -2631,7 +2638,13 @@ async fn fetch_packs(
         }
     }
     let cached_view = cache.capsule_view.take();
-    let capture = capsule_read_capture(&mut cache.read_capture, router, root).await?;
+    let capture = capsule_read_capture(
+        &mut cache.read_capture,
+        router,
+        root,
+        cache.config.cache.max_bytes,
+    )
+    .await?;
     if raw_object_fetch {
         fetch_capsule_promisor_objects(
             router,
@@ -2700,10 +2713,14 @@ async fn capsule_read_capture<'a>(
     captured: &'a mut Option<crab_read::capsule_protocol::CapsuleRepositoryCapture>,
     router: &StoreLayout,
     root: &crab_metadata::capsule_protocol::RootSnapshot,
+    cache_max_bytes: Option<u64>,
 ) -> Result<&'a crab_read::capsule_protocol::CapsuleRepositoryCapture> {
     if captured.is_none() {
         let layout = crab_storage::StoreLayout::with_global_prefix(
-            router.store().as_storage().clone(),
+            crab_cache_store::cache_capsule_controls(
+                router.store().as_storage().clone(),
+                cache_max_bytes,
+            ),
             router.repo_prefix().to_owned(),
             router.global_prefix().to_owned(),
         );
