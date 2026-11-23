@@ -1752,6 +1752,25 @@ class CdnQualificationTests(unittest.TestCase):
         warm_log.unlink()
         self.rejected(warm_log.name)
 
+    def test_sparse_xorb_linked_range_fill_cannot_prove_a_warm_read(self) -> None:
+        self.configure("gcs", "private", "direct", consumer="sdk", family="xorb")
+        records = self.directory / CDN.XORB_PRODUCT_DIR
+        for arm in ("cold-edge", "warm-edge"):
+            log_path = records / f"sparse-{arm}-viewer-requests.json"
+            proof = json.loads(log_path.read_bytes())
+            for record in proof["records"].values():
+                # Cloud CDN reports byte_range_caching on the viewer record
+                # and reports the missing range fetch as a separate child.
+                record.update(cache="hit", cache_fill_bytes=0, origin_requests={"f" * 64: {
+                    "method": "GET", "status": 206, "cache_fill_bytes": 128,
+                }})
+            json_file(log_path, proof)
+            if arm == "cold-edge":
+                result = self.command()
+                self.assertEqual(result.returncode, 0, result.stderr)
+            else:
+                self.rejected("provider-confirmed hits for every xorb range")
+
     def test_sdk_hydration_benchmarks_require_their_own_cache_and_provider_requests(self) -> None:
         for provider in ("s3", "gcs", "azure"):
             with self.subTest(provider=provider), TemporaryDirectory() as directory:

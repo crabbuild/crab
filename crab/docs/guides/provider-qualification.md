@@ -1501,9 +1501,10 @@ record to provider logs with `collect_cdn_viewer_requests.py`. Use
 `--require-origin-fill` for the cold invocation and save the joins as
 `sparse-cold-edge-viewer-requests.json` and `sparse-warm-edge-viewer-requests.json`.
 The release verifier requires a cold miss and observed xorb origin fill, a
-warm hit on every xorb range, and fewer viewer bytes than the approved xorb
-size in both edge arms. Compare xorb viewer bytes with origin fill bytes to
-measure the provider's fill amplification. Keep the full hydration lifecycle
+warm hit on every xorb range with no associated origin request, and fewer
+viewer bytes than the approved xorb size in both edge arms. Compare xorb
+viewer bytes with origin fill bytes to measure the provider's fill amplification.
+Keep the full hydration lifecycle
 and regional benchmarks for the same fixture.
 
 Crab skips the xorb size HEAD if the file lookup already authenticated the
@@ -1717,8 +1718,14 @@ bucket keeps that header out of the cache key. The collector joins viewer
 records by the tag and retains Google's `cacheFillBytes` from each matched
 viewer record. It joins Cloud CDN's range-fill and validation requests on
 `parentInsertId` and retains their hashed IDs, methods, status codes, and fill
-bytes. Include both kinds of log entry, and give delayed validation entries
-time to arrive. The benchmark requires external measurements to cover the
+bytes. A `byte_range_caching` viewer hit with a linked successful origin fill
+counts as a miss in qualification. A linked validation also rules out a fully
+warm hit. Include both kinds of log entry and give delayed child entries time
+to arrive. Larger objects can require an extra priming read before Cloud CDN
+starts caching ranges. Run that read between the cold and warm measurements
+when needed, and keep it outside both timed intervals. [Cloud CDN caching](https://docs.cloud.google.com/cdn/docs/caching) · [Cloud CDN request logs](https://docs.cloud.google.com/cdn/docs/logging)
+
+The benchmark requires external measurements to cover the
 logged origin GETs in addition to client-native GETs. The fill-byte minimum is
 the higher of the total from distinct origin records and the largest viewer
 record, since viewer and origin records can describe the same fill.

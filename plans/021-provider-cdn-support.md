@@ -323,8 +323,11 @@ preregistered file window and join range responses to provider logs. Release
 qualification also requires the native, cold edge, and warm edge sparse
 reads for the same approved publication and projection as the full hydration
 workload. It verifies one cold miss with xorb origin fill and warm hits
-for every delivered xorb range. Xorb fill is measured separately from
-adjacent Git, shard, and catalog fetches. Live sparse reports remain open.
+for every delivered xorb range. A linked Cloud CDN range fill or validation
+rules out a warm hit. A CloudFront or Front Door origin GET for the same xorb
+within the timed arm also rules out a warm hit. Xorb fill is measured
+separately from adjacent Git, shard, and catalog fetches. Live sparse reports
+remain open.
 Record each qualified profile's full-object, range and duration limits and
 enforce them before sending the first edge request. Xorb hydration reuses
 encoded sizes already verified during captured file dependency lookup to

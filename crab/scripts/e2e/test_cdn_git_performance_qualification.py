@@ -106,6 +106,20 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         self.amend_edge_response("near/0001/warm_edge", object_bytes=17, requested_bytes=8, bytes=8)
         self.collect(policy=policy)
 
+        arm = self.root / "near/0001/warm_edge"
+        log = arm / fixture.CDN.VIEWER_REQUEST_FILES["s3"]
+        proof = json.loads(log.read_bytes())
+        client = json.loads((arm / "client.json").read_bytes())
+        proof["origin_requests"]["f" * 64] = {
+            "key_sha256": next(iter(proof["records"].values()))["key_sha256"],
+            "status": 206, "response_body_bytes": 8, "at_unix_s": client["started_at_unix_ms"] // 1000,
+        }
+        fixture.json_file(log, proof)
+        report = arm / "measurement.json"
+        fixture.json_file(report, json.loads(report.read_bytes()) | {"origin_gets": 2, "origin_fill_bytes": 8})
+        with self.assertRaisesRegex(ValueError, "warm edge hit at its compiled ranged GET size limit"):
+            self.collect(policy=policy)
+
     def test_cold_full_transfer_does_not_prove_cache_delivery_at_limit(self) -> None:
         policy = self.root / "release-policy.txt"
         policy.write_text(f"{self.registration['scope']} 8 16 8 5000\n")

@@ -1894,10 +1894,7 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
                 and row["cache"] in ("hit", "miss", "unknown")
                 and type(row["response_bytes"]) is int and row["response_bytes"] >= response["bytes"],
                 "CDN log status or response bytes disagree with the client")
-        if response["complete"] and response["cache"] != "unknown":
-            require(row["cache"] == response["cache"], "CDN log cache result disagrees with the completed response")
-        if count_response and served_payload and row["cache"] in ("hit", "miss"):
-            completed_cache[request_id] = row["cache"]
+        cache = row["cache"]
         if keyed_origin or object_key is not None or transition_key is not None:
             require(matches(SHA256, row["key_sha256"]), "invalid CDN object key fingerprint")
             require(xorb_key is None or (row["key_sha256"] == xorb_key) == count_response,
@@ -1919,9 +1916,9 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
         if edge == "cloud-cdn":
             require(type(row["cache_fill_bytes"]) is int and row["cache_fill_bytes"] >= 0,
                     "Cloud CDN log has invalid reported cache fill bytes")
+            supplied_from_origin = positive(row["cache_fill_bytes"])
             if count_response:
                 viewer_fill_bytes = max(viewer_fill_bytes, row["cache_fill_bytes"])
-                successful_fill |= served_payload and positive(row["cache_fill_bytes"])
             children = row["origin_requests"]
             require(isinstance(children, dict), "invalid Cloud CDN origin requests")
             for origin_id, value in children.items():
@@ -1934,10 +1931,20 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
                 if count_response:
                     origin_gets += origin["method"] == "GET"
                     child_fill_bytes += origin["cache_fill_bytes"]
-                    # Origin errors still contribute bytes. Cold fill needs a
-                    # successful GET linked to completed viewer delivery.
-                    successful_fill |= (served_payload and origin["method"] == "GET" and origin["status"] in (200, 206)
-                                        and positive(origin["cache_fill_bytes"]))
+                    supplied_from_origin |= (origin["method"] == "GET" and origin["status"] in (200, 206)
+                                             and positive(origin["cache_fill_bytes"]))
+            if count_response and served_payload:
+                # Cloud CDN can log byte_range_caching for a request whose
+                # missing ranges were filled by linked backend GETs.
+                successful_fill |= supplied_from_origin
+                if supplied_from_origin and cache == "hit":
+                    cache = "miss"
+                elif children and cache == "hit":
+                    cache = "unknown"
+        if response["complete"] and response["cache"] != "unknown":
+            require(response["cache"] in (row["cache"], cache), "CDN log cache result disagrees with the completed response")
+        if count_response and served_payload and cache in ("hit", "miss"):
+            completed_cache[request_id] = cache
     if xorb_key is not None or service:
         attempts = sum(response["family"] == "xorb" for response in expected.values()) if sparse_xorb else len(records)
         require(client["edge_attempts"] == attempts and all(client[key] == count for key, count in observed_transfer.items()),
@@ -1951,6 +1958,7 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
         origins = proof["origin_requests"]
         require(isinstance(origins, dict), f"invalid {service} origin requests")
         start, finish = (client[key] // precision for key in ("started_at_unix_ms", "finished_at_unix_ms"))
+        origin_keys = set()
         for origin_id, value in origins.items():
             origin = fields(value, {"key_sha256", timestamp, "status", "response_body_bytes"}, f"{service} origin request")
             require(matches(SHA256, origin_id) and origin_id not in logged_ids and matches(SHA256, origin["key_sha256"])
@@ -1963,10 +1971,15 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
             logged_ids.add(origin_id)
             if sparse_xorb and origin["key_sha256"] != xorb_key:
                 continue
+            origin_keys.add(origin["key_sha256"])
             origin_gets += 1
             if origin["status"] in (200, 206):
                 child_fill_bytes += origin["response_body_bytes"]
                 successful_fill |= positive(origin["response_body_bytes"])
+        # These providers join origin GETs by key and time. If a key touched
+        # origin in this arm, its viewer hits alone cannot prove a warm read.
+        completed_cache = {request_id: cache for request_id, cache in completed_cache.items()
+                           if cache != "hit" or records[request_id]["key_sha256"] not in origin_keys}
     # Collapsed traffic and separate range-fills can describe the same bytes
     # at both levels. Use the strongest floor without adding overlapping totals.
     return ViewerRequestMetrics(logged_ids, origin_gets, max(viewer_fill_bytes, child_fill_bytes),
@@ -2944,7 +2957,7 @@ def collect_git_performance(
                 windows[arm] = (client["started_at_unix_ms"], client["finished_at_unix_ms"])
                 viewer_log = None
                 traffic = ViewerRequestMetrics(set(), 0, 0, False, {})
-                cache_corrections = {"hit": 0, "miss": 0}
+                cache_corrections = dict.fromkeys(("hit", "miss", "unknown"), 0)
                 if provider in VIEWER_REQUEST_FILES and client["all_edge_attempts"]:
                     log_name = VIEWER_REQUEST_FILES[provider]
                     viewer_log = read_git_record(inputs / slot / log_name, limit=GIT_FETCH_RECORD_LIMIT)
@@ -2960,14 +2973,14 @@ def collect_git_performance(
                                  or any(row["complete"] and row["bytes"] for row in responses.values()))
                                 and all(limits.admits(row) for row in responses.values()),
                                 f"{label} disagrees with its compiled CDN read limits")
-                    for request_id, cache in traffic.completed_cache.items():
-                        row = responses.get(request_id)
-                        if row is None:
+                    for request_id, row in responses.items():
+                        if not row["complete"] or not row["bytes"]:
                             continue
-                        # A viewer header may describe only the first chunk.
-                        # Use the joined log's disposition for the entire response.
-                        if row["cache"] == "unknown":
-                            cache_corrections[cache] += 1
+                        # Provider logs can disprove a hit reported by the
+                        # viewer, or resolve an ambiguous viewer header.
+                        cache = traffic.completed_cache.get(request_id, "unknown")
+                        cache_corrections[row["cache"]] -= 1
+                        cache_corrections[cache] += 1
                         if arm == "warm_edge" and cache == "hit":
                             form = "ranged GET" if row["range"] else "full GET"
                             if missing_boundaries.get(form) == (row["object_bytes"], row["requested_bytes"]):
@@ -2979,11 +2992,8 @@ def collect_git_performance(
                         f"{label} has mismatched provider measurements")
                 measured = {key: client[key] for key in GIT_CLIENT_METRICS}
                 measured.update({key: external[key] for key in GIT_EXTERNAL_METRICS})
-                corrected = sum(cache_corrections.values())
-                require(corrected <= measured["edge_unknown"], f"{label} undercounts its unknown CDN cache results")
-                measured["edge_unknown"] -= corrected
-                measured["edge_hits"] += cache_corrections["hit"]
-                measured["edge_misses"] += cache_corrections["miss"]
+                for cache, metric in (("hit", "edge_hits"), ("miss", "edge_misses"), ("unknown", "edge_unknown")):
+                    measured[metric] += cache_corrections[cache]
                 require(all(type(value) is int and value >= 0 for value in measured.values()),
                         f"{label} is missing measured metrics")
                 require(positive(measured["peak_memory_bytes"])

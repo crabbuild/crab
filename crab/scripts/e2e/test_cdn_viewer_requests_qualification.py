@@ -61,7 +61,8 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
         observed = cdn.verify_viewer_requests(proof, read, "e" * 64, "cloudfront")
         self.assertEqual((observed.fill_bytes, observed.successful_fill, observed.completed_cache), (0, False, {"c" * 64: "hit"}))
         proof["origin_requests"]["1" * 64] = {"key_sha256": xorb_key, "at_unix_s": 1, "status": 206, "response_body_bytes": 512}
-        self.assertEqual(cdn.verify_viewer_requests(proof, read, "e" * 64, "cloudfront").fill_bytes, 512)
+        observed = cdn.verify_viewer_requests(proof, read, "e" * 64, "cloudfront")
+        self.assertEqual((observed.fill_bytes, observed.completed_cache), (512, {}))
         with self.assertRaisesRegex(ValueError, "ranges totaling less"):
             cdn.verify_sparse_xorb_traffic(read | {"edge_bytes": 1024}, 1024)
         with self.assertRaisesRegex(ValueError, "approved hydration xorb"):
