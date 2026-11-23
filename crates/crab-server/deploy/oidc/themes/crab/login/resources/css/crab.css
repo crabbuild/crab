@@ -1,0 +1,323 @@
+@font-face {
+  font-family: "Geist Variable";
+  src: url("../fonts/geist-latin-wght-normal.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+#keycloak-bg {
+  margin: 0;
+  min-height: 100dvh;
+  background: var(--background);
+  color: var(--foreground);
+  font:
+    400 0.875rem/1.55 "Geist Variable",
+    sans-serif;
+}
+
+#keycloak-bg .pf-v5-c-login {
+  display: block;
+  min-height: 100dvh;
+  padding: 0;
+  background: none;
+  font: inherit;
+}
+
+#keycloak-bg .pf-v5-c-login__container {
+  display: grid;
+  grid-template-columns: var(--sign-in-columns);
+  grid-template-areas: "brand brand" "art form";
+  align-items: center;
+  gap: var(--sign-in-top-gap) var(--sign-in-column-gap);
+  width: min(var(--sign-in-max-width), calc(100% - 3rem));
+  margin-inline: auto;
+  padding: 0 0 3rem;
+}
+
+#keycloak-bg .pf-v5-c-login__container::before {
+  grid-area: art;
+  align-self: start;
+  width: 100%;
+  aspect-ratio: var(--sign-in-art-ratio);
+  border-radius: calc(var(--radius) + 0.25rem);
+  background: url("../img/sign-in-art.svg") center / cover no-repeat;
+  content: "";
+}
+
+#keycloak-bg #kc-header {
+  grid-area: brand;
+  display: flex;
+  align-items: center;
+  min-height: 4rem;
+  margin: 0;
+  padding: 0;
+}
+
+#keycloak-bg #kc-header-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  /* Keycloak marks its desktop brand color important for its dark backdrop. */
+  color: var(--foreground) !important;
+  font:
+    650 1rem/1.5 "Geist Variable",
+    sans-serif;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+#kc-header-wrapper::before {
+  flex: none;
+  width: 2rem;
+  height: 2rem;
+  background: currentColor;
+  mask: url("../img/crab-mark.svg") center / contain no-repeat;
+  content: "";
+}
+
+#keycloak-bg .pf-v5-c-login__main {
+  grid-area: form;
+  align-self: center;
+  width: min(100%, var(--sign-in-form-width));
+  border: 0;
+  border-radius: calc(var(--radius) + 0.25rem);
+  padding: var(--sign-in-panel-padding);
+  background: var(--card);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--foreground) 10%, transparent);
+  color: var(--foreground);
+}
+
+#keycloak-bg .pf-v5-c-login__main-header,
+#keycloak-bg .pf-v5-c-login__main-body,
+#keycloak-bg .pf-v5-c-login__main-footer {
+  border: 0;
+  padding-inline: 0;
+  background: none;
+}
+
+#keycloak-bg .pf-v5-c-login__main-header {
+  padding-block: 0 var(--sign-in-section-gap);
+}
+
+#keycloak-bg #kc-page-title {
+  color: var(--foreground);
+  font: var(--sign-in-heading);
+  letter-spacing: var(--sign-in-heading-tracking);
+  text-wrap: balance;
+}
+
+#keycloak-bg .pf-v5-c-login__main-body {
+  padding-block: 0;
+}
+
+#keycloak-bg .pf-v5-c-form {
+  --pf-v5-c-form--GridGap: 1.25rem;
+}
+
+/* Names belong in the profile. Keep them visible if a realm requires them or reports an error. */
+#kc-register-form
+  .pf-v5-c-form__group:has(#firstName, #lastName):not(
+    :has(.pf-v5-c-form__label-required, [aria-invalid="true"])
+  ) {
+  display: none;
+}
+
+#keycloak-bg .pf-v5-c-form__label {
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+  color: var(--foreground);
+  --pf-v5-c-form__label--FontWeight: 500;
+}
+
+#keycloak-bg :is(.pf-v5-c-form__label-required, .kc-feedback-text.pf-m-error) {
+  color: var(--destructive);
+}
+
+#keycloak-bg .pf-v5-c-login__main-footer-band {
+  display: flex;
+  justify-content: flex-start;
+  border-top: 1px solid var(--border);
+  padding-inline: 0;
+  background: none;
+  color: var(--muted-foreground);
+}
+
+#keycloak-bg .pf-v5-c-login__main-footer-band-item {
+  padding-block-end: 0;
+}
+
+/* Map Keycloak's native controls to the Crab Input, InputGroup, and Button styles. */
+#keycloak-bg :is(.pf-v5-c-form-control, .pf-v5-c-input-group, .pf-v5-c-button) {
+  border-radius: calc(var(--radius) - 0.125rem);
+}
+
+#keycloak-bg :is(.pf-v5-c-form-control, .pf-v5-c-input-group) {
+  border: 1px solid var(--input);
+  background: var(--background);
+  color: var(--foreground);
+}
+
+#keycloak-bg :is(.pf-v5-c-form-control, .pf-v5-c-input-group):hover {
+  border-color: var(--input-hover);
+}
+
+#keycloak-bg .pf-v5-c-form-control > input {
+  height: calc(var(--sign-in-field-height) - 2px);
+  padding: 0.25rem 0.625rem;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: 1rem;
+  line-height: 1.5rem;
+}
+
+#keycloak-bg .pf-v5-c-form-control > input::placeholder {
+  color: var(--muted-foreground);
+}
+
+@media (min-width: 768px) {
+  #keycloak-bg .pf-v5-c-form-control > input {
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+  }
+}
+
+#keycloak-bg
+  :is(.pf-v5-c-form-control, .pf-v5-c-input-group):has(input:focus-visible),
+#keycloak-bg .pf-v5-c-button:focus-visible {
+  outline: none;
+  border-color: var(--ring);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--ring) 25%, transparent);
+}
+
+#keycloak-bg
+  :is(.pf-v5-c-form-control.pf-m-error, .pf-v5-c-input-group:has(.pf-m-error)) {
+  border-color: var(--destructive);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--destructive) 20%, transparent);
+}
+
+#keycloak-bg .pf-v5-c-input-group .pf-v5-c-form-control {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+#keycloak-bg .pf-v5-c-form-control > input:focus-visible {
+  outline: none;
+}
+
+#keycloak-bg .pf-v5-c-form-control::before,
+#keycloak-bg .pf-v5-c-form-control::after,
+#keycloak-bg .pf-v5-c-button::after {
+  border: 0;
+}
+
+#keycloak-bg .pf-v5-c-button {
+  border: 1px solid transparent;
+  font:
+    500 0.875rem/1.25rem "Geist Variable",
+    sans-serif;
+}
+
+#keycloak-bg [data-password-toggle] {
+  align-self: center;
+  width: var(--sign-in-reveal-size);
+  height: var(--sign-in-reveal-size);
+  margin-inline: 0.25rem;
+  padding: 0;
+  border-radius: calc(var(--radius) - 3px);
+  background: transparent;
+  color: var(--muted-foreground);
+}
+
+@media (pointer: coarse) {
+  #keycloak-bg [data-password-toggle] {
+    margin-inline: 0;
+  }
+}
+
+#keycloak-bg [data-password-toggle]:hover {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+#keycloak-bg .pf-v5-c-login a {
+  color: var(--info);
+  text-underline-offset: 0.18em;
+}
+
+#keycloak-bg .pf-v5-c-button.pf-m-primary {
+  min-height: var(--sign-in-action-height);
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+#keycloak-bg .pf-v5-c-button.pf-m-primary:hover {
+  background: color-mix(in oklab, var(--primary) 90%, transparent);
+}
+
+#keycloak-bg #kc-social-providers .pf-v5-c-button {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-height: var(--sign-in-action-height);
+  padding-inline: 0.875rem;
+  border-color: var(--border);
+  background: var(--background);
+  color: var(--foreground);
+}
+
+#keycloak-bg #kc-social-providers :is(img, picture) {
+  width: 1rem;
+  height: 1rem;
+}
+
+#keycloak-bg #kc-social-providers .pf-v5-c-button:hover {
+  border-color: var(--input-hover);
+  background: var(--accent);
+}
+
+#keycloak-bg #kc-social-providers .pf-v5-c-button:focus-visible {
+  border-color: var(--ring);
+}
+
+#keycloak-bg .kc-login-divider {
+  color: var(--muted-foreground);
+}
+
+#keycloak-bg input[type="checkbox"] {
+  accent-color: var(--primary);
+}
+
+#keycloak-bg
+  :focus-visible:not(.pf-v5-c-form-control > input, .pf-v5-c-button) {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+@media (forced-colors: active) {
+  #keycloak-bg
+    :is(.pf-v5-c-form-control, .pf-v5-c-input-group):has(input:focus-visible),
+  #keycloak-bg .pf-v5-c-button:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+}
+
+@media (max-width: 740px) {
+  #keycloak-bg .pf-v5-c-login__container {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "brand" "form" "art";
+    justify-items: center;
+    width: min(100% - 2rem, var(--sign-in-form-width));
+    row-gap: 1.5rem;
+    padding-bottom: 1.75rem;
+  }
+
+  #keycloak-bg #kc-header {
+    justify-self: start;
+  }
+}

@@ -2,6 +2,7 @@
 @import "tw-animate-css";
 @import "@fontsource-variable/geist";
 @import "@fontsource-variable/geist-mono";
+@import "./theme.css";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -2160,10 +2161,6 @@ main {
   color: var(--foreground);
 }
 
-.sign-in {
-  max-width: 520px;
-  margin: --spacing(16) auto;
-}
 @media (max-width: 640px) {
   .global-header {
     position: relative;
@@ -7500,44 +7497,8 @@ main {
 }
 
 :root {
-  color-scheme: light;
   --page-gutter: --spacing(6);
   --page-block: --spacing(6);
-  /* Geist's sRGB palette, mapped to the component system's semantic roles. */
-  --background: hsl(0 0% 100%);
-  --foreground: hsl(0 0% 9%);
-  --card: var(--background);
-  --card-foreground: var(--foreground);
-  --popover: var(--background);
-  --popover-foreground: var(--foreground);
-  --primary: var(--foreground);
-  --primary-foreground: var(--background);
-  --secondary: hsl(0 0% 95%);
-  --secondary-foreground: var(--foreground);
-  --muted: hsl(0 0% 98%);
-  --muted-foreground: hsl(0 0% 40%);
-  --accent: hsl(0 0% 92%);
-  --accent-foreground: var(--foreground);
-  --destructive: hsl(358 66% 48%);
-  --info: hsl(211 100% 42%);
-  --info-foreground: hsl(211 100% 15%);
-  --success-foreground: hsl(128 29% 15%);
-  --warning-foreground: hsl(20 79% 17%);
-  --destructive-foreground: hsl(0 0% 100%);
-  --destructive-muted: hsl(0 100% 97%);
-  --destructive-muted-foreground: hsl(355 49% 15%);
-  --destructive-border: hsl(0 82% 85%);
-  --success: hsl(133 50% 32%);
-  --warning: hsl(30 100% 32%);
-  --done: hsl(274 71% 43%);
-  --shadow-overlay: 0 8px 24px rgb(0 0 0 / 12%), 0 0 0 1px var(--border);
-  --shadow-raised: 0 1px 2px rgb(0 0 0 / 5%);
-  --border: hsl(0 0% 88%);
-  --input: hsl(0 0% 55%);
-  --input-hover: hsl(0 0% 40%);
-  --ring: hsl(0 0% 40%);
-  --radius: 0.5rem;
-  --overlay: rgb(0 0 0 / 20%);
 }
 
 @media (max-width: 900px) {
@@ -7545,36 +7506,6 @@ main {
     --page-gutter: --spacing(4);
     --page-block: --spacing(5);
   }
-}
-
-.dark {
-  color-scheme: dark;
-  --input: hsl(0 0% 42%);
-  --input-hover: hsl(0 0% 63%);
-  --background: hsl(0 0% 4%);
-  --foreground: hsl(0 0% 93%);
-  --card: hsl(0 0% 6%);
-  --popover: hsl(0 0% 7%);
-  --secondary: hsl(0 0% 10%);
-  --muted: hsl(0 0% 7%);
-  --accent: hsl(0 0% 14%);
-  --muted-foreground: hsl(0 0% 63%);
-  --destructive: hsl(358 100% 69%);
-  --info: hsl(210 100% 66%);
-  --info-foreground: hsl(206 100% 96%);
-  --success-foreground: hsl(136 73% 94%);
-  --warning-foreground: hsl(40 94% 93%);
-  --destructive-foreground: hsl(0 0% 9%);
-  --destructive-muted: hsl(357 37% 12%);
-  --destructive-muted-foreground: hsl(353 90% 96%);
-  --destructive-border: hsl(357 55% 26%);
-  --success: hsl(131 43% 57%);
-  --warning: hsl(39 90% 50%);
-  --done: hsl(275 80% 71%);
-  --border: hsl(0 0% 20%);
-  --ring: hsl(0 0% 63%);
-  --shadow-overlay: 0 8px 24px rgb(0 0 0 / 40%), 0 0 0 1px var(--border);
-  --overlay: rgb(0 0 0 / 60%);
 }
 
 @layer base {
