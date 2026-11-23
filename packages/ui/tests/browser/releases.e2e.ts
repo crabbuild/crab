@@ -129,6 +129,7 @@ test("publishes and browses GitHub-style releases and source tags", async ({
         json: {
           target_oid: main,
           previous_tag: "v0.9.0",
+          configuration_file: ".github/release.yml",
           body: `## What's changed\n\n- A generated entry\n\n[Full changelog](/team/project/commits/${main}?since=${oldTag})\n`,
         },
       });
@@ -284,6 +285,9 @@ test("publishes and browses GitHub-style releases and source tags", async ({
   await page.getByLabel("Previous tag").selectOption("refs/tags/v0.9.0");
   await page.getByRole("button", { name: "Generate release notes" }).click();
   await page.getByText("Preview notes since v0.9.0").click();
+  await expect(
+    page.getByText(".github/release.yml", { exact: true }),
+  ).toBeVisible();
   await expect(page.getByText("A generated entry")).toBeVisible();
   await expectNoAccessibilityViolations(page);
   await page.getByRole("button", { name: "Insert generated notes" }).click();

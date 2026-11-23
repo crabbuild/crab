@@ -9,6 +9,7 @@ import { refName } from "./api";
 interface GeneratedNotes {
   target_oid: string;
   previous_tag: string | null;
+  configuration_file: string | null;
   body: string;
 }
 
@@ -108,6 +109,11 @@ export function ReleaseNotesGenerator({
                 ? `Preview notes since ${preview.previous_tag}`
                 : "Preview notes for all history"}
             </summary>
+            {preview.configuration_file && (
+              <p className="text-sm text-muted-foreground">
+                Rules from <code>{preview.configuration_file}</code>
+              </p>
+            )}
             <DiscussionMarkdown>{preview.body}</DiscussionMarkdown>
           </details>
           <Button

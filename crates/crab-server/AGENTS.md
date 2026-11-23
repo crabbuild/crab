@@ -235,7 +235,9 @@ reads current follows by paging the canonical discussion keys.
 owns release watch activation and the publication outbox. Release completion
 queues the notice in its publication transaction. `api/releases/notes.rs`
 composes canonical completed pull merges with a pinned Git ancestry range
-for the editable release preview. Activity writes enroll participants under
+for the editable release preview. Its `notes/configuration.rs` reads categories
+and exclusions from that target commit and resolves current label and author
+identities. Activity writes enroll participants under
 their qualified identity before scheduling delivery. Watch outbox events carry
 the activity number and advance by bounded pages after Directory delivery.
 The mention outbox pins enrollment sources to committed activity and gates

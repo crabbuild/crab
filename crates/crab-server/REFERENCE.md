@@ -1147,9 +1147,39 @@ tag still points to its recorded commit and whose commit is a strict ancestor
 of the target. An empty string includes all history. An explicit tag must
 resolve to the target commit or an ancestor. The response returns the pinned
 `target_oid`, the selected `previous_tag` and `previous_oid` (both null for
-all history), and the Markdown `body`. Generation supports up to 4,096
+all history), the selected `configuration_file` or null, and the Markdown
+`body`. Generation supports up to 4,096
 merged pull requests in the repository and returns an error if the scan or
 64 KiB body limit is exceeded.
+
+To group release notes, commit a `.github/release.yml` or
+`.github/release.yaml` file. Crab reads it from the selected target commit
+and prefers the `.yml` file when both exist. API callers may pass
+`configuration_file_path` to select another repository-relative file.
+The preview identifies the file it used.
+
+```yaml
+changelog:
+  exclude:
+    labels: [skip-release-notes]
+    authors: [automation]
+  categories:
+    - title: Features
+      labels: [enhancement]
+      exclude:
+        labels: [internal]
+    - title: Other changes
+      labels: ["*"]
+```
+
+Global exclusions remove pull requests from all sections and from the
+contributor list when they have no other included pull requests. The first
+eligible category wins. Category exclusions let the pull request match a
+later category. Use `"*"` to include changes that match no earlier category,
+or omit `categories` to keep the default list. Label names match current
+repository labels case-insensitively. Author selectors use current Crab
+profile handles, with an optional leading `@`. The configuration is limited
+to 32 KiB, 32 categories, 128 label entries, and 128 author entries.
 
 An existing lightweight or annotated tag is accepted only when it peels to the exact target. A new published release creates a lightweight tag through canonical ref publication. Drafts reserve their release tag but do not publish a new Git tag until a version-bound edit publishes the draft. Republishing a withdrawn release verifies the existing Git tag again before notifying watchers.
 

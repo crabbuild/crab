@@ -140,6 +140,8 @@ pub(crate) enum Error {
     AssigneePermission,
     #[error("Write access is required to manage releases")]
     ReleasePermission,
+    #[error("Invalid release notes YAML")]
+    ReleaseNotesYaml(#[source] serde_yaml::Error),
     #[error("{0}")]
     RefRule(&'static str),
     #[error("A release already exists for this tag or the tag points to another commit")]
@@ -517,6 +519,11 @@ impl IntoResponse for Error {
                 StatusCode::FORBIDDEN,
                 "forbidden",
                 "Write access is required to manage releases",
+            ),
+            Self::ReleaseNotesYaml(_) => (
+                StatusCode::BAD_REQUEST,
+                "release_notes_yaml",
+                "Use valid YAML with supported changelog fields in the release note configuration",
             ),
             Self::ReleaseConflict => (
                 StatusCode::CONFLICT,

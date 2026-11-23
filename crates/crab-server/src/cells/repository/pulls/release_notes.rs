@@ -8,6 +8,7 @@ pub(crate) struct MergedPullForRelease {
     pub title: String,
     pub author: RepositoryAuthor,
     pub commit_oid: String,
+    pub label_ids: Vec<u64>,
 }
 
 pub(crate) struct ListMergedPullsForRelease;
@@ -24,7 +25,7 @@ impl Read for ListMergedPullsForRelease {
     ) -> crate::cells::Result<Self::Output> {
         let upper = before.map_or(MAX_NUMBER, |number| number.saturating_sub(1));
         let rows = context.query(
-            "SELECT number, title, author_issuer, author_subject, author_name, completed_merge \
+            "SELECT number, title, author_issuer, author_subject, author_name, completed_merge, label_ids \
              FROM repository_pulls WHERE state = ? AND number <= ? ORDER BY number DESC LIMIT ?",
             &[
                 SqlValue::Integer(i64::from(PullState::Merged.code())),
@@ -44,6 +45,7 @@ impl Read for ListMergedPullsForRelease {
                     title: result_text(row, 1)?,
                     author: author_from_row(row, 2)?,
                     commit_oid: merged.commit_oid,
+                    label_ids: decode_label_ids(result_blob(row, 6)?)?,
                 })
             })
             .collect::<crate::cells::Result<Vec<_>>>()?;

@@ -8,6 +8,9 @@ use crab_remote_git::{
 use super::*;
 use crate::cells::repository::{ListMergedPullsForRelease, MergedPullForRelease};
 
+mod configuration;
+use configuration::Rules;
+
 const MAX_MERGED_PULLS: usize = 4096;
 
 #[derive(Deserialize)]
@@ -15,6 +18,7 @@ const MAX_MERGED_PULLS: usize = 4096;
 pub(super) struct Parameters {
     target_oid: String,
     previous_tag: Option<String>,
+    configuration_file_path: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -22,6 +26,7 @@ pub(super) struct GeneratedNotes {
     target_oid: String,
     previous_tag: Option<String>,
     previous_oid: Option<String>,
+    configuration_file: Option<String>,
     body: String,
 }
 
@@ -50,6 +55,7 @@ pub(super) async fn generate(
         &operation,
         target_oid,
         parameters.previous_tag,
+        parameters.configuration_file_path,
     )
     .await;
     // Finish with the Git failure itself so locator-close and interruption
@@ -79,6 +85,7 @@ async fn draft(
     operation: &OperationContext,
     target_oid: ObjectId,
     previous_tag: Option<String>,
+    configuration_file_path: Option<String>,
 ) -> Result<GeneratedNotes> {
     let target = git
         .snapshot(&Revision::Commit(target_oid), operation)
@@ -102,6 +109,14 @@ async fn draft(
         }
         None => published_predecessor(server, repo, git, &target, operation).await?,
     };
+    let (configuration_file, rules) = configuration::load(
+        server,
+        repo,
+        &target,
+        operation,
+        configuration_file_path.as_deref(),
+    )
+    .await?;
     let pulls = merged_pulls(server, repo).await?;
     let mut candidates = pulls
         .iter()
@@ -135,6 +150,7 @@ async fn draft(
         repo,
         target_oid,
         previous.as_ref().map(|(_, oid)| *oid),
+        &rules,
         pulls
             .into_iter()
             .zip(included)
@@ -144,6 +160,7 @@ async fn draft(
         target_oid: target_oid.to_string(),
         previous_oid: previous.as_ref().map(|(_, oid)| oid.to_string()),
         previous_tag: previous.map(|(name, _)| name),
+        configuration_file,
         body,
     })
 }
@@ -232,15 +249,20 @@ fn markdown(
     repo: &Repository,
     target: ObjectId,
     previous: Option<ObjectId>,
+    rules: &Rules,
     pulls: impl Iterator<Item = MergedPullForRelease>,
 ) -> Result<String> {
     let mut body = String::from("## What's changed\n\n");
     let mut contributors = Vec::new();
     let mut authors = HashSet::new();
+    let mut sections = vec![String::new(); rules.categories.len().max(1)];
     for pull in pulls {
+        let Some(section) = rules.section(&pull) else {
+            continue;
+        };
         let title = markdown_text(&pull.title);
         let author = markdown_text(&pull.author.name);
-        body.push_str(&format!(
+        sections[section].push_str(&format!(
             "- {title} by {author} in [#{}](/api/discussion-references/{}/pull/{})\n",
             pull.number, repo.id, pull.number
         ));
@@ -251,7 +273,18 @@ fn markdown(
     if contributors.is_empty() {
         body.push_str("No merged pull requests in this range.\n");
     } else {
-        body.push_str("\n## Contributors\n\n");
+        for (index, section) in sections
+            .into_iter()
+            .enumerate()
+            .filter(|(_, text)| !text.is_empty())
+        {
+            if let Some(category) = rules.categories.get(index) {
+                body.push_str(&format!("### {}\n\n", markdown_text(&category.title)));
+            }
+            body.push_str(&section);
+            body.push('\n');
+        }
+        body.push_str("## Contributors\n\n");
         for author in contributors {
             body.push_str(&format!("- {author}\n"));
         }
