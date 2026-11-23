@@ -60,6 +60,7 @@ enum Term {
     Kind(SubjectKind),
     Unmerged,
     Draft(bool),
+    Locked(bool),
     Missing(Metadata),
 }
 
@@ -101,21 +102,12 @@ impl Query {
         names
     }
     pub(super) fn needs_lifecycle(&self) -> bool {
-        fn has(expression: &Expression) -> bool {
-            match expression {
-                Expression::Term {
-                    value: Term::Reason(_) | Term::Missing(Metadata::Reason),
-                    ..
-                } => true,
-                Expression::Not(inner)
-                | Expression::Scope {
-                    expression: inner, ..
-                } => has(inner),
-                Expression::And(parts) | Expression::Or(parts) => parts.iter().any(has),
-                _ => false,
-            }
-        }
-        has(&self.expression)
+        self.expression
+            .has_term(|term| matches!(term, Term::Reason(_) | Term::Missing(Metadata::Reason)))
+    }
+    fn needs_lock_state(&self) -> bool {
+        self.expression
+            .has_term(|term| matches!(term, Term::Locked(_)))
     }
     pub(crate) fn parse(source: Option<&str>) -> Result<Self, &'static str> {
         let Some(source) = source else {
@@ -140,6 +132,20 @@ impl Query {
             return Err("Search query has an unexpected closing parenthesis");
         }
         Ok(Self { expression })
+    }
+}
+
+impl Expression {
+    fn has_term(&self, matches: fn(&Term) -> bool) -> bool {
+        match self {
+            Self::Term { value, .. } => matches(value),
+            Self::Not(inner)
+            | Self::Scope {
+                expression: inner, ..
+            } => inner.has_term(matches),
+            Self::And(parts) | Self::Or(parts) => parts.iter().any(|part| part.has_term(matches)),
+            Self::All => false,
+        }
     }
 }
 
@@ -366,6 +372,8 @@ fn atom_expression(atom: &str) -> Result<Expression, &'static str> {
                     Term::State(SubjectState::Merged)
                 }
                 "unmerged" if qualifier.eq_ignore_ascii_case("is") => Term::Unmerged,
+                "locked" if qualifier.eq_ignore_ascii_case("is") => Term::Locked(true),
+                "unlocked" if qualifier.eq_ignore_ascii_case("is") => Term::Locked(false),
                 "issue" if qualifier.eq_ignore_ascii_case("is") => Term::Kind(SubjectKind::Issue),
                 "pr" if qualifier.eq_ignore_ascii_case("is") => Term::Kind(SubjectKind::Pull),
                 _ => return Err("Search is/state qualifier has an unsupported value"),

@@ -41,7 +41,7 @@ is buffered before owner dispatch so Cellar can safely retry stale routes; it is
 not forwarded as a non-replayable upload stream. Successful HTTP output
 uses the SDK output gate, including its ownership and durability checks.
 
-Repository assignment format 2 and discussion index format 14 require the explicit
+Repository assignment format 2 and discussion index format 15 require the explicit
 preparation described below. Issue lifecycle metadata also requires explicit
 `cells prepare-issue-state` on existing repositories. Pull lifecycle metadata
 requires `cells prepare-pull-state`. Other canonical records
@@ -501,13 +501,29 @@ review key or exclusive KV bound. Both phases process at most eight source recor
 per transaction; unrelated pull metadata also advances the request cursor. Reads
 remain unavailable until all sources complete. Domain records, versions, request
 history, receipts and public submission mappings are unchanged. Older indexes
-require `cells rebuild-search`. Fresh repositories initialize format 14.
+require `cells rebuild-search`. Fresh repositories initialize the current index format.
 
 Native list output adds `review_requested_from_me`. Author, reviewer and commenter
 names now share one ordered `people` binding collection, one Directory snapshot,
 digest encoding and validation. Public HTTP cannot supply bindings.
 Update peers together; there is no old list-shape reader or source-scan fallback.
 Review-status predicates are described below.
+
+## Conversation lock search preparation
+
+Discussion index format 15 adds a sparse projection of the canonical issue and
+PR lock records. Update serving peers together and run the existing
+`cells rebuild-search --owner OWNER --name REPO` command. Ready format-14
+indexes install the new table and copy lock records in bounded issue and pull
+frames, retaining their other projections and revision. Repositories on
+earlier formats use the full existing rebuild before the lock frames. A new
+generation invalidates old cursors and interrupted preparation resumes against
+the recorded phase and position.
+
+Lock writes publish their state, index row, and activity in one Repository
+Cell transaction. Posting and search evaluate expiry from the Cell clock. There
+is no background expiry write. Lock-filtered cursors expire at the earliest
+future lock deadline and bind the repository archive state.
 
 ## Team review search preparation
 

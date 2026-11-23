@@ -163,6 +163,23 @@ async fn issue_lock_blocks_new_contributions_and_keeps_comment_receipts() {
         })
         .collect();
     assert_eq!(moderation, ["unlocked", "locked"]);
+    let unlocked = format!("{ROOT}/issues?q=is:issue%20is:unlocked");
+    let locked = format!("{ROOT}/issues?q=is:issue%20is:locked");
+    assert_eq!(h.json(&unlocked, &bob).await["matching"], 1);
+    h.write(
+        Method::PUT,
+        &format!("{ROOT}/settings/archive"),
+        &alice,
+        json!({"expected_version":0,"archived":true,"repository":"team/private"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert_eq!(h.json(&locked, &bob).await["matching"], 1);
+    assert_eq!(h.json(&unlocked, &bob).await["matching"], 0);
+    let closed_for_archive = h.json(&lock_path, &bob).await;
+    assert_eq!(closed_for_archive["locked"], true);
+    assert_eq!(closed_for_archive["can_post"], false);
     h.close().await;
 }
 
@@ -234,6 +251,14 @@ async fn pull_lock_checks_live_access_and_keeps_a_rejected_review_private() {
         .await
         .error_for_status()
         .unwrap();
+    let locked = h.json(&format!("{ROOT}/pulls?q=is:locked"), &bob).await;
+    assert_eq!(locked["matching"], 1);
+    assert_eq!(locked["items"][0]["number"], 1);
+    assert_eq!(
+        h.json(&format!("{ROOT}/issues?q=is:issue%20is:locked"), &bob)
+            .await["matching"],
+        0
+    );
     let submit = format!("{draft_path}/submit");
     let batch = json!({"request_id":Uuid::now_v7(),"expected":draft,"body":"Review summary","state":"commented"});
     assert_locked(h.write(Method::POST, &submit, &bob, batch.clone()).await).await;
@@ -307,7 +332,18 @@ async fn moderator_can_lock_and_unlock_from_the_browser() {
     browser.sign_in().await;
     click("Lock conversation").await;
     browser
-        .run(&["select", "[role=dialog] select", "off_topic"])
+        .run(&[
+            "select",
+            "[role=dialog] label:nth-of-type(1) select",
+            "off_topic",
+        ])
+        .await;
+    browser
+        .run(&[
+            "select",
+            "[role=dialog] label:nth-of-type(2) select",
+            "hour",
+        ])
         .await;
     click("Lock").await;
     browser
@@ -317,6 +353,58 @@ async fn moderator_can_lock_and_unlock_from_the_browser() {
         h.json(&format!("{ISSUE}/lock"), &bob).await["reason"],
         "off_topic"
     );
+    let timed = h.json(&format!("{ISSUE}/lock"), &bob).await;
+    assert!(timed["expires_at_ms"].as_u64().is_some());
+    assert!(
+        timed["expires_in_ms"]
+            .as_u64()
+            .is_some_and(|delay| delay > 3_590_000)
+    );
+    browser
+        .run(&["find", "role", "link", "click", "--name", "Back to issues"])
+        .await;
+    browser
+        .run(&["wait", "button[aria-label='Filter by conversation lock']"])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Filter by conversation lock",
+        ])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "menuitemradio",
+            "click",
+            "--name",
+            "Locked",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&[
+            "wait",
+            "--fn",
+            "new URLSearchParams(location.search).get('q') === 'is:issue is:open is:locked'",
+        ])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "link",
+            "click",
+            "--name",
+            "Moderation test",
+            "--exact",
+        ])
+        .await;
     click("Unlock conversation").await;
     browser.run(&["wait", "--text", "Lock conversation"]).await;
     assert_eq!(

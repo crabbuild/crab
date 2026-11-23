@@ -52,6 +52,8 @@ pub(crate) enum Action {
     Updated,
     Locked {
         reason: Option<super::locks::Reason>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expires_at_ms: Option<u64>,
     },
     Unlocked,
     CommentHidden {

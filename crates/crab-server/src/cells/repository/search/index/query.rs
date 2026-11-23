@@ -94,6 +94,7 @@ pub(crate) struct Page<T> {
     pub assigned_to_me: bool,
     pub review_requested_from_me: bool,
     pub navigation: super::super::navigation::StateNavigation,
+    pub lock_filter: super::super::navigation::LockFilter,
     pub labels: Vec<LabelSummary>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -130,6 +131,8 @@ struct Cursor {
     query: String,
     key: Key,
     subject: Subject,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expires_at_ms: Option<u64>,
 }
 impl Cursor {
     fn decode(value: &str) -> Result<Self, &'static str> {
@@ -152,6 +155,9 @@ impl Cursor {
                 .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
             || matches!(cursor.key, Key::Rank(rank) if !rank.is_finite() || rank < 0.0)
             || matches!(cursor.key, Key::Integer(key) if key > MAX_NUMBER)
+            || cursor
+                .expires_at_ms
+                .is_some_and(|expiry| expiry == 0 || expiry > MAX_NUMBER)
         {
             return Err("Discussion cursor fields are invalid");
         }
@@ -179,11 +185,15 @@ struct Bindings<'a> {
     assignees: &'a [super::super::assignees::Binding],
     review: Option<super::super::reviews::status::Bound>,
     review_teams: &'a super::super::reviews::teams::Bindings,
+    archived: bool,
+    now_ms: i64,
 }
 impl<'a> Bindings<'a> {
     fn new(
         input: &'a SearchInput,
         prepared: Option<&super::super::reviews::status::Prepared>,
+        archived: bool,
+        now_ms: i64,
     ) -> crate::cells::Result<Self> {
         let mut values = Self {
             people: &input.people,
@@ -191,6 +201,8 @@ impl<'a> Bindings<'a> {
             review: None,
             values: Vec::new(),
             review_teams: &input.review_teams,
+            archived,
+            now_ms,
         };
         if let Some(prepared) = prepared {
             values.review = Some(super::super::reviews::status::Bound::new(
@@ -228,6 +240,11 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
     let generation = ensure_ready(context)?;
     let revision = revision(context)?;
     let query = Query::parse(input.query.as_deref()).map_err(crate::cells::Error::Invalid)?;
+    let archived = query
+        .needs_lock_state()
+        .then(|| crate::cells::repository::settings::archived(context))
+        .transpose()?;
+    let now_ms = crate::cells::repository::timestamp(context.now_ms())?;
     let review = if query.needs_review_source() {
         Some(super::super::reviews::status::prepare(
             context,
@@ -271,6 +288,7 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         input.sort,
         input.direction,
         &query.expression,
+        archived,
         &input.people,
         &input.assignees,
         &input.review_context,
@@ -290,10 +308,16 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
             || cursor.revision != revision
             || cursor.query != digest
             || (input.sort == Sort::Relevance) != matches!(cursor.key, Key::Rank(_))
+            || cursor.expires_at_ms.is_some_and(|expiry| expiry <= now_ms)
     }) {
         return Err(crate::cells::Error::StaleSearch);
     }
-    let mut bindings = Bindings::new(&input, review.as_ref())?;
+    let mut bindings = Bindings::new(
+        &input,
+        review.as_ref(),
+        archived.unwrap_or(false),
+        context.now_ms(),
+    )?;
     let kind_clause = kind_filter(subject_kind, &mut bindings);
     // Each counter describes its navigation query, even when the current query
     // selects only closed work. Rows and both targets share this native snapshot.
@@ -330,7 +354,12 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         .ok_or(crate::cells::Error::Invalid(
             "discussion count exceeds its range",
         ))?;
-    let mut bindings = Bindings::new(&input, review.as_ref())?;
+    let mut bindings = Bindings::new(
+        &input,
+        review.as_ref(),
+        archived.unwrap_or(false),
+        context.now_ms(),
+    )?;
     let kind_clause = kind_filter(subject_kind, &mut bindings);
     let predicate = expression(&query.expression, &mut bindings)?;
     let filter = format!("{kind_clause} AND ({predicate})");
@@ -437,6 +466,13 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
                 query: digest,
                 key: last.key.clone(),
                 subject: last.subject,
+                // The earliest expiry can change typed or negated lock predicates
+                // without a write. Do not seek through a different result set.
+                expires_at_ms: if archived == Some(false) {
+                    locks::next_expiry(context)?
+                } else {
+                    None
+                },
             }
             .encode()?,
         )
@@ -479,6 +515,7 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         assigned_to_me: query.assigned_to_me(),
         review_requested_from_me: query.review_requested_from_me(),
         navigation,
+        lock_filter: query.lock_filter(),
         labels,
     })
 }
@@ -575,6 +612,15 @@ fn scoped_expression(
             Term::Kind(subject_kind) => format!("d.kind = {}",kind(*subject_kind)),
             Term::Unmerged => "d.kind = 1 AND d.state <> 2".into(),
             Term::Draft(draft) => format!("d.kind = 1 AND d.draft = {}",u8::from(*draft)),
+            Term::Locked(locked) => {
+                if bindings.archived {
+                    u8::from(*locked).to_string()
+                } else {
+                    let now = bindings.bind(SqlValue::Integer(bindings.now_ms));
+                    let negate = if *locked { "" } else { "NOT " };
+                    format!("{negate}EXISTS (SELECT 1 FROM discussion_index_locks l WHERE l.document=d.rowid AND (l.expires_at_ms IS NULL OR l.expires_at_ms > {now}))")
+                }
+            }
             Term::Missing(Metadata::Label) => "NOT EXISTS (SELECT 1 FROM discussion_index_labels dl JOIN repository_labels l ON l.number = dl.label WHERE dl.document = d.rowid AND l.deleted_version IS NULL)".into(),
             Term::Missing(Metadata::Assignee) => "NOT EXISTS (SELECT 1 FROM discussion_index_assignees a WHERE a.document = d.rowid)".into(),
             Term::Missing(Metadata::Milestone) => "NOT EXISTS (SELECT 1 FROM discussion_index_milestones m WHERE m.document = d.rowid)".into(),

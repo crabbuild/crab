@@ -184,8 +184,10 @@ prepared format. Nested SDK scopes discard domain work before a terminal
 rejection commits. State format-2 records remain unchanged by this extraction.
 `api/discussion_bulk/` binds repository UUIDs, resolves current roster eligibility
 and owns the bulk HTTP contract.
-`collaboration/locks.rs` owns versioned issue and PR conversation locks and their
-activity. Posting, edit, review batch, state-with-comment and reaction commands
+`collaboration/locks.rs` owns versioned issue and PR conversation locks, their
+deadlines and activity. `search/index/locks.rs` projects the persisted records
+for indexed filtering. Ready format-14 indexes copy the lock records through
+bounded format-15 preparation frames. Posting, edit, review batch, state-with-comment and reaction commands
 read the parent lock before mutating. Published submission receipts remain
 recoverable. `api/discussion_lock/` resolves current role authority for locks.
 `collaboration/minimization.rs` owns per-contribution visibility and activity.

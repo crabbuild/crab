@@ -256,6 +256,8 @@ fn suggestions(
             ("is:pr", "Pull requests"),
             ("is:merged", "Merged pull requests"),
             ("is:unmerged", "Pull requests that have not merged"),
+            ("is:locked", "Locked conversations"),
+            ("is:unlocked", "Unlocked conversations"),
             ("draft:true", "Draft pull requests"),
             ("draft:false", "Non-draft pull requests"),
             ("label:", "Filter by repository label"),

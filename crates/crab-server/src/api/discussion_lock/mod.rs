@@ -40,18 +40,32 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
 
 #[derive(Serialize)]
 struct View {
-    #[serde(flatten)]
-    lock: locks::Lock,
+    version: u64,
+    locked: bool,
+    reason: Option<locks::Reason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_in_ms: Option<u64>,
     can_manage: bool,
     can_post: bool,
 }
 
-fn view(lock: locks::Lock, archived: bool, manages: bool) -> Json<View> {
-    Json(View {
-        lock,
+fn view(lock: locks::Lock, archived: bool, manages: bool) -> Result<Json<View>> {
+    let expires_at_ms = if archived { None } else { lock.expires_at_ms() };
+    let expires_in_ms = expires_at_ms
+        .map(|expires| crate::cells::unix_now_ms().map(|now| expires.saturating_sub(now as u64)))
+        .transpose()
+        .map_err(Error::Cell)?;
+    Ok(Json(View {
+        version: lock.version,
+        locked: lock.locked || archived,
+        reason: lock.reason,
+        expires_at_ms,
+        expires_in_ms,
         can_manage: !archived && manages,
         can_post: !archived && (!lock.locked || manages),
-    })
+    }))
 }
 
 async fn read(
@@ -73,11 +87,11 @@ async fn read(
     )?
     .ok_or(Error::NotFound)?;
     let membership = app::membership(&server, &principal, &repo).await?;
-    Ok(view(
+    view(
         lock,
         archived,
         can_manage(&membership.principal, repo.id, kind),
-    ))
+    )
 }
 
 #[derive(Deserialize)]
@@ -125,11 +139,11 @@ async fn write(
     )? {
         locks::Outcome::Saved(lock, archived) => {
             let membership = app::membership(&server, &principal, &repo).await?;
-            Ok(view(
+            view(
                 lock,
                 archived,
                 can_manage(&membership.principal, repo.id, kind),
-            ))
+            )
         }
         locks::Outcome::Archived => Err(Error::Archived),
         locks::Outcome::NotFound => Err(Error::NotFound),

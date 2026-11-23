@@ -40,7 +40,7 @@ export type Target =
     }
   | { kind: "pull_reply"; pull: number; thread: number; number: number };
 export type Action =
-  | { kind: "locked"; reason: LockReason | null }
+  | { kind: "locked"; reason: LockReason | null; expires_at_ms?: number }
   | { kind: "comment_hidden"; reason: MinimizationReason }
   | { kind: "base_changed" | "head_changed"; from: string; to: string }
   | {

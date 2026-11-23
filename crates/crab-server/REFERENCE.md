@@ -2626,9 +2626,10 @@ existing member records remain valid. No alias accepts superseded native inputs.
 ### Lock a conversation
 
 Open **Lock conversation** on an issue or pull request. Issue locks require
-Moderate or higher. Pull request locks require Write or higher. Pick an optional
-reason and confirm. The conversation displays its lock and reason, and the
-timeline records the lock or unlock.
+Moderate or higher. Pull request locks require Write or higher. Choose an optional
+reason and a duration of one hour, one day, one week, or until unlocked.
+The conversation displays its lock reason and expiry. The timeline records
+the lock and its expiry or a manual unlock.
 
 The posting restriction applies to comments, comment edits, reviews, inline
 threads and replies, and comments submitted with a state change. People with
@@ -2638,19 +2639,25 @@ comment. Pending review drafts stay private and can be published when the
 reviewer regains posting access.
 
 `GET .../lock` returns `{version, locked, reason, can_manage, can_post}`.
-An untouched conversation starts unlocked at version zero.
+Temporary locks include `expires_at_ms` and `expires_in_ms`. The Repository
+Cell uses its clock to end the restriction at the recorded deadline. Expiry
+keeps the version, and the open page refreshes the status at the deadline.
+Archived repositories treat all conversations as locked. An untouched
+conversation in an active repository starts unlocked at version zero.
 `PUT .../lock` takes `{version, change}` with
-`change: {kind:"lock", reason}` or `change: {kind:"unlock"}`.
+`change: {kind:"lock", reason, duration}` or `change: {kind:"unlock"}`.
+Omit `duration` for a permanent lock, or send `hour`, `day`, or `week`.
 Supported reasons are `off_topic`, `too_heated`, `resolved`, and `spam`.
-The lock change and its timeline entry commit together. Retry with the original
-version and change to acknowledge an unchanged result. Reload on HTTP 409.
+The lock, search entry, and timeline event commit together. An exact retry
+keeps the original deadline even if the lock has since expired. Reload on
+HTTP 409 before submitting a changed choice.
 Blocked contributions receive HTTP 423 with code `conversation_locked`.
 A previously accepted submission can recover its receipt while locked.
 
 Update every API and Repository Cell peer before setting conversation locks.
 Older collaboration writers lack the lock check, and older activity readers
-lack the new event kinds. Existing repositories default to unlocked without
-a migration.
+lack the new event kinds. Existing format-14 indexes require bounded lock
+preparation through `cells rebuild-search --owner OWNER --name REPO`.
 
 ### Hide or unhide a comment
 
@@ -2681,7 +2688,11 @@ and batched presentation response. Existing comments need no migration.
 
 List endpoints accept `q` (up to 256 characters), `limit` (1–50), `sort`,
 `direction`, and an opaque exclusive `before` cursor. State belongs in the query,
-for example `q=is:closed label:bug`. An absent `q` defaults to
+for example `q=is:closed label:bug`. Use `is:locked` or `is:unlocked` to
+filter by effective conversation lock. The **Conversation** menu changes the
+global lock filter while preserving other conditions. A lock-filtered cursor
+can expire when a temporary lock ends, and an archive state change invalidates
+the cursor. Restart the search to use the current matches. An absent `q` defaults to
 `is:issue is:open` for the issue workspace and `is:open` for the PR workspace.
 An explicit query has no additional hidden state filter. The issue endpoint
 searches both discussion kinds; the PR endpoint retains its PR scope.
@@ -2788,15 +2799,15 @@ handle invalidates its old cursor even without a repository mutation. Malformed 
 queries or index contents return 409 `stale_search_cursor`. Restart at the first
 page to obtain a fresh snapshot. Comment pagination remains numeric.
 
-The current discussion index format is 10. It retains qualified author identities,
+The current discussion index format is 15. It retains qualified author identities,
 milestone catalog entries and stable actor assignment keys, and adds searchable
 assignment name snapshots, transactional reviewer relationships and per-source
 commenter identities, transactional contribution text/FTS, latest-review/decision
-references and chronological conversation references. Older indexes report
-`outdated`; run the explicit rebuild below before admitting indexed traffic.
-It rebuilds only derived tables and preserves canonical milestone and assignment
-records. Clearing, milestone catalog preparation and discussion projection are
-separate bounded phases, with restart/resume through the existing management CLI.
+references, chronological conversation references, and lock state. Older
+indexes report `outdated`. Format 14 upgrades in place by copying canonical lock
+records in bounded issue and pull phases. Earlier formats rebuild other derived
+tables as well. Both preserve canonical records and resume through the management
+CLI.
 
 New empty repositories initialize their index. Existing native repositories
 require `cells rebuild-search --owner OWNER --name NAME` against the running

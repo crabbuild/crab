@@ -150,3 +150,35 @@ test("a locked pull request restricts publishing while leaving its diff readable
     0,
   );
 });
+
+test("an open conversation refreshes its posting controls after the lock expires", async ({
+  page,
+}) => {
+  await mockPullRequest(page);
+  await page.clock.install();
+  let expired = false;
+  await page.route("**/api/repos/team/project/pulls/1/lock?*", (route) =>
+    route.fulfill({
+      json: {
+        version: 1,
+        locked: !expired,
+        reason: expired ? null : "off_topic",
+        can_manage: false,
+        can_post: expired,
+        ...(expired
+          ? {}
+          : { expires_at_ms: Date.now() + 30_000, expires_in_ms: 30_000 }),
+      },
+    }),
+  );
+  await page.goto("/team/project/pull/1");
+  const editor = page.getByRole("textbox", { name: "Comment", exact: true });
+  await expect(page.getByText("Conversation locked · Off topic")).toBeVisible();
+  await expect(editor).toBeDisabled();
+  expired = true;
+  await page.clock.fastForward(30_000);
+  await expect(editor).toBeEnabled();
+  await expect(page.getByText("Conversation locked · Off topic")).toHaveCount(
+    0,
+  );
+});

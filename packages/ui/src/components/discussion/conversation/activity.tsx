@@ -1,3 +1,4 @@
+import { timestamp } from "../time";
 import { HistoryIcon } from "@primer/octicons-react";
 import { PinIcon, PinOffIcon } from "lucide-react";
 import { Author } from "../author";
@@ -186,6 +187,10 @@ export function ActivityItem({
         >
           #{parent.number} {event.title}
         </Link>
+        {event.action.kind === "locked" &&
+          event.action.expires_at_ms !== undefined && (
+            <> until {timestamp(event.action.expires_at_ms)}</>
+          )}
         {event.action.kind === "issue_closed" && event.action.pull && (
           <>
             {" via "}

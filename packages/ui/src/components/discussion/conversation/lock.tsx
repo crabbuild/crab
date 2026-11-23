@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/dialog";
 import { Failure } from "../failure";
 import { useMutation } from "../mutations";
+import { timestamp } from "../time";
 
 const reasons = {
   off_topic: "Off topic",
@@ -28,14 +29,19 @@ const reasons = {
 } as const;
 
 export type LockReason = keyof typeof reasons;
+type Duration = "hour" | "day" | "week";
 type Lock = {
   version: number;
   locked: boolean;
   reason: LockReason | null;
   can_manage: boolean;
   can_post: boolean;
+  expires_at_ms?: number;
+  expires_in_ms?: number;
 };
-type Change = { kind: "lock"; reason: LockReason | null } | { kind: "unlock" };
+type Change =
+  | { kind: "lock"; reason: LockReason | null; duration?: Duration }
+  | { kind: "unlock" };
 
 const ConversationLock = createContext<{
   lock?: Lock;
@@ -63,10 +69,17 @@ export function ConversationLockProvider({
     if (next)
       setCurrent((old) => (old && old.version > next.version ? old : next));
   }, [resource.data]);
+  const lock = current ?? resource.data;
+  useEffect(() => {
+    if (lock?.expires_in_ms === undefined) return;
+    // Read the authoritative state again once the reported lock window elapses.
+    const timer = setTimeout(resource.retry, Math.max(100, lock.expires_in_ms));
+    return () => clearTimeout(timer);
+  }, [lock, resource.retry]);
   return (
     <ConversationLock
       value={{
-        lock: current ?? resource.data,
+        lock,
         refresh: resource.retry,
         accept: setCurrent,
       }}
@@ -92,6 +105,7 @@ export function ConversationLockControl({
   const mutation = useMutation(csrf, repo);
   const [open, setOpen] = useState(false);
   const [reason, setReason] = useState<LockReason | "">("");
+  const [duration, setDuration] = useState<Duration | "">("");
   async function change(change: Change) {
     if (!visible) return;
     const next = await mutation.run<Lock>(
@@ -106,6 +120,7 @@ export function ConversationLockControl({
       conversation?.accept(next);
       setOpen(false);
       setReason("");
+      setDuration("");
       conversation?.refresh();
       onChanged();
     }
@@ -119,6 +134,11 @@ export function ConversationLockControl({
           <LockIcon className="size-4" aria-hidden="true" />
           Conversation locked
           {visible.reason ? ` · ${reasons[visible.reason]}` : ""}
+          {visible.expires_at_ms !== undefined && (
+            <time dateTime={new Date(visible.expires_at_ms).toISOString()}>
+              · Expires {timestamp(visible.expires_at_ms)}
+            </time>
+          )}
         </span>
       )}
       {visible.can_manage &&
@@ -150,7 +170,11 @@ export function ConversationLockControl({
                 className="grid gap-4"
                 onSubmit={(event) => {
                   event.preventDefault();
-                  void change({ kind: "lock", reason: reason || null });
+                  void change({
+                    kind: "lock",
+                    reason: reason || null,
+                    duration: duration || undefined,
+                  });
                 }}
               >
                 <label className="grid gap-1 text-sm">
@@ -168,6 +192,21 @@ export function ConversationLockControl({
                         {label}
                       </option>
                     ))}
+                  </select>
+                </label>
+                <label className="grid gap-1 text-sm">
+                  Duration
+                  <select
+                    className="rounded-md border bg-background px-3 py-2"
+                    value={duration}
+                    onChange={(event) =>
+                      setDuration(event.currentTarget.value as Duration | "")
+                    }
+                  >
+                    <option value="">Until unlocked</option>
+                    <option value="hour">1 hour</option>
+                    <option value="day">1 day</option>
+                    <option value="week">1 week</option>
                   </select>
                 </label>
                 <Failure message={mutation.error} />

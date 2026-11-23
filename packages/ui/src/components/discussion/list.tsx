@@ -44,6 +44,10 @@ export interface DiscussionPage<T> {
   authored_by_me: boolean;
   assigned_to_me: boolean;
   review_requested_from_me: boolean;
+  lock_filter?: Record<
+    "any" | "locked" | "unlocked",
+    { query: string | null; selected: boolean }
+  >;
   navigation:
     | { kind: "results" }
     | {
@@ -105,7 +109,10 @@ export function DiscussionListControls({
   repo: Repository;
   url: URL;
   view: "issues" | "pulls";
-  data?: Pick<DiscussionPage<unknown>, "counts" | "navigation" | "matching">;
+  data?: Pick<
+    DiscussionPage<unknown>,
+    "counts" | "navigation" | "matching" | "lock_filter"
+  >;
   loading: boolean;
   density: "comfortable" | "compact";
   onDensityChange: (density: "comfortable" | "compact") => void;
@@ -114,6 +121,7 @@ export function DiscussionListControls({
   const filters = discussionFilters(url);
   const [sortOpen, setSortOpen] = useState(false);
   const navigation = data?.navigation;
+  const lock = data?.lock_filter;
   const cannotChangeState =
     navigation?.kind === "state" &&
     (navigation.open === null || navigation.closed === null);
@@ -195,6 +203,55 @@ export function DiscussionListControls({
               onSelect={(q) => change({ q })}
             />
           ))}
+          {lock && (
+            <DropdownMenu modal={false}>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  aria-label="Filter by conversation lock"
+                >
+                  {lock.locked.selected
+                    ? "Locked"
+                    : lock.unlocked.selected
+                      ? "Unlocked"
+                      : "Conversation"}
+                  <ChevronDownIcon data-icon="inline-end" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuRadioGroup
+                  value={
+                    lock.locked.selected
+                      ? "locked"
+                      : lock.unlocked.selected
+                        ? "unlocked"
+                        : lock.any.selected
+                          ? "any"
+                          : ""
+                  }
+                >
+                  {(["any", "locked", "unlocked"] as const).map((choice) => (
+                    <DropdownMenuRadioItem
+                      key={choice}
+                      value={choice}
+                      disabled={lock[choice].query === null}
+                      onSelect={() => {
+                        const q = lock[choice].query;
+                        if (q !== null) change({ q });
+                      }}
+                    >
+                      {choice === "any"
+                        ? "Any conversation"
+                        : choice === "locked"
+                          ? "Locked"
+                          : "Unlocked"}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
           <DropdownMenu
             modal={false}
             open={sortOpen}

@@ -39,7 +39,9 @@ pub(in crate::cells) fn dispatch_mutation(
         || id == issues::lifecycle::tests::Historical::ID
         || id == pulls::lifecycle::tests::Historical::ID;
     #[cfg(test)]
-    let maintenance = maintenance || id == projection::tests::Historical::ID;
+    let maintenance = maintenance
+        || id == projection::tests::Historical::ID
+        || id == search::index::tests::LockFixture::ID;
     if !maintenance {
         search::index::ensure_ready(context)?;
     }
@@ -111,6 +113,10 @@ pub(in crate::cells) fn dispatch_mutation(
         }
         collaboration::minimization::Set::ID => {
             invoke_mutation::<collaboration::minimization::Set>(context, input)
+        }
+        #[cfg(test)]
+        search::index::tests::LockFixture::ID => {
+            invoke_mutation::<search::index::tests::LockFixture>(context, input)
         }
         collaboration::locks::Set::ID => {
             invoke_mutation::<collaboration::locks::Set>(context, input)

@@ -535,3 +535,250 @@ async fn state_counters_equal_their_navigation_queries_across_boolean_and_litera
     }
     fixtures::close(&server).await;
 }
+
+pub(in crate::cells::repository) struct LockFixture;
+
+#[derive(Deserialize, Serialize)]
+pub(in crate::cells::repository) enum LockFixtureInput {
+    Format14,
+    ShortDeadline { number: u64 },
+}
+
+impl Mutation for LockFixture {
+    const CLASS: &'static str = CLASS;
+    const ID: u32 = 985;
+    type Input = LockFixtureInput;
+    type Output = Option<u64>;
+
+    fn execute(
+        context: &mut Transaction<'_>,
+        input: Self::Input,
+    ) -> crate::cells::Result<MutationResult<Self::Output>> {
+        let deadline = match input {
+            LockFixtureInput::Format14 => {
+                let mut current = state(context)?.unwrap();
+                current.format = 14;
+                context.put_document(STATE_KEY, &current)?;
+                context.install_schema("DROP TABLE discussion_index_locks;")?;
+                None
+            }
+            LockFixtureInput::ShortDeadline { number } => {
+                let subject = Subject {
+                    kind: SubjectKind::Issue,
+                    number,
+                };
+                let key = format!("collaboration/v1/locks/{}", subject.key());
+                let mut lock = context.document::<serde_json::Value>(&key)?.unwrap();
+                let deadline = timestamp(context.now_ms())? + 5_000;
+                lock["deadline"]["at"] = serde_json::json!(deadline);
+                context.put_document(&key, &lock)?;
+                locks::project(context, subject, serde_json::from_value(lock)?)?;
+                Some(deadline)
+            }
+        };
+        Ok(MutationResult::Success(deadline))
+    }
+}
+
+fn lock(
+    number: u64,
+    duration: Option<collaboration::locks::Duration>,
+) -> collaboration::locks::Input {
+    collaboration::locks::Input {
+        subject: Subject {
+            kind: SubjectKind::Issue,
+            number,
+        },
+        actor: actor(),
+        version: 0,
+        change: collaboration::locks::Change::Lock {
+            reason: None,
+            duration,
+        },
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn temporary_locks_expire_in_enforcement_and_search_and_invalidate_continuations() {
+    use collaboration::locks::{Duration, Get, Outcome, Set};
+    let server = fixtures::fixture().await;
+    let cell = cell(&server);
+    for title in ["Temporary", "Permanent", "Never locked"] {
+        create(&cell, title, "").await;
+    }
+    let temporary = || lock(1, Some(Duration::Hour));
+    let Outcome::Saved(first, false) = write::<Set>(&cell, temporary()).await else {
+        panic!("lock failed")
+    };
+    let Outcome::Saved(recovered, false) = write::<Set>(&cell, temporary()).await else {
+        panic!("lock replay failed")
+    };
+    assert_eq!(first.expires_at_ms(), recovered.expires_at_ms());
+    assert!(matches!(
+        write::<Set>(&cell, lock(2, None)).await,
+        Outcome::Saved(_, false)
+    ));
+
+    let deadline = write::<LockFixture>(&cell, LockFixtureInput::ShortDeadline { number: 1 })
+        .await
+        .unwrap();
+    let comment = || CreateCommentInput {
+        can_post_locked: false,
+        issue: 1,
+        submission_id: *Uuid::now_v7().as_bytes(),
+        author: actor(),
+        body: "Comment after expiration".into(),
+    };
+    assert!(matches!(
+        write::<CreateComment>(&cell, comment()).await,
+        CreateCommentOutcome::Locked
+    ));
+    let search = SearchInput {
+        limit: 1,
+        query: Some("is:locked is:open".into()),
+        ..Default::default()
+    };
+    let first_page = page(&cell, search.clone()).await;
+    assert_eq!(first_page.counts.open, 2);
+    assert_eq!(numbers(&first_page), [2]);
+    let continuation = first_page.next.unwrap();
+    let remaining =
+        deadline.saturating_sub(timestamp(crate::cells::unix_now_ms().unwrap()).unwrap());
+    tokio::time::sleep(std::time::Duration::from_millis(remaining + 30)).await;
+
+    let state = cell
+        .client
+        .query::<Get>(&cell.target, None, temporary().subject)
+        .await
+        .unwrap()
+        .output
+        .unwrap()
+        .0;
+    assert_eq!(state.version, 1);
+    assert!(!state.locked);
+    assert_eq!(state.expires_at_ms(), None);
+    let error = cell
+        .client
+        .query::<ListDiscussions>(
+            &cell.target,
+            None,
+            SearchInput {
+                before: Some(continuation),
+                ..search.clone()
+            },
+        )
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(error, crate::cells::Error::StaleSearch),
+        "{error:?}"
+    );
+    assert_eq!(page(&cell, search).await.matching, 1);
+    let unlocked = page(
+        &cell,
+        SearchInput {
+            query: Some("is:unlocked is:open".into()),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(numbers(&unlocked), [3, 1]);
+    assert!(matches!(
+        write::<CreateComment>(&cell, comment()).await,
+        CreateCommentOutcome::Created(_)
+    ));
+    let Outcome::Saved(replayed, false) = write::<Set>(&cell, temporary()).await else {
+        panic!("lock replay failed")
+    };
+    assert!(!replayed.locked);
+    let Outcome::Saved(renewed, false) = write::<Set>(
+        &cell,
+        collaboration::locks::Input {
+            version: 1,
+            ..temporary()
+        },
+    )
+    .await
+    else {
+        panic!("new lock failed")
+    };
+    assert!(renewed.locked);
+    assert_eq!(renewed.version, 2);
+    assert!(renewed.expires_at_ms().unwrap() > deadline);
+    server.shutdown_runtimes().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn format_14_preparation_pages_existing_locks_and_preserves_other_indexes() {
+    use collaboration::locks::{Outcome, Set};
+    let server = fixtures::fixture().await;
+    let cell = cell(&server);
+    for number in 1..=10 {
+        create(&cell, "Indexed needle", "").await;
+        assert!(matches!(
+            write::<Set>(&cell, lock(number, None)).await,
+            Outcome::Saved(_, false)
+        ));
+    }
+    let ready = cell
+        .client
+        .query::<GetSearchIndexStatus>(&cell.target, None, ())
+        .await
+        .unwrap()
+        .output;
+    let SearchIndexStatus::Ready {
+        generation: previous,
+        revision,
+    } = ready
+    else {
+        panic!("index not ready")
+    };
+    write::<LockFixture>(&cell, LockFixtureInput::Format14).await;
+    let generation = Uuid::now_v7();
+    let mut result = write::<RebuildIndex>(
+        &cell,
+        RebuildSearchInput::Begin {
+            expected: Some(previous),
+            generation,
+        },
+    )
+    .await;
+    let mut phases = Vec::new();
+    while let RebuildSearchOutcome::Progress {
+        status: SearchIndexStatus::Building { progress, .. },
+    } = result
+    {
+        phases.push(progress.phase);
+        assert!(phases.len() <= 3);
+        result = write::<RebuildIndex>(
+            &cell,
+            RebuildSearchInput::Step {
+                generation,
+                version: progress.version,
+            },
+        )
+        .await;
+    }
+    assert_eq!(
+        phases,
+        [
+            SearchIndexPhase::IssueLocks,
+            SearchIndexPhase::IssueLocks,
+            SearchIndexPhase::PullLocks
+        ]
+    );
+    assert!(matches!(result, RebuildSearchOutcome::Progress {
+        status: SearchIndexStatus::Ready { generation: new, revision: unchanged }
+    } if generation == new && revision == unchanged));
+    let filtered = page(
+        &cell,
+        SearchInput {
+            query: Some("needle is:locked".into()),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(filtered.matching, 10);
+    server.shutdown_runtimes().await.unwrap();
+}

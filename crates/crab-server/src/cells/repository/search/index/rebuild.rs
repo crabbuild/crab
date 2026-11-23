@@ -55,6 +55,19 @@ impl Mutation for RebuildIndex {
                         "discussion index generation is invalid",
                     ));
                 }
+                locks::install(context)?;
+                // A ready format 14 already has every other projection.
+                // Copy only canonical lock records and keep the existing rows.
+                if current
+                    .as_ref()
+                    .is_some_and(|state| state.format == 14 && state.progress.is_none())
+                {
+                    context.put_document(
+                        STATE_KEY,
+                        &building(generation, SearchIndexPhase::IssueLocks),
+                    )?;
+                    return progress(context);
+                }
                 // Preserve the existing TEXT lookup and its index. Clear/rebuild
                 // removes old subjects in bounded frames before serving UUID keys.
                 if current.as_ref().is_some_and(|state| state.format < 4) {
@@ -72,16 +85,7 @@ impl Mutation for RebuildIndex {
                 super::super::reviews::reset(context)?;
                 super::super::contributions::reset(context)?;
                 crate::cells::repository::collaboration::conversation::reset(context)?;
-                State {
-                    format: FORMAT,
-                    generation,
-                    progress: Some(SearchIndexProgress {
-                        phase: SearchIndexPhase::Clear,
-                        after: 0,
-                        processed: 0,
-                        version: 1,
-                    }),
-                }
+                building(generation, SearchIndexPhase::Clear)
             }
             RebuildSearchInput::Step {
                 generation,
@@ -130,6 +134,10 @@ impl Mutation for RebuildIndex {
                     SearchIndexPhase::Conversation => {
                         crate::cells::repository::collaboration::conversation::step(context)?
                     }
+                    SearchIndexPhase::IssueLocks => {
+                        locks::step(context, build, SubjectKind::Issue)?
+                    }
+                    SearchIndexPhase::PullLocks => locks::step(context, build, SubjectKind::Pull)?,
                     SearchIndexPhase::Reviews => super::super::reviews::reviews(context)?,
                     SearchIndexPhase::ReviewRequests => super::super::reviews::requests(context)?,
                     SearchIndexPhase::Milestones => {
@@ -255,8 +263,14 @@ impl Mutation for RebuildIndex {
                                 statement("INSERT INTO discussion_fts(discussion_fts) VALUES ('integrity-check')", vec![]),
                                 statement("INSERT INTO discussion_comment_fts(discussion_comment_fts) VALUES ('integrity-check')", vec![]),
                             ] })?;
-                            current.progress = None;
+                            build.phase = SearchIndexPhase::IssueLocks;
+                            build.after = 0;
                         }
+                        SearchIndexPhase::IssueLocks => {
+                            build.phase = SearchIndexPhase::PullLocks;
+                            build.after = 0;
+                        }
+                        SearchIndexPhase::PullLocks => current.progress = None,
                     }
                 }
                 current
@@ -266,6 +280,19 @@ impl Mutation for RebuildIndex {
         progress(context)
     }
 }
+fn building(generation: Uuid, phase: SearchIndexPhase) -> State {
+    State {
+        format: FORMAT,
+        generation,
+        progress: Some(SearchIndexProgress {
+            phase,
+            after: 0,
+            processed: 0,
+            version: 1,
+        }),
+    }
+}
+
 fn progress(
     context: &Transaction<'_>,
 ) -> crate::cells::Result<MutationResult<RebuildSearchOutcome>> {
