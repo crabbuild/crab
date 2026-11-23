@@ -561,14 +561,27 @@ URL or its UUID. Both selectors use current repository access. A query
 containing only filters lists matching file paths.
 
 `path:` matches a case-insensitive substring of the repository-relative path.
-Start it with `/` to anchor it at the root. Use `*` or `?` within one path
-component and `**` across directories. Quotes keep wildcards literal and
-allow spaces, as in `path:"release notes"`. Repeated path filters must all match.
+Use `*` or `?` within one path component and `**` across directories.
+For a root-anchored directory glob, use a leading slash, as in `path:/src/**`.
+Quotes keep wildcards literal and allow spaces, as in `path:"release notes"`.
+Repeated path filters must all match.
 `language:` uses the file extension and accepts C, C++, C#, CSS, Go, HTML,
 Java, JavaScript, JSON, Kotlin, Markdown, PHP, Python, Ruby, Rust, Shell,
 SQL, Swift, TOML, TypeScript, XML, and YAML. `symbol:` and `content:` select
-the search mode and supply the literal term. Quote text such as
+the search mode and supply the term. Quote text such as
 `"repo:owner/name"` to search for the qualifier itself.
+
+Wrap a pattern in slashes to search with a regular expression. For example,
+`content:/phase [0-9]+\nstatus OK/` matches text across lines,
+`symbol:/^parse_(file|tree)$/` matches definition names, and
+`path:/^src\/.*\.rs$/` matches paths. **Search in** also applies to a bare
+`/pattern/`. Escape a slash inside the pattern with `\/`. Quotes make an
+expression literal. Content expressions see the full UTF-8 file, with
+match fragments linked to their own lines. Larger highlights are shortened.
+Match case sets the default for content and symbol terms, and an inline
+flag such as `(?-i)` can override the default. The Rust regex engine limits
+program size and nesting, and supports patterns without look-around or
+backreferences.
 
 `GET /api/repos/{owner}/{name}/code-search` takes `q`, optional `rev`, an
 optional directory `path`, `kind=content|path|symbol` (default `content`),
@@ -617,6 +630,11 @@ repository. An indexed content or symbol search can consider all indexed paths
 and checks up to 32 candidates per repository. Follow `next` with the same
 parameters, including after an empty page. A repository in progress keeps
 the same commit until its scan finishes.
+
+An indexed query with a regular expression examines at most 4,096 path rows
+per repository per page. Follow its continuation even when a page contains
+no matches. Crab verifies text expressions against Git content without using
+literal trigram filters to rule out a match.
 
 The server builds a default-branch index in the background and keeps one
 published artifact per repository in object storage. It contains paths and

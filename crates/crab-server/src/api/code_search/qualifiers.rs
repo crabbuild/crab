@@ -2,7 +2,56 @@ use super::{ApiError, Kind, Repository, Syntax, display_path};
 use regex::{Regex, RegexBuilder};
 use uuid::Uuid;
 
-pub(super) const MAX_QUERY_CHARS: usize = 512;
+const MAX_QUERY_CHARS: usize = 512;
+
+pub(super) enum Term {
+    Literal(String),
+    Expression(String),
+}
+
+impl Term {
+    fn parse(value: &str) -> Result<Self, ApiError> {
+        if let Some(pattern) = regex_inner(value) {
+            if pattern.is_empty() {
+                return Err(ApiError::Input(
+                    "Enter a pattern between the regex delimiters",
+                ));
+            }
+            return Ok(Self::Expression(pattern.to_owned()));
+        }
+        Ok(Self::Literal(match quoted_inner(value) {
+            Some(inner) => unescape(inner),
+            None if value.starts_with('"') => {
+                return Err(ApiError::Input("Close the quoted code search qualifier"));
+            }
+            None => value.to_owned(),
+        }))
+    }
+
+    fn scoped_value(self) -> Result<String, ApiError> {
+        match self {
+            Self::Literal(value) if !value.is_empty() => Ok(value),
+            Self::Literal(_) => Err(ApiError::Input(
+                "Enter a value for each code search qualifier",
+            )),
+            Self::Expression(_) => Err(ApiError::Input(
+                "Use an exact repository, organization, or language name",
+            )),
+        }
+    }
+}
+
+pub(super) fn compile_expression(pattern: &str, case_sensitive: bool) -> Result<Regex, ApiError> {
+    RegexBuilder::new(pattern)
+        .case_insensitive(!case_sensitive)
+        .size_limit(256 * 1024)
+        .dfa_size_limit(1024 * 1024)
+        .nest_limit(32)
+        .build()
+        .map_err(|_| {
+            ApiError::Input("Use a valid regular expression with a supported size and syntax")
+        })
+}
 
 #[derive(Default)]
 pub(super) struct Filters {
@@ -10,10 +59,11 @@ pub(super) struct Filters {
     organization: Option<String>,
     language: Option<Language>,
     paths: Vec<Regex>,
+    pub(super) regex_paths: bool,
 }
 
 impl Filters {
-    pub(super) fn parse(query: &str, mut kind: Kind) -> Result<(String, Kind, Self), ApiError> {
+    pub(super) fn parse(query: &str, mut kind: Kind) -> Result<(Term, Kind, Self), ApiError> {
         if query.chars().count() > MAX_QUERY_CHARS || query.chars().any(char::is_control) {
             return Err(ApiError::Input(
                 "Code search queries may contain up to 512 characters",
@@ -45,6 +95,10 @@ impl Filters {
                 Some((field, raw))
             });
             let Some((field, raw)) = qualifier else {
+                if regex_inner(token).is_some() {
+                    single(&mut scoped_text, Term::parse(token)?)?;
+                    continue;
+                }
                 if !literal.is_empty() {
                     literal.push_str(if qualifier_between_terms { " " } else { spaces });
                 }
@@ -53,21 +107,15 @@ impl Filters {
                 continue;
             };
             qualifier_between_terms = true;
-            let quoted = raw.starts_with('"');
-            let value = if quoted {
-                let inner = quoted_inner(raw)
-                    .ok_or(ApiError::Input("Close the quoted code search qualifier"))?;
-                unescape(inner)
-            } else {
-                raw.to_owned()
-            };
-            if value.is_empty() {
+            let value = Term::parse(raw)?;
+            if matches!(&value, Term::Literal(value) if value.is_empty()) {
                 return Err(ApiError::Input(
                     "Enter a value for each code search qualifier",
                 ));
             }
             match field {
                 Field::Repository => {
+                    let value = value.scoped_value()?;
                     let (owner, name) = value
                         .split_once('/')
                         .filter(|(owner, name)| path_segment(owner) && path_segment(name))
@@ -75,6 +123,7 @@ impl Filters {
                     single(&mut filters.repository, (owner.to_owned(), name.to_owned()))?;
                 }
                 Field::Organization => {
+                    let value = value.scoped_value()?;
                     if !path_segment(&value) {
                         return Err(ApiError::Input(
                             "Use the organization namespace or ID with org:",
@@ -82,27 +131,38 @@ impl Filters {
                     }
                     single(&mut filters.organization, value)?;
                 }
-                Field::Language => single(&mut filters.language, Language::parse(&value)?)?,
-                Field::Path => filters.paths.push(path_matcher(&value, quoted)?),
+                Field::Language => single(
+                    &mut filters.language,
+                    Language::parse(&value.scoped_value()?)?,
+                )?,
+                Field::Path => match value {
+                    Term::Literal(value) => filters
+                        .paths
+                        .push(path_matcher(&value, raw.starts_with('"'))?),
+                    Term::Expression(pattern) => {
+                        filters.paths.push(compile_expression(&pattern, false)?);
+                        filters.regex_paths = true;
+                    }
+                },
                 Field::Text(scope) => {
                     kind = scope;
                     single(&mut scoped_text, value)?;
                 }
             }
         }
-        let literal = if let Some(scoped_text) = scoped_text {
+        let term = if let Some(scoped_text) = scoped_text {
             if !literal.is_empty() {
                 return Err(ApiError::Input(
-                    "Use one search term with content: or symbol:",
+                    "Use one content, symbol, or regular expression term",
                 ));
             }
             scoped_text
         } else if let Some(inner) = quoted_inner(&literal) {
-            unescape(inner)
+            Term::Literal(unescape(inner))
         } else {
-            literal
+            Term::Literal(literal)
         };
-        if literal.is_empty() {
+        if matches!(&term, Term::Literal(value) if value.is_empty()) {
             if filters.repository.is_none()
                 && filters.organization.is_none()
                 && filters.language.is_none()
@@ -114,7 +174,7 @@ impl Filters {
             }
             kind = Kind::Path;
         }
-        Ok((literal, kind, filters))
+        Ok((term, kind, filters))
     }
 
     pub(super) fn repository_matches(&self, repo: &Repository) -> bool {
@@ -164,6 +224,13 @@ fn path_segment(value: &str) -> bool {
 }
 
 fn word_end(value: &str) -> usize {
+    let prefix = ["path:", "content:", "symbol:"]
+        .iter()
+        .find(|prefix| value.starts_with(**prefix))
+        .map_or(0, |prefix| prefix.len());
+    if let Some(end) = regex_end(&value[prefix..]) {
+        return prefix + end;
+    }
     let mut quoted = false;
     let mut characters = value.char_indices().peekable();
     while let Some((index, character)) = characters.next() {
@@ -177,6 +244,31 @@ fn word_end(value: &str) -> usize {
         }
     }
     value.len()
+}
+
+fn regex_end(value: &str) -> Option<usize> {
+    let mut characters = value.strip_prefix('/')?.char_indices();
+    while let Some((index, character)) = characters.next() {
+        match character {
+            '\\' => {
+                characters.next();
+            }
+            '/' => {
+                let end = index + 2;
+                return value[end..]
+                    .chars()
+                    .next()
+                    .is_none_or(char::is_whitespace)
+                    .then_some(end);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn regex_inner(value: &str) -> Option<&str> {
+    (regex_end(value)? == value.len()).then(|| &value[1..value.len() - 1])
 }
 
 fn quoted_inner(value: &str) -> Option<&str> {
@@ -240,6 +332,7 @@ fn path_matcher(value: &str, quoted: bool) -> Result<Regex, ApiError> {
     }
     RegexBuilder::new(&pattern)
         .case_insensitive(true)
+        .dot_matches_new_line(true)
         .build()
         .map_err(|_| ApiError::Input("Invalid path: filter"))
 }

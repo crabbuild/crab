@@ -163,8 +163,8 @@ function SearchForm({
             onChange={(event) => setTerms(event.target.value)}
           />
           <FieldDescription id="code-search-qualifiers">
-            Narrow with <code>path:</code> or <code>language:</code>. Use{" "}
-            <code>symbol:</code> to find definitions.
+            Use <code>/pattern/</code> for regex. Narrow with <code>path:</code>{" "}
+            or <code>language:</code>.
           </FieldDescription>
         </Field>
         <Button className="mt-6" type="submit" disabled={!terms.trim()}>

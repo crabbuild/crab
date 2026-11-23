@@ -509,6 +509,159 @@ async fn code_search_qualifiers_filter_pinned_results_without_widening_access() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn code_search_expressions_match_pinned_contents_paths_and_definitions() {
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    let (_, _, head) = searchable_repository(
+        &h,
+        &alice,
+        "team",
+        "private",
+        [
+            ("src/retry.rs".into(), "fn retry_12() {}\n".into()),
+            (
+                "src/reference.rs".into(),
+                "fn caller() { retry_12(); }\n".into(),
+            ),
+            (
+                "docs/deploy.txt".into(),
+                "before\nphase 42\nstatus OK\nafter\n/retry_12/\n".into(),
+            ),
+            ("docs/retry.rs".into(), "fn retry_67() {}\n".into()),
+        ],
+    )
+    .await;
+    let query = |endpoint: &str, q: &str| {
+        let mut params = url::form_urlencoded::Serializer::new(String::new());
+        params.append_pair("q", q);
+        format!("{endpoint}?{}", params.finish())
+    };
+    let repository = "/api/repos/team/private/code-search";
+    let contents = h
+        .json(
+            &query(repository, r"content:/phase [0-9]+\nstatus [A-Z]+/"),
+            &alice,
+        )
+        .await;
+    assert_eq!(contents["commit"], head);
+    assert_eq!(contents["items"].as_array().unwrap().len(), 1);
+    assert_eq!(contents["items"][0]["path"], "docs/deploy.txt");
+    let lines = contents["items"][0]["lines"].as_array().unwrap();
+    assert_eq!(
+        lines
+            .iter()
+            .map(|line| (&line["line"], &line["matched"]))
+            .collect::<Vec<_>>(),
+        [
+            (&json!(2), &json!("phase 42")),
+            (&json!(3), &json!("status OK"))
+        ]
+    );
+
+    let quoted = h
+        .json(&query(repository, r#"content:"/retry_12/""#), &alice)
+        .await;
+    assert_eq!(quoted["items"].as_array().unwrap().len(), 1);
+    assert_eq!(quoted["items"][0]["lines"][0]["matched"], "/retry_12/");
+
+    let workspace = "/api/code-search";
+    let repo = h
+        .server
+        .repositories
+        .get(&("team".into(), "private".into()))
+        .unwrap();
+    code_index::reconcile(&h.server, &repo, &h.server.cancellation)
+        .await
+        .unwrap();
+    let paths = h
+        .json(
+            &query(workspace, r"path:/^src\/(retry|reference)\.rs$/"),
+            &alice,
+        )
+        .await;
+    assert_eq!(paths["indexed_repositories"], 1);
+    assert_eq!(paths["groups"][0]["files"].as_array().unwrap().len(), 2);
+    assert_eq!(paths["groups"][0]["files"][0]["lines"], json!([]));
+
+    let symbols = h
+        .json(
+            &query(workspace, r"symbol:/^(absent|retry_[0-9]+)$/ path:/^src\//"),
+            &alice,
+        )
+        .await;
+    assert_eq!(symbols["groups"][0]["commit"], head);
+    assert_eq!(symbols["groups"][0]["files"].as_array().unwrap().len(), 1);
+    assert_eq!(symbols["groups"][0]["files"][0]["path"], "src/retry.rs");
+    assert_eq!(
+        symbols["groups"][0]["files"][0]["lines"][0]["matched"],
+        "retry_12"
+    );
+
+    let malformed = h
+        .http
+        .get(format!("{}{}", h.origin, query(repository, r"/(?=phase)/")))
+        .header(reqwest::header::COOKIE, &alice)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+    h.close().await;
+}
+
+#[test]
+fn expression_excerpts_bound_zero_width_and_long_matches() {
+    let cancel = CancellationToken::new();
+    let lines = "zero\n".repeat(8);
+    let (matches, more) =
+        expression_matches(&lines, &Regex::new("(?m)^").unwrap(), &cancel).unwrap();
+    assert_eq!(matches.len(), MAX_MATCH_LINES);
+    assert!(more && matches.iter().all(|line| line.matched.is_empty()));
+
+    let line = "é".repeat(MAX_HIGHLIGHT_CHARS + 70);
+    let (matches, more) = expression_matches(&line, &Regex::new("é+").unwrap(), &cancel).unwrap();
+    assert_eq!(
+        matches[0].matched,
+        format!("{}…", "é".repeat(MAX_HIGHLIGHT_CHARS))
+    );
+    assert!(!more);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn indexed_expression_continues_after_an_empty_bounded_page() {
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    let (_, _, head) = searchable_repository(
+        &h,
+        &alice,
+        "team",
+        "private",
+        (0..indexed::EXPRESSION_PATHS_PER_PAGE)
+            .map(|number| (format!("src/a-{number:05}.txt"), "fixture\n".into()))
+            .chain([("src/z-report.txt".into(), "report\n".into())]),
+    )
+    .await;
+    let repo = h
+        .server
+        .repositories
+        .get(&("team".into(), "private".into()))
+        .unwrap();
+    code_index::reconcile(&h.server, &repo, &h.server.cancellation)
+        .await
+        .unwrap();
+    let query = "/api/code-search?q=path%3A%2Fz-report%5C.txt%24%2F";
+    let first = h.json(query, &alice).await;
+    assert_eq!(first["indexed_repositories"], 1);
+    assert_eq!(first["scanned"], indexed::EXPRESSION_PATHS_PER_PAGE);
+    assert_eq!(first["groups"], json!([]));
+    let after = first["next"].as_str().unwrap();
+    let second = h.json(&format!("{query}&cursor={after}"), &alice).await;
+    assert_eq!(second["groups"][0]["commit"], head);
+    assert_eq!(second["groups"][0]["files"][0]["path"], "src/z-report.txt");
+    assert_eq!(second["next"], Value::Null);
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires agent-browser and the built embedded UI with native Git"]
 async fn native_browser_finds_symbols_across_repositories_and_opens_the_definition() {
     let h = Harness::new(false).await;
@@ -579,7 +732,7 @@ async fn native_browser_finds_symbols_across_repositories_and_opens_the_definiti
         .run(&[
             "fill",
             "#workspace-search-text",
-            "repo:team/library language:rust path:*.rs symbol:workspace_needle",
+            "repo:team/library language:rust path:*.rs symbol:/^workspace_(needle|hook)$/",
         ])
         .await;
     browser

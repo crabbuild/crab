@@ -239,7 +239,7 @@ impl Continuations<'_> {
     fn seal(&self, data: &[u8]) -> blake3::Hash {
         let mut mac = blake3::Hasher::new_keyed(self.key);
         // Old continuations could refer to the same text with literal semantics.
-        mac.update(b"crab-workspace-code-search-v2\0");
+        mac.update(b"crab-workspace-code-search-v3\0");
         mac.update(self.context.as_bytes());
         mac.update(data);
         mac.finalize()

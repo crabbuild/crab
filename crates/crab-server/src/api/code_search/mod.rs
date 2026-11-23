@@ -32,6 +32,7 @@ pub(super) mod workspace;
 const PAGE_ENTRIES: usize = 128;
 const FILE_READ_BATCH: usize = 8;
 const MAX_MATCH_LINES: usize = 6;
+const MAX_HIGHLIGHT_CHARS: usize = 128;
 const MAX_CURSOR_PATH: usize = 8 * 1024;
 const CURSOR_HEADER: usize = 20 + 32;
 
@@ -185,16 +186,12 @@ struct Pattern {
     case_sensitive: bool,
     mask: Option<code_index::Mask>,
     filters: qualifiers::Filters,
+    expression: bool,
 }
 
 impl Pattern {
     fn new(terms: &str, path: &str, case_sensitive: bool, kind: Kind) -> Result<Self, ApiError> {
-        let (literal, kind, filters) = qualifiers::Filters::parse(terms, kind)?;
-        if literal.chars().count() > 128 {
-            return Err(ApiError::Input(
-                "Search text may contain up to 128 characters",
-            ));
-        }
+        let (term, kind, filters) = qualifiers::Filters::parse(terms, kind)?;
         if path.len() > 1024
             || path.chars().any(char::is_control)
             || path.split('/').any(|part| matches!(part, "." | ".."))
@@ -202,18 +199,41 @@ impl Pattern {
             return Err(ApiError::Input("Enter a repository directory path"));
         }
         let directory = GitPath::new(path.as_bytes().to_vec())?;
-        let matcher = RegexBuilder::new(&regex::escape(&literal))
-            .case_insensitive(!case_sensitive)
-            .build()
-            .map_err(|_| ApiError::Input("The search term could not be compiled"))?;
+        let expression = matches!(&term, qualifiers::Term::Expression(_));
+        let (matcher, mask) = match term {
+            qualifiers::Term::Literal(literal) => {
+                if literal.chars().count() > 128 {
+                    return Err(ApiError::Input(
+                        "Search text may contain up to 128 characters",
+                    ));
+                }
+                let matcher = RegexBuilder::new(&regex::escape(&literal))
+                    .case_insensitive(!case_sensitive)
+                    .build()
+                    .map_err(|_| ApiError::Input("The search term could not be compiled"))?;
+                (matcher, code_index::Mask::query(&literal, case_sensitive))
+            }
+            qualifiers::Term::Expression(pattern) => {
+                // Regex alternatives and optional atoms do not imply required trigrams.
+                (
+                    qualifiers::compile_expression(&pattern, case_sensitive)?,
+                    None,
+                )
+            }
+        };
         Ok(Self {
             matcher,
             directory,
             kind,
             case_sensitive,
-            mask: code_index::Mask::query(&literal, case_sensitive),
+            mask,
             filters,
+            expression,
         })
+    }
+
+    fn uses_expression(&self) -> bool {
+        self.expression || self.filters.regex_paths
     }
 }
 
@@ -432,6 +452,17 @@ async fn file_matches(
             return Ok(Inspection::Skipped);
         };
         matches
+    } else if pattern.expression {
+        let cancel = operation.cancellation().clone();
+        let matcher = pattern.matcher.clone();
+        let Some(matches) =
+            tokio::task::spawn_blocking(move || expression_matches(&text, &matcher, &cancel))
+                .await
+                .map_err(|source| Error::DecodeTask { source })?
+        else {
+            return Ok(Inspection::Skipped);
+        };
+        matches
     } else {
         let mut hits = text.lines().enumerate().filter_map(|(index, line)| {
             let found = pattern.matcher.find(line)?;
@@ -449,6 +480,51 @@ async fn file_matches(
         lines,
         more_lines,
     }))
+}
+
+fn expression_matches(
+    text: &str,
+    matcher: &Regex,
+    cancel: &CancellationToken,
+) -> Option<(Vec<Excerpt>, bool)> {
+    let mut excerpts = Vec::new();
+    let mut number = 1;
+    let mut line_start = 0;
+    while line_start <= text.len() {
+        if cancel.is_cancelled() {
+            return None;
+        }
+        let Some(found) = matcher.find_at(text, line_start) else {
+            break;
+        };
+        let mut advance = 0;
+        for (offset, _) in text[line_start..found.start()].match_indices('\n') {
+            advance = offset + 1;
+            number += 1;
+        }
+        line_start += advance;
+        loop {
+            if excerpts.len() == MAX_MATCH_LINES {
+                return Some((excerpts, true));
+            }
+            let end = text[line_start..]
+                .find('\n')
+                .map_or(text.len(), |offset| line_start + offset);
+            let line = text[line_start..end].trim_end_matches('\r');
+            let start = found.start().saturating_sub(line_start).min(line.len());
+            let stop = found.end().saturating_sub(line_start).min(line.len());
+            excerpts.push(excerpt(number, line, start..stop));
+
+            // Advance by line even for a zero-width match. At most seven
+            // searches are needed to fill these excerpts and detect more.
+            line_start = end + 1;
+            number += 1;
+            if line_start >= found.end() {
+                break;
+            }
+        }
+    }
+    Some((excerpts, false))
 }
 
 fn symbol_matches(
@@ -497,10 +573,15 @@ fn excerpt(number: usize, text: &str, found: Range<usize>) -> Excerpt {
         .char_indices()
         .nth(120)
         .map_or(after.len(), |(index, _)| index);
+    let matched = &text[found];
+    let marked = matched.char_indices().nth(MAX_HIGHLIGHT_CHARS).map_or_else(
+        || matched.to_owned(),
+        |(end, _)| format!("{}…", &matched[..end]),
+    );
     Excerpt {
         line: number,
         before: format!("{}{}", if from > 0 { "…" } else { "" }, &before[from..]),
-        matched: text[found].into(),
+        matched: marked,
         after: format!(
             "{}{}",
             &after[..to],
@@ -558,7 +639,7 @@ impl Tokens<'_> {
     fn signature(&self, payload: &[u8]) -> blake3::Hash {
         let mut hash = blake3::Hasher::new_keyed(self.key);
         // The same raw text can resolve to a different query after qualifiers.
-        hash.update(b"crab-code-search-v2\0");
+        hash.update(b"crab-code-search-v3\0");
         hash.update(self.repository.as_bytes());
         hash.update(payload);
         hash.finalize()

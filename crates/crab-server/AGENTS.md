@@ -328,7 +328,9 @@ and session migration paths are supported.
 - `api/code_search/` searches authorized Git snapshots under bulk read
   admission. Repository searches bind the UUID, commit, and query filters.
   `api/code_search/qualifiers.rs` parses scope filters and applies the same path
-  and language predicates before indexed or direct Git blob reads.
+  and language predicates before indexed or direct Git blob reads. It bounds
+  user regex compilation. The indexed reader bounds path rows for regex queries
+  and only applies trigram pruning to literals.
   Workspace search reuses the catalog's current grants and the same bounded
   Git scans. Its cursor also binds the actor and readable repository scope.
   `repository/code_index/` publishes the bounded, checksummed default-tree

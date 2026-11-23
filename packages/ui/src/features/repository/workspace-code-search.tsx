@@ -104,8 +104,8 @@ export default function WorkspaceCodeSearch({ url }: { url: URL }) {
               defaultValue={q}
             />
             <FieldDescription id="workspace-search-qualifiers">
-              Try <code>repo:owner/name</code>, <code>language:rust</code>, or{" "}
-              <code>path:src/</code> to narrow results.
+              Use <code>/pattern/</code> for regex. Narrow with{" "}
+              <code>repo:owner/name</code> or <code>language:rust</code>.
             </FieldDescription>
           </Field>
           <Button className="mt-6" type="submit">

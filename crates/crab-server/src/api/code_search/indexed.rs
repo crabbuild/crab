@@ -1,6 +1,8 @@
 use super::*;
 use crate::repository::code_index::Row;
 
+pub(super) const EXPRESSION_PATHS_PER_PAGE: usize = 4_096;
+
 pub(super) async fn inspect(
     rows: &[Row],
     snapshot: &RemoteGitSnapshot,
@@ -24,9 +26,16 @@ pub(super) async fn inspect(
     } else {
         window.paths
     };
-    let mut visited = range.len();
+    // A selective path expression may find no candidates. Advance a bounded
+    // path cursor anyway so user patterns cannot monopolize the index reader.
+    let examined = if pattern.uses_expression() {
+        range.len().min(EXPRESSION_PATHS_PER_PAGE)
+    } else {
+        range.len()
+    };
+    let mut visited = examined;
     let mut candidates = Vec::new();
-    for (i, row) in range.iter().enumerate() {
+    for (i, row) in range.iter().take(examined).enumerate() {
         if !eligible(row, pattern) {
             continue;
         }
