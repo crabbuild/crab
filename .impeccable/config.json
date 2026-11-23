@@ -11,6 +11,15 @@
         ],
         "createdAt": "2026-11-03T07:27:37.550Z",
         "reason": "Agent review: the flagged .prose-agent blockquote border marks quoted Markdown content, not a card accent; git blame confirms it predates Kanban removal."
+      },
+      {
+        "rule": "overused-font",
+        "value": "geist",
+        "files": [
+          "crates/crab-server/deploy/oidc/themes/crab/login/resources/css/crab.css"
+        ],
+        "createdAt": "2026-11-23T08:01:39.931Z",
+        "reason": "Agent decision: Keycloak uses the same existing Geist typography as Crab’s shadcn UI, as requested for design consistency."
       }
     ]
   }

@@ -78,10 +78,11 @@ fn shared_auth(store: Store) -> Authentication {
         config,
         secret: None,
         http: reqwest::Client::new(),
-        client: Some((
-            Client::from_provider_metadata(metadata, ClientId::new("crab".into()), None),
-            false,
-        )),
+        oidc: Some(DiscoveredOidc {
+            client: Client::from_provider_metadata(metadata, ClientId::new("crab".into()), None),
+            groups_scope: false,
+            can_sign_up: false,
+        }),
         sessions: Mutex::new(HashMap::new()),
         git_tokens: Mutex::new(HashMap::new()),
         state: AuthState {

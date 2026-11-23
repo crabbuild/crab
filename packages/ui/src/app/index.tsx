@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Spinner } from "@/components/ui/spinner";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { SignIn } from "@/features/auth/sign-in";
 import { GitAccess } from "@/features/git-access";
 import { GitImport } from "@/features/imports";
 import { CreateRepository } from "@/features/repository/create";
@@ -435,32 +436,11 @@ export function App() {
                 <Spinner /> Checking your session…
               </div>
             ) : !session.data.authenticated ? (
-              <div className="notice sign-in">
-                <h1>Sign in to Crab</h1>
-                <p>
-                  {session.data.mode === "github"
-                    ? "Use GitHub to access your repositories."
-                    : "Use your team's identity provider to access your repositories."}
-                </p>
-                {url.searchParams.has("auth_error") && (
-                  <p className="error" role="alert">
-                    Sign-in could not be completed. Start again, or contact your
-                    administrator if this continues.
-                  </p>
-                )}
-                <Button
-                  variant="default"
-                  onClick={() =>
-                    window.location.assign(
-                      `/auth/login?${new URLSearchParams({ return_to: url.pathname + (url.searchParams.has("auth_error") ? "" : url.search) })}`,
-                    )
-                  }
-                >
-                  {session.data.mode === "github"
-                    ? "Continue with GitHub"
-                    : "Continue to sign in"}
-                </Button>
-              </div>
+              <SignIn
+                mode={session.data.mode}
+                canSignUp={session.data.can_sign_up}
+                url={url}
+              />
             ) : codeSearch ? (
               <Suspense
                 fallback={

@@ -30,7 +30,7 @@ use openidconnect::{ClientSecret, Nonce, PkceCodeVerifier};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{Mutex, Semaphore};
-use transport::discover;
+use transport::{DiscoveredOidc, discover};
 
 mod oidc;
 use oidc::Client;
@@ -246,7 +246,7 @@ pub(crate) struct Authentication {
     config: OidcConfig,
     secret: Option<ClientSecret>,
     http: reqwest::Client,
-    client: Option<(Client, bool)>,
+    oidc: Option<DiscoveredOidc>,
     sessions: Mutex<HashMap<Key, Arc<Session>>>,
     git_tokens: Mutex<HashMap<Key, Arc<GitToken>>>,
     state: AuthState,
@@ -323,7 +323,7 @@ impl Authentication {
             .timeout(Duration::from_secs(10))
             .build()
             .map_err(AuthError::provider)?;
-        let client = match config.provider {
+        let oidc = match config.provider {
             AuthProvider::Oidc => Some(discover(&config, secret.clone(), &http).await?),
             AuthProvider::GitHub => None,
         };
@@ -331,7 +331,7 @@ impl Authentication {
             config,
             secret,
             http,
-            client,
+            oidc,
             sessions: Mutex::new(HashMap::new()),
             git_tokens: Mutex::new(HashMap::new()),
             state,
@@ -342,6 +342,10 @@ impl Authentication {
             admission: Semaphore::new(8),
             logout_admission: Semaphore::new(4),
         })
+    }
+
+    fn can_sign_up(&self) -> bool {
+        self.oidc.as_ref().is_some_and(|oidc| oidc.can_sign_up)
     }
 
     pub(crate) fn is_oidc(&self) -> bool {
