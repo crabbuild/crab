@@ -29,6 +29,33 @@ pub(crate) use provider::{KEY_ONE, KEY_TWO, Provider, start_provider};
 
 pub(crate) const TEST_SCIM_TOKEN: &str = "crab-fixture-user-provisioning-token-only";
 
+pub(crate) fn rustfs_store(fixture: &str) -> Store {
+    let required = |name| std::env::var(name).unwrap_or_else(|_| panic!("missing {name}"));
+    let endpoint = required("CRAB_HTTP_CELL_TEST_ENDPOINT");
+    assert_eq!(Url::parse(&endpoint).unwrap().host_str(), Some("127.0.0.1"));
+    let store = crab_storage::build_explicit_store(
+        &required("CRAB_HTTP_CELL_TEST_BUCKET"),
+        crab_storage::ObjectStoreCredentials::Aws {
+            access_key_id: required("AWS_ACCESS_KEY_ID"),
+            secret_access_key: required("AWS_SECRET_ACCESS_KEY"),
+            session_token: None,
+            region: "us-east-1".into(),
+        },
+        Some(&endpoint),
+        true,
+    )
+    .unwrap();
+    let prefix = format!(
+        "{}/{fixture}-{}",
+        required("CRAB_HTTP_CELL_TEST_PREFIX"),
+        Uuid::now_v7()
+    );
+    Store::new(Arc::new(object_store::prefix::PrefixStore::new(
+        Arc::clone(store.inner()),
+        prefix,
+    )))
+}
+
 #[derive(Default)]
 struct TestAuthFiles {
     state_key: Option<std::path::PathBuf>,

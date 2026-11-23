@@ -1029,3 +1029,4 @@ async fn pull_request_merge_methods_use_canonical_ref_publication() {
 mod http;
 mod large_comparison;
 mod merge_methods;
+mod real_comparison;

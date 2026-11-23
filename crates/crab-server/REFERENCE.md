@@ -3323,6 +3323,37 @@ pure reorder does not add a timeline event.
 
 ### Work with pull requests and reviews
 
+The browser compares the head to the Git merge base. It sends the exact
+base tip and head from that preview when creating the pull request. If either
+tip changes before submission, the API rejects the request before creating a
+pull, and **Review inputs** refreshes the comparison while keeping the draft.
+
+The opt-in real-change fixture takes the base, head and common-ancestor trees
+from pinned Next.js and Neovim commits and publishes them as short divergent
+histories. It checks every changed path, mode and object ID against stock Git,
+checks the full bytes of one lazily loaded file, and moves the source branch
+while the browser holds an open draft. Chromium checks that the author must
+refresh and resubmit, that an inline comment appears on the expected change,
+and that viewed progress survives reload. The fixture reports cold comparison
+latency and warm concurrent comparison and file-read latency. It pauses
+unrelated repository maintenance during timing.
+
+One local RustFS run recorded the following timings. Each warm p95 uses eight
+requests of its type, with two comparisons and two file reads in flight per
+round. Browser timing includes navigation to **Files changed**, path filtering,
+and rendering the inline comment.
+
+| Source trees | Changed paths | Cold comparison | Warm comparison p95 | Warm file p95 | Browser filter and thread |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Next.js | 1,179 | 4,572 ms | 148 ms | 48 ms | 830 ms |
+| Neovim | 536 | 196 ms | 77 ms | 43 ms | 445 ms |
+
+With `agent-browser` and the built UI available, set `CRAB_REVIEW_CORPUS_DIR`
+to a directory holding `vercel/next.js.git` and `neovim/neovim` at the commits
+pinned in the fixture. Use the per-checkout `CARGO_TARGET_DIR` and the same
+isolated loopback RustFS variables as the search corpus test. Run
+`cargo test -p crab-server --lib --locked real_repository_pull_review_matches_git_and_reconfirms_a_moved_head -- --ignored --nocapture`.
+
 Pull details and summaries expose nullable `closed_at` and `merged_at` in Unix
 milliseconds. A successful close records its transition time; reopening clears
 it. A completed merge sets both to the native completion time, independently of

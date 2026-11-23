@@ -74,23 +74,9 @@ async fn publish(
     pin: &str,
 ) -> String {
     let tree = git::success(input, &["rev-parse", &format!("{pin}^{{tree}}")]).await;
-    let objects = git::success(
-        input,
-        &[
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-path",
-            "objects",
-        ],
-    )
-    .await;
-    assert!(!objects.contains(['\n', '\r']));
     let path = local.join(name);
-    std::fs::create_dir(&path).unwrap();
-    git::success(&path, &["init", "--bare", "--object-format=sha1", "."]).await;
-    // The new root commit references the source tree without writing refs or
-    // objects in the input repository or transferring its full history.
-    std::fs::write(path.join("objects/info/alternates"), format!("{objects}\n")).unwrap();
+    // The new root uses the source tree with no writes to the input repository.
+    git::bare_with_alternates(input, &path).await;
     let head = git::success(&path, &["commit-tree", &tree, "-m", pin]).await;
     git::success(&path, &["update-ref", "refs/heads/main", &head]).await;
 
@@ -236,29 +222,9 @@ async fn workspace_search_indexes_and_checks_a_real_repository_corpus() {
     let root = std::path::PathBuf::from(required("CRAB_SEARCH_CORPUS_DIR"));
     let scratch = std::path::PathBuf::from(required("CARGO_TARGET_DIR"));
     let local = tempfile::tempdir_in(scratch).unwrap();
-    let endpoint_url = required("CRAB_HTTP_CELL_TEST_ENDPOINT");
-    let fixture = url::Url::parse(&endpoint_url).unwrap();
-    assert_eq!(fixture.host_str(), Some("127.0.0.1"));
-    let store = crab_storage::build_explicit_store(
-        &required("CRAB_HTTP_CELL_TEST_BUCKET"),
-        crab_storage::ObjectStoreCredentials::Aws {
-            access_key_id: required("AWS_ACCESS_KEY_ID"),
-            secret_access_key: required("AWS_SECRET_ACCESS_KEY"),
-            session_token: None,
-            region: "us-east-1".into(),
-        },
-        Some(&endpoint_url),
-        true,
-    )
-    .unwrap();
-    let prefix = format!(
-        "{}/search-corpus-{}",
-        required("CRAB_HTTP_CELL_TEST_PREFIX"),
-        uuid::Uuid::now_v7()
-    );
-    let store = object_store::prefix::PrefixStore::new(Arc::clone(store.inner()), prefix);
     let reads = Arc::new(StorageReads::default());
-    let store = crab_storage::Store::new(Arc::new(store)).with_storage_observer(reads.clone());
+    let store = crate::test_support::http::rustfs_store("search-corpus")
+        .with_storage_observer(reads.clone());
     let h = Harness::new_with_store(false, false, store).await;
     // Exercise the search index without starting unrelated browse projection
     // builds, which compete with the measurement and have smaller fixture limits.
