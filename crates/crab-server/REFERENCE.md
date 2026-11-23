@@ -3705,15 +3705,26 @@ hex-encoded HMAC-SHA256), then deduplicate by delivery UUID before processing.
   Git import traffic stay outside the subscription.
 - `pull_request` contains `data.action`, PR number, title, draft state, version,
   base and head refs and SHAs, `head_repository`, and `merge_commit`. Actions
-  include `opened`, `edited`, `closed`, `reopened`, `ready_for_review`, and
-  `converted_to_draft`, and `synchronize` for a native PR head switch. A base
-  retarget uses `edited`. A merged PR uses `closed` with `merge_commit`. The
-  non-merge SHAs describe the PR's recorded comparison. Use push events to
-  observe subsequent branch-tip changes.
+  include `opened`, `edited`, `closed`, `reopened`, `ready_for_review`,
+  `converted_to_draft`, and `synchronize`. A base retarget uses `edited` and
+  a merged PR uses `closed` with `merge_commit`. A `synchronize` delivery
+  caused by a committed branch update includes `head_change.before` and
+  `head_change.after`. The latter is also `head_sha`, the exact new head to
+  check. A recreated branch has a null `before`. The `base_sha` describes
+  the PR's recorded comparison. A browser head-branch switch emits the
+  recorded new comparison without `head_change`.
 
-Publication and delivery are separate. The worker sends a Git event only after
-resolving its committed plan receipt. An unconfirmed plan is cancelled after
-an hour. Delivery retries reuse the UUID and payload. A 2xx response confirms
+A branch update emits one synchronization event for each open PR already
+tracking that repository and branch when publication reserves delivery. A
+private fork's update is sent by the upstream PR repository's subscription
+even when the fork has no webhook. The worker skips a PR closed, reopened,
+or rerouted before it expands the publication into deliveries. Deleting a
+branch emits a push event when subscribed. Delivery is asynchronous, so check the current PR
+head before scheduling work that would supersede a newer run.
+
+Publication and delivery are separate. The worker resolves the committed Git
+plan before queueing or sending a ref event. An unconfirmed plan is cancelled
+after an hour. Delivery retries reuse the UUID and payload. A 2xx response confirms
 delivery. Other responses and connection failures retry after 10 and 20
 seconds, then remain visible as failed. **Recent deliveries** shows up to 50
 entries and the last ten HTTP outcomes per entry. An administrator can redeliver

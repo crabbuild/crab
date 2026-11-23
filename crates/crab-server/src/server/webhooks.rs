@@ -1,5 +1,7 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
+use crab_git::receive_plan::RefUpdate;
+use crab_metadata::capsule_protocol::{CapsulePlanReceipt, resolve_capsule_plan_receipt};
 use futures_util::{StreamExt, stream};
 use hmac::{Hmac, Mac};
 use serde_json::{Value, json};
@@ -10,7 +12,9 @@ use uuid::Uuid;
 use crate::{
     WebhookDestination,
     app::{self, Error, Result},
-    cells::repository::webhooks::{self as stored, Delivery, Event, FinishInput, Outcome},
+    cells::repository::webhooks::{
+        self as stored, Delivery, Event, FinishInput, HeadChange, Outcome, sync,
+    },
     repository::Repository,
     server::Server,
 };
@@ -98,6 +102,140 @@ pub(crate) async fn reserve_push(server: &Server, repo: &Repository, plan: &str)
     )
 }
 
+fn head_changed(update: &RefUpdate) -> bool {
+    update.name.starts_with("refs/heads/") && update.new.is_some() && update.old != update.new
+}
+
+pub(crate) fn observes_publication(
+    server: &Server,
+    repo: &Repository,
+    updates: &[RefUpdate],
+) -> bool {
+    let Some(sender) = &server.webhook_sender else {
+        return false;
+    };
+    let local = sender.target(repo.id).is_some();
+    let upstream = repo
+        .forked_from
+        .is_some_and(|id| sender.target(id).is_some());
+    updates.iter().any(|update| {
+        (local && update.old != update.new && is_push_ref(&update.name))
+            || (upstream && head_changed(update))
+    })
+}
+
+pub(crate) async fn reserve_publication(
+    server: &Server,
+    repo: &Repository,
+    plan: &str,
+    updates: &[RefUpdate],
+) -> Result<()> {
+    let Some(sender) = &server.webhook_sender else {
+        return Ok(());
+    };
+    let synchronize = updates.iter().any(head_changed);
+    if let Some(url) = sender.target(repo.id) {
+        reserve_push(server, repo, plan).await?;
+        if synchronize {
+            reserve_sync(server, repo, None, plan, url).await?;
+        }
+    }
+    if synchronize
+        && let Some(upstream) = repo.fork_source(server)
+        && let Some(url) = sender.target(upstream.id)
+    {
+        reserve_sync(server, &upstream, Some(repo.id), plan, url).await?;
+    }
+    Ok(())
+}
+
+async fn reserve_sync(
+    server: &Server,
+    repo: &Repository,
+    source: Option<Uuid>,
+    plan: &str,
+    target: &Url,
+) -> Result<()> {
+    let cell = app::repository_cell(server, repo)?;
+    app::command_output(
+        cell.client
+            .command::<sync::Reserve>(
+                cell.target,
+                app::mutation_identity()?,
+                sync::Reservation {
+                    plan: plan.to_owned(),
+                    source,
+                    destination: destination(target),
+                },
+            )
+            .await,
+    )
+}
+
+async fn committed_plan(repo: &Repository, plan: &str) -> Option<CapsulePlanReceipt> {
+    match resolve_capsule_plan_receipt(&repo.store, &repo.layout, plan).await {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            tracing::warn!(repository = %repo.id, %error, "webhook ref publication receipt is unavailable");
+            None
+        }
+    }
+}
+
+async fn resolve_sync(
+    server: &Server,
+    sender: &Sender,
+    repo: &Repository,
+    pending: &sync::Pending,
+) -> sync::Resolution {
+    if !sender
+        .target(repo.id)
+        .is_some_and(|url| destination(url) == pending.destination)
+    {
+        return sync::Resolution::Discard;
+    }
+    let fork = if let Some(id) = pending.source {
+        let Some(fork) = server.repositories.by_id(id) else {
+            return sync::Resolution::Wait;
+        };
+        if !fork
+            .fork_source(server)
+            .is_some_and(|source| source.id == repo.id)
+        {
+            return sync::Resolution::Discard;
+        }
+        Some(fork)
+    } else {
+        None
+    };
+    let source = fork.as_deref().unwrap_or(repo);
+    let Some(receipt) = committed_plan(source, &pending.plan).await else {
+        return sync::Resolution::Wait;
+    };
+    let changes = receipt
+        .transaction()
+        .edits()
+        .iter()
+        .filter_map(|edit| {
+            let after = edit.new_oid()?;
+            let before = edit.expected_old();
+            (pending.heads.contains(edit.ref_name())
+                && edit.ref_name().starts_with("refs/heads/")
+                && before != Some(after))
+            .then(|| {
+                (
+                    edit.ref_name().to_owned(),
+                    HeadChange {
+                        before: before.map(str::to_owned),
+                        after: after.to_owned(),
+                    },
+                )
+            })
+        })
+        .collect();
+    sync::Resolution::Committed(changes)
+}
+
 async fn deliver(
     server: &Server,
     sender: &Sender,
@@ -115,19 +253,8 @@ async fn deliver(
     };
     let (name, event) = match &delivery.event {
         Event::Push { plan } => {
-            let receipt = match crab_metadata::capsule_protocol::resolve_capsule_plan_receipt(
-                &repo.store,
-                &repo.layout,
-                plan,
-            )
-            .await
-            {
-                Ok(Some(receipt)) => receipt,
-                Ok(None) => return Ok(Outcome::WaitingForPublication),
-                Err(error) => {
-                    tracing::warn!(repository = %repo.id, %error, "webhook ref publication receipt is unavailable");
-                    return Ok(Outcome::WaitingForPublication);
-                }
+            let Some(receipt) = committed_plan(repo, plan).await else {
+                return Ok(Outcome::WaitingForPublication);
             };
             let updates = receipt.transaction().edits().iter()
                 .filter(|edit| edit.expected_old() != edit.new_oid() && is_push_ref(edit.ref_name()))
@@ -158,6 +285,32 @@ async fn deliver(
 
 pub(crate) async fn drain(server: &Server, repo: &Repository, sender: &Sender) -> Result<()> {
     let cell = app::repository_cell(server, repo)?;
+    for _ in 0..8 {
+        if server.cancellation.is_cancelled() {
+            return Ok(());
+        }
+        let Some(pending) =
+            app::query_output(cell.client.query::<sync::Next>(cell.target, None, ()).await)?
+        else {
+            break;
+        };
+        let resolution = resolve_sync(server, sender, repo, &pending).await;
+        app::command_output(
+            cell.client
+                .command::<sync::Advance>(
+                    cell.target,
+                    app::mutation_identity()?,
+                    sync::Step {
+                        id: pending.id,
+                        due: pending.due,
+                        cursor: pending.cursor,
+                        through: pending.through,
+                        resolution,
+                    },
+                )
+                .await,
+        )?;
+    }
     for _ in 0..8 {
         if server.cancellation.is_cancelled()
             || !app::query_output(

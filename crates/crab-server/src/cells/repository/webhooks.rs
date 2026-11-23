@@ -2,6 +2,8 @@ use super::{collaboration::next_version, pulls::PullRecord, *};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub(crate) mod sync;
+
 const ACTIVE: &str = "hooks/v1/active";
 const TASKS: &str = "hooks/v1/deliveries/";
 const DUE: &str = "hooks/v1/due/";
@@ -48,7 +50,16 @@ pub(crate) enum Event {
         head_sha: String,
         head_repository: Option<Uuid>,
         merge_commit: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        head_change: Option<HeadChange>,
     },
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HeadChange {
+    pub before: Option<String>,
+    pub after: String,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -104,6 +115,15 @@ fn enqueue(
     subscription: Subscription,
     event: Event,
 ) -> crate::cells::Result<()> {
+    enqueue_at(context, subscription, event, timestamp(context.now_ms())?)
+}
+
+fn enqueue_at(
+    context: &Transaction<'_>,
+    subscription: Subscription,
+    event: Event,
+    queued_at: u64,
+) -> crate::cells::Result<()> {
     let now = timestamp(context.now_ms())?;
     schedule(
         context,
@@ -111,7 +131,7 @@ fn enqueue(
             id: Uuid::now_v7(),
             subscription,
             event,
-            queued_at: now,
+            queued_at,
             status: Status::Queued,
             attempts: 0,
             http_status: None,
@@ -128,35 +148,41 @@ pub(super) fn pull(
     record: &PullRecord,
     action: PullAction,
 ) -> crate::cells::Result<()> {
+    if matches!(action, PullAction::Reopened | PullAction::Synchronize) {
+        sync::route_changed(context, record.number)?;
+    }
     let Some(subscription) = context
         .document::<Subscription>(ACTIVE)?
         .filter(|hook| hook.pull_request)
     else {
         return Ok(());
     };
+    enqueue(context, subscription, pull_event(record, action, None))
+}
+
+fn pull_event(record: &PullRecord, action: PullAction, head_change: Option<HeadChange>) -> Event {
     let merge = record.merge.as_ref();
     let (base_sha, head_sha) = match (merge, record.retargeted_base.as_ref()) {
         (Some(merge), _) => (&merge.base_oid, &merge.head_oid),
         (None, Some(snapshot)) => (&snapshot.base_oid, &snapshot.head_oid),
         _ => (&record.base_oid, &record.head_oid),
     };
-    enqueue(
-        context,
-        subscription,
-        Event::PullRequest {
-            action,
-            number: record.number,
-            title: record.title.clone(),
-            draft: record.draft,
-            version: record.version,
-            base_ref: record.base_ref.clone(),
-            base_sha: base_sha.clone(),
-            head_ref: record.head_ref.clone(),
-            head_sha: head_sha.clone(),
-            head_repository: record.head_repository,
-            merge_commit: merge.map(|value| value.commit_oid.clone()),
-        },
-    )
+    Event::PullRequest {
+        action,
+        number: record.number,
+        title: record.title.clone(),
+        draft: record.draft,
+        version: record.version,
+        base_ref: record.base_ref.clone(),
+        base_sha: base_sha.clone(),
+        head_ref: record.head_ref.clone(),
+        head_sha: head_change
+            .as_ref()
+            .map_or_else(|| head_sha.clone(), |change| change.after.clone()),
+        head_repository: record.head_repository,
+        merge_commit: merge.map(|value| value.commit_oid.clone()),
+        head_change,
+    }
 }
 
 pub(crate) struct QueuePush;

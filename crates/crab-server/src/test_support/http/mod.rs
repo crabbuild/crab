@@ -262,19 +262,24 @@ impl Harness {
         harness
     }
 
-    pub(crate) async fn with_webhook_receiver(endpoint: Url) -> Self {
+    pub(crate) async fn with_webhook_receiver(endpoint: Url, repository: Option<Uuid>) -> Self {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), [42_u8; 32]).unwrap();
         let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let catalog_prefix = if repository.is_some() {
+            "webhook-fork"
+        } else {
+            ""
+        };
         let harness = Self::configured(
             false,
             false,
             store,
-            "",
+            catalog_prefix,
             Some(file.path().to_owned()),
             None,
             None,
-            Some(endpoint),
+            Some((endpoint, repository)),
         )
         .await;
         harness.initialize_directory().await;
@@ -289,7 +294,7 @@ impl Harness {
         state_key_file: Option<std::path::PathBuf>,
         github_actions: Option<TestGitHubActions>,
         email_endpoint: Option<Url>,
-        webhook_endpoint: Option<Url>,
+        webhook_endpoint: Option<(Url, Option<Uuid>)>,
     ) -> Self {
         let (provider, provider_task) = start_provider(0).await;
         provider.confidential.store(confidential, Ordering::SeqCst);
@@ -416,9 +421,9 @@ impl Harness {
             server.cursor_key = [7; 32];
             server.auth = Some(auth);
             server.github_actions = github_actions.map(|configure| configure(record.id));
-            server.webhook_sender = webhook_endpoint.map(|url| {
+            server.webhook_sender = webhook_endpoint.map(|(url, repository)| {
                 crate::server::webhooks::Sender::new(&[crate::WebhookDestination {
-                    repository: record.id,
+                    repository: repository.unwrap_or(record.id),
                     url,
                 }])
                 .unwrap()
