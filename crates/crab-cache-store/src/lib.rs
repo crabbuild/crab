@@ -54,8 +54,8 @@ mod xorb_read;
 pub use capsule_control::cache_capsule_controls;
 use observation::NoopCacheObserver;
 pub use observation::{CacheObserver, CacheReadObservation, CacheReadOutcome, CacheSource};
-pub use xorb_read::XorbReadMode;
 use xorb_read::XorbReadState;
+pub use xorb_read::{XorbReadHint, XorbReadMode};
 
 /// Result alias for cache/storage adapter operations.
 pub type Result<T> = std::result::Result<T, CacheStoreError>;

@@ -1817,15 +1817,17 @@ mod tests {
 
     #[tokio::test]
     async fn sparse_range_stream_verifies_only_the_needed_xorb_bytes_from_cdn() {
-        reconstruct_over_cdn_ranges(Some(1024..8192)).await;
+        for range_cap in [64, 1024] {
+            reconstruct_over_cdn_ranges(Some(1024..8192), range_cap).await;
+        }
     }
 
     #[tokio::test]
     async fn complete_hydration_uses_cdn_ranges_when_full_get_is_disabled() {
-        reconstruct_over_cdn_ranges(None).await;
+        reconstruct_over_cdn_ranges(None, 64).await;
     }
 
-    async fn reconstruct_over_cdn_ranges(window: Option<std::ops::Range<u64>>) {
+    async fn reconstruct_over_cdn_ranges(window: Option<std::ops::Range<u64>>, range_cap: usize) {
         use crab_storage::cdn::{
             CdnAccess, CdnCredential, CdnCredentials, CdnReadFamily, CdnRoute, CdnTransport,
         };
@@ -1879,6 +1881,7 @@ mod tests {
             .await
             .unwrap();
         let size = body.len();
+        let range_cap = range_cap.min(size);
         let spans = if window.is_some() {
             let footer = size - FOOTER_SIZE..size;
             let metadata = xorb_metadata_region(size, &body[footer.clone()]).unwrap();
@@ -1886,21 +1889,25 @@ mod tests {
             let first = parsed.chunk_meta(0).unwrap();
             let first_start = first.offset as usize;
             let payload = first_start..first_start + first.compressed_len as usize;
-            vec![
-                footer,
-                metadata.offset..metadata.offset + metadata.len,
-                payload,
-            ]
+            let suffix = metadata.offset..size;
+            if suffix.len() <= range_cap {
+                vec![suffix, payload]
+            } else {
+                vec![
+                    footer,
+                    metadata.offset..metadata.offset + metadata.len,
+                    payload,
+                ]
+            }
         } else {
             std::iter::once(0..size).collect()
         };
-        const RANGE_CAP: usize = 64;
         let mut expected = spans
             .into_iter()
             .flat_map(|range| {
                 (range.start..range.end)
-                    .step_by(RANGE_CAP)
-                    .map(move |start| (start, (start + RANGE_CAP).min(range.end) - 1))
+                    .step_by(range_cap)
+                    .map(move |start| (start, (start + range_cap).min(range.end) - 1))
             })
             .collect::<Vec<_>>();
         expected.sort_unstable();
@@ -1928,7 +1935,7 @@ mod tests {
         )
         .with_loopback_read_limits(
             CdnReadFamily::Xorb,
-            &format!("{full_limit} {size} {RANGE_CAP} 10000"),
+            &format!("{full_limit} {size} {range_cap} 10000"),
         )
         .unwrap();
         let origin = crab_storage::Store::new(Arc::new(RejectFullXorbReads {

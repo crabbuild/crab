@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
 use crab_cache::CacheKey;
-use crab_cache_store::{CachingStore, XorbReadMode};
+use crab_cache_store::{CachingStore, XorbReadHint, XorbReadMode};
 use crab_metadata::file_index_lookup::{
     FileIndexLookupSession, ShardLocation, SharedFileIndexLookup,
 };
@@ -393,7 +393,7 @@ impl StoreClient {
     }
 }
 
-fn xorb_url(hash: &MerkleHash, chunks: &[ChunkRange]) -> String {
+fn xorb_url(hash: &MerkleHash, chunks: &[ChunkRange], chunk_count: Option<usize>) -> String {
     let mut url = format!("{XORB_URL_PREFIX}{}", hash.hex());
     if !chunks.is_empty() {
         url.push_str("?chunks=");
@@ -403,11 +403,15 @@ fn xorb_url(hash: &MerkleHash, chunks: &[ChunkRange]) -> String {
             }
             url.push_str(&range.to_string());
         }
+        if let Some(count) = chunk_count {
+            use std::fmt::Write as _;
+            let _ = write!(url, "&entries={count}");
+        }
     }
     url
 }
 
-fn parse_xorb_url(url: &str) -> ClientResult<(MerkleHash, Vec<ChunkRange>)> {
+fn parse_xorb_url(url: &str) -> ClientResult<(MerkleHash, Vec<ChunkRange>, Option<usize>)> {
     let body = url
         .strip_prefix(XORB_URL_PREFIX)
         .ok_or_else(|| ClientError::Other(format!("unrecognized xorb url: {url}")))?;
@@ -420,6 +424,18 @@ fn parse_xorb_url(url: &str) -> ClientResult<(MerkleHash, Vec<ChunkRange>)> {
     let hash = MerkleHash::from_hex(hex)
         .map_err(|e| ClientError::Other(format!("invalid xorb url hash: {e}")))?;
 
+    let (chunks_part, chunk_count) = match chunks_part.and_then(|part| part.split_once("&entries="))
+    {
+        Some((ranges, count)) => (
+            Some(ranges),
+            Some(
+                count
+                    .parse()
+                    .map_err(|_| ClientError::Other("invalid xorb chunk count".to_owned()))?,
+            ),
+        ),
+        None => (chunks_part, None),
+    };
     let ranges = match chunks_part {
         None => Vec::new(),
         Some(s) => s
@@ -432,7 +448,7 @@ fn parse_xorb_url(url: &str) -> ClientResult<(MerkleHash, Vec<ChunkRange>)> {
             .collect::<ClientResult<Vec<_>>>()?,
     };
 
-    Ok((hash, ranges))
+    Ok((hash, ranges, chunk_count))
 }
 
 fn build_response_v2(file_info: &MDBFileInfo) -> QueryReconstructionResponseV2 {
@@ -448,7 +464,7 @@ fn build_response_v2(file_info: &MDBFileInfo) -> QueryReconstructionResponseV2 {
         });
 
         let fetch = XorbMultiRangeFetch {
-            url: xorb_url(&seg.xorb_hash, std::slice::from_ref(&chunks)),
+            url: xorb_url(&seg.xorb_hash, std::slice::from_ref(&chunks), None),
             ranges: vec![XorbRangeDescriptor {
                 chunks,
                 bytes: HttpRange::new(0, u64::from(seg.unpacked_segment_bytes)),
@@ -596,7 +612,11 @@ fn build_range_response_v2(
             .entry(HexMerkleHash::from(segment.xorb_hash))
             .or_default()
             .push(XorbMultiRangeFetch {
-                url: xorb_url(&segment.xorb_hash, std::slice::from_ref(&chunks)),
+                url: xorb_url(
+                    &segment.xorb_hash,
+                    std::slice::from_ref(&chunks),
+                    Some(xorb.chunks.len()),
+                ),
                 ranges: vec![XorbRangeDescriptor {
                     chunks,
                     // This adapter encodes chunk addressing in its private URL;
@@ -758,7 +778,7 @@ impl Client for StoreClient {
             .retrieve_url()
             .await
             .map_err(|error| self.record_error(error))?;
-        let (xorb_hash, chunk_ranges) =
+        let (xorb_hash, chunk_ranges, chunk_count) =
             parse_xorb_url(&url).map_err(|error| self.record_error(error))?;
 
         let xorb_path = self.router.xorb_path(&xorb_hash);
@@ -791,7 +811,8 @@ impl Client for StoreClient {
             _ => None,
         };
         let decoded = self.store
-            .get_xorb_chunks_with_mode(&xorb_path, &xorb_hash, &ranges, self.xorb_read_mode, encoded_size)
+            .get_xorb_chunks_with_mode(&xorb_path, &xorb_hash, &ranges, self.xorb_read_mode,
+                                       XorbReadHint { encoded_size, chunk_count })
             .await
             .map_err(ReadError::from)
             .map_err(|error| self.map_read_error(error))?;

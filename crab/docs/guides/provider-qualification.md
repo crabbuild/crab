@@ -906,7 +906,9 @@ xorb reader reports this fingerprint after it verifies nonempty requested
 chunks from the edge. Retain the action's separately verified output bytes
 or digest with the transfer evidence. For sparse SDK and mount reads, verify
 the requested xorb spans and correlate the metadata and payload requests
-with the provider logs. Record the provider's cache-fill bytes separately
+with the provider logs. When the shard supplies the chunk count and the
+suffix fits the qualified range limit, one GET can witness both the footer
+and metadata table. Record the provider's cache-fill bytes separately
 from the bytes Crab consumes. The sum of parallel
 transfer times differs from elapsed action time. Front Door's response
 header describes the first 8 MB chunk, so Crab records an unknown cache

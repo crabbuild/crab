@@ -274,6 +274,8 @@ async fn verified_xorb_chunks_report_their_delivery_source() {
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let transport = CdnTransport::loopback_fixture(listener.local_addr().unwrap()).unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let served = Arc::clone(&requests);
         let server = tokio::spawn(async move {
             while let Ok((socket, _)) = listener.accept().await {
                 let mut socket = BufReader::new(socket);
@@ -296,6 +298,7 @@ async fn verified_xorb_chunks_report_their_delivery_source() {
                     }
                     line.clear();
                 }
+                served.lock().unwrap().push(range);
                 let (status, body) = match range {
                     Some((start, end)) => (
                         format!(
@@ -352,12 +355,28 @@ async fn verified_xorb_chunks_report_their_delivery_source() {
             assert!(capture.0.lock().unwrap().is_empty());
         }
         let range = [(0, 1)];
+        let hint = XorbReadHint {
+            encoded_size: Some(xorb.bytes.len() as u64),
+            chunk_count: Some(3),
+        };
         for _ in 0..2 {
-            let (bytes, _) = store
-                .get_xorb_chunks_with_mode(&path, &xorb.hash, &range, mode, None)
+            let (bytes, offsets) = store
+                .get_xorb_chunks_with_mode(&path, &xorb.hash, &range, mode, hint)
                 .await
                 .unwrap();
             assert_eq!(bytes, expected);
+            assert_eq!(offsets, [0, expected.len() as u32]);
+        }
+        if mode == XorbReadMode::SelectiveCdn {
+            let size = xorb.bytes.len();
+            let metadata_start = size - FOOTER_SIZE - 3 * CHUNK_META_ENTRY_SIZE;
+            let parser = XorbParser::parse(xorb.bytes.clone()).unwrap();
+            let first = parser.chunk_meta(0).unwrap();
+            let payload_end = (first.offset + first.compressed_len) as usize;
+            assert_eq!(
+                *requests.lock().unwrap(),
+                [Some((metadata_start, size - 1)), Some((0, payload_end - 1))]
+            );
         }
         let payloads = std::mem::take(&mut *capture.0.lock().unwrap());
         assert_eq!(payloads.len(), 2);

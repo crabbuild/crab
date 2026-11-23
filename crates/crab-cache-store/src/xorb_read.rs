@@ -7,7 +7,9 @@ use bytes::{Bytes, BytesMut};
 use crab_cache::CacheError;
 use crab_storage::{StorageError, store::CdnReadAttempt};
 use crab_xet::hash::MerkleHash;
-use crab_xet::xorb::format::{ChunkMeta, FOOTER_SIZE, MAX_XORB_SIZE};
+use crab_xet::xorb::format::{
+    CHUNK_META_ENTRY_SIZE, ChunkMeta, FOOTER_SIZE, MAX_XORB_CHUNKS, MAX_XORB_SIZE,
+};
 use crab_xet::xorb::parser::{
     XorbParser, decode_chunk_range_bytes, xorb_chunks_from_metadata, xorb_metadata_region,
 };
@@ -29,6 +31,15 @@ pub enum XorbReadMode {
     Selective,
     /// Read selectively at the edge and keep other sources on the whole-object path.
     SelectiveCdn,
+}
+
+/// Xorb coordinates captured from the selected catalog and reconstruction shard.
+#[derive(Clone, Copy, Default)]
+pub struct XorbReadHint {
+    /// Encoded object size from the captured catalog.
+    pub encoded_size: Option<u64>,
+    /// Total chunk count from the reconstruction shard.
+    pub chunk_count: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -85,8 +96,14 @@ impl CachingStore {
         xorb_hash: &MerkleHash,
         ranges: &[(u32, u32)],
     ) -> Result<(Bytes, Vec<u32>)> {
-        self.get_xorb_chunks_with_mode(path, xorb_hash, ranges, XorbReadMode::Selective, None)
-            .await
+        self.get_xorb_chunks_with_mode(
+            path,
+            xorb_hash,
+            ranges,
+            XorbReadMode::Selective,
+            XorbReadHint::default(),
+        )
+        .await
     }
 
     /// Read verified chunks from a complete body without installing a full-xorb copy.
@@ -96,8 +113,14 @@ impl CachingStore {
         xorb_hash: &MerkleHash,
         ranges: &[(u32, u32)],
     ) -> Result<(Bytes, Vec<u32>)> {
-        self.get_xorb_chunks_with_mode(path, xorb_hash, ranges, XorbReadMode::Whole, None)
-            .await
+        self.get_xorb_chunks_with_mode(
+            path,
+            xorb_hash,
+            ranges,
+            XorbReadMode::Whole,
+            XorbReadHint::default(),
+        )
+        .await
     }
 
     /// Read bounded, hash-verified xorb metadata with the same repair policy as hydration.
@@ -114,7 +137,10 @@ impl CachingStore {
             .chain(edge.as_ref().map(XorbSource::Cdn))
             .chain([XorbSource::Origin(edge.as_ref())])
         {
-            match self.xorb_read_plan(path, xorb_hash, source, None).await {
+            match self
+                .xorb_read_plan(path, xorb_hash, source, XorbReadHint::default())
+                .await
+            {
                 Ok(Some(plan)) => {
                     source.check_deadline()?;
                     self.observe_xorb_source(source, CacheReadOutcome::Hit, 0);
@@ -135,14 +161,13 @@ impl CachingStore {
     }
 
     /// Read authenticated xorb chunks using the caller's transfer and retention policy.
-    /// `encoded_size`, when present, must come from the captured catalog of this target.
     pub async fn get_xorb_chunks_with_mode(
         &self,
         path: &Path,
         xorb_hash: &MerkleHash,
         ranges: &[(u32, u32)],
         mode: XorbReadMode,
-        encoded_size: Option<u64>,
+        hint: XorbReadHint,
     ) -> Result<(Bytes, Vec<u32>)> {
         if ranges.is_empty() {
             return Ok((Bytes::new(), vec![0]));
@@ -178,7 +203,7 @@ impl CachingStore {
             .chain([XorbSource::Origin(edge.as_ref())])
         {
             match self
-                .xorb_chunks_from_source(path, xorb_hash, ranges, source, mode, encoded_size)
+                .xorb_chunks_from_source(path, xorb_hash, ranges, source, mode, hint)
                 .await
             {
                 Ok(Some(result)) => {
@@ -278,7 +303,7 @@ impl CachingStore {
         ranges: &[(u32, u32)],
         source: XorbSource<'_>,
         mode: XorbReadMode,
-        encoded_size: Option<u64>,
+        hint: XorbReadHint,
     ) -> Result<Option<(Bytes, Vec<u32>)>> {
         let install = mode == XorbReadMode::Selective;
         if !matches!(
@@ -286,11 +311,11 @@ impl CachingStore {
             (XorbReadMode::Selective, _) | (XorbReadMode::SelectiveCdn, XorbSource::Cdn(_))
         ) {
             return self
-                .complete_xorb_ranges(path, xorb_hash, ranges, source, encoded_size, false)
+                .complete_xorb_ranges(path, xorb_hash, ranges, source, hint.encoded_size, false)
                 .await;
         }
-        let object_len = if let XorbSource::Cdn(edge) = source {
-            let size = match encoded_size {
+        let hint = if let XorbSource::Cdn(edge) = source {
+            let size = match hint.encoded_size {
                 Some(size) => size,
                 None => source.read_origin(self.origin.head(path)).await?.size,
             };
@@ -302,14 +327,14 @@ impl CachingStore {
                     .complete_xorb_ranges(path, xorb_hash, ranges, source, Some(size), install)
                     .await;
             }
-            Some(size)
+            XorbReadHint {
+                encoded_size: Some(size),
+                ..hint
+            }
         } else {
-            None
+            XorbReadHint::default()
         };
-        let Some(plan) = self
-            .xorb_read_plan(path, xorb_hash, source, object_len)
-            .await?
-        else {
+        let Some(plan) = self.xorb_read_plan(path, xorb_hash, source, hint).await? else {
             return Ok(None);
         };
         let requested_bytes = requested_payload_bytes(&plan.chunks, ranges)?;
@@ -444,7 +469,7 @@ impl CachingStore {
         path: &Path,
         xorb_hash: &MerkleHash,
         source: XorbSource<'_>,
-        object_len: Option<u64>,
+        hint: XorbReadHint,
     ) -> Result<Option<XorbReadPlan>> {
         let object_len = match source {
             XorbSource::Local => {
@@ -464,18 +489,29 @@ impl CachingStore {
                 };
                 head.size
             }
-            XorbSource::Cdn(_) | XorbSource::Origin(_) => match object_len {
+            XorbSource::Cdn(_) | XorbSource::Origin(_) => match hint.encoded_size {
                 Some(size) => size,
                 None => source.read_origin(self.origin.head(path)).await?.size,
             },
         };
         Self::validate_xorb_size(path, object_len)?;
         let footer_start = object_len - FOOTER_SIZE as u64;
-        let Some(footer) = self
+        let mut suffix_start = footer_start;
+        if let (XorbSource::Cdn(edge), Some(count)) = (source, hint.chunk_count)
+            && count <= *MAX_XORB_CHUNKS
+            && let Some(bytes) = count.checked_mul(CHUNK_META_ENTRY_SIZE)
+            && let Some(start) = footer_start.checked_sub(bytes as u64)
+            && edge
+                .range_chunk_bytes(object_len)
+                .is_some_and(|limit| object_len - start <= limit.get() as u64)
+        {
+            suffix_start = start;
+        }
+        let Some(suffix) = self
             .xorb_range(
                 path,
                 xorb_hash,
-                footer_start..object_len,
+                suffix_start..object_len,
                 source,
                 Some(object_len),
             )
@@ -484,22 +520,30 @@ impl CachingStore {
             return Ok(None);
         };
         let object_len = object_len as usize; // Bounded by MAX_XORB_SIZE above.
-        let region = xorb_metadata_region(object_len, &footer).map_err(CacheError::from)?;
-        let metadata_range = region.offset as u64..(region.offset + region.len) as u64;
-        let Some(metadata) = self
-            .xorb_range(
-                path,
-                xorb_hash,
-                metadata_range,
-                source,
-                Some(object_len as u64),
-            )
-            .await?
-        else {
-            return Ok(None);
+        let footer_index = (footer_start - suffix_start) as usize;
+        let footer = &suffix[footer_index..];
+        let region = xorb_metadata_region(object_len, footer).map_err(CacheError::from)?;
+        let metadata = if region.offset >= suffix_start as usize {
+            // Use the footer's validated bounds even when the shard hint differs.
+            suffix.slice(region.offset - suffix_start as usize..footer_index)
+        } else {
+            let metadata_range = region.offset as u64..footer_start;
+            let Some(metadata) = self
+                .xorb_range(
+                    path,
+                    xorb_hash,
+                    metadata_range,
+                    source,
+                    Some(object_len as u64),
+                )
+                .await?
+            else {
+                return Ok(None);
+            };
+            metadata
         };
         let (chunks, actual) =
-            xorb_chunks_from_metadata(object_len, &footer, &metadata).map_err(CacheError::from)?;
+            xorb_chunks_from_metadata(object_len, footer, &metadata).map_err(CacheError::from)?;
         if actual != *xorb_hash {
             return Err(CacheError::HashMismatch {
                 requested: xorb_hash.hex(),

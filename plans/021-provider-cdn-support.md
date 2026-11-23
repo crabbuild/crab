@@ -320,8 +320,11 @@ admitted for ranges and exceeds the full-GET profile. Verify the assembled
 xorb before returning any decoded chunks.
 SDK and mount range hydration can use authenticated compressed xorb spans
 from the edge. Keep the selected source through footer, metadata and payload
-verification. Qualify sparse access and provider fill amplification separately
-from complete hydration. The native SDK stream and NFS mount workers verify a
+verification. When the shard's chunk count fits the qualified range limit,
+read the exact footer and chunk-table suffix in one edge request. Use the
+validated footer to locate the table and authenticate its xorb hash before
+fetching payload ranges. Qualify sparse access and provider fill amplification
+separately from complete hydration. The native SDK stream and NFS mount workers verify a
 preregistered file window and join range responses to provider logs. Release
 qualification also requires the native, cold edge, and warm edge sparse
 reads for the same approved publication and projection as the full hydration
