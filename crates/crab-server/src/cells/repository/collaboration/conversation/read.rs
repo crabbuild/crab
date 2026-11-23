@@ -51,6 +51,7 @@ impl Query {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReviewSource {
     pub head_ref: String,
+    pub head_repository: Option<Uuid>,
     pub merged_head: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -140,6 +141,7 @@ impl Read for ListConversation {
             };
             Some(ReviewSource {
                 head_ref: pull.head_ref,
+                head_repository: pull.head_repository,
                 merged_head: pull.merge.map(|m| m.head_oid),
             })
         } else {

@@ -17,6 +17,7 @@ async function fixture(page: Page, withTeam = false) {
   let submitted: ReviewState | null = null;
   let decision: ReviewState | null = null;
   let current: boolean | null = true;
+  let mergeEligible: boolean | null = null;
   let state: "requested" | "cancelled" | "fulfilled" | null = null;
   let teamState:
     | { kind: "requested" }
@@ -39,6 +40,8 @@ async function fixture(page: Page, withTeam = false) {
     )
       return route.fulfill({ json: { items: [], can_manage: canManage } });
     if (path.endsWith("/conversation")) return conversationPage(route);
+    if (path === "/api/notifications/unread" && request.method() === "GET")
+      return route.fulfill({ json: { unread: false } });
     if (path === "/api/session")
       return route.fulfill({
         json: {
@@ -195,6 +198,7 @@ async function fixture(page: Page, withTeam = false) {
         decision: decision
           ? { number: 1, state: decision, commit_oid: "b".repeat(40), current }
           : null,
+        merge_eligible: decision ? mergeEligible : null,
       };
       const carol = {
         id: "a".repeat(64),
@@ -284,6 +288,9 @@ async function fixture(page: Page, withTeam = false) {
       submitted = state;
       if (state !== "commented") decision = state;
       current = freshness;
+    },
+    setMergeEligibility: (eligible: boolean) => {
+      mergeEligible = eligible;
     },
     readOnly: () => {
       canManage = false;
@@ -398,6 +405,31 @@ test("review requests retain failed choices, persist on reload, cancel and can b
     .click();
   await expect(widget.getByText("Review requested by Alice")).toBeVisible();
   expect(model.writes).toHaveLength(5);
+  expect(model.unexpected).toEqual([]);
+});
+
+test("the reviewer sidebar distinguishes recorded feedback from eligible decisions", async ({
+  page,
+}) => {
+  const model = await fixture(page);
+  const widget = page.getByRole("region", { name: "Reviewers", exact: true });
+  model.review("approved");
+  model.setMergeEligibility(false);
+  await page.goto("/team/project/pull/1");
+  await expect(widget.getByText("Approved", { exact: true })).toBeVisible();
+  await expect(widget.getByText("Write access required")).toBeVisible();
+  await expect(widget.getByText("Eligible approval")).toHaveCount(0);
+
+  model.setMergeEligibility(true);
+  await page.reload();
+  await expect(widget.getByText("Eligible approval")).toBeVisible();
+
+  model.review("changes_requested", false);
+  await page.reload();
+  await expect(
+    widget.getByText("Changes requested", { exact: true }),
+  ).toBeVisible();
+  await expect(widget.getByText("Earlier commit · still active")).toBeVisible();
   expect(model.unexpected).toEqual([]);
 });
 

@@ -332,6 +332,7 @@ export function PullDetail({
                     csrf={csrf}
                     onSaved={refresh}
                     allowIssueClosure={data.state !== "merged"}
+                    reviewerRefresh={epoch}
                   />
                 </div>
               </div>

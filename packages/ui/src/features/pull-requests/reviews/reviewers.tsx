@@ -48,6 +48,7 @@ interface Reviewer {
   } | null;
   review: ReviewSummary | null;
   decision: ReviewSummary | null;
+  merge_eligible: boolean | null;
 }
 interface Page {
   items: Reviewer[];
@@ -98,7 +99,6 @@ export function Reviewers({
     if (saved) {
       setOpen(false);
       setSelected(undefined);
-      resource.retry();
       onSaved();
     }
   }
@@ -315,25 +315,30 @@ export function Reviewers({
                   const requested = request?.state.kind === "requested";
                   const name =
                     reviewer.reviewer.profile?.handle ?? reviewer.reviewer.name;
-                  const Icon =
-                    summary?.current && summary.state === "approved"
-                      ? CheckCircleFillIcon
-                      : summary?.current &&
-                          summary.state === "changes_requested"
-                        ? XCircleFillIcon
-                        : summary
-                          ? CodeReviewIcon
-                          : ClockIcon;
+                  const eligible = reviewer.merge_eligible;
+                  const approval =
+                    summary?.current && summary.state === "approved";
+                  const acceptedApproval = approval && eligible !== false;
+                  const changes =
+                    summary?.state === "changes_requested" &&
+                    (eligible === true ||
+                      (eligible !== false && summary.current));
+                  const Icon = acceptedApproval
+                    ? CheckCircleFillIcon
+                    : changes
+                      ? XCircleFillIcon
+                      : summary
+                        ? CodeReviewIcon
+                        : ClockIcon;
                   return (
                     <li key={reviewer.id} className="flex items-start gap-2">
                       <Icon
                         aria-hidden="true"
                         className={cn(
                           "mt-0.5 shrink-0",
-                          summary?.current && summary.state === "approved"
+                          acceptedApproval
                             ? "text-success"
-                            : summary?.current &&
-                                summary.state === "changes_requested"
+                            : changes
                               ? "text-destructive"
                               : "text-muted-foreground",
                         )}
@@ -347,10 +352,9 @@ export function Reviewers({
                             <Badge
                               asChild
                               variant={
-                                summary.current && summary.state === "approved"
+                                acceptedApproval
                                   ? "success"
-                                  : summary.current &&
-                                      summary.state === "changes_requested"
+                                  : changes
                                     ? "destructive"
                                     : "secondary"
                               }
@@ -368,8 +372,20 @@ export function Reviewers({
                                       : "Commented"}
                               </Link>
                             </Badge>
+                            {eligible === false && (
+                              <Badge variant="outline">
+                                Write access required
+                              </Badge>
+                            )}
+                            {eligible === true && approval && (
+                              <Badge variant="outline">Eligible approval</Badge>
+                            )}
                             {summary.current === false && (
-                              <Badge variant="outline">Outdated review</Badge>
+                              <Badge variant="outline">
+                                {changes
+                                  ? "Earlier commit · still active"
+                                  : "Outdated review"}
+                              </Badge>
                             )}
                             {summary.current === null && (
                               <Badge variant="outline">Head unavailable</Badge>

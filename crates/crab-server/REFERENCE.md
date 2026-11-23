@@ -2826,12 +2826,16 @@ identifies the latest submitted review; `decision` identifies the latest
 approval or change request. A later comment does not replace a decision.
 Summary records contain `number`, `state`, `commit_oid`, and `current`.
 
-Freshness compares the recorded commit with the actual source ref. `current`
-is true for the observed head, false for an older commit, and null if the head
-is missing. Merged PRs use their recorded source head. Only a current decision
-gets a positive or negative status color; older decisions show “Outdated review,”
-and an absent head shows “Head unavailable.” A re-request remains visible
-alongside the previous review. Fulfillment alone never implies approval.
+For an active decision on an open PR, `merge_eligible` reports whether the
+reviewer has a current durable Write or Admin grant. A current eligible approval
+shows **Eligible approval**. A reader's approval stays visible with **Write
+access required**. An eligible change request remains active after a source push.
+
+Freshness compares the recorded commit with the selected source ref, including
+when the fork and upstream have branches with the same name. `current` is true
+for the observed head, false for an older commit, and null if the head is missing.
+Merged PRs use their recorded source head. A re-request remains visible alongside
+the previous review. Fulfillment alone never implies approval.
 Conversation review responses and their timeline use the same three-state
 freshness contract. The review list envelope includes nullable `head_oid` from
 that read; all loaded review cards follow this head, including older pages kept

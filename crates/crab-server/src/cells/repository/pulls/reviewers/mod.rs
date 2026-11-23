@@ -37,6 +37,7 @@ pub(crate) struct Page {
     pub open: bool,
     pub merge_pending: bool,
     pub head_ref: String,
+    pub head_repository: Option<uuid::Uuid>,
     pub merged_head: Option<String>,
 }
 
@@ -99,6 +100,7 @@ impl Read for ListReviewers {
             open: PullState::from_code(result_u64_from_row(row, 4)?)? == PullState::Open,
             merge_pending: result_u64_from_row(row, 5)? != 0,
             head_ref: result_text(row, 6)?,
+            head_repository: super::storage::head_repository(context, input.pull)?,
             merged_head: merged.map(|merge| merge.head_oid),
         };
         // One ordered participant row per qualified account. Primary-key seeks and

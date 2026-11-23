@@ -490,9 +490,12 @@ async fn native_browser_squashes_a_protected_private_fork_pull_request() {
         h.json(&pull, &alice).await["merge_requirements"]["head_up_to_date"],
         true
     );
-    let acl = h.json(&members, &alice).await;
-    super::repositories::repository_write(&h, Method::PUT, &members, &alice, id,
-        json!({"expected_revision":acl["revision"],"members":[{"subject":"bob-id","name":"Bob","access":"write"}],"groups":[]})).await.error_for_status().unwrap();
+    let reviewer_access = async |access: &str| {
+        let acl = h.json(&members, &alice).await;
+        super::repositories::repository_write(&h, Method::PUT, &members, &alice, id,
+            json!({"expected_revision":acl["revision"],"members":[{"subject":"bob-id","name":"Bob","access":access}],"groups":[]})).await.error_for_status().unwrap();
+    };
+    reviewer_access("write").await;
     let approve = async |head: &str| {
         super::repositories::repository_write(&h, Method::POST, &format!("{pull}/reviews"), &bob, id,
             json!({"request_id":Uuid::now_v7(),"state":"approved","body":"Reviewed the fork commit","commit_oid":head,"base_revision":base_revision})).await.error_for_status().unwrap();
@@ -509,6 +512,35 @@ async fn native_browser_squashes_a_protected_private_fork_pull_request() {
         .unwrap();
     };
     approve(&head).await;
+    for path in ["reviewers", "conversation", "reviews"] {
+        let page = h.json(&format!("{pull}/{path}"), &alice).await;
+        assert_eq!(page["head_oid"], head, "{path}");
+    }
+    browser
+        .run(&["open", &format!("{}/{owner}/library/pull/1", h.origin)])
+        .await;
+    browser.run(&["wait", "--text", "Eligible approval"]).await;
+    let refresh_checks = async || {
+        browser
+            .run(&[
+                "find",
+                "role",
+                "button",
+                "click",
+                "--name",
+                "Refresh checks",
+                "--exact",
+            ])
+            .await;
+    };
+    reviewer_access("read").await;
+    refresh_checks().await;
+    browser
+        .run(&["wait", "--fn", "document.querySelector('.reviewers')?.textContent.includes('Write access required') && document.querySelector('[aria-label=\"Merge status\"]')?.textContent.includes('1 more approving review is required')"])
+        .await;
+    reviewer_access("write").await;
+    refresh_checks().await;
+    browser.run(&["wait", "--text", "Eligible approval"]).await;
     let completed = workflow(&head, 1);
     for (field, value) in [
         ("head_repository", json!({"id":999})),
@@ -648,6 +680,9 @@ async fn native_browser_squashes_a_protected_private_fork_pull_request() {
         .run(&["wait", "--text", "The branch tips changed"])
         .await;
     browser.run(&["wait", "--text", "Merging is blocked"]).await;
+    browser
+        .run(&["wait", "--fn", "document.querySelector('.reviewers')?.textContent.includes('Outdated review') && document.querySelector('.review-event')?.textContent.includes('Outdated')"])
+        .await;
     git(local.path(), &["fetch", remote.as_str(), "main"]).await;
     assert_eq!(
         git(local.path(), &["rev-parse", "FETCH_HEAD"]).await,
@@ -680,6 +715,13 @@ async fn native_browser_squashes_a_protected_private_fork_pull_request() {
     git(local.path(), &["fetch", remote.as_str(), "main"]).await;
     let landed = git(local.path(), &["rev-parse", "FETCH_HEAD"]).await;
     let merged = h.json(&pull, &alice).await;
+    for path in ["reviewers", "conversation", "reviews"] {
+        assert_eq!(
+            h.json(&format!("{pull}/{path}"), &alice).await["head_oid"],
+            new_head,
+            "{path}"
+        );
+    }
     assert_eq!(merged["merge"]["method"], "squash");
     assert_eq!(merged["merge"]["commit_oid"], landed);
     assert_ne!(landed, new_head);

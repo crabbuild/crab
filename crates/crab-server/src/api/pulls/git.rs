@@ -92,6 +92,27 @@ pub(super) fn fork_repository(
         .ok_or(Error::NotFound)
 }
 
+pub(in crate::api) async fn review_head(
+    server: &Server,
+    upstream: &Repository,
+    fork: Option<Uuid>,
+    head_ref: &str,
+    merged_head: Option<String>,
+) -> Result<Option<String>> {
+    // A merged review follows the recorded source even if its ref disappears.
+    if merged_head.is_some() {
+        return Ok(merged_head);
+    }
+    match fork {
+        None => Ok(upstream.ref_oid(head_ref).await?),
+        Some(id) => match fork_repository(server, upstream, id) {
+            Ok(source) => Ok(source.ref_oid(head_ref).await?),
+            Err(Error::NotFound) => Ok(None),
+            Err(error) => Err(error),
+        },
+    }
+}
+
 pub(super) struct PullGit {
     pub base: RemoteGitRepository,
     pub fork: Option<RemoteGitRepository>,

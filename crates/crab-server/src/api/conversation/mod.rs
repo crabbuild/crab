@@ -113,11 +113,17 @@ async fn page(
             .await,
     )?
     .ok_or(Error::NotFound)?;
-    let head = match &page.source {
-        Some(source) => match &source.merged_head {
-            Some(oid) => Some(oid.clone()),
-            None => repo.ref_oid(&source.head_ref).await?,
-        },
+    let head = match page.source {
+        Some(source) => {
+            pulls::review_head(
+                server,
+                &repo,
+                source.head_repository,
+                &source.head_ref,
+                source.merged_head,
+            )
+            .await?
+        }
         None => None,
     };
     let targets = page

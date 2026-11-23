@@ -36,6 +36,7 @@ mod codeowners;
 pub(crate) use branch_update::authorize_branch_update;
 pub(super) mod comments;
 mod git;
+pub(super) use git::review_head;
 mod merge;
 mod merge_methods;
 mod readiness;
