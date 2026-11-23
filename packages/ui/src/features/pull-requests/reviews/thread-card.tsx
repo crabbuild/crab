@@ -250,6 +250,7 @@ export function ReviewThreadCard({
                         aria-label={`Select suggestion from thread #${thread.number}`}
                         disabled={
                           suggestions.pending ||
+                          !!suggestions.retry ||
                           (suggestions.atLimit && !selected)
                         }
                         onCheckedChange={() => suggestions.toggle(thread)}

@@ -85,7 +85,8 @@ pub(super) enum Publication {
 impl Publication {
     fn plan_id(&self) -> Option<String> {
         match self {
-            Self::NativePush | Self::ReviewSuggestions(_) => None,
+            Self::NativePush => None,
+            Self::ReviewSuggestions(batch) => Some(batch.plan_id.clone()),
             Self::BranchUpdate(update) => Some(update.plan_id.clone()),
             Self::ForkSync { plan_id, .. } => Some(plan_id.clone()),
             Self::PullRequest(pull) => pull.plan_id.clone(),

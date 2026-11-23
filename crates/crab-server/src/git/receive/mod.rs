@@ -251,6 +251,7 @@ pub(crate) struct SuggestionPublication {
     pub upstream: Option<uuid::Uuid>,
     pub number: u64,
     pub threads: Vec<(u64, u64)>,
+    pub plan_id: String,
 }
 
 pub(crate) struct BranchUpdatePublication {

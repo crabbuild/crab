@@ -3417,7 +3417,14 @@ and shows the destination branch and editable commit message. Crab uses the
 writer's ordinary Git identity and credits each other suggestion author once in
 `Co-authored-by` trailers.
 `POST .../suggestions` takes
-`{expected_head, threads: [{number, version}], message?}` and returns `{commit}`.
+`{request_id, expected_head, threads: [{number, version}], message?}` and
+returns `{commit}`. Use a fresh UUID for a new batch. Retry the same UUID,
+expected head, selected versions, and message to recover the original commit
+after a lost response or a busy reply. Recovery requires current write access
+and uses the durable publication receipt, including after the branch advances.
+The browser keeps the original submission while the review workspace stays
+open. Close the dialog to refresh the review and choose **Resume suggestion
+commit** to retry.
 Crab checks the selected comment versions, comparison, current file blobs,
 and nonoverlapping line ranges before publishing one commit against the
 expected head. The publication worker rechecks the pull and comment versions

@@ -31,6 +31,13 @@ type Batch = {
   threads: SelectedSuggestion[];
 };
 
+type Submission = {
+  request_id: string;
+  expected_head: string;
+  threads: Array<Pick<SelectedSuggestion, "number" | "version">>;
+  message: string;
+};
+
 function selection(thread: PullReviewThread): SelectedSuggestion {
   const { number, version, path, start_line, end_line } = thread;
   return { number, version, path, start_line, end_line };
@@ -59,6 +66,11 @@ export function useSuggestionBatch(
   const [batch, setBatch] = useState<Batch>();
   const [commit, setCommit] = useState<string>();
   const [intent, setIntent] = useState<Batch & { fromBatch: boolean }>();
+  const [open, setOpen] = useState(false);
+  const [attempt, setAttempt] = useState<{
+    input: Submission;
+    recovering: boolean;
+  }>();
   const [message, setMessage] = useState("");
   const enabled = pull.can_apply_suggestions && !repo.archived;
   const comparison = { head: pull.head_oid, baseRevision: pull.base_revision };
@@ -68,14 +80,26 @@ export function useSuggestionBatch(
   // A selected thread can leave the mounted page during navigation. Keep
   // its captured version so publication can validate the batch as selected.
   const selected = batch && current(batch) ? batch.threads : [];
+  const retry =
+    attempt &&
+    (attempt.recovering ||
+      mutation.status === undefined ||
+      mutation.status === 429 ||
+      mutation.status >= 500)
+      ? attempt.input
+      : undefined;
   function toggle(thread: PullReviewThread) {
-    if (!canApplySuggestion(thread)) return;
+    if (retry || !canApplySuggestion(thread)) return;
     const next = selected.some((item) => item.number === thread.number)
       ? selected.filter((item) => item.number !== thread.number)
       : [...selected, selection(thread)];
     if (next.length <= batchLimit) setBatch({ ...comparison, threads: next });
   }
   function review(thread?: PullReviewThread) {
+    if (retry) {
+      setOpen(true);
+      return;
+    }
     if (!enabled || mutation.pending || (thread && !canApplySuggestion(thread)))
       return;
     const threads = thread ? [selection(thread)] : selected;
@@ -86,38 +110,53 @@ export function useSuggestionBatch(
         ? document.activeElement
         : null;
     setIntent({ ...comparison, threads, fromBatch: thread === undefined });
+    setAttempt(undefined);
     setMessage(`Apply review suggestions from pull request #${pull.number}`);
+    setOpen(true);
   }
   const stale = intent && !current(intent);
   function remove(number: number) {
-    if (!intent?.fromBatch || stale || mutation.pending) return;
+    if (!intent?.fromBatch || retry || stale || mutation.pending) return;
     const threads = intent.threads.filter((item) => item.number !== number);
     const next = threads.length ? { ...intent, threads } : undefined;
+    setAttempt(undefined);
     mutation.reset();
     setBatch(next);
     setIntent(next);
+    if (!next) setOpen(false);
   }
   async function apply() {
-    if (!intent || stale || !enabled || mutation.pending || !message.trim())
+    if (
+      !intent ||
+      mutation.pending ||
+      (!retry && (stale || !enabled || !message.trim()))
+    )
       return;
+    const input = retry ?? {
+      request_id: crypto.randomUUID(),
+      expected_head: intent.head,
+      threads: intent.threads.map(({ number, version }) => ({
+        number,
+        version,
+      })),
+      message: message.trim(),
+    };
+    // Retrying always sends the first immutable request, even after a refresh
+    // changes the displayed head or the server reports a transient failure.
+    setAttempt({ input, recovering: retry !== undefined });
     setCommit(undefined);
     const kind = pull.head_repository ? "upstream-pulls" : "pulls";
-    const result = await mutation.run<{ commit: string }>(
+    const result = await mutation.run<{ commit: string } | null>(
       endpoint(destination, `${kind}/${pull.number}/suggestions`),
       "POST",
-      {
-        expected_head: intent.head,
-        threads: intent.threads.map(({ number, version }) => ({
-          number,
-          version,
-        })),
-        message: message.trim(),
-      },
+      input,
     );
-    if (result) {
+    if (result?.commit) {
       setCommit(result.commit);
       setBatch(undefined);
       setIntent(undefined);
+      setAttempt(undefined);
+      setOpen(false);
       refresh();
     }
   }
@@ -131,11 +170,23 @@ export function useSuggestionBatch(
     commit,
     destination,
     intent,
+    open,
+    retry,
     stale,
     message,
     setMessage,
     close() {
-      if (!mutation.pending) setIntent(undefined);
+      if (mutation.pending) return;
+      setOpen(false);
+      if (!retry) {
+        setIntent(undefined);
+        setAttempt(undefined);
+      }
+    },
+    dismissRetry() {
+      setIntent(undefined);
+      setAttempt(undefined);
+      mutation.reset();
     },
     restoreFocus() {
       trigger.current?.focus();
@@ -144,8 +195,8 @@ export function useSuggestionBatch(
     error:
       mutation.code === "file_changed"
         ? "A selected suggestion changed. Refresh the review and select its current version."
-        : mutation.error && mutation.status === undefined
-          ? "Crab couldn’t confirm the commit. Refresh the branch before trying again."
+        : retry && !mutation.pending && mutation.status === undefined
+          ? "Crab couldn’t confirm the commit. Retry to recover its result."
           : mutation.error,
     atLimit: selected.length >= batchLimit,
   };
@@ -161,11 +212,12 @@ export function SuggestionCommit({
   branch: string;
 }) {
   const id = useId();
-  const { destination, intent, message, pending, stale, enabled } = suggestions;
+  const { destination, intent, message, pending, stale, enabled, open, retry } =
+    suggestions;
   const count = intent?.threads.length ?? 0;
   const error =
     suggestions.error ??
-    (stale
+    (stale && !retry
       ? "The review changed. Refresh and select the suggestions again."
       : undefined);
   return (
@@ -184,8 +236,22 @@ export function SuggestionCommit({
           .
         </p>
       )}
+      {retry && !open && (
+        <div className="flex flex-wrap gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => suggestions.review()}
+          >
+            Resume suggestion commit
+          </Button>
+          <Button variant="ghost" size="sm" onClick={suggestions.dismissRetry}>
+            Dismiss retry
+          </Button>
+        </div>
+      )}
       <Dialog
-        open={Boolean(intent)}
+        open={open}
         onOpenChange={(open) => {
           if (!open) suggestions.close();
         }}
@@ -204,11 +270,17 @@ export function SuggestionCommit({
                 : `Commit ${count} suggestions`}
             </DialogTitle>
             <DialogDescription>
-              Create one commit in{" "}
-              <code>
-                {destination.owner}/{destination.name}
-              </code>{" "}
-              on <code>{branch}</code>.
+              {retry ? (
+                "Confirm the result of the original submission."
+              ) : (
+                <>
+                  Create one commit in{" "}
+                  <code>
+                    {destination.owner}/{destination.name}
+                  </code>{" "}
+                  on <code>{branch}</code>.
+                </>
+              )}
             </DialogDescription>
           </DialogHeader>
           <form
@@ -243,7 +315,7 @@ export function SuggestionCommit({
                       size="sm"
                       variant="ghost"
                       aria-label={`Remove suggestion from thread #${thread.number}`}
-                      disabled={pending || stale}
+                      disabled={pending || stale || !!retry}
                       onClick={() => suggestions.remove(thread.number)}
                     >
                       Remove
@@ -262,7 +334,7 @@ export function SuggestionCommit({
                     suggestions.setMessage(event.target.value)
                   }
                   maxLength={256}
-                  disabled={pending}
+                  disabled={pending || !!retry}
                   required
                 />
               </Field>
@@ -279,13 +351,19 @@ export function SuggestionCommit({
                 onClick={suggestions.close}
                 disabled={pending}
               >
-                Cancel
+                {retry ? "Back to review" : "Cancel"}
               </Button>
               <Button
                 type="submit"
-                disabled={pending || stale || !enabled || !message.trim()}
+                disabled={
+                  pending || (!retry && (stale || !enabled || !message.trim()))
+                }
               >
-                {pending ? "Committing…" : "Commit changes"}
+                {pending
+                  ? "Committing…"
+                  : retry
+                    ? "Retry suggestion commit"
+                    : "Commit changes"}
               </Button>
             </DialogFooter>
           </form>

@@ -46,6 +46,7 @@ pub(crate) struct Harness {
     pub(crate) drop_next_fork_sync_reply: Arc<AtomicBool>,
     pub(crate) drop_next_merge_reply: Arc<AtomicBool>,
     pub(crate) drop_next_branch_update_reply: Arc<AtomicBool>,
+    pub(crate) drop_next_suggestion_reply: Arc<AtomicBool>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -498,16 +499,19 @@ impl Harness {
         let drop_next_fork_sync_reply = Arc::new(AtomicBool::new(false));
         let drop_next_merge_reply = Arc::new(AtomicBool::new(false));
         let drop_next_branch_update_reply = Arc::new(AtomicBool::new(false));
+        let drop_next_suggestion_reply = Arc::new(AtomicBool::new(false));
         let app = router(Arc::clone(&server)).layer(axum::middleware::from_fn({
             let drop_import = Arc::clone(&drop_next_import_reply);
             let drop_sync = Arc::clone(&drop_next_fork_sync_reply);
             let drop_merge = Arc::clone(&drop_next_merge_reply);
             let drop_branch_update = Arc::clone(&drop_next_branch_update_reply);
+            let drop_suggestion = Arc::clone(&drop_next_suggestion_reply);
             move |request: axum::extract::Request, next: axum::middleware::Next| {
                 let drop_import = Arc::clone(&drop_import);
                 let drop_sync = Arc::clone(&drop_sync);
                 let drop_merge = Arc::clone(&drop_merge);
                 let drop_branch_update = Arc::clone(&drop_branch_update);
+                let drop_suggestion = Arc::clone(&drop_suggestion);
                 async move {
                     let is_import = request.method() == axum::http::Method::POST
                         && request.uri().path().ends_with("/git-receive-pack")
@@ -518,10 +522,13 @@ impl Harness {
                         && request.uri().path().ends_with("/merge");
                     let is_branch_update = request.method() == axum::http::Method::POST
                         && request.uri().path().ends_with("/update-branch");
+                    let is_suggestion = request.method() == axum::http::Method::POST
+                        && request.uri().path().ends_with("/suggestions");
                     let mut response = next.run(request).await;
                     if response.status().is_success()
                         && (is_branch_update && drop_branch_update.swap(false, Ordering::SeqCst)
-                            || is_merge && drop_merge.swap(false, Ordering::SeqCst))
+                            || is_merge && drop_merge.swap(false, Ordering::SeqCst)
+                            || is_suggestion && drop_suggestion.swap(false, Ordering::SeqCst))
                     {
                         // Deliver the headers so Chromium cannot retry an
                         // interrupted connection before the app sees the loss.
@@ -559,6 +566,7 @@ impl Harness {
             drop_next_fork_sync_reply,
             drop_next_merge_reply,
             drop_next_branch_update_reply,
+            drop_next_suggestion_reply,
             tasks: vec![task, provider_task],
         }
     }

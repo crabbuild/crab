@@ -130,7 +130,9 @@ existing repositories, without rewriting reviews or receipts. `reviews/pending.r
 owns private drafts and atomic review publication through the existing review
 and thread writers. Review threads belong to `pulls/review_threads/`.
 `api/pulls/review_threads/suggestions.rs` builds a single expected-head Git
-commit from versioned review suggestions. `pulls/viewed.rs` owns actor-scoped review progress,
+commit from versioned review suggestions. The actor and exact batch bind the
+Capsule plan. Retry reads its durable branch receipt before checking live tips.
+`pulls/viewed.rs` owns actor-scoped review progress,
 bound to stable comparison file identities. Browse projection reads and
 writes belong to `projection/`. `dispatch.rs` alone decodes operation IDs. `search/` owns the shared issue/PR
 query grammar; `search/results/` owns tagged issue/PR results and the mixed

@@ -6,8 +6,10 @@ use crab_remote::objects::{TreeEdits, object_id};
 use crab_remote_git::{ContentClassification, EntryKind, EntryMode, OperationKind, Revision};
 use gix_hash::ObjectId;
 use gix_object::{Kind, tree};
-use std::collections::{BTreeMap, BTreeSet};
+use serde::Serialize;
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use uuid::Uuid;
 
 const MAX_SUGGESTIONS: usize = 20;
 const MAX_FILE_BYTES: usize = 900 * 1024;
@@ -16,16 +18,25 @@ const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Input {
+    request_id: Uuid,
     expected_head: String,
     threads: Vec<ThreadVersion>,
     message: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ThreadVersion {
     number: u64,
     version: u64,
+}
+
+struct Batch {
+    number: u64,
+    head: ObjectId,
+    threads: Vec<ThreadVersion>,
+    message: String,
+    plan_id: String,
 }
 
 pub(super) async fn apply(
@@ -59,53 +70,132 @@ async fn apply_batch(
     discussion: &Repository,
     target: &Repository,
     number: u64,
-    input: Input,
+    mut input: Input,
 ) -> std::result::Result<Json<Value>, contents::Error> {
     use contents::Error as WriteError;
-    if !app::membership(&server, &principal, target)
-        .await?
-        .principal
-        .can_write(target.id)
-    {
-        return Err(WriteError::Permission);
-    }
+    require_writer(&server, &principal, target).await?;
     if input.threads.is_empty() || input.threads.len() > MAX_SUGGESTIONS {
         return Err(WriteError::Input("Select 1–20 suggestions to commit"));
     }
-    let ids = input
+    input.threads.sort_unstable_by_key(|thread| thread.number);
+    if input
         .threads
-        .iter()
-        .map(|thread| thread.number)
-        .collect::<BTreeSet<_>>();
-    if ids.len() != input.threads.len() {
+        .windows(2)
+        .any(|pair| pair[0].number == pair[1].number)
+    {
         return Err(WriteError::Input("Select each suggestion only once"));
     }
+    if input.request_id.is_nil() {
+        return Err(WriteError::Input("Use a nonzero suggestion request ID"));
+    }
     let number = app::number(number)?;
-    let mut message = input.message.as_deref().map(str::trim).map_or_else(
+    let message = input.message.as_deref().map(str::trim).map_or_else(
         || format!("Apply review suggestions from pull request #{number}"),
         str::to_owned,
     );
     contents::validate_message(&message)?;
-    let pull = active_pull(&server, discussion, target, number)
+    let head = api::statuses::parse_oid(&input.expected_head)
+        .map_err(|_| WriteError::Input("Use the exact head commit to apply suggestions"))?;
+    let actor = app::actor(&principal)?;
+    let digest = crab_metadata::receipts::publication_request_digest(&(
+        "pull_request_suggestions",
+        target.id,
+        discussion.id,
+        target.identity.placement_generation(),
+        number,
+        &actor.issuer,
+        &actor.subject,
+        head.to_string(),
+        &input.threads,
+        &message,
+    ))
+    .map_err(ReceiveError::from)?;
+    let batch = Batch {
+        number,
+        head,
+        threads: input.threads,
+        message,
+        plan_id: api::encode_hex(&crab_metadata::receipts::publication_plan_id(
+            &digest,
+            input.request_id.as_bytes(),
+        )),
+    };
+    if let Some(commit) = recover_batch(&server, &principal, target, &batch).await? {
+        return Ok(Json(json!({"commit":commit})));
+    }
+    let commit = match publish_batch(&server, &principal, discussion, target, actor, &batch).await {
+        Ok(commit) => commit.to_string(),
+        // Another attempt can commit after our first receipt read, including
+        // before validation notices the head or selected conversations changed.
+        Err(error) => recover_batch(&server, &principal, target, &batch)
+            .await?
+            .ok_or(error)?,
+    };
+    Ok(Json(json!({"commit":commit})))
+}
+
+async fn require_writer(
+    server: &Server,
+    principal: &Principal,
+    target: &Repository,
+) -> std::result::Result<(), contents::Error> {
+    if !app::membership(server, principal, target)
+        .await?
+        .principal
+        .can_write(target.id)
+    {
+        return Err(contents::Error::Permission);
+    }
+    Ok(())
+}
+
+async fn recover_batch(
+    server: &Server,
+    principal: &Principal,
+    target: &Repository,
+    batch: &Batch,
+) -> std::result::Result<Option<String>, contents::Error> {
+    let commit = super::super::git::committed_branch_edit(
+        target,
+        &batch.plan_id,
+        None,
+        Some(&batch.head.to_string()),
+    )
+    .await?;
+    if commit.is_some() {
+        require_writer(server, principal, target).await?;
+    }
+    Ok(commit)
+}
+
+async fn publish_batch(
+    server: &Arc<Server>,
+    principal: &Principal,
+    discussion: &Repository,
+    target: &Repository,
+    actor: Identity,
+    batch: &Batch,
+) -> std::result::Result<ObjectId, contents::Error> {
+    use contents::Error as WriteError;
+    let pull = active_pull(server, discussion, target, batch.number)
         .await
         .map_err(|error| match error {
             Error::Archived => WriteError::from(ReceiveError::Archived),
             error => WriteError::from(error),
         })?;
-    let source = comparison(&server, discussion, &pull).await?;
-    if !source.live || source.head_oid != input.expected_head {
+    let source = comparison(server, discussion, &pull).await?;
+    if !source.live || source.head_oid != batch.head.to_string() {
         return Err(WriteError::Conflict);
     }
     let Some(repository) = source.repository else {
         return Err(WriteError::Conflict);
     };
-    let head = ObjectId::from_hex(source.head_oid.as_bytes()).map_err(|_| WriteError::Conflict)?;
+    let head = batch.head;
     let mut files: BTreeMap<Vec<u8>, Vec<Replacement>> = BTreeMap::new();
-    let actor = app::actor(&principal)?;
     let mut authors = BTreeMap::new();
-    for selected in &input.threads {
+    for selected in &batch.threads {
         let thread = storage::thread(
-            &server,
+            server,
             discussion,
             pull.number,
             app::number(selected.number)?,
@@ -148,6 +238,7 @@ async fn apply_batch(
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
+    let mut message = batch.message.clone();
     if !authors.is_empty() {
         message.push('\n');
         for (email, name) in authors {
@@ -160,8 +251,8 @@ async fn apply_batch(
         .map_err(|error| WriteError::Build(Box::new(error.into())))?;
     objects.push((Kind::Commit, commit));
     receive::publish_suggestion_objects(
-        server,
-        principal,
+        Arc::clone(server),
+        principal.clone(),
         (target.config.owner.clone(), target.config.name.clone()),
         crab_git::receive_plan::RefUpdate {
             name: pull.head_ref,
@@ -171,16 +262,23 @@ async fn apply_batch(
         objects,
         SuggestionPublication {
             upstream: (target.id != discussion.id).then_some(discussion.id),
-            number,
-            threads: input
+            number: batch.number,
+            threads: batch
                 .threads
-                .into_iter()
+                .iter()
                 .map(|thread| (thread.number, thread.version))
                 .collect(),
+            plan_id: batch.plan_id.clone(),
         },
     )
-    .await?;
-    Ok(Json(json!({"commit":oid.to_string()})))
+    .await
+    .map_err(|error| match error {
+        ReceiveError::Coordination(crab_coordination::CoordinationError::PushLockHeld {
+            ..
+        }) => ReceiveError::Busy,
+        error => error,
+    })?;
+    Ok(oid)
 }
 
 async fn active_pull(

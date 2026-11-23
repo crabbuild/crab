@@ -556,16 +556,19 @@ async fn commit_suggestions_across_pages(
     browser
         .run(&["fill", "[role='dialog'] input[maxlength='256']", message])
         .await;
+    h.drop_next_suggestion_reply
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     click(&browser, "button", "Commit changes").await;
     browser
-        .run(&["wait", "--text", "Committed suggestions in"])
+        .run(&["wait", "--text", "Retry suggestion commit"])
         .await;
+    assert!(
+        !h.drop_next_suggestion_reply
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
 
     assert!(with_http_token(source, token, &["fetch", remote, "feature"]).await);
     let commit = git(source, &["rev-parse", "FETCH_HEAD"]).await;
-    browser
-        .run(&["wait", &format!("a[href*='/commit/{commit}']")])
-        .await;
     assert_eq!(git(source, &["rev-parse", "FETCH_HEAD^"]).await, head);
     assert_eq!(
         git(
@@ -601,6 +604,30 @@ async fn commit_suggestions_across_pages(
         git(source, &["log", "-1", "--format=%cn", "FETCH_HEAD"]).await,
         "Alice"
     );
+
+    click(&browser, "button", "Back to review").await;
+    browser
+        .run(&["wait", "--fn", "!document.querySelector('[role=dialog]')"])
+        .await;
+    git(source, &["switch", "--detach", &commit]).await;
+    std::fs::write(source.join("after-review.txt"), "later work\n").unwrap();
+    git(source, &["add", "after-review.txt"]).await;
+    git(source, &["commit", "-m", "Add later work"]).await;
+    let later = git(source, &["rev-parse", "HEAD"]).await;
+    assert!(with_http_token(source, token, &["push", remote, "HEAD:refs/heads/feature"]).await);
+    click(&browser, "button", "Refresh").await;
+    browser.run(&["wait", "--text", "517 changed files"]).await;
+    click(&browser, "button", "Resume suggestion commit").await;
+    click(&browser, "button", "Retry suggestion commit").await;
+    browser
+        .run(&["wait", "--text", "Committed suggestions in"])
+        .await;
+    browser
+        .run(&["wait", &format!("a[href*='/commit/{commit}']")])
+        .await;
+    assert!(with_http_token(source, token, &["fetch", remote, "feature"]).await);
+    assert_eq!(git(source, &["rev-parse", "FETCH_HEAD"]).await, later);
+    assert_eq!(git(source, &["rev-parse", "FETCH_HEAD^"]).await, commit);
     drop(browser);
 }
 

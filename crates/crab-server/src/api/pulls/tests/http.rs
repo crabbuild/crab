@@ -538,7 +538,7 @@ async fn suggestion_batches_publish_one_git_commit_or_leave_the_head_unchanged()
             Method::POST,
             &endpoint,
             &alice,
-            json!({"expected_head":head,"threads":[
+            json!({"request_id":uuid::Uuid::now_v7(),"expected_head":head,"threads":[
                 {"number":1,"version":1},{"number":2,"version":1},{"number":3,"version":1}
             ]}),
         )
@@ -546,8 +546,11 @@ async fn suggestion_batches_publish_one_git_commit_or_leave_the_head_unchanged()
     assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
     let unchanged = git::success(path, &["ls-remote", remote.as_str(), "refs/heads/feature"]).await;
     assert_eq!(unchanged, format!("{head}\trefs/heads/feature"));
-    let input =
-        json!({"expected_head":head,"threads":[{"number":1,"version":1},{"number":2,"version":1}]});
+    let input = json!({
+        "request_id":uuid::Uuid::now_v7(),
+        "expected_head":head,
+        "threads":[{"number":1,"version":1},{"number":2,"version":1}],
+    });
     let mut stale = input.clone();
     stale["threads"][1]["version"] = json!(2);
     assert_eq!(
@@ -564,14 +567,17 @@ async fn suggestion_batches_publish_one_git_commit_or_leave_the_head_unchanged()
             .status(),
         StatusCode::FORBIDDEN
     );
-    let applied: Value = h
-        .write(Method::POST, &endpoint, &alice, input.clone())
-        .await
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let submit = || h.write(Method::POST, &endpoint, &alice, input.clone());
+    let (first, second) = tokio::join!(submit(), submit());
+    let mut outcomes = Vec::<Value>::new();
+    for response in [first, second] {
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            continue;
+        }
+        outcomes.push(response.error_for_status().unwrap().json().await.unwrap());
+    }
+    let applied = outcomes.first().unwrap();
+    assert!(outcomes.iter().all(|value| value == applied));
     git::success(path, &["fetch", remote.as_str(), "feature"]).await;
     assert_eq!(
         git::success(path, &["rev-parse", "FETCH_HEAD"]).await,
@@ -589,8 +595,21 @@ async fn suggestion_batches_publish_one_git_commit_or_leave_the_head_unchanged()
         git::success(path, &["show", "FETCH_HEAD:second.txt"]).await,
         "alpha\r\nnew beta"
     );
+    let mut reordered = input.clone();
+    reordered["threads"].as_array_mut().unwrap().reverse();
+    let replayed: Value = h
+        .write(Method::POST, &endpoint, &alice, reordered)
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(&replayed, applied);
+    let mut changed = input;
+    changed["message"] = json!("A different commit message");
     assert_eq!(
-        h.write(Method::POST, &endpoint, &alice, input)
+        h.write(Method::POST, &endpoint, &alice, changed)
             .await
             .status(),
         StatusCode::CONFLICT

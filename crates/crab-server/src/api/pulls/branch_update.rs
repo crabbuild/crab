@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::{git::PullGit, merge, storage};
+use super::{
+    git::{PullGit, committed_branch_edit},
+    merge, storage,
+};
 use crate::{
     app::{self, Error, Result},
     auth::Principal,
@@ -311,11 +314,11 @@ async fn update_destination(
         head,
         plan_id: plan_id.clone(),
     });
-    if let Some(commit) = committed_update(
+    if let Some(commit) = committed_branch_edit(
         &destination.head,
         &plan_id,
         replacement.as_ref().map(|intent| intent.branch.as_str()),
-        &input.head_oid,
+        replacement.is_none().then_some(input.head_oid.as_str()),
     )
     .await?
     {
@@ -426,11 +429,11 @@ async fn update_destination(
         (Err(error), Some(intent)) => {
             // A concurrent retry may have reached publication after this
             // request read the receipts and before its ref admission.
-            committed_update(
+            committed_branch_edit(
                 &destination.head,
                 &intent.plan_id,
                 Some(&intent.branch),
-                &input.head_oid,
+                None,
             )
             .await?
             .ok_or_else(|| publication_error(error, true))?
@@ -443,40 +446,6 @@ async fn update_destination(
             .await;
     }
     Ok(Json(json!({"commit":commit})))
-}
-
-async fn committed_update(
-    head: &Repository,
-    plan_id: &str,
-    replacement: Option<&str>,
-    old: &str,
-) -> Result<Option<String>> {
-    let receipt = crab_metadata::capsule_protocol::resolve_capsule_plan_receipt(
-        &head.store,
-        &head.layout,
-        plan_id,
-    )
-    .await
-    .map_err(|error| merge::map_receive(error.into()))?;
-    let Some(receipt) = receipt else {
-        return Ok(None);
-    };
-    let [edit] = receipt.transaction().edits() else {
-        return Err(Error::CellContract(
-            "Branch update receipt has unexpected ref edits",
-        ));
-    };
-    let expected = match replacement {
-        Some(branch) => edit.ref_name() == branch && edit.expected_old().is_none(),
-        // The PR can switch heads after an ordinary branch update commits.
-        None => edit.ref_name().starts_with("refs/heads/") && edit.expected_old() == Some(old),
-    };
-    edit.new_oid()
-        .filter(|_| expected)
-        .map(|commit| Some(commit.to_owned()))
-        .ok_or(Error::CellContract(
-            "Branch update receipt has an unexpected ref",
-        ))
 }
 
 fn publication_error(error: ReceiveError, replacement: bool) -> Error {

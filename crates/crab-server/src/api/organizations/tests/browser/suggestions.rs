@@ -46,7 +46,11 @@ pub(super) async fn apply_to_fork(
         threads.push(json!({"number":thread["number"],"version":thread["version"]}));
     }
     let action = format!("{fork_api}/upstream-pulls/1/suggestions");
-    let input = json!({"expected_head":selected["head_oid"],"threads":threads});
+    let input = json!({
+        "request_id":uuid::Uuid::now_v7(),
+        "expected_head":selected["head_oid"],
+        "threads":threads,
+    });
     assert_eq!(
         repository_write(h, Method::POST, &action, reviewer, fork, input.clone())
             .await
