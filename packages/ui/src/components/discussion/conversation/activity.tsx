@@ -61,6 +61,8 @@ function action(event: ActivityEvent): string {
       return "cancelled a team review request on";
     case "code_owner_reviews_requested":
       return "requested code owner reviews on";
+    case "merge_queue_prioritized":
+      return "prioritized";
     case "updated":
       return "updated";
     case "issue_closed":

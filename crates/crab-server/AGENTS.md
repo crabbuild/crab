@@ -70,6 +70,11 @@ merge admission and publication under the per-PR merge lease. FIFO queue
 entries share this worker. The Cell assigns order per target branch, admits
 tests within the configured build window, and guards merge reservation for
 the first entry. `auto_merge/queue.rs` reconciles candidate checks and retries.
+An administrator's priority change advances the branch queue's order
+revision in the same Cell transaction as the move. Candidate sources, CI
+admission, and begin-merge compare that revision so a stale worker cannot
+publish or remove an entry for a superseded order. A pending publication
+prevents reordering until it settles.
 Classic branch protection and active branch rulesets can require queues.
 Classic transitions share the branch ref lease with publication. Ruleset
 settings and final branch publication share a repository or organization

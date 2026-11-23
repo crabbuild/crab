@@ -95,6 +95,7 @@ struct Candidate {
 pub(super) struct QueueBase {
     pub reference: String,
     pub oid: String,
+    pub order_revision: u64,
 }
 
 pub(super) async fn prospective_base(
@@ -110,6 +111,7 @@ pub(super) async fn prospective_base(
     let mut base = QueueBase {
         reference: state.job.base_ref.clone(),
         oid: live_base.to_owned(),
+        order_revision: state.order_revision,
     };
     if ahead.is_empty() {
         return Ok(Some(base));
@@ -128,7 +130,8 @@ pub(super) async fn prospective_base(
         let Some(candidate) = read_candidate(server, git, job.pull)
             .await?
             .filter(|candidate| {
-                candidate.source == Source::captured(repo, &pull, Some(job.id))
+                candidate.source
+                    == Source::captured(repo, &pull, Some(job.candidate_id(state.order_revision)))
                     && candidate.method == job.method
                     && candidate.head.to_string() == job.head_oid
             })
@@ -168,6 +171,7 @@ pub(super) async fn prospective_base(
         base = QueueBase {
             reference: merge_candidate_ref(job.pull),
             oid: tip,
+            order_revision: state.order_revision,
         };
     }
     Ok(Some(base))
@@ -327,6 +331,15 @@ pub(super) async fn verify_comparison(
     tested_oid: &str,
     queued: bool,
 ) -> Result<()> {
+    let queue = if queued {
+        let active = auto_merge::active_queue(server, repo, pull.number)
+            .await?
+            .filter(|state| state.first)
+            .ok_or(Error::MergeConflict)?;
+        Some(active.job.candidate_id(active.order_revision))
+    } else {
+        None
+    };
     let candidate = read_candidate(server, repository, pull.number)
         .await?
         .filter(|candidate| {
@@ -334,7 +347,7 @@ pub(super) async fn verify_comparison(
                 && candidate.base.to_string() == input.base_oid
                 && candidate.head.to_string() == input.head_oid
                 && candidate.method == input.method
-                && candidate.source.queue.is_some() == queued
+                && candidate.source.queue == queue
                 && candidate.source == Source::captured(repo, pull, candidate.source.queue)
         });
     if candidate.is_none() {
@@ -408,7 +421,9 @@ async fn detail(
     let candidate = read_candidate(&server, &repository, number).await?;
     let tips = live_tips(&server, &repo, &repository, &pull).await?;
     let queued = auto_merge::active_queue(&server, &repo, number).await?;
-    let queue = queued.as_ref().map(|state| state.job.id);
+    let queue = queued
+        .as_ref()
+        .map(|state| state.job.candidate_id(state.order_revision));
     let queue_required = settings::requires_merge_queue(&server, &repo, &pull.base_ref).await?;
     let queue_current = match &queued {
         Some(state) => state.job.enabled(
@@ -523,15 +538,16 @@ pub(super) async fn queue_commit(
     git: &PullGit,
     pull: &PullRequest,
     job: &Job,
-    (base, head): (&str, &str),
+    base: &QueueBase,
 ) -> Result<Option<String>> {
     Ok(read_candidate(server, &git.base, pull.number)
         .await?
         .filter(|candidate| {
-            candidate.source == Source::captured(repo, pull, Some(job.id))
+            candidate.source
+                == Source::captured(repo, pull, Some(job.candidate_id(base.order_revision)))
                 && candidate.method == job.method
-                && candidate.base.to_string() == base
-                && candidate.head.to_string() == head
+                && candidate.base.to_string() == base.oid
+                && candidate.head.to_string() == job.head_oid
         })
         .map(|candidate| candidate.oid.to_string()))
 }
@@ -546,7 +562,7 @@ pub(super) async fn stage(
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<ObjectId> {
     let job = plan.map(|(job, _)| job);
-    let queue = job.map(|job| job.id);
+    let queue = plan.map(|(job, base)| job.candidate_id(base.order_revision));
     let method = job.map_or(MergeMethod::MergeCommit, |job| job.method);
     if !principal.can_write(repo.id) {
         return Err(Error::MergePermission);
@@ -807,7 +823,7 @@ pub(crate) async fn authorize_merge_candidate(
     }
     let allowed = match (queue, active) {
         (None, None) => true,
-        (Some(id), Some(state)) if state.job.id == id => {
+        (Some(id), Some(state)) if state.job.candidate_id(state.order_revision) == id => {
             let CandidatePublication::Prepare {
                 method,
                 build_ref,
@@ -893,7 +909,10 @@ pub(in crate::api) async fn require_check_target(
     };
     if candidate.oid != oid
         || (active.is_none() && queue_required)
-        || candidate.source.queue != active.as_ref().map(|state| state.job.id)
+        || candidate.source.queue
+            != active
+                .as_ref()
+                .map(|state| state.job.candidate_id(state.order_revision))
         || !is_current(&candidate, repo, &pull, effective.as_deref(), Some(&head))
     {
         return Err(Error::CommitNotFound);

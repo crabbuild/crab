@@ -7,6 +7,14 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   NativeSelect,
   NativeSelectOption,
 } from "@/components/ui/native-select";
@@ -122,6 +130,28 @@ function Entries({
   );
   const change = useMutation(csrf, repo);
   const [announcement, setAnnouncement] = useState("");
+  const [priority, setPriority] = useState<{
+    item: MergeQueueItem;
+    requestId: string;
+  }>();
+  async function moveToFront() {
+    if (!priority) return;
+    const { item, requestId } = priority;
+    const result = await change.run<{ request_id: string }>(
+      endpoint(repo, `pulls/${item.pull}/merge-queue/priority`),
+      "PUT",
+      { request_id: requestId, queue_id: item.request_id },
+    );
+    if (result?.request_id !== requestId) return;
+    setPriority(undefined);
+    setAnnouncement(`Saved priority for pull request #${item.pull}.`);
+    if (before) {
+      navigate(repoHref(repo, { view: "pulls", action: "queue", branch }));
+    } else {
+      page.retry();
+    }
+  }
+
   async function remove(item: MergeQueueItem) {
     setAnnouncement("");
     const result = await change.run<{
@@ -158,7 +188,46 @@ function Entries({
           {announcement}
         </p>
       )}
-      <Failure message={change.error} />
+      {!priority && <Failure message={change.error} />}
+      <Dialog
+        open={priority !== undefined}
+        onOpenChange={(open) => {
+          if (!open && !change.pending) {
+            change.reset();
+            setPriority(undefined);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Move pull request to the front?</DialogTitle>
+            <DialogDescription>
+              The queue will rebuild candidates for{" "}
+              {branch.replace(/^refs\/heads\//, "")} and run their required
+              checks again.
+            </DialogDescription>
+          </DialogHeader>
+          <Failure message={change.error} />
+          <DialogFooter>
+            <Button
+              variant="outline"
+              disabled={change.pending}
+              onClick={() => {
+                change.reset();
+                setPriority(undefined);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              disabled={change.pending}
+              onClick={() => void moveToFront()}
+            >
+              Confirm move to front
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Result state={page} timingLabel="Merge queue">
         {(data) => (
           <>
@@ -207,17 +276,37 @@ function Entries({
                         )}
                       </div>
                     </div>
-                    {item.can_remove && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={change.pending}
-                        aria-label={`Remove pull request #${item.pull} from queue`}
-                        onClick={() => void remove(item)}
-                      >
-                        Remove from queue
-                      </Button>
-                    )}
+                    <div className="flex flex-wrap gap-2">
+                      {item.can_prioritize && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={change.pending}
+                          aria-label={`Move pull request #${item.pull} to front`}
+                          onClick={() => {
+                            change.reset();
+                            setAnnouncement("");
+                            setPriority({
+                              item,
+                              requestId: crypto.randomUUID(),
+                            });
+                          }}
+                        >
+                          Move to front
+                        </Button>
+                      )}
+                      {item.can_remove && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={change.pending}
+                          aria-label={`Remove pull request #${item.pull} from queue`}
+                          onClick={() => void remove(item)}
+                        >
+                          Remove from queue
+                        </Button>
+                      )}
+                    </div>
                   </li>
                 ))}
               </ol>

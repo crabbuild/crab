@@ -3528,6 +3528,16 @@ shows the requested head, whether a candidate is scheduled, and whether
 publication is pending. Open **Candidate checks** for the current result and
 tested commit. Readers can inspect the queue. Writers and PR authors can
 remove an entry by its exact request before publication is pending.
+Repository admins can select **Move to front** for an urgent pull request.
+Crab keeps the entry and its recorded requester and rebuilds candidates for
+the reordered branch. Checks on earlier candidate commits cannot satisfy the
+new order. Once the front entry has begun publication, the queue accepts
+priority changes again after that publication finishes.
+
+`PUT /api/repos/{owner}/{name}/pulls/{number}/merge-queue/priority` accepts
+`queue_id` from the queue row and a new UUID as `request_id`. Retrying the
+same accepted request returns its acknowledgement without moving the entry
+a second time. The pull request conversation records the move.
 
 `GET /api/repos/{owner}/{name}/pulls/queue` takes the full target ref as
 `branch` (for example, `refs/heads/main`). Pass the returned `next` cursor

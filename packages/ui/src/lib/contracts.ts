@@ -14,7 +14,7 @@ export type Session = { authenticated: boolean, mode: SessionMode, user: Session
 export type MergeQueueState = "waiting" | "preparing" | "candidate_scheduled" | "publishing";
 
 // prettier-ignore
-export type MergeQueueItem = { pull: number, title: string, request_id: string, head_oid: string, state: MergeQueueState, can_remove: boolean, };
+export type MergeQueueItem = { pull: number, title: string, request_id: string, head_oid: string, state: MergeQueueState, can_remove: boolean, can_prioritize: boolean, };
 
 // prettier-ignore
 export type MergeQueuePage = { items: Array<MergeQueueItem>, next: string | null, };

@@ -9,6 +9,7 @@ pub(crate) struct Query {
     pub before: Option<String>,
     pub actor: RepositoryAuthor,
     pub can_write: bool,
+    pub can_admin: bool,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -32,6 +33,7 @@ pub(crate) struct Entry {
     head_oid: String,
     state: EntryState,
     can_remove: bool,
+    can_prioritize: bool,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -55,6 +57,7 @@ impl Read for List {
         let prefix = queue_prefix(&input.branch);
         if let Some(before) = &input.before
             && !before.strip_prefix(&prefix).is_some_and(|key| {
+                let key = key.strip_prefix("priority/").unwrap_or(key);
                 key.len() == 16
                     && key
                         .bytes()
@@ -81,6 +84,22 @@ impl Read for List {
                 .map(|(_, pull)| pull)
                 .collect()
         };
+        let order_revision = priority::revision(context, &input.branch)?;
+        let first = window.first().copied();
+        let can_reorder = if let Some(first) = first.filter(|_| input.can_admin) {
+            let publishing = context.query(
+                "SELECT pending_merge IS NOT NULL FROM repository_pulls WHERE number=?",
+                &[integer(first)?],
+            )?;
+            publishing
+                .rows
+                .first()
+                .map(|row| result_u64_from_row(row, 0))
+                .transpose()?
+                .is_some_and(|publishing| publishing == 0)
+        } else {
+            false
+        };
         let next = (rows.len() > LIMIT).then(|| rows[LIMIT - 1].0.clone());
         let mut items = Vec::with_capacity(rows.len().min(LIMIT));
         for (position, number) in rows.into_iter().take(LIMIT) {
@@ -88,7 +107,7 @@ impl Read for List {
                 return Err(Error::Invalid("Merge queue entry has no active job"));
             };
             let Some(queue) = job.queue.filter(|queue| {
-                job.base_ref == input.branch && queue_key(&job.base_ref, queue.sequence) == position
+                job.base_ref == input.branch && queue_key(&job.base_ref, queue) == position
             }) else {
                 return Err(Error::Invalid("Merge queue entry does not match its key"));
             };
@@ -110,7 +129,9 @@ impl Read for List {
                 EntryState::Publishing
             } else if !window.contains(&number) {
                 EntryState::Waiting
-            } else if queue.testing.is_some_and(|test| test.version == version) {
+            } else if queue.testing.is_some_and(|test| {
+                test.version == version && test.order_revision == order_revision
+            }) {
                 EntryState::CandidateScheduled
             } else {
                 EntryState::Preparing
@@ -122,6 +143,7 @@ impl Read for List {
                 head_oid: job.head_oid,
                 state,
                 can_remove: !publishing && (input.can_write || owns_pull),
+                can_prioritize: can_reorder && !publishing && first != Some(number),
             });
         }
         Ok(Page { items, next })
@@ -132,20 +154,24 @@ impl Read for List {
 mod tests {
     use super::*;
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn branch_queue_pages_follow_admission_order_across_removals() {
-        let server = crate::test_support::server::fixture().await;
-        let repo = &server.repositories.values()[0];
-        let cell = server.cells().unwrap().repository(repo.id).unwrap();
-        let actor = RepositoryAuthor {
+    const BRANCH: &str = "refs/heads/main";
+
+    fn author() -> RepositoryAuthor {
+        RepositoryAuthor {
             issuer: "https://identity.test".into(),
             subject: "writer".into(),
             name: "Writer".into(),
-        };
-        let branch = "refs/heads/main";
+        }
+    }
+
+    async fn seed_queue(
+        cell: &crate::cells::RepositoryCell,
+        actor: &RepositoryAuthor,
+        count: u64,
+    ) -> Vec<Uuid> {
         let base_oid = "a".repeat(40);
         let head_oid = "b".repeat(40);
-        for _ in 0..=LIMIT {
+        for _ in 0..count {
             let opened = cell
                 .client
                 .command::<CreatePull>(
@@ -159,7 +185,7 @@ mod tests {
                         author: actor.clone(),
                         title: "Queued change".into(),
                         body: String::new(),
-                        base_ref: branch.into(),
+                        base_ref: BRANCH.into(),
                         base_oid: base_oid.clone(),
                         head_ref: "refs/heads/feature".into(),
                         head_repository: None,
@@ -171,7 +197,7 @@ mod tests {
             assert!(matches!(opened.output, CreatePullOutcome::Created(_)));
         }
         let mut ids = Vec::new();
-        for pull in (1..=LIMIT as u64 + 1).rev() {
+        for pull in (1..=count).rev() {
             let id = Uuid::now_v7();
             ids.push(id);
             let result = cell
@@ -185,7 +211,7 @@ mod tests {
                             pull,
                             id,
                             actor: actor.clone(),
-                            base_ref: branch.into(),
+                            base_ref: BRANCH.into(),
                             head_ref: "refs/heads/feature".into(),
                             head_repository: None,
                             head_oid: head_oid.clone(),
@@ -207,6 +233,17 @@ mod tests {
                 .unwrap();
             assert!(matches!(result.output, Outcome::Saved));
         }
+        ids
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn branch_queue_pages_follow_admission_order_across_removals() {
+        let server = crate::test_support::server::fixture().await;
+        let repo = &server.repositories.values()[0];
+        let cell = server.cells().unwrap().repository(repo.id).unwrap();
+        let actor = author();
+        let branch = BRANCH;
+        let ids = seed_queue(&cell, &actor, LIMIT as u64 + 1).await;
         let read = async |branch: &str, before| {
             cell.client
                 .query::<List>(
@@ -217,6 +254,7 @@ mod tests {
                         before,
                         actor: actor.clone(),
                         can_write: false,
+                        can_admin: false,
                     },
                 )
                 .await
@@ -248,6 +286,7 @@ mod tests {
                     pull: 2,
                     id: ids[LIMIT - 1],
                     reason: Stop::Canceled,
+                    front_revision: None,
                 },
             )
             .await
@@ -262,5 +301,119 @@ mod tests {
             [1]
         );
         assert!(last.next.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn priority_and_begin_publication_fence_each_other() {
+        let server = crate::test_support::server::fixture().await;
+        let repo = &server.repositories.values()[0];
+        let cell = server.cells().unwrap().repository(repo.id).unwrap();
+        let actor = author();
+        let ids = seed_queue(&cell, &actor, 2).await;
+        let job = cell
+            .client
+            .query::<Get>(&cell.target, None, 2)
+            .await
+            .unwrap()
+            .output
+            .unwrap()
+            .job;
+        let commit_oid = "c".repeat(40);
+        let merge = PullMerge {
+            request_id: job
+                .publication_id(1, &job.initial_base_oid, Some(&commit_oid), 0)
+                .into_bytes(),
+            author: actor.clone(),
+            method: job.method,
+            pull_version: 1,
+            base_oid: job.initial_base_oid.clone(),
+            head_oid: job.head_oid.clone(),
+            commit_oid,
+            message: String::new(),
+            created_at_ms: 1,
+            publication_plan: Some("d".repeat(64)),
+            bypass_rulesets: Vec::new(),
+            tested_candidate: true,
+        };
+        let transition = async |transition, merge: &PullMerge| {
+            cell.client
+                .command::<super::super::super::merge::TransitionPullMerge>(
+                    &cell.target,
+                    crate::app::mutation_identity().unwrap(),
+                    TransitionPullMergeInput {
+                        pull: 2,
+                        merge: merge.clone(),
+                        transition,
+                    },
+                )
+                .await
+                .unwrap()
+                .output
+        };
+        let edit = async |change| {
+            cell.client
+                .command::<Edit>(
+                    &cell.target,
+                    crate::app::mutation_identity().unwrap(),
+                    change,
+                )
+                .await
+                .unwrap()
+                .output
+        };
+        let prioritize = |pull: u64, request_id| {
+            Change::Prioritize(Priority {
+                pull,
+                id: ids[(2 - pull) as usize],
+                request_id,
+                actor: actor.clone(),
+                configured_queue_required: true,
+                ruleset_queue_required: false,
+            })
+        };
+
+        assert!(matches!(
+            transition(PullMergeTransition::Begin, &merge).await,
+            TransitionPullMergeOutcome::Applied(_)
+        ));
+        let request = Uuid::now_v7();
+        assert!(matches!(
+            edit(prioritize(1, request)).await,
+            Outcome::MergePending
+        ));
+        let TransitionPullMergeOutcome::Applied(aborted) =
+            transition(PullMergeTransition::Abort, &merge).await
+        else {
+            panic!("Expected the reserved publication to abort");
+        };
+        let stale = PullMerge {
+            pull_version: aborted.version,
+            request_id: job
+                .publication_id(aborted.version, &merge.base_oid, Some(&merge.commit_oid), 0)
+                .into_bytes(),
+            ..merge
+        };
+
+        assert!(matches!(edit(prioritize(1, request)).await, Outcome::Saved));
+        assert!(matches!(
+            edit(prioritize(2, Uuid::now_v7())).await,
+            Outcome::Saved
+        ));
+        // Even with the same pull back at the front, a worker holding the
+        // original order cannot begin a merge or apply a failed-check decision.
+        assert!(matches!(
+            transition(PullMergeTransition::Begin, &stale).await,
+            TransitionPullMergeOutcome::Conflict
+        ));
+        assert!(matches!(
+            edit(Change::Disarm {
+                pull: 2,
+                id: ids[0],
+                reason: Stop::ChecksFailed,
+                front_revision: Some(0),
+            })
+            .await,
+            Outcome::Changed
+        ));
     }
 }

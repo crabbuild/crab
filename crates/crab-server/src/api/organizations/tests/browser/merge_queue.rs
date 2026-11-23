@@ -141,6 +141,18 @@ async fn native_browser_queue_publishes_tested_commits_in_admission_order() {
     let visible = h.json(&queue_endpoint, &reader).await;
     assert_eq!(visible["items"][0]["title"], "feature");
     assert_eq!(visible["items"][0]["can_remove"], false);
+    assert_eq!(visible["items"][1]["can_prioritize"], false);
+    assert_eq!(
+        h.write(
+            Method::PUT,
+            &format!("{second}/merge-queue/priority"),
+            &reader,
+            json!({"request_id":Uuid::now_v7(),"queue_id":visible["items"][1]["request_id"]})
+        )
+        .await
+        .status(),
+        reqwest::StatusCode::FORBIDDEN
+    );
     assert_eq!(
         h.write(
             Method::DELETE,
@@ -183,6 +195,18 @@ async fn native_browser_queue_publishes_tested_commits_in_admission_order() {
     browser
         .run(&["select", "#merge-queue-branch", "refs/heads/integration"])
         .await;
+    for number in [2, 1] {
+        let move_button = format!("[aria-label='Move pull request #{number} to front']");
+        browser.run(&["wait", &move_button]).await;
+        browser.run(&["click", &move_button]).await;
+        click("Confirm move to front").await;
+        browser
+            .run(&["wait", "--fn", "!document.querySelector('[role=dialog]')"])
+            .await;
+        let order: Value = h.json(&queue_endpoint, &writer).await;
+        assert_eq!(order["items"][0]["pull"], number);
+        assert_eq!(order["items"][0]["can_prioritize"], false);
+    }
     browser
         .run(&["wait", "[aria-label='Remove pull request #2 from queue']"])
         .await;

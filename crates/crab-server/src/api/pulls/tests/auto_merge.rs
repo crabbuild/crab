@@ -499,6 +499,61 @@ async fn grouped_checks_build_in_a_bounded_window_rebuild_after_removal_and_publ
         format!("{base}\trefs/heads/main")
     );
 
+    // Both entries already have candidates. Move the second to the front,
+    // then restore the first and replay the first move to model a lost reply.
+    let promote = async |entry: &(String, Uuid), request_id: Uuid| {
+        write(
+            Method::PUT,
+            &format!("{}/merge-queue/priority", entry.0),
+            json!({"request_id":request_id,"queue_id":entry.1}),
+        )
+        .await
+    };
+    let first_move = Uuid::now_v7();
+    promote(second, first_move)
+        .await
+        .error_for_status()
+        .unwrap();
+    assert_eq!(
+        h.json(&format!("{}/auto-merge", second.0), &alice).await["request"]["first"],
+        true
+    );
+    assert!(matches!(
+        super::super::candidate::require_check_target(
+            &h.server,
+            &repo,
+            1,
+            gix_hash::ObjectId::from_hex(first_tip.as_bytes()).unwrap(),
+        )
+        .await,
+        Err(crate::app::Error::CommitNotFound)
+    ));
+    let promoted = wait_for_candidate(&second.0, &base, false).await;
+    assert_ne!(promoted, obsolete);
+
+    promote(first, Uuid::now_v7())
+        .await
+        .error_for_status()
+        .unwrap();
+    promote(second, first_move)
+        .await
+        .error_for_status()
+        .unwrap();
+    assert_eq!(
+        promote(first, first_move).await.status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        h.json(&format!("{}/auto-merge", first.0), &alice).await["request"]["first"],
+        true
+    );
+    let rebuilt = wait_for_candidate(&first.0, &base, false).await;
+    assert_ne!(rebuilt, first_tip);
+    assert_eq!(
+        git(&["ls-remote", remote.as_str(), "refs/heads/main"]).await,
+        format!("{base}\trefs/heads/main")
+    );
+
     write(
         Method::DELETE,
         &format!("{}/auto-merge", first.0),
@@ -513,6 +568,7 @@ async fn grouped_checks_build_in_a_bounded_window_rebuild_after_removal_and_publ
     ));
     let second_tip = wait_for_candidate(&second.0, &base, false).await;
     assert_ne!(second_tip, obsolete);
+    assert_ne!(second_tip, promoted);
     git(&["fetch", remote.as_str(), "refs/crab/merge-queue/2"]).await;
     assert_eq!(git(&["show", "FETCH_HEAD:README.md"]).await, "base");
     let third_tip = wait_for_candidate(&third.0, &second_tip, true).await;
@@ -673,6 +729,7 @@ async fn branch_queue_overrides_isolate_methods_build_limits_and_check_deadlines
                             version,
                             base_oid: base.clone(),
                             previous_oid: None,
+                            order_revision: 0,
                         },
                         configured_queue_required: false,
                         ruleset_queue_required: false,
@@ -692,6 +749,7 @@ async fn branch_queue_overrides_isolate_methods_build_limits_and_check_deadlines
                             pull: number,
                             id: request,
                             reason: Stop::ChecksTimedOut,
+                            front_revision: Some(0),
                         },
                     )
                     .await,
