@@ -585,3 +585,4 @@ async fn conversation_resolution_guards_new_and_pending_merges() {
 }
 
 mod bypass;
+mod linear_history;

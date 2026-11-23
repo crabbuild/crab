@@ -38,6 +38,7 @@ interface Ruleset {
   require_conversation_resolution: boolean;
   require_up_to_date?: boolean;
   require_merge_queue?: boolean;
+  require_linear_history?: boolean;
   required_checks: string[];
   required_integrations: string[];
   bypass_actors?: BypassGrant[];
@@ -377,6 +378,7 @@ function RulesetSummary({
         {rule.restrict_creations && <li>Restrict creations</li>}
         {rule.restrict_updates && <li>Restrict updates</li>}
         {rule.restrict_deletions && <li>Restrict deletions</li>}
+        {rule.require_linear_history && <li>Require linear history</li>}
         {(rule.require_pull_request ||
           rule.require_merge_queue ||
           rule.required_approvals > 0 ||
@@ -607,6 +609,16 @@ function RulesetForm({
             }
           />{" "}
           Restrict deletions
+        </label>
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={Boolean(rule.require_linear_history)}
+            onChange={(event) =>
+              change({ require_linear_history: event.target.checked })
+            }
+          />{" "}
+          Require linear history
         </label>
         {branch && (
           <>

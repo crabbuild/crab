@@ -295,6 +295,7 @@ pub(crate) struct BypassOption {
 pub(crate) struct MergePolicy {
     pub protection: Option<BranchProtection>,
     pub updates_restricted: bool,
+    pub linear_history_required: bool,
     pub rulesets: Vec<String>,
     pub bypass_options: Vec<BypassOption>,
 }
@@ -364,6 +365,9 @@ impl RefPolicy {
         bypass: &[RulesetId],
     ) -> Result<MergePolicy> {
         let mut protection = self.protections.protection(reference).cloned();
+        let mut linear_history_required = protection
+            .as_ref()
+            .is_some_and(|rule| rule.require_linear_history);
         let mut checks: HashSet<_> = protection
             .iter()
             .flat_map(|rule| rule.required_checks.iter().map(|name| name.to_lowercase()))
@@ -383,7 +387,10 @@ impl RefPolicy {
                 RulesetId::Organization { .. } => format!("{} (organization)", ruleset.name),
             };
             names.push(name.clone());
-            if !ruleset.requires_pull() && !ruleset.restrict_updates {
+            if !ruleset.requires_pull()
+                && !ruleset.restrict_updates
+                && !ruleset.require_linear_history
+            {
                 continue;
             }
             if ruleset.allows_bypass(actor.for_rule(id), true) {
@@ -394,6 +401,7 @@ impl RefPolicy {
                 bypass_options.push(BypassOption { id, name });
             }
             updates_restricted |= ruleset.restrict_updates;
+            linear_history_required |= ruleset.require_linear_history;
             if !ruleset.requires_pull() {
                 continue;
             }
@@ -407,6 +415,7 @@ impl RefPolicy {
                 require_conversation_resolution: false,
                 require_up_to_date: false,
                 require_merge_queue: false,
+                require_linear_history: false,
                 required_checks: Vec::new(),
                 required_integrations: Vec::new(),
             });
@@ -437,6 +446,7 @@ impl RefPolicy {
         Ok(MergePolicy {
             protection,
             updates_restricted,
+            linear_history_required,
             rulesets: names,
             bypass_options,
         })
@@ -583,6 +593,7 @@ pub(crate) fn protection_record(rule: BranchProtection) -> BranchProtectionRecor
         require_conversation_resolution: rule.require_conversation_resolution,
         require_up_to_date: rule.require_up_to_date,
         require_merge_queue: rule.require_merge_queue,
+        require_linear_history: rule.require_linear_history,
         required_checks: rule.required_checks,
         required_integrations: rule.required_integrations,
     }
@@ -601,6 +612,7 @@ fn branch_protections(settings: BranchProtectionSettings) -> Result<BranchProtec
                 require_conversation_resolution: rule.require_conversation_resolution,
                 require_up_to_date: rule.require_up_to_date,
                 require_merge_queue: rule.require_merge_queue,
+                require_linear_history: rule.require_linear_history,
                 required_checks: rule.required_checks,
                 required_integrations: rule.required_integrations,
             })

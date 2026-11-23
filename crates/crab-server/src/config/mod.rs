@@ -168,6 +168,9 @@ pub struct BranchProtection {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     #[cfg_attr(test, ts(optional = nullable))]
     pub require_merge_queue: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub require_linear_history: bool,
     #[serde(default)]
     pub required_checks: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

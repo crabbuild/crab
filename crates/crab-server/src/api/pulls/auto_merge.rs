@@ -200,7 +200,9 @@ async fn view(
             Some((base, head)) if base != head => {
                 let report =
                     queue_requirements(server, repo, pull, &grant, (&base, &head), None).await?;
-                !report.checks.is_empty() && report.satisfied
+                !report.checks.is_empty()
+                    && report.satisfied
+                    && report.permits_method(settings.merge_queue_method)
             }
             _ => false,
         }
@@ -314,10 +316,15 @@ async fn enable(
             None,
         )
         .await?;
+        report.require_method(input.method)?;
         report.enforce()?;
         if report.checks.is_empty() {
             return Err(Error::MergeCandidateChecks);
         }
+    } else if !input.method.preserves_linear_history()
+        && super::requires_linear_history(&server, &repo, &pull.base_ref).await?
+    {
+        return Err(Error::MergeLinearHistory);
     }
     change(
         &server,

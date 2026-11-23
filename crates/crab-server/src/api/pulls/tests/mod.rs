@@ -585,6 +585,7 @@ async fn pull_request_merge_methods_use_canonical_ref_publication() {
         require_conversation_resolution: false,
         require_up_to_date: false,
         require_merge_queue: false,
+        require_linear_history: false,
         required_checks: vec![],
         required_integrations: vec![],
     }];

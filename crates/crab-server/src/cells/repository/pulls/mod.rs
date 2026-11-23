@@ -89,6 +89,10 @@ impl MergeMethod {
     pub(crate) fn supports_queue(self) -> bool {
         matches!(self, Self::MergeCommit | Self::Squash | Self::Rebase)
     }
+
+    pub(crate) fn preserves_linear_history(self) -> bool {
+        matches!(self, Self::Squash | Self::Rebase)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

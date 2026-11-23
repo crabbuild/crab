@@ -21,7 +21,7 @@ use crate::{
     api::statuses::{self, StatusState},
     app::{self, Error, Result},
     auth::{Identity, Principal},
-    cells::repository::{MergeReviewers, collaboration::Target},
+    cells::repository::{MergeMethod, MergeReviewers, collaboration::Target},
     repository::Repository,
     server::Server,
 };
@@ -186,16 +186,23 @@ async fn pull_view(
         && auto_merge::active_queue(server, repo, pull.number)
             .await?
             .is_some();
-    let merge_methods = merge_methods.enabled;
+    let configured_methods = merge_methods.enabled;
+    let merge_methods: Vec<_> = configured_methods
+        .iter()
+        .copied()
+        .filter(|method| requirements.permits_method(*method))
+        .collect();
     let eligible_bypass = pull.state == PullState::Open
         && !merge_queued
         && !pull.draft
         && pull.merge_pending.is_none()
         && branches_available
-        && !merge_methods.is_empty()
-        && (requirements.queue_required || !requirements.satisfied)
+        && !configured_methods.is_empty()
+        && (requirements.queue_required
+            || !requirements.satisfied
+            || merge_methods.len() < configured_methods.len())
         && !requirements.bypass_options.is_empty();
-    let can_bypass = if eligible_bypass {
+    let bypass_merge_methods: Vec<_> = if eligible_bypass {
         let requested: Vec<_> = requirements
             .bypass_options
             .iter()
@@ -213,12 +220,15 @@ async fn pull_view(
         )
         .await
         {
-            Ok(bypassed) => bypassed.satisfied && !bypassed.queue_required,
-            Err(Error::MergeBypassUnavailable) => false,
+            Ok(bypassed) if bypassed.satisfied && !bypassed.queue_required => configured_methods
+                .into_iter()
+                .filter(|method| bypassed.permits_method(*method))
+                .collect(),
+            Ok(_) | Err(Error::MergeBypassUnavailable) => vec![],
             Err(error) => return Err(error),
         }
     } else {
-        false
+        vec![]
     };
     let reaction = reactions::one(
         server,
@@ -299,18 +309,20 @@ async fn pull_view(
             && !merge_queued
             && !pull.draft
             && can_write
-            && !merge_methods.is_empty()
             && (pull.merge_pending.is_some()
-                || (!requirements.queue_required && current.is_some() && requirements.satisfied)),
+                || (!merge_methods.is_empty() && !requirements.queue_required
+                    && current.is_some() && requirements.satisfied)),
         "branches_available": branches_available,
         "merge_methods": merge_methods,
+        "bypass_merge_methods": bypass_merge_methods,
         "auto_merge_configured": auto_merge_configured,
         "merge_queued": merge_queued,
         "merge_queue_required": requirements.queue_required,
         "merge_requirements": {
-            "bypass_options": if can_bypass { requirements.bypass_options.as_slice() } else { &[] },
+            "bypass_options": if bypass_merge_methods.is_empty() { &[] } else { requirements.bypass_options.as_slice() },
             "protected": requirements.protected,
             "updates_restricted": requirements.updates_restricted,
+            "linear_history_required": requirements.linear_history_required,
             "required_approvals": requirements.required_approvals,
             "rulesets": requirements.rulesets,
             "approvals": requirements.approvals,
@@ -350,6 +362,7 @@ struct MergeRequirements {
     queue_required: bool,
     protected: bool,
     updates_restricted: bool,
+    linear_history_required: bool,
     rulesets: Vec<String>,
     bypass_options: Vec<crate::repository::settings::BypassOption>,
     required_approvals: usize,
@@ -365,6 +378,16 @@ struct MergeRequirements {
 }
 
 impl MergeRequirements {
+    fn permits_method(&self, method: MergeMethod) -> bool {
+        !self.linear_history_required || method.preserves_linear_history()
+    }
+
+    fn require_method(&self, method: MergeMethod) -> Result<()> {
+        self.permits_method(method)
+            .then_some(())
+            .ok_or(Error::MergeLinearHistory)
+    }
+
     fn require_queue(&self, target: MergeCheckTarget<'_>) -> Result<()> {
         if self.queue_required && !matches!(target, MergeCheckTarget::Queue(_)) {
             return Err(Error::MergeQueueRequired);
@@ -395,6 +418,23 @@ impl MergeRequirements {
         }
         Ok(())
     }
+}
+
+async fn requires_linear_history(
+    server: &Server,
+    repo: &Repository,
+    reference: &str,
+) -> Result<bool> {
+    let policy = crate::repository::settings::load_ref_policy(server, repo).await?;
+    let default_ref = policy.default_ref(repo).await?;
+    Ok(policy
+        .protections
+        .protection(reference)
+        .is_some_and(|rule| rule.require_linear_history)
+        || policy
+            .active()?
+            .matches(reference, &default_ref)
+            .any(|(_, rule)| rule.require_linear_history))
 }
 
 #[derive(Clone, Copy)]
@@ -519,7 +559,8 @@ async fn requirements(
     requirements.rulesets = policy.rulesets;
     requirements.bypass_options = policy.bypass_options;
     requirements.updates_restricted = policy.updates_restricted;
-    requirements.protected |= policy.updates_restricted;
+    requirements.linear_history_required = policy.linear_history_required;
+    requirements.protected |= policy.updates_restricted || policy.linear_history_required;
     requirements.satisfied &= !policy.updates_restricted;
     requirements.unresolved_conversations = unresolved;
     requirements.satisfied &= unresolved.is_none_or(|count| count == 0);
@@ -535,6 +576,7 @@ pub(crate) async fn authorize_merge_publication(
     publication: &crate::git::receive::PullPublication,
     plan: Option<&str>,
     update: &crab_git::receive_plan::RefUpdate,
+    linear_history: Option<bool>,
 ) -> Result<()> {
     let head_oid = publication.head_oid.to_string();
     let pull = storage::pull(server, repo, publication.number)
@@ -586,6 +628,14 @@ pub(crate) async fn authorize_merge_publication(
     )
     .await?;
     report.require_queue(target)?;
+    report.require_method(pending.method)?;
+    if report.linear_history_required {
+        match linear_history {
+            Some(true) => (),
+            Some(false) => return Err(Error::MergeLinearHistory),
+            None => return Err(Error::MergeConflict),
+        }
+    }
     if !grant.principal.is_auto_merge() {
         merge_methods::require(server, repo, pending.method).await?;
     }
@@ -610,6 +660,7 @@ fn merge_requirements(
             queue_required: false,
             protected: false,
             updates_restricted: false,
+            linear_history_required: false,
             rulesets: Vec::new(),
             bypass_options: Vec::new(),
             required_approvals: 0,
@@ -650,6 +701,7 @@ fn merge_requirements(
         queue_required: rule.require_merge_queue,
         protected: true,
         updates_restricted: false,
+        linear_history_required: false,
         rulesets: Vec::new(),
         bypass_options: Vec::new(),
         required_approvals,

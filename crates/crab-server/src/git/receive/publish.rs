@@ -557,6 +557,7 @@ struct RefMutation<'a> {
     initial_head: Option<(crab_write::capsule_protocol::RootSnapshot, String, String)>,
     closing_ref: Option<&'a crab_git::receive_plan::RefUpdate>,
     closing_issues: BTreeMap<u64, String>,
+    linear_history: Option<BTreeMap<String, bool>>,
 }
 
 fn tracks_issue_closures(
@@ -583,6 +584,17 @@ fn updated_default<'a>(
 }
 
 impl RefMutation<'_> {
+    fn linear_violation(&self, update: &crab_git::receive_plan::RefUpdate) -> Option<&'static str> {
+        if update.new.is_none() {
+            return None;
+        }
+        match self.linear_history.as_ref()?.get(&update.name) {
+            Some(true) => None,
+            Some(false) => Some("ref requires linear history; merge commits are prohibited"),
+            None => Some("linear history policy changed; retry the ref update"),
+        }
+    }
+
     fn check_policy(
         &self,
         policy: &settings::RefPolicy,
@@ -621,22 +633,33 @@ impl RefMutation<'_> {
                 ));
             }
             for (id, rule) in rules.matches(&update.name, default_ref) {
-                if let Some(message) = rule.violation(update, pull) {
+                let violation = rule.violation(update, pull).or_else(|| {
+                    if !pull && rule.require_linear_history {
+                        self.linear_violation(update)
+                    } else {
+                        None
+                    }
+                });
+                if let Some(message) = violation {
                     if pull || !rule.allows_bypass(actor.for_rule(id), false) {
                         return Err(ReceiveError::RefRule(message));
                     }
                     bypassed.insert(id);
                 }
             }
-            if !pull
-                && (update.old.is_some() || self.has_branch)
-                && let Some(protection) = policy.protections.protection(&update.name)
-            {
-                return Err(if protection.require_merge_queue {
-                    ReceiveError::RefRule("protected branch requires the merge queue")
-                } else {
-                    ReceiveError::Protected
-                });
+            if !pull && let Some(protection) = policy.protections.protection(&update.name) {
+                if update.old.is_some() || self.has_branch {
+                    return Err(if protection.require_merge_queue {
+                        ReceiveError::RefRule("protected branch requires the merge queue")
+                    } else {
+                        ReceiveError::Protected
+                    });
+                }
+                if protection.require_linear_history
+                    && let Some(message) = self.linear_violation(update)
+                {
+                    return Err(ReceiveError::RefRule(message));
+                }
             }
         }
         Ok(bypassed)
@@ -795,6 +818,7 @@ async fn publish_attempt(
         initial_head,
         closing_ref,
         closing_issues: BTreeMap::new(),
+        linear_history: None,
     };
     let policy = if defer_readiness {
         settings::import_ref_policy(server, entry).await?
@@ -806,6 +830,22 @@ async fn publish_attempt(
         .bypass_context(entry.id)
         .organization_teams(organization_teams.as_deref());
     mutation.check_policy(&policy, view.head(), actor)?;
+    let active = policy.active()?;
+    let linear_refs = request
+        .updates
+        .iter()
+        .filter(|update| {
+            update.new.is_some()
+                && (policy
+                    .protections
+                    .protection(&update.name)
+                    .is_some_and(|rule| rule.require_linear_history)
+                    || active
+                        .matches(&update.name, view.head())
+                        .any(|(_, rule)| rule.require_linear_history))
+        })
+        .map(|update| update.name.clone())
+        .collect();
     let visibility_bases = input.visibility_bases;
     let default_branch = repository
         .refs()
@@ -836,6 +876,7 @@ async fn publish_attempt(
         max_ref_updates,
         rewritten_ref,
         inspect_visible_tip,
+        linear_refs,
     );
     let closing_issues = Arc::new(Mutex::new(BTreeMap::new()));
     let commit_observer = closing_ref.map(|update| {
@@ -901,6 +942,7 @@ async fn publish_attempt(
     mutation.closing_issues =
         std::mem::take(&mut *closing_issues.lock().map_err(|_| ReceiveError::Cancelled)?);
     let changed_path_hashes = prepared.plan().changed_path_hashes().clone();
+    mutation.linear_history = Some(prepared.plan().linear_history().clone());
     let dependency_limits = dependency_limits();
     let pointers = prepared.plan().pointers();
     let source = match &input.publication {
@@ -1211,9 +1253,16 @@ async fn commit_authorized(
         if let Some(candidate) = &pull.candidate {
             crate::api::authorize_merge_candidate(server, entry, pull, candidate).await?;
         } else {
-            crate::api::authorize_merge_publication(server, entry, &current, pull, plan_id, update)
-                .await
-                .map_err(|error| ReceiveError::Settings(Box::new(error)))?;
+            let linear = mutation
+                .linear_history
+                .as_ref()
+                .and_then(|status| status.get(&update.name))
+                .copied();
+            crate::api::authorize_merge_publication(
+                server, entry, &current, pull, plan_id, update, linear,
+            )
+            .await
+            .map_err(|error| ReceiveError::Settings(Box::new(error)))?;
         }
     }
     if let Publication::ReviewSuggestions(suggestion) = mutation.publication {

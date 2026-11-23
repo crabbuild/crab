@@ -93,108 +93,117 @@ test("candidate checks use the prepared merge SHA and recover the original prepa
   await expect(refspec).toBeHidden();
 });
 
-test("a tested merge retries the same commit and submission after an empty reply", async ({
-  page,
-}) => {
-  const fixture = await mockPullRequest(page);
-  const pull = fixture.pull();
-  const commit = "c".repeat(40);
-  const root = "/api/repos/team/project/pulls/1";
-  const comparison = {
-    version: pull.version,
-    base_oid: pull.base_oid,
-    head_oid: pull.head_oid,
-  };
-  const submissions: unknown[] = [];
-  const merged = () => ({
-    ...fixture.pull(),
-    merge: {
-      author: pull.author,
-      method: "merge_commit",
-      commit_oid: commit,
-      tested_candidate_oid: commit,
-      message: "",
-      created_at: pull.updated_at,
-    },
-  });
-  await page.route(
-    (url) => url.pathname === root,
-    (route) =>
-      fixture.lifecycle.state === "merged"
-        ? route.fulfill({ json: merged() })
-        : route.fallback(),
-  );
-  await page.route(
-    (url) => url.pathname === `${root}/merge-candidate`,
-    (route) =>
-      route.fulfill({
-        json: {
-          preview: { ...comparison, previous_oid: commit },
-          candidate: {
-            ...comparison,
-            commit,
-            ref_name: "refs/crab/merge-queue/1",
-            current: true,
-            mirror_ref: null,
-            can_remove: true,
-            promotion: "ready",
-            required_checks: [
-              {
-                context: "ci/test",
-                state: "success",
-                provider: "crab_status",
-                author: "Crab CI",
-                head_sha: commit,
-              },
-            ],
+for (const method of ["merge_commit", "squash"] as const) {
+  test(`a tested ${method} retries the same commit and submission after an empty reply`, async ({
+    page,
+  }) => {
+    const fixture = await mockPullRequest(page);
+    const pull = fixture.pull();
+    const commit = "c".repeat(40);
+    const root = "/api/repos/team/project/pulls/1";
+    const comparison = {
+      version: pull.version,
+      base_oid: pull.base_oid,
+      head_oid: pull.head_oid,
+    };
+    const submissions: unknown[] = [];
+    const merged = () => ({
+      ...fixture.pull(),
+      merge: {
+        author: pull.author,
+        method,
+        commit_oid: commit,
+        tested_candidate_oid: commit,
+        message: "",
+        created_at: pull.updated_at,
+      },
+    });
+    await page.route(
+      (url) => url.pathname === root,
+      (route) =>
+        fixture.lifecycle.state === "merged"
+          ? route.fulfill({ json: merged() })
+          : route.fallback(),
+    );
+    await page.route(
+      (url) => url.pathname === `${root}/merge-candidate`,
+      (route) =>
+        route.fulfill({
+          json: {
+            preview: { ...comparison, previous_oid: commit },
+            candidate: {
+              ...comparison,
+              commit,
+              method,
+              ref_name: "refs/crab/merge-queue/1",
+              current: true,
+              mirror_ref: null,
+              can_remove: true,
+              promotion: "ready",
+              required_checks: [
+                {
+                  context: "ci/test",
+                  state: "success",
+                  provider: "crab_status",
+                  author: "Crab CI",
+                  head_sha: commit,
+                },
+              ],
+            },
           },
-        },
-      }),
-  );
-  await page.route(
-    (url) => url.pathname === `${root}/merge`,
-    (route) => {
-      submissions.push(route.request().postDataJSON());
-      fixture.lifecycle.state = "merged";
-      return submissions.length === 1
-        ? route.fulfill({
-            status: 200,
-            contentType: "application/json",
-            body: "",
-          })
-        : route.fulfill({ json: merged() });
-    },
-  );
+        }),
+    );
+    await page.route(
+      (url) => url.pathname === `${root}/merge`,
+      (route) => {
+        submissions.push(route.request().postDataJSON());
+        fixture.lifecycle.state = "merged";
+        return submissions.length === 1
+          ? route.fulfill({
+              status: 200,
+              contentType: "application/json",
+              body: "",
+            })
+          : route.fulfill({ json: merged() });
+      },
+    );
 
-  await page.goto("/team/project/pull/1/checks?candidate=1");
-  const candidate = page.getByRole("region", { name: "Merge candidate" });
-  await expect(page.getByText("All required checks have passed")).toBeVisible();
-  await expect(page.locator(".required-checks-summary code")).toHaveAttribute(
-    "title",
-    commit,
-  );
-  await candidate
-    .getByRole("button", { name: "Merge tested candidate" })
-    .click();
-  await expect(candidate.getByRole("status")).toContainText(commit.slice(0, 7));
-  await candidate.getByRole("button", { name: "Confirm tested merge" }).click();
-  await expect(candidate.getByRole("alert")).toContainText(
-    "The reply was lost",
-  );
-  await candidate.getByRole("button", { name: "Retry tested merge" }).click();
+    await page.goto("/team/project/pull/1/checks?candidate=1");
+    const candidate = page.getByRole("region", { name: "Merge candidate" });
+    await expect(
+      page.getByText("All required checks have passed"),
+    ).toBeVisible();
+    await expect(page.locator(".required-checks-summary code")).toHaveAttribute(
+      "title",
+      commit,
+    );
+    await candidate
+      .getByRole("button", { name: "Merge tested candidate" })
+      .click();
+    await expect(candidate.getByRole("status")).toContainText(
+      commit.slice(0, 7),
+    );
+    await candidate
+      .getByRole("button", { name: "Confirm tested merge" })
+      .click();
+    await expect(candidate.getByRole("alert")).toContainText(
+      "The reply was lost",
+    );
+    await candidate.getByRole("button", { name: "Retry tested merge" }).click();
 
-  await expect(
-    page.getByRole("region", { name: "Merge status" }),
-  ).toContainText("Published the tested merge candidate.");
-  expect(submissions).toHaveLength(2);
-  expect(submissions[0]).toEqual({
-    ...comparison,
-    tested_candidate_oid: commit,
-    method: "merge_commit",
-    request_id: expect.any(String),
+    await expect(
+      page.getByRole("region", { name: "Merge status" }),
+    ).toContainText("Published the tested merge candidate.");
+    expect(submissions).toHaveLength(2);
+    expect(submissions[0]).toEqual({
+      ...comparison,
+      tested_candidate_oid: commit,
+      method,
+      request_id: expect.any(String),
+    });
+    expect(submissions[1]).toEqual(submissions[0]);
   });
-  expect(submissions[1]).toEqual(submissions[0]);
-});
+}
 
 test("candidate checks link to the automatically dispatched run", async ({
   page,

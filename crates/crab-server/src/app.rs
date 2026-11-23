@@ -106,6 +106,8 @@ pub(crate) enum Error {
     MergeBlocked,
     #[error("A ruleset restricts updates to the base branch")]
     MergeUpdatesRestricted,
+    #[error("The base branch requires linear history")]
+    MergeLinearHistory,
     #[error("Required checks are not satisfied on the merge candidate")]
     MergeCandidateChecks,
     #[error("Unresolved review conversations block the merge")]
@@ -444,6 +446,11 @@ impl IntoResponse for Error {
                 StatusCode::FORBIDDEN,
                 "ruleset_restricts_updates",
                 "A ruleset restricts updates to the base branch",
+            ),
+            Self::MergeLinearHistory => (
+                StatusCode::CONFLICT,
+                "linear_history_required",
+                "The base branch requires linear history. Use squash or rebase",
             ),
             Self::MergeHeadBehind => (
                 StatusCode::CONFLICT,

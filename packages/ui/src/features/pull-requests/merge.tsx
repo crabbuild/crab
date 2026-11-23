@@ -60,16 +60,20 @@ export function MergePanel({
   const [messages, setMessages] = useState<
     Partial<Record<MergeMethod, string>>
   >({});
-  const selectedMethod = pull.merge_methods.includes(preferredMethod)
+  const bypassMethods = pull.bypass_merge_methods ?? pull.merge_methods;
+  const availableMethods = pull.can_merge ? pull.merge_methods : bypassMethods;
+  const selectedMethod = availableMethods.includes(preferredMethod)
     ? preferredMethod
-    : (pull.merge_methods[0] ?? "fast_forward");
+    : (availableMethods[0] ?? "fast_forward");
   const method = confirmation?.method ?? selectedMethod;
   const bypassOptions = pull.merge_requirements.bypass_options ?? [];
   const bypassIds = bypassOptions.map(({ id }) => id);
   const bypassing = Boolean(confirmation?.bypass_rulesets?.length);
   const staleConfirmation =
     confirmation &&
-    (!pull.merge_methods.includes(confirmation.method) ||
+    (!(bypassing ? bypassMethods : pull.merge_methods).includes(
+      confirmation.method,
+    ) ||
       confirmation.version !== pull.version ||
       confirmation.base_oid !== pull.base_oid ||
       confirmation.head_oid !== pull.head_oid ||
@@ -191,10 +195,18 @@ export function MergePanel({
       </section>
     );
   const unavailable = !pull.branches_available && !pending;
-  // Pull eligibility and protection can refresh before the repository catalog.
-  const ready = requirements.satisfied && !unavailable;
   const queued = pull.merge_queued;
   const queueRequired = pull.merge_queue_required;
+  // Pull eligibility and protection can refresh before the repository catalog.
+  const ready =
+    requirements.satisfied &&
+    !unavailable &&
+    (queueRequired ||
+      !requirements.linear_history_required ||
+      pull.merge_methods.length > 0);
+  const bypassOnly = bypassMethods.find(
+    (method) => !pull.merge_methods.includes(method),
+  );
   const StatusIcon =
     pending || queued
       ? ClockIcon
@@ -290,6 +302,16 @@ export function MergePanel({
               <code>{branch(pull.base_ref)}</code>.
             </p>
           )}
+          {!unavailable && requirements.linear_history_required && (
+            <p className="merge-blocked-note">
+              <code>{branch(pull.base_ref)}</code> requires linear history.
+              {queueRequired || queued
+                ? " The queue must use squash or rebase."
+                : pull.merge_methods.length > 0
+                  ? " Use squash or rebase."
+                  : " Enable squash or rebase in repository settings."}
+            </p>
+          )}
           {!queued &&
             !unavailable &&
             requirements.head_up_to_date === false && (
@@ -358,7 +380,7 @@ export function MergePanel({
                       ? mergeMethod(method).action
                       : "Merge with ruleset bypass"}
                   </Button>
-                  {pull.merge_methods.length > 1 && (
+                  {availableMethods.length > 1 && (
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <Button
@@ -373,7 +395,7 @@ export function MergePanel({
                         <DropdownMenuRadioGroup
                           value={method}
                           onValueChange={(value) => {
-                            const selected = pull.merge_methods.find(
+                            const selected = availableMethods.find(
                               (option) => option === value,
                             );
                             if (selected) setMethod(selected);
@@ -381,7 +403,7 @@ export function MergePanel({
                         >
                           {mergeMethods
                             .filter(({ value }) =>
-                              pull.merge_methods.includes(value),
+                              availableMethods.includes(value),
                             )
                             .map(({ value, label, description }) => (
                               <DropdownMenuRadioItem key={value} value={value}>
@@ -396,6 +418,22 @@ export function MergePanel({
                         </DropdownMenuRadioGroup>
                       </DropdownMenuContent>
                     </DropdownMenu>
+                  )}
+                  {pull.can_merge && bypassOnly && bypassIds.length > 0 && (
+                    <Button
+                      variant="outline"
+                      onClick={() =>
+                        setConfirmation({
+                          method: bypassOnly,
+                          version: pull.version,
+                          base_oid: pull.base_oid,
+                          head_oid: pull.head_oid,
+                          bypass_rulesets: bypassIds,
+                        })
+                      }
+                    >
+                      Merge with ruleset bypass
+                    </Button>
                   )}
                 </div>
               )}

@@ -33,6 +33,7 @@ pub struct RefUpdate {
 pub struct RefPolicy {
     pub allow_delete: bool,
     pub allow_non_fast_forward: bool,
+    pub inspect_linear_history: bool,
 }
 
 /// Bounds for one validation, including ancestry walks and trusted frontier lookups.
@@ -74,6 +75,7 @@ pub struct ValidatedRefUpdates {
     peeled: BTreeMap<String, ObjectId>,
     pointers: Vec<PointerDependency>,
     changed_path_hashes: BTreeSet<[u8; 32]>,
+    linear_history: BTreeMap<String, bool>,
 }
 impl ValidatedRefUpdates {
     /// Returns the complete candidate ref map.
@@ -91,6 +93,10 @@ impl ValidatedRefUpdates {
     /// Returns Blake3 identities for exact raw paths changed by newly introduced commits.
     pub fn changed_path_hashes(&self) -> &BTreeSet<[u8; 32]> {
         &self.changed_path_hashes
+    }
+    /// Reports whether each inspected ref introduces zero merge commits.
+    pub fn linear_history(&self) -> &BTreeMap<String, bool> {
+        &self.linear_history
     }
 }
 
@@ -269,6 +275,7 @@ pub fn validate<S: GraphSource, C: Fn() -> bool>(
     }
     validator.connected(roots)?;
     let mut peeled = BTreeMap::new();
+    let mut linear_history = BTreeMap::new();
     for update in updates {
         let Some(new) = update.new else { continue };
         if let Some(old) = update.old
@@ -305,6 +312,12 @@ pub fn validate<S: GraphSource, C: Fn() -> bool>(
         if current != new {
             peeled.insert(update.name.clone(), current);
         }
+        if policy(&update.name).inspect_linear_history {
+            linear_history.insert(
+                update.name.clone(),
+                validator.is_linear(update.old, current)?,
+            );
+        }
     }
     let changed_path_hashes = validator.changed_path_hashes(updates)?;
     Ok(ValidatedRefUpdates {
@@ -316,6 +329,7 @@ pub fn validate<S: GraphSource, C: Fn() -> bool>(
             .map(|(blob, pointer)| PointerDependency { blob, pointer })
             .collect(),
         changed_path_hashes,
+        linear_history,
     })
 }
 
@@ -591,6 +605,30 @@ impl<'a, S: GraphSource, C: Fn() -> bool> Validator<'a, S, C> {
             );
         }
         Ok(false)
+    }
+
+    fn is_linear(&mut self, old: Option<ObjectId>, mut tip: ObjectId) -> Result<bool> {
+        while Some(tip) != old {
+            self.step()?;
+            let node = self.load(tip)?;
+            if node.kind != Kind::Commit {
+                return Ok(true);
+            }
+            let mut parents = node
+                .links
+                .into_iter()
+                .filter_map(|(oid, kind)| (kind == Kind::Commit).then_some(oid));
+            let Some(parent) = parents.next() else {
+                return Ok(true);
+            };
+            if parents.next().is_some() {
+                // If the old ref already reaches this merge, every commit
+                // beneath it was already part of the ref's history.
+                return old.map_or(Ok(false), |old| self.is_ancestor(tip, old));
+            }
+            tip = parent;
+        }
+        Ok(true)
     }
 }
 

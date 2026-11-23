@@ -1133,13 +1133,26 @@ and workflow. Any applicable rule can require the head to contain the current
 base commit or require the merge queue. Each setting requires at least one
 required check or workflow.
 
+**Require linear history** is available in classic branch protection and in
+repository and organization rulesets. Crab checks the commits introduced by
+each matching ref update, including objects already reachable from another
+ref. For a new branch or commit-targeted tag, the check covers its history.
+An existing merge below the previous tip can remain in place.
+
+A PR with this rule uses squash or rebase. The merge panel shows the permitted
+methods. If neither is enabled, a repository administrator can enable one in
+merge settings. Queue policy uses the configured queue method. The manual CI
+candidate uses the first enabled linear method and publishes the exact
+tested commit. Final publication rechecks the rule and the candidate history
+under the ref and policy leases.
+
 `GET /api/repos/{owner}/{name}/rulesets` returns the version, rulesets, and
 `can_manage`. Administrators can see disabled rulesets and replace the complete
 collection with matching `expected_version`. Each entry contains `id` (UUID),
 `name`, `target` (`branch` or `tag`), `enforcement` (`active` or `disabled`),
 `include`, `exclude`, `restrict_creations`, `restrict_updates`, `restrict_deletions`,
 `require_pull_request`, `required_approvals`, `required_code_owner_reviews`,
-`require_conversation_resolution`, `require_up_to_date`, `require_merge_queue`,
+`require_conversation_resolution`, `require_up_to_date`, `require_merge_queue`, `require_linear_history`,
 `required_checks`, and `required_integrations`. Branch-only settings must have
 empty or zero values on tag rulesets. A stale replacement returns HTTP 409.
 
@@ -3820,11 +3833,12 @@ optional `message`. `DELETE` takes the active `request_id`. The current request
 reports why it stopped. `PUT .../settings/merge-methods` accepts an optional
 `auto_merge` boolean alongside the enabled methods and `expected_version`.
 
-### Test a prospective merge commit
+### Test a prospective merge
 
 On an open, ready pull request, writers can select **Prepare merge candidate**
 on the **Checks** tab. Crab combines the captured base and head in a two-parent
-commit. It publishes the commit at `refs/crab/merge-queue/<pull-number>` under
+commit by default. A branch that requires linear history uses the first enabled
+squash or rebase method. Crab publishes the tip at `refs/crab/merge-queue/<pull-number>` under
 both source ref leases. Authorized Git clients can fetch that ref. Crab owns
 its namespace and applies the normal repository and artifact access checks.
 The protected branch advances only through its regular merge workflow.
@@ -3840,8 +3854,8 @@ or remove the stale ref. Candidate checks appear separately from head checks.
 Crab retains the current candidate ref until it is replaced or removed.
 
 Select **Merge tested candidate** under **Candidate checks** to publish that
-exact SHA. The base branch must require at least one check, merge commits must
-be enabled, and the current pull request and candidate must both satisfy the
+exact SHA. The base branch must require at least one check, the candidate's
+method must be enabled, and the pull request and candidate must both satisfy the
 base branch policy. This includes head checks, reviews, conversations, and an
 up-to-date head when required. Crab rechecks current write access, both source
 tips, the candidate ref, file locks, and the current policy before publication.
@@ -3849,11 +3863,12 @@ The merged pull request records the tested SHA.
 
 `GET .../pulls/{number}/merge-candidate` returns `preview` and `candidate`.
 Submit `preview` with `POST` to prepare the recorded comparison. It contains
-the request ID, PR version, exact tip OIDs, and prior candidate OID. `DELETE`
+the request ID, PR version, exact tip OIDs, prior candidate OID, and the
+`method` when the branch requires linear history. `DELETE`
 accepts the candidate's `commit` to remove that exact ref. Retrying a completed
 preparation returns its recorded commit, including after the ref is removed.
 The candidate's `promotion` field describes tested-merge eligibility.
-Submit `POST .../pulls/{number}/merge` with `method: "merge_commit"`,
+Submit `POST .../pulls/{number}/merge` with the candidate's `method`,
 `tested_candidate_oid`, `request_id`, `version`, `base_oid`, and `head_oid`
 to publish the candidate. Retry an interrupted response with the same request.
 

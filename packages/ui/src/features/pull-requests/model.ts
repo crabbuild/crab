@@ -96,11 +96,13 @@ export interface PullRequest extends PullSummary {
     tested_candidate_oid?: string | null;
   } | null;
   merge_methods: MergeMethod[];
+  bypass_merge_methods?: MergeMethod[];
   merge_requirements: {
     rulesets?: string[];
     bypass_options?: { id: RulesetId; name: string }[];
     protected: boolean;
     updates_restricted?: boolean;
+    linear_history_required?: boolean;
     required_approvals: number;
     approvals: number;
     changes_requested: number;

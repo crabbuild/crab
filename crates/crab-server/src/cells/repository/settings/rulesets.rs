@@ -121,6 +121,8 @@ pub(crate) struct Ruleset {
     pub require_up_to_date: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub require_merge_queue: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_linear_history: bool,
     pub required_checks: Vec<String>,
     pub required_integrations: Vec<Uuid>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -197,6 +199,7 @@ impl Ruleset {
             && (self.requires_pull()
                 || self.restrict_creations
                 || self.restrict_updates
+                || self.require_linear_history
                 || self.restrict_deletions)
             && !self.include.is_empty()
             && [&self.include, &self.exclude].into_iter().all(|patterns| {
