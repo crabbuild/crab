@@ -130,26 +130,46 @@ impl RemoteGitSnapshot {
             });
         }
 
-        let base_ancestors = commit_ancestors(
-            base.commit_oid,
-            base_operation,
-            base.commit_graph.as_deref(),
-        )
-        .await?;
+        enum BaseAncestors<'a> {
+            Indexed(&'a CommitGraphIndex),
+            Walked(HashSet<ObjectId>),
+        }
+        let graph = base.commit_graph.as_deref();
+        let base_ancestors = match graph.filter(|graph| graph.has_ancestor_sets()) {
+            Some(graph) => BaseAncestors::Indexed(graph),
+            // Without stored ancestor sets, walk the base once. Repeating a
+            // full membership walk for each head commit exhausts the budget.
+            None => BaseAncestors::Walked(
+                commit_ancestors(base.commit_oid, base_operation, graph).await?,
+            ),
+        };
         let mut pending = vec![self.commit_oid];
         let mut visited = HashSet::new();
         let mut traversed = 0u64;
         let mut items = Vec::new();
+        let mut has_next = false;
         while let Some(oid) = pending.pop() {
             operation.ensure_active()?;
-            if visited.contains(&oid) || base_ancestors.contains(&oid) {
+            if !visited.insert(oid) {
+                continue;
+            }
+            // A shared commit cuts off all of its parents. Resolve membership
+            // against the authorized base even when the head is in a fork.
+            let shared = match &base_ancestors {
+                BaseAncestors::Indexed(graph) => {
+                    graph
+                        .reachable_from_roots(&[oid], &[base.commit_oid], base_operation)
+                        .await?[0]
+                }
+                BaseAncestors::Walked(ancestors) => ancestors.contains(&oid),
+            };
+            if shared {
                 continue;
             }
             if traversed >= skip && items.len() == page.limit() {
-                pending.push(oid);
+                has_next = true;
                 break;
             }
-            visited.insert(oid);
             operation.charge(BudgetDimension::HistoryCommits, 1).await?;
             let commit = operation.read_commit(oid).await?;
             queue_all_parents(
@@ -178,15 +198,7 @@ impl RemoteGitSnapshot {
                 maximum: u64::MAX,
             })?;
         }
-        while pending
-            .last()
-            .is_some_and(|oid| visited.contains(oid) || base_ancestors.contains(oid))
-        {
-            pending.pop();
-        }
-        let next = if pending.is_empty() {
-            None
-        } else {
+        let next = if has_next {
             let next_skip = skip
                 .checked_add(items.len() as u64)
                 .ok_or(Error::LimitExceeded {
@@ -199,6 +211,8 @@ impl RemoteGitSnapshot {
                 base.commit_oid,
                 next_skip,
             ))
+        } else {
+            None
         };
         Ok(Page { items, next })
     }

@@ -12,6 +12,8 @@ use crate::{
     },
 };
 
+mod deep_history;
+
 struct Case {
     name: &'static str,
     source: &'static str,

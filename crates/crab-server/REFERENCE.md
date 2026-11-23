@@ -3360,6 +3360,17 @@ pinned in the fixture. Use the per-checkout `CARGO_TARGET_DIR` and the same
 isolated loopback RustFS variables as the search corpus test. Run
 `cargo test -p crab-server --lib --locked real_repository_pull_review_matches_git_and_reconfirms_a_moved_head -- --ignored --nocapture`.
 
+The **Commits** tab lists commits reachable from the pinned PR head and absent
+from the pinned base. Once the current commit graph is ready, its verified
+ancestor sets let the server exclude shared commits without reading the entire
+base history for each page. The native RustFS fixture builds 10,050 shared
+commits and a topic merge with a parent below the merge base. It checks the
+unindexed merge base with a ten-commit read budget, compares the preview against
+stock Git, and opens a PR against the inspected tips. After graph publication,
+it compares two one-item commit pages with `git rev-list` and opens the Commits
+tab in Chromium. Run with the same RustFS environment and built UI using
+`cargo test -p crab-server --lib --locked deep_pull_commit_pages_match_git_and_render_in_the_browser -- --ignored --nocapture`.
+
 Pull details and summaries expose nullable `closed_at` and `merged_at` in Unix
 milliseconds. A successful close records its transition time; reopening clears
 it. A completed merge sets both to the native completion time, independently of

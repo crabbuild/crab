@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque, hash_map::Entry};
 
 use gix_hash::ObjectId;
 
@@ -47,6 +47,8 @@ impl RemoteGitSnapshot {
         let mut queued = HashSet::from([self.commit_oid, other.commit_oid]);
         let mut reached = HashMap::from([(self.commit_oid, HEAD), (other.commit_oid, BASE)]);
         let mut common = HashSet::new();
+        let mut parent_edges = HashMap::<ObjectId, Vec<ObjectId>>::new();
+        let mut ancestors = Vec::new();
         while let Some(oid) = pending.pop_front() {
             operation.ensure_active()?;
             other_operation.ensure_active()?;
@@ -73,18 +75,34 @@ impl RemoteGitSnapshot {
             } else {
                 other_operation
             };
-            reader.charge(BudgetDimension::HistoryCommits, 1).await?;
-            let commit = reader.read_commit(oid).await?;
+            let parents = match parent_edges.entry(oid) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    reader.charge(BudgetDimension::HistoryCommits, 1).await?;
+                    entry.insert(reader.read_commit(oid).await?.parents)
+                }
+            };
             reader
-                .charge(BudgetDimension::Entries, commit.parents.len() as u64)
+                .charge(BudgetDimension::Entries, parents.len() as u64)
                 .await?;
-            for parent in commit.parents {
+            ancestors.extend(parents.iter().rev().copied());
+            while let Some(parent) = ancestors.pop() {
                 let seen = reached.entry(parent).or_default();
-                if *seen | flags != *seen {
-                    *seen |= flags;
-                    if queued.insert(parent) {
-                        pending.push_back(parent);
-                    }
+                if *seen | flags == *seen {
+                    continue;
+                }
+                *seen |= flags;
+                if flags & ANCESTOR_OF_BASE != 0
+                    && let Some(parents) = parent_edges.get(&parent)
+                {
+                    // Mark verified parent edges immediately. A shortcut into
+                    // shared history can otherwise stay ahead of the paint walk.
+                    reader
+                        .charge(BudgetDimension::Entries, parents.len() as u64)
+                        .await?;
+                    ancestors.extend(parents.iter().rev().copied());
+                } else if queued.insert(parent) {
+                    pending.push_back(parent);
                 }
             }
         }

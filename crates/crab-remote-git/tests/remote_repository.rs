@@ -4421,6 +4421,50 @@ async fn ahead_history_excludes_every_base_ancestor_and_binds_both_commits() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn indexed_ahead_history_spends_history_budget_on_topic_commits() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let graph = publish_complete_graph(&fixture, true).await;
+    let cancellation = CancellationToken::new();
+    let repository = fixture
+        .repository
+        .with_commit_graph(&graph, &cancellation)
+        .await
+        .unwrap();
+    let operation = repository
+        .operation_with_limits(
+            OperationKind::History,
+            &cancellation,
+            OperationLimits {
+                max_history_commits: 1,
+                ..OperationLimits::default()
+            },
+        )
+        .await
+        .unwrap();
+    let result = async {
+        let head = repository
+            .snapshot(&Revision::Reference("main".into()), &operation)
+            .await?;
+        let base = repository
+            .snapshot(&Revision::Commit(fixture.side_commit), &operation)
+            .await?;
+        let page = head
+            .ahead_history(&base, &PageRequest::new(1, None)?, &operation)
+            .await?;
+        assert_eq!(
+            page.items.iter().map(|item| item.oid).collect::<Vec<_>>(),
+            [head.commit_oid()]
+        );
+        assert!(page.next.is_none());
+        Ok(())
+    }
+    .await;
+    let result = operation.finish(result).await;
+    fixture.runtime.shutdown().await;
+    result.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn path_history_uses_raw_commits_and_omits_unchanged_merges() {
     let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
     let cancellation = CancellationToken::new();

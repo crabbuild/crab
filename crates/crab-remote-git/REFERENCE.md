@@ -266,7 +266,18 @@ history continuations carry the next verified raw parent, so resumed pages do
 page-sized work without replaying newer commits. Page size may change between
 requests. Version-1 history cursors from `v2.0.0-alpha.1` retain their offset
 meaning, prefix traversal, and work charges. All-parent and ahead-history
-continuations retain their existing traversal and codec.
+continuations retain their existing traversal order and codec. With a matching
+Capsule commit graph, ahead history checks each visited commit against the
+base's authenticated ancestor set. A shared commit and its parents are excluded
+without decoding them as raw commits. The head walk still reads verified raw
+commits and follows their parent links. Cross-repository comparisons use the
+base operation for membership and the head operation for commit reads. Without
+stored ancestor sets, the base ancestry uses its bounded raw walk.
+
+Merge-base discovery retains the parent links it has already verified. Once a
+common commit is known, it follows those links immediately to mark dominated
+ancestors. This lets a recent shared commit stop a redundant parent path that
+would otherwise keep walking back through a long shared history.
 
 Authenticate imported cursors before using a resume OID: the public byte decoder
 checks syntax only. The HTTP server issues UUID-bound signed envelopes; the SDK
