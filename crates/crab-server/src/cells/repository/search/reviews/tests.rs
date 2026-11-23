@@ -274,6 +274,7 @@ async fn rebuild_pages_review_history_and_sparse_requests_without_changing_versi
                 actor: alice.clone(),
                 team,
                 recipients: Some(Vec::new()),
+                routing: None,
             }
         )
         .await,
