@@ -19,7 +19,9 @@ impl CatalogStore {
         Ok((document.as_ref().clone(), etag))
     }
 
-    async fn load_snapshot(&self) -> Result<(Arc<CatalogDocument>, Option<ETag>), CatalogError> {
+    pub(crate) async fn load_snapshot(
+        &self,
+    ) -> Result<(Arc<CatalogDocument>, Option<ETag>), CatalogError> {
         let previous = self.latest.read().await.clone();
         if let Some(previous) = previous {
             // Every reuse needs a fresh provider token, or a warm reader could
@@ -81,12 +83,6 @@ impl CatalogStore {
                 record.owner.eq_ignore_ascii_case(owner) && record.name.eq_ignore_ascii_case(name)
             })
             .ok_or(CatalogError::NotFound)?;
-        Ok(MembershipSnapshot {
-            repository_id: record.id,
-            revision: document.version,
-            members: record.members.clone(),
-            groups: record.groups.clone(),
-            organization: record.organization.clone(),
-        })
+        document.membership_snapshot(record)
     }
 }

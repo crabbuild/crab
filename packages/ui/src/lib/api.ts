@@ -2,8 +2,9 @@ import type { BranchProtection } from "@/lib/contracts";
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 
 export interface GitImportInput {
+  request_id: string;
   source: string;
-  owner: string;
+  owner?: string;
   name: string;
   description?: string;
   token?: string;
@@ -12,14 +13,18 @@ export interface GitImportInput {
 export interface GitImportJob {
   id: string;
   source: string;
+  fork_source?: string;
   owner: string;
   name: string;
-  state: "queued" | "running" | "succeeded" | "failed";
+  state: "queued" | "running" | "succeeded" | "failed" | "interrupted";
   message: string;
+  resumable: boolean;
   repository?: { owner: string; name: string };
 }
 
 export interface Repository {
+  forked_from?: { id: string; owner: string; name: string };
+  can_fork?: boolean;
   id: string;
   owner: string;
   name: string;
@@ -105,6 +110,7 @@ export interface Change {
   kind: string;
   old: Entry | null;
   new: Entry | null;
+  view_id?: string;
 }
 export interface Changes {
   base: string | null;
@@ -218,6 +224,7 @@ function withAbort<T>(
 export async function request<T>(
   url: string,
   signal: AbortSignal,
+  repositoryId?: string,
 ): Promise<{ data: T; timing: Timing }> {
   if (signal.aborted) return Promise.reject(abortReason(signal));
   // Stable cross-repository links carry their UUID through the server
@@ -227,9 +234,10 @@ export async function request<T>(
     page && new URLSearchParams(page.search).get("repository_id");
   const [, owner, name] = page?.pathname.split("/") ?? [];
   const requested =
-    owner && name && url.startsWith(`/api/repos/${owner}/${name}/`)
+    repositoryId ??
+    (owner && name && url.startsWith(`/api/repos/${owner}/${name}/`)
       ? expected
-      : null;
+      : null);
   const key = requested
     ? JSON.stringify([requestKey(url), requested])
     : requestKey(url);
@@ -305,18 +313,75 @@ async function parseResponse<T>(response: Response): Promise<T> {
   return body as T;
 }
 
-export async function startGitImport(
+function gitImportPath(organization?: string): string {
+  return organization
+    ? `/api/organizations/${encodeURIComponent(organization)}/repositories/imports/git`
+    : "/api/imports/git";
+}
+
+export function startGitImport(
   input: GitImportInput,
   csrf: string,
-  signal?: AbortSignal,
+  organization?: string,
 ): Promise<GitImportJob> {
-  const response = await fetch("/api/imports/git", {
+  return postGitImport(gitImportPath(organization), input, csrf);
+}
+
+export function startRepositoryFork(
+  source: Pick<Repository, "id" | "owner" | "name">,
+  input: { request_id: string; name: string },
+  csrf: string,
+): Promise<GitImportJob> {
+  return postGitImport(endpoint(source, "forks"), input, csrf, source.id);
+}
+
+export async function updateForkBranch(
+  repo: Repository,
+  comparison: { branch: string; fork_oid: string; upstream_oid: string },
+  csrf: string,
+) {
+  const response = await fetch(endpoint(repo, "fork-sync"), {
     method: "POST",
-    signal,
     headers: {
       Accept: "application/json",
       "Content-Type": "application/json",
       "X-CSRF-Token": csrf,
+      "X-Crab-Repository-Id": repo.id,
+    },
+    body: JSON.stringify(comparison),
+  });
+  return parseResponse<{ branch: string; commit: string }>(response);
+}
+
+export function resumeGitImport(
+  id: string,
+  token: string | undefined,
+  csrf: string,
+  organization?: string,
+): Promise<GitImportJob> {
+  return postGitImport(
+    `${gitImportPath(organization)}/${encodeURIComponent(id)}/resume`,
+    { token },
+    csrf,
+  );
+}
+
+async function postGitImport(
+  path: string,
+  input:
+    | GitImportInput
+    | { token?: string }
+    | { request_id: string; name: string },
+  csrf: string,
+  repository?: string,
+): Promise<GitImportJob> {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "X-CSRF-Token": csrf,
+      ...(repository ? { "X-Crab-Repository-Id": repository } : {}),
     },
     body: JSON.stringify(input),
   });
@@ -326,9 +391,10 @@ export async function startGitImport(
 export async function gitImportStatus(
   id: string,
   signal: AbortSignal,
+  organization?: string,
 ): Promise<GitImportJob> {
   const result = await request<GitImportJob>(
-    `/api/imports/git/${encodeURIComponent(id)}`,
+    `${gitImportPath(organization)}/${encodeURIComponent(id)}`,
     signal,
   );
   return result.data;
@@ -336,23 +402,26 @@ export async function gitImportStatus(
 
 export function useRequest<T>(
   url: string | null,
+  repositoryId?: string,
 ): Loaded<T> & { retry: () => void } {
   const [attempt, setAttempt] = useState(0);
   const retry = useCallback(() => setAttempt((value) => value + 1), []);
-  const [state, setState] = useState<Loaded<T> & { url?: string | null }>({
+  const [state, setState] = useState<
+    Loaded<T> & { url?: string | null; repositoryId?: string }
+  >({
     loading: true,
   });
   useEffect(() => {
     const controller = new AbortController();
     if (!url) {
-      setState({ loading: false, url });
+      setState({ loading: false, url, repositoryId });
       return;
     }
-    setState({ loading: true, url });
-    request<T>(url, controller.signal)
+    setState({ loading: true, url, repositoryId });
+    request<T>(url, controller.signal, repositoryId)
       .then((result) => {
         if (!controller.signal.aborted)
-          setState({ ...result, loading: false, url });
+          setState({ ...result, loading: false, url, repositoryId });
       })
       .catch((error: unknown) => {
         if (!controller.signal.aborted)
@@ -360,13 +429,16 @@ export function useRequest<T>(
             loading: false,
             error: error instanceof Error ? error.message : "Request failed",
             url,
+            repositoryId,
           });
       });
     return () => controller.abort();
-  }, [url, attempt]);
+  }, [url, repositoryId, attempt]);
   // Never paint the preceding route's data while the new effect is pending.
   return {
-    ...(state.url === url ? state : { loading: !!url }),
+    ...(state.url === url && state.repositoryId === repositoryId
+      ? state
+      : { loading: !!url }),
     retry,
   };
 }

@@ -320,3 +320,35 @@ fn repository_triage_role_round_trips_without_becoming_write_access() {
             && RepositoryAccess::Triage < RepositoryAccess::Write
     );
 }
+
+#[test]
+fn outbound_receivers_require_one_explicit_https_binding_and_shared_auth() {
+    let mut config = local_config("s3://bucket/repositories");
+    let destination = WebhookDestination {
+        repository: uuid::Uuid::now_v7(),
+        url: Url::parse("https://ci.example.test/events").unwrap(),
+    };
+    config.outbound_webhooks.push(destination.clone());
+    assert!(config.validate().is_err());
+    config.auth = Some(OidcConfig {
+        provider: AuthProvider::Oidc,
+        issuer: IssuerUrl::new("https://idp.example.test".into()).unwrap(),
+        public_url: Url::parse("http://127.0.0.1:8788").unwrap(),
+        client_id: "fixture-client".into(),
+        client_secret_file: None,
+        state_key_file: Some("/run/secrets/auth-state".into()),
+        github: None,
+    });
+    assert!(config.validate().is_ok());
+    config.outbound_webhooks.push(destination);
+    assert!(config.validate().is_err());
+    config.outbound_webhooks.pop();
+    for url in [
+        "http://ci.example.test/events",
+        "https://user@ci.example.test/events",
+        "https://ci.example.test/events?key=fixture",
+    ] {
+        config.outbound_webhooks[0].url = Url::parse(url).unwrap();
+        assert!(config.validate().is_err());
+    }
+}

@@ -394,16 +394,20 @@ function ReleaseList({
 function ReleaseDetail({
   repo,
   tag,
+  number,
   csrf,
   canManage,
 }: {
   repo: Repository;
   tag: string;
+  number?: string;
   csrf: string;
   canManage: boolean;
 }) {
   const release = useRequest<Release>(
-    endpoint(repo, `releases/tag/${encodeURIComponent(tag)}`),
+    endpoint(repo, `releases/tag/${encodeURIComponent(tag)}`, {
+      release_number: number,
+    }),
   );
   return (
     <Result state={release}>
@@ -504,6 +508,7 @@ export function Releases({
         <ReleaseDetail
           repo={repo}
           tag={selected}
+          number={url.searchParams.get("release_number") ?? undefined}
           csrf={csrf}
           canManage={canManage}
         />

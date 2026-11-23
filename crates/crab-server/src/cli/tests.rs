@@ -100,6 +100,9 @@ fn healthcheck_uses_the_stable_tls_name_against_the_local_listener() {
         },
         import: crab_server::ImportConfig::default(),
         auth: None,
+        github_actions: None,
+        notification_email: None,
+        outbound_webhooks: vec![],
     };
 
     let (url, resolution) = management_target(&config, "/readyz").unwrap();

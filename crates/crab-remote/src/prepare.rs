@@ -83,6 +83,8 @@ pub struct Options<P> {
     pub graph: GraphLimits,
     pub pack: ReceiveLimits,
     pub policy: P,
+    /// Inspect this tip's changed paths even if it already has a visibility proof.
+    pub inspect_visible_tip: Option<ObjectId>,
 }
 
 /// Validated ref edits and immutable pack/visibility preparation.
@@ -810,6 +812,7 @@ struct Source<'a> {
     proof: Option<GitVisibilityIndex>,
     refs: Vec<String>,
     prior: Option<(String, ObjectId)>,
+    inspect_visible_tip: Option<ObjectId>,
     handle: tokio::runtime::Handle,
 }
 
@@ -851,6 +854,10 @@ impl Source<'_> {
 }
 
 impl GraphSource for Source<'_> {
+    fn inspect_visible_tip(&self, oid: &ObjectId) -> bool {
+        self.inspect_visible_tip.as_ref() == Some(oid)
+    }
+
     fn trusted_kind(&mut self, oid: &ObjectId) -> SourceResult<Option<Kind>> {
         if !self.visible(oid)? {
             return Ok(None);
@@ -951,6 +958,7 @@ pub async fn prepare_capsule(
             proof,
             refs: base.keys().cloned().collect(),
             prior: None,
+            inspect_visible_tip: options.inspect_visible_tip,
             handle: handle.clone(),
         };
         let result = (|| {

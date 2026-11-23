@@ -57,6 +57,7 @@ async fn create_pull(cell: &RepositoryCell, author: &RepositoryAuthor, number: u
     let outcome = write::<CreatePull>(
         cell,
         CreatePullInput {
+            code_owner_requests: Default::default(),
             metadata: Default::default(),
             submission_id: *Uuid::now_v7().as_bytes(),
             author: author.clone(),
@@ -65,6 +66,7 @@ async fn create_pull(cell: &RepositoryCell, author: &RepositoryAuthor, number: u
             body: String::new(),
             base_ref: "refs/heads/main".into(),
             head_ref: format!("refs/heads/feature-{number}"),
+            head_repository: None,
             base_oid: "a".repeat(40),
             head_oid: "b".repeat(40),
         },
@@ -168,6 +170,8 @@ async fn request_review_cancel_replay_and_refresh_preserve_indexed_participation
     assert_eq!(search(&cell, "review-involves:bob", &bob).await.matching, 0);
     request(&cell, 1, &alice, &bob, true).await;
     let review = CreatePullReviewInput {
+        base_revision: None,
+        review_teams: Vec::new(),
         submission_id: *Uuid::now_v7().as_bytes(),
         pull: 1,
         author: bob.clone(),
@@ -237,6 +241,8 @@ async fn rebuild_pages_review_history_and_sparse_requests_without_changing_versi
         write::<CreatePullReview>(
             &cell,
             CreatePullReviewInput {
+                base_revision: None,
+                review_teams: Vec::new(),
                 submission_id: *Uuid::now_v7().as_bytes(),
                 pull: number,
                 author: bob.clone(),

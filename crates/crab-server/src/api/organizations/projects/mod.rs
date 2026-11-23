@@ -206,7 +206,14 @@ async fn items(
         let cell = app::repository_cell(&server, &repo)?;
         let found = app::query_output(
             cell.client
-                .query::<source::WorkSummaries>(&cell.target, None, subjects.clone())
+                .query::<source::WorkSummaries>(
+                    &cell.target,
+                    None,
+                    source::WorkQuery {
+                        subjects: subjects.clone(),
+                        default_ref: repo.default_ref().await?,
+                    },
+                )
                 .await,
         )?;
         if found.len() != subjects.len() {
@@ -338,7 +345,14 @@ async fn submit(
                     let subjects = item.subject.into_iter().collect::<Vec<_>>();
                     let summaries = app::query_output(
                         cell.client
-                            .query::<source::WorkSummaries>(&cell.target, None, subjects)
+                            .query::<source::WorkSummaries>(
+                                &cell.target,
+                                None,
+                                source::WorkQuery {
+                                    subjects,
+                                    default_ref: repo.default_ref().await?,
+                                },
+                            )
                             .await,
                     )?;
                     summaries.len() == 1

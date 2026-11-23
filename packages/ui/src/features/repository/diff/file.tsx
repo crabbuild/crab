@@ -17,7 +17,6 @@ import type { DiffLineAnnotation, SelectedLineRange } from "@pierre/diffs";
 import { MultiFileDiff } from "@pierre/diffs/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { DiffReviewState, InlineDiffThread } from "./model";
-import { changePanelId } from "./model";
 
 function changeVariant(kind: string) {
   if (kind === "Added") return "success" as const;
@@ -26,6 +25,7 @@ function changeVariant(kind: string) {
 }
 
 export function DiffView({
+  id,
   repo,
   rev,
   base,
@@ -35,7 +35,8 @@ export function DiffView({
   eager,
   review,
 }: {
-  repo: Repository;
+  id: string;
+  repo: Pick<Repository, "owner" | "name">;
   rev: string;
   theme: "light" | "dark";
   codeThemes: CodeThemes;
@@ -134,17 +135,15 @@ export function DiffView({
   return (
     <section
       ref={panel}
-      id={changePanelId(change.path_hex)}
+      id={id}
       className="panel diff-panel"
       data-change-path={change.path}
       data-change-path-hex={change.path_hex}
-      aria-labelledby={`${changePanelId(change.path_hex)}-heading`}
+      aria-labelledby={`${id}-heading`}
     >
       <div className="panel-header">
         <div className="diff-file-heading">
-          <h4 id={`${changePanelId(change.path_hex)}-heading`}>
-            {change.path}
-          </h4>
+          <h4 id={`${id}-heading`}>{change.path}</h4>
           <Badge variant={changeVariant(change.kind)}>{change.kind}</Badge>
           {change.old?.mode !== change.new?.mode && (
             <code>
@@ -152,34 +151,37 @@ export function DiffView({
             </code>
           )}
         </div>
-        <ToggleGroup
-          role="group"
-          type="single"
-          variant="outline"
-          spacing={0}
-          aria-label={`Diff layout for ${change.path}`}
-          value={style}
-          onValueChange={(value) => {
-            if (value === "split" || value === "unified") setStyle(value);
-          }}
-        >
-          <ToggleGroupItem
-            value="split"
-            role="button"
-            aria-pressed={style === "split"}
-            aria-checked={undefined}
+        <div className="flex flex-wrap items-center justify-end gap-3">
+          {review?.renderFileActions?.(change)}
+          <ToggleGroup
+            role="group"
+            type="single"
+            variant="outline"
+            spacing={0}
+            aria-label={`Diff layout for ${change.path}`}
+            value={style}
+            onValueChange={(value) => {
+              if (value === "split" || value === "unified") setStyle(value);
+            }}
           >
-            Split
-          </ToggleGroupItem>
-          <ToggleGroupItem
-            value="unified"
-            role="button"
-            aria-pressed={style === "unified"}
-            aria-checked={undefined}
-          >
-            Unified
-          </ToggleGroupItem>
-        </ToggleGroup>
+            <ToggleGroupItem
+              value="split"
+              role="button"
+              aria-pressed={style === "split"}
+              aria-checked={undefined}
+            >
+              Split
+            </ToggleGroupItem>
+            <ToggleGroupItem
+              value="unified"
+              role="button"
+              aria-pressed={style === "unified"}
+              aria-checked={undefined}
+            >
+              Unified
+            </ToggleGroupItem>
+          </ToggleGroup>
+        </div>
       </div>
       {load ? (
         <Result state={state}>

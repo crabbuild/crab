@@ -188,7 +188,15 @@ pub(crate) async fn advertise(
     {
         return Err(GitError::NotFound);
     }
-    require_v2(&headers)?;
+    advertise_read(&server, query, &headers).await
+}
+
+pub(crate) async fn advertise_read(
+    server: &Server,
+    query: Discovery,
+    headers: &HeaderMap,
+) -> Result<Response, GitError> {
+    require_v2(headers)?;
     if query.service != "git-upload-pack" {
         return Err(GitError::Request("Unsupported Git service"));
     }
@@ -229,6 +237,16 @@ pub(crate) async fn upload_pack(
         .get(&(owner, name))
         .filter(|entry| principal.can_read(entry.id))
         .ok_or(GitError::NotFound)?;
+    upload_pack_read(server, entry, headers, request, None).await
+}
+
+pub(crate) async fn upload_pack_read(
+    server: Arc<Server>,
+    entry: Arc<crate::repository::Repository>,
+    headers: HeaderMap,
+    request: Request,
+    scope: Option<(String, gix_hash::ObjectId)>,
+) -> Result<Response, GitError> {
     if headers
         .get("content-type")
         .and_then(|value| value.to_str().ok())
@@ -270,11 +288,25 @@ pub(crate) async fn upload_pack(
     let (view, repository) = entry
         .open_capsule_repository(&server, upload_pack_repository_options()?, &cancel)
         .await?;
+    let scoped_refs = if let Some((name, target)) = scope {
+        let reference = repository
+            .refs()
+            .find(&name)
+            .filter(|reference| reference.target == target)
+            .ok_or(GitError::NotFound)?;
+        Some(RepositoryRefs {
+            entries: vec![reference.clone()],
+            ..RepositoryRefs::default()
+        })
+    } else {
+        None
+    };
+    let advertised = scoped_refs.as_ref().unwrap_or_else(|| repository.refs());
     let mut response = Vec::new();
     match request.command.as_str() {
         "ls-refs" => {
             let request = wire::parse_ls_refs(&request.args)?;
-            write_refs(&mut response, repository.refs(), &request, &cancel).await?;
+            write_refs(&mut response, advertised, &request, &cancel).await?;
             Ok((
                 [("content-type", "application/x-git-upload-pack-result")],
                 response,
@@ -283,9 +315,16 @@ pub(crate) async fn upload_pack(
         }
         "fetch" => {
             let request = wire::parse_fetch(&request.args)?;
+            if let Some(scoped_refs) = &scoped_refs
+                && request
+                    .deepen_not
+                    .iter()
+                    .any(|name| scoped_refs.find(name).is_none())
+            {
+                return Err(crab_read::ReadError::UnauthorizedObject.into());
+            }
             let visibility = view.git_visibility_index().await?;
-            let refs = repository
-                .refs()
+            let refs = advertised
                 .entries
                 .iter()
                 .map(|reference| reference.name.clone())

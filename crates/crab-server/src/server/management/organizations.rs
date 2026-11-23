@@ -75,7 +75,7 @@ async fn set_repository_organization(
         issuer: "urn:crab:local".into(),
         subject: "operator".into(),
     };
-    catalog
+    let record = catalog
         .set_organization_access(
             &owner,
             &name,
@@ -85,8 +85,15 @@ async fn set_repository_organization(
             actor,
         )
         .await
-        .map(Json)
-        .map_err(app::repository_access_error)
+        .map_err(app::repository_access_error)?;
+    let (document, _) = catalog.load().await.map_err(app::repository_access_error)?;
+    // Publish the new owner with the repository route before returning. Until
+    // another peer refreshes, it must fail closed on a different owner binding.
+    server
+        .install_catalog(document)
+        .await
+        .map_err(|source| Error::RepositorySetup(Box::new(source)))?;
+    Ok(Json(record))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -1,6 +1,9 @@
 mod read;
+mod rename;
+pub(crate) mod transfer;
+pub(crate) use rename::Rename;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -29,6 +32,8 @@ pub enum CatalogError {
     Json(#[from] serde_json::Error),
     #[error("repository catalog is invalid: {0}")]
     Invalid(&'static str),
+    #[error("repository destination is already in use")]
+    NameUnavailable,
     #[error("repository catalog changed concurrently")]
     Conflict,
     #[error("repository is not present in the catalog")]
@@ -46,6 +51,8 @@ pub enum CatalogError {
 pub struct CatalogRecord {
     pub id: Uuid,
     pub owner: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<Uuid>,
     pub name: String,
     pub prefix: String,
     pub placement_generation: u64,
@@ -57,6 +64,10 @@ pub struct CatalogRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) organization: Option<OrganizationAccess>,
     pub protected_branches: Vec<BranchProtection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    naming: Option<rename::Naming>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) transfer: Option<transfer::Offer>,
 }
 
 pub(crate) const MAX_TEAM_GRANTS: usize = 100;
@@ -100,6 +111,7 @@ impl OrganizationAccess {
 #[serde(rename_all = "snake_case")]
 pub enum RepositoryApplicationState {
     EmptyCellPending,
+    GitImportPending,
     CellReady,
 }
 
@@ -115,7 +127,7 @@ pub struct CatalogDocument {
     pub pending_membership_audit: Option<MembershipAuditEvent>,
 }
 
-/// Revision-bound replacement of the complete repository access list.
+/// Revision-bound replacement of direct members and OIDC group grants.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -137,6 +149,8 @@ pub struct MembershipActor {
 pub struct MembershipSnapshot {
     pub repository_id: Uuid,
     pub revision: u64,
+    #[serde(skip)]
+    pub(crate) renamed: bool,
     pub members: Vec<RepositoryMember>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<RepositoryGroup>,
@@ -171,6 +185,18 @@ impl Default for CatalogDocument {
 }
 
 impl CatalogDocument {
+    pub(crate) fn membership_snapshot(
+        &self,
+        record: &CatalogRecord,
+    ) -> Result<MembershipSnapshot, CatalogError> {
+        let source = record.access_record(
+            record
+                .forked_from
+                .and_then(|id| self.repositories.iter().find(|source| source.id == id)),
+        )?;
+        Ok(record.access_snapshot(self.version, source))
+    }
+
     fn validate(&self, root: &StorageRoot) -> Result<(), CatalogError> {
         if self.schema_version != SCHEMA_VERSION || self.repositories.len() > MAX_REPOSITORIES {
             return Err(CatalogError::Invalid(
@@ -210,18 +236,38 @@ impl CatalogDocument {
         {
             return Err(CatalogError::Invalid("membership audit chain is invalid"));
         }
-        let mut ids = HashSet::new();
+        let records: HashMap<_, _> = self
+            .repositories
+            .iter()
+            .map(|record| (record.id, record))
+            .collect();
+        if records.len() != self.repositories.len() {
+            return Err(CatalogError::Invalid("repository IDs must be unique"));
+        }
         let mut names = HashSet::new();
         let mut prefixes = HashSet::new();
         for record in &self.repositories {
             if record.placement_generation == 0
-                || !ids.insert(record.id)
                 || !names.insert((record.owner.to_lowercase(), record.name.to_lowercase()))
                 || !prefixes.insert(record.prefix.clone())
             {
                 return Err(CatalogError::Invalid(
                     "repository IDs, names, prefixes, and placement generations must be valid and unique",
                 ));
+            }
+            if let Some(upstream) = record.forked_from {
+                record.access_record(records.get(&upstream).copied())?;
+                if !record.members.is_empty()
+                    || !record.groups.is_empty()
+                    || record
+                        .organization
+                        .as_ref()
+                        .is_some_and(|access| !access.teams.is_empty())
+                {
+                    return Err(CatalogError::Invalid(
+                        "forks must inherit repository access",
+                    ));
+                }
             }
             let runtime = record.runtime_config(root, "main")?;
             if let Some(organization) = &record.organization {
@@ -230,6 +276,8 @@ impl CatalogDocument {
             crate::config::validate_repository(&runtime)
                 .map_err(|_| CatalogError::Invalid("repository record failed validation"))?;
         }
+        self.validate_renames(&mut names)?;
+        self.validate_transfers()?;
         Ok(())
     }
 
@@ -252,6 +300,57 @@ fn valid_actor(actor: &MembershipActor) -> bool {
     [&actor.issuer, &actor.subject].iter().all(|value| {
         !value.is_empty() && value.chars().count() <= 512 && !value.chars().any(char::is_control)
     })
+}
+
+pub(crate) fn personal_namespace(issuer: &str, subject: &str) -> String {
+    let identity = format!("{issuer}\0{subject}");
+    let digest = blake3::derive_key("crab personal repository namespace v1", identity.as_bytes());
+    let hex = blake3::Hash::from_bytes(digest).to_hex();
+    format!("user-{}", &hex[..32])
+}
+
+pub(crate) fn is_personal_namespace(owner: &str) -> bool {
+    owner
+        .to_ascii_lowercase()
+        .strip_prefix("user-")
+        .is_some_and(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+pub(crate) fn organization_namespace(id: Uuid) -> String {
+    format!("org-{}", id.simple())
+}
+
+pub(crate) fn is_organization_namespace(owner: &str) -> bool {
+    owner
+        .to_ascii_lowercase()
+        .strip_prefix("org-")
+        .is_some_and(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+pub(crate) enum BrowserNamespace {
+    Personal(String),
+    Organization(Uuid),
+}
+
+impl BrowserNamespace {
+    fn catalog_owner(
+        self,
+        members: &[RepositoryMember],
+    ) -> Result<(String, Option<OrganizationAccess>), CatalogError> {
+        match self {
+            Self::Personal(owner) => Ok((owner, None)),
+            Self::Organization(id) if members.is_empty() => Ok((
+                organization_namespace(id),
+                Some(OrganizationAccess {
+                    id,
+                    teams: Vec::new(),
+                }),
+            )),
+            Self::Organization(_) => Err(CatalogError::Invalid(
+                "organization repositories inherit their initial administrators",
+            )),
+        }
+    }
 }
 
 fn valid_audit_path(path: &str) -> bool {
@@ -295,6 +394,43 @@ fn membership_digest(
 }
 
 impl CatalogRecord {
+    pub fn organization_id(&self) -> Option<Uuid> {
+        self.organization.as_ref().map(|access| access.id)
+    }
+
+    pub(crate) fn access_record<'a>(
+        &'a self,
+        source: Option<&'a Self>,
+    ) -> Result<&'a Self, CatalogError> {
+        let Some(upstream) = self.forked_from else {
+            return Ok(self);
+        };
+        // A fork stays in its source organization and shares its live ACL. A
+        // reused route or another fork cannot become its authority.
+        source
+            .filter(|source| {
+                source.id == upstream
+                    && source.forked_from.is_none()
+                    && source.organization.is_some()
+                    && source.organization_id() == self.organization_id()
+                    && source.application == RepositoryApplicationState::CellReady
+            })
+            .ok_or(CatalogError::Invalid(
+                "fork source is unavailable in its organization",
+            ))
+    }
+
+    pub(crate) fn access_snapshot(&self, revision: u64, source: &Self) -> MembershipSnapshot {
+        MembershipSnapshot {
+            repository_id: self.id,
+            revision,
+            renamed: self.name_version() > 0,
+            organization: source.organization.clone(),
+            members: source.members.clone(),
+            groups: source.groups.clone(),
+        }
+    }
+
     fn membership_digest(&self) -> Result<String, CatalogError> {
         membership_digest(&self.members, &self.groups, self.organization.as_ref())
     }
@@ -341,6 +477,11 @@ pub struct CatalogStore {
     latest: Arc<RwLock<Option<CachedCatalog>>>,
 }
 
+enum InsertMode {
+    ExistingPrefix,
+    Reserved(MembershipActor),
+}
+
 impl CatalogStore {
     pub(crate) fn new(root: StorageRoot) -> Self {
         let path = root.path(CATALOG_RELATIVE_PATH);
@@ -370,52 +511,16 @@ impl CatalogStore {
         description: String,
         members: Vec<RepositoryMember>,
     ) -> Result<CatalogRecord, CatalogError> {
-        self.create_repository_with_mode(
-            owner,
-            name,
-            prefix,
-            default_branch,
-            description,
-            members,
-            true,
-        )
-        .await
-    }
-
-    pub(crate) async fn create_repository_exclusive(
-        &self,
-        owner: String,
-        name: String,
-        prefix: String,
-        default_branch: String,
-        description: String,
-        members: Vec<RepositoryMember>,
-    ) -> Result<CatalogRecord, CatalogError> {
-        self.create_repository_with_mode(
-            owner,
-            name,
-            prefix,
-            default_branch,
-            description,
-            members,
-            false,
-        )
-        .await
-    }
-
-    async fn create_repository_with_mode(
-        &self,
-        owner: String,
-        name: String,
-        prefix: String,
-        default_branch: String,
-        description: String,
-        members: Vec<RepositoryMember>,
-        allow_existing: bool,
-    ) -> Result<CatalogRecord, CatalogError> {
+        if is_organization_namespace(&owner) {
+            return Err(CatalogError::Invalid(
+                "organization namespaces require organization authority",
+            ));
+        }
         let record = CatalogRecord {
             id: Uuid::now_v7(),
             owner,
+            organization: None,
+            forked_from: None,
             name,
             prefix,
             placement_generation: 1,
@@ -423,21 +528,109 @@ impl CatalogStore {
             description,
             members,
             groups: Vec::new(),
-            organization: None,
             protected_branches: Vec::new(),
+            naming: None,
+            transfer: None,
         };
-        let runtime = record.runtime_config(&self.root, &default_branch)?;
+        self.initialize_git(&record, &default_branch, false).await?;
+        self.insert_with_mode(record, InsertMode::ExistingPrefix)
+            .await
+    }
+
+    pub(crate) async fn reserve_browser_repository(
+        &self,
+        namespace: BrowserNamespace,
+        name: String,
+        description: String,
+        request: Uuid,
+        actor: MembershipActor,
+        members: Vec<RepositoryMember>,
+    ) -> Result<CatalogRecord, CatalogError> {
+        let (owner, organization) = namespace.catalog_owner(&members)?;
+        let mut hash = blake3::Hasher::new_derive_key("crab browser repository creation v1");
+        hash.update(owner.as_bytes());
+        hash.update(request.as_bytes());
+        let mut id = [0; 16];
+        id.copy_from_slice(&hash.finalize().as_bytes()[..16]);
+        let id = uuid::Builder::from_custom_bytes(id).into_uuid();
+        self.insert_with_mode(
+            CatalogRecord {
+                id,
+                owner,
+                organization,
+                forked_from: None,
+                name,
+                prefix: format!("browser-repositories/{id}"),
+                placement_generation: 1,
+                application: RepositoryApplicationState::EmptyCellPending,
+                description,
+                members,
+                groups: Vec::new(),
+                protected_branches: Vec::new(),
+                naming: None,
+                transfer: None,
+            },
+            InsertMode::Reserved(actor),
+        )
+        .await
+    }
+
+    pub(crate) async fn reserve_git_import(
+        &self,
+        id: Uuid,
+        namespace: BrowserNamespace,
+        name: String,
+        description: String,
+        actor: MembershipActor,
+        members: Vec<RepositoryMember>,
+        forked_from: Option<Uuid>,
+    ) -> Result<CatalogRecord, CatalogError> {
+        let (owner, organization) = namespace.catalog_owner(&members)?;
+        self.insert_with_mode(
+            CatalogRecord {
+                id,
+                owner,
+                organization,
+                forked_from,
+                name,
+                prefix: format!("git-imports/{id}"),
+                placement_generation: 1,
+                application: RepositoryApplicationState::GitImportPending,
+                description,
+                members,
+                groups: Vec::new(),
+                protected_branches: Vec::new(),
+                naming: None,
+                transfer: None,
+            },
+            InsertMode::Reserved(actor),
+        )
+        .await
+    }
+
+    pub(crate) async fn initialize_git(
+        &self,
+        record: &CatalogRecord,
+        default_branch: &str,
+        require_identity: bool,
+    ) -> Result<(), CatalogError> {
+        let runtime = record.runtime_config(&self.root, default_branch)?;
         crate::config::validate_repository(&runtime)
             .map_err(|_| CatalogError::Invalid("repository record failed validation"))?;
         let layout = self.root.repository_layout(runtime.prefix.clone());
-        crab_write::capsule_protocol::initialize(
+        let id = blake3::hash(record.id.as_bytes()).to_hex();
+        let root = crab_write::capsule_protocol::initialize(
             &layout,
-            blake3::hash(record.id.as_bytes()).to_hex().as_ref(),
+            id.as_ref(),
             &format!("refs/heads/{default_branch}"),
         )
         .await?;
-        crab_metadata::capsule_protocol::load_root(&layout).await?;
-        self.insert_with_mode(record, allow_existing).await
+        if require_identity && root.record().root().repository_id() != id.as_str() {
+            return Err(CatalogError::Invalid(
+                "reserved Git prefix contains another repository",
+            ));
+        }
+        Ok(())
     }
 
     pub async fn adopt_repository(
@@ -451,6 +644,8 @@ impl CatalogStore {
         let record = CatalogRecord {
             id: Uuid::now_v7(),
             owner,
+            organization: None,
+            forked_from: None,
             name,
             prefix,
             placement_generation: 1,
@@ -458,8 +653,9 @@ impl CatalogStore {
             description,
             members,
             groups: Vec::new(),
-            organization: None,
             protected_branches: Vec::new(),
+            naming: None,
+            transfer: None,
         };
         let runtime = record.runtime_config(&self.root, "main")?;
         crate::config::validate_repository(&runtime)
@@ -541,6 +737,7 @@ impl CatalogStore {
             crate::config::validate_repository(&record.runtime_config(&self.root, "main")?)
                 .map_err(|_| CatalogError::Invalid("repository record failed validation"))?;
             if require_administrator
+                && record.organization.is_none()
                 && !record
                     .members
                     .iter()
@@ -602,6 +799,11 @@ impl CatalogStore {
         }) else {
             return Err(CatalogError::NotFound);
         };
+        if record.forked_from.is_some() {
+            return Err(CatalogError::Invalid(
+                "manage fork access on the source repository",
+            ));
+        }
         let previous = record.clone();
         edit(record)?;
         if record == &previous {
@@ -687,6 +889,29 @@ impl CatalogStore {
         Err(CatalogError::Conflict)
     }
 
+    pub(crate) async fn needs_cell_initialization(
+        &self,
+        repository: Uuid,
+        pending: RepositoryApplicationState,
+    ) -> Result<bool, CatalogError> {
+        let (document, _) = self.load().await?;
+        let state = document
+            .repositories
+            .iter()
+            .find(|record| record.id == repository)
+            .ok_or(CatalogError::NotFound)?
+            .application;
+        if state == RepositoryApplicationState::CellReady {
+            return Ok(false);
+        }
+        if state != pending {
+            return Err(CatalogError::Invalid(
+                "repository is reserved by another initialization workflow",
+            ));
+        }
+        Ok(true)
+    }
+
     pub(crate) async fn mark_cell_ready(
         &self,
         repository: Uuid,
@@ -716,13 +941,14 @@ impl CatalogStore {
     }
 
     async fn insert(&self, record: CatalogRecord) -> Result<CatalogRecord, CatalogError> {
-        self.insert_with_mode(record, true).await
+        self.insert_with_mode(record, InsertMode::ExistingPrefix)
+            .await
     }
 
     async fn insert_with_mode(
         &self,
         record: CatalogRecord,
-        allow_existing: bool,
+        mode: InsertMode,
     ) -> Result<CatalogRecord, CatalogError> {
         for _ in 0..MAX_CAS_ATTEMPTS {
             let (mut document, etag) = self.load_for_mutation().await?;
@@ -730,16 +956,43 @@ impl CatalogStore {
                 existing.owner.eq_ignore_ascii_case(&record.owner)
                     && existing.name.eq_ignore_ascii_case(&record.name)
             }) {
-                return if allow_existing && existing.prefix == record.prefix {
+                let same = existing.organization_id() == record.organization_id()
+                    && existing.forked_from == record.forked_from
+                    && match &mode {
+                        InsertMode::ExistingPrefix => existing.prefix == record.prefix,
+                        InsertMode::Reserved(_) => {
+                            existing.id == record.id
+                                && existing.prefix == record.prefix
+                                && existing.owner == record.owner
+                                && existing.name == record.name
+                                && existing.description == record.description
+                        }
+                    };
+                return if same {
                     Ok(existing.clone())
                 } else {
                     Err(CatalogError::Conflict)
                 };
             }
+            if is_organization_namespace(&record.owner) {
+                if record.organization.is_none() {
+                    return Err(CatalogError::Invalid(
+                        "organization namespaces require organization authority",
+                    ));
+                }
+                // A lookalike catalog owner from before managed accounts keeps
+                // its original access. It cannot share a managed namespace.
+                if document.repositories.iter().any(|existing| {
+                    existing.owner.eq_ignore_ascii_case(&record.owner)
+                        && existing.organization_id() != record.organization_id()
+                }) {
+                    return Err(CatalogError::Conflict);
+                }
+            }
             if document
                 .repositories
                 .iter()
-                .any(|existing| existing.prefix == record.prefix)
+                .any(|existing| existing.id == record.id || existing.prefix == record.prefix)
             {
                 return Err(CatalogError::Conflict);
             }
@@ -747,15 +1000,19 @@ impl CatalogStore {
                 .version
                 .checked_add(1)
                 .ok_or(CatalogError::Invalid("catalog version overflowed"))?;
+            document.release_alias(&record.owner, &record.name);
             document.repositories.push(record.clone());
             document.normalize();
-            if !record.members.is_empty() {
+            if !record.members.is_empty() || record.organization.is_some() {
                 document.pending_membership_audit = Some(MembershipAuditEvent {
                     id: Uuid::now_v7(),
                     repository_id: record.id,
-                    actor: MembershipActor {
-                        issuer: "urn:crab:local".into(),
-                        subject: "operator".into(),
+                    actor: match &mode {
+                        InsertMode::Reserved(actor) => actor.clone(),
+                        _ => MembershipActor {
+                            issuer: "urn:crab:local".into(),
+                            subject: "operator".into(),
+                        },
                     },
                     previous_members_digest: membership_digest(&[], &[], None)?,
                     new_members_digest: record.membership_digest()?,

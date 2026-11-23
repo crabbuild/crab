@@ -1,9 +1,11 @@
+import { mergeMethod } from "./merge-methods";
 import { useEffect, useState } from "react";
 import { OverlayVisibility } from "@/components/ui/use-overlay-state";
 import { useSubmission } from "@/components/discussion/hooks";
 import { Author } from "@/components/discussion/author";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
-import { CheckRuns } from "./checks";
+import { PullChecks } from "./candidate-checks";
+import { ChangeBase } from "./change-base";
 import type { CodeThemes } from "@/lib/code-theme";
 import { DiscussionMetadata } from "@/components/discussion/metadata";
 import { repoHref, repositoryRoute } from "@/lib/repository-route";
@@ -19,12 +21,15 @@ import {
 } from "@primer/octicons-react";
 
 import { PullCommits } from "./commits";
+import { PullCodeOwners } from "./codeowners";
 import { PullConversation } from "./conversation";
 import { useCommentSubmission } from "@/components/discussion/conversation/compose";
 import type { PullRequest } from "./model";
 import { branch, pullIcons, pullStatus } from "./presentation";
 import { ReviewChanges, type ReviewDraft } from "./reviews/form";
+import { PendingComments, usePendingReview } from "./reviews/pending";
 import { PullReviewThreads } from "./reviews/threads";
+import { LinkedReviewThread } from "./reviews/thread-card";
 
 function PullBadge({ pull }: { pull: PullRequest }) {
   const status = pullStatus(pull);
@@ -79,6 +84,17 @@ export function PullDetail({
     requestedTab === "checks"
       ? requestedTab
       : "conversation";
+  const thread = Number(url.searchParams.get("thread"));
+  const reply = Number(url.searchParams.get("reply"));
+  const unresolvedOnly = url.searchParams.get("threads") === "unresolved";
+  const linkedThread =
+    tab === "files" && Number.isSafeInteger(thread) && thread > 0;
+  const pendingReview = usePendingReview(
+    repo,
+    number,
+    csrf,
+    tab === "files" && !linkedThread,
+  );
   const [visitedConversation, setVisitedConversation] = useState(
     tab === "conversation",
   );
@@ -126,10 +142,8 @@ export function PullDetail({
                   <strong>
                     <Author author={data.merge.author} />
                   </strong>{" "}
-                  {data.merge.method === "merge_commit"
-                    ? "created merge commit"
-                    : "fast-forwarded"}{" "}
-                  <code>{short(data.merge.commit_oid)}</code> into{" "}
+                  {mergeMethod(data.merge.method).completion}{" "}
+                  <code>{short(data.merge.commit_oid)}</code> on{" "}
                   <code>{branch(data.base_ref)}</code>
                 </span>
               ) : (
@@ -138,9 +152,31 @@ export function PullDetail({
                     <Author author={data.author} />
                   </strong>{" "}
                   wants to merge <code>{short(data.head_oid)}</code> from{" "}
-                  <code>{branch(data.head_ref)}</code> into{" "}
-                  <code>{branch(data.base_ref)}</code>
+                  {data.head_repository ? (
+                    <Link
+                      href={repoHref(data.head_repository, {
+                        rev: data.head_ref,
+                      })}
+                    >
+                      <code>
+                        {data.head_repository.name}:{branch(data.head_ref)}
+                      </code>
+                    </Link>
+                  ) : (
+                    <code>{branch(data.head_ref)}</code>
+                  )}{" "}
+                  into <code>{branch(data.base_ref)}</code>
                 </span>
+              )}
+              {data.can_change_base && !repo.archived && (
+                <ChangeBase
+                  repo={repo}
+                  pull={data}
+                  csrf={csrf}
+                  theme={theme}
+                  codeThemes={codeThemes}
+                  refresh={refresh}
+                />
               )}
             </div>
           </div>
@@ -197,42 +233,78 @@ export function PullDetail({
             </div>
           )}
           {tab === "checks" ? (
-            <CheckRuns
+            <PullChecks
+              key={`${repo.id}:${number}`}
               repo={repo}
-              pull={number}
-              oid={data.head_oid}
+              pull={data}
+              csrf={csrf}
               selected={selectedCheck}
               before={checkBefore}
+              showCandidate={url.searchParams.get("candidate") === "1"}
+              onMerged={(merged) => {
+                setCurrent(merged);
+                refresh();
+              }}
             />
           ) : tab === "commits" ? (
             data.branches_available ? (
               <PullCommits repo={repo} pull={data} url={url} />
             ) : null
+          ) : linkedThread ? (
+            <LinkedReviewThread
+              key={`${thread}:${reply}`}
+              repo={repo}
+              pull={data}
+              csrf={csrf}
+              number={thread}
+              refresh={refresh}
+              reply={
+                Number.isSafeInteger(reply) && reply > 0 ? reply : undefined
+              }
+            />
           ) : tab === "files" ? (
-            data.branches_available ? (
-              <>
-                {data.state === "open" && !repo.archived && (
-                  <ReviewChanges
-                    repo={repo}
-                    pull={data}
-                    csrf={csrf}
-                    refresh={refresh}
-                    disabled={pull.loading || Boolean(pull.error)}
-                    draft={reviewDraft}
-                    onDraft={setReviewDraft}
-                    submission={reviewSubmission}
-                  />
-                )}
+            <>
+              {data.branches_available && (
+                <PullCodeOwners repo={repo} pull={data} />
+              )}
+              {(reviewDraft?.attempt ||
+                (data.branches_available &&
+                  data.state === "open" &&
+                  !repo.archived)) && (
+                <ReviewChanges
+                  repo={repo}
+                  pull={data}
+                  csrf={csrf}
+                  refresh={refresh}
+                  disabled={pull.loading || Boolean(pull.error)}
+                  draft={reviewDraft}
+                  onDraft={setReviewDraft}
+                  submission={reviewSubmission}
+                  pendingReview={pendingReview}
+                />
+              )}
+              <PendingComments
+                review={pendingReview}
+                head={data.head_oid}
+                canEdit={data.branches_available && data.state === "open"}
+                canDiscard={!repo.archived}
+                busy={!!reviewDraft?.attempt}
+              />
+              {data.branches_available && (
                 <PullReviewThreads
+                  key={unresolvedOnly ? "unresolved" : "all"}
+                  unresolvedOnly={unresolvedOnly}
                   repo={repo}
                   pull={data}
                   csrf={csrf}
                   theme={theme}
                   codeThemes={codeThemes}
                   refresh={refresh}
+                  pendingReview={pendingReview}
+                  submittingReview={!!reviewDraft?.attempt}
                 />
-              </>
-            ) : null
+              )}
+            </>
           ) : null}
           {/* Keep drafts and pending writes mounted; hide portals with their panel. */}
           {(tab === "conversation" || visitedConversation) && (
@@ -259,6 +331,7 @@ export function PullDetail({
                     path={`pulls/${number}`}
                     csrf={csrf}
                     onSaved={refresh}
+                    allowIssueClosure={data.state !== "merged"}
                   />
                 </div>
               </div>

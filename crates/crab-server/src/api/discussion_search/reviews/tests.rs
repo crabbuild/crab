@@ -30,6 +30,7 @@ async fn reviewer_filters_resolve_public_handles_and_current_accounts() {
             repo,
             crate::app::mutation_identity().unwrap(),
             CreatePullInput {
+                code_owner_requests: Default::default(),
                 metadata: Default::default(),
                 submission_id: *uuid::Uuid::now_v7().as_bytes(),
                 author: author.clone(),
@@ -38,6 +39,7 @@ async fn reviewer_filters_resolve_public_handles_and_current_accounts() {
                 body: String::new(),
                 base_ref: "refs/heads/main".into(),
                 head_ref: "refs/heads/feature".into(),
+                head_repository: None,
                 base_oid: "a".repeat(40),
                 head_oid: "b".repeat(40),
             },
@@ -105,6 +107,8 @@ async fn reviewer_filters_resolve_public_handles_and_current_accounts() {
             repo,
             crate::app::mutation_identity().unwrap(),
             CreatePullReviewInput {
+                base_revision: None,
+                review_teams: Vec::new(),
                 submission_id: *uuid::Uuid::now_v7().as_bytes(),
                 pull: 1,
                 author: reviewer,
@@ -271,6 +275,17 @@ async fn real_git_review_transitions_filter_both_list_kinds_with_consistent_roll
     assert_eq!(required["matching"], 1);
     *h.provider.mode.lock().await = "member".into();
     let bob = h.login().await;
+    let membership_url = format!("{root}/members");
+    let mut current = h.json(&membership_url, &alice).await;
+    let members = current["members"].as_array_mut().unwrap();
+    members
+        .iter_mut()
+        .find(|member| member["subject"] == "bob-id")
+        .unwrap()["access"] = json!("write");
+    members.push(json!({"subject":"carol-id","name":"Carol","access":"write"}));
+    h.write(Method::PUT, &membership_url, &alice,
+        json!({"expected_revision":current["revision"],"members":current["members"],"groups":current["groups"]}))
+        .await.error_for_status().unwrap();
     for state in ["approved", "changes_requested"] {
         h.write(Method::POST,&format!("{root}/pulls/1/reviews"),&bob,json!({"request_id":uuid::Uuid::now_v7(),"state":state,"body":"Review feedback","commit_oid":head})).await.error_for_status().unwrap();
         for view in ["issues", "pulls"] {
@@ -324,6 +339,8 @@ async fn real_git_review_transitions_filter_both_list_kinds_with_consistent_roll
             &carol.target,
             crate::app::mutation_identity().unwrap(),
             CreatePullReviewInput {
+                base_revision: None,
+                review_teams: Vec::new(),
                 pull: 1,
                 submission_id: *uuid::Uuid::now_v7().as_bytes(),
                 author: RepositoryAuthor {

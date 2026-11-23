@@ -1,16 +1,17 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 
-use crab_remote::objects::{self, encode_tree, object_id, read_tree};
+use crab_remote::objects::{self, encode_tree, object_id};
 use futures_util::future::BoxFuture;
 use gix_hash::ObjectId;
 use gix_object::{Kind, bstr::BString, tree};
 
+use super::{MergeMethod, conflicts, rebase};
 use crate::{auth::Identity, git::objects::commit_bytes};
+use crab_remote_git::{OperationContext, RemoteGitObject, RemoteGitSnapshot, Revision};
 
-const MAX_ANCESTRY_COMMITS: usize = 100_000;
 const MAX_MERGE_BLOB_BYTES: usize = 8 * 1024 * 1024;
 
-pub(super) struct Plan {
+pub(in crate::api::pulls) struct Plan {
     pub oid: ObjectId,
     pub objects: Vec<(Kind, Vec<u8>)>,
 }
@@ -21,123 +22,253 @@ pub(super) enum Error {
     History,
     #[error("the pull request changes conflict")]
     Conflict,
+    #[error("{0}")]
+    Resolution(&'static str),
+    #[error("the pull request cannot be safely rebased")]
+    Rebase,
     #[error(transparent)]
     Object(#[from] objects::Error),
 }
 
+pub(in crate::api::pulls) struct Strategy<'a> {
+    pub method: MergeMethod,
+    pub actor: &'a Identity,
+    pub message: &'a str,
+    pub seconds: u64,
+    pub allow_empty_rebase: bool,
+}
+
+pub(super) struct Readers<'a> {
+    pub base: &'a OperationContext,
+    pub head: &'a OperationContext,
+}
+
+impl Readers<'_> {
+    async fn object(&self, oid: ObjectId) -> Result<RemoteGitObject, Error> {
+        // The caller derived the ID from the two captured commit graphs.
+        // Missing in one reader can mean the other graph owns this object.
+        let result = match self.base.read_object(oid).await {
+            Err(crab_remote_git::Error::ObjectNotFound { .. })
+                if !std::ptr::eq(self.base, self.head) =>
+            {
+                self.head.read_object(oid).await
+            }
+            result => result,
+        };
+        result.map_err(objects::Error::from).map_err(Error::from)
+    }
+}
+
 pub(super) async fn build(
-    repository: &crab_remote_git::RemoteGitRepository,
-    operation: &crab_remote_git::OperationContext,
+    git: &super::super::git::PullGit,
+    readers: &Readers<'_>,
     current: ObjectId,
     other: ObjectId,
-    actor: &Identity,
-    message: &str,
-    seconds: u64,
+    strategy: Strategy<'_>,
+    conflicts: conflicts::Mode,
 ) -> Result<Plan, Error> {
-    let ancestor = merge_base(operation, current, other).await?;
-    let ancestor_tree = repository
-        .snapshot(&crab_remote_git::Revision::Commit(ancestor), operation)
-        .await
-        .map_err(objects::Error::from)?
-        .root_tree_oid();
-    let current_tree = repository
-        .snapshot(&crab_remote_git::Revision::Commit(current), operation)
-        .await
-        .map_err(objects::Error::from)?
-        .root_tree_oid();
-    let other_tree = repository
-        .snapshot(&crab_remote_git::Revision::Commit(other), operation)
-        .await
-        .map_err(objects::Error::from)?
-        .root_tree_oid();
-    let mut objects = Vec::new();
-    let tree = merge_tree(
-        operation,
-        Some(ancestor_tree),
-        current_tree,
-        other_tree,
-        &mut objects,
+    let (base, head, ancestor) = comparison(git, readers, current, other).await?;
+    if strategy.method == MergeMethod::Rebase {
+        return rebase::build(git.head(), readers, &base, &head, &ancestor, strategy).await;
+    }
+    let mut generated = Generated {
+        conflicts,
+        ..Generated::default()
+    };
+    let tree = merged_tree(
+        readers,
+        ancestor.root_tree_oid(),
+        &base,
+        &head,
+        &mut generated,
     )
     .await?;
-    let commit = commit_bytes(tree, &[current, other], actor, message, seconds)?;
-    let oid = object_id(Kind::Commit, &commit).map_err(objects::Error::from)?;
-    objects.push((Kind::Commit, commit));
-    Ok(Plan { oid, objects })
+    generated.conflicts.check_complete()?;
+    let parents = [current, other];
+    let parents = if strategy.method == MergeMethod::Squash {
+        &parents[..1]
+    } else {
+        &parents
+    };
+    let commit = commit_bytes(
+        tree,
+        parents,
+        strategy.actor,
+        strategy.message,
+        strategy.seconds,
+    )?;
+    let oid = generated.add(Kind::Commit, commit)?;
+    Ok(generated.plan(oid))
 }
 
-async fn merge_base(
-    operation: &crab_remote_git::OperationContext,
+pub(super) async fn preview_conflicts(
+    git: &super::super::git::PullGit,
+    readers: &Readers<'_>,
     current: ObjectId,
     other: ObjectId,
-) -> Result<ObjectId, Error> {
-    let mut current_pending = VecDeque::from([(current, 0usize)]);
-    let mut other_pending = VecDeque::from([(other, 0usize)]);
-    let mut current_depths = HashMap::from([(current, 0usize)]);
-    let mut other_depths = HashMap::from([(other, 0usize)]);
-    let mut best: Option<(usize, ObjectId)> = None;
-    loop {
-        let current_depth = current_pending.front().map(|(_, depth)| *depth);
-        let other_depth = other_pending.front().map(|(_, depth)| *depth);
-        if best.is_some_and(|(distance, _)| {
-            current_depth.unwrap_or(0) + other_depth.unwrap_or(0) >= distance
-        }) {
-            break;
-        }
-        let expand_current = match (current_depth, other_depth) {
-            (Some(current), Some(other)) => current <= other,
-            (Some(_), None) => true,
-            (None, Some(_)) => false,
-            (None, None) => break,
-        };
-        if current_depths.len() + other_depths.len() > MAX_ANCESTRY_COMMITS {
-            return Err(Error::History);
-        }
-        let (pending, own, opposite) = if expand_current {
-            (&mut current_pending, &mut current_depths, &other_depths)
-        } else {
-            (&mut other_pending, &mut other_depths, &current_depths)
-        };
-        let Some((oid, depth)) = pending.pop_front() else {
-            continue;
-        };
-        if let Some(opposite_depth) = opposite.get(&oid) {
-            let distance = depth + opposite_depth;
-            if best.is_none_or(|(best_distance, _)| distance < best_distance) {
-                best = Some((distance, oid));
-            }
-        }
-        for parent in read_parents(operation, oid).await? {
-            if let std::collections::hash_map::Entry::Vacant(entry) = own.entry(parent) {
-                entry.insert(depth + 1);
-                pending.push_back((parent, depth + 1));
-            }
-        }
-    }
-    best.map(|(_, oid)| oid).ok_or(Error::History)
+) -> Result<Vec<conflicts::File>, Error> {
+    let (base, head, ancestor) = comparison(git, readers, current, other).await?;
+    let mut generated = Generated {
+        conflicts: conflicts::Mode::Preview(vec![]),
+        ..Generated::bounded()
+    };
+    merged_tree(
+        readers,
+        ancestor.root_tree_oid(),
+        &base,
+        &head,
+        &mut generated,
+    )
+    .await?;
+    let conflicts::Mode::Preview(files) = generated.conflicts else {
+        return Err(Error::History);
+    };
+    Ok(files)
 }
 
-async fn read_parents(
-    operation: &crab_remote_git::OperationContext,
-    oid: ObjectId,
-) -> Result<Vec<ObjectId>, Error> {
-    let object = operation
-        .read_object(oid)
+async fn comparison(
+    git: &super::super::git::PullGit,
+    readers: &Readers<'_>,
+    current: ObjectId,
+    other: ObjectId,
+) -> Result<(RemoteGitSnapshot, RemoteGitSnapshot, RemoteGitSnapshot), Error> {
+    let base = git
+        .base
+        .snapshot(&Revision::Commit(current), readers.base)
         .await
         .map_err(objects::Error::from)?;
-    if object.kind != Kind::Commit {
-        return Err(Error::History);
-    }
-    let commit = gix_object::CommitRef::from_bytes(&object.data, gix_hash::Kind::Sha1)
+    let head = git
+        .head()
+        .snapshot(&Revision::Commit(other), readers.head)
+        .await
         .map_err(objects::Error::from)?;
-    Ok(commit.parents().collect())
+    let bases = base
+        .merge_bases_across_captures(&head, readers.base, readers.head)
+        .await
+        .map_err(objects::Error::from)?;
+    // A criss-cross merge needs a virtual base tree. Choosing just one can lose changes.
+    let [ancestor] = bases.as_slice() else {
+        return Err(Error::History);
+    };
+    let ancestor = git
+        .base
+        .snapshot(&Revision::Commit(*ancestor), readers.base)
+        .await
+        .map_err(objects::Error::from)?;
+    Ok((base, head, ancestor))
 }
 
-fn merge_tree<'a>(
-    operation: &'a crab_remote_git::OperationContext,
+pub(super) async fn merged_tree(
+    readers: &Readers<'_>,
+    ancestor_tree: ObjectId,
+    base: &RemoteGitSnapshot,
+    head: &RemoteGitSnapshot,
+    generated: &mut Generated,
+) -> Result<ObjectId, Error> {
+    merge_tree(
+        readers,
+        Some(ancestor_tree),
+        base.root_tree_oid(),
+        head.root_tree_oid(),
+        generated,
+    )
+    .await
+}
+
+#[derive(Default)]
+pub(super) struct Generated {
+    objects: Vec<(Kind, Vec<u8>)>,
+    by_oid: HashMap<ObjectId, usize>,
+    bytes: usize,
+    bounded: bool,
+    conflicts: conflicts::Mode,
+}
+
+impl Generated {
+    pub(super) fn bounded() -> Self {
+        Self {
+            bounded: true,
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn add(&mut self, kind: Kind, data: Vec<u8>) -> Result<ObjectId, Error> {
+        let oid = object_id(kind, &data).map_err(objects::Error::from)?;
+        self.objects.push((kind, data));
+        self.index(oid)?;
+        Ok(oid)
+    }
+
+    fn index(&mut self, oid: ObjectId) -> Result<(), Error> {
+        let Some((_, data)) = self.objects.last() else {
+            return Err(Error::History);
+        };
+        self.bytes = self.bytes.saturating_add(data.len());
+        if self.bounded && (self.bytes > 64 * 1024 * 1024 || self.objects.len() > 16_384) {
+            return Err(Error::Rebase);
+        }
+        self.by_oid.insert(oid, self.objects.len() - 1);
+        Ok(())
+    }
+
+    pub(super) fn plan(self, oid: ObjectId) -> Plan {
+        Plan {
+            oid,
+            objects: self.objects,
+        }
+    }
+
+    fn get(&self, oid: ObjectId) -> Option<&(Kind, Vec<u8>)> {
+        self.by_oid
+            .get(&oid)
+            .and_then(|index| self.objects.get(*index))
+    }
+
+    async fn tree(&self, readers: &Readers<'_>, oid: ObjectId) -> Result<Vec<tree::Entry>, Error> {
+        let object;
+        let (kind, data) = if let Some((kind, data)) = self.get(oid) {
+            (*kind, data.as_slice())
+        } else {
+            object = readers.object(oid).await?;
+            (object.kind, object.data.as_ref())
+        };
+        if kind != Kind::Tree {
+            return Err(Error::Conflict);
+        }
+        Ok(gix_object::TreeRef::from_bytes(data, gix_hash::Kind::Sha1)
+            .map_err(objects::Error::from)?
+            .into_owned()
+            .entries)
+    }
+}
+
+pub(super) fn merge_tree<'a>(
+    readers: &'a Readers<'a>,
     ancestor_oid: Option<ObjectId>,
     current_oid: ObjectId,
     other_oid: ObjectId,
-    objects: &'a mut Vec<(Kind, Vec<u8>)>,
+    objects: &'a mut Generated,
+) -> BoxFuture<'a, Result<ObjectId, Error>> {
+    Box::pin(async move {
+        merge_tree_at(
+            readers,
+            ancestor_oid,
+            current_oid,
+            other_oid,
+            objects,
+            &mut Vec::new(),
+        )
+        .await
+    })
+}
+
+fn merge_tree_at<'a>(
+    readers: &'a Readers<'a>,
+    ancestor_oid: Option<ObjectId>,
+    current_oid: ObjectId,
+    other_oid: ObjectId,
+    objects: &'a mut Generated,
+    path: &'a mut Vec<u8>,
 ) -> BoxFuture<'a, Result<ObjectId, Error>> {
     Box::pin(async move {
         if current_oid == other_oid {
@@ -150,11 +281,11 @@ fn merge_tree<'a>(
             return Ok(current_oid);
         }
         let ancestor = match ancestor_oid {
-            Some(oid) => read_tree(operation, oid).await?,
+            Some(oid) => objects.tree(readers, oid).await?,
             None => vec![],
         };
-        let current = read_tree(operation, current_oid).await?;
-        let other = read_tree(operation, other_oid).await?;
+        let current = objects.tree(readers, current_oid).await?;
+        let other = objects.tree(readers, other_oid).await?;
         let ancestor = entries_by_name(ancestor);
         let current = entries_by_name(current);
         let other = entries_by_name(other);
@@ -166,29 +297,39 @@ fn merge_tree<'a>(
             .collect::<std::collections::BTreeSet<_>>();
         let mut merged = Vec::with_capacity(names.len());
         for name in names {
+            let parent = path.len();
+            if parent != 0 {
+                path.push(b'/');
+            }
+            path.extend(&name);
             let entry = merge_entry(
-                operation,
+                readers,
                 ancestor.get(&name),
                 current.get(&name),
                 other.get(&name),
                 objects,
+                path,
             )
             .await?;
+            path.truncate(parent);
             if let Some(mut entry) = entry {
                 entry.filename = BString::from(name);
                 merged.push(entry);
             }
         }
-        encode_tree(merged, objects).map_err(Error::from)
+        let oid = encode_tree(merged, &mut objects.objects)?;
+        objects.index(oid)?;
+        Ok(oid)
     })
 }
 
 fn merge_entry<'a>(
-    operation: &'a crab_remote_git::OperationContext,
+    readers: &'a Readers<'a>,
     ancestor: Option<&'a tree::Entry>,
     current: Option<&'a tree::Entry>,
     other: Option<&'a tree::Entry>,
-    objects: &'a mut Vec<(Kind, Vec<u8>)>,
+    objects: &'a mut Generated,
+    path: &'a mut Vec<u8>,
 ) -> BoxFuture<'a, Result<Option<tree::Entry>, Error>> {
     Box::pin(async move {
         if same_entry(current, other) {
@@ -206,12 +347,13 @@ fn merge_entry<'a>(
                     && other.mode.is_tree()
                     && ancestor.is_none_or(|entry| entry.mode.is_tree()) =>
             {
-                let oid = merge_tree(
-                    operation,
+                let oid = merge_tree_at(
+                    readers,
                     ancestor.map(|entry| entry.oid),
                     current.oid,
                     other.oid,
                     objects,
+                    path,
                 )
                 .await?;
                 Ok(Some(tree::Entry {
@@ -223,7 +365,7 @@ fn merge_entry<'a>(
             (Some(ancestor), Some(current), Some(other))
                 if !ancestor.mode.is_tree() && !current.mode.is_tree() && !other.mode.is_tree() =>
             {
-                merge_blob(operation, ancestor, current, other, objects)
+                merge_blob(readers, ancestor, current, other, objects, path)
                     .await
                     .map(Some)
             }
@@ -235,11 +377,12 @@ fn merge_entry<'a>(
 }
 
 async fn merge_blob(
-    operation: &crab_remote_git::OperationContext,
+    readers: &Readers<'_>,
     ancestor: &tree::Entry,
     current: &tree::Entry,
     other: &tree::Entry,
-    objects: &mut Vec<(Kind, Vec<u8>)>,
+    objects: &mut Generated,
+    path: &[u8],
 ) -> Result<tree::Entry, Error> {
     let mode = if current.mode == other.mode {
         current.mode
@@ -254,9 +397,9 @@ async fn merge_blob(
         return Err(Error::Conflict);
     }
     let filename = current.filename.clone();
-    let ancestor_bytes = read_blob(operation, ancestor.oid).await?;
-    let current_bytes = read_blob(operation, current.oid).await?;
-    let other_bytes = read_blob(operation, other.oid).await?;
+    let ancestor_bytes = read_blob(readers, objects, ancestor.oid).await?;
+    let current_bytes = read_blob(readers, objects, current.oid).await?;
+    let other_bytes = read_blob(readers, objects, other.oid).await?;
     let mut input = gix_diff::blob::InternedInput::new(&[][..], &[][..]);
     let mut merged = Vec::new();
     let options = gix_merge::blob::builtin_driver::text::Options::default();
@@ -267,12 +410,29 @@ async fn merge_blob(
         &other_bytes,
         options.diff_algorithm,
     );
-    let resolution = merge.run(&mut merged, Default::default(), options.conflict);
+    let labels = gix_merge::blob::builtin_driver::text::Labels {
+        current: Some(gix_object::bstr::BStr::new(b"PR head")),
+        other: Some(gix_object::bstr::BStr::new(b"Base branch")),
+        ancestor: None,
+    };
+    let resolution = merge.run(&mut merged, labels, options.conflict);
     if resolution == gix_merge::blob::Resolution::Conflict {
-        return Err(Error::Conflict);
+        if matches!(objects.conflicts, conflicts::Mode::Reject)
+            || [ancestor, current, other].iter().any(|entry| {
+                !matches!(
+                    entry.mode.kind(),
+                    tree::EntryKind::Blob | tree::EntryKind::BlobExecutable
+                )
+            })
+            || [&ancestor_bytes, &current_bytes, &other_bytes]
+                .iter()
+                .any(|bytes| bytes.contains(&0) || std::str::from_utf8(bytes).is_err())
+        {
+            return Err(Error::Conflict);
+        }
+        merged = objects.conflicts.resolve(path, merged)?;
     }
-    let oid = object_id(Kind::Blob, &merged).map_err(objects::Error::from)?;
-    objects.push((Kind::Blob, merged));
+    let oid = objects.add(Kind::Blob, merged)?;
     Ok(tree::Entry {
         mode,
         filename,
@@ -281,20 +441,22 @@ async fn merge_blob(
 }
 
 async fn read_blob(
-    operation: &crab_remote_git::OperationContext,
+    readers: &Readers<'_>,
+    generated: &Generated,
     oid: ObjectId,
 ) -> Result<Vec<u8>, Error> {
-    let object = operation
-        .read_object(oid)
-        .await
-        .map_err(objects::Error::from)?;
-    if object.kind != Kind::Blob
-        || object.data.len() > MAX_MERGE_BLOB_BYTES
-        || object.data.contains(&0)
-    {
+    if let Some((kind, bytes)) = generated.get(oid) {
+        return checked_blob(*kind, bytes);
+    }
+    let object = readers.object(oid).await?;
+    checked_blob(object.kind, &object.data)
+}
+
+fn checked_blob(kind: Kind, bytes: &[u8]) -> Result<Vec<u8>, Error> {
+    if kind != Kind::Blob || bytes.len() > MAX_MERGE_BLOB_BYTES || bytes.contains(&0) {
         return Err(Error::Conflict);
     }
-    Ok(object.data.to_vec())
+    Ok(bytes.to_vec())
 }
 
 fn entries_by_name(entries: Vec<tree::Entry>) -> BTreeMap<Vec<u8>, tree::Entry> {

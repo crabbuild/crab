@@ -184,7 +184,7 @@ struct UploadOutput {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum Error {
+pub(super) enum Error {
     #[error("{0}")]
     Input(&'static str),
     #[error("Write access is required to change files")]
@@ -241,6 +241,11 @@ impl IntoResponse for Error {
             )
                 .into_response();
         }
+        if let Self::Receive(error) = &self
+            && let ReceiveError::RefRule(message) = error.as_ref()
+        {
+            return crate::app::Error::RefRule(message).into_response();
+        }
         let (status, code, message) = match &self {
             Self::Input(message) => (StatusCode::BAD_REQUEST, "invalid_request", *message),
             Self::App(app::Error::NotFound) => (
@@ -286,11 +291,18 @@ impl IntoResponse for Error {
                 "branch_exists",
                 "A branch with this name already exists or conflicts with another branch",
             ),
-            Self::Receive(error) if matches!(error.as_ref(), ReceiveError::Request(_)) => (
-                StatusCode::CONFLICT,
-                "conflict",
-                "The branch changed; reload before committing",
-            ),
+            Self::Receive(error)
+                if matches!(
+                    error.as_ref(),
+                    ReceiveError::Request(_) | ReceiveError::BranchChanged
+                ) =>
+            {
+                (
+                    StatusCode::CONFLICT,
+                    "conflict",
+                    "The branch changed; reload before committing",
+                )
+            }
             Self::Receive(error)
                 if matches!(
                     error.as_ref(),
@@ -685,7 +697,7 @@ fn validate_path(path_hex: &str) -> Result<crab_remote_git::GitPath, Error> {
     Ok(path)
 }
 
-fn validate_message(message: &str) -> Result<(), Error> {
+pub(super) fn validate_message(message: &str) -> Result<(), Error> {
     let message = message.trim();
     if message.is_empty()
         || message.chars().count() > MAX_MESSAGE_CHARS

@@ -4,6 +4,7 @@ import { tableFromArrays, tableToIPC } from "apache-arrow";
 import { strToU8, zipSync } from "fflate";
 import { parquetWriteBuffer } from "hyparquet-writer";
 import initSqlJs from "sql.js";
+import { emptyIssueTemplates } from "./fixtures";
 import {
   expectNoAccessibilityViolations,
   selectDarkTheme,
@@ -220,6 +221,8 @@ test.beforeEach(async ({ page }) => {
   }> = [];
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/repos/team/project/issues/templates")
+      return route.fulfill({ json: emptyIssueTemplates });
     if (
       url.pathname.startsWith("/api/repos/team/project/") &&
       !["GET", "HEAD"].includes(route.request().method())
@@ -573,6 +576,14 @@ test.beforeEach(async ({ page }) => {
           directory_oid: oid,
         },
       });
+    if (url.pathname.endsWith("/file-codeowners"))
+      return route.fulfill({
+        json: {
+          commit: url.searchParams.get("rev"),
+          path_hex: url.searchParams.get("path_hex"),
+          source: null,
+        },
+      });
     if (url.pathname.endsWith("/file-preview")) {
       const requestedPath = url.searchParams.get("path_hex");
       const additionalSymbolSource = Object.entries(
@@ -635,8 +646,11 @@ test.beforeEach(async ({ page }) => {
     if (url.pathname.endsWith("/changes"))
       return route.fulfill({
         json: {
-          base: null,
-          commit: oid,
+          base: url.searchParams.get("merge_base") ? currentHead : null,
+          base_tip: url.searchParams.get("merge_base")
+            ? currentHead
+            : undefined,
+          commit: url.searchParams.get("merge_base") ? createdBranchHead : oid,
           changes: [
             {
               path: "src/index.ts",
@@ -1717,6 +1731,80 @@ fn report() {
   expect(
     await page.evaluate(() => document.documentElement.scrollWidth),
   ).toBeLessThanOrEqual(390);
+});
+
+test("file code owners follow the inspected commit and link to the exact policy line", async ({
+  page,
+}) => {
+  const historical = pathParent;
+  const file = "README.md";
+  const policy = ".github/CODEOWNERS";
+  const owner = "@release-owner";
+  const text = `${"# Ownership rules\n".repeat(6)}*.md ${owner}\n`;
+  const seen: string[] = [];
+  await page.route(
+    (url) => url.pathname.endsWith("/file-preview"),
+    (route) => {
+      const query = new URL(route.request().url()).searchParams;
+      const source = query.get("path_hex") === pathHex(policy);
+      return route.fulfill({
+        json: {
+          oid,
+          size: source ? text.length : readme.length,
+          mode: "100644",
+          classification: "OrdinaryGit",
+          preview: { state: "inline", text: source ? text : readme },
+          commit: query.get("rev") === historical ? historical : oid,
+          generation: 1,
+        } satisfies FilePreview,
+      });
+    },
+  );
+  await page.route(
+    (url) => url.pathname.endsWith("/file-codeowners"),
+    (route) => {
+      const query = new URL(route.request().url()).searchParams;
+      const rev = query.get("rev");
+      const path = query.get("path_hex");
+      if (rev) seen.push(rev);
+      const source =
+        path === pathHex(file) && rev === historical
+          ? {
+              path: policy,
+              path_hex: pathHex(policy),
+              line: 7,
+              owners: [
+                { reference: owner, eligible: true },
+                { reference: "@unavailable", eligible: false },
+              ],
+              problem: null,
+            }
+          : null;
+      return route.fulfill({ json: { commit: rev, path_hex: path, source } });
+    },
+  );
+  const button = page.getByRole("button", { name: "Code owners", exact: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`/team/project/blob/${historical}/${file}`);
+  await button.focus();
+  await button.press("Enter");
+  const popover = page.getByRole("dialog", { name: "File code owners" });
+  await expect(popover.getByRole("listitem")).toHaveText(owner);
+  await expect(popover).toContainText(
+    "Some listed owners could not be resolved or lack Write access.",
+  );
+  const rule = popover.getByRole("link", { name: `${policy}, line 7` });
+  const target = `/team/project/blob/${historical}/${policy}#L7`;
+  await expect(rule).toHaveAttribute("href", target);
+  await expectNoAccessibilityViolations(page);
+  await rule.click();
+  await expect(page).toHaveURL(target);
+  await expect(page.locator('.file-source-code [data-line="7"]')).toContainText(
+    owner,
+  );
+  await page.goto(`/team/project/blob/main/${file}`);
+  await expect.poll(() => seen).toContain(oid);
+  await expect(button).toHaveCount(0);
 });
 
 test("source stays beside the file tree across tablet widths and remains reachable on mobile", async ({
@@ -2989,6 +3077,96 @@ test("footer groups the Crab mark and tagline into one compact signature", async
   expect(spacing).toBeLessThanOrEqual(12);
 });
 
+test("code search preserves scope and links each match to the searched commit", async ({
+  page,
+}) => {
+  let continuationAttempts = 0;
+  await page.route(
+    (url) => url.pathname === "/api/repos/team/project/code-search",
+    (route) => {
+      const request = new URL(route.request().url());
+      expect(request.searchParams.get("q")).toBe("render");
+      expect(request.searchParams.get("path")).toBe("src");
+      expect(request.searchParams.get("rev")).toBe("refs/heads/main");
+      expect(request.searchParams.get("case_sensitive")).toBe("true");
+      const cursor = request.searchParams.get("cursor");
+      if (cursor) {
+        expect(cursor).toBe("signed-search-cursor");
+        if (++continuationAttempts === 1)
+          return route.fulfill({
+            status: 503,
+            json: { error: { message: "Search is temporarily unavailable" } },
+          });
+      }
+      const item = cursor ? "src/index.ts" : "src/render.ts";
+      return route.fulfill({
+        json: {
+          commit: oid,
+          scanned: cursor ? 1 : 3,
+          skipped: cursor ? 0 : 1,
+          next: cursor ? null : "signed-search-cursor",
+          items: [
+            {
+              path: item,
+              path_hex: pathHex(item),
+              more_lines: false,
+              lines: [
+                {
+                  line: cursor ? 7 : 2,
+                  before: "export const ",
+                  matched: "render",
+                  after: " = 1",
+                },
+              ],
+            },
+          ],
+        },
+      });
+    },
+  );
+  await page.goto("/team/project");
+  await page
+    .locator(".repo-header")
+    .getByRole("link", { name: "Search code", exact: true })
+    .click();
+  const form = page.getByRole("search", { name: "Search repository code" });
+  await form.getByLabel("Search text").fill("render");
+  await form.getByLabel("Directory (optional)").fill("src");
+  await form.getByRole("checkbox", { name: "Match case" }).check();
+  await form.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page).toHaveURL(/code-search\?.*q=render/);
+  const results = page.getByRole("region", { name: "Code search results" });
+  await expect(
+    results.getByText("1 matching file", { exact: false }),
+  ).toBeVisible();
+  await expect(
+    results.getByText("Skipped 1 file", { exact: false }),
+  ).toBeVisible();
+  await expect(results.locator("mark")).toHaveText("render");
+  const next = results.getByRole("button", { name: "Scan next page" });
+  await next.click();
+  await expect(results.getByRole("alert")).toHaveText(
+    "Search is temporarily unavailable",
+  );
+  await expect(
+    results.getByRole("link", { name: "src/render.ts" }),
+  ).toBeVisible();
+  await next.click();
+  await expect(
+    results.getByText("2 matching files", { exact: false }),
+  ).toBeVisible();
+  await expectNoAccessibilityViolations(page);
+  const line = results.locator("a[href$='#L7']");
+  await expect(line).toHaveAttribute(
+    "href",
+    `/team/project/blob/${oid}/src/index.ts#L7`,
+  );
+  await line.click();
+  await expect(page).toHaveURL(`/team/project/blob/${oid}/src/index.ts#L7`);
+  await page.goBack();
+  await expect(form.getByLabel("Search text")).toHaveValue("render");
+});
+
 test("Go to file finds a deep repository path before its directory is expanded", async ({
   page,
 }) => {
@@ -3932,11 +4110,16 @@ test("repository settings create, edit, and delete branch protection rules", asy
     .click();
   await page.getByLabel("Branch name").fill("main");
   await page.getByLabel("Required approving reviews").selectOption("2");
+  const queue = page.getByRole("checkbox", { name: "Require merge queue" });
+  await expect(queue).toBeDisabled();
   await page.getByLabel("Required status checks").fill("ci/test\nsecurity");
+  await queue.click();
+  await expect(queue).toBeChecked();
   await page.getByRole("button", { name: "Save changes" }).click();
   const rule = page.locator(".protection-list > li");
   await expect(rule).toContainText("main");
   await expect(rule).toContainText("2 approving reviews required");
+  await expect(rule).toContainText("Merge queue required");
   await expect(rule.locator(".protection-checks")).toContainText("ci/test");
   await expect(rule.locator(".protection-checks")).toContainText("security");
   expect(updates[0]).toEqual({
@@ -3945,12 +4128,14 @@ test("repository settings create, edit, and delete branch protection rules", asy
       {
         branch: "main",
         required_approvals: 2,
+        require_merge_queue: true,
         required_checks: ["ci/test", "security"],
       },
     ],
   });
 
   await page.getByRole("button", { name: "Edit main" }).click();
+  await expect(queue).toBeChecked();
   await page.getByLabel("Required approving reviews").selectOption("1");
   await page.getByLabel("Required status checks").fill("build");
   await page.getByRole("button", { name: "Save changes" }).click();
@@ -3962,6 +4147,7 @@ test("repository settings create, edit, and delete branch protection rules", asy
       {
         branch: "main",
         required_approvals: 1,
+        require_merge_queue: true,
         required_checks: ["build"],
       },
     ],

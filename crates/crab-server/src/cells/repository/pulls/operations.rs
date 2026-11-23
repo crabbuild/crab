@@ -1,7 +1,9 @@
+use super::storage::{head_repository, store_head_repository};
 use super::*;
 use crate::cells::repository::collaboration::{
-    Target,
+    Subject, SubjectKind, Target,
     activity::{self, Action},
+    creation,
 };
 
 pub(crate) struct CreatePull;
@@ -16,118 +18,150 @@ impl Mutation for CreatePull {
         context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
-        if settings::archived(context)? {
-            return Ok(MutationResult::Rejected(CreatePullOutcome::Archived));
-        }
-        lifecycle::ensure_ready(context)?;
-        validate_create_pull(&input)?;
-        input.metadata.selection.validate()?;
-        let digest = create_pull_digest(&input);
-        let existing = context.sql(&SqlBatch { statements: vec![statement(
+        write_pull(context, input, None)
+    }
+}
+
+pub(crate) struct RejectStalePullComparison;
+
+impl Mutation for RejectStalePullComparison {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
+    const ID: u32 = 400;
+    type Input = CreatePullInput;
+    type Output = CreatePullOutcome;
+
+    fn execute(
+        context: &mut Transaction<'_>,
+        input: Self::Input,
+    ) -> crate::cells::Result<MutationResult<Self::Output>> {
+        write_pull(context, input, Some(creation::Failure::ComparisonChanged))
+    }
+}
+
+fn write_pull(
+    context: &mut Transaction<'_>,
+    input: CreatePullInput,
+    rejection: Option<creation::Failure>,
+) -> crate::cells::Result<MutationResult<CreatePullOutcome>> {
+    if settings::archived(context)? {
+        return Ok(MutationResult::Rejected(CreatePullOutcome::Archived));
+    }
+    lifecycle::ensure_ready(context)?;
+    validate_create_pull(&input)?;
+    input.metadata.selection.validate()?;
+    let digest = create_pull_digest(&input);
+    let existing = context.sql(&SqlBatch { statements: vec![statement(
             "SELECT payload_digest, pull_number FROM repository_pull_submissions WHERE request_id = ?",
             vec![SqlValue::Blob(input.submission_id.to_vec())],
         )] })?;
-        if let Some(row) = existing[0].rows.first() {
-            if result_blob(row, 0)? != digest.as_bytes() {
-                return Ok(MutationResult::Rejected(CreatePullOutcome::RequestConflict));
-            }
-            return Ok(MutationResult::Success(CreatePullOutcome::Created(
-                Box::new(load_pull(context, result_u64_from_row(row, 1)?)?.ok_or(
-                    crate::cells::Error::Invalid("repository pull submission has no pull"),
-                )?),
-            )));
+    if let Some(row) = existing[0].rows.first() {
+        if result_blob(row, 0)? != digest.as_bytes() {
+            return Ok(MutationResult::Rejected(CreatePullOutcome::RequestConflict));
         }
-        use crate::cells::repository::collaboration::{Subject, SubjectKind, creation};
-        let comparison = Some(creation::Comparison {
-            base_oid: input.base_oid.clone(),
-            head_oid: input.head_oid.clone(),
-        });
-        match input.metadata.resolve(
-            context,
-            SubjectKind::Pull,
-            input.submission_id,
-            digest,
-            comparison,
-        )? {
-            creation::Resolution::Ready => {}
-            creation::Resolution::Rejected(reason) => {
-                return Ok(MutationResult::Success(
-                    CreatePullOutcome::MetadataRejected(reason),
-                ));
-            }
-            creation::Resolution::Conflict => {
-                return Ok(MutationResult::Rejected(CreatePullOutcome::RequestConflict));
-            }
+        return Ok(MutationResult::Success(CreatePullOutcome::Created(
+            Box::new(load_pull(context, result_u64_from_row(row, 1)?)?.ok_or(
+                crate::cells::Error::Invalid("repository pull submission has no pull"),
+            )?),
+        )));
+    }
+    let comparison = Some(creation::Comparison {
+        base_oid: input.base_oid.clone(),
+        head_oid: input.head_oid.clone(),
+    });
+    match input.metadata.resolve(
+        context,
+        SubjectKind::Pull,
+        input.submission_id,
+        digest,
+        comparison,
+        rejection,
+    )? {
+        creation::Resolution::Ready => {}
+        creation::Resolution::Rejected(reason) => {
+            return Ok(MutationResult::Success(
+                CreatePullOutcome::MetadataRejected(reason),
+            ));
         }
-        let milestone = input.metadata.selection.milestone;
-        let sequence = context.sql(&SqlBatch { statements: vec![
+        creation::Resolution::Conflict => {
+            return Ok(MutationResult::Rejected(CreatePullOutcome::RequestConflict));
+        }
+    }
+    let milestone = input.metadata.selection.milestone;
+    let sequence = context.sql(&SqlBatch { statements: vec![
             statement("UPDATE repository_sequences SET last = last + 1 WHERE kind = 'pull' AND last < 9007199254740991", vec![]),
             statement("SELECT last FROM repository_sequences WHERE kind = 'pull'", vec![]),
         ] })?;
-        if sequence[0].rows_affected != 1 {
-            return Err(crate::cells::Error::Invalid(
-                "repository pull numbering is exhausted",
-            ));
-        }
-        let now = timestamp(context.now_ms())?;
-        let record = PullRecord {
-            draft: input.draft,
-            number: result_u64(&sequence, 1, 0)?,
-            create_submission_id: input.submission_id,
-            author: input.author,
-            title: input.title,
-            body: input.body,
-            state: PullState::Open,
-            base_ref: input.base_ref,
-            base_oid: input.base_oid,
-            head_ref: input.head_ref,
-            head_oid: input.head_oid,
-            label_ids: input.metadata.selection.label_ids,
-            assignees: input.metadata.eligible,
-            merge_pending: None,
-            merge: None,
-            review_decisions: vec![],
-            version: 1,
-            created_at_ms: now,
-            updated_at_ms: now,
-        };
-        context.sql(&SqlBatch { statements: vec![
+    if sequence[0].rows_affected != 1 {
+        return Err(crate::cells::Error::Invalid(
+            "repository pull numbering is exhausted",
+        ));
+    }
+    let now = timestamp(context.now_ms())?;
+    let record = PullRecord {
+        draft: input.draft,
+        number: result_u64(&sequence, 1, 0)?,
+        create_submission_id: input.submission_id,
+        author: input.author,
+        title: input.title,
+        body: input.body,
+        state: PullState::Open,
+        base_ref: input.base_ref,
+        base_oid: input.base_oid,
+        retargeted_base: None,
+        head_ref: input.head_ref,
+        head_repository: input.head_repository,
+        head_oid: input.head_oid,
+        label_ids: input.metadata.selection.label_ids,
+        assignees: input.metadata.eligible,
+        merge_pending: None,
+        merge: None,
+        review_decisions: vec![],
+        version: 1,
+        created_at_ms: now,
+        updated_at_ms: now,
+    };
+    context.sql(&SqlBatch { statements: vec![
             statement("INSERT INTO repository_pull_submissions(request_id, payload_digest, pull_number) VALUES (?, ?, ?)", vec![SqlValue::Blob(record.create_submission_id.to_vec()), SqlValue::Blob(digest.as_bytes().to_vec()), integer(record.number)?]),
             insert_pull_statement(&record)?,
         ] })?;
-        lifecycle::create(context, record.number)?;
-        let state = if input.draft {
-            PullReadiness::Draft
-        } else {
-            PullReadiness::Ready
-        };
-        readiness::store(context, record.number, state)?;
-        advance_revision(context)?;
-        let target = Target::Pull {
-            number: record.number,
-        };
-        crate::cells::repository::collaboration::body_written(
-            context,
-            target,
-            &record.author,
-            record.version,
-            None,
-            &record.body,
-        )?;
-        activity::append(context, target, &record.author, Action::Created)?;
-        creation::assign_milestone(
-            context,
-            Subject {
-                kind: SubjectKind::Pull,
-                number: record.number,
-            },
-            &record.author,
-            milestone,
-        )?;
-        Ok(MutationResult::Success(CreatePullOutcome::Created(
-            Box::new(record),
-        )))
+    if let Some(repository) = record.head_repository {
+        store_head_repository(context, record.number, repository)?;
     }
+    lifecycle::create(context, record.number)?;
+    let state = if input.draft {
+        PullReadiness::Draft
+    } else {
+        PullReadiness::Ready
+    };
+    readiness::store(context, record.number, state)?;
+    advance_revision(context)?;
+    let target = Target::Pull {
+        number: record.number,
+    };
+    let source = activity::append(context, target, &record.author, Action::Created)?;
+    webhooks::pull(context, &record, webhooks::PullAction::Opened)?;
+    crate::cells::repository::collaboration::body_written(context, &source, None, &record.body)?;
+    collaboration::mentions::assigned(context, &source, &[], &record.assignees)?;
+    creation::assign_milestone(
+        context,
+        Subject {
+            kind: SubjectKind::Pull,
+            number: record.number,
+        },
+        &record.author,
+        milestone,
+    )?;
+    if !record.draft {
+        review_requests::automatic::apply(
+            context,
+            &record,
+            &record.author,
+            input.code_owner_requests,
+        )?;
+    }
+    Ok(MutationResult::Success(CreatePullOutcome::Created(
+        Box::new(record),
+    )))
 }
 
 pub(crate) struct UpdatePull;
@@ -165,6 +199,11 @@ impl Mutation for UpdatePull {
             return Ok(MutationResult::Rejected(UpdatePullOutcome::NotFound));
         };
         let was_state = pull.state;
+        let content_changed = input
+            .title
+            .as_ref()
+            .is_some_and(|value| value != &pull.title)
+            || input.body.as_ref().is_some_and(|value| value != &pull.body);
         let was_closed = pull.state != PullState::Open;
         let edited = input
             .title
@@ -215,9 +254,9 @@ impl Mutation for UpdatePull {
         if let Some(value) = input.label_ids {
             pull.label_ids = value;
         }
-        if let Some(value) = input.assignees {
-            pull.assignees = value;
-        }
+        let previous_assignees = input
+            .assignees
+            .map(|value| std::mem::replace(&mut pull.assignees, value));
         pull.version = pull
             .version
             .checked_add(1)
@@ -250,17 +289,18 @@ impl Mutation for UpdatePull {
             number: pull.number,
         };
         if edited {
+            let source = activity::append(context, target, &input.actor, Action::Updated)?;
+            if let Some(previous) = previous_assignees {
+                collaboration::mentions::assigned(context, &source, &previous, &pull.assignees)?;
+            }
             if let Some(previous) = previous_body.as_deref() {
                 crate::cells::repository::collaboration::body_written(
                     context,
-                    target,
-                    &input.actor,
-                    pull.version,
+                    &source,
                     Some(previous),
                     &pull.body,
                 )?;
             }
-            activity::append(context, target, &input.actor, Action::Updated)?;
         }
         if was_closed != (pull.state != PullState::Open) {
             let action = if pull.state == PullState::Open {
@@ -269,6 +309,14 @@ impl Mutation for UpdatePull {
                 Action::Closed
             };
             activity::append(context, target, &input.actor, action)?;
+            let event = if pull.state == PullState::Open {
+                webhooks::PullAction::Reopened
+            } else {
+                webhooks::PullAction::Closed
+            };
+            webhooks::pull(context, &pull, event)?;
+        } else if content_changed {
+            webhooks::pull(context, &pull, webhooks::PullAction::Edited)?;
         }
         Ok(MutationResult::Success(UpdatePullOutcome::Updated(
             Box::new(pull),
@@ -381,6 +429,7 @@ impl PullSummary {
             merged_at_ms: lifecycle.merged_at_ms,
             base_ref: result_text(row, 6)?,
             head_ref: result_text(row, 7)?,
+            head_repository: head_repository(context, number)?,
             label_ids: decode_label_ids(result_blob(row, 8)?)?,
             assignees: assignments::decode(result_blob(row, 9)?)?,
             version: result_u64_from_row(row, 10)?,
@@ -401,7 +450,12 @@ fn validate_create_pull(input: &CreatePullInput) -> crate::cells::Result<()> {
     validate_ref(&input.head_ref)?;
     validate_oid(&input.base_oid)?;
     validate_oid(&input.head_oid)?;
-    if input.base_ref == input.head_ref || input.base_oid == input.head_oid {
+    if input
+        .head_repository
+        .is_some_and(|repository| repository.is_nil())
+        || (input.head_repository.is_none() && input.base_ref == input.head_ref)
+        || input.base_oid == input.head_oid
+    {
         return Err(crate::cells::Error::Invalid(
             "repository pull branches are invalid",
         ));
@@ -409,7 +463,7 @@ fn validate_create_pull(input: &CreatePullInput) -> crate::cells::Result<()> {
     Ok(())
 }
 
-fn validate_ref(value: &str) -> crate::cells::Result<()> {
+pub(super) fn validate_ref(value: &str) -> crate::cells::Result<()> {
     if !value.starts_with("refs/heads/")
         || value == "refs/heads/"
         || value.len() > 1_024
@@ -456,6 +510,12 @@ fn create_pull_digest(input: &CreatePullInput) -> blake3::Hash {
     if input.draft {
         hasher.update(b"draft\0");
     }
+    if let Some(repository) = input.head_repository {
+        hasher.update(b"head-repository\0");
+        hasher.update(repository.as_bytes());
+    }
     input.metadata.selection.hash(&mut hasher);
+    // Derived code owners are evaluated at admission. Recovery retains the
+    // already committed requests when grants or team membership change.
     hasher.finalize()
 }

@@ -34,6 +34,7 @@ async fn pull(cell: &RepositoryCell, number: u64) {
         write::<CreatePull>(
             cell,
             CreatePullInput {
+                code_owner_requests: Default::default(),
                 metadata: Default::default(),
                 draft: false,
                 submission_id: *Uuid::now_v7().as_bytes(),
@@ -42,6 +43,7 @@ async fn pull(cell: &RepositoryCell, number: u64) {
                 body: String::new(),
                 base_ref: "refs/heads/main".into(),
                 head_ref: format!("refs/heads/topic-{number}"),
+                head_repository: None,
                 base_oid: "a".repeat(40),
                 head_oid: "b".repeat(40)
             }
@@ -60,6 +62,8 @@ async fn review(
     let CreatePullReviewOutcome::Created(record) = write::<CreatePullReview>(
         cell,
         CreatePullReviewInput {
+            base_revision: None,
+            review_teams: Vec::new(),
             pull,
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor(who),
@@ -141,10 +145,21 @@ fn input(query: &str, token: Option<&str>, approvals: u8) -> SearchInput {
             .needs_review_source()
             .then(|| Context {
                 source_token: token.map(str::to_owned),
+                default_ref: "refs/heads/main".into(),
+                inherited_rulesets: Default::default(),
+                reviewers: MergeReviewers {
+                    issuer: actor("Bob").issuer,
+                    subjects: vec!["Bob".into(), "Carol".into()],
+                },
                 configured_rules: vec![BranchProtectionRecord {
                     branch: "main".into(),
                     required_approvals: approvals,
+                    required_code_owner_reviews: false,
+                    require_conversation_resolution: false,
+                    require_up_to_date: false,
+                    require_merge_queue: false,
                     required_checks: vec![],
+                    required_integrations: vec![],
                 }],
             }),
         ..Default::default()
@@ -248,6 +263,8 @@ async fn review_status_counts_follow_current_decisions_and_preserve_mixed_boolea
             can_write: true,
             can_admin: true,
             configured_protected: true,
+            organization_protected: false,
+            default_ref: "refs/heads/main".into(),
         },
     )
     .await;
@@ -302,7 +319,12 @@ async fn source_changes_invalidate_cursors_and_rollups_retain_the_filtered_snaps
             rules: vec![BranchProtectionRecord {
                 branch: "main".into(),
                 required_approvals: 2,
+                required_code_owner_reviews: false,
+                require_conversation_resolution: false,
+                require_up_to_date: false,
+                require_merge_queue: false,
                 required_checks: vec![],
+                required_integrations: vec![],
             }],
         },
     )
@@ -324,7 +346,12 @@ async fn source_changes_invalidate_cursors_and_rollups_retain_the_filtered_snaps
             rules: vec![BranchProtectionRecord {
                 branch: "main".into(),
                 required_approvals: 1,
+                required_code_owner_reviews: false,
+                require_conversation_resolution: false,
+                require_up_to_date: false,
+                require_merge_queue: false,
                 required_checks: vec![],
+                required_integrations: vec![],
             }],
         },
     )
@@ -425,6 +452,9 @@ async fn merged_source_heads_survive_branch_deletion_and_explicit_bounded_prepar
         commit_oid: "d".repeat(40),
         message: "Merge".into(),
         created_at_ms: 1,
+        publication_plan: None,
+        bypass_rulesets: Vec::new(),
+        tested_candidate: false,
     };
     for transition in [PullMergeTransition::Begin, PullMergeTransition::Complete] {
         assert!(matches!(
@@ -511,4 +541,52 @@ async fn merged_source_heads_survive_branch_deletion_and_explicit_bounded_prepar
     .unwrap();
     assert_eq!(rollup[0].head_oid.as_deref(), Some(c.as_str()));
     fixtures::close(&server).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_filters_apply_rulesets_to_the_default_ref_in_the_search_snapshot() {
+    use crate::cells::repository::rulesets::{
+        Enforcement, ReplaceRulesets, ReplaceRulesetsInput, ReplaceRulesetsOutcome, Ruleset, Target,
+    };
+
+    let server = fixtures::fixture().await;
+    let cell = server
+        .cells()
+        .unwrap()
+        .repository(server.repositories.values()[0].id)
+        .unwrap();
+    pull(&cell, 1).await;
+    let head = "b".repeat(40);
+    review(&cell, 1, "Bob", ReviewState::Approved, &head).await;
+    let token = refs(&cell, 1, &[(1, &head)]).await;
+    assert_eq!(matches(&cell, "review:approved", &token, 1).await, 1);
+    let update = write::<ReplaceRulesets>(
+        &cell,
+        ReplaceRulesetsInput {
+            expected_version: 0,
+            rulesets: vec![Ruleset {
+                id: Uuid::now_v7(),
+                name: "Review default branch".into(),
+                target: Target::Branch,
+                enforcement: Enforcement::Active,
+                include: vec!["~DEFAULT_BRANCH".into()],
+                exclude: Vec::new(),
+                restrict_creations: false,
+                restrict_deletions: false,
+                require_pull_request: false,
+                required_approvals: 2,
+                required_code_owner_reviews: false,
+                require_conversation_resolution: false,
+                require_up_to_date: false,
+                require_merge_queue: false,
+                required_checks: Vec::new(),
+                required_integrations: Vec::new(),
+                bypass_actors: Vec::new(),
+            }],
+        },
+    )
+    .await;
+    assert!(matches!(update, ReplaceRulesetsOutcome::Saved(_)));
+    assert_eq!(matches(&cell, "review:required", &token, 1).await, 1);
+    assert_eq!(matches(&cell, "review:approved", &token, 1).await, 0);
 }

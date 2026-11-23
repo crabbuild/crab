@@ -624,7 +624,7 @@ The visibility source pins one prior ref tip and its complete closure to the adm
 
 The planner first prunes objects already covered by the prior closure. It emits additive evidence only when traversal reaches the exact prior tip. Otherwise it expands every pruned edge and emits a complete replacement closure.
 
-This distinction matters for rewrites even though HTTP currently rejects non-fast-forward pushes. A future policy-controlled rewrite must not leave old unreachable objects authorized through stale additive evidence.
+Native Git receive rejects non-fast-forward pushes. A generated pull request head rebase can replace the exact leased head through the browser publication path. It records replacement visibility when the old tip is unreachable, so a rewritten ref authorizes only the new history.
 
 Commits, trees, and tags require their outgoing edges when a closure expands. Proven blobs are leaves. Gitlinks remain external. Unreachable incoming objects never enter a ref's visibility evidence.
 

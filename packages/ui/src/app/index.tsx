@@ -19,7 +19,10 @@ import { Spinner } from "@/components/ui/spinner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { GitAccess } from "@/features/git-access";
 import { GitImport } from "@/features/imports";
+import { CreateRepository } from "@/features/repository/create";
 import { NotificationLink, Notifications } from "@/features/notifications";
+import { DiscussionSubscriptions } from "@/features/notifications/subscriptions";
+import { WatchedRepositories } from "@/features/notifications/watched";
 import { gitOwnerSuggestion } from "@/features/imports/source";
 import {
   OrganizationPage,
@@ -32,6 +35,8 @@ import {
 import { ProfileSettings, UserProfile } from "@/features/profile";
 import { LogOutIcon, UserRoundIcon } from "lucide-react";
 import { RepositoryPage } from "@/features/repository/page";
+import { TransferPage } from "@/features/settings/transfer";
+import { BrowseRepositories } from "@/features/repository/catalog-browse";
 import {
   DiscussionCodeTheme,
   DiscussionCsrf,
@@ -46,9 +51,13 @@ import {
   type CodeTheme,
 } from "@/lib/code-theme";
 import { repoHref, repositoryRoute } from "@/lib/repository-route";
-import { RepoIcon } from "@primer/octicons-react";
-import { useEffect, useLayoutEffect, useState } from "react";
+import { RepoIcon, SearchIcon } from "@primer/octicons-react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useState } from "react";
 import crabMark from "../../../web/crab.optimized.svg";
+
+const WorkspaceCodeSearch = lazy(
+  () => import("@/features/repository/workspace-code-search"),
+);
 
 export function App() {
   const location = useLocation();
@@ -121,19 +130,31 @@ export function App() {
     };
   }, [codeTheme, resolved]);
   const url = new URL(location, window.location.origin);
-  const notifications = url.pathname === "/-/notifications";
+  const codeSearch = url.pathname === "/-/code-search";
+  const inbox = url.pathname === "/-/notifications";
+  const watched = url.pathname === "/-/notifications/watched";
+  const subscriptions = url.pathname === "/-/notifications/subscriptions";
+  const notifications = inbox || watched || subscriptions;
   const savedReplies = url.pathname === "/-/settings/saved-replies";
   const profileSettings = url.pathname === "/-/profile" || savedReplies;
   const actorId =
     /^\/-\/users\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(
       url.pathname,
     )?.[1];
+  const transferId = /^\/-\/repository-transfers\/([0-9a-f-]{36})$/i.exec(
+    url.pathname,
+  )?.[1];
   const organizationRoute =
     /^\/-\/organizations\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(\/invitation|\/projects(?:\/([0-9a-f-]{36}))?)?$/i.exec(
       url.pathname,
     );
   const route =
-    profileSettings || actorId || organizationRoute || notifications
+    profileSettings ||
+    actorId ||
+    transferId ||
+    organizationRoute ||
+    notifications ||
+    codeSearch
       ? undefined
       : repositoryRoute(url);
   const projectWorkspace = organizationRoute?.[2]?.startsWith("/projects")
@@ -147,6 +168,7 @@ export function App() {
       : session.data.user
         ? JSON.stringify([session.data.user.issuer, session.data.user.subject])
         : null;
+  const importAccount = teamAccount ?? "local";
   const teamCommands = useTeamCommands(session.data?.csrf ?? "", teamAccount);
   const [signingOut, setSigningOut] = useState(false);
   const [sessionError, setSessionError] = useState<string>();
@@ -160,22 +182,21 @@ export function App() {
   });
   const [gitAccessOpen, setGitAccessOpen] = useState(false);
   const catalog = useRequest<{ repositories: Repository[] }>(
-    session.data?.authenticated && (url.pathname === "/" || gitAccessOpen)
+    session.data?.authenticated && (inbox || subscriptions || gitAccessOpen)
       ? "/api/repos"
       : null,
   );
-  const repositoryCatalog = useRequest<{ repositories: Repository[] }>(
-    session.data?.authenticated && route
-      ? `/api/repos?${new URLSearchParams({ owner: route.owner, name: route.name })}`
+  const [importedRepository, setImportedRepository] =
+    useState<Pick<Repository, "owner" | "name">>();
+  const requestedRepository = route ?? importedRepository;
+  const repositoryCatalog = useRequest<{
+    repositories: Repository[];
+    redirect?: Pick<Repository, "id" | "owner" | "name">;
+  }>(
+    session.data?.authenticated && requestedRepository
+      ? `/api/repos?${new URLSearchParams({ owner: requestedRepository.owner, name: requestedRepository.name })}`
       : null,
   );
-  // A repository page must not wait for settings reads from unrelated Cells.
-  // Load the full catalog only for navigation or an open Git access selector.
-  const pageCatalog = route ? repositoryCatalog : catalog;
-  const [importedRepository, setImportedRepository] = useState<{
-    owner: string;
-    name: string;
-  }>();
   async function signOut() {
     setSigningOut(true);
     setSessionError(undefined);
@@ -196,7 +217,19 @@ export function App() {
     }
   }
   const expectedRepository = url.searchParams.get("repository_id");
-  const repo = pageCatalog.data?.repositories.find(
+  const renamed = repositoryCatalog.data?.redirect;
+  useEffect(() => {
+    if (
+      !renamed ||
+      !route ||
+      (expectedRepository !== null && expectedRepository !== renamed.id)
+    )
+      return;
+    const remainder = url.pathname.split("/").slice(3).join("/");
+    const path = repoHref(renamed) + (remainder ? `/${remainder}` : "");
+    window.location.replace(path + url.search + url.hash);
+  }, [renamed, route, expectedRepository, url.pathname, url.search, url.hash]);
+  const repo = repositoryCatalog.data?.repositories.find(
     (repo) =>
       repo.owner === route?.owner &&
       repo.name === route.name &&
@@ -205,25 +238,41 @@ export function App() {
   useEffect(() => {
     document.title = repo
       ? `${repo.owner}/${repo.name} · Crab`
-      : projectWorkspace
-        ? "Projects · Crab"
-        : "Repositories · Crab";
-  }, [repo, projectWorkspace]);
+      : subscriptions
+        ? "Subscriptions · Crab"
+        : watched
+          ? "Watched repositories · Crab"
+          : inbox
+            ? "Notifications · Crab"
+            : transferId
+              ? "Repository transfer · Crab"
+              : projectWorkspace
+                ? "Projects · Crab"
+                : codeSearch
+                  ? "Search code · Crab"
+                  : "Repositories · Crab";
+  }, [
+    repo,
+    watched,
+    inbox,
+    subscriptions,
+    projectWorkspace,
+    transferId,
+    codeSearch,
+  ]);
   useEffect(() => {
-    if (!importedRepository || !catalog.data) return;
+    if (!importedRepository || url.pathname !== "/") return;
     if (
-      catalog.data.repositories.some(
-        (candidate) =>
-          candidate.owner === importedRepository.owner &&
-          candidate.name === importedRepository.name,
+      repositoryCatalog.data?.repositories.some(
+        ({ owner, name }) =>
+          owner === importedRepository.owner &&
+          name === importedRepository.name,
       )
     ) {
-      navigate(
-        `/${encodeURIComponent(importedRepository.owner)}/${encodeURIComponent(importedRepository.name)}`,
-      );
+      navigate(repoHref(importedRepository));
       setImportedRepository(undefined);
     }
-  }, [catalog.data, importedRepository]);
+  }, [importedRepository, repositoryCatalog.data, url.pathname]);
   return (
     <TooltipProvider>
       <ProjectCommandsProvider
@@ -262,6 +311,18 @@ export function App() {
               </Link>
             )}
             <div className="header-actions">
+              {session.data?.authenticated && (
+                <Button asChild variant="ghost" size="sm">
+                  <Link
+                    href="/-/code-search"
+                    aria-label="Search code across repositories"
+                    aria-current={codeSearch ? "page" : undefined}
+                  >
+                    <SearchIcon data-icon="inline-start" />
+                    <span className="hidden sm:inline">Search code</span>
+                  </Link>
+                </Button>
+              )}
               {session.data?.user && (
                 <GitAccess
                   session={session.data}
@@ -400,8 +461,40 @@ export function App() {
                     : "Continue to sign in"}
                 </Button>
               </div>
-            ) : notifications ? (
-              <Notifications csrf={session.data.csrf ?? ""} />
+            ) : codeSearch ? (
+              <Suspense
+                fallback={
+                  <p role="status" className="notice">
+                    <Spinner /> Loading code search…
+                  </p>
+                }
+              >
+                <WorkspaceCodeSearch key={teamAccount} url={url} />
+              </Suspense>
+            ) : subscriptions ? (
+              <DiscussionSubscriptions
+                key={teamAccount}
+                csrf={session.data.csrf ?? ""}
+                repositories={catalog.data?.repositories ?? []}
+                url={url}
+              />
+            ) : watched ? (
+              <WatchedRepositories
+                key={teamAccount}
+                csrf={session.data.csrf ?? ""}
+              />
+            ) : inbox ? (
+              <Notifications
+                csrf={session.data.csrf ?? ""}
+                repositories={catalog.data?.repositories ?? []}
+                url={url}
+              />
+            ) : transferId ? (
+              <TransferPage
+                key={transferId}
+                id={transferId}
+                csrf={session.data.csrf ?? ""}
+              />
             ) : organizationRoute ? (
               organizationRoute[2]?.startsWith("/projects") ? (
                 <OrganizationProjects
@@ -437,68 +530,40 @@ export function App() {
                 <h1>Page not found</h1>
                 <Link href="/">Back to repositories</Link>
               </div>
-            ) : (
-              <Result state={pageCatalog} timingLabel="Repository catalog">
-                {(data) =>
-                  url.pathname === "/" ? (
-                    <div className="catalog">
-                      <div className="section-heading">
-                        <div className="catalog-heading-title">
-                          <h1>Your repositories</h1>
-                          <Badge variant="outline">
-                            {data.repositories.length}
-                          </Badge>
-                        </div>
-                        <GitImport
-                          csrf={session.data?.csrf ?? ""}
-                          defaultOwner={gitOwnerSuggestion(
-                            session.data?.user?.name,
-                          )}
-                          onImported={(repository) => {
-                            setImportedRepository(repository);
-                            catalog.retry();
-                          }}
-                        />
-                      </div>
-                      <p className="muted">Your code, in your storage.</p>
-                      {data.repositories.length === 0 && (
-                        <div className="notice">
-                          <h2>No repositories available</h2>
-                          <p>
-                            Ask your administrator to grant access to your
-                            account.
-                          </p>
-                          {session.data?.user && (
-                            <p className="muted">
-                              Your user ID:{" "}
-                              <code>{session.data.user.subject}</code>
-                            </p>
-                          )}
-                        </div>
+            ) : url.pathname === "/" ? (
+              <div className="catalog">
+                <div className="section-heading">
+                  <h1>Your repositories</h1>
+                  <div className="flex flex-wrap items-start gap-2">
+                    <CreateRepository
+                      csrf={session.data?.csrf ?? ""}
+                      onCreated={(repository) => navigate(repoHref(repository))}
+                    />
+                    <GitImport
+                      key={importAccount}
+                      account={importAccount}
+                      csrf={session.data?.csrf ?? ""}
+                      defaultOwner={gitOwnerSuggestion(
+                        session.data?.user?.name,
                       )}
-                      <div className="repo-cards">
-                        {data.repositories.map((repo) => (
-                          <article className="panel repo-card" key={repo.id}>
-                            <div className="repo-card-heading">
-                              <RepoIcon size={18} aria-hidden="true" />
-                              <h2>
-                                <Link href={repoHref(repo)}>
-                                  {repo.owner} / <strong>{repo.name}</strong>
-                                </Link>
-                              </h2>
-                              {repo.archived && (
-                                <Badge variant="outline">Archived</Badge>
-                              )}
-                            </div>
-                            <p className="muted">
-                              {repo.description ||
-                                "Browse files, history, and changes."}
-                            </p>
-                          </article>
-                        ))}
-                      </div>
-                    </div>
-                  ) : repo ? (
+                      onImported={(repository) =>
+                        navigate(repoHref(repository))
+                      }
+                    />
+                  </div>
+                </div>
+                <BrowseRepositories
+                  url={url}
+                  subject={session.data?.user?.subject}
+                />
+              </div>
+            ) : (
+              <Result
+                state={repositoryCatalog}
+                timingLabel="Repository catalog"
+              >
+                {() =>
+                  repo ? (
                     <DiscussionRepository.Provider value={repo}>
                       <DiscussionCsrf.Provider value={session.data?.csrf ?? ""}>
                         <DiscussionCodeTheme.Provider

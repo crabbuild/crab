@@ -1,3 +1,4 @@
+import { DiscussionWatch } from "@/features/notifications/preferences";
 import { DiscussionProjects } from "@/features/projects/discussion";
 import { useId, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
@@ -272,6 +273,7 @@ export function DiscussionMetadata({
   csrf,
   onSaved,
   children,
+  allowIssueClosure,
 }: {
   repo: Repository;
   assignees?: RepositoryAssignee[];
@@ -283,6 +285,7 @@ export function DiscussionMetadata({
   csrf: string;
   onSaved: () => void;
   children?: ReactNode;
+  allowIssueClosure?: boolean;
 }) {
   return (
     <aside className="discussion-metadata" aria-label="Metadata">
@@ -350,6 +353,7 @@ export function DiscussionMetadata({
         path={path}
         csrf={csrf}
         onSaved={onSaved}
+        allowIssueClosure={allowIssueClosure}
       />
       <DiscussionProjects repo={repo} path={path} />
       <MilestonePicker
@@ -359,6 +363,7 @@ export function DiscussionMetadata({
         csrf={csrf}
         onSaved={onSaved}
       />
+      {csrf && <DiscussionWatch repo={repo} csrf={csrf} subject={path} />}
       {children}
     </aside>
   );

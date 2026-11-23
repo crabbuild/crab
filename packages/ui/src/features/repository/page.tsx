@@ -1,3 +1,4 @@
+import { RepositoryWatch } from "@/features/notifications/preferences";
 import { PaneResizer } from "@/components/layout/pane-resizer";
 import { useWorkspaceHeight } from "@/components/layout/use-workspace-height";
 import { Link } from "@/components/navigation/link";
@@ -6,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { DiscussionWorkspace } from "@/components/discussion/workspace";
 import type { Session } from "@/lib/contracts";
+import { GitImport } from "@/features/imports";
 import {
   displayHex,
   endpoint,
@@ -35,6 +37,7 @@ import {
   SidebarCollapseIcon,
   TagIcon,
   ProjectIcon,
+  SearchIcon,
 } from "@primer/octicons-react";
 import {
   Suspense,
@@ -47,6 +50,7 @@ import {
 import { CreateFile, DeleteFile, EditFile, UploadFiles } from "./files/editor";
 import { FileNavigation } from "./files/navigation";
 import { LatestCommit } from "./latest-commit";
+import { ForkSync } from "./fork-sync";
 import { RepositoryRefControls, RepositoryToolbar } from "./toolbar";
 
 const RepositoryTree = lazy(() =>
@@ -88,11 +92,18 @@ const Releases = lazy(() =>
     default: module.Releases,
   })),
 );
+const RepositoryRulesets = lazy(() =>
+  import("@/features/settings/rulesets").then((module) => ({
+    default: module.RepositoryRulesets,
+  })),
+);
 const Settings = lazy(() =>
   import("@/features/settings").then((module) => ({
     default: module.Settings,
   })),
 );
+const RepositoryCodeSearch = lazy(() => import("./code-search"));
+const ForkComparison = lazy(() => import("./fork-compare"));
 const DEFAULT_TREE_PANE_WIDTH = 320;
 const MIN_TREE_PANE_WIDTH = 240;
 const MAX_TREE_PANE_WIDTH = 640;
@@ -122,6 +133,7 @@ export function RepositoryPage({
   const route = repositoryRoute(url);
   const view = route?.view ?? "code";
   const canWrite = repo.access === "write" && !repo.archived;
+  const forkSource = repo.forked_from;
   const refs = useRequest<Refs>(
     view === "projects" ||
       view === "issues" ||
@@ -133,6 +145,7 @@ export function RepositoryPage({
   );
   const [createdRefs, setCreatedRefs] = useState<Ref[]>([]);
   const [deletedRefs, setDeletedRefs] = useState<string[]>([]);
+  const [syncedBranch, setSyncedBranch] = useState<string>();
   useEffect(() => {
     if (!refs.data) return;
     setDeletedRefs((current) =>
@@ -363,8 +376,8 @@ export function RepositoryPage({
   );
   return (
     <>
-      <div className="repo-header">
-        <nav aria-label="Repository">
+      <div className="repo-header flex items-center gap-2">
+        <nav aria-label="Repository" className="min-w-0 flex-1">
           {[
             {
               view: "code",
@@ -422,7 +435,85 @@ export function RepositoryPage({
             </Link>
           ))}
         </nav>
+        {identity && <RepositoryWatch key={repo.id} repo={repo} csrf={csrf} />}
+        {view !== "code-search" && (
+          <Button asChild variant="outline" size="sm" className="shrink-0">
+            <Link
+              aria-label="Search code"
+              href={repoHref(repo, { view: "code-search", at: revision })}
+            >
+              <SearchIcon data-icon="inline-start" />
+              <span className="hidden sm:inline">Search code</span>
+            </Link>
+          </Button>
+        )}
       </div>
+      {overview &&
+        repo.can_fork &&
+        repo.organization_id &&
+        identity &&
+        !repo.archived && (
+          <div className="flex justify-end px-4 py-2">
+            <GitImport
+              key={`${identity.issuer}:${identity.subject}:${repo.id}`}
+              account={JSON.stringify([identity.issuer, identity.subject])}
+              organization={{ id: repo.organization_id, name: repo.owner }}
+              fork={repo}
+              csrf={csrf}
+              onImported={(repository) => {
+                onRepositoryChanged();
+                navigate(repoHref(repository));
+              }}
+            />
+          </div>
+        )}
+      {forkSource && (
+        <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 text-sm text-muted-foreground">
+          <span>
+            Forked from{" "}
+            <Link
+              href={repoHref(forkSource)}
+              className="underline underline-offset-4"
+            >
+              {forkSource.name}
+            </Link>
+          </span>
+          {overview && (
+            <div className="flex flex-wrap items-center gap-2">
+              <Button asChild variant="outline" size="sm">
+                <Link
+                  href={repoHref(repo, {
+                    view: "fork-compare",
+                    rev: branch?.name,
+                  })}
+                >
+                  Compare with upstream
+                </Link>
+              </Button>
+              {canWrite && branch && (
+                <>
+                  {syncedBranch === branch.name && (
+                    <span role="status">Branch updated.</span>
+                  )}
+                  <ForkSync
+                    key={`${repo.id}:${branch.name}`}
+                    repo={repo}
+                    branch={branch.name}
+                    csrf={csrf}
+                    onUpdated={() => {
+                      setSyncedBranch(branch.name);
+                      setCreatedRefs((current) =>
+                        current.filter((ref) => ref.name !== branch.name),
+                      );
+                      refs.retry();
+                    }}
+                  />
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
       {repo.archived && (
         <div className="archived-banner" role="status">
           <ArchiveIcon size={16} />
@@ -432,7 +523,37 @@ export function RepositoryPage({
       <div
         className={`repo-body${view === "projects" ? " repo-project-workspace" : ""}${overview ? " repo-overview" : ""}${fileWorkspace ? " repo-file-workspace" : ""}${discussionNavigation ? " repo-discussion-workspace" : ""}${view === "settings" ? " repo-settings-workspace" : ""}`}
       >
-        {view === "projects" ? (
+        {view === "fork-compare" ? (
+          forkSource ? (
+            <Result state={visibleRefState} timingLabel="Fork references">
+              {(data) => (
+                <Suspense
+                  fallback={
+                    <div className="notice" role="status">
+                      <Spinner /> Loading comparison…
+                    </div>
+                  }
+                >
+                  <ForkComparison
+                    key={`${repo.id}:${route?.head ?? ""}`}
+                    repo={repo}
+                    source={forkSource}
+                    refs={data}
+                    requestedHead={route?.head}
+                    csrf={csrf}
+                    url={url}
+                    theme={theme}
+                    codeThemes={codeThemes}
+                  />
+                </Suspense>
+              )}
+            </Result>
+          ) : (
+            <div className="notice error" role="alert">
+              This repository has no upstream fork source.
+            </div>
+          )
+        ) : view === "projects" ? (
           <Suspense
             fallback={
               <div className="notice" role="status">
@@ -453,6 +574,16 @@ export function RepositoryPage({
           >
             <ActivityPage repo={repo} />
           </Suspense>
+        ) : view === "rulesets" ? (
+          <Suspense
+            fallback={
+              <div className="notice" role="status">
+                <Spinner /> Loading rulesets…
+              </div>
+            }
+          >
+            <RepositoryRulesets key={repo.id} repo={repo} />
+          </Suspense>
         ) : view === "settings" ? (
           repo.can_admin ? (
             <Result state={visibleRefState} timingLabel="Repository references">
@@ -471,6 +602,10 @@ export function RepositoryPage({
                     section={
                       route?.section === "branches" ||
                       route?.section === "members" ||
+                      route?.section === "integrations" ||
+                      route?.section === "webhooks" ||
+                      route?.section === "deploy-tokens" ||
+                      route?.section === "rulesets" ||
                       route?.section === "mentions" ||
                       route?.section === "team-access"
                         ? route.section
@@ -558,7 +693,17 @@ export function RepositoryPage({
         ) : (
           <Result state={visibleRefState} timingLabel="Repository references">
             {(data) =>
-              view === "releases" ? (
+              view === "code-search" ? (
+                <Suspense
+                  fallback={
+                    <div className="notice" role="status">
+                      <Spinner /> Loading code search…
+                    </div>
+                  }
+                >
+                  <RepositoryCodeSearch repo={repo} refs={data} url={url} />
+                </Suspense>
+              ) : view === "releases" ? (
                 <Suspense
                   fallback={
                     <div className="notice" role="status">

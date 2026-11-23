@@ -1,13 +1,10 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use axum::{
     Extension, Json, Router,
-    extract::{DefaultBodyLimit, Path, Query, State, rejection::JsonRejection},
+    extract::{DefaultBodyLimit, Query, State},
     middleware,
-    routing::{get, put},
+    routing::{get, post, put},
 };
 use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
@@ -18,11 +15,18 @@ use crate::{
     auth::Principal,
     cells::{
         Address,
-        directory::notifications::{
-            Entry, List, ListInput, MarkRead, MarkReadInput, Position, Reason,
+        directory::{
+            IdentityKey,
+            notifications::{
+                Entry, List, ListInput, NoticeTarget, Position, Reason, ReleaseKind,
+                State as NotificationState, Thread, ThreadPage, View,
+            },
         },
         repository::{
-            collaboration::{SubjectKind, Target},
+            collaboration::{
+                Subject, SubjectKind, Target,
+                watches::{self, Mode},
+            },
             search::index::references::{FindReferences, ReferenceInput},
         },
     },
@@ -30,12 +34,44 @@ use crate::{
     server::Server,
 };
 
+mod discussions;
+mod email;
+mod state;
+mod subscriptions;
+mod unsubscribe;
+mod watched;
+
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .route("/api/notifications", get(list))
         .route("/api/notifications/unread", get(unread))
-        .route("/api/notifications/{id}/read", put(mark_read))
+        .route("/api/notifications/email", get(email::get).put(email::set))
+        .route("/api/notifications/watched", get(watched::list))
+        .route("/api/notifications/subscriptions", get(discussions::list))
+        .route("/api/notifications/{id}/state", put(state::single))
+        .route(
+            "/api/repos/{owner}/{name}/subscription",
+            get(subscriptions::get).put(subscriptions::set),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/{discussion}/{number}/subscription",
+            get(subscriptions::get_thread).put(subscriptions::set_thread),
+        )
         .layer(DefaultBodyLimit::max(1024))
+        .merge(
+            Router::new()
+                .route("/api/notifications/bulk", post(state::bulk))
+                .route("/api/notifications/unsubscribe", post(unsubscribe::apply))
+                .route(
+                    "/api/notifications/subscriptions/unsubscribe",
+                    post(discussions::bulk::apply),
+                )
+                .route(
+                    "/api/notifications/watched/unwatch",
+                    post(watched::bulk::apply),
+                )
+                .layer(DefaultBodyLimit::max(16 * 1024)),
+        )
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
 
@@ -44,24 +80,38 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
 struct Parameters {
     before: Option<String>,
     limit: Option<u8>,
+    repository: Option<Uuid>,
+    unread: Option<bool>,
+    reason: Option<Reason>,
+    view: Option<View>,
 }
 
 #[derive(Serialize)]
 struct RepositoryLabel {
+    id: Uuid,
     owner: String,
     name: String,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum InboxSubject {
+    Discussion(Subject),
+    Release { kind: ReleaseKind, number: u64 },
 }
 
 #[derive(Serialize)]
 struct Item {
     id: Uuid,
     repository: RepositoryLabel,
+    subject: InboxSubject,
     title: String,
     href: String,
     sender: String,
     reason: Reason,
-    read: bool,
-    created_at_ms: u64,
+    #[serde(flatten)]
+    state: NotificationState,
+    updated: Position,
 }
 
 #[derive(Serialize)]
@@ -100,49 +150,78 @@ async fn list(
     if !(1..=50).contains(&limit) {
         return Err(Error::Invalid("Notification pages require 1–50 items"));
     }
-    let before = params.before.as_deref().map(cursor).transpose()?;
-    let entries = entries(&server, &principal, before).await?;
-    // Read one account's bounded history and authorize by repository, rather
-    // than scanning private repositories or checking the same grant per item.
-    let mut groups = HashMap::<Uuid, Vec<(usize, Entry)>>::new();
-    for (order, entry) in entries.into_iter().enumerate() {
-        groups
-            .entry(entry.notice.repository)
-            .or_default()
-            .push((order, entry));
+    let mut before = params.before.as_deref().map(cursor).transpose()?;
+    if let Some(id) = params.repository {
+        let repo = server.repositories.by_id(id).ok_or(Error::NotFound)?;
+        if !may_read(&server, &principal, &repo).await? {
+            return Err(Error::NotFound);
+        }
     }
-    let batches: Vec<Vec<(usize, Item)>> = stream::iter(groups)
-        .map(|(id, entries)| repository_items(&server, &principal, id, entries))
-        .buffer_unordered(8)
-        .try_collect()
-        .await?;
+    let actor = app::account(&principal)?;
+    let view = params.view.unwrap_or_default();
+    let mut items = Vec::new();
+    loop {
+        let page = entries(&server, actor.clone(), before, view).await?;
+        // Authorize each repository batch. Cell cursors can cross private
+        // rows, so the HTTP cursor is only made from a visible item.
+        let mut groups = HashMap::<Uuid, Vec<(usize, Thread)>>::new();
+        for (order, thread) in page.threads.into_iter().enumerate() {
+            let entry = &thread.entry;
+            if params
+                .repository
+                .is_some_and(|id| id != entry.notice.repository)
+                || (params.unread == Some(true) && thread.state.read)
+                || params.reason.is_some_and(|reason| reason != entry.reason)
+            {
+                continue;
+            }
+            groups
+                .entry(entry.notice.repository)
+                .or_default()
+                .push((order, thread));
+        }
+        let batches: Vec<Vec<(usize, Item)>> = stream::iter(groups)
+            .map(|(id, entries)| repository_items(&server, &principal, &actor, id, view, entries))
+            .buffer_unordered(8)
+            .try_collect()
+            .await?;
+        let mut visible: Vec<_> = batches.into_iter().flatten().collect();
+        visible.sort_unstable_by_key(|(order, _)| *order);
+        items.extend(visible.into_iter().map(|(_, item)| item));
+        if items.len() > limit || page.next.is_none() {
+            break;
+        }
+        before = page.next;
+    }
     app::account(&principal)?;
-    let mut items: Vec<_> = batches.into_iter().flatten().collect();
-    items.sort_unstable_by_key(|(order, _)| *order);
     // A cursor always points to a returned item. Hidden entries do not reveal
     // timestamps, IDs, counts, or empty pages with private continuations.
     let next = (items.len() > limit).then(|| {
-        let last = &items[limit - 1].1;
-        format!("{}:{}", last.created_at_ms, last.id)
+        let last = &items[limit - 1];
+        format!("{}:{}", last.updated.created_at_ms, last.updated.id)
     });
-    let items = items
-        .into_iter()
-        .take(limit)
-        .map(|(_, item)| item)
-        .collect();
+    items.truncate(limit);
     Ok(Json(Page { items, next }))
 }
 
 async fn entries(
     server: &Server,
-    principal: &Principal,
+    identity: IdentityKey,
     before: Option<Position>,
-) -> Result<Vec<Entry>> {
-    let identity = app::account(principal)?;
+    view: View,
+) -> Result<ThreadPage> {
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     app::query_output(
         cells
-            .query::<List>(Address::Directory, None, ListInput { identity, before })
+            .query::<List>(
+                Address::Directory,
+                None,
+                ListInput {
+                    identity,
+                    before,
+                    view,
+                },
+            )
             .await,
     )
 }
@@ -156,23 +235,45 @@ async fn unread(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
 ) -> Result<Json<Unread>> {
-    let repositories: HashSet<_> = entries(&server, &principal, None)
-        .await?
-        .into_iter()
-        .filter(|entry| !entry.read)
-        .map(|entry| entry.notice.repository)
-        .collect();
-    let mut accessible = stream::iter(repositories)
-        .filter_map(|id| std::future::ready(server.repositories.by_id(id)))
-        .map(|repo| {
-            let (server, principal) = (&server, &principal);
-            async move { may_read(server, principal, &repo).await }
-        })
-        .buffer_unordered(8);
-    while let Some(current) = accessible.try_next().await? {
-        if current {
-            app::account(&principal)?;
-            return Ok(Json(Unread { unread: true }));
+    let actor = app::account(&principal)?;
+    let mut before = None;
+    loop {
+        let page = entries(&server, actor.clone(), before, View::Inbox).await?;
+        let mut repositories = HashMap::<Uuid, Vec<Entry>>::new();
+        for thread in page.threads.into_iter().filter(|thread| !thread.state.read) {
+            repositories
+                .entry(thread.entry.notice.repository)
+                .or_default()
+                .push(thread.entry);
+        }
+        let mut accessible = stream::iter(repositories)
+            .map(|(id, items)| {
+                let (server, principal, actor) = (&server, &principal, &actor);
+                async move {
+                    let Some(repo) = server.repositories.by_id(id) else {
+                        return Ok(false);
+                    };
+                    if !may_notify(server, principal, &repo, actor).await? {
+                        return Ok(false);
+                    }
+                    let entries: Vec<_> = items.iter().collect();
+                    let sources =
+                        resolve_sources(server, &repo, actor, View::Inbox, &entries).await?;
+                    let visible = !sources.releases.is_empty()
+                        || sources.discussions.into_iter().any(|visible| visible);
+                    Ok::<_, Error>(visible && may_notify(server, principal, &repo, actor).await?)
+                }
+            })
+            .buffer_unordered(8);
+        while let Some(current) = accessible.try_next().await? {
+            if current {
+                app::account(&principal)?;
+                return Ok(Json(Unread { unread: true }));
+            }
+        }
+        before = page.next;
+        if before.is_none() {
+            break;
         }
     }
     app::account(&principal)?;
@@ -187,70 +288,207 @@ async fn may_read(server: &Server, principal: &Principal, repo: &Repository) -> 
     }
 }
 
+async fn may_notify(
+    server: &Server,
+    principal: &Principal,
+    repo: &Repository,
+    actor: &IdentityKey,
+) -> Result<bool> {
+    Ok(may_read(server, principal, repo).await?
+        && subscriptions::read(server, repo, actor.clone()).await?.mode != Mode::Muted)
+}
+
+struct ResolvedSources {
+    discussions: Vec<bool>,
+    releases: HashMap<u64, watches::ReleaseSource>,
+}
+
+async fn resolve_sources(
+    server: &Server,
+    repo: &Repository,
+    actor: &IdentityKey,
+    view: View,
+    entries: &[&Entry],
+) -> Result<ResolvedSources> {
+    let cell = app::repository_cell(server, repo)?;
+    let mut activity = Vec::new();
+    let mut numbers = Vec::new();
+    for entry in entries {
+        match entry.notice.target {
+            NoticeTarget::Discussion(target) => activity.push(watches::InboxActivity {
+                subject: target.subject(),
+                updated: entry.notice.position(),
+                resumed: entry.resumed,
+            }),
+            NoticeTarget::Release { number, .. } => numbers.push(number),
+        }
+    }
+    let discussions = async {
+        if view != View::Inbox {
+            return Ok(vec![true; activity.len()]);
+        }
+        let mut visibility = Vec::with_capacity(activity.len());
+        for batch in activity.chunks(50) {
+            let shown = app::query_output(
+                cell.client
+                    .query::<watches::InboxVisibility>(
+                        &cell.target,
+                        None,
+                        watches::InboxVisibilityInput {
+                            actor: actor.clone(),
+                            items: batch.to_vec(),
+                        },
+                    )
+                    .await,
+            )?;
+            if shown.len() != batch.len() {
+                return Err(Error::CellContract(
+                    "Notification visibility count does not match",
+                ));
+            }
+            visibility.extend(shown);
+        }
+        Ok(visibility)
+    };
+    let releases = async {
+        let mut sources = HashMap::new();
+        for batch in numbers.chunks(50) {
+            let shown = app::query_output(
+                cell.client
+                    .query::<watches::PublishedReleases>(&cell.target, None, batch.to_vec())
+                    .await,
+            )?;
+            if shown.len() != batch.len() {
+                return Err(Error::CellContract(
+                    "Notification release count does not match",
+                ));
+            }
+            sources.extend(
+                batch
+                    .iter()
+                    .copied()
+                    .zip(shown)
+                    .filter_map(|(number, source)| Some((number, source?))),
+            );
+        }
+        Ok(sources)
+    };
+    let (discussions, releases) = tokio::try_join!(discussions, releases)?;
+    Ok(ResolvedSources {
+        discussions,
+        releases,
+    })
+}
+
 async fn repository_items(
     server: &Server,
     principal: &Principal,
+    actor: &IdentityKey,
     id: Uuid,
-    entries: Vec<(usize, Entry)>,
+    view: View,
+    entries: Vec<(usize, Thread)>,
 ) -> Result<Vec<(usize, Item)>> {
     let Some(repo) = server.repositories.by_id(id) else {
         return Ok(Vec::new());
     };
-    if !may_read(server, principal, &repo).await? {
+    if !may_notify(server, principal, &repo, actor).await? {
         return Ok(Vec::new());
     }
+    let sources = resolve_sources(
+        server,
+        &repo,
+        actor,
+        view,
+        &entries
+            .iter()
+            .map(|(_, thread)| &thread.entry)
+            .collect::<Vec<_>>(),
+    )
+    .await?;
+    let mut discussions = sources.discussions.into_iter();
     let cell = app::repository_cell(server, &repo)?;
     let owner = &repo.config.owner;
     let name = &repo.config.name;
     let mut items = Vec::new();
     let mut cache = HashMap::new();
-    for (order, entry) in entries {
+    for (order, thread) in entries {
+        let entry = thread.entry;
         let notice = entry.notice;
-        let (kind, number, files, anchor) = location(notice.target);
-        let sources = match cache.entry(number) {
-            std::collections::hash_map::Entry::Occupied(found) => found.into_mut(),
-            std::collections::hash_map::Entry::Vacant(missing) => {
-                missing.insert(app::query_output(
-                    cell.client
-                        .query::<FindReferences>(
-                            &cell.target,
-                            None,
-                            ReferenceInput {
-                                search: number.to_string(),
-                                exact: true,
-                            },
-                        )
-                        .await,
-                )?)
+        let (subject, title, href) = match notice.target {
+            NoticeTarget::Discussion(target) => {
+                if discussions.next() != Some(true) {
+                    continue;
+                }
+                let (kind, number, files, contribution) = location(target);
+                let sources = match cache.entry(number) {
+                    std::collections::hash_map::Entry::Occupied(found) => found.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(missing) => {
+                        missing.insert(app::query_output(
+                            cell.client
+                                .query::<FindReferences>(
+                                    &cell.target,
+                                    None,
+                                    ReferenceInput {
+                                        search: number.to_string(),
+                                        exact: true,
+                                    },
+                                )
+                                .await,
+                        )?)
+                    }
+                };
+                let Some(source) = sources.iter().find(|item| item.subject.kind == kind) else {
+                    continue;
+                };
+                let path = match kind {
+                    SubjectKind::Issue => "issues",
+                    SubjectKind::Pull => "pull",
+                };
+                (
+                    InboxSubject::Discussion(target.subject()),
+                    source.title.clone(),
+                    format!(
+                        "/{owner}/{name}/{path}/{number}{files}?repository_id={id}{contribution}"
+                    ),
+                )
             }
-        };
-        let Some(source) = sources.iter().find(|item| item.subject.kind == kind) else {
-            continue;
-        };
-        let path = match kind {
-            SubjectKind::Issue => "issues",
-            SubjectKind::Pull => "pull",
+            NoticeTarget::Release { kind, number } => {
+                let Some(source) = sources.releases.get(&number) else {
+                    continue;
+                };
+                let tag: String =
+                    url::form_urlencoded::byte_serialize(source.tag.as_bytes()).collect();
+                (
+                    InboxSubject::Release { kind, number },
+                    source.title.clone(),
+                    format!(
+                        "/{owner}/{name}/releases/tag/{tag}?repository_id={id}&release_number={number}"
+                    ),
+                )
+            }
         };
         items.push((
             order,
             Item {
-                id: notice.id,
+                id: notice.thread_id(),
+                updated: notice.position(),
                 repository: RepositoryLabel {
+                    id,
                     owner: owner.clone(),
                     name: name.clone(),
                 },
-                title: source.title.clone(),
-                href: format!("/{owner}/{name}/{path}/{number}{files}?repository_id={id}{anchor}"),
+                subject,
+                title,
+                href,
                 sender: notice.sender,
                 reason: entry.reason,
-                read: entry.read,
-                created_at_ms: notice.created_at_ms,
+                state: thread.state,
             },
         ));
     }
-    // Title reads await a different Cell. Recheck the current grant once
+    // Source reads await a different Cell. Recheck the current grant once
     // per repository before presenting its whole batch.
-    if !may_read(server, principal, &repo).await? {
+    if !may_notify(server, principal, &repo, actor).await? {
         return Ok(Vec::new());
     }
     Ok(items)
@@ -278,53 +516,39 @@ fn location(target: Target) -> (SubjectKind, u64, &'static str, String) {
             "",
             format!("#pullrequestreview-{number}"),
         ),
-        Target::PullThread { pull, number }
-        | Target::PullReply {
+        Target::PullThread { pull, number } => (
+            SubjectKind::Pull,
             pull,
-            thread: number,
-            ..
+            "/files",
+            format!("&thread={number}#review-thread-{number}"),
+        ),
+        Target::PullReply {
+            pull,
+            thread,
+            number,
         } => (
             SubjectKind::Pull,
             pull,
             "/files",
-            format!("#review-thread-{number}"),
+            format!("&thread={thread}&reply={number}#review-thread-{thread}"),
         ),
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReadRequest {
-    created_at_ms: u64,
-}
+#[cfg(test)]
+mod delivery_tests;
 
-async fn mark_read(
-    State(server): State<Arc<Server>>,
-    Extension(principal): Extension<Principal>,
-    Path(id): Path<Uuid>,
-    input: std::result::Result<Json<ReadRequest>, JsonRejection>,
-) -> Result<Json<()>> {
-    let identity = app::account(&principal)?;
-    let Json(input) = input.map_err(Error::Body)?;
-    let position = Position {
-        id,
-        created_at_ms: input.created_at_ms,
-    };
-    valid_position(position)?;
-    let cells = server.cells().ok_or(Error::CellUnavailable)?;
-    app::command_output(
-        cells
-            .command::<MarkRead>(
-                Address::Directory,
-                app::mutation_identity()?,
-                MarkReadInput { identity, position },
-            )
-            .await,
-    )?;
-    app::account(&principal)?;
-    // Unknown and already-read notices have the same response as a change.
-    Ok(Json(()))
-}
+#[cfg(test)]
+mod watch_tests;
+
+#[cfg(test)]
+mod triage_tests;
+
+#[cfg(test)]
+mod bulk_tests;
+
+#[cfg(test)]
+mod unsubscribe_tests;
 
 #[cfg(test)]
 mod tests {
@@ -389,11 +613,12 @@ mod tests {
         let notice = Notice {
             id: Uuid::now_v7(),
             repository: repo.id,
-            target: Target::Issue { number: 1 },
+            target: Target::Issue { number: 1 }.into(),
             created_at_ms: 100,
             sender: "Alice".into(),
         };
         let mut delivery = Delivery {
+            email: false,
             notice: notice.clone(),
             recipients: vec![Recipient {
                 actor,
@@ -401,7 +626,9 @@ mod tests {
                 access: Access::Direct,
             }],
         };
-        let put_read = format!("/api/notifications/{}/read", notice.id);
+        let put_read = format!("/api/notifications/{}/state", notice.thread_id());
+        let expected =
+            json!({"repository_id":repo.id,"expected":notice.position(),"action":{"read":true}});
         for (attempt, access) in [Access::Direct, Access::Group, Access::Direct]
             .into_iter()
             .enumerate()
@@ -427,20 +654,73 @@ mod tests {
             assert_eq!(
                 items,
                 json!({"next": null, "items": [{
-                    "id": notice.id, "repository": {"owner": "team", "name": "private"},
+                    "id": notice.thread_id(), "repository": {"id":repo.id, "owner": "team", "name": "private"},
+                    "subject": {"kind":"issue","number":1},
                     "title": "Issue mentioned",
                     "href": format!("/team/private/issues/1?repository_id={}", repo.id),
-                    "sender": "Alice", "reason": "mention", "read": attempt > 0,
-                    "created_at_ms": notice.created_at_ms
+                    "sender": "Alice", "reason": "mention", "read": attempt > 0, "saved": false, "done": false,
+                    "updated": notice.position()
                 }]})
             );
             assert_eq!(
-                h.write(Method::PUT, &put_read, &bob, json!({"created_at_ms": 100}))
+                h.write(Method::PUT, &put_read, &bob, expected.clone())
                     .await
                     .status(),
                 StatusCode::OK
             );
         }
+        delivery.notice = Notice {
+            id: Uuid::now_v7(),
+            target: Target::IssueComment {
+                issue: 1,
+                number: 9,
+            }
+            .into(),
+            created_at_ms: 101,
+            ..notice
+        };
+        delivery.recipients[0].reason = Reason::Subscribed;
+        client
+            .command::<Deliver>(
+                Address::Directory,
+                app::mutation_identity().unwrap(),
+                delivery.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            h.write(Method::PUT, &put_read, &bob, expected)
+                .await
+                .status(),
+            StatusCode::CONFLICT
+        );
+        let row = h
+            .json("/api/notifications?reason=mention&unread=true", &bob)
+            .await;
+        let [item] = row["items"].as_array().unwrap().as_slice() else {
+            panic!("a new update must leave one unread conversation");
+        };
+        assert_eq!(item["id"], json!(delivery.notice.thread_id()));
+        assert_eq!(item["updated"], json!(delivery.notice.position()));
+        assert!(item["href"].as_str().unwrap().ends_with("#issuecomment-9"));
+        let before_update = format!("/api/notifications?before=101:{}", delivery.notice.id);
+        assert_eq!(h.json(&before_update, &bob).await["items"], json!([]));
+        assert_eq!(
+            h.write(
+                Method::PUT,
+                &put_read,
+                &bob,
+                json!({"repository_id":repo.id,"expected":item["updated"],"action":{"read":true}})
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            h.json("/api/notifications/unread", &bob).await,
+            json!({"unread":false})
+        );
+
         let mut members = repo.config.members.clone();
         members.retain(|member| member.subject != "bob-id");
         h.server

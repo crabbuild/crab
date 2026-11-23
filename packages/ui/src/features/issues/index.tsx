@@ -4,7 +4,7 @@ import { type Repository } from "@/lib/api";
 import { Link } from "@/components/navigation/link";
 
 import { IssueList } from "./list";
-import { NewIssue } from "./create";
+import { IssueTemplatePicker } from "./templates";
 import { IssueDetail } from "./detail";
 
 export function Issues({
@@ -25,7 +25,12 @@ export function Issues({
         <Link href={repoHref(repo, { view: "issues" })}>Back to issues</Link>
       </div>
     ) : (
-      <NewIssue key="new" repo={repo} csrf={csrf} />
+      <IssueTemplatePicker
+        key={repo.id}
+        repo={repo}
+        csrf={csrf}
+        selected={url.searchParams.get("template")}
+      />
     );
   if (issue) {
     const number = Number(issue);

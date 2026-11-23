@@ -147,7 +147,7 @@ async fn edit(
             })
             .collect();
         eligible.sort_unstable_by_key(|person| person.id);
-        (roster.principal.can_triage(repo.id), eligible)
+        (roster.membership.principal.can_triage(repo.id), eligible)
     } else {
         (
             app::membership(&server, &principal, &repo)

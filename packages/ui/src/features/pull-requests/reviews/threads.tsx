@@ -1,3 +1,5 @@
+import { Link } from "@/components/navigation/link";
+import { repoHref } from "@/lib/repository-route";
 import { Editor } from "@/components/discussion/editor";
 import { Failure } from "@/components/discussion/failure";
 import { useSubmission } from "@/components/discussion/hooks";
@@ -5,7 +7,10 @@ import { useMutation } from "@/components/discussion/mutations";
 import { useContributionFocus } from "@/components/discussion/permalink";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
-import { ComparisonView } from "@/features/repository/diff";
+import {
+  ChangeComparison,
+  usePullComparison,
+} from "@/features/repository/diff";
 import {
   changePanelId,
   type DiffReviewState,
@@ -18,7 +23,11 @@ import { useMemo, useState } from "react";
 
 import type { PullRequest, PullReviewThread } from "../model";
 import { usePagedRequest } from "../pagination";
+import { branch } from "../presentation";
 import { ReviewThreadCard } from "./thread-card";
+import { useViewedFiles } from "./viewed";
+import type { PendingReview } from "./pending";
+import { SuggestionCommit, useSuggestionBatch } from "./suggestion";
 
 function isOutdatedThread(thread: InlineDiffThread) {
   return thread.outdated || thread.vanished;
@@ -35,6 +44,8 @@ function isResolvedThread(thread: InlineDiffThread) {
 type ThreadSelection = {
   pathHex: string;
   range: SelectedLineRange;
+  base: string;
+  head: string;
 };
 
 export function PullReviewThreads({
@@ -44,6 +55,9 @@ export function PullReviewThreads({
   theme,
   codeThemes,
   refresh,
+  pendingReview,
+  submittingReview,
+  unresolvedOnly,
 }: {
   repo: Repository;
   pull: PullRequest;
@@ -51,15 +65,20 @@ export function PullReviewThreads({
   theme: "light" | "dark";
   codeThemes: CodeThemes;
   refresh: () => void;
+  pendingReview: PendingReview;
+  submittingReview: boolean;
+  unresolvedOnly: boolean;
 }) {
   const path = (before?: number) =>
     endpoint(repo, `pulls/${pull.number}/threads`, {
       outdated: "false",
+      resolved: unresolvedOnly ? "false" : undefined,
       before: before?.toString(),
     });
   const outdatedPath = (before?: number) =>
     endpoint(repo, `pulls/${pull.number}/threads`, {
       outdated: "true",
+      resolved: unresolvedOnly ? "false" : undefined,
       before: before?.toString(),
     });
   const threads = usePagedRequest<PullReviewThread>(path);
@@ -98,6 +117,28 @@ export function PullReviewThreads({
     focus?.[1],
     currentMatch || outdatedMatch || linkedThread.data !== undefined,
   );
+  function refreshThreads() {
+    threads.retry();
+    outdatedThreads.retry();
+    linkedThread.retry();
+    refresh();
+  }
+  const suggestions = useSuggestionBatch(
+    repo,
+    pull,
+    csrf,
+    currentItems,
+    refreshThreads,
+  );
+  const headRepo = pull.head_repository ?? repo;
+  const comparison = usePullComparison(
+    headRepo,
+    pull.base_oid,
+    pull.head_oid,
+    pull.head_repository ? repo.id : undefined,
+  );
+  const preview = comparison.data;
+  const viewed = useViewedFiles(repo, pull.number, csrf, preview?.changes);
   const [selection, setSelection] = useState<ThreadSelection>();
   const [body, setBody] = useState("");
   const [suggestion, setSuggestion] = useState("");
@@ -130,12 +171,19 @@ export function PullReviewThreads({
   }
   const review: DiffReviewState = {
     threads: threads.items,
+    renderFileActions: viewed.renderFileActions,
     onLineSelected(pathHex, range) {
-      if (!range || range.endSide) {
+      if (!range || range.endSide || !preview || pull.merge_pending) {
         clearSelection();
         return;
       }
-      setSelection({ pathHex, range });
+      mutation.reset();
+      setSelection({
+        pathHex,
+        range,
+        base: preview.base,
+        head: preview.commit,
+      });
       setBody("");
       setSuggestion("");
       setSuggestionEnabled(false);
@@ -193,7 +241,8 @@ export function PullReviewThreads({
       );
     },
   };
-  const selectedSide = selection?.range.side === "deletions" ? "old" : "new";
+  const selectedSide: "old" | "new" =
+    selection?.range.side === "deletions" ? "old" : "new";
   const selectedStart = selection
     ? Math.min(selection.range.start, selection.range.end)
     : 0;
@@ -202,30 +251,62 @@ export function PullReviewThreads({
     : 0;
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    if (!selection) return;
+    if (!selection || !body.trim()) return;
     const input = {
       body,
       suggested_text:
         selectedSide === "new" && suggestionEnabled ? suggestion : null,
-      base_oid: pull.base_oid,
-      head_oid: pull.head_oid,
+      base_oid: selection.base,
+      head_oid: selection.head,
       path_hex: selection.pathHex,
       side: selectedSide,
       start_line: selectedStart,
       end_line: selectedEnd,
     };
+    const submitter = (event.nativeEvent as SubmitEvent).submitter;
+    if (submitter?.getAttribute("value") === "pending-review") {
+      const requestId = submission({
+        ...input,
+        version: pendingReview.draft?.version,
+      });
+      if (
+        await pendingReview.change(
+          {
+            action: "save",
+            comment: { ...input, request_id: requestId },
+          },
+          requestId,
+        )
+      )
+        clearSelection();
+      return;
+    }
     const created = await mutation.run<PullReviewThread>(path(), "POST", {
       ...input,
       request_id: submission(input),
     });
     if (created) {
       clearSelection();
-      threads.retry();
-      outdatedThreads.retry();
+      refreshThreads();
     }
   }
   return (
     <section className="pull-review-threads" aria-label="Inline review threads">
+      {unresolvedOnly && (
+        <div className="section-heading">
+          <h3>Unresolved review conversations</h3>
+          <Link
+            className="underline underline-offset-4"
+            href={repoHref(repo, {
+              view: "pulls",
+              pull: String(pull.number),
+              pull_tab: "files",
+            })}
+          >
+            Show all conversations
+          </Link>
+        </div>
+      )}
       <header className="inline-review-header">
         <div>
           <span className="inline-review-kicker">Review workspace</span>
@@ -253,10 +334,12 @@ export function PullReviewThreads({
           </span>
         </div>
       </header>
-      <ComparisonView
-        repo={repo}
-        base={pull.base_oid}
-        head={pull.head_oid}
+      {viewed.status}
+      <ChangeComparison
+        state={comparison}
+        repo={headRepo}
+        base={preview?.base}
+        rev={preview?.commit ?? ""}
         theme={theme}
         codeThemes={codeThemes}
         review={review}
@@ -266,65 +349,86 @@ export function PullReviewThreads({
           message={`Could not open the linked thread. ${linkedThread.error}`}
         />
       )}
-      {selection && pull.state === "open" && !repo.archived && (
-        <form
-          className="panel discussion-form inline-review-form"
-          onSubmit={submit}
-          aria-labelledby="inline-review-composer-heading"
-        >
-          <h3 id="inline-review-composer-heading">Comment on selected lines</h3>
-          <p className="muted">
-            {selectedSide === "old" ? "Old" : "New"} lines {selectedStart}–
-            {selectedEnd} · <code>{selection.pathHex}</code>
-          </p>
-          <Editor
-            id="inline-review-body"
-            label="Comment"
-            value={body}
-            onChange={setBody}
-            disabled={mutation.pending}
-            required
-          />
-          {selectedSide === "new" && (
-            <div className="inline-review-suggestion">
-              <label>
-                <input
-                  type="checkbox"
-                  checked={suggestionEnabled}
-                  disabled={mutation.pending}
-                  onChange={(event) =>
-                    setSuggestionEnabled(event.target.checked)
-                  }
-                />{" "}
-                Include suggested replacement
-              </label>
-              {suggestionEnabled && (
-                <textarea
-                  aria-label="Suggested replacement"
-                  value={suggestion}
-                  rows={4}
-                  maxLength={65536}
-                  disabled={mutation.pending}
-                  onChange={(event) => setSuggestion(event.target.value)}
-                />
-              )}
+      {selection &&
+        pull.state === "open" &&
+        !pull.merge_pending &&
+        !repo.archived && (
+          <form
+            className="panel discussion-form inline-review-form"
+            onSubmit={submit}
+            aria-labelledby="inline-review-composer-heading"
+          >
+            <h3 id="inline-review-composer-heading">
+              Comment on selected lines
+            </h3>
+            <p className="muted">
+              {selectedSide === "old" ? "Old" : "New"} lines {selectedStart}–
+              {selectedEnd} · <code>{selection.pathHex}</code>
+            </p>
+            <Editor
+              id="inline-review-body"
+              label="Comment"
+              value={body}
+              onChange={setBody}
+              disabled={mutation.pending}
+              required
+            />
+            {selectedSide === "new" && (
+              <div className="inline-review-suggestion">
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={suggestionEnabled}
+                    disabled={mutation.pending}
+                    onChange={(event) =>
+                      setSuggestionEnabled(event.target.checked)
+                    }
+                  />{" "}
+                  Include suggested replacement
+                </label>
+                {suggestionEnabled && (
+                  <textarea
+                    aria-label="Suggested replacement"
+                    value={suggestion}
+                    rows={4}
+                    maxLength={65536}
+                    disabled={mutation.pending}
+                    onChange={(event) => setSuggestion(event.target.value)}
+                  />
+                )}
+              </div>
+            )}
+            <Failure message={mutation.error} />
+            <div className="discussion-actions">
+              <Button
+                type="submit"
+                variant="default"
+                disabled={
+                  mutation.pending || pendingReview.pending || !body.trim()
+                }
+              >
+                {mutation.pending ? "Posting…" : "Comment"}
+              </Button>
+              <Button
+                type="submit"
+                value="pending-review"
+                variant="outline"
+                disabled={
+                  mutation.pending ||
+                  pendingReview.pending ||
+                  !pendingReview.ready ||
+                  submittingReview ||
+                  !body.trim()
+                }
+              >
+                {pendingReview.pending ? "Saving…" : "Add to review"}
+              </Button>
+              <Button variant="outline" type="button" onClick={clearSelection}>
+                Cancel
+              </Button>
             </div>
-          )}
-          <Failure message={mutation.error} />
-          <div className="discussion-actions">
-            <Button
-              type="submit"
-              variant="default"
-              disabled={mutation.pending || !body.trim()}
-            >
-              {mutation.pending ? "Posting…" : "Comment"}
-            </Button>
-            <Button variant="outline" type="button" onClick={clearSelection}>
-              Cancel
-            </Button>
-          </div>
-        </form>
-      )}
+          </form>
+        )}
       <Result state={threads} timingLabel="Review threads">
         {() => (
           <div className="inline-review-list">
@@ -338,10 +442,27 @@ export function PullReviewThreads({
                   Outdated threads remain visible for context.
                 </p>
               </div>
-              <Button variant="outline" size="sm" onClick={threads.retry}>
-                Refresh
-              </Button>
+              <div className="discussion-actions">
+                {suggestions.enabled && suggestions.selected.length > 0 && (
+                  <Button
+                    size="sm"
+                    disabled={suggestions.pending}
+                    onClick={() => suggestions.review(suggestions.selected)}
+                  >
+                    {suggestions.pending
+                      ? "Committing…"
+                      : `Commit suggestions (${suggestions.selected.length})`}
+                  </Button>
+                )}
+                <Button variant="outline" size="sm" onClick={refreshThreads}>
+                  Refresh
+                </Button>
+              </div>
             </div>
+            <SuggestionCommit
+              suggestions={suggestions}
+              branch={branch(pull.head_ref)}
+            />
             {currentItems.length ? (
               currentItems.map((thread) => (
                 <ReviewThreadCard
@@ -352,16 +473,16 @@ export function PullReviewThreads({
                   csrf={csrf}
                   linked={thread.number === focusNumber}
                   onJumpToDiff={review.onDiffSelected}
-                  refresh={() => {
-                    threads.retry();
-                    outdatedThreads.retry();
-                    linkedThread.retry();
-                    refresh();
-                  }}
+                  refresh={refreshThreads}
+                  suggestions={suggestions}
                 />
               ))
             ) : (
-              <p className="muted">No inline review threads yet.</p>
+              <p className="muted">
+                {unresolvedOnly
+                  ? "No unresolved threads on this revision."
+                  : "No inline review threads yet."}
+              </p>
             )}
             {threads.next !== null && (
               <Button variant="outline" size="sm" onClick={threads.loadMore}>
@@ -373,7 +494,7 @@ export function PullReviewThreads({
       </Result>
       <details
         className="inline-review-outdated"
-        open={outdatedMatch || linkedOutdated || undefined}
+        open={unresolvedOnly || outdatedMatch || linkedOutdated || undefined}
       >
         <summary>Outdated conversations ({outdatedItems.length})</summary>
         <Result state={outdatedThreads} timingLabel="Outdated review threads">
@@ -389,12 +510,7 @@ export function PullReviewThreads({
                     csrf={csrf}
                     linked={thread.number === focusNumber}
                     onJumpToDiff={review.onDiffSelected}
-                    refresh={() => {
-                      threads.retry();
-                      outdatedThreads.retry();
-                      linkedThread.retry();
-                      refresh();
-                    }}
+                    refresh={refreshThreads}
                   />
                 ))}
                 {outdatedThreads.next !== null && (

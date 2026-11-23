@@ -21,7 +21,10 @@ import { Field, FieldLabel } from "@/components/ui/field";
 import { ChevronDownIcon } from "lucide-react";
 import { Link } from "@/components/navigation/link";
 import { Button } from "@/components/ui/button";
-import { ComparisonView } from "@/features/repository/diff";
+import {
+  ChangeComparison,
+  usePullComparison,
+} from "@/features/repository/diff";
 import { navigate, type Refs, type Repository } from "@/lib/api";
 import type { CodeThemes } from "@/lib/code-theme";
 import { repoHref, repositoryRoute } from "@/lib/repository-route";
@@ -38,6 +41,7 @@ export function NewPull({
   csrf,
   theme,
   codeThemes,
+  fork,
 }: {
   repo: Repository;
   refs: Refs;
@@ -45,26 +49,34 @@ export function NewPull({
   csrf: string;
   theme: "light" | "dark";
   codeThemes: CodeThemes;
+  fork?: { repo: Repository; refs: Refs; requestedHead?: string };
 }) {
   const branches = refs.refs.filter((ref) =>
     ref.name.startsWith("refs/heads/"),
   );
   const requestedBase = repositoryRoute(url)?.base;
-  const initialBase =
-    branches.find(
-      (ref) => ref.name === requestedBase || branch(ref.name) === requestedBase,
-    )?.name ??
-    refs.head?.name ??
-    branches[0]?.name ??
-    "";
-  const requestedHead = repositoryRoute(url)?.head;
+  const initialBase = requestedBase
+    ? (branches.find(
+        (ref) =>
+          ref.name === requestedBase || branch(ref.name) === requestedBase,
+      )?.name ?? "")
+    : (refs.head?.name ?? branches[0]?.name ?? "");
+  const headRefs = fork?.refs ?? refs;
+  const headBranches = headRefs.refs.filter((ref) =>
+    ref.name.startsWith("refs/heads/"),
+  );
+  const requestedHead = fork?.requestedHead ?? repositoryRoute(url)?.head;
   const [base, setBase] = useState(initialBase);
   const [head, setHead] = useState(
-    branches.find(
-      (ref) => ref.name === requestedHead || branch(ref.name) === requestedHead,
-    )?.name ??
-      branches.find((ref) => ref.name !== initialBase)?.name ??
-      initialBase,
+    requestedHead
+      ? (headBranches.find(
+          (ref) =>
+            ref.name === requestedHead || branch(ref.name) === requestedHead,
+        )?.name ?? "")
+      : fork
+        ? (headRefs.head?.name ?? headBranches[0]?.name ?? "")
+        : (branches.find((ref) => ref.name !== initialBase)?.name ??
+          initialBase),
   );
   const [title, setTitle] = useState(
     (url.searchParams.get("title") ?? "").slice(0, 256),
@@ -83,30 +95,47 @@ export function NewPull({
     onCreated: (created) =>
       navigate(repoHref(repo, { view: "pulls", pull: String(created.number) })),
   });
-  const baseOid = branches.find((ref) => ref.name === base)?.oid;
-  const headOid = branches.find((ref) => ref.name === head)?.oid;
-  const comparable = Boolean(baseOid && headOid && baseOid !== headOid);
+  const headRepo = fork?.repo ?? repo;
+  const canCreate =
+    !fork ||
+    (headRepo.access === "write" && repo.access === "write" && !repo.archived);
+  const comparable = Boolean(base && head && (fork || base !== head));
+  const comparison = usePullComparison(headRepo, base, head, fork && repo.id);
+  const preview = comparison.data;
+  const canSubmit = Boolean(preview && preview.base !== preview.commit);
   return (
     <section className="pulls-page pull-compose">
-      <Link href={repoHref(repo, { view: "pulls" })}>← Back to pulls</Link>
+      {fork ? (
+        <Link href={repoHref(headRepo)}>← Back to fork</Link>
+      ) : (
+        <Link href={repoHref(repo, { view: "pulls" })}>← Back to pulls</Link>
+      )}
       <div className="compare-heading">
-        <h2>Compare changes</h2>
-        <p className="muted">
-          Choose a base branch and a different head branch to review.
-        </p>
+        <h2>{fork ? "Compare with upstream" : "Compare changes"}</h2>
+        {!fork && (
+          <p className="muted">
+            Choose a base branch and a different head branch to review.
+          </p>
+        )}
       </div>
       <div className="panel compare-picker">
         <GitMergeIcon />
         <Field orientation="horizontal" className="w-auto gap-2">
-          <FieldLabel htmlFor="pull-base">base:</FieldLabel>
+          <FieldLabel htmlFor="pull-base">
+            {fork ? "Upstream branch" : "base:"}
+          </FieldLabel>
           <NativeSelect
             id="pull-base"
             disabled={creation.locked}
             value={base}
             onChange={(event) => setBase(event.target.value)}
           >
+            {!base && (
+              <NativeSelectOption value="">Choose a branch</NativeSelectOption>
+            )}
             {branches.map((ref) => (
               <NativeSelectOption key={ref.name} value={ref.name}>
+                {fork && `${repo.name}:`}
                 {branch(ref.name)}
               </NativeSelectOption>
             ))}
@@ -114,25 +143,36 @@ export function NewPull({
         </Field>
         <span aria-hidden="true">←</span>
         <Field orientation="horizontal" className="w-auto gap-2">
-          <FieldLabel htmlFor="pull-head">compare:</FieldLabel>
+          <FieldLabel htmlFor={fork ? "fork-compare-head" : "pull-head"}>
+            {fork ? "Fork branch" : "compare:"}
+          </FieldLabel>
           <NativeSelect
-            id="pull-head"
+            id={fork ? "fork-compare-head" : "pull-head"}
             disabled={creation.locked}
             value={head}
             onChange={(event) => setHead(event.target.value)}
           >
-            {branches.map((ref) => (
+            {!head && (
+              <NativeSelectOption value="">Choose a branch</NativeSelectOption>
+            )}
+            {headBranches.map((ref) => (
               <NativeSelectOption key={ref.name} value={ref.name}>
+                {fork && `${headRepo.name}:`}
                 {branch(ref.name)}
               </NativeSelectOption>
             ))}
           </NativeSelect>
         </Field>
       </div>
-      {branches.length < 2 ? (
+      {!fork && branches.length < 2 ? (
         <div className="notice">
           <h3>Two branches are required</h3>
           <p>Push another branch before creating a pull request.</p>
+        </div>
+      ) : !base || !head ? (
+        <div className="notice" role="status">
+          <h3>A branch in this comparison is unavailable</h3>
+          <p>Choose an available base and head branch to continue.</p>
         </div>
       ) : !comparable ? (
         <div className="notice">
@@ -141,83 +181,115 @@ export function NewPull({
         </div>
       ) : (
         <>
-          <h3>Open a pull request</h3>
-          <CreationForm
-            repo={repo}
-            title={title}
-            body={body}
-            onTitle={setTitle}
-            onBody={setBody}
-            metadata={metadata}
-            onMetadata={setMetadata}
-            disabled={creation.locked}
-            error={creation.error}
-            recovering={creation.recovering}
-            rejected={creation.rejected}
-            onReview={creation.review}
-            onSubmit={(event) => {
-              event.preventDefault();
-              const input = {
-                title,
-                body,
-                draft,
-                base_ref: base,
-                head_ref: head,
-                metadata: selection(metadata),
-              };
-              void creation.submit(input);
-            }}
-          >
-            <div className="inline-flex items-center rounded-lg bg-primary text-primary-foreground">
-              <Button
-                type="submit"
-                className="rounded-r-none"
-                disabled={
-                  creation.pending || creation.rejected || !title.trim()
+          {canCreate && (!fork || canSubmit || creation.locked) && (
+            <>
+              <h3>
+                {fork
+                  ? `Open a pull request in ${repo.name}`
+                  : "Open a pull request"}
+              </h3>
+              <CreationForm
+                repo={repo}
+                title={title}
+                body={body}
+                onTitle={setTitle}
+                onBody={setBody}
+                descriptionHint={
+                  <>
+                    Use <code>Fixes #123</code> to close a repository issue when
+                    this pull request merges into the default branch.
+                  </>
                 }
+                metadata={metadata}
+                onMetadata={setMetadata}
+                disabled={creation.locked}
+                error={creation.error}
+                recovering={creation.recovering}
+                rejected={creation.rejected}
+                onReview={() => {
+                  creation.review();
+                  comparison.retry();
+                }}
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  if (!canSubmit && !creation.recovering) return;
+                  const input = {
+                    title,
+                    body,
+                    draft,
+                    base_ref: base,
+                    head_ref: head,
+                    head_repository: fork?.repo.id,
+                    expected: preview && {
+                      base_oid: preview.base_tip,
+                      head_oid: preview.commit,
+                    },
+                    metadata: selection(metadata),
+                  };
+                  void creation.submit(input);
+                }}
               >
-                {creation.pending
-                  ? "Creating…"
-                  : creation.recovering
-                    ? "Retry original submission"
-                    : draft
-                      ? "Create draft pull request"
-                      : "Create pull request"}
-              </Button>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
+                <div className="inline-flex items-center rounded-lg bg-primary text-primary-foreground">
                   <Button
-                    className="rounded-l-none border-l border-primary-foreground/30"
-                    size="icon"
-                    aria-label="Choose pull request mode"
-                    disabled={creation.locked}
+                    type="submit"
+                    className="rounded-r-none"
+                    disabled={
+                      creation.pending ||
+                      creation.rejected ||
+                      !title.trim() ||
+                      (!canSubmit && !creation.recovering)
+                    }
                   >
-                    <ChevronDownIcon />
+                    {creation.pending
+                      ? "Creating…"
+                      : creation.recovering
+                        ? "Retry original submission"
+                        : draft
+                          ? "Create draft pull request"
+                          : "Create pull request"}
                   </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuLabel>Pull request mode</DropdownMenuLabel>
-                  <DropdownMenuGroup>
-                    <DropdownMenuRadioGroup
-                      value={draft ? "draft" : "ready"}
-                      onValueChange={(value) => setDraft(value === "draft")}
-                    >
-                      <DropdownMenuRadioItem value="ready">
-                        Create pull request
-                      </DropdownMenuRadioItem>
-                      <DropdownMenuRadioItem value="draft">
-                        Create draft pull request
-                      </DropdownMenuRadioItem>
-                    </DropdownMenuRadioGroup>
-                  </DropdownMenuGroup>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
-          </CreationForm>
-          <ComparisonView
-            repo={repo}
-            base={baseOid ?? ""}
-            head={headOid ?? ""}
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        className="rounded-l-none border-l border-primary-foreground/30"
+                        size="icon"
+                        aria-label="Choose pull request mode"
+                        disabled={creation.locked}
+                      >
+                        <ChevronDownIcon />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuLabel>Pull request mode</DropdownMenuLabel>
+                      <DropdownMenuGroup>
+                        <DropdownMenuRadioGroup
+                          value={draft ? "draft" : "ready"}
+                          onValueChange={(value) => setDraft(value === "draft")}
+                        >
+                          <DropdownMenuRadioItem value="ready">
+                            Create pull request
+                          </DropdownMenuRadioItem>
+                          <DropdownMenuRadioItem value="draft">
+                            Create draft pull request
+                          </DropdownMenuRadioItem>
+                        </DropdownMenuRadioGroup>
+                      </DropdownMenuGroup>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+              </CreationForm>
+            </>
+          )}
+          {!fork && preview && !canSubmit && (
+            <p className="notice" role="status">
+              The head branch has no commits to propose.
+            </p>
+          )}
+          <ChangeComparison
+            state={comparison}
+            repo={headRepo}
+            base={preview?.base}
+            rev={preview?.commit ?? ""}
             theme={theme}
             codeThemes={codeThemes}
           />

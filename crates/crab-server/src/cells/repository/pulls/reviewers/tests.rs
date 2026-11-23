@@ -24,6 +24,7 @@ async fn seed(cell: &RepositoryCell) {
     write::<CreatePull>(
         cell,
         CreatePullInput {
+            code_owner_requests: Default::default(),
             metadata: Default::default(),
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor("one", "author"),
@@ -32,6 +33,7 @@ async fn seed(cell: &RepositoryCell) {
             body: String::new(),
             base_ref: "refs/heads/main".into(),
             head_ref: "refs/heads/topic".into(),
+            head_repository: None,
             base_oid: "a".repeat(40),
             head_oid: "b".repeat(40),
         },
@@ -78,6 +80,8 @@ async fn request(cell: &RepositoryCell, author: &RepositoryAuthor, requested: bo
 }
 fn review(author: &RepositoryAuthor, state: ReviewState) -> CreatePullReviewInput {
     CreatePullReviewInput {
+        base_revision: None,
+        review_teams: Vec::new(),
         pull: 1,
         submission_id: *Uuid::now_v7().as_bytes(),
         author: author.clone(),

@@ -1,5 +1,6 @@
 mod blame;
 mod history;
+mod merge_base;
 pub use blame::SharedBlame;
 
 use std::borrow::Borrow;
@@ -80,13 +81,23 @@ impl RemoteGitSnapshot {
         page: &PageRequest,
         operation: &OperationContext,
     ) -> Result<Page<Commit>> {
+        self.ahead_history_across_captures(base, page, operation, operation)
+            .await
+    }
+
+    /// Return the head-only history of separately captured and authorized snapshots.
+    ///
+    /// The cursor binds the two tips. Each operation must belong to its
+    /// snapshot, and callers finish both operations after the read.
+    pub async fn ahead_history_across_captures(
+        &self,
+        base: &Self,
+        page: &PageRequest,
+        operation: &OperationContext,
+        base_operation: &OperationContext,
+    ) -> Result<Page<Commit>> {
         self.ensure_operation(operation)?;
-        base.ensure_operation(operation)?;
-        if !Arc::ptr_eq(&self.repository, &base.repository) {
-            return Err(Error::InternalInvariant {
-                invariant: "history snapshots belong to different repository generations",
-            });
-        }
+        base.ensure_operation(base_operation)?;
         let skip = match page.after() {
             Some(cursor) => {
                 let decoded = cursor.decode_ahead_history()?;
@@ -106,8 +117,12 @@ impl RemoteGitSnapshot {
             });
         }
 
-        let base_ancestors =
-            commit_ancestors(base.commit_oid, operation, self.commit_graph.as_deref()).await?;
+        let base_ancestors = commit_ancestors(
+            base.commit_oid,
+            base_operation,
+            base.commit_graph.as_deref(),
+        )
+        .await?;
         let mut pending = vec![self.commit_oid];
         let mut visited = HashSet::new();
         let mut traversed = 0u64;

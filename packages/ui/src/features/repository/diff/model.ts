@@ -1,6 +1,7 @@
 import type { DiscussionAuthor } from "@/components/discussion/author";
 import type { SelectedLineRange } from "@pierre/diffs";
 import { type ReactNode } from "react";
+import type { Change } from "@/lib/api";
 
 export function changePanelId(pathHex: string) {
   return `changed-file-${pathHex}`;
@@ -35,4 +36,5 @@ export interface DiffReviewState {
   fileSummary?: (pathHex: string) => DiffReviewFileSummary | null;
   fileSummaryVersion?: string;
   renderAnnotation?: (thread: InlineDiffThread) => ReactNode;
+  renderFileActions?: (file: Change) => ReactNode;
 }

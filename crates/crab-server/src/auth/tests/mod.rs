@@ -90,6 +90,7 @@ fn shared_auth(store: Store) -> Authentication {
             pending_checks: Arc::default(),
         },
         cursor_key: [7; 32],
+        webhook_key: None,
         admission: Semaphore::new(1),
         logout_admission: Semaphore::new(1),
     }
@@ -373,6 +374,42 @@ async fn reactivation_requires_new_sessions_on_every_replica() {
         .await
         .unwrap();
     assert!(restarted.load_session(fresh_key).await.is_some());
+}
+
+#[tokio::test]
+async fn suspended_accounts_lose_mention_group_evidence() {
+    let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+    let operator = shared_auth(store.clone());
+    let replica = shared_auth(store);
+    let mut session = active_session(key("mention-group"));
+    Arc::get_mut(&mut session)
+        .unwrap()
+        .groups
+        .push("engineering".into());
+    operator.store_session(session).await.unwrap();
+    let grants = [crate::RepositoryGroup {
+        group: "engineering".into(),
+        access: RepositoryAccess::Read,
+    }];
+    assert!(
+        replica
+            .mention_group("alice", &grants)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    operator
+        .set_account_suspended("alice", 0, true)
+        .await
+        .unwrap();
+    assert!(
+        replica
+            .mention_group("alice", &grants)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]

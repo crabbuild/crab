@@ -1,6 +1,12 @@
 use super::*;
 
 pub(crate) struct WorkSummaries;
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WorkQuery {
+    pub subjects: Vec<Subject>,
+    pub default_ref: String,
+}
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct WorkDetails {
@@ -15,6 +21,7 @@ fn work_details(
     context: &mut Transaction<'_>,
     subject: Subject,
     assignees: Vec<super::super::assignments::Assignee>,
+    default_ref: &str,
 ) -> Result<Option<WorkDetails>> {
     let Some(work) = subject.summary(context)? else {
         return Ok(None);
@@ -43,6 +50,7 @@ fn work_details(
             subject,
             before: None,
             limit: 3,
+            default_ref: default_ref.into(),
         },
     )?
     .ok_or(Error::Invalid("project links source is missing"))?;
@@ -58,14 +66,15 @@ fn work_details(
 impl Read for WorkSummaries {
     const CLASS: &'static str = super::super::CLASS;
     const ID: u32 = 397;
-    type Input = Vec<Subject>;
+    type Input = WorkQuery;
     type Output = Vec<Option<WorkDetails>>;
     fn execute(context: &mut Transaction<'_>, input: Self::Input) -> Result<Self::Output> {
-        if input.len() > 50 {
+        if input.subjects.len() > 50 {
             return Err(Error::Invalid("work lookup is limited to 50 subjects"));
         }
         preparation::ensure_ready(context)?;
         input
+            .subjects
             .into_iter()
             .map(|subject| {
                 validate_number(subject.number)?;
@@ -84,7 +93,7 @@ impl Read for WorkSummaries {
                     SqlValue::Blob(bytes) => super::super::assignments::decode(bytes)?,
                     _ => return Err(Error::Invalid("project source assignments are invalid")),
                 };
-                work_details(context, subject, assignees)
+                work_details(context, subject, assignees, &input.default_ref)
             })
             .collect()
     }
@@ -149,6 +158,7 @@ pub(crate) struct ItemQuery {
     pub query: String,
     pub status: Option<String>,
     pub hide_closed: bool,
+    pub default_ref: String,
 }
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -250,7 +260,7 @@ impl Read for Items {
             };
             let details = if let Some(subject) = entry.subject {
                 Some(
-                    work_details(context, subject, assignees)?
+                    work_details(context, subject, assignees, &input.default_ref)?
                         .ok_or(Error::Invalid("project source is missing"))?,
                 )
             } else {

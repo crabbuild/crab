@@ -10,7 +10,7 @@ pub(crate) mod organization;
 pub(crate) mod planning;
 mod records;
 pub(crate) mod runtime;
-pub(crate) use initializer::initialize_repository;
+pub(crate) use initializer::prepare_repository;
 pub(crate) mod repository;
 
 pub(crate) use application::MutationIdentity;

@@ -34,7 +34,7 @@ async fn list(
     let roster = Roster::load(&server, &principal, repo).await?;
     Ok(Json(json!({
         "items":roster.items,
-        "can_manage":roster.principal.can_triage(repo.id),
+        "can_manage":roster.membership.principal.can_triage(repo.id),
     })))
 }
 

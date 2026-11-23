@@ -16,7 +16,7 @@ use crate::{
     auth::Principal,
     cells::{
         Address,
-        directory::{ActorSummary, LookupAccounts, LookupProfiles},
+        directory::{ActorSummary, LookupProfiles},
         organization::{
             self, Caller, ChangeMember, ChangeOutcome, Edit, EditInput, GetOrganization,
             ListMembers, MemberChange, Page, PageCursor, PageQuery, Role,
@@ -27,6 +27,8 @@ use crate::{
 
 pub(super) mod invitations;
 mod projects;
+pub(super) mod repository_access;
+mod rulesets;
 pub(super) mod teams;
 
 #[derive(Serialize)]
@@ -68,6 +70,7 @@ mod tests;
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .merge(invitations::routes())
+        .merge(repository_access::routes())
         .merge(teams::routes())
         .route("/api/organizations/{id}", get(own).patch(edit))
         .route("/api/organizations/{id}/members", get(members))
@@ -77,26 +80,16 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         )
         .layer(axum::extract::DefaultBodyLimit::max(8192))
         .merge(projects::routes())
+        .merge(rulesets::routes())
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
 pub(in crate::api) async fn actor(server: &Server, principal: &Principal) -> Result<Uuid> {
     let identity = app::account(principal)?;
-    let cells = server.cells().ok_or(Error::CellUnavailable)?;
-    let ids = app::query_output(
-        cells
-            .query::<LookupAccounts>(Address::Directory, None, vec![identity])
-            .await,
-    )?;
+    let actor = crate::repository::access::actor_id(server, identity).await?;
     app::account(principal)?;
-    match ids.as_slice() {
-        [Some(id)] => Ok(*id),
-        [None] => Err(Error::NotFound),
-        _ => Err(Error::CellContract(
-            "Account lookup returned an invalid result count",
-        )),
-    }
+    actor.ok_or(Error::NotFound)
 }
-fn read_error(error: crate::cells::Error) -> Error {
+pub(super) fn read_error(error: crate::cells::Error) -> Error {
     match error {
         crate::cells::Error::NotInitialized | crate::cells::Error::AccessDenied => Error::NotFound,
         other => Error::Cell(other),

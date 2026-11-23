@@ -50,6 +50,9 @@ async fn organization_owner_grants_and_revokes_a_team_members_repository_access_
         .await
         .unwrap();
 
+    catalog.mark_cell_ready(repo.id).await.unwrap();
+    let (document, _) = catalog.load().await.unwrap();
+    h.server.install_catalog(document).await.unwrap();
     let alice = h.login().await;
     let org = format!("/api/organizations/{organization}");
     let offer: Value = h

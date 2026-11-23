@@ -215,6 +215,8 @@ async fn references_find_titles_and_disambiguate_issue_and_pull_numbers() {
             repo,
             crate::app::mutation_identity().unwrap(),
             CreatePullInput {
+                head_repository: None,
+                code_owner_requests: Default::default(),
                 metadata: Default::default(),
                 submission_id: *Uuid::now_v7().as_bytes(),
                 author: RepositoryAuthor {

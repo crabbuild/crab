@@ -7,8 +7,9 @@ const MAX_DESCRIPTION_CHARS: usize = 1_000;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct GitImportRequest {
+    pub(super) request_id: Option<uuid::Uuid>,
     source: String,
-    owner: String,
+    owner: Option<String>,
     name: String,
     #[serde(default)]
     description: Option<String>,
@@ -19,6 +20,7 @@ pub(super) struct GitImportRequest {
 #[derive(Clone)]
 pub(super) struct ValidatedImport {
     pub(super) source: String,
+    pub(super) fork_source: Option<uuid::Uuid>,
     pub(super) owner: String,
     pub(super) name: String,
     pub(super) description: String,
@@ -27,10 +29,20 @@ pub(super) struct ValidatedImport {
 
 pub(super) fn validate_request(
     request: GitImportRequest,
+    organization: Option<uuid::Uuid>,
     allowed_hosts: &[String],
 ) -> Result<ValidatedImport, ImportError> {
     let source = normalize_source(&request.source, allowed_hosts)?;
-    let owner = identifier(request.owner, "owner")?;
+    let owner = match (organization, request.owner) {
+        (Some(id), None) => crate::catalog::organization_namespace(id),
+        (Some(_), Some(_)) => {
+            return Err(ImportError::Invalid(
+                "The organization URL selects the import owner",
+            ));
+        }
+        (None, Some(owner)) => identifier(owner, "owner")?,
+        (None, None) => return Err(ImportError::Invalid("A Crab owner is required")),
+    };
     let name = identifier(request.name, "name")?;
     let description = request.description.unwrap_or_default().trim().to_owned();
     if description.chars().count() > MAX_DESCRIPTION_CHARS
@@ -56,11 +68,34 @@ pub(super) fn validate_request(
     }
     Ok(ValidatedImport {
         source,
+        fork_source: None,
         owner,
         name,
         description,
         token,
     })
+}
+
+pub(super) fn stored_request(
+    source: String,
+    owner: String,
+    name: String,
+    description: String,
+    token: Option<String>,
+    allowed_hosts: &[String],
+) -> Result<ValidatedImport, ImportError> {
+    validate_request(
+        GitImportRequest {
+            request_id: None,
+            source,
+            owner: Some(owner),
+            name,
+            description: Some(description),
+            token,
+        },
+        None,
+        allowed_hosts,
+    )
 }
 
 fn normalize_source(value: &str, allowed_hosts: &[String]) -> Result<String, ImportError> {
@@ -272,7 +307,7 @@ fn normalize_github_source(value: &str) -> Result<String, ImportError> {
     normalize_source(value, &["github.com".to_owned()])
 }
 
-fn identifier(value: String, field: &'static str) -> Result<String, ImportError> {
+pub(super) fn identifier(value: String, field: &'static str) -> Result<String, ImportError> {
     let value = value.trim().to_owned();
     if !valid_identifier(&value)
         || (field == "owner" && matches!(value.as_str(), "api" | "assets" | "auth" | "git"))

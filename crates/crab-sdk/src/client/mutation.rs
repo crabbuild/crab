@@ -775,6 +775,7 @@ async fn prepare_batch(
         BTreeMap::new(),
         cancel,
         crab_remote::prepare::Options {
+            inspect_visible_tip: None,
             layout: layout.clone(),
             graph: crab_git::receive_plan::GraphLimits {
                 max_ref_updates: crate::mutation::MAX_REF_UPDATES,

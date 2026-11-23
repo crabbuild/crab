@@ -14,6 +14,7 @@ mod tests;
 
 pub(super) async fn bind_source(
     server: &Server,
+    principal: &Principal,
     repo: &crate::repository::Repository,
     input: &mut crate::cells::repository::SearchInput,
 ) -> Result<()> {
@@ -28,7 +29,7 @@ pub(super) async fn bind_source(
             .query::<GetSourceState>(&cell.target, None, ())
             .await,
     )?;
-    let source_token = if let Some(state) = state {
+    let (source_token, default_ref) = if let Some(state) = state {
         let source =
             crate::repository::projection::current_source(repo, server, &server.cancellation)
                 .await?;
@@ -39,12 +40,23 @@ pub(super) async fn bind_source(
                 .await?;
             return Err(app::Error::ReviewIndexPending);
         }
-        Some(source.source_token)
+        (
+            Some(source.source_token),
+            String::from_utf8(source.head_ref)
+                .map_err(|_| app::Error::CellContract("Invalid Git default branch"))?,
+        )
     } else {
-        None
+        (None, String::new())
     };
     input.review_context = Some(Context {
         source_token,
+        default_ref,
+        inherited_rulesets: crate::repository::settings::inherited_rulesets(server, repo).await?,
+
+        reviewers: app::membership(server, principal, repo)
+            .await?
+            .merge_reviewers(server)
+            .await?,
         configured_rules: repo
             .config
             .protected_branches

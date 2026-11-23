@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
+  type ReactNode,
   type Ref,
 } from "react";
 import {
@@ -103,6 +104,7 @@ export function Editor({
   disabled,
   required = false,
   autoFocus = false,
+  hint,
   attachments = true,
   ref,
 }: {
@@ -113,6 +115,7 @@ export function Editor({
   disabled: boolean;
   required?: boolean;
   autoFocus?: boolean;
+  hint?: ReactNode;
   attachments?: boolean;
   ref?: Ref<HTMLTextAreaElement>;
 }) {
@@ -501,7 +504,10 @@ export function Editor({
         />
       )}
       <p id={`${id}-help`} className="editor-help">
-        <span>Markdown supported. External images appear as links.</span>
+        <span>
+          Markdown supported. External images appear as links.
+          {hint && <> {hint}</>}
+        </span>
         <span>
           <kbd>/</kbd> Commands
           {repo && (

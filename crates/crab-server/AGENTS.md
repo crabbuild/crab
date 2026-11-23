@@ -18,6 +18,10 @@ and migration limitations.
 2. `crates/crab-server/src/server/mod.rs` — `serve`: process composition and ordered shutdown; `src/server/http/mod.rs` composes routes and `src/repository/mod.rs` owns pinned reads and maintenance.
 3. `crates/crab-server/src/app.rs` — `admit / repository`: request repository/principal boundary and error mapping.
 4. `crates/crab-server/src/auth/mod.rs` — `Authentication`: identity and configuration; `auth/principal/` owns credentials and UUID-bound current grants; `auth/state.rs` owns durable sessions, `auth/http/mod.rs` owns login/session endpoints, and `auth/transport.rs` bounds provider requests.
+   `auth/deploy_tokens/` owns administrator issue and revoke plus Git-only
+   authentication of read-only repository credentials. The repository Cell
+   stores versioned digests and expiry. Authentication verifies each transport
+   request before binding the principal to that repository UUID.
    `auth/accounts.rs` owns durable suspension revisions, with mutations exposed
    only through private `server/management/accounts.rs` and the `accounts` CLI.
 5. `crates/crab-server/src/git/receive/mod.rs` — `receive / publish_objects`: bounded native receive and publication orchestration.
@@ -31,6 +35,10 @@ The Cell repository facade in `src/cells/repository/mod.rs` exposes typed
 operations. `models.rs` owns common records/inputs; `issues/` owns issue and
 comment operations, `reads.rs` owns snapshot presentation reads and `lifecycle/`
 owns canonical close reasons/times and explicit bounded preparation.
+`api/issues/templates/` owns the default-branch template chooser, bounded Git
+file reads and signed defaults for issue submission. Inheritance uses a
+readable `.github` repository in the same namespace and binds the proof to
+that source. The ordinary native issue creation transaction owns the receipt.
 `issues/pins/` owns the independently versioned, three-slot
 repository pin collection and permanent submissions; `api/issues/pins/` enriches
 its bounded current issue summaries and composes current Write capability. Tests stay
@@ -44,9 +52,60 @@ checks source versions before composition. Outstanding request counts live in
 the transactional discussion projection. `pulls/reviews/` owns submitted review commands; `reviews/dismissals/` owns
 canonical dismissal SQL, effective detail reads, and permanent recovery. Public
 review presentation uses these native records directly in `api/pulls/reviews/`.
+`cells/repository/pulls/head.rs` commits and records a PR head switch.
+`api/pulls/branch_update/replacement.rs` recovers that switch from the Git
+publication receipt and holds both comparison tips and the new ref through
+the Cell mutation.
+`cells/repository/pulls/auto_merge.rs` owns durable PR auto-merge requests.
+`cells/repository/collaboration/links/closure.rs` captures opt-in issue closures
+under the Git publication policy lease and applies them at native merge
+completion. `links/keywords.rs` interprets closing references in Markdown prose.
+The discussion index projects pending references by base ref and completed
+references from the publication snapshot used for receipt recovery.
+`api/pulls/auto_merge/worker.rs` sweeps waiting requests and uses the standard
+merge admission and publication under the per-PR merge lease. FIFO queue
+entries share this worker. The Cell assigns order per target branch, admits
+tests within the configured build window, and guards merge reservation for
+the first entry. `auto_merge/queue.rs` reconciles candidate checks and retries.
+Classic branch protection and active branch rulesets can require queues.
+Classic transitions share the branch ref lease with publication. Ruleset
+settings and final branch publication share a repository or organization
+policy lease after any ref leases. Default-branch changes hold the same lease
+because they affect ruleset matching.
+`api/pulls/candidate.rs` prepares and describes the exact commit used for
+prospective CI. The build prefix must connect current candidate refs to the
+live base. Settings revisions bind queue entries to their effective method,
+including after removal of an exact branch override.
+Linear candidates carry source comparison metadata on their tip. Git receive
+owns the reserved ref and leases the target, prospective parent, and PR head.
+`api/integrations/` binds signed workflow reports to the current candidate.
+`collaboration/mentions.rs` queues mentions, review requests, and assignments
+in the native transaction that writes the source activity. `server/mentions.rs` expands current eligible
+recipients and delivers to the Directory inbox before acknowledging the event.
+`api/notifications/` rechecks access before exposing source links or titles.
+`cells/directory/notifications/email.rs` owns the verified address binding,
+versioned opt-in, and transactional email queue. `server/email.rs` rechecks
+current delivery authority and sends generic inbox links with durable
+provider idempotency keys.
+`cells/repository/integrations.rs` owns GitHub Actions connections, delivery
+receipts, bounded accepted-delivery history, and workflow attempt ordering. It
+reads active providers and their exact-commit results from one snapshot for merge
+admission. `api/integrations/`
+owns signed GitHub deliveries, operator-bound workflow dispatch, and scoped Git
+checkout. Dispatch reservations and run binding live in
+`cells/repository/integrations/dispatches.rs`.
+`cells/repository/webhooks.rs` owns outbound subscriptions, leased deliveries,
+and bounded completed history. `server/webhooks.rs` signs and sends only to
+the approved receiver. Public Git ref writes from HTTP Git and the browser
+reserve before publication and recover through the immutable plan receipt.
+PR mutations queue in their Cell transaction.
 Private `cells prepare-review-state` installs the empty feature relation on
-existing repositories, without rewriting reviews or receipts. Review threads belong to
-`pulls/review_threads/`; browse projection reads and
+existing repositories, without rewriting reviews or receipts. `reviews/pending.rs`
+owns private drafts and atomic review publication through the existing review
+and thread writers. Review threads belong to `pulls/review_threads/`.
+`api/pulls/review_threads/suggestions.rs` builds a single expected-head Git
+commit from versioned review suggestions. `pulls/viewed.rs` owns actor-scoped review progress,
+bound to stable comparison file identities. Browse projection reads and
 writes belong to `projection/`. `dispatch.rs` alone decodes operation IDs. `search/` owns the shared issue/PR
 query grammar; `search/results/` owns tagged issue/PR results and the mixed
 list operation; `search/counts/` owns exact integer comment/reaction/interaction
@@ -102,6 +161,20 @@ and applies the same group grant rule against the latest repository ACL.
 `catalog/` owns atomic complete ACL edits and the audit outbox; `api/members/`
 and `packages/ui/src/features/settings/groups.tsx` compose access administration. SSO groups do
 not grant native Organization or team authority. Tests stay with these owners.
+`api/organizations/repository_access.rs` composes an owner-only member
+grant inspection from a catalog revision and the Organization Cell's current
+team memberships. Its native read shares the same team-epoch predicate as
+repository authorization. The public view omits provider identity and claims.
+`api/catalog.rs` composes personal and organization repository creation using
+the durable catalog reservation and shared Git and Cell initializer.
+`cells/organization/repositories.rs` records owner-authorized submissions.
+The catalog's explicit organization UUID owns the repository relationship.
+`api/repository_transfer/` checks the current source and destination authorities.
+`catalog/transfer.rs` commits consent, the complete address and grant change,
+and the membership audit together. `catalog/rename.rs` owns historical addresses.
+`repository/access.rs` resolves current owner grants, and `app::membership`
+applies them alongside repository members and groups across browser and Git.
+`git_import/jobs.rs` owns actor-scoped durable import status and worker heartbeats.
 `api/write.rs` owns the shared proven-rejection response marker.
 `api/discussion_state/` owns current membership and state HTTP composition.
 `server/http/boundary.rs` binds browser mutation headers to the stable repository
@@ -121,7 +194,25 @@ single activity event is indexed into both timelines.
 `collaboration/mentions.rs` records Markdown mentions with the source body.
 `collaboration/mention_settings.rs` owns versioned aliases. `server/mentions.rs`
 delivers the durable outbox to `cells/directory/notifications.rs`.
-`api/notifications/` rechecks repository access when reading inbox entries.
+`collaboration/watches.rs` owns private repository and discussion preferences
+and their active watcher indexes. `collaboration/watches/discussions.rs`
+reads current follows by paging the canonical discussion keys.
+`collaboration/watches/chronology.rs` owns the private origin-time index.
+`api/notifications/discussions/timed.rs` merges authorized Repository pages.
+`collaboration/watches/publications.rs`
+owns release watch activation and the publication outbox. Release completion
+queues the notice in its publication transaction. Activity writes enroll participants under
+their qualified identity before scheduling delivery. Watch outbox events carry
+the activity number and advance by bounded pages after Directory delivery.
+The mention outbox pins enrollment sources to committed activity and gates
+later watch pages until the inbox delivery and follow commit. The Directory
+groups inbox entries by typed discussion. `notifications/triage.rs` binds all
+selected rows to observed activity in one transaction. `notifications/filing.rs`
+retains saved and completed conversations with private activity-order indexes.
+`notifications/retention.rs` sweeps expired completions and fences replay.
+`collaboration/watches/inbox.rs` commits inbox dismissal with the Repository
+watch preference. `api/notifications/` checks repository access and mute state before listing
+entries or changing their state.
 
 The native runtime lives in `src/cells/runtime.rs`; `src/cells/client.rs` owns
 the authority-checked `CellClient` and target-bound read receipts.
@@ -198,6 +289,22 @@ and session migration paths are supported.
   receive, and LFS endpoints and their route assembly. `auth/` assembles login
   and session routes. `server/http/mod.rs` applies the common security boundary
   after merging these routers. Shared request policy remains in `app.rs`.
+- `catalog/rename.rs` owns the versioned name and redirect transaction.
+  `api/repository_name/` binds the administrative action to the durable
+  repository UUID. `server/repository_route.rs` rechecks current authority
+  before serving historical addresses from the shared catalog.
+- `api/catalog_browse/` ranks and pages catalog matches. Reuse `api/catalog.rs`
+  for current direct, group, organization, and fork grants. Browse reads
+  lifecycle settings only for the result page and rechecks access before
+  returning results and continuations.
+- `api/code_search/` searches authorized Git snapshots under bulk read
+  admission. Repository searches bind the UUID, commit, and query filters.
+  Workspace search reuses the catalog's current grants and the same bounded
+  Git scans. Its cursor also binds the actor and readable repository scope.
+  `repository/code_index/` publishes the bounded, checksummed default-tree
+  artifact through the background lifecycle. It stores paths and filters,
+  and the HTTP owner verifies selected matches against the pinned Git tree.
+  Missing or stale derived data leaves the authorized Git scan available.
 - `api/contracts.rs` exports the public identity/access/organization/team wire
   types to `packages/ui/src/lib/contracts.ts` during tests. Update the actual
   Serde owner, regenerate with `npm run contracts:generate` in `packages/ui`,
@@ -219,7 +326,10 @@ and session migration paths are supported.
 | Auth or routing | `crates/crab-server/src/server/http/mod.rs` | `crates/crab-server/src/server/http/boundary.rs`, `src/auth/mod.rs` |
 | Read readiness | `crates/crab-server/src/repository/mod.rs` | `src/server/background.rs`, `src/repository/maintenance.rs`, `crates/crab-write/src/generation.rs` |
 | Management and capacity | `crates/crab-server/src/server/management/mod.rs` | `src/server/capacity.rs`, `src/metrics/mod.rs` |
-| Git imports | `crates/crab-server/src/git_import/mod.rs` | `src/git_import/source.rs` (validation), `src/git_import/git.rs` (process isolation) |
+| Git imports and private organization forks | `crates/crab-server/src/git_import/mod.rs` | `src/git_import/source.rs` (validation), `src/git_import/git.rs` (process isolation), `src/git/receive/fork_lfs.rs` (fork LFS copy), `crates/crab-remote/src/prepare/capsule.rs` (shared Xet verification), `src/catalog/mod.rs` (fork lineage and access) |
+| Fork branch synchronization | `crates/crab-server/src/api/fork_sync.rs` | `src/git/receive/fork_sync.rs` (upstream pack and branch lease), `src/git/receive/publish.rs` (policy and receipts) |
+| Fork pull request merges | `crates/crab-server/src/api/pulls/merge/mod.rs` | `src/git/receive/fork_merge.rs` (exact fork dependencies), `src/git/receive/publish.rs` (upstream policy and both ref leases) |
+| Commit review suggestions | `crates/crab-server/src/api/pulls/review_threads/suggestions.rs` | `src/git/receive/publish.rs` (target lease and fresh review checks), `packages/ui/src/features/pull-requests/reviews/suggestion.tsx` (destination and commit dialog) |
 | Browse APIs | `crates/crab-server/src/api/mod.rs` | `src/api/query.rs` (Git queries), `src/api/representation.rs` (encoding/ranges) |
 
 ## Invariants

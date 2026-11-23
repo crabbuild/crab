@@ -26,6 +26,7 @@ async fn seed(h: &Harness, cookie: &str) {
             &cell.target,
             crate::app::mutation_identity().unwrap(),
             CreatePullInput {
+                code_owner_requests: Default::default(),
                 metadata: Default::default(),
                 submission_id: *uuid::Uuid::now_v7().as_bytes(),
                 author: RepositoryAuthor {
@@ -38,6 +39,7 @@ async fn seed(h: &Harness, cookie: &str) {
                 body: "Description".into(),
                 base_ref: "refs/heads/main".into(),
                 head_ref: "refs/heads/feature".into(),
+                head_repository: None,
                 base_oid: "a".repeat(40),
                 head_oid: "b".repeat(40),
             },

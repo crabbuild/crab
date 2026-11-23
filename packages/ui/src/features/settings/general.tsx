@@ -5,6 +5,9 @@ import { short } from "@/lib/format";
 import { AlertIcon, GitBranchIcon, PencilIcon } from "@primer/octicons-react";
 import { useMemo, useState } from "react";
 import { ArchiveSettings } from "./archive";
+import { MergeMethodSettings } from "./merge-methods";
+import { RenameSettings } from "./rename";
+import { TransferSettings } from "./transfer";
 
 const names = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
 
@@ -92,6 +95,11 @@ export function DefaultBranchSettings({
   return (
     <section className="settings-content" aria-labelledby="general-settings">
       <h2 id="general-settings">General</h2>
+      <RenameSettings
+        repo={repo}
+        csrf={csrf}
+        onRepositoryChanged={onRepositoryChanged}
+      />
       <section
         className="settings-section"
         aria-labelledby="default-branch-heading"
@@ -197,6 +205,8 @@ export function DefaultBranchSettings({
           </div>
         )}
       </section>
+      <MergeMethodSettings repo={repo} csrf={csrf} />
+      <TransferSettings repo={repo} csrf={csrf} />
       <ArchiveSettings
         repo={repo}
         csrf={csrf}

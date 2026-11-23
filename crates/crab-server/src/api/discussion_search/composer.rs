@@ -148,7 +148,7 @@ pub(super) async fn mentions(
     input.validate().map_err(Error::Invalid)?;
     let search = input.search.trim().to_lowercase();
     let initial = app::membership(&server, &principal, &repo).await?;
-    let keys = roster::identities(&principal, &roster::members(&initial))?;
+    let keys = roster::identities(&principal, &roster::members(&server, &initial).await?)?;
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     let mut matches = Vec::new();
     for batch in keys.chunks(100) {
@@ -170,7 +170,8 @@ pub(super) async fn mentions(
     }
     let group_matches = group_mentions(&server, &initial, &search).await?;
     let current = app::membership(&server, &principal, &repo).await?;
-    let current_subjects: BTreeSet<_> = roster::members(&current)
+    let current_subjects: BTreeSet<_> = roster::members(&server, &current)
+        .await?
         .into_iter()
         .map(|member| member.subject)
         .collect();

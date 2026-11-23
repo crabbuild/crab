@@ -23,14 +23,17 @@ import {
   GitPullRequestClosedIcon,
   GitPullRequestDraftIcon,
   ShieldLockIcon,
-  XCircleFillIcon,
 } from "@primer/octicons-react";
 import { ChevronDownIcon } from "lucide-react";
 import { useState } from "react";
 
 import { RelativeTime } from "@/components/discussion/time";
-import type { PullRequest } from "./model";
+import type { MergeMethod, PullRequest, RulesetId } from "./model";
+import { mergeMethod, mergeMethods } from "./merge-methods";
 import { branch } from "./presentation";
+import { AutoMerge } from "./auto-merge";
+import { RequiredChecks } from "./required-checks";
+import { CodeOwnersSummary } from "./codeowners";
 
 export function MergePanel({
   repo,
@@ -46,22 +49,53 @@ export function MergePanel({
   const mutation = useMutation(csrf, repo);
   const submission = useSubmission();
   const pending = pull.merge_pending;
-  const [confirming, setConfirming] = useState(false);
-  const [method, setMethod] = useState<"merge_commit" | "fast_forward">(
-    "merge_commit",
-  );
-  const [message, setMessage] = useState(
-    `Merge pull request #${pull.number} from ${branch(pull.head_ref)}`,
-  );
+  const [confirmation, setConfirmation] = useState<{
+    method: MergeMethod;
+    version: number;
+    base_oid: string;
+    head_oid: string;
+    bypass_rulesets?: RulesetId[];
+  }>();
+  const [preferredMethod, setMethod] = useState<MergeMethod>("merge_commit");
+  const [messages, setMessages] = useState<
+    Partial<Record<MergeMethod, string>>
+  >({});
+  const selectedMethod = pull.merge_methods.includes(preferredMethod)
+    ? preferredMethod
+    : (pull.merge_methods[0] ?? "fast_forward");
+  const method = confirmation?.method ?? selectedMethod;
+  const bypassOptions = pull.merge_requirements.bypass_options ?? [];
+  const bypassIds = bypassOptions.map(({ id }) => id);
+  const bypassing = Boolean(confirmation?.bypass_rulesets?.length);
+  const staleConfirmation =
+    confirmation &&
+    (!pull.merge_methods.includes(confirmation.method) ||
+      confirmation.version !== pull.version ||
+      confirmation.base_oid !== pull.base_oid ||
+      confirmation.head_oid !== pull.head_oid ||
+      (bypassing &&
+        JSON.stringify(confirmation.bypass_rulesets) !==
+          JSON.stringify(bypassIds)));
+  const createsMessage = method === "merge_commit" || method === "squash";
+  const suffix = ` (#${pull.number})`;
+  const defaultMessage =
+    method === "squash"
+      ? Array.from(pull.title)
+          .slice(0, 256 - suffix.length)
+          .join("") + suffix
+      : `Merge pull request #${pull.number} from ${branch(pull.head_ref)}`;
+  const message = messages[method] ?? defaultMessage;
   const requirements = pull.merge_requirements;
+  const unresolved = requirements.unresolved_conversations;
   const reviewsSatisfied =
-    requirements.required_approvals === 0 ||
+    (requirements.required_approvals === 0 && !requirements.code_owners) ||
     (requirements.changes_requested === 0 &&
       requirements.approvals >= requirements.required_approvals);
 
   async function merge() {
     // A pending publication must replay the exact original submission, even if
     // current branch tips or the form have changed since the first attempt.
+    if (!pending && (!confirmation || staleConfirmation)) return;
     const input = pending
       ? {
           version: pending.pull_version,
@@ -69,20 +103,22 @@ export function MergePanel({
           base_oid: pending.base_oid,
           head_oid: pending.head_oid,
           message: pending.message,
+          ...(pending.tested_candidate_oid
+            ? { tested_candidate_oid: pending.tested_candidate_oid }
+            : {}),
+          ...(pending.bypass_rulesets?.length
+            ? { bypass_rulesets: pending.bypass_rulesets }
+            : {}),
         }
-      : {
-          version: pull.version,
-          method,
-          base_oid: pull.base_oid,
-          head_oid: pull.head_oid,
-          message: method === "merge_commit" ? message : "",
-        };
-    const merged = await mutation.run<PullRequest>(
+      : { ...confirmation, message: createsMessage ? message : "" };
+    const saved = await mutation.run<PullRequest>(
       endpoint(repo, `pulls/${pull.number}/merge`),
       "POST",
       { ...input, request_id: pending?.request_id ?? submission(input) },
     );
-    if (merged) refresh();
+    // A rejected archived retry clears the server reservation. Keep its
+    // error visible until the user refreshes the archived merge state.
+    if (saved || !pending || !repo.archived) refresh();
   }
 
   if (pull.merge)
@@ -94,13 +130,17 @@ export function MergePanel({
             <strong>Pull request merged</strong>
             <p>
               <Author author={pull.merge.author} />{" "}
-              {pull.merge.method === "merge_commit"
-                ? "created merge commit"
-                : "fast-forwarded commit"}{" "}
-              <code>{short(pull.merge.commit_oid)}</code> into{" "}
+              {mergeMethod(pull.merge.method).completion}{" "}
+              <code>{short(pull.merge.commit_oid)}</code> on{" "}
               <code>{branch(pull.base_ref)}</code>{" "}
               <RelativeTime value={pull.merged_at} />.
             </p>
+            {pull.merge.tested_candidate_oid && (
+              <p>Published the tested merge candidate.</p>
+            )}
+            {!!pull.merge.bypass_rulesets?.length && (
+              <p>Ruleset bypass used.</p>
+            )}
           </div>
         </div>
       </section>
@@ -153,22 +193,33 @@ export function MergePanel({
   const unavailable = !pull.branches_available && !pending;
   // Pull eligibility and protection can refresh before the repository catalog.
   const ready = requirements.satisfied && !unavailable;
-  const StatusIcon = pending
-    ? ClockIcon
-    : ready
-      ? CheckCircleFillIcon
-      : ShieldLockIcon;
+  const queued = pull.merge_queued;
+  const queueRequired = pull.merge_queue_required;
+  const StatusIcon =
+    pending || queued
+      ? ClockIcon
+      : ready
+        ? CheckCircleFillIcon
+        : ShieldLockIcon;
   return (
     <section
-      className={`pull-merge-note ${pending ? "pending" : ready ? "ready" : "blocked"}`}
+      className={`pull-merge-note ${pending || queued ? "pending" : ready ? "ready" : "blocked"}`}
       aria-label="Merge status"
     >
       {!unavailable && (
         <RequiredChecks
           repo={repo}
-          pull={pull}
-          requirements={requirements}
+          pull={pull.number}
+          oid={pull.head_oid}
+          checks={requirements.checks}
           refresh={refresh}
+        />
+      )}
+      {!unavailable && requirements.code_owners && (
+        <CodeOwnersSummary
+          repo={repo}
+          report={requirements.code_owners}
+          required
         />
       )}
       <div className="merge-summary">
@@ -177,13 +228,15 @@ export function MergePanel({
           <strong>
             {pending ? (
               <>
-                <Author author={pending.author} /> started{" "}
-                {pending.method === "merge_commit"
-                  ? "a merge commit"
-                  : "a fast-forward merge"}
+                <Author author={pending.author} /> started a merge using{" "}
+                {mergeMethod(pending.method).label.toLowerCase()}
               </>
+            ) : queued ? (
+              "In the merge queue"
             ) : unavailable ? (
               "This pull request cannot be merged"
+            ) : queueRequired ? (
+              "Merge queue required"
             ) : ready ? (
               "Merge requirements are satisfied"
             ) : (
@@ -193,8 +246,15 @@ export function MergePanel({
           <p>
             {unavailable ? (
               "The base or head branch is unavailable."
+            ) : queued ? (
+              "The queue tests this pull request against the latest base before merging."
             ) : pending ? (
               "Retry to confirm the outcome of the original merge."
+            ) : queueRequired ? (
+              <>
+                Pull requests to <code>{branch(pull.base_ref)}</code> merge
+                through the queue after their required checks pass.
+              </>
             ) : (
               <>
                 Merge <code>{branch(pull.head_ref)}</code> into{" "}
@@ -211,6 +271,53 @@ export function MergePanel({
               </span>
             </p>
           )}
+          {!unavailable && Boolean(requirements.rulesets?.length) && (
+            <p>
+              <Link
+                className="underline underline-offset-4"
+                href={repoHref(repo, { view: "rulesets" })}
+              >
+                Applied rulesets
+              </Link>
+              {" · "}
+              {requirements.rulesets?.join(", ")}
+            </p>
+          )}
+          {!queued &&
+            !unavailable &&
+            requirements.head_up_to_date === false && (
+              <p className="merge-blocked-note">
+                The head branch is behind the base branch.{" "}
+                {pull.can_update_branch
+                  ? "Use Update branch to bring it up to date."
+                  : "A writer on the head repository must update it."}
+              </p>
+            )}
+          {!unavailable && unresolved != null && (
+            <p className={unresolved > 0 ? "merge-blocked-note" : undefined}>
+              {unresolved > 0 ? (
+                <>
+                  {unresolved === 1
+                    ? "1 unresolved conversation"
+                    : `${unresolved} unresolved conversations`}
+                  {" · "}
+                  <Link
+                    className="underline underline-offset-4"
+                    href={repoHref(repo, {
+                      view: "pulls",
+                      pull: String(pull.number),
+                      pull_tab: "files",
+                      threads: "unresolved",
+                    })}
+                  >
+                    View unresolved conversations
+                  </Link>
+                </>
+              ) : (
+                "All review conversations resolved."
+              )}
+            </p>
+          )}
           {!unavailable && !reviewsSatisfied && (
             <p className="merge-blocked-note">
               {requirements.changes_requested > 0
@@ -222,73 +329,109 @@ export function MergePanel({
       </div>
       {!unavailable && (
         <div className="merge-footer">
-          {pull.can_merge ? (
+          {pull.can_merge || (!pending && bypassIds.length > 0) ? (
             <div className="merge-controls">
-              {!pending && !confirming && (
+              {!pending && !confirmation && (
                 <div className="merge-method-row">
-                  <Button variant="default" onClick={() => setConfirming(true)}>
-                    Merge pull request
+                  <Button
+                    variant="default"
+                    onClick={() =>
+                      setConfirmation({
+                        method: selectedMethod,
+                        version: pull.version,
+                        base_oid: pull.base_oid,
+                        head_oid: pull.head_oid,
+                        ...(!pull.can_merge
+                          ? { bypass_rulesets: bypassIds }
+                          : {}),
+                      })
+                    }
+                  >
+                    {pull.can_merge
+                      ? mergeMethod(method).action
+                      : "Merge with ruleset bypass"}
                   </Button>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button variant="outline">
-                        {method === "merge_commit"
-                          ? "Create a merge commit"
-                          : "Fast-forward only"}
-                        <ChevronDownIcon data-icon="inline-end" />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent className="w-80">
-                      <DropdownMenuRadioGroup
-                        value={method}
-                        onValueChange={(value) => {
-                          if (
-                            value === "merge_commit" ||
-                            value === "fast_forward"
-                          )
-                            setMethod(value);
-                        }}
-                      >
-                        <DropdownMenuRadioItem value="merge_commit">
-                          <div>
-                            <div>Create a merge commit</div>
-                            <p className="text-xs text-muted-foreground">
-                              Add all commits with a two-parent merge commit.
-                            </p>
-                          </div>
-                        </DropdownMenuRadioItem>
-                        <DropdownMenuRadioItem value="fast_forward">
-                          <div>
-                            <div>Fast-forward only</div>
-                            <p className="text-xs text-muted-foreground">
-                              Move the base branch only when it is an ancestor.
-                            </p>
-                          </div>
-                        </DropdownMenuRadioItem>
-                      </DropdownMenuRadioGroup>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+                  {pull.merge_methods.length > 1 && (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          variant="outline"
+                          aria-label="Select merge method"
+                        >
+                          {mergeMethod(method).label}
+                          <ChevronDownIcon data-icon="inline-end" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent className="w-80">
+                        <DropdownMenuRadioGroup
+                          value={method}
+                          onValueChange={(value) => {
+                            const selected = pull.merge_methods.find(
+                              (option) => option === value,
+                            );
+                            if (selected) setMethod(selected);
+                          }}
+                        >
+                          {mergeMethods
+                            .filter(({ value }) =>
+                              pull.merge_methods.includes(value),
+                            )
+                            .map(({ value, label, description }) => (
+                              <DropdownMenuRadioItem key={value} value={value}>
+                                <div>
+                                  <div>{label}</div>
+                                  <p className="text-xs text-muted-foreground">
+                                    {description}
+                                  </p>
+                                </div>
+                              </DropdownMenuRadioItem>
+                            ))}
+                        </DropdownMenuRadioGroup>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  )}
                 </div>
               )}
-              {(pending || confirming) && (
+              {(pending || confirmation) && (
                 <form
                   onSubmit={(event) => {
                     event.preventDefault();
                     void merge();
                   }}
                 >
-                  {!pending && method === "merge_commit" && (
+                  {bypassing && !pending && !staleConfirmation && (
+                    <p className="merge-blocked-note break-all">
+                      Bypass {bypassOptions.map(({ name }) => name).join(", ")}{" "}
+                      for this merge.
+                    </p>
+                  )}
+                  {!pending && createsMessage && (
                     <label className="merge-message">
                       Commit message
                       <Input
                         autoFocus
-                        aria-label="Merge commit message"
+                        aria-label={
+                          method === "squash"
+                            ? "Squash commit message"
+                            : "Merge commit message"
+                        }
                         value={message}
                         maxLength={256}
                         disabled={mutation.pending}
-                        onChange={(event) => setMessage(event.target.value)}
+                        onChange={(event) =>
+                          setMessages({
+                            ...messages,
+                            [method]: event.target.value,
+                          })
+                        }
                       />
                     </label>
+                  )}
+                  {staleConfirmation && !pending && (
+                    <p role="status">
+                      The merge options or branch tips changed. Cancel and
+                      review them again.
+                    </p>
                   )}
                   <div className="merge-method-row">
                     <Button
@@ -297,21 +440,23 @@ export function MergePanel({
                       disabled={
                         mutation.pending ||
                         (!pending &&
-                          method === "merge_commit" &&
-                          !message.trim())
+                          (staleConfirmation ||
+                            (createsMessage && !message.trim())))
                       }
                     >
                       {mutation.pending
                         ? "Merging…"
                         : pending
                           ? "Retry merge"
-                          : "Confirm merge"}
+                          : bypassing
+                            ? "Confirm bypass and merge"
+                            : "Confirm merge"}
                     </Button>
                     {!pending && (
                       <Button
                         variant="outline"
                         disabled={mutation.pending}
-                        onClick={() => setConfirming(false)}
+                        onClick={() => setConfirmation(undefined)}
                       >
                         Cancel
                       </Button>
@@ -320,7 +465,7 @@ export function MergePanel({
                 </form>
               )}
             </div>
-          ) : (
+          ) : !queued && !queueRequired ? (
             <p className="muted">
               {pending
                 ? "Write access is required to recover the original merge."
@@ -328,7 +473,7 @@ export function MergePanel({
                   ? "Write access is required to merge."
                   : "The requirements above must be satisfied before this pull request can be merged."}
             </p>
-          )}
+          ) : null}
           <Failure message={mutation.error} />
           {mutation.error && repo.archived && pending && (
             <Button variant="outline" size="sm" onClick={refresh}>
@@ -336,6 +481,15 @@ export function MergePanel({
             </Button>
           )}
         </div>
+      )}
+      {(pull.auto_merge_configured || queueRequired || queued) && (
+        <AutoMerge
+          key={`${repo.id}:${pull.number}`}
+          repo={repo}
+          pull={pull}
+          csrf={csrf}
+          refresh={refresh}
+        />
       )}
       {!pending && (
         <PullReadinessControl
@@ -346,93 +500,5 @@ export function MergePanel({
         />
       )}
     </section>
-  );
-}
-
-function RequiredChecks({
-  repo,
-  pull,
-  requirements,
-  refresh,
-}: {
-  repo: Repository;
-  pull: PullRequest;
-  requirements: PullRequest["merge_requirements"];
-  refresh: () => void;
-}) {
-  if (!requirements.checks.length) return null;
-  const unsuccessful = requirements.checks.some(
-    (check) => check.state === "error" || check.state === "failure",
-  );
-  const waiting = requirements.checks.some(
-    (check) => check.state === null || check.state === "pending",
-  );
-  const SummaryIcon = unsuccessful
-    ? XCircleFillIcon
-    : waiting
-      ? ClockIcon
-      : CheckCircleFillIcon;
-  return (
-    <div
-      className={`required-checks ${unsuccessful ? "failure" : waiting ? "pending" : "success"}`}
-    >
-      <div className="required-checks-summary">
-        <SummaryIcon />
-        <strong>
-          {unsuccessful
-            ? "Some required checks were not successful"
-            : waiting
-              ? "Required checks are waiting"
-              : "All required checks have passed"}
-        </strong>
-        <Button variant="outline" size="sm" onClick={refresh}>
-          Refresh checks
-        </Button>
-      </div>
-      <ul>
-        {requirements.checks.map((check) => {
-          const CheckIcon =
-            check.state === "success"
-              ? CheckCircleFillIcon
-              : check.state === "failure" || check.state === "error"
-                ? XCircleFillIcon
-                : ClockIcon;
-          return (
-            <li key={check.context} className={check.state ?? "expected"}>
-              <CheckIcon />
-              <span>
-                <strong>{check.context}</strong>
-                <small>
-                  {check.description ??
-                    (check.state === null
-                      ? "Expected — Waiting for status to be reported."
-                      : check.state === "pending"
-                        ? "In progress"
-                        : check.state === "success"
-                          ? "Successful"
-                          : "Unsuccessful")}
-                </small>
-              </span>
-              {check.run_id ? (
-                <Link
-                  href={repoHref(repo, {
-                    view: "pulls",
-                    pull: String(pull.number),
-                    pull_tab: "checks",
-                    check: String(check.run_id),
-                  })}
-                >
-                  Details
-                </Link>
-              ) : check.target_url ? (
-                <a href={check.target_url} target="_blank" rel="noreferrer">
-                  Details
-                </a>
-              ) : null}
-            </li>
-          );
-        })}
-      </ul>
-    </div>
   );
 }

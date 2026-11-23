@@ -7,15 +7,16 @@ use crate::{
     catalog::{CatalogStore, RepositoryApplicationState},
 };
 
-pub(crate) async fn initialize_repository(config: &Config, repository: Uuid) -> Result<()> {
-    let catalog = CatalogStore::from_config(config)?;
-    let (document, _) = catalog.load().await?;
-    let record = document
-        .repositories
-        .iter()
-        .find(|record| record.id == repository)
-        .ok_or(crate::catalog::CatalogError::NotFound)?;
-    if record.application == RepositoryApplicationState::CellReady {
+pub(crate) async fn prepare_repository(
+    config: &Config,
+    catalog: &CatalogStore,
+    repository: Uuid,
+    pending: RepositoryApplicationState,
+) -> Result<()> {
+    if !catalog
+        .needs_cell_initialization(repository, pending)
+        .await?
+    {
         return Ok(());
     }
     std::fs::create_dir_all(&config.cells.data_dir)?;
@@ -81,9 +82,7 @@ pub(crate) async fn initialize_repository(config: &Config, repository: Uuid) -> 
         return Err(error.into());
     }
     initialized?;
-    wait_for_initializer_lease(config, &node_name).await?;
-    catalog.mark_cell_ready(repository).await?;
-    Ok(())
+    wait_for_initializer_lease(config, &node_name).await
 }
 
 async fn wait_for_initializer_lease(config: &Config, node: &str) -> Result<()> {

@@ -8,7 +8,7 @@ use crate::cells::repository::collaboration::{Subject, SubjectKind};
 use crate::cells::repository::{MAX_NUMBER, SqlBatch, integer, result_u64, statement};
 
 const STATE_KEY: &str = "discussion-search/v1/state";
-const FORMAT: u16 = 12;
+const FORMAT: u16 = 13;
 const BATCH: usize = 8;
 pub(super) const MAX_DIRTY: usize = 128;
 
@@ -230,7 +230,7 @@ fn subject(row: &[SqlValue]) -> crate::cells::Result<Subject> {
     Ok(Subject { kind, number })
 }
 
-fn rowid(subject: Subject) -> u64 {
+pub(in crate::cells::repository) fn rowid(subject: Subject) -> u64 {
     subject.number * 2 + u64::from(subject.kind == SubjectKind::Pull)
 }
 

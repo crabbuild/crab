@@ -23,6 +23,7 @@ fn cell(server: &crate::server::Server) -> RepositoryCell {
 }
 fn input(draft: bool) -> CreatePullInput {
     CreatePullInput {
+        code_owner_requests: Default::default(),
         metadata: Default::default(),
         draft,
         submission_id: *Uuid::now_v7().as_bytes(),
@@ -31,6 +32,7 @@ fn input(draft: bool) -> CreatePullInput {
         body: "Initial body".into(),
         base_ref: "refs/heads/main".into(),
         head_ref: "refs/heads/feature".into(),
+        head_repository: None,
         base_oid: "a".repeat(40),
         head_oid: "b".repeat(40),
     }
@@ -50,6 +52,7 @@ async fn create(cell: &RepositoryCell, draft: bool) -> PullRecord {
 }
 fn selection(pull: &PullRecord, state: PullReadiness) -> SetPullReadinessInput {
     SetPullReadinessInput {
+        code_owner_requests: Default::default(),
         number: pull.number,
         version: pull.version,
         actor: actor("Alice"),
@@ -99,6 +102,9 @@ fn merge(pull: &PullRecord) -> PullMerge {
         commit_oid: pull.head_oid.clone(),
         message: String::new(),
         created_at_ms: 1,
+        publication_plan: None,
+        bypass_rulesets: Vec::new(),
+        tested_candidate: false,
     }
 }
 

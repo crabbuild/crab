@@ -2,11 +2,15 @@ import { Link } from "@/components/navigation/link";
 import type { OrganizationView, Session } from "@/lib/contracts";
 import { useRequest, type Refs, type Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
+import { DeployTokens } from "./deploy-tokens";
 import { DefaultBranchSettings } from "./general";
 import { MemberSettings } from "./members";
 import { MentionSettings } from "./mentions";
 import { BranchProtectionSettings } from "./protections";
+import { IntegrationSettings } from "./integrations";
+import { RepositoryRulesets } from "./rulesets";
 import { RepositoryTeamSettings } from "./team-access";
+import { OutboundWebhooks } from "./webhooks";
 
 export function Settings({
   repo,
@@ -20,7 +24,16 @@ export function Settings({
   repo: Repository;
   refs: Refs;
   csrf: string;
-  section: "general" | "branches" | "members" | "mentions" | "team-access";
+  section:
+    | "general"
+    | "branches"
+    | "members"
+    | "integrations"
+    | "webhooks"
+    | "deploy-tokens"
+    | "rulesets"
+    | "mentions"
+    | "team-access";
   identity: Session["user"];
   onDefaultChanged: () => void;
   onRepositoryChanged: () => void;
@@ -51,12 +64,45 @@ export function Settings({
           Branches
         </Link>
         <Link
+          className={section === "rulesets" ? "active" : ""}
+          aria-current={section === "rulesets" ? "page" : undefined}
+          href={repoHref(repo, { view: "settings", section: "rulesets" })}
+        >
+          Rulesets
+        </Link>
+        <Link
           className={section === "members" ? "active" : ""}
           aria-current={section === "members" ? "page" : undefined}
           href={repoHref(repo, { view: "settings", section: "members" })}
         >
           Members
         </Link>
+        <Link
+          className={section === "integrations" ? "active" : ""}
+          aria-current={section === "integrations" ? "page" : undefined}
+          href={repoHref(repo, { view: "settings", section: "integrations" })}
+        >
+          Integrations
+        </Link>
+        <Link
+          className={section === "webhooks" ? "active" : ""}
+          aria-current={section === "webhooks" ? "page" : undefined}
+          href={repoHref(repo, { view: "settings", section: "webhooks" })}
+        >
+          Webhooks
+        </Link>
+        {identity && (
+          <Link
+            className={section === "deploy-tokens" ? "active" : ""}
+            aria-current={section === "deploy-tokens" ? "page" : undefined}
+            href={repoHref(repo, {
+              view: "settings",
+              section: "deploy-tokens",
+            })}
+          >
+            Deploy tokens
+          </Link>
+        )}
         {ownership.data?.role === "owner" && (
           <Link
             className={teamSection ? "active" : ""}
@@ -74,7 +120,15 @@ export function Settings({
           Team mentions
         </Link>
       </nav>
-      {teamSection ? (
+      {section === "rulesets" ? (
+        <RepositoryRulesets key={repo.id} repo={repo} csrf={csrf} />
+      ) : section === "integrations" ? (
+        <IntegrationSettings key={repo.id} repo={repo} csrf={csrf} />
+      ) : section === "webhooks" ? (
+        <OutboundWebhooks key={repo.id} repo={repo} csrf={csrf} />
+      ) : section === "deploy-tokens" ? (
+        <DeployTokens key={repo.id} repo={repo} csrf={csrf} />
+      ) : teamSection ? (
         organization ? (
           <RepositoryTeamSettings
             repo={repo}
@@ -87,7 +141,21 @@ export function Settings({
           </div>
         )
       ) : section === "members" ? (
-        <MemberSettings repo={repo} csrf={csrf} identity={identity} />
+        repo.forked_from ? (
+          <div className="notice">
+            This fork inherits access from the source repository.{" "}
+            <Link
+              href={repoHref(repo.forked_from, {
+                view: "settings",
+                section: "members",
+              })}
+            >
+              Manage source access
+            </Link>
+          </div>
+        ) : (
+          <MemberSettings repo={repo} csrf={csrf} identity={identity} />
+        )
       ) : section === "mentions" ? (
         <MentionSettings key={repo.id} repo={repo} csrf={csrf} />
       ) : section === "branches" ? (

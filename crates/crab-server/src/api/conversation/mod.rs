@@ -141,6 +141,16 @@ async fn page(
         .collect();
     let authors = Authors::load(server, principal, actors.into_iter()).await?;
     let principal = app::membership(server, principal, &repo).await?.principal;
+    let ruleset_protected = pulls::reviews::ruleset_requires_admin(
+        server,
+        &repo,
+        &principal,
+        page.items.iter().find_map(|entry| match entry {
+            Entry::Review(detail) if detail.dismissible => Some(detail),
+            _ => None,
+        }),
+    )
+    .await?;
     let items = page
         .items
         .into_iter()
@@ -173,6 +183,7 @@ async fn page(
                         &reaction,
                         &principal,
                         &repo,
+                        ruleset_protected,
                     ),
                 ),
                 Entry::Activity(_) => {

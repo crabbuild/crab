@@ -45,6 +45,9 @@ async fn lookup(
 ) -> Result<(CatalogStore, MembershipSnapshot, OrganizationAccess, Uuid)> {
     let qualified = app::account(principal)?;
     let repository = app::repository(server, principal, route)?;
+    if repository.forked_from.is_some() {
+        return Err(Error::NotFound);
+    }
     let catalog = server.catalog().ok_or(Error::NotFound)?;
     let snapshot = catalog
         .membership(&route.0, &route.1)
@@ -54,7 +57,7 @@ async fn lookup(
         return Err(Error::NotFound);
     }
     let organization = snapshot.organization.clone().ok_or(Error::NotFound)?;
-    let actor = app::registered_actor(server, qualified)
+    let actor = crate::repository::access::actor_id(server, qualified)
         .await?
         .ok_or(Error::NotFound)?;
     Ok((catalog, snapshot, organization, actor))

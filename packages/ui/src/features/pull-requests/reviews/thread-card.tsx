@@ -1,16 +1,26 @@
 import { Author } from "@/components/discussion/author";
-import { endpoint, type Repository } from "@/lib/api";
+import { endpoint, useRequest, type Repository } from "@/lib/api";
 import { Reactions } from "@/components/discussion/reactions";
 import { Editor } from "@/components/discussion/editor";
 import { Failure } from "@/components/discussion/failure";
 import { DiscussionMarkdown } from "@/components/discussion/markdown";
 import { useMutation } from "@/components/discussion/mutations";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Link } from "@/components/navigation/link";
+import { Result } from "@/components/request/result";
+import { repoHref } from "@/lib/repository-route";
 import { useState } from "react";
 
 import type { PullRequest, PullReviewThread } from "../model";
+import { branch } from "../presentation";
 import { ReviewReplies } from "./replies";
-import { SuggestionAction } from "./suggestion";
+import {
+  canApplySuggestion,
+  SuggestionCommit,
+  useSuggestionBatch,
+  type SuggestionBatch,
+} from "./suggestion";
 
 function initials(value: string) {
   const parts = value.trim().split(/\s+/).filter(Boolean);
@@ -23,22 +33,92 @@ function initials(value: string) {
   );
 }
 
+export function LinkedReviewThread({
+  repo,
+  pull,
+  csrf,
+  number,
+  reply,
+  refresh,
+}: {
+  repo: Repository;
+  pull: PullRequest;
+  csrf: string;
+  number: number;
+  reply?: number;
+  refresh: () => void;
+}) {
+  const thread = useRequest<PullReviewThread>(
+    endpoint(repo, `pulls/${pull.number}/threads/${number}`),
+  );
+  const suggestions = useSuggestionBatch(
+    repo,
+    pull,
+    csrf,
+    thread.data ? [thread.data] : [],
+    () => {
+      thread.retry();
+      refresh();
+    },
+  );
+  return (
+    <section
+      className="inline-review-list"
+      aria-label="Linked review conversation"
+    >
+      <Button asChild variant="outline" size="sm" className="w-fit">
+        <Link
+          href={repoHref(repo, {
+            view: "pulls",
+            pull: String(pull.number),
+            pull_tab: "files",
+          })}
+        >
+          Back to files changed
+        </Link>
+      </Button>
+      <SuggestionCommit
+        suggestions={suggestions}
+        branch={branch(pull.head_ref)}
+      />
+      <Result state={thread} timingLabel="Review conversation">
+        {(data) => (
+          <ReviewThreadCard
+            repo={repo}
+            pull={pull}
+            thread={data}
+            csrf={csrf}
+            refresh={thread.retry}
+            linked
+            suggestions={suggestions}
+            reply={reply}
+          />
+        )}
+      </Result>
+    </section>
+  );
+}
+
 export function ReviewThreadCard({
   repo,
   pull,
   thread,
   csrf,
-  linked,
   onJumpToDiff,
   refresh,
+  suggestions,
+  linked,
+  reply,
 }: {
   repo: Repository;
   pull: PullRequest;
   thread: PullReviewThread;
   csrf: string;
-  linked: boolean;
   onJumpToDiff?: (thread: PullReviewThread) => void;
   refresh: () => void;
+  suggestions?: SuggestionBatch;
+  linked?: boolean;
+  reply?: number;
 }) {
   const mutation = useMutation(csrf, repo);
   const [editing, setEditing] = useState(false);
@@ -47,6 +127,7 @@ export function ReviewThreadCard({
     thread.start_line === thread.end_line
       ? `line ${thread.start_line}`
       : `lines ${thread.start_line}–${thread.end_line}`;
+  const selected = suggestions?.selected.includes(thread.number);
   async function saveEdit(event: React.FormEvent) {
     event.preventDefault();
     const updated = await mutation.run<PullReviewThread>(
@@ -154,20 +235,38 @@ export function ReviewThreadCard({
             target={`pulls/${pull.number}/threads/${thread.number}`}
             summary={thread.reactions}
           />
-          {thread.suggested_text !== null &&
-            !thread.outdated &&
-            !thread.vanished &&
-            !thread.resolved &&
-            thread.side === "new" &&
-            repo.access === "write" && (
-              <SuggestionAction
-                repo={repo}
-                pull={pull}
-                thread={thread}
-                csrf={csrf}
-                refresh={refresh}
-              />
-            )}
+          {thread.suggested_text !== null && (
+            <div className="review-suggestion">
+              <pre>{thread.suggested_text || "Remove selected lines"}</pre>
+              {suggestions?.enabled && canApplySuggestion(thread) && (
+                <div className="discussion-actions">
+                  <Button
+                    size="sm"
+                    disabled={suggestions.pending}
+                    onClick={() => suggestions.review([thread.number])}
+                  >
+                    Apply suggestion
+                  </Button>
+                  {!linked && (
+                    <label className="inline-flex items-center gap-2 text-sm">
+                      <Checkbox
+                        checked={selected}
+                        aria-label={`Select suggestion from thread #${thread.number}`}
+                        disabled={
+                          suggestions.pending ||
+                          (suggestions.atLimit && !selected)
+                        }
+                        onCheckedChange={() =>
+                          suggestions.toggle(thread.number)
+                        }
+                      />
+                      Include in batch
+                    </label>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
           <div className="discussion-actions review-thread-actions">
             {onJumpToDiff && !thread.outdated && !thread.vanished && (
               <Button
@@ -192,16 +291,18 @@ export function ReviewThreadCard({
                 Edit
               </Button>
             )}
-            {thread.can_resolve && (
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={mutation.pending}
-                onClick={toggleResolved}
-              >
-                {thread.resolved ? "Reopen" : "Resolve"}
-              </Button>
-            )}
+            {thread.can_resolve &&
+              !repo.archived &&
+              !(thread.resolved && pull.merge_pending) && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={mutation.pending}
+                  onClick={toggleResolved}
+                >
+                  {thread.resolved ? "Reopen" : "Resolve"}
+                </Button>
+              )}
           </div>
           {thread.outdated && (
             <p className="muted review-thread-warning">
@@ -209,7 +310,13 @@ export function ReviewThreadCard({
               path or anchored lines may no longer exist.
             </p>
           )}
-          <ReviewReplies repo={repo} pull={pull} thread={thread} csrf={csrf} />
+          <ReviewReplies
+            repo={repo}
+            pull={pull}
+            thread={thread}
+            csrf={csrf}
+            selected={reply}
+          />
           <Failure message={mutation.error} />
         </div>
       </details>

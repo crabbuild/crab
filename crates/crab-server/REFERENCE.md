@@ -16,6 +16,7 @@ Use this map to enter the reference without reading it in order.
 | Call repository browser APIs | [Repository browser and application APIs](#repository-browser-and-application-apis) |
 | Configure browser sign-in (OIDC or GitHub OAuth) | [Team sign-in](#team-sign-in) |
 | Import a repository from Git | [Git imports](#git-imports) |
+| Fork a private organization repository | [Private organization forks](#private-organization-forks) |
 | Configure OpenID Connect (OIDC) | [Team sign-in](#team-sign-in) |
 | Clone or fetch with native Git | [Git HTTP reads](#git-http-reads) |
 | Transfer LFS objects | [Git LFS transfers](#git-lfs-transfers) |
@@ -438,9 +439,10 @@ The blame view links commit OIDs and subjects to immutable commit details. Its a
 | Tree and file workspace | Resizable lazy folder-first tree, preserved expansion, breadcrumbs, source, current-file code symbols, format-aware preview, blame, raw bytes, copy, download, edit, and delete |
 | History and comparison | Signed pagination, first-parent path history, a persistent change tree with independently scrolling jump-linked diffs, split/unified layouts, and exact revision links |
 | Go to file | Bounded full-tree fuzzy search without blob reads; `T` opens and focuses search |
+| Search code | Literal UTF-8 text search on a selected branch, tag, or commit, with directory and case filters, snippets, and commit-pinned line links |
 | Releases | Releases/Tags navigation, search, drafts, publication, edits, deletion, source ZIPs, and binary assets |
 | Pull requests | Conversation, Commits, Checks, Files changed, reviews, shared Markdown formatting, approval state, and merge controls |
-| Review requests | Versioned member requests, cancellation, submitted-review fulfillment, and reviewer sidebar |
+| Review requests | Versioned requests for people and teams, inbox delivery, cancellation, submitted-review fulfillment, and reviewer sidebar |
 | Pull readiness | `PUT /api/repos/{owner}/{name}/pulls/{number}/readiness`; list/detail responses include `draft` |
 | Issues and metadata | Searchable issues, comments, labels, assignees, Markdown formatting and preview, and conflict recovery |
 | Settings | Default branch, exact protection rules, and archive state with stale-version checks |
@@ -458,6 +460,7 @@ The blame view links commit OIDs and subjects to immutable commit details. Its a
 | `tree` | Paginated raw-byte directory entries |
 | `tree-attribution` | Last-change commit summaries for one exact tree page |
 | `search` | Bounded fuzzy file-path search without blob-body reads |
+| `code-search` | Bounded content search of a verified commit with an exclusive continuation |
 | `file` | Highlightable file metadata and content |
 | `blob` | Exact Git blob bytes as an attachment |
 | `asset` | Signature-checked PNG, JPEG, GIF, or WebP bytes served inline |
@@ -535,6 +538,188 @@ tests do not establish production throughput.
 
 Root commits compare against an empty tree. Path history follows the exact first-parent path. Commit history with `base` instead returns commits reachable from `rev` but not from `base`, across every parent.
 
+For a PR comparison, call `changes` with `base`, `rev`, and `merge_base=true`.
+The response includes `base_tip` and `commit` from a single ref capture, plus
+`base`, the effective Git merge base. Pin individual `diff` requests to that
+effective `base` and `commit`. Unrelated histories return 422 `no_merge_base`.
+When several best ancestors exist, the read selects the lowest object ID for
+stable file and review anchors. Git merge-commit generation requires a single
+best ancestor and asks the author to resolve more complex histories in Git.
+
+### Search repository code
+
+**Search code** matches literal UTF-8 text in one repository. Select a branch,
+tag, or full commit, optionally restrict the search to an exact directory,
+and select **Match case** when needed. Each excerpt links to its file and line
+at the commit searched.
+
+`GET /api/repos/{owner}/{name}/code-search` takes `q`, optional `rev`, an
+optional directory `path`, `case_sensitive` (default `false`), `limit`
+(1–40 matching files, default 20), and an opaque `cursor`. It returns
+`{commit, items, scanned, skipped, next}`. Each file carries `path`,
+`path_hex`, `more_lines`, and up to six excerpts with `line`, `before`,
+`matched`, and `after`. Supply the same search parameters with `next`
+to continue. A cursor binds the repository UUID, commit, and search filters.
+Subsequent pages use the pinned commit even if the selected branch advances.
+Every request checks current repository access before returning any matches.
+
+Each page inspects up to 128 blobs in canonical path order. Large blobs above
+256 KiB, binary and invalid UTF-8 data, and separately stored Crab or LFS
+content are counted as skipped. An empty page may have a continuation.
+The browser reports scanned and skipped counts and keeps earlier results
+visible when a continuation needs to be retried. This search uses the
+verified snapshot reader and bulk read budgets. It scans eligible blobs on
+demand.
+
+### Search across repositories
+
+Open **Search code** from the global header, or **Search organization code**
+from an organization's repository list. Search file contents or paths on
+default branches. Use an exact directory and **Match case** to narrow the
+scan. Results name the repository and link to the exact Git commit, file,
+and matching line.
+
+`GET /api/code-search` takes `q`, optional `organization` UUID and
+`directory`, `kind=content|path` (default `content`), `case_sensitive`,
+and `cursor`. It returns `groups`, `scanned` paths, `skipped` files,
+`verified` content candidates checked against Git, and `next`. Groups carry
+`id`, `owner`, `name`, `commit`, and matching `files`. Path matches use
+the Git tree and have no excerpts. Each page examines up to four repositories
+and returns up to 20 matching files. A Git scan considers up to 32 paths per
+repository. An indexed content search can consider all indexed paths and checks
+up to 32 content candidates per repository. Follow `next` with the same
+parameters, including after an empty page. A repository in progress keeps
+the same commit until its scan finishes.
+
+The server builds a default-branch index in the background and keeps one
+published artifact per repository in object storage. It contains paths and
+trigram filters. An index answers only for its exact Git tree. Crab checks
+returned paths and text against Git and reuses unchanged blob filters after
+an update. Short literals and Unicode case-folding cases that the filter
+cannot rule out remain candidates. The page reports `indexed_repositories`,
+`scanning_repositories`, and `limited_repositories`. Crab scans Git while a
+matching index is unavailable or exceeds the artifact or memory limit.
+
+Search considers current readable repositories and checks them again before
+returning excerpts or a cursor. A continuation binds the account, filters,
+and readable repository set. A grant or address change in that scope returns
+HTTP 409, and **Start over** opens a new search. Persistent symbol definitions
+and large-catalog performance qualification remain open.
+
+### Create a repository in the browser
+
+Choose **New repository** in the catalog to provision an empty private Git
+repository with `main` as its default branch. The server derives the personal
+namespace from the verified issuer and subject. Profile edits leave the
+namespace stable. The local operator uses the `local` namespace. User
+sessions can import into their own personal namespace.
+
+`GET /api/repos/creation` returns `{owner, default_branch}`.
+`POST /api/repos/creation` accepts `{request_id, name, description}` and
+returns the cataloged `{id, owner, name}`. It requires a browser session and
+CSRF protection. The creator receives repository Admin access. Conflicting
+names are checked case-insensitively. The catalog reserves the name before Git
+and Cell initialization and exposes it after Cell readiness. Retry an
+interrupted request with its original UUID and fields to reuse the reservation
+and repository UUID. The form retains those fields and the UUID in session
+storage until the request is confirmed.
+
+Organization owners can choose **Repositories → New repository** from their
+organization page. The organization owns the new private repository, and its
+URL uses `org-<organization UUID without hyphens>` as the stable namespace.
+Renaming the organization leaves repository URLs and IDs stable.
+
+Current organization owners inherit repository Admin access. This grant is
+resolved from the current organization role for browser and Git requests,
+including requests made with an existing Git token. Git tokens retain their
+original repository and read/write limits. Ordinary organization members and
+outside collaborators need repository-specific access. Removing an owner
+removes their inherited access. Separately assigned repository grants follow
+their own lifecycle.
+
+`GET /api/organizations/{organization}/repositories/creation` returns the
+organization destination for an owner. `POST` accepts the same body as
+personal creation. The Organization Cell records the owner's authorized
+submission before catalog and Git initialization, and rechecks ownership
+before replay. A retry uses the same account, submission ID, and fields.
+`GET /api/repos?organization={organization}` lists only repositories the
+caller can access. Managed namespaces accept new repositories through the
+organization creation path. Organization imports and member-managed
+repository creation policy are separate capabilities.
+
+Upgrade serving replicas together before starting organization-owned
+creation. Existing catalog entries keep their previous ownership and grants.
+
+### Find a repository
+
+The home page and an organization's **Repositories** tab search repositories
+you can read. Search treats words case-insensitively and matches the name,
+qualified owner/name, or description. Exact names and name prefixes appear
+before description matches. The organization tab keeps the search scoped to
+that organization. Search terms and the current page are in the URL.
+
+`GET /api/repos?limit=32` returns `{repositories, next}`. Each result has
+`id`, `owner`, `name`, `description`, and `archived`. Provide optional
+`q` (up to 200 characters) and `organization` (UUID). Pages accept a
+`limit` from 1 to 50 and return `next: null` on the last page. Send the
+returned continuation as `after` with the same search and organization.
+Crab binds it to the signed-in account and rechecks current repository
+access. If a continuation has gone stale, start from the first page.
+
+Exact `owner` plus `name` lookups return the repository detail needed by
+repository pages and settings. Search and exact lookup options are mutually
+exclusive.
+
+### Rename a repository
+
+Repository administrators can change the name in **Settings → General**.
+Crab keeps the repository UUID, storage placement, Git refs, collaboration
+records, and access grants. Existing links and smart HTTP Git remotes
+continue to resolve to the current name while their old address is available.
+Crab checks current access before redirecting. Claiming a former name for a
+different repository replaces its redirect. Git tokens retain their original
+repository UUID and permission ceiling after a rename.
+
+`GET /api/repositories/{repository}/name` returns the canonical `id`, `owner`,
+`name`, and version to a repository administrator. To rename it, send `name`,
+the captured `version`, and a UUID `request_id` with `PUT` on the same path.
+Use the same input and request ID to recover a lost response. The current
+name version prevents a stale submission from overwriting a newer rename.
+Archived repositories must be unarchived before renaming.
+
+Upgrade serving replicas together before the first rename or transfer. The
+shared catalog stores the revision and former owner/name pairs.
+Clients that use an old remote can update it with `git remote set-url origin`
+and the current URL.
+
+### Transfer repository ownership
+
+In **Settings → General**, a repository administrator can create an offer for a
+personal account by profile handle or for an organization by link or ID. Share
+the private offer link with the recipient. The named account or a current owner
+of the destination organization must sign in and accept within 24 hours. A
+current source administrator can cancel a pending offer. The recipient can
+also decline it. Crab rechecks the requester's authority and destination access
+at acceptance. Archived repositories and repositories in a private fork network
+are ineligible for transfer.
+
+Acceptance retains the repository UUID, storage placement, Git history,
+collaboration records, and direct collaborators. Former organization team and
+SSO group grants are removed. The destination organization uses its current
+access policies, or the destination personal account gains administrator
+access. Existing URLs redirect after checking current access until the former
+address is reclaimed. Issue a fresh Git token for the destination owner after
+acceptance. That token can follow the authorized redirect from the old remote.
+
+`GET /api/repositories/{repository}/transfer` returns the current name version
+and offer to a repository administrator. A `POST` to that route submits `version`,
+`request_id`, destination `name`, and `recipient` (`{kind:"account",handle}` or
+`{kind:"organization",id}`). `GET /api/repository-transfers/{id}` reads the
+private offer. `PUT` on that path takes `decision` (`accept`, `decline`, or
+`cancel`). The browser endpoints use the session and the usual CSRF protection.
+Retry a lost response with the same request ID or decision. A changed source
+address, a competing catalog update, or a claimed destination blocks acceptance.
+
 ### Git imports
 
 The catalog page exposes **Import from Git** for an authenticated browser
@@ -546,8 +731,36 @@ copied as well.
 
 | Endpoint | Contract |
 | --- | --- |
-| `POST /api/imports/git` | Starts an asynchronous import. The JSON body is `{source, owner, name, description?, token?}`. `source` is an HTTPS or SSH clone URL (or GitHub `owner/repository` shorthand) whose host appears in `import.allowed_hosts`; HTTPS tokens are sent as a bearer header and never persisted. Browser requests require the session CSRF token. |
-| `GET /api/imports/git/{id}` | Returns `queued`, `running`, `succeeded`, or `failed` status for the caller's own job. Job records are in-memory and retained for one hour after completion. |
+| `POST /api/imports/git` | Starts an asynchronous import. The JSON body is `{request_id?, source, owner, name, description?, token?}`. `source` is an HTTPS or SSH clone URL (or GitHub `owner/repository` shorthand) whose host appears in `import.allowed_hosts`. HTTPS tokens are sent as bearer headers and remain in memory. Browser requests require the session CSRF token. An exact request UUID replay returns the existing job. |
+| `GET /api/imports/git/{id}` | Reads the caller's job from object storage on any serving replica. States are `queued`, `running`, `succeeded`, `failed`, and `interrupted`. The response includes `resumable` and includes the destination link after success. |
+| `POST /api/imports/git/{id}/resume` | Resumes a failed or interrupted job as the original account. Send the session CSRF token and a JSON body of `{}` or `{"token":"…"}` for a private HTTPS source. An active or completed job returns its existing status. |
+
+Organization owners use **Import from Git** in the organization's
+**Repositories** tab. The scoped endpoint
+`/api/organizations/{organization}/repositories/imports/git` takes the same
+fields except `owner`, which is derived from the organization UUID. Its
+`/{id}` and `/{id}/resume` endpoints are available to current organization
+owners. One owner can share the import status link with another owner, who can
+resume the same job and repository. The imported repository grants Admin
+access through current organization ownership.
+
+Crab checks organization authority at reservation, during native Git
+publication, and at the decision to expose the repository. The final decision
+is recorded in the organization Cell for the exact prepared repository and
+snapshot, after repository Cell preparation. When authority ends before that
+decision, the destination remains private until a current owner resumes it.
+
+Status records live under `.crab/http-server/v1/git-imports/` within the configured
+root. A worker updates the record every 15 seconds. After 60 seconds without
+an update, an unfinished job reports `interrupted`. The browser stores only
+the last job UUID for that account in the current tab and resumes status polling
+after a reload. Choose **Resume import** to continue with the same destination
+and job ID. If Git publication already committed, Crab can finish without
+contacting the source. Otherwise, it clones again and requires the same default
+branch and ref tips if the original attempt already pinned them. Supply a
+fresh source token if the clone needs one. Jobs from before resumable import
+support remain readable and have `resumable: false`. Upgrade serving replicas
+together before starting new imports.
 
 Configure additional Git hosts explicitly:
 
@@ -562,26 +775,92 @@ fragments are rejected. Child Git commands disable inherited credential
 helpers and HTTP redirects. Keep outbound network policy enabled as a second
 boundary for private deployments.
 
-On success, the importing identity is the new repository's administrator in an
-OIDC deployment. A local-trust deployment uses the local operator. Imports are
-published only after the repository Cell has been initialized, its root verified,
-and its control record released to idle. The catalog keeps the repository out of
-serving indexes until that readiness gate passes; transient Cell activation
-errors are retried by request paths. The import job becomes `succeeded` once all
-refs are durably committed; Git browse indexes and attribution are then rebuilt
-in the background. A mirror preserves every advertised ref (including provider
-pull-request refs), so large GitHub mirrors can take longer during verified
-visibility planning even though the repository is already durable. Jobs are
-bounded to four concurrent imports; cloning and publication have a 30-minute
-deadline, publication uses the server's atomic receive capability, and failed
-publications retry with bounded backoff. The runtime image includes `git`; each
-import reserves up to 8 GiB from the Cell local-disk budget while cloning, then
-shrinks that reservation to the measured mirror plus a command margin. `TMPDIR`
-must still have room for Git's process scratch files.
-The server also needs outbound access to the configured Git host (or the
-configured network proxy). Transient push failures are retried at the Git
-publication boundary; a terminal failure leaves the destination name reserved until
-an operator removes the repository that was created before the failure.
+On success, the importing identity is the new repository's administrator for
+account-scoped imports in an authenticated deployment. A local-trust deployment
+uses the local operator. Crab pins the default branch and ref tips, reserves a
+destination, and publishes through the server's atomic Git receive. The catalog exposes the repository after it
+verifies all refs and finishes Cell initialization. Git browse indexes and
+attribution are then rebuilt in the background. Large mirrors, including
+provider pull-request refs, can take longer during verified visibility planning.
+Each server allows four concurrent imports. Cloning and publication have a
+30-minute command deadline. Transient publication failures retry with bounded
+backoff. A job that reserved a name retains that reservation for future resumes.
+The runtime image includes `git`. Each import reserves up to 8 GiB from the
+Cell local-disk budget while cloning and shrinks the reservation to the measured
+mirror plus a command margin. `TMPDIR` needs space for Git process scratch
+files. The server needs outbound access to the configured Git host or proxy.
+
+### Private organization forks
+
+An organization owner can choose **Fork repository** in a source repository's
+Code view. Choose a new repository name in the same organization. Crab copies
+the advertised Git refs and history through the native Git service and keeps
+the source repository UUID as the fork's lineage. Before publishing refs, Crab
+copies and verifies reachable Git LFS payloads. For native Crab Xet files, it
+verifies the shared shard and xorb data and writes the selected file bindings
+into the fork's own catalog. If content is missing or corrupt, repair it in the
+source and resume the fork job. The ready fork's Code view links back to the
+source. You can clone the fork and push independent changes with its own
+repository-scoped Git token.
+
+The fork inherits current source members, OIDC groups, and organization team
+grants. Manage access on the source. Removing access there also removes fork
+access, even when an account already holds a fork Git token. Organization
+rulesets still apply to the fork, including its initial Git publication.
+
+`POST /api/repos/{owner}/{name}/forks` accepts `{request_id, name}` and requires
+the source repository ID header and browser CSRF token. It returns an
+organization job with `fork_source`. Use the organization Git import status and
+resume routes with the same job ID. Resume with `{}` and a current organization
+owner session. The job exposes the fork after verifying the pinned refs and
+preparing its repository Cell. Deploy the updated server on all replicas before
+creating forks.
+
+On the fork's **Code** view, select a branch and choose **Sync fork**. Crab
+compares it with the upstream branch of the same name. Writers can choose
+**Update branch** when it can fast-forward to the previewed upstream commit.
+A divergence preserves the fork's commits and can be resolved in Git. The
+update uses the fork's branch protections and rulesets, and transfers the new
+commits and their required LFS and Xet content.
+
+`GET /api/repos/{owner}/{name}/fork-sync?branch=refs/heads/main` returns the
+branch relationship and both commit IDs. `POST` accepts `{branch, fork_oid,
+upstream_oid}` from that comparison. Both tips must still match before
+publication. Repeating a committed comparison can recover the recorded outcome
+after a lost reply, including after subsequent branch changes.
+
+Choose **Compare with upstream** on the fork's **Code** view to compare any
+fork branch with an upstream branch. The file list and diffs show changes
+from the common Git ancestor to the fork tip. Changes made only upstream
+are excluded. Branch selection does not write refs or copy Git objects.
+
+For the comparison API, send `GET /api/repos/{owner}/{name}/changes` with
+`rev=refs/heads/{fork-branch}`, `base=refs/heads/{upstream-branch}`,
+`merge_base=true`, and `upstream={source-repository-uuid}`. Crab verifies
+the UUID against the fork's lineage and applies the current inherited access
+rules. The response identifies the ancestor as `base`, the upstream tip as
+`base_tip`, and the fork tip as `commit`. File diff requests can pin `base`
+and `commit` in the fork. Both `changes` and `commits` also accept exact
+commit IDs in `base` and `rev` for a repeatable comparison.
+
+Writers can open a regular or draft pull request in the upstream repository
+from the same comparison. The request stores the fork UUID, branch name and
+both inspected commit IDs. The upstream owns the conversation, reviews,
+CODEOWNERS and merge requirements. Files and commits are read from the fork.
+The base and head may have the same branch name. API clients post to the
+upstream `pulls` route with `head_repository` set to the fork UUID, and supply
+`expected.base_oid` and `expected.head_oid` from the comparison.
+
+For Crab commit statuses and check runs on a fork-only head, use the upstream
+endpoint with `?pull={number}`. Crab checks that the commit is the current
+head of that pull request. The records use the upstream's check provider and
+permission rules. Approved changes can use the upstream's enabled merge
+methods, including merge commits, squash, rebase, and fast-forward. Publication
+checks both refs under leases and copies the required Git, LFS, and native Xet
+content. Squash and rebase transfer only dependencies reachable from their
+result, preserving the chosen upstream commit history. Fork pull requests can
+also receive [GitHub Actions results](#connect-github-actions) for their exact
+head through the upstream's configured connection.
 
 ### Render repository content safely
 
@@ -673,13 +952,113 @@ Repository administration routes require `admin` access:
 | --- | --- |
 | `PATCH /api/repos/{owner}/{name}/settings/default-branch` | `name`, current `expected_head`, and target `expected_oid` |
 | `PUT /api/repos/{owner}/{name}/settings/branch-protections` | `expected_version` and the complete `rules` set |
+| `PUT /api/repos/{owner}/{name}/rulesets` | `expected_version` and the complete `rulesets` set |
 | `PUT /api/repos/{owner}/{name}/settings/archive` | `expected_version`, `archived`, and exact `owner/name` confirmation |
 
 Changing the default branch records a new symbolic HEAD through the ref journal. It copies no objects and applies immediately to browser defaults and native Git discovery.
 
-Branch protection uses exact short branch names. A configuration can seed version zero; after the first administrative save, the stored object is authoritative across restarts and server instances.
+Branch protection uses exact short branch names. A configuration can seed version zero; after the first administrative save, the stored object is authoritative across restarts and server instances. Set `require_conversation_resolution` to require resolved review threads.
 
 Archived repositories remain readable and searchable. Browser writes, native pushes, and LFS uploads return a read-only error. Native Git and LFS check archive state again immediately before publication.
+
+### Manage branch and tag rulesets
+
+Open **Settings → Rulesets** to create, edit, disable, or remove a named ruleset.
+Repository readers can open **Rulesets** from Branches or Tags to see active
+rules. Pull requests list the active rulesets that match their base branch.
+
+Choose a branch or tag target. Use short ref names and patterns such as
+`release/*` for one path segment and `release/**/*` for nested names. Use
+`~ALL` for every ref of the selected target and `~DEFAULT_BRANCH` for the
+current default branch. A ref qualifies when any include matches and no
+exclude matches. `?` matches one character within a segment. Positive bracket
+classes such as `v[0-9]*` match character ranges.
+
+Both targets can restrict creation and deletion. Branch rulesets can also
+require a pull request before an existing ref is updated, a minimum number of
+eligible approvals, code owner review, conversation resolution, named checks, and specific connected
+GitHub Actions workflows. Reviews and checks imply the pull request requirement.
+Matching rulesets and classic branch protection apply together. Crab applies
+the highest required approval count and includes every distinct required check
+and workflow. Any applicable rule can require the head to contain the current
+base commit or require the merge queue. Each setting requires at least one
+required check or workflow.
+
+`GET /api/repos/{owner}/{name}/rulesets` returns the version, rulesets, and
+`can_manage`. Administrators can see disabled rulesets and replace the complete
+collection with matching `expected_version`. Each entry contains `id` (UUID),
+`name`, `target` (`branch` or `tag`), `enforcement` (`active` or `disabled`),
+`include`, `exclude`, `restrict_creations`, `restrict_deletions`,
+`require_pull_request`, `required_approvals`, `required_code_owner_reviews`,
+`require_conversation_resolution`, `require_up_to_date`, `require_merge_queue`,
+`required_checks`, and `required_integrations`. Branch-only settings must have
+empty or zero values on tag rulesets. A stale replacement returns HTTP 409.
+
+Rulesets govern Crab Server Git HTTP, browser Git changes, releases that create
+tags, and PR merges. Deployments that rely on mandatory server policy must
+limit direct object-store writes through storage IAM.
+
+### Apply organization rulesets
+
+Organization owners can open **Rulesets** on the organization page to manage
+branch and tag policy. Target every repository, a set of repository UUIDs, or
+repository names using include and exclude patterns. A pattern-based rule also
+applies to future repositories with matching names.
+
+Repository readers see matching active rulesets under **Inherited from
+organization**. Repository administrators can edit local policies. Organization
+rulesets combine with local rulesets and classic branch protection at ref
+publication, including organization Git imports. Approval counts use the
+strictest requirement. Named status checks apply across repositories.
+Individual GitHub Actions connections are configured per repository.
+Organization rules can require the merge queue with a named status check.
+
+`GET /api/organizations/{id}/rulesets` returns `version` and `rulesets`. To
+replace the collection, send those entries with `expected_version` to `PUT`
+on the same route. Each entry contains a `ruleset` and `repositories`. The
+repository selector is `{"kind":"all"}`, `{"kind":"selected","ids":[...]}`,
+or `{"kind":"name","include":[...],"exclude":[...]}`. A stale write
+returns HTTP 409.
+
+An explicit PR bypass references a local rule by UUID and an inherited rule
+by `{"organization":"<uuid>","ruleset":"<uuid>"}`. The scopes are independent.
+Organization team bypass requires active membership in the non-secret team
+and current write access to the repository.
+
+### Grant ruleset bypass access
+
+Ruleset administrators can grant bypass access to repository administrators,
+repository writers, organization owners, and non-secret teams already granted
+repository access. The actor must have current write access. A grant in
+**Always** mode can bypass that ruleset during direct Git and browser writes.
+**Pull requests only** applies to branch rulesets and requires explicit
+confirmation on the PR merge panel. Other matching rulesets, classic branch
+protections, repository merge methods and Git publication checks still apply.
+
+The administrator ruleset response includes `bypass_options` for role and team
+selection. Use the optional `bypass_actors` list on a ruleset with entries such
+as `{"actor":{"kind":"team","id":"<uuid>"},"mode":"pull_request"}`. Role kinds
+are `repository_admin`, `repository_write` and `organization_owner`. Readers
+can view active rulesets without seeing bypass grants.
+
+A PR merge may include `bypass_rulesets`, a list of eligible matching ruleset
+UUIDs. The reserved merge binds those IDs to the request. Before publishing,
+Crab checks the original actor's current authority and the selected rules.
+Completed PRs record the selected IDs. Direct publications log the ruleset
+IDs and committed Git transaction ID when bypass is used.
+
+### Require conversation resolution
+
+Enable **Require conversation resolution** in **Settings → Branches** or in a
+branch ruleset. The merge panel shows the number of unresolved published inline
+review conversations and links to the filtered list in **Files changed**.
+Outdated threads count until resolved. General comments, replies and private
+review drafts have no separate resolution state.
+
+The merge route checks the count before admission and again before writing the
+Git ref. During a pending merge, contributors can resolve existing threads.
+New threads and reopen requests wait until the merge completes or aborts, so
+the unresolved count cannot increase during publication.
 
 ### Create and manage releases
 
@@ -695,7 +1074,7 @@ Release routes use durable request reservations and versioned records:
 
 Creation includes a stable universally unique identifier (UUID) in `request_id`, short `tag_name`, full target commit OID, title, Markdown body, prerelease flag, and draft state. The target must be a visible commit.
 
-An existing lightweight or annotated tag is accepted only when it peels to the exact target. A new published release creates a lightweight tag through canonical ref publication. Drafts reserve their release tag but do not publish a new Git tag until a version-bound edit publishes the draft.
+An existing lightweight or annotated tag is accepted only when it peels to the exact target. A new published release creates a lightweight tag through canonical ref publication. Drafts reserve their release tag but do not publish a new Git tag until a version-bound edit publishes the draft. Republishing a withdrawn release verifies the existing Git tag again before notifying watchers.
 
 Readers cannot list or open drafts. Writers can recover drafts after restart. Replaying the same request recovers the same release; changing the payload or racing for the tag returns HTTP 409.
 
@@ -958,8 +1337,9 @@ The browser reads `GET /api/repos/{owner}/{name}/team-access` and replaces the
 grant list with `PUT` and `{expected_revision, teams}`. Both responses include
 `team_names` keyed by the current team UUIDs. The mutation requires the session
 CSRF token and repository UUID header. A stale change returns 409. Grant changes
-use the catalog audit outbox. Repository admins without organization ownership
-cannot see or edit this list. Authenticated catalog responses include
+use the catalog audit outbox. Direct member and team changes share the same
+revision. Repository admins without organization ownership cannot see or edit
+the grant list. Forks inherit access from their source. Authenticated catalog responses include
 `organization_id` for visible organization-owned repositories.
 
 Each protected request resolves current organization and team membership.
@@ -974,17 +1354,42 @@ Upgrade all serving peers before binding repositories. Unbound catalog rows
 retain their existing serialization. Old peers reject the new catalog field
 and cannot run the organization authorization read.
 
+### Inspect an organization member’s repository access
+
+Open the organization’s **People** page and select **View repository access**
+for a current member. Organization owners can see the member's highest
+configured role from direct grants, active teams, and organization ownership.
+Fork rows identify the source of the grants. The view shows separately when
+sign-in is blocked for the account. Where a signed SSO claim could add access,
+the row shows the highest configured SSO role. Git credentials can have a
+lower scope than the account's role.
+
+`GET /api/organizations/{id}/members/{actor}/repository-access` returns
+`{account, items, next}`. Pass its opaque `next` as `after` to continue.
+`limit` accepts 1–50 and defaults to 30. The continuation binds the requesting
+owner, inspected member, catalog revision, current teams and account
+suspension version. Reload from the first page after a change. The response
+omits private provider identities and group names. Upgrade Organization Cell
+peers together so every owner supports the new read.
+
 ### Configure protected branches
 
 A repository can define at most 100 exact branch rules:
 
 ```toml
 protected_branches = [
-  { branch = "main", required_approvals = 1, required_checks = ["ci/test"] },
+  { branch = "main", required_approvals = 1, require_up_to_date = true, required_checks = ["ci/test"] },
 ]
 ```
 
 Each rule accepts 0 to 20 approvals and up to 50 unique case-insensitive check contexts. Each context contains 1 to 100 characters.
+
+Select **Require branches to be up to date before merging** with at least one
+required check or GitHub Actions workflow. The head must contain the current
+base commit, and the required checks must pass on that head. If the PR falls
+behind, choose **Update branch** and run the checks on the new commit. Crab
+checks this policy again with both refs leased at merge publication.
+[GitHub strict required checks](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets#require-status-checks-to-pass-before-merging)
 
 After a repository has a branch, native Git cannot create, update, or delete a protected name. The first branch can initialize an empty or tag-only repository. Fast-forward or two-parent pull-request merge is the supported protected-branch publication path.
 
@@ -1100,6 +1505,29 @@ Token rules:
 - Explicit revocation clears the session's token index before token object
   cleanup. Authentication rejects any token missing from the current index.
 - Revocation is enforced on the next request; an already admitted request drains
+
+### Create a deploy token for CI
+
+In **Settings → Deploy tokens**, a signed-in repository administrator can
+create a named, read-only credential that lasts 1, 7, or 30 days. Use the
+username `crab` and store the displayed password in the CI secret store.
+Deploy tokens allow Git fetch and Git LFS download. They cannot push, upload
+LFS objects, or publish status checks. The secret appears once on creation.
+If the reply is lost, reload the token list, revoke the new entry if present,
+and create another.
+
+Deploy tokens belong to a repository UUID. Signing out, changing the
+creator's access, renaming the repository, or transferring ownership leaves
+them active until expiry or revocation. An administrator can revoke each
+token individually, including on an archived repository. Revocation applies
+to new Git and LFS requests on every replica. An admitted transfer can finish.
+
+`GET /api/repos/{owner}/{name}/settings/deploy-tokens` lists active metadata
+and returns the current `version`. Use it as `expected_version` when posting
+`{"edit":{"kind":"create","name":"Nightly build","days":7},"expected_version":0}`
+to the same endpoint. Revoke with `edit.kind` set to `revoke` and `edit.id`
+set to the token's ID. A stale version returns HTTP 409. A repository can
+have up to 32 active deploy tokens.
 
 ### Fetch through smart HTTP
 
@@ -1550,18 +1978,27 @@ owner label does not acquire ownership.
 | Surface | Routes |
 | --- | --- |
 | Issues | `GET/POST /api/repos/{owner}/{name}/issues`, `GET/PATCH /api/repos/{owner}/{name}/issues/{number}` |
+| Issue templates | `GET /api/repos/{owner}/{name}/issues/templates` |
 | Issue comments | `GET/POST /api/repos/{owner}/{name}/issues/{number}/comments`, `GET/PATCH /api/repos/{owner}/{name}/issues/{number}/comments/{comment}` |
 | Pull requests | `GET/POST /api/repos/{owner}/{name}/pulls`, `GET/PATCH /api/repos/{owner}/{name}/pulls/{number}` |
 | Pull comments | `GET/POST /api/repos/{owner}/{name}/pulls/{number}/comments`, `GET/PATCH /api/repos/{owner}/{name}/pulls/{number}/comments/{comment}` |
 | Reviews | `GET/POST /api/repos/{owner}/{name}/pulls/{number}/reviews`, `GET/PATCH /api/repos/{owner}/{name}/pulls/{number}/reviews/{review}` |
+| Pending review | `GET/PUT /api/repos/{owner}/{name}/pulls/{number}/pending-review`, `POST .../pending-review/submit` |
 | Inline review threads | `GET/POST /api/repos/{owner}/{name}/pulls/{number}/threads`, `GET/PATCH /api/repos/{owner}/{name}/pulls/{number}/threads/{thread}` |
 | Thread replies | `GET/POST /api/repos/{owner}/{name}/pulls/{number}/threads/{thread}/replies`, `GET/PATCH /api/repos/{owner}/{name}/pulls/{number}/threads/{thread}/replies/{reply}` |
+| Apply review suggestions | `POST /api/repos/{owner}/{name}/pulls/{number}/suggestions` |
+| Apply upstream review suggestions to a fork | `POST /api/repos/{fork-owner}/{fork-name}/upstream-pulls/{number}/suggestions` |
 | Merge | `POST /api/repos/{owner}/{name}/pulls/{number}/merge` |
 | Label search choices | `GET /api/repos/{owner}/{name}/discussion-search/labels` |
 | Milestone search choices | `GET /api/repos/{owner}/{name}/discussion-search/milestones` |
 | Markdown suggestions | `GET /api/repos/{owner}/{name}/discussion-search/{mentions,team-mentions,references}` |
 | Team mention settings | `GET/PUT /api/repos/{owner}/{name}/mention-settings` |
-| Account mention inbox | `GET /api/notifications`, `GET /api/notifications/unread`, `PUT /api/notifications/{id}/read` |
+| Account notification inbox | `GET /api/notifications`, `GET /api/notifications/unread`, `PUT /api/notifications/{id}/state`, `POST /api/notifications/bulk`, `POST /api/notifications/unsubscribe` |
+| Account email notifications | `GET/PUT /api/notifications/email` |
+| Watched repositories | `GET /api/notifications/watched`, `POST /api/notifications/watched/unwatch` |
+| Repository notification preference | `GET /api/repos/{owner}/{name}/subscription`, `PUT /api/repos/{owner}/{name}/subscription` |
+| Discussion subscriptions | `GET /api/notifications/subscriptions`, `POST /api/notifications/subscriptions/unsubscribe` |
+| Discussion notification preference | `GET` and `PUT /api/repos/{owner}/{name}/issues/{number}/subscription` or `/pulls/{number}/subscription` |
 | Stable discussion links | `GET /api/discussion-references/{repository_id}/{kind}/{number}` |
 | Discussion attachments | `POST /api/repos/{owner}/{name}/discussion-attachments`, `GET /api/discussion-attachments/{repository_id}/{id}` |
 | Labels | `GET/POST /api/repos/{owner}/{name}/labels`, `PATCH/DELETE /api/repos/{owner}/{name}/labels/{number}` |
@@ -1573,6 +2010,83 @@ owner label does not acquire ownership.
 | Linked work | Issue/pull `GET .../{number}/links`; `GET/PUT /api/repos/{owner}/{name}/pulls/{pull}/linked-issues/{issue}` |
 
 Every route prefix is `/api/repos/{owner}/{name}`. Browser mutations require the session cookie, canonical `Origin`, and CSRF token.
+
+### Open an issue from a repository template
+
+Commit templates to `.github/ISSUE_TEMPLATE/` on the repository's default
+branch. **New issue** shows the template picker when it finds a template or
+contact link. A selected filename can be shared with
+`/OWNER/REPO/issues/new?template=FILE`. Repositories without templates keep
+the ordinary issue form.
+
+- Markdown `.md` files use YAML front matter for `name`, `about`, `title`,
+  `labels` and `assignees`. The title and Markdown body are editable prefills.
+- YAML `.yml` and `.yaml` files use `name`, `description`, `title`, `labels`,
+  `assignees` and `body`. Forms support Markdown instructions, single-line
+  inputs, text areas, dropdowns and checkboxes. The browser validates required
+  answers and turns them into an editable issue description when submitted.
+  A text area's `render` language wraps its answer in a code block.
+- `config.yml` supports `blank_issues_enabled` and HTTP(S) `contact_links`.
+  Disabling blank issues in the picker reserves that option for writers and
+  admins. Existing API clients can continue to create issues directly.
+
+The picker resolves named labels and enrolled assignee handles against the
+repository. Unknown defaults are skipped. A one-hour proof authorizes the
+exact selected defaults for the repository and contributor, including readers
+who can open issues. The native issue mutation rechecks label and assignee
+eligibility and uses the existing creation receipt on retry. Template browsing
+reads at most 32 files of up to 32 KiB each, plus the chooser configuration.
+
+An organization or personal account can publish defaults in a repository
+named `.github`. Store the files at the same `.github/ISSUE_TEMPLATE/` path
+on that repository's default branch. A destination with a valid template or
+`config.yml` uses its own chooser in full. Otherwise, the chooser can use the
+shared templates, configuration and contact links together. It links to the
+source repository and resolves label and assignee names in the destination.
+
+Crab's private defaults require current Read access to both repositories.
+Losing source access hides the inherited choices and invalidates outstanding
+proofs for new writes. The original submission can still recover an issue
+created while the proof was authorized.
+
+### Close a linked issue when its pull request merges
+
+In the pull request’s **Linked issues** section, enter an issue number and leave
+**Close issue when merged into the default branch** selected. Writers can change
+this option on an existing link. The issue stays open until the pull request
+publishes to the repository’s default branch. A completed closure records the
+merging author and a link back to the pull request in the issue timeline.
+
+The linked-issue `PUT` accepts an optional `closes_on_merge` boolean. Omission
+preserves an active link’s selection. New links submitted without this field
+start as related work, as do existing links from earlier server versions. A
+pull request can mark up to ten linked issues for closure. Link selection and
+version changes use the same request and conflict behavior as unlinking.
+
+Crab captures the selected issues under the Git publication policy lease and
+updates open issues to **Completed** in the same Cell transaction as merge
+completion. A retry finishes the captured closure even after the default branch
+or links change. The update preserves the reasons on already-closed issues.
+
+In a description targeting the default branch, write `Fixes #123`,
+`Closes: #123`, or `Resolves #123`. Crab accepts the singular, plural, and past
+tense forms in any case, with an optional colon. Use a keyword for each issue.
+Crab reads up to 32 distinct same-repository issue references in Markdown prose.
+Code blocks, inline code, block quotes, Markdown links and escaped examples do
+not create links. A number resolves in the issue namespace even when a pull
+request has the same number.
+
+Both sidebars show description links. Edit the description to change them
+before merge. A manual link and a description link to the same issue appear in
+one row. Linked-work API items sourced from the description include
+`from_description: true`. Items omit `version` when there is no manual link to
+edit. The `linked-issues/{issue}` edit route addresses the manual link.
+Default-branch changes and PR retargeting affect the active links.
+Completed merges retain the captured links and the issue's closure event.
+
+Before serving existing repositories, deploy all peers and run
+`cells rebuild-search --owner OWNER --name REPO` to prepare discussion index
+format 13. This indexes existing descriptions and preserves prior issue states.
 
 Person mention suggestions require a matching `repository_id` UUID. Person and reference endpoints
 accept an optional `search` of up to 80 characters and return up to 12 items.
@@ -1604,13 +2118,12 @@ for accounts without explicit access are retained separately. An offline
 recipient sees a retained notice when their signed-in session proves current
 repository read access.
 
-The account inbox returns up to 20 visible notices by default. Supply
-`limit` (1–50) and a returned `next` value as `before` for pagination.
-Each account retains up to 100 explicit-grant notices and up to 100 addressed
-notices for group-backed repositories. Source titles, links, and the unread
-indicator require current repository read access. The unread endpoint returns
-`{"unread":true}` when any accessible entry is unread. Mark a notice read
-with its `created_at_ms`. The request is idempotent.
+The account inbox returns up to 20 visible conversations by default.
+Each account retains up to 100 recent conversations for explicit grants and
+100 for addressed notices in group-backed repositories. Saved conversations
+are retained independently. Source titles, links, and the unread indicator
+require current repository access. See [Read the notification inbox](#read-the-notification-inbox)
+for the view, cursor, and mutation contracts.
 
 Reference lookups can resolve an independently authorized repository by name.
 The response supplies its UUID. With `exact=true`, only exact issue and pull
@@ -1651,9 +2164,9 @@ browser uses that capability for state controls. PR `can_manage` controls state
 while `can_merge` still requires code write permission. Role edits use the
 existing revisioned membership catalog and audit chain. Detail capabilities and
 edit admission read durable membership instead of inferring it from a public
-profile or delayed routing snapshot. Atomic ordering between grant changes and
-in-flight operations remains separate work, along with Maintain, team-backed
-review rosters, complete moderation, and required-review permission parity.
+profile or delayed routing snapshot. Rechecks across awaited reads are not an
+atomic cross-authority fence. Maintain, complete moderation and required-review
+permission parity remain delivery work.
 
 Native issue/PR edit inputs carry `can_triage` instead of their earlier coarse
 management flag. Update fleet peers together before assigning the new role.
@@ -2104,8 +2617,293 @@ participants per frame, replaces the empty derived table, and replays review
 and request sources in bounded frames. It preserves canonical records and
 submission receipts. Update serving peers and bundled UI together for the new
 native read and public DTO; see [reviewer status preparation](CELLAR.md#reviewer-status-preparation).
-Pending/dismissed reviews, team review requests, code-owner suggestions, and review-request notifications
-remain separate delivery work.
+
+In organization repositories, the picker searches visible teams that have a
+repository grant. `GET .../reviewers` returns a `teams` list with `id`, `name`,
+`state`, and `can_request`. A request's state links to the review that fulfilled
+it. Use `{version, change: {kind: "request_team", team_id: "UUID"}}` or
+`{version, change: {kind: "cancel_team", team_id: "UUID"}}` on the same
+`PUT .../review-requests` route. Request admission checks current Triage or
+higher, the team grant, and team visibility. Cancellations still work after a
+grant is revoked for managers who can see the team. Organization owners can
+remove requests for a deleted team, shown with a null name.
+
+An ordinary or pending review submitted by a current team member fulfills the
+request in the review transaction. The author's own review and a replay of an
+earlier review leave the request pending. The request sends inbox notifications
+to current members other than the requester and pull author. Activity and inbox
+lines omit team identity, so notifications can remain in users' history without
+exposing a team name after membership changes. The current limits are 100 team
+requests per PR and 256 members per team request. `review-requested:` search and
+list rollup counts still cover individual requests. Automatic reviewer
+assignment remains open.
+
+### Require code owner reviews
+
+In **Settings → Branches**, enable **Require review from code owners** on the
+protected branch. The corresponding field on a protection rule is
+`required_code_owner_reviews`. The gate is independent of the numeric approval
+count. Direct updates to the protected branch still require the normal PR path.
+
+Crab reads the first CODEOWNERS file it finds on the PR's exact base commit in
+this order: `.github/CODEOWNERS`, `CODEOWNERS`, `docs/CODEOWNERS`. It applies
+case-sensitive patterns in file order to the merge-base diff. The last matching
+line determines ownership. An ownerless match clears inherited ownership.
+Each matched rule requires a current-head approval from any eligible owner on
+its line. Listed people use `@handle` and need a current durable Write grant.
+Organization teams use `@<repository organization namespace>/<team-slug>`, with
+lowercase words from the team name separated by hyphens. A team must be visible
+within the organization and have its own Write or Admin repository grant. A
+current member's approval can then satisfy the rule. Ambiguous slugs do not
+resolve. Secret teams and email references are ineligible.
+
+**Files changed** shows matched ownership, and the merge panel shows outstanding
+approvals when required. `GET .../pulls/{number}/codeowners` reports the base and
+head OIDs, source file, affected and missing path counts, and up to 30 rule
+summaries. Crab re-evaluates the same policy before Git publication while the
+refs are leased. A changed path whose matched line has no eligible owner
+blocks a required review. Unreadable or over-budget policy also blocks the
+required gate. Invalid pattern lines are skipped. Policy files must be regular
+UTF-8 Git blobs under 3 MiB, with up to 4,096 rules and 1,024 distinct owner
+references per comparison.
+
+Opening a ready PR or marking a draft ready requests its eligible code owners
+even on branches without a required-owner protection rule. Draft creation
+sends no requests. Requests appear in **Reviewers**, and the inbox notification
+links each recipient to the PR. A recipient named both directly and through a
+team receives one notification for the transition. Converting to draft keeps
+existing requests and inbox history. Later readiness transitions preserve
+existing or cancelled requests and may add newly eligible owners. Managers can
+change the resulting user and team requests through the usual reviewer controls.
+The current delivery limits are 256 members
+per team, 1,024 distinct accounts per transition, and 1 MiB for the resolved
+delivery plan. Invalid or unresolved owner references are skipped for delivery
+and remain visible in the PR ownership report.
+
+The file toolbar shows **Code owners** when a rule applies to the displayed
+file. It lists currently eligible owners and links to the rule line in the
+CODEOWNERS file at the exact commit being browsed. Historical commits use
+their own policies and current repository grants. An ownerless override hides
+the ownership indicator.
+
+`GET /api/repos/{owner}/{name}/file-codeowners` accepts an exact `rev` commit
+ID and the file’s `path_hex`. It returns the pinned `commit`, `path_hex`, and
+the applicable `source` with policy path, line, and owner eligibility. `source`
+is null when no rule assigns owners. An invalid policy includes a `problem`
+and its source path. Missing file paths and inaccessible repositories return
+404. Verified email owner lookup remains open. See [GitHub’s CODEOWNERS reference](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners).
+
+### Read the notification inbox
+
+Signed-in users open **Notifications** from the global header. Unread, All,
+Saved, and Done support repository and reason filters. Each issue, pull
+request, or release has one row, ordered by its latest activity. The link opens the latest
+contribution and the strongest retained notification reason stays visible.
+A personal mention takes precedence over a team mention, review request,
+assignment, or watch update.
+
+**Save** keeps a conversation beyond rolling inbox history and through later
+activity. **Mark as done** reads the current activity and removes it from
+Unread and All. Done shows activity completed in the last 90 days. Crab
+cleans up expired completions in the background and keeps a compact activity
+cutoff so delayed copies cannot bring them back. Saved conversations stay in
+Saved until you unsave them. A newer contribution
+reopens the conversation as unread and keeps any bookmark. **Move to inbox**
+restores the current activity with its read state.
+
+Assignments, individual and team review requests, Markdown `@handle` mentions,
+and configured closed-team mentions enqueue a notification with the source
+activity. The server checks current repository access before displaying it in
+the recipient's private inbox. Retried delivery preserves read state. Pending
+review comments enqueue mentions when the reviewer publishes the review.
+
+A newly added assignee on an issue or pull request receives an assignment
+notification. Creation, individual edits, and bulk edits use the same rule.
+Unchanged assignees, removals, and self-assignment produce no new assignment
+reason. Subscribers can still receive discussion updates.
+
+`GET /api/notifications` accepts `view` (`inbox`, `saved`, or `done`),
+`repository` (repository UUID), `unread` (default false), `reason` (`assigned`,
+`review_requested`, `mention`, `team_mention`, `release`, or `subscribed`), `limit`
+(1–50, default 20), and the `before` cursor from `next`. The default inbox
+view excludes completed conversations. Rows have a stable `id`, an `updated`
+stamp with `id` and `created_at_ms`, and `read`, `saved`, and `done` flags.
+Issue, pull request, and release numbers address distinct inbox rows. The
+unread endpoint reports accessible unread activity in the inbox view.
+
+`PUT /api/notifications/{id}/state` accepts the row's `repository_id`, its
+`updated` stamp as `expected`, and one `action` such as `{"done":true}`.
+Actions set a desired `read`, `save`, or `done` flag and return the
+confirmed state. The write requires CSRF protection. A missing or changed row
+returns 409 so the client can refresh. Reads and writes check current repository
+access and mute preferences.
+
+Select up to 50 loaded conversations and choose a bulk action to mark them read
+or unread, save or unsave them, mark them done, or move them back to the inbox.
+`POST /api/notifications/bulk` accepts one `action`, a `request_id` UUID,
+`issued_at_ms`, and `items` with each row's `id`, `repository_id`, and `updated`
+stamp as `expected`. Selection spans loaded pages. If any row is stale, the
+batch makes no state changes. Inaccessible or muted repositories reject
+admission, and the server rechecks access before returning results. The
+response has `items` with each row ID and its confirmed flags. Retry the same
+body after a lost response to recover the stored result within the receipt
+window.
+
+Use **Unsubscribe** on an inbox row or on selected rows to stop ordinary
+discussion updates and dismiss the observed activity. Saved bookmarks remain
+available. A newer personal or team mention or review request can reopen the
+conversation. Following the discussion again enables future activity.
+
+`POST /api/notifications/unsubscribe` accepts `items` with each row's `id`,
+`repository_id`, typed `subject`, and `updated` stamp as `expected`. Each row
+returns `unsubscribed`, `changed`, or `unavailable`. The server applies
+eligible rows and leaves changed and inaccessible rows alone. Retry the same
+selection after a lost response. The repository remembers what was dismissed
+and a replay preserves any newer follow.
+
+#### Receive inbox notifications by email
+
+In **Notifications → Email settings**, opt in to email delivery. Crab uses
+the verified email from your OIDC sign-in or the verified primary email from
+GitHub sign-in. Sign in again after the server enables email or after updating
+your address with your identity provider. A changed or unverified address
+turns delivery off. Opt in again to send alerts to a newly verified address.
+
+Emails link to the inbox. Discussion titles and contents stay inside Crab,
+behind the current repository access checks. The sender checks repository
+access, account suspension, mute, and opt-in before sending queued activity.
+Repository watches and discussion follows apply to both delivery channels.
+Delivery is limited to future inbox activity and can be turned off at any time.
+
+`GET /api/notifications/email` returns `configured`, `address`, `enabled`,
+and `version` for the signed-in account. Send `enabled` and the captured
+`version` with `PUT`. A stale request for a different choice returns 409.
+The verified address comes from sign-in.
+
+Operators can enable delivery across serving peers with browser authentication
+and a [Resend API key with sending access](https://resend.com/docs/dashboard/api-keys/introduction).
+Mount the key as a readable secret file and use a From address on a verified
+Resend domain. Use the same sender, provider account, and public URL on each
+serving peer so a retried message keeps the same payload and provider
+idempotency scope.
+
+```toml
+[notification_email]
+from = "notifications@example.org"
+api_key_file = "/run/secrets/crab-notification-email"
+```
+
+OIDC must issue both `email` and `email_verified=true` in the signed ID
+token. When enabled, GitHub OAuth requests the
+[`user:email` scope](https://docs.github.com/en/rest/users/emails#list-email-addresses-for-the-authenticated-user).
+Omit the section to disable delivery. Deploy the serving peers together when
+enabling or disabling email.
+
+Open **Watch** in a repository to choose direct notifications, new issue
+activity, new pull request activity, both kinds, or mute. Enable **New
+releases** on its own or with issue or pull request watching. Watching adds
+notices for activity after the preference takes effect and excludes your own
+activity. A release notice is queued when publication commits. Drafts and
+edits to a published release do not queue notices. Opening a release notice
+uses its tag and release number. Withdrawn or deleted releases are hidden
+from the inbox and unread badge. Muting clears the release watch and hides
+existing repository notices until you change the preference.
+
+`GET /api/repos/{owner}/{name}/subscription` returns the signed-in reader's
+current mode and version, defaulting to `{"mode":"direct","version":0}`.
+`releases:true` indicates release watching. Send the captured version and
+desired mode and release choice with `PUT`. Omit `releases` or send false to
+disable release watching. The allowed modes are `direct`, `issues`,
+`pull_requests`, `issues_and_pull_requests`, and `muted`. A successful retry
+of the same choice returns the current preference. A stale request for a
+different choice returns 409. Both endpoints require current repository access. The private preference
+can be changed on an archived repository.
+
+Open **Watched repositories** from the notification inbox to see and edit your
+repository watches in one place. Each row shows which updates you selected.
+To stop watching, choose **Direct notifications** and turn off **New releases**.
+Your discussion subscriptions and direct notices remain available.
+
+`GET /api/notifications/watched` returns `items` with the repository address
+(`id`, `owner`, `name`) and the signed-in account's current preference.
+Each page scans up to `limit` currently readable repositories (1–50, default
+32) in owner/name order, and includes only active watches. A page can be empty
+with additional repositories left to scan. Pass `next` as `after` to continue
+until `next` is null. Access is refreshed after the preference reads. A change
+to the scanned portion returns 409 so the client can reload from the first
+page. An optional `owner` restricts the results and cursor to that repository
+namespace. Watch edits use the versioned repository subscription endpoints.
+
+In **Watched repositories**, choose **Unwatch all**, select an owner, and
+confirm the count of active watches across the owner's pages. The owner picker
+lists owners from loaded rows. Load more repositories to see additional
+owners. Crab stops
+repository-level issue, pull request, and release updates for those watches.
+Direct notices and individual discussion preferences remain available.
+
+`POST /api/notifications/watched/unwatch` accepts the `owner` and 1–50
+`items` with each repository's UUID as `id` and its previewed preference
+`version`. It requires CSRF protection. Each item returns `unwatched`,
+`changed`, `unavailable`, or `unconfirmed`. The server checks current
+ownership and read access and edits each repository independently. Newer
+watch or mute settings survive. Retry an unconfirmed item with its original
+version to recover a possible completed write. The browser splits larger
+selections into bounded requests.
+
+Open **Subscriptions** from the notification inbox to manage discussions you
+follow, including those with no inbox activity. Filter by repository,
+discussion type, or subscription reason. Sort by most or least recently
+subscribed across accessible repositories, or choose repository order. Each
+row shows the discussion state, follow choice, recorded source, and repository
+mute state. Earlier follows with no recorded source or date remain available
+and appear last in the time sorts. Use **Notification settings**
+on a row to change which updates you receive or stop following it.
+
+`GET /api/notifications/subscriptions` accepts optional `repository` (UUID),
+`kind` (`issue` or `pull`), and `reason` (`manual`, `participation`, `mention`,
+`assignment`, or `unknown`) filters. It returns `items` with the repository
+address, typed subject, title, state, versioned preference, repository mute flag,
+and `origin` with a reason and `subscribed_at_ms` when available.
+`sort=recent` and `sort=oldest` order dated subscriptions across repositories.
+Default results follow catalog order, then issue and pull request numbers
+within each repository. Undated subscriptions use that same order. Pass
+`next` as `after` to continue with the same filters and sort. A page can be empty with more discussions to scan. The server
+checks repository grants before reading preferences and refreshes them before
+returning titles or continuation positions. Edits use the existing
+discussion subscription endpoints.
+
+Select up to 50 loaded rows and choose **Unsubscribe selected** to stop
+following several discussions. Selection spans loaded pages and repositories.
+Earlier inbox activity keeps its read and filing state.
+
+`POST /api/notifications/subscriptions/unsubscribe` accepts `items` with
+each row's `repository_id`, typed `subject`, and captured preference `version`.
+It returns those addresses with `unsubscribed`, `changed`, `unavailable`, or
+`unconfirmed` for each item. The request requires CSRF protection and current
+repository read access. Eligible changes commit within each Repository Cell.
+Newer preferences survive. Retry unconfirmed items with their original
+versions to recover a possible completed write.
+
+Use **Notification settings** in the issue or pull request sidebar for a private
+override. Each discussion starts with the repository setting (`inherit`).
+Choose all future discussion activity (`follow`), close, reopen and merge events
+(`state_changes`), or unsubscribe from activity (`unsubscribed`). The repository
+mute applies to every mode. Direct mentions, assignments, and review requests
+still use the repository setting. Past inbox items keep their read state.
+
+Use the issue or pull request subscription endpoint with the same versioned
+`GET` and `PUT` contract. The endpoints require current read access and return
+404 for a missing discussion. Issue and pull request numbers address distinct
+preferences. Opening a discussion, publishing a comment or review, or changing
+its open, closed, or merged state automatically follows that discussion for
+the participating account. Participating again after unsubscribing starts a new
+follow with the activity as its cutoff. New mentions and assignments also
+follow the discussion when the worker confirms eligible recipients. The follow
+applies to activity after the source change, including replies that arrive
+before delivery runs. A newer private choice takes precedence, and repository
+mute suppresses automatic following. Group-only recipients need current
+signed group evidence for automatic following. Direct inbox notices retain
+their existing delivery and access rules. Email delivery remains open.
 
 ### Link related work
 
@@ -2231,8 +3029,8 @@ No discussion-index rebuild is needed. See [native lifecycle preparation](CELLAR
 Pull list rows, including PR rows returned by issue search, include `rollup` with
 `number`, captured `head_oid`, `checks` and `reviews`. Check counts distinguish
 success, neutral, skipped, pending and failed outcomes. Latest commit statuses
-and latest check runs remain separate sources; the newest run number wins per
-case-insensitive run name, matching the existing native check presentation.
+and latest check runs remain separate sources. The newest run wins within
+each case-insensitive name and provider connection.
 Review counts include selected-head approvals, unresolved requests for changes,
 outstanding review requests and decisions anchored on earlier commits. Requested
 changes remain active after a new push until the same reviewer replaces the
@@ -2258,15 +3056,82 @@ remain unchanged. Update serving peers and the bundled UI together.
 
 Pull creation records exact base and head branch names plus their opening commit OIDs. Detail reads refresh both live tips without rewriting the immutable opening evidence.
 
+Browser creation supplies `expected: {base_oid, head_oid}` from its completed
+comparison. A stale or deleted ref records a terminal 409 `comparison_changed`
+with the rejected write-outcome header. Review the refreshed comparison and use
+a new submission UUID. Exact retries recover the original result even if refs
+have moved again. Tagged ref-only create clients retain server-side tip capture.
+Inline review `base_oid` identifies the effective comparison base while PR
+detail `base_oid` identifies the destination tip for merge publication. Existing
+threads keep their original anchors and may appear as outdated after this change.
+
+The Files changed tab stores Viewed progress per signed-in account and PR.
+`GET /api/repos/{owner}/{name}/pulls/{number}/viewed` returns a `version` and
+the account's file revisions. `PUT` takes `version`, `file` (the `view_id`
+from the comparison), and `viewed`. A stale write requires reloading progress.
+A new commit retains marks for identical diff entries and clears them for files
+whose compared content or mode changed. Each account can track 950 paths per
+PR. Progress writes stay separate from PR versions, checks and activity.
+
 If either branch is deleted, the conversation and original OIDs remain visible while live comparison becomes unavailable. A completed merge retains its pre-merge comparison after source deletion.
 
 Reviews record `commented`, `approved`, or `changes_requested` against the exact current head. Pull authors cannot approve or request changes on their own pull. Advancing the head marks older reviews as not current.
+
+On branches with required approvals, only current explicit repository Write and
+Admin grants count toward the requirement. Other participants can still review.
+OIDC group claims belong to the signed-in session alone, so group-only grants
+provide no durable evidence about another reviewer. The protected `review:required`
+and `review:approved` filters use the same eligible reviewer scope. List rollups
+and `review:changes_requested` continue to describe recorded participation.
 
 Review submission opens a shadcn “Review changes” dialog above the diff. The
 modal stays fixed while asynchronous file content loads. Comment, Approve and
 Request changes use the shared radio-group component. Draft text and submission
 identity stay with the pull detail, surviving dialog closure and data reloads.
-They are discarded when leaving the pull; no browser storage is used.
+The summary editor and in-flight submission persist for the lifetime of the pull
+detail. Pending inline comments persist on the server across browser reloads.
+
+Choose “Add to review” in the inline editor to save a private comment with an
+optional suggested replacement. Choose “Comment” to publish that comment
+immediately. The signed-in reviewer can edit, remove, or discard their pending
+comments and submit them from “Review changes.”
+
+`GET .../pending-review` returns the current account's `{version, comments}`.
+`PUT .../pending-review` accepts `{expected, request_id, edit}`. The edit is
+`{action:"save", comment, replace?}`, `{action:"remove", id}` or
+`{action:"discard"}`. The saved comment uses the inline thread creation
+shape and the same request UUID as the top-level edit. One draft holds up to
+20 comments and 96 KiB of encoded draft data, pinned to one comparison.
+Reload after a version conflict to see the current private draft.
+
+`POST .../pending-review/submit` takes `{expected, request_id, body, state}`
+and returns `{review, threads}` with the published record IDs. The summary
+may be empty when the draft contains comments. Stale comparisons reject
+submission and preserve the draft. A single repository Cell transaction
+writes the review, threads, activity, and submission receipt and then clears
+the draft. Retry the same submission UUID and payload to recover the resulting
+IDs after a lost response, even if a new draft or comparison now exists.
+Deploy the updated server peers and bundled browser UI together.
+
+Repository writers can apply a single suggestion or select up to 20 and commit
+them together. The commit dialog shows the destination branch and lets the
+writer edit the commit message. Crab uses the writer's ordinary Git identity
+and credits each other suggestion author once in `Co-authored-by` trailers.
+`POST .../suggestions` takes
+`{expected_head, threads: [{number, version}], message?}` and returns `{commit}`.
+Crab checks the selected comment versions, comparison, current file blobs,
+and nonoverlapping line ranges before publishing one commit against the
+expected head. The publication worker rechecks the pull and comment versions
+while holding the target ref lease. Edits preserve untouched bytes and executable modes. Each
+edited file is capped at 900 KiB and the resulting files at 4 MiB combined.
+Archived repositories and branch protections follow existing Git publication
+rules. A stale selection leaves the branch unchanged.
+
+For a private fork PR, send the same request to the fork's
+`upstream-pulls/{number}/suggestions` route and bind the repository identity
+header to that fork. The fork's recorded upstream supplies the PR and review
+records. Crab verifies that the PR names this fork and applies the fork's
+current write permissions, branch rules, and archive state to publication.
 
 `POST .../pulls/{number}/reviews` requires `request_id`, `body`, `state` and
 `commit_oid`. The latter is the exact lowercase, nonzero SHA-1 inspected by the
@@ -2287,7 +3152,9 @@ Deploy the API and bundled UI together for the required commit pin.
 
 Inline threads store a raw Git path, old/new side, inclusive line range, exact base/head OIDs, and the anchored blob OIDs. Root comments publish immediately; repository members can create and reply, replies are durable child records, and every creation is idempotent by UUID. Pull authors and writers can resolve or reopen a thread, while only the thread author can edit its body or suggestion. A thread is marked outdated when the comparison OIDs or anchored blob no longer match; deleted paths remain listed with the original anchor evidence.
 
-Suggestions are allowed only on new-side text anchors. The browser applies a current suggestion through the existing exact-head/exact-blob contents update contract, so it creates the normal Git commit and stale branch or blob tips return a conflict rather than silently changing a different file.
+Suggestions are allowed only on new-side text anchors. The browser commits a
+current suggestion against the exact reviewed head and file blob. Stale
+branch or blob tips return a conflict.
 
 For protected branches requiring review, only each reviewer's latest approval on the current head counts. Unresolved requests for changes also block merging when anchored on an older commit; pushing new commits cannot resolve another reviewer's decision. The same reviewer must submit a current approval, or an authorized user must dismiss the active review. This follows [GitHub's required-review behavior](https://docs.github.com/en/pull-requests/how-tos/review-pull-requests/approving-a-pull-request-with-required-reviews).
 
@@ -2371,18 +3238,261 @@ dismissal restrictions and broader review/workspace parity remain open. This
 workflow follows [GitHub review dismissal](https://docs.github.com/en/pull-requests/how-tos/review-pull-requests/dismissing-a-pull-request-review)
 and its [protected-branch permission contract](https://docs.github.com/en/rest/pulls/reviews#dismiss-a-review-for-a-pull-request), checked 2026-10-22.
 
+### Change a pull request's base branch
+
+An author or repository writer can select **Change base** on an open pull
+request. Choose a branch in the upstream repository and inspect the merge-base
+comparison before confirming. This also works when the head is in a private
+organization fork. The new base and the inspected head must still match the
+preview, and the pull request must be free of a pending merge.
+
+Changing the base writes a conversation event and dismisses active approvals.
+Requests for changes stay active. Review threads retain their original anchors
+and may become outdated. The new target's branch policy and CODEOWNERS rules
+apply immediately. Required checks continue to use the exact head commit.
+
+`POST /api/repos/{owner}/{name}/pulls/{number}/base` takes `request_id`, `version`,
+`base_ref`, `base_oid` and `head_oid`. Use the selected branch tip as `base_oid`
+and the compared head tip as `head_oid`. A successful retry with the same
+inputs returns `saved: true`. The pull request detail returns the current
+`base_revision`. Include it when submitting reviews or pending review batches
+after a base change.
+[GitHub base branch changes](https://docs.github.com/en/pull-requests/how-tos/create-pull-requests/changing-the-base-branch-of-a-pull-request)
+
+### Update the head branch from the base
+
+Open a pull request's **Conversation** tab and choose **Update branch** when
+the head lacks commits from the base. Crab creates a merge commit on the head
+branch. The first parent is the head you reviewed and the second is the base
+shown beside the action. The pull request stays open at the new head so it can
+receive fresh approvals and checks.
+
+The action requires Write access to the head repository and works for
+same-repository and private organization fork pull requests. Crab verifies both
+tips and applies the head branch's protections, rulesets and file locks before
+publication. If the tips changed, refresh the comparison. If the changes
+conflict, choose **Resolve conflicts**, edit each file, and **Mark as resolved**.
+Choose **Commit merge** to publish the merge commit on the head branch. The
+browser editor supports overlapping changes in existing UTF-8 text files.
+Resolve binary and structural conflicts with Git. Head branch policy still
+applies when Crab publishes a browser resolution.
+
+To publish a resolution when the head branch is protected, select **Create a
+branch and update this pull request** in the conflict editor. Enter an unused
+branch name in the head repository. Crab applies branch creation rules,
+publishes the resolved commit, and then switches the existing pull request to
+the new head. The switch records an activity event, expires prior approvals,
+and starts a new review comparison. If the PR or a captured tip changes before
+the switch, Crab shows a link to the branch and leaves the PR on its current head.
+
+Choose **Update with rebase** from the branch update menu to replay the head
+commits on top of the captured base. Confirm **Rebase branch** to replace the
+head history with the new commits. Crab preserves authors and commit messages,
+checks the final tree against a three-way merge, and applies the head branch's
+protections, rulesets and file locks. A rebase that cannot reproduce the merge
+result is rejected. Stock Git receive still rejects non-fast-forward pushes.
+
+`GET /api/repos/{owner}/{name}/pulls/{number}/update-branch` returns `update`
+with `request_id`, `version`, `base_oid` and `head_oid` when the head can be
+compared and lacks the base commit. Submit that object with `POST` to the same
+route. The `method` defaults to `merge_commit`. Set it to `rebase` to replay
+the commits. `resolutions` are valid for `merge_commit`. For a fork, use
+`/api/repos/{fork-owner}/{fork-name}/upstream-pulls/{number}/update-branch`
+and bind the write to the fork repository ID. Retrying the same submission can
+recover the recorded commit after an interrupted response.
+
+Add `new_branch` with a short branch name to create a replacement head. The
+reply includes the fully qualified `branch` and `pull_updated`. A false
+`pull_updated` acknowledges Git publication and reports an incomplete PR switch.
+Retrying the identical request can recover both results from their receipts.
+
+Pass `?conflicts=true` to preview the marked text of conflicting files. The
+response includes `conflicts` with each file's `path`, `path_hex` and `text`.
+Submit the preview's `update` with a `resolutions` array of `path_hex` and
+replacement `text` for every conflict. The preview and resolution support at
+most eight conflicting files, 128 KiB per file and 512 KiB total. Crab rechecks
+the exact tips and conflict paths before publishing. Retrying the same
+submission recovers the original merge commit if publication already finished.
+
 ### Merge a pull request
 
-Writers call `POST /api/repos/{owner}/{name}/pulls/{number}/merge` with a UUID `request_id`, pull `version`, `method`, exact base and head OIDs, and commit message.
+Writers call `POST /api/repos/{owner}/{name}/pulls/{number}/merge` with a UUID
+`request_id`, pull `version`, `method`, exact base and head OIDs, and an optional
+message for methods that create a single commit.
 
 | Method | Contract |
 | --- | --- |
-| `fast_forward` | Moves the base only when it is an ancestor of the head |
-| `merge_commit` | Creates a two-parent commit after bounded recursive tree and text merging |
+| `fast_forward` | Moves the base when it is an ancestor of the head |
+| `merge_commit` | Creates a two-parent commit after bounded tree and text merging |
+| `squash` | Creates one commit with the same merged tree and the base as its only parent |
+| `rebase` | Replays the topic changes as separate linear commits with original authors and messages and new committer metadata |
 
-Merge-commit construction rejects binary conflicts, type conflicts, delete/modify conflicts, and overlapping text conflicts. Individual text blobs can contain at most 8 MiB during merge construction.
+The browser exposes enabled methods in the pull request. The confirmation
+lets writers edit the merge or squash message. Repository administrators use
+**Settings → General → Pull request merge methods** to choose at least one
+method. `GET /api/repos/{owner}/{name}/settings/merge-methods` returns
+`{version,enabled}`. The `PUT` accepts `{expected_version,enabled}` and rejects
+stale writes. Repositories initially enable all four methods. Pull request
+detail returns the enabled list in `merge_methods`.
 
-The server revalidates live refs, approvals, required checks, pointer dependencies, and visibility under the base-ref lease and both GC fences. A durable merge marker supports recovery after response loss or restart.
+Direct PR merges reject binary, type, delete/modify, and overlapping text
+conflicts. Use [Update the head branch from the base](#update-the-head-branch-from-the-base)
+to resolve supported text conflicts before merging. Individual text blobs can
+contain at most 8 MiB. Rebase skips
+empty and merge commits and checks the final tree against the three-way
+merge result. It refuses a history that would lose a merge-only edit or
+produce a different result. Rebase is bounded to 256 topic commits and a
+bounded set of generated Git objects. Signature headers are dropped from
+rewritten commits. Both methods leave the source branch tip intact.
+
+The server acquires source and destination ref leases and both GC fences. It
+revalidates tips, grants, enabled merge methods, approvals, required checks,
+pointer dependencies and visibility before publishing the destination. New reservations bind the exact
+ref edit to a durable Git publication plan. A retry checks the plan receipt
+before reading current tips, so it can finish recorded PR state after a
+subsequent destination advance. Ambiguous publication keeps the exact original
+intent pending. Reservations from the tagged alpha retain their original retry
+semantics because they predate plan receipts.
+
+### Automatically merge a pull request
+
+Repository administrators enable **Allow auto-merge** in **Settings → General
+→ Pull request merge methods**. It is disabled by default. Writers can then
+select **Enable auto-merge** on a blocked pull request, choose an enabled
+method, and confirm the head commit and optional commit message. The PR author
+and current writers can disable a waiting request.
+
+Crab persists the request in the repository Cell. The background worker finds
+waiting requests after startup and rechecks current approvals, conversations,
+check results, branch policy, and the scheduler's durable Write grant. The
+head commit and both branch names are pinned. The base tip can advance on the
+selected branch. A new head commit requires fresh consent, including a push by
+a writer. Session-only OIDC group grants require a durable repository or team
+grant before the user can schedule a merge. Automatic merges use the standard
+leased publication and receipt path, with no ruleset bypass.
+
+`GET .../pulls/{number}/auto-merge` returns the current request and actions.
+`PUT` takes `request_id`, `version`, `base_oid`, `head_oid`, `method`, and an
+optional `message`. `DELETE` takes the active `request_id`. The current request
+reports why it stopped. `PUT .../settings/merge-methods` accepts an optional
+`auto_merge` boolean alongside the enabled methods and `expected_version`.
+
+### Test a prospective merge commit
+
+On an open, ready pull request, writers can select **Prepare merge candidate**
+on the **Checks** tab. Crab combines the captured base and head in a two-parent
+commit. It publishes the commit at `refs/crab/merge-queue/<pull-number>` under
+both source ref leases. Authorized Git clients can fetch that ref. Crab owns
+its namespace and applies the normal repository and artifact access checks.
+The protected branch advances only through its regular merge workflow.
+
+Use **Candidate checks** to inspect CI for the prepared SHA. To run a connected
+GitHub Actions workflow, fetch the candidate and push the displayed mirror
+refspec to the configured GitHub repository. Configure the workflow's `push`
+branch filter to include `crab/merge-queue/**`. Each mirror branch includes the
+Crab repository UUID, PR number, and candidate SHA. Signed workflow deliveries
+must match that branch and the current candidate. A change to either source tip
+or the PR comparison makes the candidate stale. Writers can prepare a new one
+or remove the stale ref. Candidate checks appear separately from head checks.
+Crab retains the current candidate ref until it is replaced or removed.
+
+Select **Merge tested candidate** under **Candidate checks** to publish that
+exact SHA. The base branch must require at least one check, merge commits must
+be enabled, and the current pull request and candidate must both satisfy the
+base branch policy. This includes head checks, reviews, conversations, and an
+up-to-date head when required. Crab rechecks current write access, both source
+tips, the candidate ref, file locks, and the current policy before publication.
+The merged pull request records the tested SHA.
+
+`GET .../pulls/{number}/merge-candidate` returns `preview` and `candidate`.
+Submit `preview` with `POST` to prepare the recorded comparison. It contains
+the request ID, PR version, exact tip OIDs, and prior candidate OID. `DELETE`
+accepts the candidate's `commit` to remove that exact ref. Retrying a completed
+preparation returns its recorded commit, including after the ref is removed.
+The candidate's `promotion` field describes tested-merge eligibility.
+Submit `POST .../pulls/{number}/merge` with `method: "merge_commit"`,
+`tested_candidate_oid`, `request_id`, `version`, `base_oid`, and `head_oid`
+to publish the candidate. Retry an interrupted response with the same request.
+
+### Merge a pull request through the queue
+
+Enable **Require merge queue** on an exact branch in **Settings → Branches**
+to make the queue the branch's merge path. The branch rule must name a
+required status check or GitHub Actions workflow. A required branch uses the queue even when optional
+queues are disabled. Native pushes, direct PR merges, ordinary auto-merge,
+and manual candidate promotion cannot publish to that branch. Crab still
+recovers any merge whose Git publication committed before the rule changed.
+
+The branch protection API accepts `require_merge_queue: true` in the rule.
+
+To cover matching branches across repositories, enable **Require merge queue**
+in a repository or organization branch ruleset. The rule can match the current
+default branch, exact branches, or include and exclude patterns. A matching
+rule protects existing branches from updates and
+deletion through Git HTTP. Branch creation follows the ruleset's creation
+policy. An explicit ruleset bypass applies only to the selected rule. Classic
+protection and every other matching ruleset still apply.
+
+To offer the queue on other branches, enable **Allow merge queue** under
+**Settings → General → Pull request merge methods**. It is disabled by default. On a ready pull request with passing
+head checks and reviews, select **Add to merge queue**. The target branch must
+require at least one check.
+
+In the same settings section, **Queue merge method** chooses the repository
+default of merge commit, squash, or rebase. It is independent of the enabled
+direct merge methods and defaults to merge commit. **Branch queue overrides**
+let administrators override the method, build limit, and check timeout
+independently for up to 100 exact branch names. Each unset field inherits the
+repository default. Branch protection and rulesets determine where a queue is
+required.
+
+Changing the effective queue method, adding a method override, or removing
+one invalidates waiting entries on the affected branches. Re-add those entries
+to build and test candidates with the current method. Squash produces one commit on the base.
+Rebase uses the existing bounded history replay and preserves the replayed
+commit messages. Crab tests and publishes the tip of that exact history.
+
+Crab keeps the admission order separately for each target branch. Set
+**Concurrent queue builds** to a value from 1 to 8 in the repository's merge
+settings or on an exact branch override. The repository default is 1.
+The first entry tests the branch's latest tip.
+Each following entry within the build limit tests a candidate that includes
+the changes ahead of it. If the base advances unexpectedly or an earlier
+entry is removed, Crab rebuilds the affected candidates and requires checks on
+their new SHAs. When an earlier candidate becomes the base exactly as tested,
+its successor keeps its existing check results.
+Writers can inspect that commit under **Candidate checks**. Connections
+configured for [automatic GitHub Actions dispatch](#start-github-actions-for-a-merge-queue-candidate)
+show the launched run and its status. Other required checks can report on the
+candidate Git ref or use the configured GitHub Actions mirror. Crab publishes
+each tested SHA automatically, in queue order, after the required checks pass.
+Later results cannot advance the branch while earlier entries are waiting.
+Strict head freshness is satisfied through the tested candidate. The PR head
+must still pass its own checks and meet current review and conversation policy.
+
+A failed check, unresolved conflict, changed head, revoked Write grant, or
+expiration of the configured **Queue check timeout** removes the entry and
+advances the queue. Set the timeout from 1 to 720 minutes. It defaults to 60
+minutes. For a candidate that includes earlier entries, Crab evaluates failures
+against the live base when the entry reaches the front. PR authors and writers
+can remove an entry before publication is
+pending. A PR in the queue can only merge through the queue.
+
+The settings `PUT` accepts optional `merge_queue` (boolean),
+`merge_queue_method` (`merge_commit`, `squash`, or `rebase`),
+`merge_queue_builds` (1–8), and `merge_queue_timeout_minutes` (1–720).
+`merge_queue_branches` replaces the override collection when supplied. Each
+entry has a short `branch` name and at least one of `method`, `builds`, or
+`timeout_minutes`. Send an empty array to restore inheritance for every branch.
+The settings response omits default-valued queue settings and an empty
+override list.
+Use `PUT .../auto-merge` with `queue: true`, the `queue_method` returned by
+the state endpoint as `method`, the exact comparison and a `request_id` to
+enqueue. The state response gives the effective method, build limit, and
+timeout for the target branch. It identifies the first entry and shows
+whether candidate preparation has started. Disabling
+optional queues invalidates optional entries, including across off/on changes.
+Branches that require the queue keep their entries.
 
 ### Manage labels and assignees
 
@@ -2503,11 +3613,15 @@ namespace and immutable asset bodies in backups. Restoring visible records
 without counters, claims, request ledgers,
 control and immutable roots loses numbering, ownership and retry guarantees.
 
-Discussion deletion, moderation, edit history, and broad activity feeds remain unimplemented. Native backup restore, cross-provider export, and complete product-root restore qualification remain pending.
+Discussion deletion, moderation, edit history, broad activity feeds, and
+email delivery remain unimplemented. Native backup restore, cross-provider
+export, and complete product-root restore qualification remain pending.
 
 ## Commit statuses and required checks
 
-CI systems can report compact commit statuses or detailed check runs. Both surfaces require a reachable commit and repository write access.
+CI systems can report compact commit statuses or detailed check runs. The
+direct reporting API requires a reachable commit and repository write access.
+GitHub Actions uses the separate signed workflow endpoint below.
 
 ### Report a commit status
 
@@ -2555,18 +3669,252 @@ Each output can contain:
 
 Encoded output can contain at most 192 KiB. Requests can contain at most 256 KiB. A commit retains at most 100 runs. Lists default to 30 and accept 1 to 50 with an exclusive `before` cursor.
 
+### Send repository webhooks
+
+Add one approved receiver per repository UUID in the server configuration. Set
+`auth.state_key_file` to the same file on every serving peer. The destination
+must use HTTPS with no URL credentials, query, or fragment. The sender verifies
+TLS and does not follow redirects.
+
+```toml
+[[outbound_webhooks]]
+repository = "01900000-0000-7000-8000-000000000101"
+url = "https://ci.example.test/events"
+```
+
+A repository administrator opens **Settings → Webhooks**, chooses **Git pushes**
+and/or **Pull requests**, and copies the signing secret to the receiver. The
+browser can only enable the exact endpoint assigned by the operator. Saving
+again creates a new secret and cancels outstanding deliveries for the former
+subscription. Removing or changing the configured endpoint stops delivery to
+that endpoint as peers take up the new configuration. Roll out consistent
+receiver assignments across the fleet before enabling subscriptions.
+
+Crab POSTs a JSON object with `repository` (the stable UUID), `delivery` (the
+delivery UUID), `occurred_at_ms`, and `data`. `X-Crab-Event` is `push` or
+`pull_request`. `X-Crab-Delivery` is the delivery UUID. Verify the raw bytes
+with the configured secret and `X-Hub-Signature-256` (`sha256=` plus the
+hex-encoded HMAC-SHA256), then deduplicate by delivery UUID before processing.
+[Webhook signature guidance](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries)
+
+- `push` contains `data.updates` for one committed branch or tag transaction.
+  It covers smart HTTP Git and Crab browser writes, including file commits,
+  branch creation and deletion, release tags, fork synchronization, and PR
+  merges. Each update contains `ref`, `before`, and `after`. Creation and
+  deletion use `null` for the missing side. Private merge-candidate refs and
+  Git import traffic stay outside the subscription.
+- `pull_request` contains `data.action`, PR number, title, draft state, version,
+  base and head refs and SHAs, `head_repository`, and `merge_commit`. Actions
+  include `opened`, `edited`, `closed`, `reopened`, `ready_for_review`, and
+  `converted_to_draft`, and `synchronize` for a native PR head switch. A base
+  retarget uses `edited`. A merged PR uses `closed` with `merge_commit`. The
+  non-merge SHAs describe the PR's recorded comparison. Use push events to
+  observe subsequent branch-tip changes.
+
+Publication and delivery are separate. The worker sends a Git event only after
+resolving its committed plan receipt. An unconfirmed plan is cancelled after
+an hour. Delivery retries reuse the UUID and payload. A 2xx response confirms
+delivery. Other responses and connection failures retry after 10 and 20
+seconds, then remain visible as failed. **Recent deliveries** shows up to 50
+entries and the last ten HTTP outcomes per entry. An administrator can redeliver
+completed deliveries for the current subscription. Disabling a webhook prevents
+new delivery attempts and cannot recall a request that already reached the
+receiver.
+
+### Connect GitHub Actions
+
+Crab accepts GitHub.com workflow-run deliveries from a private GitHub App.
+Use a GitHub source repository that has the same commits as the Crab repository
+and an Actions workflow triggered by pushes to the branches under review.
+The Crab public URL must be reachable by GitHub. All serving replicas need
+the same `auth.state_key_file`.
+
+1. A Crab repository administrator opens **Settings → Integrations**, enters
+   the GitHub repository ID and workflow ID, and chooses the check name.
+   Use `gh api repos/OWNER/REPO --jq .id` and
+   `gh api repos/OWNER/REPO/actions/workflows --jq '.workflows[] | [.id, .path] | @tsv'`
+   to find the IDs.
+   [Repository API](https://docs.github.com/en/rest/repos/repos#get-a-repository)
+   · [Workflows API](https://docs.github.com/en/rest/actions/workflows#list-repository-workflows)
+2. Configure a private GitHub App with the displayed webhook URL and secret,
+   read-only Actions repository permission, and the **Workflow run** event.
+   Install the app on the source repository.
+   [GitHub App registration](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app)
+   · [GitHub workflow-run event](https://docs.github.com/en/webhooks/webhook-events-and-payloads#workflow_run)
+3. Push the same commit to Crab and the GitHub source. Open the Crab pull
+   request's **Checks** tab to see the workflow and its GitHub logs link.
+   If GitHub sends the result before the commit reaches Crab, ensure that
+   the commit is reachable on Crab and redeliver from the app's recent deliveries.
+   [GitHub redelivery](https://docs.github.com/en/webhooks/testing-and-troubleshooting-webhooks/redelivering-webhooks)
+4. To enforce it, edit the target branch rule and select the workflow under
+   **Required GitHub Actions workflows**. Each selection binds the rule to the
+   connection ID for that workflow. A passed manual or differently scoped
+   check cannot stand in for it.
+
+The webhook verifies the signature over the raw request before parsing the
+workflow. Connection credentials cover one Crab repository UUID, GitHub
+repository ID, and workflow ID. The server derives the secret from the shared
+state key and returns it only on an administrator's connect or rotate request.
+Rotate the secret in Crab and then update the GitHub App. Rotation retains
+already accepted runs. Disconnecting immediately rejects new deliveries and
+leaves referring branch rules blocked until edited.
+Incoming deliveries are limited to 1 MiB and a repository can connect up to
+16 workflows. The pull request shows the workflow's exact head SHA and opens
+the corresponding GitHub run. Redelivery is idempotent and older runs and
+attempts cannot overwrite the selected result. GitHub `pull_request` workflows
+can run against a synthetic merge commit. Head checks use the `push` workflow
+result for the matching Crab head.
+[GitHub webhook signatures](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries)
+· [GitHub workflow triggers](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request)
+
+#### Inspect accepted workflow deliveries
+
+In **Settings → Integrations**, select **Recent deliveries** for a connected
+workflow. Repository administrators can see its latest 50 accepted reports,
+newest first. Each entry shows the receipt ID, Crab commit, GitHub run and
+attempt, and whether the report changed the check. A report that already
+matches the stored check or arrives after a newer result is marked **Check
+unchanged**. Sending the same receipt again leaves one entry.
+
+`GET /api/repos/{owner}/{name}/settings/integrations/{connection}/deliveries`
+returns the same summaries. History starts with reports accepted after all
+serving peers receive this update. It omits unrelated workflow events and
+rejected requests. Use the GitHub App's delivery log to diagnose or retry a
+failed request. Secret rotation retains history, and disconnecting deletes the
+connection's history. [GitHub App delivery log](https://docs.github.com/en/webhooks/testing-and-troubleshooting-webhooks/viewing-webhook-deliveries#viewing-webhook-deliveries-for-github-apps)
+
+#### Start GitHub Actions for a merge queue candidate
+
+An operator configures a GitHub App with **Actions: Read and write**, installs it
+on the workflow repository, and authorizes that workflow and its trusted
+definition branch for the Crab repository UUID from `GET /api/repos`. Put the
+App's private key on every serving replica. Crab requests an installation token
+scoped to the bound GitHub repository and Actions permission when dispatching.
+
+```toml
+[github_actions]
+app_id = 7
+private_key_file = "/run/secrets/github-actions.pem"
+
+[[github_actions.bindings]]
+crab_repository = "01900000-0000-7000-8000-000000000001"
+installation = 42
+github_repository = 123
+workflow = 456
+branch = "main"
+```
+
+Use a private Actions repository to test private Crab source. Define the
+workflow on the default branch and the bound branch. Store Crab's canonical
+HTTPS origin without a trailing slash in
+the Actions variable `CRAB_ORIGIN`. In Crab, open **Settings → Integrations**,
+connect the workflow webhook as above, and select **Set up queue dispatch**.
+Save the displayed checkout token as the Actions secret
+`CRAB_QUEUE_READ_TOKEN`. Continue reporting signed head checks through the same
+required connection. Use a separate Actions secret name in each workflow if
+several connections share the Actions repository. Rotate the Actions secret
+when changing dispatch settings or rotating the webhook secret.
+
+Add the dispatch trigger and job below to the connected workflow. Keep its
+existing push trigger and run the push jobs only on push events. Add your
+project's test steps after checkout so the checkout credential is out of scope
+when project code executes. The endpoint serves Git objects reachable from the
+active candidate. Git LFS and Xet hydration require separate access.
+
+```yaml
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Crab queue {0} {1}', inputs.crab_commit, inputs.crab_dispatch) || github.event.head_commit.message }}
+'on':
+  workflow_dispatch:
+    inputs:
+      crab_commit:
+        required: true
+        type: string
+      crab_dispatch:
+        required: true
+        type: string
+      crab_source:
+        required: true
+        type: string
+jobs:
+  queue:
+    if: github.event_name == 'workflow_dispatch'
+    permissions: {}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the exact Crab candidate
+        shell: bash
+        env:
+          CRAB_ORIGIN: ${{ vars.CRAB_ORIGIN }}
+          CRAB_SOURCE: ${{ inputs.crab_source }}
+          CRAB_COMMIT: ${{ inputs.crab_commit }}
+          CRAB_QUEUE_READ_TOKEN: ${{ secrets.CRAB_QUEUE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$CRAB_ORIGIN" == https://* ]]
+          [[ "$CRAB_SOURCE" == "$CRAB_ORIGIN"/ci/queue/* ]]
+          [[ "$CRAB_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          auth=$(printf 'crab-ci:%s' "$CRAB_QUEUE_READ_TOKEN" | base64 | tr -d '\r\n')
+          echo "::add-mask::$auth"
+          git init .
+          GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=http.extraHeader \
+            GIT_CONFIG_VALUE_0="Authorization: Basic $auth" \
+            GIT_CONFIG_KEY_1=http.followRedirects GIT_CONFIG_VALUE_1=false \
+            git -c protocol.version=2 fetch --depth=1 "$CRAB_SOURCE" "$CRAB_COMMIT"
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$CRAB_COMMIT"
+```
+
+Crab binds the candidate to the returned GitHub run ID. It can recover a lost
+response from the dispatching App's run title or a matching signed delivery.
+Candidate checks link to the bound run. The GitHub run's `head_sha` describes
+the workflow definition branch. Crab uses the dispatch's candidate SHA as the
+tested commit. A superseded or published candidate loses checkout access.
+[GitHub workflow dispatch API](https://docs.github.com/en/rest/actions/workflows?apiVersion=2026-03-10#create-a-workflow-dispatch-event)
+· [GitHub App installation authentication](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-as-a-github-app-installation)
+
+For a private organization fork, configure the connection on the upstream Crab
+repository. Include `crab/pulls/**` in the GitHub workflow's `push` branches and
+test the pushed revision. Copy the **GitHub Actions mirror refspec** from the
+open Crab pull request's **Checks** tab. Fetch the fork commit locally, then run
+`git push <github-remote> <copied-refspec>` for the connected GitHub repository.
+Restrict writes to the mirror and review workflow changes before pushing a fork
+commit. The GitHub repository and workflow are trusted to report the result.
+
+The mirror branch includes the upstream Crab repository UUID and pull request
+number. Crab verifies that the signed delivery comes from the configured GitHub
+repository and that the SHA matches the fork's current head or its recorded
+merged head. A new result for an outdated head is rejected. Retries of an
+already accepted delivery remain idempotent. After the fork branch moves, copy
+the updated refspec and push the new commit to run its checks. If the fork
+branch was rebased, fetch the current mirror branch before updating it with
+`--force-with-lease`.
+[GitHub push workflow trigger](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#push)
+
 ### Evaluate required checks
 
-For each required context, the newest report wins across status and check-run records. A check run wins a same-millisecond tie.
+For each named Crab context, the latest commit status and latest Crab check run must
+both pass when both exist. A single existing report can satisfy the rule. The
+merge panel shows the blocking result first, along with its reporter and tested
+commit. A required GitHub Actions connection needs a completed successful
+result from that active connection for the exact same head. Neutral, skipped,
+pending, disconnected, and missing workflow results block merge.
 
 | Latest result | Required-check state |
 | --- | --- |
 | Status `pending`, or run `queued` or `in_progress` | Pending and blocks merge |
 | Status `success` | Success |
-| Run conclusion `success`, `neutral`, or `skipped` | Success |
+| Named Crab check run conclusion `success`, `neutral`, or `skipped` | Success |
+| Required GitHub Actions workflow conclusion `success` | Success |
 | Missing, `failure`, `error`, or any other completed run conclusion | Unsuccessful and blocks merge |
 
-Required checks bind to the pull request's exact current head. A new head starts with missing checks. Merge admission uses one latest-status snapshot; later updates apply to later merge attempts.
+Required checks bind to the pull request's exact current head. A new head starts
+with missing checks. Publication refreshes required checks immediately before
+attempting the ref edit. A recorded receipt proves a previous publication even
+if policy or check results have since changed.
+
+Update the repository Cell peers and the bundled UI together before saving any
+branch rules that require workflow connections. Rules containing only named
+Crab contexts retain their existing storage representation.
 
 ## Resource and lifecycle limits
 
@@ -2638,7 +3986,7 @@ The server is complete only when a real account can perform the workflow and obs
 | GitHub-quality design | Themes, responsive layouts, accessible controls, navigation, and loading/error behavior across workflows | In progress |
 | Team identity and authorization | OIDC, sessions, membership, permissions, isolation, revocation, CSRF, and administration | In progress; browser and CLI membership replacement are audited, and back-channel logout revokes delivered exact-identity sessions |
 | Git hosting | Authenticated fetch and push, exact branch/tag lifecycle, protection, publication, and independent-client proof | In progress; additional crash phases and coexistence qualification remain |
-| Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | Mention inbox available. Moderation, history, and other notification reasons remain |
+| Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; moderation, edit history, and email delivery qualification remain |
 | Repository management | CLI create/adopt/list, archive, settings, search, import, and audited administration | In progress; browser creation/import and audit history remain |
 | Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Native process restart and owner handoff tested; native metrics and shutdown wiring implemented. Backup restore, crash matrices, upgrades, and provider qualification remain |
 | Quality gates | API, UI, accessibility, realistic repositories, security, package smoke, and measured performance | In progress |
@@ -2694,6 +4042,7 @@ The interface follows these upstream contracts:
 - [Pierre Trees documentation](https://trees.software/docs)
 - [Primer React guidance](https://primer.style/product/getting-started/react/)
 - [GitHub default-branch administration](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-branches-in-your-repository/changing-the-default-branch)
+- [GitHub repository rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets)
 - [GitHub classic branch protection](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/managing-a-branch-protection-rule)
 - [GitHub repository archive behavior](https://docs.github.com/en/repositories/archiving-a-github-repository/archiving-repositories)
 
@@ -2718,12 +4067,13 @@ unknown fields. Repository Git tokens cannot access these account features.
 Native authorization precedes receipt replay and mutations; last-owner guards,
 invitation decisions, membership tombstones and audit append are transactional.
 
-Organization ownership grants Admin access to explicitly bound repositories.
-Registered-account
-invitations currently use manually shared acceptance links; email delivery,
-owner-name discovery, nested teams, owner registry and cross-authority repository/project
-fencing remain unfinished. See `CELLAR.md` for preparation, expiry and coordinated
-deployment contracts. Native tests live in `cells/organization/tests/`, HTTP tests
+Current organization owners inherit Admin on their organization’s repositories.
+Other organization members can inherit roles through repository team grants.
+Registered-account invitations currently use manually shared acceptance links;
+email delivery, owner-name discovery, nested teams, owner registry and
+cross-authority repository/project fencing remain unfinished. See `CELLAR.md`
+for preparation, expiry and coordinated deployment contracts. Native tests live
+in `cells/organization/tests/`, HTTP tests
 in `api/organizations/tests/`, and browser fixtures in
 `packages/ui/tests/browser/organizations.e2e.ts`. The process qualifier also covers
 private bootstrap, metadata persistence, profile enrichment and last-owner denial.
@@ -2753,8 +4103,7 @@ submission controller lives above application routing, so lost acknowledgements
 can recover after navigation or organization removal without retargeting the
 write. New native/HTTP tests live beside their team owners; responsive,
 accessibility, conflict and recovery scenarios live in
-`packages/ui/tests/browser/teams.e2e.ts`. Repository access uses the explicit
-catalog binding described above. Team-based PR review requests and nested teams
+`packages/ui/tests/browser/teams.e2e.ts`. Hierarchy, autocomplete and Projects
 remain separate work.
 
 Current team qualification: 13 native/HTTP team checks, all 476 native regressions
@@ -2765,7 +4114,7 @@ reply followed by revocation, non-restoring rejoin, permanent rejected/cancelled
 submissions, restart and team name reuse. Desktop and actual mobile dark screens
 were inspected. The local preview preserves all 18 public repository resources
 and 39 canonical tables per repository Cell. These results qualify the standalone
-team slice; they do not complete hierarchy, repository authority or Projects.
+team slice.
 
 Initial issue/PR metadata is owned by `cells/repository/collaboration/creation/`
 and composed by `api/discussion_creation/`. Public create bodies optionally include

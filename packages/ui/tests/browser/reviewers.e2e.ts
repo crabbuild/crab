@@ -8,7 +8,8 @@ import {
 } from "./accessibility";
 
 const actorId = "01900000-0000-7000-8000-000000000002";
-async function fixture(page: Page) {
+const teamId = "01900000-0000-7000-8000-000000000003";
+async function fixture(page: Page, withTeam = false) {
   let enrolled = false,
     removed = false,
     handle = "public-bob";
@@ -17,6 +18,10 @@ async function fixture(page: Page) {
   let decision: ReviewState | null = null;
   let current: boolean | null = true;
   let state: "requested" | "cancelled" | "fulfilled" | null = null;
+  let teamState:
+    | { kind: "requested" }
+    | { kind: "fulfilled"; review: number }
+    | null = null;
   let fail = false,
     canManage = true,
     archived = false,
@@ -103,6 +108,7 @@ async function fixture(page: Page) {
           merge: null,
           merge_pending: null,
           reactions: emptyReactions(),
+          merge_methods: ["merge_commit", "squash", "rebase", "fast_forward"],
           merge_requirements: {
             protected: true,
             required_approvals: 1,
@@ -124,7 +130,8 @@ async function fixture(page: Page) {
           version: number;
           change:
             | { kind: "request"; actor_id: string }
-            | { kind: "cancel"; id: string };
+            | { kind: "cancel"; id: string }
+            | { kind: "request_team" | "cancel_team"; team_id: string };
         };
         if (input.change.kind === "request")
           expect(input.change.actor_id).toBe(actorId);
@@ -143,6 +150,16 @@ async function fixture(page: Page) {
               error: { code: "conflict", message: "Review requests changed" },
             },
           });
+        if ("team_id" in input.change) {
+          expect(input.change.team_id).toBe(teamId);
+          expect(request.headers()["x-crab-repository-id"]).toBe(
+            "00000000-0000-4000-8000-000000000099",
+          );
+          teamState =
+            input.change.kind === "request_team" ? { kind: "requested" } : null;
+          version++;
+          return route.fulfill({ json: { team: teamId } });
+        }
         state = input.change.kind === "request" ? "requested" : "cancelled";
         version++;
         return route.fulfill({ json: { id, state: { kind: state } } });
@@ -203,6 +220,16 @@ async function fixture(page: Page) {
           next: paginated && !url.searchParams.has("after") ? id : null,
           version,
           can_manage: canManage,
+          teams: withTeam
+            ? [
+                {
+                  id: teamId,
+                  name: "Release engineering",
+                  state: teamState,
+                  can_request: canManage,
+                },
+              ]
+            : [],
           candidates: removed
             ? []
             : [
@@ -249,6 +276,10 @@ async function fixture(page: Page) {
       submitted = "commented";
       version++;
     },
+    fulfillTeam: () => {
+      teamState = { kind: "fulfilled", review: 4 };
+      version++;
+    },
     review: (state: ReviewState, freshness: boolean | null = true) => {
       submitted = state;
       if (state !== "commented") decision = state;
@@ -283,6 +314,43 @@ async function openPicker(page: Page) {
     .click();
   return page.getByRole("dialog", { name: "Request reviewers", exact: true });
 }
+
+test("team review requests use the reviewer picker and link to the fulfilling review", async ({
+  page,
+}) => {
+  const model = await fixture(page, true);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/team/project/pull/1");
+  const widget = page.getByRole("region", { name: "Reviewers", exact: true });
+  async function requestTeam() {
+    const picker = await openPicker(page);
+    await picker
+      .getByRole("textbox", { name: "Find a reviewer" })
+      .fill("release");
+    await picker
+      .getByRole("button", {
+        name: "Request review from team Release engineering",
+      })
+      .click();
+  }
+  await requestTeam();
+  await expect(widget.getByText("Team review requested")).toBeVisible();
+  await page.reload();
+  await widget
+    .getByRole("button", {
+      name: "Cancel review request for team Release engineering",
+    })
+    .click();
+  await expect(widget.getByText("No reviews yet.")).toBeVisible();
+  await requestTeam();
+  await expect(widget.getByText("Team review requested")).toBeVisible();
+  model.fulfillTeam();
+  await page.reload();
+  await expect(
+    widget.getByRole("link", { name: "Team review submitted" }),
+  ).toHaveAttribute("href", "/team/project/pull/1#pullrequestreview-4");
+  await expectNoAccessibilityViolations(page);
+});
 
 test("review requests retain failed choices, persist on reload, cancel and can be requested again", async ({
   page,

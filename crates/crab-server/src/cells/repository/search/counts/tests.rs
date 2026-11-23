@@ -133,6 +133,7 @@ async fn count_filters_share_live_issue_and_pull_projections_navigation_and_curs
             write::<CreatePull>(
                 &cell,
                 CreatePullInput {
+                    code_owner_requests: Default::default(),
                     metadata: Default::default(),
                     submission_id: *Uuid::now_v7().as_bytes(),
                     author: actor.clone(),
@@ -141,6 +142,7 @@ async fn count_filters_share_live_issue_and_pull_projections_navigation_and_curs
                     body: String::new(),
                     base_ref: "refs/heads/main".into(),
                     head_ref: format!("refs/heads/feature-{number}"),
+                    head_repository: None,
                     base_oid: "a".repeat(40),
                     head_oid: "b".repeat(40),
                 }

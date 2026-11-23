@@ -14,7 +14,9 @@ interface LinkedWork {
     title: string;
     state: "open" | "closed" | "merged";
   };
-  version: number;
+  version?: number;
+  closes_on_merge?: boolean;
+  from_description?: boolean;
 }
 interface LinkPage {
   items: LinkedWork[];
@@ -24,6 +26,7 @@ interface LinkPage {
 interface LinkState {
   active: boolean;
   version: number;
+  closes_on_merge?: boolean;
 }
 
 export function LinkedWork({
@@ -31,14 +34,17 @@ export function LinkedWork({
   path,
   csrf,
   onSaved,
+  allowIssueClosure = false,
 }: {
   repo: Repository;
   path: string;
   csrf: string;
   onSaved: () => void;
+  allowIssueClosure?: boolean;
 }) {
   const [before, setBefore] = useState<string>();
   const [issue, setIssue] = useState("");
+  const [closesOnMerge, setClosesOnMerge] = useState(allowIssueClosure);
   const resource = useRequest<LinkPage>(
     endpoint(repo, `${path}/links`, { before }),
   );
@@ -59,14 +65,16 @@ export function LinkedWork({
     issue: number,
     active: boolean,
     version: number,
+    closes?: boolean,
   ) {
     const url = endpoint(repo, `pulls/${pull}/linked-issues/${issue}`);
     const saved = await mutation.run<LinkState>(url, "PUT", {
       active,
       version,
+      closes_on_merge: closes,
     });
     if (saved) {
-      if (active) setIssue("");
+      if (active && issue === issueNumber) setIssue("");
       resource.retry();
       onSaved();
     }
@@ -81,38 +89,76 @@ export function LinkedWork({
           <>
             {page.items.length ? (
               <ul>
-                {page.items.map(({ work, version }) => {
-                  const isIssue = work.subject.kind === "issue";
-                  const number = work.subject.number;
-                  const href = repoHref(repo, {
-                    view: isIssue ? "issues" : "pulls",
-                    issue: isIssue ? String(number) : undefined,
-                    pull: isIssue ? undefined : String(number),
-                  });
-                  const pairPull = pull ?? number;
-                  const pairIssue = pull ? number : Number(path.split("/")[1]);
-                  return (
-                    <li key={number}>
-                      <Link href={href}>
-                        #{number} {work.title}
-                      </Link>
-                      <span className="muted">{work.state}</span>
-                      {page.can_manage && !repo.archived && (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          disabled={mutation.pending}
-                          aria-label={`Unlink ${isIssue ? "issue" : "pull request"} #${number}`}
-                          onClick={() =>
-                            save(pairPull, pairIssue, false, version)
-                          }
-                        >
-                          Unlink
-                        </Button>
-                      )}
-                    </li>
-                  );
-                })}
+                {page.items.map(
+                  ({
+                    work,
+                    version,
+                    closes_on_merge: closes,
+                    from_description: described,
+                  }) => {
+                    const isIssue = work.subject.kind === "issue";
+                    const number = work.subject.number;
+                    const href = repoHref(repo, {
+                      view: isIssue ? "issues" : "pulls",
+                      issue: isIssue ? String(number) : undefined,
+                      pull: isIssue ? undefined : String(number),
+                    });
+                    const pairPull = pull ?? number;
+                    const pairIssue = pull
+                      ? number
+                      : Number(path.split("/")[1]);
+                    return (
+                      <li key={number}>
+                        <Link href={href}>
+                          #{number} {work.title}
+                        </Link>
+                        <span className="muted">{work.state}</span>
+                        {described && (
+                          <span className="muted">From PR description</span>
+                        )}
+                        {closes &&
+                          (pull
+                            ? allowIssueClosure
+                            : work.state !== "merged") && (
+                            <span className="muted">Closes on merge</span>
+                          )}
+                        {pull &&
+                          !described &&
+                          version !== undefined &&
+                          allowIssueClosure &&
+                          page.can_manage &&
+                          !repo.archived && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={mutation.pending}
+                              aria-label={`${closes ? "Keep open on merge" : "Close on merge"} issue #${number}`}
+                              onClick={() =>
+                                save(pull, number, true, version, !closes)
+                              }
+                            >
+                              {closes ? "Keep open" : "Close on merge"}
+                            </Button>
+                          )}
+                        {version !== undefined &&
+                          page.can_manage &&
+                          !repo.archived && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={mutation.pending}
+                              aria-label={`Unlink ${isIssue ? "issue" : "pull request"} #${number}`}
+                              onClick={() =>
+                                save(pairPull, pairIssue, false, version)
+                              }
+                            >
+                              Unlink
+                            </Button>
+                          )}
+                      </li>
+                    );
+                  },
+                )}
               </ul>
             ) : (
               <p className="muted">
@@ -144,7 +190,13 @@ export function LinkedWork({
                 onSubmit={(event) => {
                   event.preventDefault();
                   if (selection.data && validIssue)
-                    void save(pull, issueNumber, true, selection.data.version);
+                    void save(
+                      pull,
+                      issueNumber,
+                      true,
+                      selection.data.version,
+                      allowIssueClosure && closesOnMerge,
+                    );
                 }}
               >
                 <label>
@@ -165,15 +217,24 @@ export function LinkedWork({
                 {pairUrl && (
                   <Result state={selection} timingLabel="Issue relationship">
                     {(state) =>
-                      state.active ? (
+                      state.active && (
                         <p className="muted">This issue is already linked.</p>
-                      ) : (
-                        <p className="muted">
-                          Link related work. Linking does not close the issue.
-                        </p>
                       )
                     }
                   </Result>
+                )}
+                {allowIssueClosure && (
+                  <label className="linked-work-close">
+                    <input
+                      type="checkbox"
+                      checked={closesOnMerge}
+                      disabled={mutation.pending}
+                      onChange={(event) =>
+                        setClosesOnMerge(event.target.checked)
+                      }
+                    />
+                    Close issue when merged into the default branch
+                  </label>
                 )}
                 <Button
                   variant="outline"

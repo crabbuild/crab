@@ -278,6 +278,7 @@ async fn native_issue_and_pull_search_share_labels_boolean_logic_and_readiness()
                 &cell.target,
                 crate::app::mutation_identity().unwrap(),
                 CreatePullInput {
+                    code_owner_requests: Default::default(),
                     metadata: Default::default(),
                     draft: index == 1,
                     submission_id: *Uuid::now_v7().as_bytes(),
@@ -286,6 +287,7 @@ async fn native_issue_and_pull_search_share_labels_boolean_logic_and_readiness()
                     body: "Accessibility".into(),
                     base_ref: "refs/heads/main".into(),
                     head_ref: format!("refs/heads/topic-{index}"),
+                    head_repository: None,
                     base_oid: "a".repeat(40),
                     head_oid: format!("{:040x}", index + 1),
                 },

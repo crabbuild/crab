@@ -14,6 +14,7 @@ async fn seed(h: &Harness) -> uuid::Uuid {
             &cell.target,
             crate::app::mutation_identity().unwrap(),
             CreatePullInput {
+                code_owner_requests: Default::default(),
                 metadata: Default::default(),
                 draft: true,
                 submission_id: *submission.as_bytes(),
@@ -26,6 +27,7 @@ async fn seed(h: &Harness) -> uuid::Uuid {
                 body: "Original body".into(),
                 base_ref: "refs/heads/main".into(),
                 head_ref: "refs/heads/feature".into(),
+                head_repository: None,
                 base_oid: "a".repeat(40),
                 head_oid: "b".repeat(40),
             },
@@ -182,7 +184,7 @@ async fn only_authors_or_writers_change_readiness_with_csrf_and_archive_enforcem
     h.close().await;
 }
 
-async fn merge_recovery_after_archive(published: bool) {
+async fn merge_recovery_after_archive(published: bool, advance_base: bool) {
     use crate::cells::repository::{
         CreatePullOutcome, GetPull, MergeMethod, PullMerge, PullMergeTransition, ReservePullMerge,
         ReservePullMergeInput, TransitionPullMerge, TransitionPullMergeInput,
@@ -249,6 +251,7 @@ async fn merge_recovery_after_archive(published: bool) {
             &cell.target,
             crate::app::mutation_identity().unwrap(),
             CreatePullInput {
+                code_owner_requests: Default::default(),
                 metadata: Default::default(),
                 draft: false,
                 submission_id: *uuid::Uuid::now_v7().as_bytes(),
@@ -257,6 +260,7 @@ async fn merge_recovery_after_archive(published: bool) {
                 body: String::new(),
                 base_ref: "refs/heads/main".into(),
                 head_ref: "refs/heads/feature".into(),
+                head_repository: None,
                 base_oid: base_oid.clone(),
                 head_oid: head_oid.clone(),
             },
@@ -276,6 +280,10 @@ async fn merge_recovery_after_archive(published: bool) {
         commit_oid: head_oid.clone(),
         message: String::new(),
         created_at_ms: 1,
+        publication_plan: advance_base
+            .then(|| blake3::hash(b"planned merge test").to_hex().to_string()),
+        bypass_rulesets: Vec::new(),
+        tested_candidate: false,
     };
     cell.client
         .command::<ReservePullMerge>(
@@ -315,10 +323,33 @@ async fn merge_recovery_after_archive(published: bool) {
             "refs/heads/main".into(),
             gix_hash::ObjectId::from_hex(base_oid.as_bytes()).unwrap(),
             gix_hash::ObjectId::from_hex(head_oid.as_bytes()).unwrap(),
+            crate::git::receive::PullPublication {
+                head_repository: None,
+                number: 1,
+                head_ref: "refs/heads/feature".into(),
+                head_oid: gix_hash::ObjectId::from_hex(head_oid.as_bytes()).unwrap(),
+                plan_id: merge.publication_plan.clone(),
+                cancel: server.cancellation.clone(),
+                candidate: None,
+                tested_candidate: false,
+            },
         )
         .await
         .unwrap();
     }
+    let expected_tip = if advance_base {
+        git::success(
+            path,
+            &["commit", "--allow-empty", "-m", "subsequent base advance"],
+        )
+        .await;
+        git::success(path, &["push", &git_url, "HEAD:refs/heads/main"]).await;
+        git::success(path, &["rev-parse", "HEAD"]).await
+    } else if published {
+        head_oid.clone()
+    } else {
+        base_oid.clone()
+    };
     client
         .put(format!("{origin}/api/repos/team/repo/settings/archive"))
         .json(&json!({"expected_version":0,"archived":true,"repository":"team/repo"}))
@@ -374,15 +405,20 @@ async fn merge_recovery_after_archive(published: bool) {
             crate::cells::repository::PullState::Open
         }
     );
-    assert_eq!(actual, if published { head_oid } else { base_oid });
+    assert_eq!(actual, expected_tip);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn archived_repository_recovers_the_metadata_of_an_already_published_merge() {
-    merge_recovery_after_archive(true).await;
+    merge_recovery_after_archive(true, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn archived_repository_aborts_an_unpublished_merge_without_changing_git() {
-    merge_recovery_after_archive(false).await;
+    merge_recovery_after_archive(false, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn merge_receipt_recovers_after_the_base_advances() {
+    merge_recovery_after_archive(true, true).await;
 }

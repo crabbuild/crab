@@ -59,6 +59,7 @@ async fn seed(cell: &RepositoryCell, count: usize) {
     write::<CreatePull>(
         cell,
         CreatePullInput {
+            code_owner_requests: Default::default(),
             metadata: Default::default(),
             draft: false,
             submission_id: *Uuid::now_v7().as_bytes(),
@@ -67,6 +68,7 @@ async fn seed(cell: &RepositoryCell, count: usize) {
             body: "Root description".into(),
             base_ref: "refs/heads/main".into(),
             head_ref: "refs/heads/feature".into(),
+            head_repository: None,
             base_oid: "a".repeat(40),
             head_oid: "b".repeat(40),
         },
@@ -96,6 +98,8 @@ async fn seed(cell: &RepositoryCell, count: usize) {
         write::<CreatePullReview>(
             cell,
             CreatePullReviewInput {
+                base_revision: None,
+                review_teams: Vec::new(),
                 pull: 1,
                 submission_id: *Uuid::now_v7().as_bytes(),
                 author: actor("Bob"),
@@ -469,6 +473,7 @@ async fn relationships_and_inline_thread_lifecycle_share_canonical_event_identit
                 active,
                 version,
                 actor: actor("Alice"),
+                closes_on_merge: None,
             },
         )
         .await;

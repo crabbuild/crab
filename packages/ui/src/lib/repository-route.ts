@@ -115,6 +115,8 @@ export function repoHref(
     if (path && kind) filters.kind = kind;
   } else if (view === "commit") {
     suffix = `/commit/${revision}`;
+  } else if (view === "fork-compare") {
+    suffix = `/fork-compare${rev ? `/${revision}` : ""}`;
   } else if (view === "issues") {
     suffix = `/issues${issue ? `/${encodeURIComponent(issue)}` : ""}`;
   } else if (view === "pulls") {
@@ -260,6 +262,12 @@ export function repositoryRoute(url: URL, refs?: Refs): RepositoryRoute | null {
         project: tail[0] && decodeURIComponent(tail[0]),
       };
     if (page === "pulls" && !tail.length) return { ...route, view: "pulls" };
+    if (page === "fork-compare" && tail.length <= 1)
+      return {
+        ...route,
+        view: "fork-compare",
+        head: tail[0] && decodeURIComponent(tail[0]),
+      };
     if (
       page === "pull" &&
       tail[0] &&
@@ -312,7 +320,16 @@ export function repositoryRoute(url: URL, refs?: Refs): RepositoryRoute | null {
       page === "settings" &&
       tail.length <= 1 &&
       (!tail[0] ||
-        ["branches", "access", "mentions", "team-access"].includes(tail[0]))
+        [
+          "branches",
+          "access",
+          "mentions",
+          "team-access",
+          "integrations",
+          "webhooks",
+          "deploy-tokens",
+          "rulesets",
+        ].includes(tail[0]))
     )
       return {
         ...route,
@@ -320,7 +337,14 @@ export function repositoryRoute(url: URL, refs?: Refs): RepositoryRoute | null {
         section: tail[0] === "access" ? "members" : tail[0],
       };
     if (
-      ["branches", "tags", "labels", "activity"].includes(page) &&
+      [
+        "branches",
+        "tags",
+        "labels",
+        "activity",
+        "code-search",
+        "rulesets",
+      ].includes(page) &&
       !tail.length
     )
       return { ...route, view: page };

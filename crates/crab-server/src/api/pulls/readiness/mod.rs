@@ -8,7 +8,12 @@ use axum::{
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{current_branches, pull_view, storage};
+use super::{
+    codeowners, current_branches,
+    git::PullGit,
+    pull_view, same_author,
+    storage::{self, PullState},
+};
 use crate::{
     app::{self, Error, Result},
     auth::Principal,
@@ -49,6 +54,32 @@ async fn set(
     };
     let number = app::number(number)?;
     let version = app::number(input.version)?;
+    let mut code_owner_requests = Default::default();
+    let mut can_manage = principal.can_write(repo.id);
+    if !input.draft
+        && let Some(pull) = storage::pull(&server, &repo, number).await?
+        && pull.draft
+        && pull.version == version
+        && pull.state == PullState::Open
+        && pull.merge_pending.is_none()
+        && (can_manage || same_author(&pull.author, &actor))
+    {
+        let git = PullGit::open(&server, &repo, pull.head_repository).await?;
+        if let Some((base, head)) = current_branches(&git, &pull) {
+            code_owner_requests =
+                codeowners::requests(&server, &repo, &principal, &git, (&base, &head)).await?;
+            if !code_owner_requests.is_empty() {
+                let live = PullGit::open(&server, &repo, pull.head_repository).await?;
+                if current_branches(&live, &pull) != Some((base, head)) {
+                    return Err(Error::Conflict);
+                }
+                can_manage = app::membership(&server, &principal, &repo)
+                    .await?
+                    .principal
+                    .can_write(repo.id);
+            }
+        }
+    }
     let result = app::command_output(
         cell.client
             .command::<SetPullReadiness>(
@@ -56,10 +87,11 @@ async fn set(
                 app::mutation_identity()?,
                 SetPullReadinessInput {
                     number,
+                    code_owner_requests,
                     version,
                     state,
                     actor: (&actor).into(),
-                    can_manage: principal.can_write(repo.id),
+                    can_manage,
                 },
             )
             .await,
@@ -77,12 +109,7 @@ async fn set(
         SetPullReadinessOutcome::MergePending => return Err(Error::MergePending),
         SetPullReadinessOutcome::Conflict => return Err(Error::Conflict),
     };
-    let repository = repo
-        .open_current(
-            &server,
-            crab_remote_git::RepositoryOptions::default(),
-            &server.cancellation,
-        )
+    let repository = PullGit::open(&server, &repo, pull.head_repository)
         .await
         .ok();
     let current = repository

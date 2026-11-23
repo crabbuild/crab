@@ -25,7 +25,7 @@ pub(super) async fn resolve_people(
 ) -> Result<()> {
     people::resolve(server, principal, input).await?;
     assignees::resolve(server, principal, input).await?;
-    reviews::bind_source(server, repo, input).await
+    reviews::bind_source(server, principal, repo, input).await
 }
 
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {

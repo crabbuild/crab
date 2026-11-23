@@ -4,7 +4,12 @@ use std::{
     task::{Context, Poll},
 };
 
-use axum::{body::Body, response::Response};
+use axum::{
+    Json,
+    body::Body,
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
+};
 use bytes::Bytes;
 use http_body::{Frame, SizeHint};
 use tokio::sync::{OwnedSemaphorePermit, TryAcquireError};
@@ -25,6 +30,25 @@ pub(super) fn acquire(server: &Server, action: Action) -> Result<Admission, TryA
         action,
         Action::Refs | Action::Tree | Action::Search | Action::FilePreview
     );
+    reserve(server, bulk)
+}
+
+pub(super) fn acquire_bulk(server: &Server) -> Result<Admission, TryAcquireError> {
+    reserve(server, true)
+}
+
+pub(super) fn busy() -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(header::RETRY_AFTER, "1")],
+        Json(serde_json::json!({
+            "error": {"code":"busy", "message":"The server is busy. Retry shortly"}
+        })),
+    )
+        .into_response()
+}
+
+fn reserve(server: &Server, bulk: bool) -> Result<Admission, TryAcquireError> {
     let bulk = bulk
         .then(|| server.bulk_reads.clone().try_acquire_owned())
         .transpose()?;

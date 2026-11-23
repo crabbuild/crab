@@ -32,6 +32,7 @@ export function PullRequests({
       </div>
     ) : (
       <NewPull
+        key={url.pathname}
         repo={repo}
         refs={refs}
         url={url}

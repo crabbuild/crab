@@ -215,6 +215,10 @@ pub(crate) struct Input {
     pub can_write: bool,
     pub can_admin: bool,
     pub configured_protected: bool,
+    #[serde(default)]
+    pub organization_protected: bool,
+    #[serde(default)]
+    pub default_ref: String,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum Outcome {
@@ -233,6 +237,38 @@ struct Submission {
     digest: String,
 }
 pub(crate) struct DismissReview;
+
+pub(in crate::cells::repository::pulls) fn expire_approvals(
+    context: &Transaction<'_>,
+    pull: &PullRecord,
+    actor: &RepositoryAuthor,
+    now: u64,
+    reason: &str,
+) -> crate::cells::Result<()> {
+    if !pull
+        .review_decisions
+        .iter()
+        .any(|review| review.state == ReviewState::Approved)
+    {
+        return Ok(());
+    }
+    ensure_ready(context)?;
+    let number = integer(pull.number)?;
+    let approved = SqlValue::Integer(i64::from(ReviewState::Approved.code()));
+    // Dismiss only approvals through the same records readers already use.
+    // Requests for changes remain active until a reviewer resolves them.
+    context.query("INSERT INTO repository_pull_review_dismissals(pull_number,review_number,actor_issuer,actor_subject,actor_name,body,version,created_at_ms) SELECT d.pull_number,d.review_number,?,?,?,?,r.version+1,? FROM repository_pull_review_decisions d JOIN repository_pull_reviews r ON r.pull_number=d.pull_number AND r.number=d.review_number WHERE d.pull_number=? AND d.state=?", &[
+        SqlValue::Text(actor.issuer.clone()), SqlValue::Text(actor.subject.clone()), SqlValue::Text(actor.name.clone()),
+        SqlValue::Text(reason.into()), integer(now)?, number.clone(), approved.clone(),
+    ])?;
+    context.query("UPDATE repository_pull_reviews SET version=version+1,updated_at_ms=? WHERE pull_number=? AND number IN (SELECT review_number FROM repository_pull_review_decisions WHERE pull_number=? AND state=?)", &[integer(now)?, number.clone(), number.clone(), approved.clone()])?;
+    context.query(
+        "DELETE FROM repository_pull_review_decisions WHERE pull_number=? AND state=?",
+        &[number, approved],
+    )?;
+    Ok(())
+}
+
 impl Mutation for DismissReview {
     const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 324;
@@ -278,12 +314,18 @@ impl Mutation for DismissReview {
         };
         // Configuration seeds policy only until the first administrative save.
         // Persisted rules in this transaction override a stale configured seed.
-        if existing
-            .admin_required
-            .unwrap_or(input.configured_protected)
-            && !input.can_admin
-        {
-            return Ok(MutationResult::Rejected(Outcome::Forbidden));
+        if !input.can_admin {
+            use crate::cells::repository::rulesets::{ActiveRulesets, GetRulesets};
+            let rulesets = GetRulesets::execute(context, ())?;
+            if existing
+                .admin_required
+                .unwrap_or(input.configured_protected)
+                || input.organization_protected
+                || ActiveRulesets::new(&rulesets)?
+                    .requires_pull(&existing.base_ref, &input.default_ref)
+            {
+                return Ok(MutationResult::Rejected(Outcome::Forbidden));
+            }
         }
         if existing.review.version != input.version {
             return Ok(MutationResult::Rejected(Outcome::Conflict));

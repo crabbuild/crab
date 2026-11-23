@@ -14,18 +14,21 @@ export function ChangeWorkspace({
   theme,
   codeThemes,
   sticky,
+  idPrefix = "",
   review,
 }: {
   changes: Change[];
-  repo: Repository;
+  repo: Pick<Repository, "owner" | "name">;
   rev: string;
   base?: string;
   theme: "light" | "dark";
   codeThemes: CodeThemes;
   sticky: boolean;
+  idPrefix?: string;
   review?: DiffReviewState;
 }) {
   const diffPane = useRef<HTMLDivElement>(null);
+  const heading = `${idPrefix}changed-files-heading`;
   const [selectedPath, setSelectedPath] = useState(changes[0]?.path);
 
   useEffect(() => {
@@ -42,7 +45,9 @@ export function ChangeWorkspace({
       const paneTop = pane.getBoundingClientRect().top;
       let active = firstChange;
       for (const change of changes) {
-        const panel = document.getElementById(changePanelId(change.path_hex));
+        const panel = document.getElementById(
+          idPrefix + changePanelId(change.path_hex),
+        );
         if (!panel) continue;
         if (panel.getBoundingClientRect().top - paneTop <= 32) active = change;
       }
@@ -60,11 +65,13 @@ export function ChangeWorkspace({
       pane.removeEventListener("scroll", onScroll);
       if (frame) cancelAnimationFrame(frame);
     };
-  }, [changes]);
+  }, [changes, idPrefix]);
 
   function scrollToChange(change: Change) {
     const pane = diffPane.current;
-    const panel = document.getElementById(changePanelId(change.path_hex));
+    const panel = document.getElementById(
+      idPrefix + changePanelId(change.path_hex),
+    );
     if (!pane || !panel) return;
     setSelectedPath(change.path);
     const top =
@@ -76,13 +83,13 @@ export function ChangeWorkspace({
 
   return (
     <>
-      <h3 id="changed-files-heading">
+      <h3 id={heading}>
         {changes.length} changed {changes.length === 1 ? "file" : "files"}
       </h3>
       {changes.length ? (
         <section
           className={`change-workspace${sticky ? " change-workspace-sticky" : ""}`}
-          aria-labelledby="changed-files-heading"
+          aria-labelledby={heading}
         >
           <div className="change-tree-pane">
             <ChangeTree
@@ -102,6 +109,7 @@ export function ChangeWorkspace({
               {changes.map((change, index) => (
                 <DiffView
                   key={change.path_hex}
+                  id={idPrefix + changePanelId(change.path_hex)}
                   repo={repo}
                   rev={rev}
                   base={base}

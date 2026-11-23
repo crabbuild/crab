@@ -13,6 +13,41 @@ impl Prepared {
         limits: crab_read::dependency_proof::DependencyProofLimits,
         cancel: &CancellationToken,
     ) -> Result<CapsuleArtifacts> {
+        self.upload_bound_capsule(view, None, limits, cancel).await
+    }
+
+    /// Prepare a ref publication using verified pointer bindings from an authorized source.
+    ///
+    /// The source prefix names another repository in this origin store and shared
+    /// content namespace. The caller authorizes access to it and holds the
+    /// destination ref leases and shared GC fence through commitment. Only the
+    /// dependency closure of missing Git pointer bindings is published with the refs.
+    pub async fn upload_capsule_from_shared_source(
+        &self,
+        view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+        source_prefix: &str,
+        limits: crab_read::dependency_proof::DependencyProofLimits,
+        cancel: &CancellationToken,
+    ) -> Result<CapsuleArtifacts> {
+        if self.content.is_some()
+            || source_prefix == self.layout.repo_prefix()
+            || self.layout.store().staging_write_prefix().is_some()
+        {
+            return Err(Error::Request(
+                "Shared content requires direct publication from a separate repository",
+            ));
+        }
+        self.upload_bound_capsule(view, Some(source_prefix), limits, cancel)
+            .await
+    }
+
+    async fn upload_bound_capsule(
+        &self,
+        view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+        source_prefix: Option<&str>,
+        limits: crab_read::dependency_proof::DependencyProofLimits,
+        cancel: &CancellationToken,
+    ) -> Result<CapsuleArtifacts> {
         let started = Instant::now();
         let repository_refs = self
             .repository
@@ -50,11 +85,24 @@ impl Prepared {
             .collect::<Vec<_>>();
         // Ordinary Git and LFS-only changes need no Xet catalog pages. Selected
         // Crab pointers retain complete authenticated shard/xorb closure checks.
-        let base_catalog = if hashes.is_empty() {
+        let mut base_catalog = if hashes.is_empty() {
             PointerCatalog::new()
         } else {
             lookup.files(self.layout.store(), &hashes).await?
         };
+        let mut shared_catalog = PointerCatalog::new();
+        if let Some(source_prefix) = source_prefix {
+            let missing: Vec<_> = hashes
+                .into_iter()
+                .filter(|hash| !base_catalog.files().contains_key(hash))
+                .collect();
+            if !missing.is_empty() {
+                shared_catalog =
+                    load_shared_catalog(&self.layout, source_prefix, &missing, limits, cancel)
+                        .await?;
+                base_catalog.apply(&shared_catalog)?;
+            }
+        }
         let prepared_files = self
             .content
             .as_ref()
@@ -100,7 +148,7 @@ impl Prepared {
             Some(content) => {
                 upload_capsule_content(&self.layout, &lookup, base_catalog, content, cancel).await?
             }
-            None => (PointerCatalog::new(), HashMap::new()),
+            None => (shared_catalog, HashMap::new()),
         };
         let mut packs = Vec::new();
         if let Some(pack) = &self.pack {
@@ -174,6 +222,85 @@ impl Prepared {
             origins,
             changes_namespace,
         })
+    }
+}
+
+async fn load_shared_catalog(
+    destination: &crab_storage::StoreLayout<crab_storage::Store>,
+    source_prefix: &str,
+    files: &[String],
+    limits: crab_read::dependency_proof::DependencyProofLimits,
+    cancel: &CancellationToken,
+) -> Result<PointerCatalog> {
+    use crab_coordination::{DEFAULT_GC_FENCE_TTL, GcFenceHeartbeat, GcFenceLease};
+    use crab_read::dependency_proof::DependencyProofError;
+
+    // The source contributes metadata. Use the same origin and GC namespace
+    // for both lookups so a source descriptor cannot redirect payload reads.
+    let source = crab_storage::StoreLayout::with_global_prefix(
+        destination.store().clone(),
+        source_prefix.to_owned(),
+        destination.global_prefix().to_owned(),
+    );
+    let deadline = tokio::time::Instant::now() + limits.max_duration;
+    let capture_cancel = cancel.child_token();
+    let fence = GcFenceLease::acquire_writer(
+        source.store().inner(),
+        source.repo_prefix(),
+        DEFAULT_GC_FENCE_TTL,
+    )
+    .await
+    .map_err(crab_write::WriteError::from)?;
+    let heartbeat =
+        GcFenceHeartbeat::spawn(&fence, capture_cancel.clone(), DEFAULT_GC_FENCE_TTL / 3);
+    let capture = async {
+        let root = crab_metadata::capsule_protocol::load_root(&source).await?;
+        let lookup =
+            crab_metadata::capsule_protocol::load_pointer_catalog_lookup_from_root(&source, &root)
+                .await?;
+        lookup.files(source.store(), files).await
+    };
+    // Source catalog pages are repository-local. After materializing them,
+    // the destination's shared GC fence protects all imported payloads.
+    let captured = tokio::select! {
+        biased;
+        () = capture_cancel.cancelled() => Err(Error::Cancelled),
+        result = tokio::time::timeout_at(deadline, capture) => match result {
+            Ok(result) => result.map_err(Error::from),
+            Err(_) => Err(Error::Dependency(Box::new(DependencyProofError::Deadline))),
+        },
+    };
+    heartbeat.stop().await;
+    if let Err(error) = fence.release().await {
+        tracing::warn!(%error, "shared content catalog capture fence release failed");
+    }
+    if capture_cancel.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    let catalog = captured?;
+    if catalog
+        .shards()
+        .values()
+        .any(|shard| shard.encoded_size() > limits.content.max_shard_bytes)
+        || catalog
+            .xorbs()
+            .values()
+            .any(|xorb| xorb.encoded_size() > limits.content.max_xorb_bytes)
+    {
+        return Err(Error::Dependency(Box::new(DependencyProofError::Limit(
+            "shared content object bytes",
+        ))));
+    }
+    // A shard can reference xorbs beyond a selected file recipe. Verify
+    // every descriptor that the destination will retain as a GC root.
+    let verify = crab_read::verify_capsule_pointer_catalog_objects(destination, &catalog);
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(Error::Cancelled),
+        result = tokio::time::timeout_at(deadline, verify) => {
+            result.map_err(|_| Error::Dependency(Box::new(DependencyProofError::Deadline)))??;
+            Ok(catalog)
+        },
     }
 }
 

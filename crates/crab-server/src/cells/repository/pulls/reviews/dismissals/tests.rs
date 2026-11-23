@@ -44,6 +44,7 @@ async fn seed(cell: &RepositoryCell) {
     write::<CreatePull>(
         cell,
         CreatePullInput {
+            code_owner_requests: Default::default(),
             metadata: Default::default(),
             draft: false,
             submission_id: *Uuid::now_v7().as_bytes(),
@@ -52,6 +53,7 @@ async fn seed(cell: &RepositoryCell) {
             body: "Description".into(),
             base_ref: "refs/heads/main".into(),
             head_ref: "refs/heads/feature".into(),
+            head_repository: None,
             base_oid: "a".repeat(40),
             head_oid: "b".repeat(40),
         },
@@ -62,6 +64,8 @@ async fn review(cell: &RepositoryCell, name: &str, state: ReviewState) -> PullRe
     let CreatePullReviewOutcome::Created(review) = write::<CreatePullReview>(
         cell,
         CreatePullReviewInput {
+            base_revision: None,
+            review_teams: Vec::new(),
             pull: 1,
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor(name),
@@ -89,6 +93,8 @@ fn input(review: &PullReviewRecord) -> Input {
         can_write: true,
         can_admin: false,
         configured_protected: false,
+        organization_protected: false,
+        default_ref: "refs/heads/main".into(),
     }
 }
 async fn events(
@@ -205,6 +211,9 @@ async fn protected_branch_policy_versions_and_invalid_states_leave_no_dismissal(
         commit_oid: pull.head_oid.clone(),
         message: String::new(),
         created_at_ms: 1,
+        publication_plan: None,
+        bypass_rulesets: Vec::new(),
+        tested_candidate: false,
     };
     write::<TransitionPullMerge>(
         &cell,
@@ -248,7 +257,12 @@ async fn protected_branch_policy_versions_and_invalid_states_leave_no_dismissal(
             rules: vec![BranchProtectionRecord {
                 branch: "main".into(),
                 required_approvals: 1,
+                required_code_owner_reviews: false,
+                require_conversation_resolution: false,
+                require_up_to_date: false,
+                require_merge_queue: false,
                 required_checks: vec![],
+                required_integrations: vec![],
             }],
         },
     )
@@ -460,6 +474,8 @@ async fn original_review_receipts_replay_without_restoring_a_dismissed_decision(
     let cell = cell(&server);
     seed(&cell).await;
     let input = CreatePullReviewInput {
+        base_revision: None,
+        review_teams: Vec::new(),
         pull: 1,
         submission_id: *Uuid::now_v7().as_bytes(),
         author: actor("Bob"),
@@ -554,7 +570,12 @@ async fn persisted_protections_override_the_configured_seed_in_both_directions()
             rules: vec![BranchProtectionRecord {
                 branch: "main".into(),
                 required_approvals: 1,
+                required_code_owner_reviews: false,
+                require_conversation_resolution: false,
+                require_up_to_date: false,
+                require_merge_queue: false,
                 required_checks: vec![],
+                required_integrations: vec![],
             }],
         },
     )

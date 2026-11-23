@@ -194,7 +194,7 @@ matching requests; stale changes require explicit reload. Fulfillment does not
 imply approval or current-head validity. The sidebar includes uninvited reviewers,
 keeps approval decisions separate from later comments, and distinguishes an
 outdated review from a missing head. Existing discussion indexes require
-`cells rebuild-search` for current format 11 before serving. Branch protection rules stay separate.
+`cells rebuild-search` for current format 13 before serving. Branch protection rules stay separate.
 The “Review changes” dialog keeps submission stable while the diff loads and
 pins a review to the inspected commit. A changed head requires comparison
 reload and explicit draft rebasing; retries use the native submission ledger.
@@ -612,7 +612,7 @@ The internal owners are:
 | `repository/` | Pinned Git snapshots, maintenance, browse projections, and atomic catalog installation |
 | `catalog/` | Durable catalog records and membership audit |
 | `auth/` | Identity, durable sessions, UUID-bound current grants in `principal/`, login endpoints, and bounded provider transport |
-| `git_import/mod.rs`, `git_import/source.rs`, `git_import/git.rs` | Import jobs/workflow, source validation, and isolated Git processes |
+| `git_import/` | Durable import leases and recovery, source validation, and isolated Git processes |
 | `api/` | Browse HTTP orchestration, feature handlers, Git queries, and wire encoding |
 | `git/` | Native Git protocol, object, receive, and LFS endpoints |
 | `peer/`, `peer/tls/` | Private transport and mutual TLS |

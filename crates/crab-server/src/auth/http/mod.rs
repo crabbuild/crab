@@ -3,7 +3,18 @@ use super::{
     SESSION_LIFETIME, Session, cookie_value, key, now_epoch,
     transport::{bounded_http, discover},
 };
-use crate::{AuthProvider, config::validate_identity_url, server::Server};
+use crate::{
+    AuthProvider, app,
+    cells::{
+        Address,
+        directory::{
+            IdentityKey,
+            notifications::email::{self, BindEmail, Binding},
+        },
+    },
+    config::validate_identity_url,
+    server::Server,
+};
 use axum::{
     Extension, Json,
     extract::{Query, State},
@@ -34,8 +45,8 @@ pub(crate) async fn login(
     let return_to = query.return_to.unwrap_or_else(|| "/".into());
     validate_return_to(auth, &return_to)?;
     match auth.config.provider {
-        AuthProvider::Oidc => login_oidc(auth, return_to).await,
-        AuthProvider::GitHub => login_github(auth, return_to).await,
+        AuthProvider::Oidc => login_oidc(auth, return_to, server.email.is_some()).await,
+        AuthProvider::GitHub => login_github(auth, return_to, server.email.is_some()).await,
     }
 }
 
@@ -60,7 +71,11 @@ fn validate_return_to(auth: &Authentication, return_to: &str) -> Result<(), Auth
     Ok(())
 }
 
-async fn login_oidc(auth: &Authentication, return_to: String) -> Result<Response, AuthError> {
+async fn login_oidc(
+    auth: &Authentication,
+    return_to: String,
+    notification_email: bool,
+) -> Result<Response, AuthError> {
     let (client, groups_scope) = auth.client.as_ref().ok_or(AuthError::Invalid)?;
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
     let request = client
@@ -70,8 +85,17 @@ async fn login_oidc(auth: &Authentication, return_to: String) -> Result<Response
             Nonce::new_random,
         )
         .add_scope(Scope::new("profile".into()))
-        .add_extra_param("claims", r#"{"id_token":{"groups":null}}"#)
         .set_pkce_challenge(challenge);
+    let request = if notification_email {
+        request
+            .add_scope(Scope::new("email".into()))
+            .add_extra_param(
+                "claims",
+                r#"{"id_token":{"groups":null,"email":null,"email_verified":null}}"#,
+            )
+    } else {
+        request.add_extra_param("claims", r#"{"id_token":{"groups":null}}"#)
+    };
     // Groups is provider-specific; requesting an unadvertised scope breaks
     // otherwise valid OIDC providers such as Entra ID.
     let request = if *groups_scope {
@@ -101,7 +125,11 @@ async fn login_oidc(auth: &Authentication, return_to: String) -> Result<Response
         .into_response())
 }
 
-async fn login_github(auth: &Authentication, return_to: String) -> Result<Response, AuthError> {
+async fn login_github(
+    auth: &Authentication,
+    return_to: String,
+    notification_email: bool,
+) -> Result<Response, AuthError> {
     let github = auth.config.github.clone().unwrap_or_default();
     let authorize_url = Url::parse(&github.authorize_url).map_err(AuthError::provider)?;
     validate_identity_url(&authorize_url, auth.config.public_url.scheme() == "http")
@@ -121,7 +149,14 @@ async fn login_github(auth: &Authentication, return_to: String) -> Result<Respon
             .append_pair("client_id", &auth.config.client_id)
             .append_pair("redirect_uri", redirect.as_str())
             .append_pair("response_type", "code")
-            .append_pair("scope", "read:user")
+            .append_pair(
+                "scope",
+                if notification_email {
+                    "read:user user:email"
+                } else {
+                    "read:user"
+                },
+            )
             .append_pair("state", state.secret())
             .append_pair("code_challenge", challenge.as_str())
             .append_pair("code_challenge_method", "S256");
@@ -261,8 +296,12 @@ async fn finish_login(
         .map(|name| name.as_str())
         .unwrap_or(&subject)
         .to_owned();
+    let verified_email = claims
+        .email()
+        .filter(|_| claims.email_verified() == Some(true))
+        .map(|address| address.as_str().to_owned());
     establish_session(
-        auth,
+        server,
         &headers,
         flow.return_to,
         Identity {
@@ -272,18 +311,24 @@ async fn finish_login(
         },
         groups,
         lifetime,
+        verified_email,
     )
     .await
 }
 
 async fn establish_session(
-    auth: &Authentication,
+    server: &Server,
     headers: &HeaderMap,
     return_to: String,
     identity: Identity,
     groups: Vec<String>,
     lifetime: Duration,
+    verified_email: Option<String>,
 ) -> Result<Response, AuthError> {
+    let auth = server.auth.as_ref().ok_or(AuthError::Invalid)?;
+    if server.email.is_some() {
+        bind_email(server, auth, &identity, verified_email).await?;
+    }
     let now = now_epoch()?;
     let token = CsrfToken::new_random_len(32);
     let session_key = key(token.secret());
@@ -311,6 +356,37 @@ async fn establish_session(
         .headers_mut()
         .append(header::SET_COOKIE, auth.cookie(true, "", Duration::ZERO)?);
     Ok(response)
+}
+
+async fn bind_email(
+    server: &Server,
+    auth: &Authentication,
+    identity: &Identity,
+    address: Option<String>,
+) -> Result<(), AuthError> {
+    if auth.account_state(&identity.subject).await?.suspended {
+        return Err(AuthError::Suspended);
+    }
+    let result = async {
+        let cells = server.cells().ok_or(app::Error::CellUnavailable)?;
+        app::command_output(
+            cells
+                .command::<BindEmail>(
+                    Address::Directory,
+                    app::mutation_identity()?,
+                    Binding {
+                        identity: IdentityKey {
+                            issuer: identity.issuer.clone(),
+                            subject: identity.subject.clone(),
+                        },
+                        address: address.filter(|address| email::valid_address(address)),
+                    },
+                )
+                .await,
+        )
+    }
+    .await;
+    result.map_err(|error| AuthError::Authority(Box::new(error)))
 }
 
 #[derive(Deserialize)]
@@ -357,6 +433,43 @@ async fn bounded_json<T: DeserializeOwned>(
         body.extend_from_slice(&chunk);
     }
     serde_json::from_slice(&body).map_err(AuthError::provider)
+}
+
+#[derive(Deserialize)]
+struct GitHubEmail {
+    email: String,
+    primary: bool,
+    verified: bool,
+}
+
+async fn github_email(
+    auth: &Authentication,
+    api_url: &Url,
+    token: &str,
+) -> Result<Option<String>, AuthError> {
+    let url = api_url.join("user/emails").map_err(AuthError::provider)?;
+    for page in 1..=5_u16 {
+        let response = auth
+            .http
+            .get(url.clone())
+            .query(&[("per_page", 100_u16), ("page", page)])
+            .header(header::ACCEPT, "application/vnd.github+json")
+            .header(header::USER_AGENT, "crab-server")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(AuthError::provider)?;
+        let addresses: Vec<GitHubEmail> = bounded_json(response, 64 * 1024).await?;
+        let has_next = addresses.len() == 100;
+        if let Some(primary) = addresses.into_iter().find(|address| address.primary) {
+            return Ok(primary.verified.then_some(primary.email));
+        }
+        if !has_next {
+            break;
+        }
+    }
+    Ok(None)
 }
 
 async fn finish_github_login(
@@ -416,7 +529,6 @@ async fn finish_github_login(
         .await
         .map_err(AuthError::provider)?;
     let user: GitHubUserResponse = bounded_json(user_response, 64 * 1024).await?;
-    drop(token);
     if user.id == 0
         || user.login.is_empty()
         || user.login.chars().any(char::is_control)
@@ -431,8 +543,20 @@ async fn finish_github_login(
     if name.chars().any(char::is_control) || name.chars().count() > 160 {
         return Err(AuthError::Invalid);
     }
+    let verified_email = if server.email.is_some() {
+        match github_email(auth, &api_url, &token.access_token).await {
+            Ok(address) => address,
+            Err(_) => {
+                tracing::warn!("GitHub could not verify a notification email address");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    drop(token);
     establish_session(
-        auth,
+        server,
         &headers,
         flow.return_to,
         Identity {
@@ -442,6 +566,7 @@ async fn finish_github_login(
         },
         Vec::new(),
         SESSION_LIFETIME,
+        verified_email,
     )
     .await
 }

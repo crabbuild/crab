@@ -1,6 +1,6 @@
 use super::super::storage;
 use crate::{
-    app::{Error, Result},
+    app::{self, Error, Result},
     auth::Identity,
     cells::repository::{
         CreatePullReviewReply, CreatePullReviewReplyInput, CreatePullReviewReplyOutcome,
@@ -49,21 +49,6 @@ pub(super) struct PullReviewReply {
     pub updated_at: u64,
 }
 
-pub(super) struct NewPullReviewThread {
-    pub author: Identity,
-    pub request_id: String,
-    pub body: String,
-    pub suggested_text: Option<String>,
-    pub base_oid: String,
-    pub head_oid: String,
-    pub path: Vec<u8>,
-    pub old_blob_oid: Option<String>,
-    pub new_blob_oid: Option<String>,
-    pub side: PullReviewThreadSide,
-    pub start_line: u64,
-    pub end_line: u64,
-}
-
 pub(super) struct PullReviewThreadEdit {
     pub actor: Identity,
     pub can_resolve: bool,
@@ -77,6 +62,24 @@ pub(super) struct NewPullReviewReply {
     pub author: Identity,
     pub request_id: String,
     pub body: String,
+}
+
+pub(in crate::api::pulls) async fn unresolved_conversations(
+    server: &Server,
+    repo: &Repository,
+    pull: u64,
+) -> Result<u64> {
+    let routed = app::repository_cell(server, repo)?;
+    app::query_output(
+        routed
+            .client
+            .query::<crate::cells::repository::CountUnresolvedConversations>(
+                &routed.target,
+                None,
+                pull,
+            )
+            .await,
+    )
 }
 
 pub(super) async fn thread(
@@ -140,35 +143,21 @@ pub(super) async fn thread_submission(
 pub(super) async fn create_thread(
     server: &Server,
     repo: &Repository,
-    pull: u64,
-    input: NewPullReviewThread,
+    input: CreatePullReviewThreadInput,
 ) -> Result<PullReviewThread> {
-    let routed = crate::app::repository_cell(server, repo)?;
+    let routed = app::repository_cell(server, repo)?;
     match crate::app::command_output(
         routed
             .client
             .command::<CreatePullReviewThread>(
                 &routed.target,
                 crate::app::mutation_identity()?,
-                CreatePullReviewThreadInput {
-                    pull,
-                    submission_id: storage::submission_id(&input.request_id)?,
-                    author: crate::cells::repository::RepositoryAuthor::from(&input.author),
-                    body: input.body,
-                    suggested_text: input.suggested_text,
-                    base_oid: input.base_oid,
-                    head_oid: input.head_oid,
-                    path: input.path,
-                    old_blob_oid: input.old_blob_oid,
-                    new_blob_oid: input.new_blob_oid,
-                    side: input.side,
-                    start_line: input.start_line,
-                    end_line: input.end_line,
-                },
+                input,
             )
             .await,
     )? {
         CreatePullReviewThreadOutcome::Archived => Err(Error::Archived),
+        CreatePullReviewThreadOutcome::MergePending => Err(Error::MergePending),
         CreatePullReviewThreadOutcome::Created(thread) => Ok(from_thread(*thread)),
         CreatePullReviewThreadOutcome::PullNotFound => Err(Error::NotFound),
         CreatePullReviewThreadOutcome::PullClosed => {
@@ -185,7 +174,7 @@ pub(super) async fn update_thread(
     number: u64,
     input: PullReviewThreadEdit,
 ) -> Result<PullReviewThread> {
-    let routed = crate::app::repository_cell(server, repo)?;
+    let routed = app::repository_cell(server, repo)?;
     match crate::app::command_output(
         routed
             .client
@@ -205,6 +194,7 @@ pub(super) async fn update_thread(
             .await,
     )? {
         UpdatePullReviewThreadOutcome::Archived => Err(Error::Archived),
+        UpdatePullReviewThreadOutcome::MergePending => Err(Error::MergePending),
         UpdatePullReviewThreadOutcome::Updated(thread) => Ok(from_thread(*thread)),
         UpdatePullReviewThreadOutcome::NotFound => Err(Error::NotFound),
         UpdatePullReviewThreadOutcome::Forbidden => Err(Error::Forbidden),
@@ -284,7 +274,7 @@ pub(super) async fn create_reply(
     thread: u64,
     input: NewPullReviewReply,
 ) -> Result<PullReviewReply> {
-    let routed = crate::app::repository_cell(server, repo)?;
+    let routed = app::repository_cell(server, repo)?;
     match crate::app::command_output(
         routed
             .client
@@ -318,7 +308,7 @@ pub(super) async fn update_reply(
     version: u64,
     body: String,
 ) -> Result<PullReviewReply> {
-    let routed = crate::app::repository_cell(server, repo)?;
+    let routed = app::repository_cell(server, repo)?;
     match crate::app::command_output(
         routed
             .client

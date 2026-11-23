@@ -40,6 +40,7 @@ async fn seed(cell: &RepositoryCell) {
             write::<CreatePull>(
                 cell,
                 CreatePullInput {
+                    code_owner_requests: Default::default(),
                     metadata: Default::default(),
                     submission_id: *Uuid::now_v7().as_bytes(),
                     author: actor.clone(),
@@ -48,6 +49,7 @@ async fn seed(cell: &RepositoryCell) {
                     body: "Shared searchable body".into(),
                     base_ref: "refs/heads/main".into(),
                     head_ref: format!("refs/heads/topic-{number}"),
+                    head_repository: None,
                     base_oid: "a".repeat(40),
                     head_oid: format!("{number:040x}"),
                 }
