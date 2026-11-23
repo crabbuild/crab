@@ -113,8 +113,27 @@ async fn native_browser_queue_publishes_tested_commits_in_admission_order() {
             "Allow merge queue",
         ])
         .await;
+    browser
+        .run(&["find", "label", "Concurrent queue builds", "fill", "100"])
+        .await;
     click("Save merge methods").await;
     browser.run(&["wait", "--fn", "[...document.querySelectorAll('button')].some(button => button.disabled && button.textContent.trim() === 'Save merge methods')"]).await;
+    let configured = h
+        .json(&format!("{root}/settings/merge-methods"), &writer)
+        .await;
+    assert_eq!(configured["merge_queue_builds"], 100);
+    // Keep this branch at one so the serial publication assertions below
+    // exercise the exact override while other branches inherit the new limit.
+    h.write(
+        Method::PUT,
+        &format!("{root}/settings/merge-methods"),
+        &writer,
+        json!({"expected_version":configured["version"],"enabled":configured["enabled"],
+            "merge_queue_branches":[{"branch":"integration","builds":1}]}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
     let first = format!("{root}/pulls/1");
     let second = format!("{root}/pulls/2");
     for (number, queued) in [

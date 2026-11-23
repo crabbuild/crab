@@ -2,7 +2,7 @@ use super::*;
 use crate::cells::repository::MergeMethod;
 
 const KEY: &str = "repository/v1/merge-methods";
-const MAX_QUEUE_BUILDS: u8 = 8;
+const MAX_QUEUE_BUILDS: u8 = 100;
 const MAX_QUEUE_BRANCHES: usize = 100;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

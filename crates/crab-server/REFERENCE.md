@@ -3516,11 +3516,13 @@ Rebase uses the existing bounded history replay and preserves the replayed
 commit messages. Crab tests and publishes the tip of that exact history.
 
 Crab keeps the admission order separately for each target branch. Set
-**Concurrent queue builds** to a value from 1 to 8 in the repository's merge
+**Concurrent queue builds** to a value from 1 to 100 in the repository's merge
 settings or on an exact branch override. The repository default is 1.
 The first entry tests the branch's latest tip.
 Each following entry within the build limit tests a candidate that includes
-the changes ahead of it. If the base advances unexpectedly or an earlier
+the changes ahead of it. The server resolves the ordered prefix from one
+Cell snapshot and reads its candidate commits together from one pinned Git
+snapshot. If the base advances unexpectedly or an earlier
 entry is removed, Crab rebuilds the affected candidates and requires checks on
 their new SHAs. When an earlier candidate becomes the base exactly as tested,
 its successor keeps its existing check results.
@@ -3565,7 +3567,7 @@ leave the queue.
 
 The settings `PUT` accepts optional `merge_queue` (boolean),
 `merge_queue_method` (`merge_commit`, `squash`, or `rebase`),
-`merge_queue_builds` (1–8), and `merge_queue_timeout_minutes` (1–720).
+`merge_queue_builds` (1–100), and `merge_queue_timeout_minutes` (1–720).
 `merge_queue_branches` replaces the override collection when supplied. Each
 entry has a short `branch` name and at least one of `method`, `builds`, or
 `timeout_minutes`. Send an empty array to restore inheritance for every branch.
