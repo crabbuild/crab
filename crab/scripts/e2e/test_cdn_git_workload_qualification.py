@@ -136,7 +136,7 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             "        if command == 'git-upload-pack':\n"
             "            emit_read()\n"
             "            emit_native()\n"
-            "            if managed_url is None and not evidence.exists() and not (origin.parent / 'binding-off').exists():\n"
+            "            if managed_url is None and '/capsule/' not in approved['scope'] and not evidence.exists() and not (origin.parent / 'binding-off').exists():\n"
             "                print(json.dumps({'target':'crab_storage::cdn::transfer', 'fields':{\n"
             "                    'message':'CDN verified origin-only read', 'provider':'s3', 'access':'private',\n"
             "                    'consumer':'cli', 'family':'capsule', 'profile':'direct'}}), file=sys.stderr, flush=True)\n"
@@ -145,7 +145,8 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             "                print(json.dumps(event), file=sys.stderr, flush=True)\n"
             "        if command == 'git-upload-pack' and not (origin.parent / 'origin-only').exists():\n"
             "            cache = Path(os.environ['CRAB_CACHE_DIR'])\n"
-            "            family = 'capsule' if (origin.parent / 'foreign-edge').exists() else 'git'\n"
+            "            capsule_scope = '/capsule/' in approved['scope']\n"
+            "            family = 'capsule' if capsule_scope or (origin.parent / 'foreign-edge').exists() else 'git'\n"
             "            local = (origin.parent / 'warm-cache').exists() and (cache / 'seed').exists()\n"
             "            policy = {'provider':'s3', 'access':'public' if evidence.exists() else 'private', 'consumer':'cli',\n"
             "                      'family':family, 'profile':'direct' if managed_url is None else 'managed'}\n"
@@ -155,8 +156,11 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             "                    'object_bytes':4096, 'requested_bytes':1024,\n"
             "                    'bytes':1024, 'complete':True, 'elapsed_ms':10, 'request_sha256':'e' * 64}}), file=sys.stderr, flush=True)\n"
             "            if not (origin.parent / 'rejected-edge').exists():\n"
-            "                print(json.dumps({'target':'crab_storage::cdn::transfer', 'fields': policy | {\n"
-            "                    'message':'CDN verified Git payload', 'source':'local' if local else 'edge'}}),\n"
+            "                proof = {'message':'CDN verified Git payload', 'source':'local' if local else 'edge'}\n"
+            "                if capsule_scope:\n"
+            "                    key = 'b' if local and (origin.parent / 'wrong-capsule-control').exists() else 'a'\n"
+            "                    proof.update(message='CDN verified capsule control', capsule_control_blake3=key * 64)\n"
+            "                print(json.dumps({'target':'crab_storage::cdn::transfer', 'fields': policy | proof}),\n"
             "                    file=sys.stderr, flush=True)\n"
             "                cache.mkdir(parents=True, exist_ok=True)\n"
             "                (cache / 'seed').touch()\n"
@@ -587,6 +591,26 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         missed = self.call("fetch", "--warm-local-output", str(self.root / "missed-repeat.json"))
         self.assertNotEqual(missed.returncode, 0)
         self.assertIn("warm-local fetch must use a verified local payload", missed.stderr)
+        self.assertTrue(self.run_phase("retire")["ref_retired"])
+
+    def test_capsule_repeat_keeps_exact_verified_controls_from_the_git_fetch(self) -> None:
+        approved = fixture(access="private") | {"scope": "cloudfront/private/cli/capsule/direct",
+                                                   "object_path": "v2/capsules/aa/" + "a" * 64}
+        raw = json.dumps(approved).encode()
+        self.fixture.write_bytes(raw)
+        self.digest = hashlib.sha256(raw).hexdigest()
+        self.run_phase("publish")
+        (self.root / "warm-cache").touch()
+        repeat_path = self.root / "capsule-repeat.json"
+        edge = self.run_phase("fetch", "--warm-local-output", str(repeat_path))
+        repeat = json.loads(repeat_path.read_bytes())
+        self.assertEqual((edge["capsule_controls"], repeat["capsule_controls"]), (["a" * 64], ["a" * 64]))
+        (self.root / "wrong-capsule-control").touch()
+        rejected_path = self.root / "rejected-repeat.json"
+        rejected = self.call("fetch", "--warm-local-output", str(rejected_path))
+        self.assertEqual(rejected.returncode, 1, rejected.stdout)
+        self.assertIn("must reuse controls verified by its measured edge fetch", rejected.stderr)
+        self.assertFalse(rejected_path.exists())
         self.assertTrue(self.run_phase("retire")["ref_retired"])
 
     def test_rejects_invalid_approved_sizes_before_publication(self) -> None:

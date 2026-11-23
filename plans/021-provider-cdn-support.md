@@ -550,6 +550,8 @@ from the native target within the original deadline. Unrequested OID pages
 stay undecoded. The CLI retains verified capsule ranges up to 64 KiB in its
 private disk cache. A fresh fetch checks its current grant and authenticates
 cached bytes against the selected pointer before recording a local hit.
+The regional repeat checks each retained local control fingerprint against
+the ranges verified by its measured edge primer.
 Capsule promotion still needs live warm-local and provider measurements.
 
 Start with the dedicated S3 repository and CloudFront distribution. Configure

@@ -98,6 +98,15 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "did not repeat its own warm edge fetch"):
             self.collect()
 
+    def test_capsule_repeat_must_reuse_a_range_verified_by_its_primer(self) -> None:
+        self.registration["scope"] = "cloudfront/private/cli/capsule/direct"
+        self.registration["candidate"] = fixture.cli_candidate(self.registration["scope"], PLATFORM)
+        fixture.write_git_measurements(self.root, self.registration, PLATFORM)
+        self.collect()
+        self.amend_client("near/0001/warm_local", capsule_controls=["f" * 64])
+        with self.assertRaisesRegex(ValueError, "did not reuse capsule controls verified by its warm edge fetch"):
+            self.collect()
+
     def test_cli_produces_a_report_that_the_release_contract_accepts(self) -> None:
         benchmarks = self.root / "benchmarks.json"
         row = f"{self.registration['scope']}/{PLATFORM}"

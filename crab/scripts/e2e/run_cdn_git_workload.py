@@ -434,15 +434,18 @@ def fetch_once(
     lines = run.stderr.splitlines()
     edge_responses = {}
     origin_only_scopes = set()
+    capsule_controls = {}
     lfs_key = None
     if crab is not None:
         physical_key = f"{target['repository_prefix']}/{lfs_object_path(record['sha256'])}"
         lfs_key = hashlib.sha256(physical_key.encode()).hexdigest()
     metrics = measure(lines, record["scope"], edge_responses=edge_responses, expected_lfs_key=lfs_key,
-                      origin_only_scopes=origin_only_scopes)
+                      origin_only_scopes=origin_only_scopes, capsule_controls=capsule_controls)
     if proof is not None:
         verify_transition_events(lines, record["scope"], proof)
     action = cli_action_name(record["scope"])
+    capsule_source = "local" if primed else "edge"
+    capsule = {"capsule_controls": sorted(capsule_controls.get(capsule_source, ()))} if scope_parts(record["scope"])[3] == "capsule" else {}
     return {
         "schema": f"crab.cdn-{action}/v1", "name": action, "expected_sha256": record["sha256"],
         "observed_sha256": observed, "expected_bytes": expected_bytes, "observed_bytes": observed_bytes,
@@ -451,7 +454,7 @@ def fetch_once(
         "platform": guard.platform, "candidate": guard.candidate,
         "reader": verified_read(lines, read) | guard.fingerprints, "edge_responses": edge_responses,
         "native_traffic": measure_native(lines, record["scope"]), "origin_only_scopes": sorted(origin_only_scopes),
-    } | metrics | authority
+    } | metrics | authority | capsule
 
 
 def require_edge_fetch(result: dict) -> None:
@@ -617,6 +620,9 @@ def main() -> int:
                 result["publication_sha256"] = hashlib.sha256(raw).hexdigest()
         output = (json.dumps(provenance | result, sort_keys=True) + "\n").encode()
         if repeat is not None:
+            if family == "capsule":
+                require(repeat["capsule_controls"] and set(repeat["capsule_controls"]) <= set(result["capsule_controls"]),
+                        "warm-local capsule fetch must reuse controls verified by its measured edge fetch")
             repeat |= {"publication_sha256": result["publication_sha256"],
                        "primer_sha256": hashlib.sha256(output).hexdigest()}
             with args.warm_local_output.open("x", encoding="utf-8", newline="\n") as stream:

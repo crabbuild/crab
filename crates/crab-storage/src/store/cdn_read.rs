@@ -308,7 +308,7 @@ impl Store {
                         && let Ok(value) = verify(bytes).await
                     {
                         if let Some(observation) = attempt.payload_observation() {
-                            observation.record_local();
+                            observation.record_capsule_control("local", key);
                         }
                         return Ok::<(T, Option<Bytes>), E>((value, None));
                     }
@@ -326,7 +326,12 @@ impl Store {
                             && attempt.family == CdnReadFamily::Capsule
                             && let Some(observation) = attempt.payload_observation()
                         {
-                            observation.record_verified();
+                            match cache {
+                                Some((_, (key, _))) => {
+                                    observation.record_capsule_control("edge", key)
+                                }
+                                None => observation.record_verified(),
+                            }
                         }
                         Ok((value, retained))
                     }

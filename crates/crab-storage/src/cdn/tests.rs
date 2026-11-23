@@ -646,6 +646,84 @@ async fn verified_capsule_scope_is_reported_only_for_accepted_edge_bytes() {
     }
 }
 
+#[derive(Default)]
+struct TestControlCache(Mutex<Option<(blake3::Hash, Bytes)>>);
+
+#[async_trait::async_trait]
+impl CapsuleControlCache for TestControlCache {
+    async fn read(&self, key: &blake3::Hash, _: u64) -> Option<Bytes> {
+        self.0
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|(stored, _)| stored == key)
+            .map(|(_, body)| body.clone())
+    }
+
+    async fn retain(&self, key: &blake3::Hash, body: &Bytes) {
+        *self.0.lock().unwrap() = Some((*key, body.clone()));
+    }
+}
+
+#[tokio::test]
+async fn capsule_edge_and_local_proofs_report_the_same_verified_window() {
+    let capture = Capture::default();
+    let dispatcher = tracing::Dispatch::new(capture.clone());
+    let _guard = tracing::dispatcher::set_default(&dispatcher);
+    let target = [8; 32];
+    let layout =
+        StoreLayout::with_global_prefix((), "org/repo".into(), crate::GLOBAL_PREFIX.into());
+    let path = layout.capsule_path(&"a".repeat(64));
+    let (transport, request) = endpoint(
+        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 1-4/6\r\nContent-Length: 4\r\nConnection: close\r\n\r\ngood",
+    ).await;
+    let store = Store::new(Arc::new(InMemory::new()))
+        .with_target_identity(target)
+        .with_bucket_identity(BucketIdentity::new(
+            StorageProviderKind::S3,
+            "origin",
+            "origin",
+        ))
+        .with_cdn_route(
+            CdnRoute::new(
+                target,
+                layout.repo_prefix().into(),
+                None,
+                CdnAccess::Public,
+                transport,
+                Duration::from_secs(5),
+            )
+            .for_consumer(CdnConsumer::Cli, CdnProfile::Direct),
+        )
+        .unwrap()
+        .with_capsule_control_cache(Arc::new(TestControlCache::default()));
+    let verify = |bytes: Bytes| async move {
+        assert_eq!(bytes, "good");
+        Ok::<_, StorageError>(())
+    };
+    store
+        .read_verified(&path, 6, Some(1..5), verify)
+        .await
+        .unwrap();
+    request.await.unwrap();
+    store
+        .read_verified(&path, 6, Some(1..5), verify)
+        .await
+        .unwrap();
+    let events = capture.events.lock().unwrap();
+    let proofs: Vec<_> = events
+        .iter()
+        .filter(|event| event.0.contains_key("capsule_control_blake3"))
+        .collect();
+    assert_eq!(proofs.len(), 2);
+    assert_eq!(proofs[0].0["source"], "\"edge\"");
+    assert_eq!(proofs[1].0["source"], "\"local\"");
+    assert_eq!(
+        proofs[0].0["capsule_control_blake3"],
+        proofs[1].0["capsule_control_blake3"]
+    );
+}
+
 #[test]
 fn service_read_target_reports_fingerprints_of_the_selected_layout() {
     let capture = Capture::default();

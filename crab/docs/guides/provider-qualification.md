@@ -1192,7 +1192,9 @@ same verified pointer. Keep separate runner measurements for the two recorded
 windows and join the warm edge fetch with provider logs. The verifier matches
 the repeat's primer fingerprint and cache root to that exact edge record.
 The repeat requires a verified local hit and zero edge requests for the
-registered payload. Native metadata and sidecar reads still run.
+registered payload. Capsule records retain redacted fingerprints of the
+verified control ranges. Each local capsule hit must match a range verified
+from the edge in its own primer. Native metadata and sidecar reads still run.
 
 For the direct CLI rollback check, withdraw the CDN binding on the same
 worker after retaining the successful edge fetch. Keep the same native

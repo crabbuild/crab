@@ -120,6 +120,7 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, nati
     desktop = CDN.is_direct_desktop_git_scope(registration["scope"])
     managed = CDN.is_managed_cli_git_scope(registration["scope"])
     cli = CDN.requires_cli_workload(registration["scope"])
+    capsule = cli and CDN.scope_parts(registration["scope"])[3] == "capsule"
     payload_bytes = CDN.cli_payload_bytes(registration)
     action = CDN.cli_action_name(registration["scope"])
     for ordinal, (location, region) in enumerate(registration["regions"].items()):
@@ -193,6 +194,9 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, nati
                     client["managed_grant"] = registration["managed_issuer"] | {"grant_version": 2}
                     if arm == "origin":
                         client["managed_grant"].update(approval_sha256=None, grant_version=1)
+                if capsule:
+                    control = hashlib.sha256(f"{location}/{index}/capsule-range".encode()).hexdigest()
+                    client["capsule_controls"] = [control] if arm != "origin" else []
                 proof = {}
                 origin_requests = {}
                 if provider in CDN.VIEWER_REQUEST_FILES and edge:
@@ -524,6 +528,8 @@ class CdnQualificationTests(unittest.TestCase):
         }
         if managed:
             rollback["managed_grant"] = self.registration["managed_issuer"] | {"approval_sha256": None, "grant_version": 1}
+        if "capsule_controls" in rollback:
+            rollback["capsule_controls"] = []
         if public:
             start = fetch["started_at_unix_ms"] - 30
             json_file(records / CDN.GIT_PRIOR_EXPORT_RECORD, rollback | transition | {

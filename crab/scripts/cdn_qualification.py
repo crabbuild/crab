@@ -1527,7 +1527,7 @@ def validate_git_fetch(
     raw: bytes, provenance: dict[str, Any], mode: str, label: str, *, managed_issuer: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     action = cli_action_name(provenance["scope"])
-    edge, access, _, _, _ = scope_parts(provenance["scope"])
+    edge, access, _, family, _ = scope_parts(provenance["scope"])
     value = decode(raw)
     expected = GIT_FETCH_FIELDS
     prior = mode == "prior_export"
@@ -1536,6 +1536,8 @@ def validate_git_fetch(
         expected = expected | {"primer_sha256"}
     if managed:
         expected = expected | {"managed_grant"}
+    if family == "capsule":
+        expected = expected | {"capsule_controls"}
     if prior or (isinstance(value, dict) and "transition_key_sha256" in value):
         require(access == "public" and mode in ("edge", "prior_export") and isinstance(value, dict)
                 and matches(SHA256, value.get("transition_key_sha256")),
@@ -1576,6 +1578,12 @@ def validate_git_fetch(
             and positive(client["native_writes"]) and client["visible_new_ref"] is True,
             f"{label} did not verify the published payload")
     verify_git_traffic(client, edge, label)
+    if family == "capsule":
+        controls = client["capsule_controls"]
+        maximum = client["local_payload_hits" if mode == "warm_local" else "verified_edge_payloads"]
+        require(isinstance(controls, list) and len(controls) <= min(1024, maximum)
+                and all(matches(SHA256, key) for key in controls) and controls == sorted(set(controls))
+                and (mode != "warm_local" or controls), f"{label} has invalid verified capsule controls")
     native = client["native_traffic"]
     origin_only_scopes = client["origin_only_scopes"]
     require(isinstance(origin_only_scopes, list) and len(origin_only_scopes) <= len(FAMILIES)
@@ -2787,6 +2795,7 @@ def collect_git_performance(
 ) -> dict[str, Any]:
     spec = benchmark_registration(registration)
     scope = spec["scope"]
+    family = scope_parts(scope)[3]
     policies = release_read_limits(policy) if policy is not None else None
     limits = policies.get(scope) if policies is not None else None
     missing_boundaries = {}
@@ -2919,6 +2928,7 @@ def collect_git_performance(
             windows = {}
             primer_digest = None
             primer_cache = None
+            primer_controls = set()
             service_primer = None
             for arm in ARMS:
                 slot = pair_path / arm
@@ -3013,11 +3023,15 @@ def collect_git_performance(
                     if arm == "warm_local":
                         require(client["primer_sha256"] == primer_digest and cache_root == primer_cache,
                                 f"{label} did not repeat its own warm edge fetch in the same cache")
+                        if family == "capsule":
+                            require(set(client["capsule_controls"]) <= primer_controls,
+                                    f"{label} did not reuse capsule controls verified by its warm edge fetch")
                     else:
                         require(cache_root not in cache_roots, "benchmark arms reused a local cache root")
                         cache_roots.add(cache_root)
                     if arm == "warm_edge":
                         primer_digest, primer_cache = digest, cache_root
+                        primer_controls = set(client.get("capsule_controls", ()))
                     payload = (client["publication_oid"], client["expected_sha256"])
                     receipt = client["publication_sha256"]
                 if native_target is not None:

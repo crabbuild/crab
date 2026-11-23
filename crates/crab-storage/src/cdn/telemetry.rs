@@ -285,6 +285,24 @@ impl PayloadObservation {
         self.record("local", PayloadIdentity::GitBlob(oid));
     }
 
+    pub(crate) fn record_capsule_control(self, source: &'static str, key: blake3::Hash) {
+        tracing::debug!(target: TARGET, parent: None,
+            provider = provider_label(self.policy.provider),
+            consumer = self.policy.consumer.label(),
+            access = self.policy.visibility.label(),
+            profile = self.policy.profile.label(),
+            family = self.family.label(),
+            source,
+            capsule_control_blake3 = %key.to_hex(),
+            "CDN verified capsule control"
+        );
+        if source == "edge"
+            && let Some(public) = self.public
+        {
+            public.record(self.policy, self.family, "verified_edge", None);
+        }
+    }
+
     fn record(self, source: &'static str, identity: PayloadIdentity<'_>) {
         let message = match self.family {
             CdnReadFamily::Lfs => "CDN verified LFS payload",
