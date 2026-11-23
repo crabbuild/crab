@@ -157,6 +157,8 @@ pub struct MembershipSnapshot {
     pub(crate) renamed: bool,
     #[serde(skip)]
     pub(crate) ownership_epoch: u32,
+    #[serde(skip)]
+    pub(crate) name: String,
     pub members: Vec<RepositoryMember>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<RepositoryGroup>,
@@ -444,6 +446,7 @@ impl CatalogRecord {
             revision,
             renamed: self.name_version() > 0,
             ownership_epoch: self.ownership_epoch,
+            name: self.name.clone(),
             organization: source.organization.clone(),
             members: source.members.clone(),
             groups: source.groups.clone(),

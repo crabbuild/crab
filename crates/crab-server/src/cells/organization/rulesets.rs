@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashSet};
 use super::properties::{self, PropertyValue, Schema};
 use super::*;
 use crate::cells::repository::rulesets::{
-    BypassActor, Enforcement, MAX_RULESETS, Pattern, Ruleset, Rulesets, Target,
+    BypassActor, BypassGrant, Enforcement, MAX_RULESETS, Pattern, Ruleset, Rulesets, Target,
 };
 
 const KEY: &str = "organization/v1/rulesets";
@@ -19,6 +19,8 @@ pub(crate) enum Repositories {
     Name {
         include: Vec<String>,
         exclude: Vec<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        protected: bool,
     },
     Properties {
         conditions: Vec<PropertyCondition>,
@@ -70,6 +72,18 @@ fn matches_name(pattern: &str, name: &str) -> Result<bool> {
         .ok_or(Error::Invalid("invalid saved repository pattern"))
 }
 
+fn matches_name_target(include: &[String], exclude: &[String], name: &str) -> Result<bool> {
+    let matches = |patterns: &[String]| -> Result<bool> {
+        for pattern in patterns {
+            if matches_name(pattern, name)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
+    Ok(matches(include)? && !matches(exclude)?)
+}
+
 impl PropertyCondition {
     fn valid(&self) -> bool {
         match self {
@@ -116,7 +130,9 @@ impl Repositories {
                     && ids.len() <= 100
                     && ids.iter().all(|id| !id.is_nil() && unique.insert(*id))
             }
-            Self::Name { include, exclude } => {
+            Self::Name {
+                include, exclude, ..
+            } => {
                 !include.is_empty()
                     && [include, exclude].into_iter().all(|patterns| {
                         let mut unique = HashSet::new();
@@ -140,17 +156,9 @@ impl Repositories {
         match self {
             Self::All => Ok(true),
             Self::Selected { ids } => Ok(ids.contains(&repo.id)),
-            Self::Name { include, exclude } => {
-                let matches = |patterns: &[String]| -> Result<bool> {
-                    for pattern in patterns {
-                        if matches_name(pattern, &repo.name)? {
-                            return Ok(true);
-                        }
-                    }
-                    Ok(false)
-                };
-                Ok(matches(include)? && !matches(exclude)?)
-            }
+            Self::Name {
+                include, exclude, ..
+            } => matches_name_target(include, exclude, &repo.name),
             Self::Properties { conditions } => {
                 for condition in conditions {
                     if !condition.matches(repo, values)? {
@@ -372,5 +380,33 @@ impl Read for Applicable {
             version: settings.version,
             rulesets,
         })
+    }
+}
+
+pub(crate) struct NameProtection;
+impl Read for NameProtection {
+    const CLASS: &'static str = CLASS;
+    const ID: u32 = 59;
+    type Input = String;
+    type Output = Vec<Vec<BypassGrant>>;
+
+    fn execute(context: &mut Transaction<'_>, name: String) -> Result<Self::Output> {
+        if !crate::config::valid_repository_component(&name) {
+            return Err(Error::Invalid("invalid ruleset repository"));
+        }
+        let mut protections = Vec::new();
+        for entry in load(context)?.rulesets {
+            if let Repositories::Name {
+                include,
+                exclude,
+                protected: true,
+            } = entry.repositories
+                && entry.ruleset.enforcement == Enforcement::Active
+                && matches_name_target(&include, &exclude, &name)?
+            {
+                protections.push(entry.ruleset.bypass_actors);
+            }
+        }
+        Ok(protections)
     }
 }

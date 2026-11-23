@@ -44,6 +44,14 @@ struct Change {
     request_id: Uuid,
 }
 
+#[derive(Debug, thiserror::Error)]
+enum PublicationError {
+    #[error(transparent)]
+    Application(#[from] Error),
+    #[error(transparent)]
+    Lease(#[from] crab_remote::publication::Error),
+}
+
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .route("/api/repositories/{repository}/name", get(read).put(write))
@@ -96,16 +104,76 @@ async fn write(
     Path(repository): Path<Uuid>,
     Json(change): Json<Change>,
 ) -> Result<Json<Name>> {
-    let (catalog, document) = authorized(&server, &principal, repository).await?;
-    let current = document
+    let (_, document) = authorized(&server, &principal, repository).await?;
+    let organization = document
         .repository_by_id(repository)
-        .ok_or(Error::NotFound)?;
+        .ok_or(Error::NotFound)?
+        .organization_id();
     let active = server
         .repositories
         .by_id(repository)
         .ok_or(Error::NotFound)?;
-    if change.name != current.name && settings::load_lifecycle(&server, &active).await?.archived {
-        return Err(Error::Archived);
+    let (send, reply) = tokio::sync::oneshot::channel();
+    let tracker = server.receives.clone();
+    tracker.spawn(async move {
+        let scope = match organization {
+            Some(id) => settings::RulesetScope::Organization(id),
+            None => settings::RulesetScope::Repository(&active),
+        };
+        let result = settings::with_ruleset_lease(&server, scope, &server.cancellation, |cancel| {
+            let server = server.as_ref();
+            async move {
+                commit(server, &principal, repository, organization, change, cancel)
+                    .await
+                    .map_err(PublicationError::Application)
+            }
+        })
+        .await
+        .map_err(|error| match error {
+            PublicationError::Application(error) => error,
+            PublicationError::Lease(error) => Error::RepositoryNamePublication(error),
+        });
+        let _ = send.send(result);
+    });
+    Ok(Json(reply.await.map_err(|_| {
+        Error::RepositoryNamePublication(crab_remote::publication::Error::Cancelled)
+    })??))
+}
+
+async fn commit(
+    server: &Server,
+    principal: &Principal,
+    repository: Uuid,
+    organization: Option<Uuid>,
+    change: Change,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<Name> {
+    let (catalog, document) = authorized(server, principal, repository).await?;
+    let current = document
+        .repository_by_id(repository)
+        .ok_or(Error::NotFound)?;
+    if current.organization_id() != organization {
+        return Err(Error::PageChanged);
+    }
+    if change.name != current.name {
+        if change.version != current.name_version() {
+            return Err(Error::PageChanged);
+        }
+        let active = server
+            .repositories
+            .by_id(repository)
+            .ok_or(Error::NotFound)?;
+        if settings::load_lifecycle(server, &active).await?.archived {
+            return Err(Error::Archived);
+        }
+        settings::check_rename(server, current, app::account(principal)?).await?;
+    }
+    // The policy and the catalog write use the same current source address.
+    // Receipt replay does not change that address and survives later policies.
+    if cancel.is_cancelled() {
+        return Err(Error::RepositoryNamePublication(
+            crab_remote::publication::Error::Cancelled,
+        ));
     }
     let published = catalog
         .rename_repository(
@@ -132,7 +200,7 @@ async fn write(
         .install_catalog(published)
         .await
         .map_err(|error| Error::RepositorySetup(Box::new(error)))?;
-    Ok(Json(result))
+    Ok(result)
 }
 
 #[cfg(test)]

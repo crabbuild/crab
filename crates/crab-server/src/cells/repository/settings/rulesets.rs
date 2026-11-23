@@ -97,6 +97,23 @@ impl<'a> BypassContext<'a> {
         }
         self
     }
+
+    pub(crate) fn allows(self, grants: &[BypassGrant], pull: bool) -> bool {
+        use crate::RepositoryAccess::{Admin, Write};
+
+        if !self.role.is_some_and(|role| role >= Write) {
+            return false;
+        }
+        grants.iter().any(|grant| {
+            (pull || grant.mode == BypassMode::Always)
+                && match grant.actor {
+                    BypassActor::RepositoryAdmin => self.role == Some(Admin),
+                    BypassActor::RepositoryWrite => self.role == Some(Write),
+                    BypassActor::OrganizationOwner => self.organization_owner,
+                    BypassActor::Team { id } => self.teams.contains(&id),
+                }
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -141,20 +158,7 @@ impl Ruleset {
     }
 
     pub(crate) fn allows_bypass(&self, context: BypassContext<'_>, pull: bool) -> bool {
-        use crate::RepositoryAccess::{Admin, Write};
-
-        if !context.role.is_some_and(|role| role >= Write) {
-            return false;
-        }
-        self.bypass_actors.iter().any(|grant| {
-            (pull || grant.mode == BypassMode::Always)
-                && match grant.actor {
-                    BypassActor::RepositoryAdmin => context.role == Some(Admin),
-                    BypassActor::RepositoryWrite => context.role == Some(Write),
-                    BypassActor::OrganizationOwner => context.organization_owner,
-                    BypassActor::Team { id } => context.teams.contains(&id),
-                }
-        })
+        context.allows(&self.bypass_actors, pull)
     }
 
     pub(crate) fn violation(

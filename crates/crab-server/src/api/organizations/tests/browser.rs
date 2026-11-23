@@ -1124,6 +1124,65 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
         h.json(&format!("{org}/rulesets"), &alice).await["rulesets"][0]["repositories"]["conditions"],
         json!([{"system":"fork","value":true}])
     );
+    let click = async |name: &str| {
+        browser
+            .run(&["find", "role", "button", "click", "--name", name, "--exact"])
+            .await;
+    };
+    click("New ruleset").await;
+    browser
+        .run(&["find", "label", "Name", "fill", "Library names", "--exact"])
+        .await;
+    browser
+        .run(&["select", "select:has(option[value='properties'])", "name"])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "label",
+            "Include repository patterns",
+            "fill",
+            "library",
+        ])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "checkbox",
+            "click",
+            "--name",
+            "Prevent renaming of target repositories",
+            "--exact",
+        ])
+        .await;
+    click("Save ruleset").await;
+    browser
+        .run(&["wait", "--text", "Renaming restricted"])
+        .await;
+    browser
+        .run(&["open", &format!("{}/{owner}/library/settings", h.origin)])
+        .await;
+    browser.run(&["wait", "--text", "Rename repository"]).await;
+    click("Rename repository").await;
+    browser.run(&["wait", "input[name=repository-name]"]).await;
+    browser
+        .run(&["fill", "input[name=repository-name]", "unregulated"])
+        .await;
+    click("Save name").await;
+    browser
+        .run(&[
+            "wait",
+            "--text",
+            "An organization ruleset protects this repository name",
+        ])
+        .await;
+    let repo_id = repository["id"].as_str().unwrap();
+    assert_eq!(
+        h.json(&format!("/api/repositories/{repo_id}/name"), &alice)
+            .await["name"],
+        "library"
+    );
 
     let team_settings = format!(
         "{}/-/organizations/{organization}?tab=teams&team={team}&view=settings",

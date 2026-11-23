@@ -221,6 +221,56 @@ pub(crate) async fn inherited_rulesets(server: &Server, repo: &Repository) -> Re
     )
 }
 
+pub(crate) async fn check_rename(
+    server: &Server,
+    record: &crate::catalog::CatalogRecord,
+    administrator: crate::cells::directory::IdentityKey,
+) -> Result<()> {
+    use crate::cells::{Address, organization::rulesets::NameProtection};
+
+    let Some(organization) = record.organization_id() else {
+        return Ok(());
+    };
+    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    let protections = crate::app::query_output(
+        cells
+            .query::<NameProtection>(
+                Address::Organization(organization),
+                None,
+                record.name.clone(),
+            )
+            .await,
+    )?;
+    if protections.is_empty() {
+        return Ok(());
+    }
+    if protections.iter().any(Vec::is_empty) {
+        return Err(Error::RepositoryNameProtected);
+    }
+    let grant = super::access::organization_grants_for_identity(
+        server,
+        administrator,
+        [(organization, true)].into(),
+    )
+    .await?
+    .remove(&organization)
+    .unwrap_or_default();
+    let context = BypassContext {
+        role: Some(crate::RepositoryAccess::Admin),
+        organization_owner: grant.owner,
+        teams: &grant.bypass_teams,
+        organization_teams: &grant.bypass_teams,
+    };
+    if protections
+        .iter()
+        .all(|grants| context.allows(grants, false))
+    {
+        Ok(())
+    } else {
+        Err(Error::RepositoryNameProtected)
+    }
+}
+
 pub(crate) async fn load_ref_policy(server: &Server, repo: &Repository) -> Result<RefPolicy> {
     let routed = crate::app::repository_cell(server, repo)?;
     let ((classic, rulesets), inherited) = tokio::try_join!(

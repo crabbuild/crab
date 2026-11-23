@@ -336,6 +336,7 @@ pub(in crate::cells) fn authorize(
             | RepositoryTeamNames::ID
             | CodeOwnerTeams::ID
             | rulesets::Applicable::ID
+            | rulesets::NameProtection::ID
             | properties::GetValues::ID
             | properties::search::MatchRepositories::ID
             | properties::search::Fields::ID
@@ -446,6 +447,7 @@ pub(in crate::cells) fn dispatch_read(
         }
         rulesets::Get::ID => invoke_read::<rulesets::Get>(context, input),
         rulesets::Applicable::ID => invoke_read::<rulesets::Applicable>(context, input),
+        rulesets::NameProtection::ID => invoke_read::<rulesets::NameProtection>(context, input),
         properties::GetSchema::ID => invoke_read::<properties::GetSchema>(context, input),
         properties::GetValues::ID => invoke_read::<properties::GetValues>(context, input),
         properties::search::MatchRepositories::ID => {

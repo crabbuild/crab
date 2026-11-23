@@ -332,7 +332,9 @@ and session migration paths are supported.
   after merging these routers. Shared request policy remains in `app.rs`.
 - `catalog/rename.rs` owns the versioned name and redirect transaction.
   `api/repository_name/` binds the administrative action to the durable
-  repository UUID. `server/repository_route.rs` rechecks current authority
+  repository UUID. Renames and name-changing transfers check the current
+  name's active rules under the source policy lease before catalog publication.
+  `server/repository_route.rs` rechecks current authority
   before serving historical addresses from the shared catalog.
 - `api/catalog_browse/` ranks and pages catalog matches. Reuse `api/catalog.rs`
   for current direct, group, organization, and fork grants. Browse reads

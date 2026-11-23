@@ -220,6 +220,10 @@ test("owners target repositories and repository admins see inherited rules as re
   await page.getByLabel("Repository targeting").selectOption("name");
   await page.getByLabel("Include repository patterns").fill("project*");
   await page.getByLabel("Exclude repository patterns").fill("project-sandbox");
+  const preventRenaming = page.getByRole("checkbox", {
+    name: "Prevent renaming of target repositories",
+  });
+  await preventRenaming.check();
   await page.getByRole("button", { name: "Save ruleset" }).click();
   await expect(
     page.getByText("Repository names matching", { exact: false }),
@@ -228,7 +232,12 @@ test("owners target repositories and repository admins see inherited rules as re
     kind: "name",
     include: ["project*"],
     exclude: ["project-sandbox"],
+    protected: true,
   });
+  await expect(page.getByText(/Renaming restricted/)).toBeVisible();
+  await page.getByRole("button", { name: "Edit Release policy" }).click();
+  await expect(preventRenaming).toBeChecked();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
 
   await page.getByRole("link", { name: "Properties", exact: true }).click();
   await page.getByRole("button", { name: "New property" }).click();

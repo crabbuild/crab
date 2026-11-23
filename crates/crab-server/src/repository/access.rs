@@ -94,6 +94,14 @@ pub(crate) async fn organization_grants(
         issuer: identity.issuer,
         subject: identity.subject,
     };
+    organization_grants_for_identity(server, key, organizations).await
+}
+
+pub(crate) async fn organization_grants_for_identity(
+    server: &Server,
+    key: IdentityKey,
+    organizations: HashMap<Uuid, bool>,
+) -> Result<HashMap<Uuid, ActorTeams>> {
     let Some(actor) = actor_id(server, key).await? else {
         return Ok(HashMap::new());
     };

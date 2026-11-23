@@ -66,6 +66,10 @@ pub(crate) enum Error {
     RepositoryChanged,
     #[error("The repository name or creation request is already in use")]
     RepositoryNameUnavailable,
+    #[error("An organization ruleset protects this repository name")]
+    RepositoryNameProtected,
+    #[error("Repository name changes are temporarily unavailable")]
+    RepositoryNamePublication(#[source] crab_remote::publication::Error),
     #[error("Repository creation failed")]
     RepositorySetup(#[source] Box<crate::Error>),
     #[error("This list changed; reload from the first page")]
@@ -260,6 +264,7 @@ impl IntoResponse for Error {
                     | Self::Membership(_)
                     | Self::IdentityAuthority(_)
                     | Self::TransferPublication(_)
+                    | Self::RepositoryNamePublication(_)
                     | Self::Merge(_)
                     | Self::MergeObject(_)
                     | Self::Release(_)
@@ -622,6 +627,16 @@ impl IntoResponse for Error {
                 "repository_name_unavailable",
                 "The repository name or creation request is already in use",
             ),
+            Self::RepositoryNameProtected => (
+                StatusCode::FORBIDDEN,
+                "repository_name_protected",
+                "An organization ruleset protects this repository name",
+            ),
+            Self::RepositoryNamePublication(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "repository_name_busy",
+                "Repository name changes are temporarily unavailable. Retry the same submission shortly",
+            ),
             Self::RepositorySetup(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "repository_setup",
@@ -964,6 +979,11 @@ pub(crate) async fn membership(
             crate::catalog::CatalogError::NotFound => Error::NotFound,
             error => Error::Membership(Box::new(error)),
         })?;
+    // Catalog lookup is case-insensitive. A pinned route from before a
+    // case-only rename must not authorize rules against the old spelling.
+    if snapshot.name != repo.config.name {
+        return Err(Error::NotFound);
+    }
     let current = membership_snapshot(server, principal, repo, snapshot).await?;
     if !current.principal.can_read(repo.id) {
         return Err(Error::NotFound);

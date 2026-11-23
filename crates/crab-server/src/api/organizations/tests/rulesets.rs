@@ -54,6 +54,150 @@ async fn remote(h: &Harness, alice: &str, owner: &str, name: &str) -> url::Url {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn protected_repository_names_follow_current_targets_and_requester_bypass() {
+    let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+    let h = Harness::new_with_store_and_prefix(false, false, store, "org-rename-policy").await;
+    h.initialize_directory().await;
+    let (organization, _, _) = crate::test_support::http::organizations::bootstrap(&h).await;
+    let alice = h.login().await;
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    h.write(
+        Method::POST,
+        "/api/profile",
+        &bob,
+        json!({"request_id":Uuid::now_v7(),"handle":"bob","name":"Bob"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let org = format!("/api/organizations/{organization}");
+    let rules = format!("{org}/rulesets");
+    let (release, owner) = create(&h, &org, &alice, "release-app").await;
+    let (sandbox, _) = create(&h, &org, &alice, "release-sandbox").await;
+    let release_name = format!("/api/repositories/{release}/name");
+    let sandbox_name = format!("/api/repositories/{sandbox}/name");
+    let mut owner_rule = rule(Uuid::now_v7(), "Release policy", "branch", json!(["main"]));
+    owner_rule["bypass_actors"] = json!([{"actor":{"kind":"organization_owner"},"mode":"always"}]);
+    let mut pr_only = rule(Uuid::now_v7(), "Review policy", "branch", json!(["main"]));
+    pr_only["bypass_actors"] =
+        json!([{"actor":{"kind":"organization_owner"},"mode":"pull_request"}]);
+    let targets = json!({
+        "kind":"name","include":["release-*"],"exclude":["release-sandbox"],"protected":true
+    });
+    let rulesets = |pr_only: &Value| {
+        json!([
+            {"ruleset":owner_rule,"repositories":targets},
+            {"ruleset":pr_only,"repositories":targets}
+        ])
+    };
+    h.write(
+        Method::PUT,
+        &rules,
+        &alice,
+        json!({"expected_version":0,"rulesets":rulesets(&pr_only)}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert_eq!(
+        h.json(&rules, &alice).await["rulesets"][0]["repositories"],
+        targets
+    );
+
+    let change = |name: &str| json!({"request_id":Uuid::now_v7(),"version":0,"name":name});
+    for name in ["unregulated", "release-other", "Release-app"] {
+        let rejected = h
+            .write(Method::PUT, &release_name, &alice, change(name))
+            .await;
+        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            rejected.json::<Value>().await.unwrap()["error"]["code"],
+            "repository_name_protected"
+        );
+    }
+    let original = h.json(&release_name, &alice).await;
+    assert_eq!(
+        original,
+        json!({"id":release,"owner":owner,"name":"release-app","version":0})
+    );
+    h.write(Method::PUT, &release_name, &alice, change("release-app"))
+        .await
+        .error_for_status()
+        .unwrap();
+    let enter = change("release-preview");
+    for _ in 0..2 {
+        let renamed = h
+            .write(Method::PUT, &sandbox_name, &alice, enter.clone())
+            .await
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(
+            renamed,
+            json!({"id":sandbox,"owner":owner,"name":"release-preview","version":1})
+        );
+    }
+
+    let offer = h
+        .write(
+            Method::POST,
+            &format!("/api/repositories/{release}/transfer"),
+            &alice,
+            json!({
+                "request_id":Uuid::now_v7(),"version":0,"name":"unregulated",
+                "recipient":{"kind":"account","handle":"bob"}
+            }),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    let transfer = format!(
+        "/api/repository-transfers/{}",
+        offer["id"].as_str().unwrap()
+    );
+    let accept = || h.write(Method::PUT, &transfer, &bob, json!({"decision":"accept"}));
+    let rejected = accept().await;
+    assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        rejected.json::<Value>().await.unwrap()["error"]["code"],
+        "repository_name_protected"
+    );
+    assert_eq!(h.json(&release_name, &alice).await, original);
+    assert_eq!(h.json(&transfer, &bob).await["state"], "pending");
+
+    pr_only["enforcement"] = json!("disabled");
+    h.write(
+        Method::PUT,
+        &rules,
+        &alice,
+        json!({"expected_version":1,"rulesets":rulesets(&pr_only)}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    // The accepting account is not a source owner. The source requester's
+    // live Always grant now satisfies every matching active rule.
+    drop(accept().await.error_for_status().unwrap());
+    let accepted: Value = accept()
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(accepted["state"], "accepted");
+    assert_eq!(accepted["to"]["name"], "unregulated");
+    assert_eq!(h.json(&release_name, &bob).await["id"], json!(release));
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn inherited_rules_follow_repository_targets_and_keep_bypass_sources_distinct() {
     let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
     let h = Harness::new_with_store_and_prefix(false, false, store, "org-rulesets").await;

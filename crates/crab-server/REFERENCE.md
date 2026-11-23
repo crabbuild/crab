@@ -801,6 +801,10 @@ the captured `version`, and a UUID `request_id` with `PUT` on the same path.
 Use the same input and request ID to recover a lost response. The current
 name version prevents a stale submission from overwriting a newer rename.
 Archived repositories must be unarchived before renaming.
+If an active organization name rule protects the current name, renaming
+returns HTTP 403 with `repository_name_protected` unless the administrator
+has an Always bypass for every matching protection. A lost successful response
+can still be recovered if the new name becomes protected.
 
 Upgrade serving replicas together before the first rename or transfer. The
 shared catalog stores the revision and former owner/name pairs.
@@ -819,6 +823,8 @@ pending offer. The recipient can
 also decline it. Crab rechecks the requester's authority and destination access
 at acceptance. Archived repositories and repositories in a private fork network
 are ineligible for transfer.
+If the offer changes a protected repository name, acceptance also checks
+the source requester's current ruleset bypass grants.
 
 Acceptance retains the repository UUID, storage placement, Git history,
 collaboration records, and direct collaborators. Former organization team and
@@ -1181,6 +1187,11 @@ on the same route. Each entry contains a `ruleset` and `repositories`. The
 repository selector is `{"kind":"all"}`, `{"kind":"selected","ids":[...]}`,
 `{"kind":"name","include":[...],"exclude":[...]}`, or
 `{"kind":"properties","conditions":[{"property":"<uuid>","value":true}]}`.
+For name targeting, enable **Prevent renaming of target repositories** or set
+`protected: true` on the name selector. Active rules enforce this against
+the current name at catalog publication, including transfers to a different
+name. Each matching protection requires its own Always bypass. Upgrade all
+serving peers before enabling this option.
 Property conditions use all-match semantics. A multi-select condition tests
 for one selected value. An `exclude: true` condition matches when the value is
 absent or different. A stale write returns HTTP 409.

@@ -19,7 +19,7 @@ const systemNames = { fork: "Repository type", name: "Repository name" };
 export type RepositoryTarget =
   | { kind: "all" }
   | { kind: "selected"; ids: string[] }
-  | { kind: "name"; include: string[]; exclude: string[] }
+  | { kind: "name"; include: string[]; exclude: string[]; protected?: boolean }
   | { kind: "properties"; conditions: Condition[] };
 
 export const allRepositories = { kind: "all" } satisfies RepositoryTarget;
@@ -51,6 +51,7 @@ export function RepositoryTargetSummary({
               · Exclude <code>{target.exclude.join(", ")}</code>
             </>
           )}
+          {target.protected && <> · Renaming restricted</>}
         </p>
       );
     case "properties":
@@ -168,6 +169,19 @@ export function RepositoryTargetEditor({
                 onChange({ ...target, exclude: lines(event.target.value) });
               }}
             />
+          </label>
+          <label className="flex items-center gap-2 sm:col-span-2">
+            <input
+              type="checkbox"
+              checked={!!target.protected}
+              onChange={(event) =>
+                onChange({
+                  ...target,
+                  protected: event.target.checked || undefined,
+                })
+              }
+            />
+            Prevent renaming of target repositories
           </label>
         </div>
       )}
