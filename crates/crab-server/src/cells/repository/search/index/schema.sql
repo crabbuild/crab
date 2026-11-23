@@ -178,6 +178,13 @@ CREATE TRIGGER IF NOT EXISTS discussion_reviewer_delete AFTER DELETE ON discussi
     UPDATE discussion_index_revision SET revision = revision + 1 WHERE singleton = 1;
 END;
 
+CREATE TABLE IF NOT EXISTS discussion_index_team_requests (
+    document INTEGER NOT NULL REFERENCES discussion_index(rowid) ON DELETE CASCADE,
+    team TEXT NOT NULL CHECK (length(team) = 36),
+    PRIMARY KEY (document, team),
+    CHECK (document % 2 = 1)
+) STRICT, WITHOUT ROWID;
+
 CREATE TABLE IF NOT EXISTS discussion_index_pull_sources (
     document INTEGER PRIMARY KEY REFERENCES discussion_index(rowid) ON DELETE CASCADE,
     base_ref TEXT NOT NULL,

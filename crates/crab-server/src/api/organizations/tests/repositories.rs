@@ -768,6 +768,20 @@ async fn repository_team_access_follows_current_membership_and_private_team_visi
             .error_for_status()
             .unwrap();
     }
+    let search = |surface: &str, query: &str| {
+        let encoded = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("q", query)
+            .finish();
+        format!("{repo}/{surface}?{encoded}")
+    };
+    let qualifier = format!("team-review-requested:{owner}/engineering");
+    let mine = search("pulls", "is:open review-requested:@me");
+    let named = search("issues", &format!("is:pr ({qualifier} OR label:missing)"));
+    assert_eq!(h.json(&named, &bob).await["items"][0]["number"], 1);
+    assert_eq!(h.json(&mine, &bob).await["matching"], 1);
+    let direct = search("pulls", "is:open user-review-requested:@me");
+    assert_eq!(h.json(&direct, &bob).await["matching"], 0);
+
     h.deliver_notifications(owner, "library").await;
     let notified = h.json(&inbox, &bob).await;
     assert_eq!(notified["items"].as_array().unwrap().len(), 1);
@@ -798,6 +812,8 @@ async fn repository_team_access_follows_current_membership_and_private_team_visi
         h.json(&pull, &alice).await["merge_requirements"]["approvals"],
         1
     );
+    assert_eq!(h.json(&named, &bob).await["matching"], 0);
+    assert_eq!(h.json(&mine, &bob).await["matching"], 0);
     let reviewed = h.json(&reviewers, &alice).await;
     assert_eq!(
         reviewed["teams"][0]["state"],
@@ -892,6 +908,18 @@ async fn repository_team_access_follows_current_membership_and_private_team_visi
         .await
         .unwrap();
     assert_eq!(bob_teams.status(), StatusCode::NOT_FOUND);
+    // Bob can read the pull via a direct grant but cannot filter by the
+    // secret team, even when the exact team name is already known.
+    assert_eq!(h.json(&named, &alice).await["matching"], 1);
+    assert_eq!(h.json(&named, &bob).await["matching"], 0);
+    assert_eq!(h.json(&mine, &bob).await["matching"], 0);
+    let completion =
+        format!("{repo}/discussion-search?query=team-review-requested%3Aeng&cursor=25");
+    assert_eq!(
+        h.json(&completion, &alice).await["items"][0]["description"],
+        "Engineering"
+    );
+    assert_eq!(h.json(&completion, &bob).await["items"], json!([]));
     let bob_reviewers = h.json(&reviewers, &bob).await;
     assert_eq!(bob_reviewers["teams"], json!([]));
     assert_eq!(
