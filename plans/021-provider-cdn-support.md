@@ -319,6 +319,8 @@ LFS streams and file-backed reads can split an authenticated object into
 requests within the qualified range size and the reader's buffer limit. When
 ranges are unavailable, an admitted LFS object of up to 8 MiB can use one
 whole-object GET. Both paths verify the complete SHA-256 digest.
+CDN-aware LFS streams recheck the captured grant before releasing buffered
+bytes, including queued output from the service's disk cache.
 Complete xorb reads use those same bounded batches when the object is
 admitted for ranges and exceeds the full-GET profile. Verify the assembled
 xorb before returning any decoded chunks.

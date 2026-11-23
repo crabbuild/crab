@@ -383,6 +383,46 @@ async fn cdn_full_only_policy_serves_streams_and_files_with_whole_gets() {
 }
 
 #[tokio::test]
+async fn cdn_stream_denies_buffered_bytes_after_grant_loss() {
+    use std::sync::atomic::AtomicBool;
+
+    struct Grant(AtomicBool);
+
+    #[async_trait]
+    impl crab_storage::ReadAuthorization for Grant {
+        async fn check(&self) -> crab_storage::Result<()> {
+            if self.0.load(Ordering::Relaxed) {
+                Ok(())
+            } else {
+                Err(StorageError::Forbidden {
+                    path: "expired fixture grant".into(),
+                })
+            }
+        }
+    }
+
+    let (_, origin, oid) = fixture(Fault::None).await;
+    let response = edge_partial(0..8, 8, Bytes::from_static(b"verified"));
+    let (lfs, edge) = edge_fixture(origin.clone(), vec![response], None).await;
+    let grant = Arc::new(Grant(AtomicBool::new(true)));
+    let store = lfs
+        .store
+        .with_read_authorization(grant.clone(), "stream")
+        .unwrap();
+    let lfs = LfsObjectStore::new(store, "stream");
+    let (_, mut body) = lfs.stream_content(&oid, 8, None, None).await.unwrap();
+    grant.0.store(false, Ordering::Relaxed);
+    assert!(matches!(
+        body.try_next().await,
+        Err(LfsError::Storage {
+            source: StorageError::ReadRejected { .. },
+        })
+    ));
+    assert_eq!(origin.reads.load(Ordering::Relaxed), 0);
+    edge.await.unwrap();
+}
+
+#[tokio::test]
 async fn cdn_origin_restart_respects_deadline_and_drains_partial_file() {
     use crab_storage::cdn::{CdnAccess, CdnRoute, CdnTransport};
     use std::time::Duration;

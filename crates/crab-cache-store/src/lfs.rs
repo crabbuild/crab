@@ -8,7 +8,7 @@ use crab_cache::{
     local_cache::{LfsCacheFile, LfsCacheFill},
 };
 use crab_lfs::{LfsByteStream, LfsError, LfsObjectStore, LfsReadCache, LfsReadSession, Result};
-use crab_storage::cdn::observe_service_lfs_cache;
+use crab_storage::{Store, cdn::observe_service_lfs_cache};
 use futures_util::{StreamExt as _, stream};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -48,12 +48,13 @@ impl LfsPayloadCache {
         let Some(namespace) = namespace else {
             return lfs.stream_content(oid, size, range, None).await;
         };
+        store.check_cached_read(&path).await?;
         let cache = Arc::new(self.root.for_authorized_reads(&namespace));
         match cache.open_lfs_file(oid, size).await {
             Ok(Some(source)) => {
                 let (ready, selected) = oneshot::channel();
                 let (send, receive) = mpsc::channel(1);
-                let store = store.clone();
+                let observed_store = store.clone();
                 let hit_path = path.clone();
                 tokio::spawn(deliver_cached(
                     source,
@@ -64,11 +65,11 @@ impl LfsPayloadCache {
                     ready,
                     move |source| {
                         observe_service_lfs_cache(&hit_path, || source.root_fingerprint().ok());
-                        store.observe_verified_lfs_cache_hit(&hit_path, size);
+                        observed_store.observe_verified_lfs_cache_hit(&hit_path, size);
                     },
                 ));
                 if selected.await.is_ok() {
-                    return Ok((0..size, receiver_stream(receive)));
+                    return Ok((0..size, receiver_stream(receive, store.clone())));
                 }
             }
             Ok(None) => {}
@@ -80,7 +81,7 @@ impl LfsPayloadCache {
                 observe_service_lfs_cache(&path, || fill.root_fingerprint().ok());
                 let (send, receive) = mpsc::channel(1);
                 tokio::spawn(retain(body, fill, size, send));
-                receiver_stream(receive)
+                receiver_stream(receive, store.clone())
             }
             Ok(None) => body,
             Err(error) => {
@@ -92,9 +93,14 @@ impl LfsPayloadCache {
     }
 }
 
-fn receiver_stream(receive: mpsc::Receiver<Result<Bytes>>) -> LfsByteStream {
-    stream::unfold(receive, |mut receive| async move {
-        receive.recv().await.map(|bytes| (bytes, receive))
+fn receiver_stream(receive: mpsc::Receiver<Result<Bytes>>, store: Store) -> LfsByteStream {
+    stream::try_unfold((receive, store), |(mut receive, store)| async move {
+        let Some(bytes) = receive.recv().await.transpose()? else {
+            return Ok(None);
+        };
+        // A consumer can resume polling after a cached or edge chunk was queued.
+        store.check_read_authority().await?;
+        Ok(Some((bytes, (receive, store))))
     })
     .boxed()
 }
@@ -207,5 +213,96 @@ async fn abort_fill(fill: Option<LfsCacheFill>) {
         && let Err(error) = fill.abort().await
     {
         tracing::debug!(%error, "LFS cache fill cleanup failed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crab_storage::{
+        ReadAuthorization, StorageError,
+        cdn::{CdnAccess, CdnCredential, CdnCredentials, CdnRoute, CdnTransport},
+    };
+    use futures_util::TryStreamExt as _;
+    use object_store::{memory::InMemory, path::Path};
+    use std::{
+        sync::atomic::{AtomicBool, Ordering},
+        time::Duration,
+    };
+
+    struct Grant(AtomicBool);
+
+    #[async_trait::async_trait]
+    impl ReadAuthorization for Grant {
+        async fn check(&self) -> crab_storage::Result<()> {
+            if self.0.load(Ordering::Relaxed) {
+                Ok(())
+            } else {
+                Err(StorageError::Forbidden {
+                    path: "expired fixture grant".into(),
+                })
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CdnCredentials for Grant {
+        async fn credential(
+            &self,
+            _: &Path,
+            _: Option<u64>,
+        ) -> crab_storage::Result<Option<CdnCredential>> {
+            self.check().await?;
+            Ok(Some(CdnCredential::cookie(1, "viewer=fixture".into())))
+        }
+    }
+
+    #[tokio::test]
+    async fn warm_lfs_cache_denies_lookup_and_buffered_bytes_after_grant_loss() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = Arc::new(LocalCache::new(directory.path().join("cache")));
+        let cache = LfsPayloadCache::new(root.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let transport = CdnTransport::loopback_fixture(listener.local_addr().unwrap()).unwrap();
+        let target = [7; 32];
+        let grant = Arc::new(Grant(AtomicBool::new(true)));
+        let store = Store::new(Arc::new(InMemory::new()))
+            .with_target_identity(target)
+            .with_read_authorization(grant.clone(), "repo")
+            .unwrap()
+            .with_cdn_route(CdnRoute::new(
+                target,
+                "repo".into(),
+                None,
+                CdnAccess::Private(grant.clone()),
+                transport,
+                Duration::from_secs(2),
+            ))
+            .unwrap();
+        let lfs = LfsObjectStore::new(store, "repo");
+        let digest = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let oid =
+            std::array::from_fn(|i| u8::from_str_radix(&digest[i * 2..i * 2 + 2], 16).unwrap());
+        let path = lfs.object_path_for(&oid);
+        let namespace = lfs.store().cdn_lfs_cache_namespace(&path, 3).unwrap();
+        let scoped = Arc::new(root.for_authorized_reads(&namespace));
+        let mut fill = scoped.begin_lfs_fill(&oid, 3).await.unwrap().unwrap();
+        fill.write(b"abc").await.unwrap();
+        fill.commit().await.unwrap();
+
+        let (_, mut body) = cache.stream_content(&lfs, &oid, 3, None).await.unwrap();
+        grant.0.store(false, Ordering::Relaxed);
+        assert!(matches!(
+            body.try_next().await,
+            Err(LfsError::Storage {
+                source: StorageError::ReadRejected { .. },
+            })
+        ));
+        assert!(matches!(
+            cache.stream_content(&lfs, &oid, 3, None).await,
+            Err(LfsError::Storage {
+                source: StorageError::ReadRejected { .. },
+            })
+        ));
     }
 }

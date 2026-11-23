@@ -345,7 +345,7 @@ impl LfsObjectStore {
                     session,
                 ))
                 .await?;
-            return Ok((range, Self::bound_delivery(Arc::new(attempt), stream, None)));
+            return Ok((range, self.bound_delivery(Arc::new(attempt), stream, None)));
         };
         let attempt = Arc::new(attempt);
         let edge = Arc::clone(&attempt);
@@ -363,19 +363,27 @@ impl LfsObjectStore {
         let stream = futures_util::stream::iter([Ok(first)]).chain(tail).boxed();
         // An edge body proves the OID, never the native provider's version.
         let verified = Self::verify_delivery(stream, size, true, oid, session, None);
-        Ok((0..size, Self::bound_delivery(attempt, verified, Some(size))))
+        Ok((0..size, self.bound_delivery(attempt, verified, Some(size))))
     }
 
     fn bound_delivery(
+        &self,
         attempt: Arc<CdnReadAttempt>,
         stream: LfsByteStream,
         edge_size: Option<u64>,
     ) -> LfsByteStream {
         futures_util::stream::try_unfold(
-            (attempt, stream, edge_size),
-            |(attempt, mut stream, mut remaining)| async move {
+            (attempt, stream, edge_size, self.store.clone()),
+            |(attempt, mut stream, mut remaining, store)| async move {
                 let next = attempt
-                    .within_deadline(async { stream.next().await.transpose() })
+                    .within_deadline(async {
+                        let next = stream.next().await.transpose()?;
+                        if next.is_some() {
+                            // A verified edge buffer can outlive the grant that fetched it.
+                            store.check_read_authority().await?;
+                        }
+                        Ok::<_, LfsError>(next)
+                    })
                     .await?;
                 Ok(next.map(|chunk| {
                     if let Some(size) = &mut remaining {
@@ -387,7 +395,7 @@ impl LfsObjectStore {
                             remaining = None;
                         }
                     }
-                    (chunk, (attempt, stream, remaining))
+                    (chunk, (attempt, stream, remaining, store))
                 }))
             },
         )

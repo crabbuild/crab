@@ -68,8 +68,9 @@ file ownership as other local payloads.
 The optional `lfs` feature composes full CDN-eligible LFS reads with the
 caller's bounded disk cache. Repositories, viewer bindings, and public
 receipts have separate namespaces under the shared budget. Local delivery
-verifies the captured descriptor. Remote delivery retains an object only
-after its complete SHA-256 and size checks.
+verifies the captured descriptor. The cache checks the grant before lookup
+and again before returning queued bytes from disk or a remote fill. Remote
+delivery retains an object only after its complete SHA-256 and size checks.
 
 Catalog replacement also fails closed: a live generation lease prevents
 rebinding, and retained recovery files still prevent rebinding after that lease
