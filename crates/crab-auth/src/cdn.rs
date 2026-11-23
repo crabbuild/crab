@@ -68,6 +68,14 @@ impl CdnViewerGrant {
         SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(self.expires_at))
     }
 
+    /// Schedule renewal up to 15 seconds early, using at most half the remaining lifetime.
+    #[must_use]
+    pub fn refresh_at(&self, captured_at: SystemTime) -> Option<SystemTime> {
+        let expiry = self.expiry()?;
+        let lifetime = expiry.duration_since(captured_at).unwrap_or_default();
+        Some(expiry - Duration::from_secs(15).min(lifetime / 2))
+    }
+
     /// Check the issuer's response against the caller's independently selected deployment.
     pub fn validate_binding(
         &self,

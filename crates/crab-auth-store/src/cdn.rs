@@ -352,6 +352,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_denials_share_a_short_lived_replacement_viewer() {
+        let mut replacement = resolution("https://downloads.example.com");
+        let expires_at = SystemTime::now() + Duration::from_secs(14);
+        replacement.cdn.as_mut().unwrap().expires_at = expires_at
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (credentials, provider) = credentials(Some(replacement));
+        let key = Path::from("org/repo/v2/history/object");
+        let (a, b) = tokio::join!(
+            credentials.credential(&key, Some(0)),
+            credentials.credential(&key, Some(0))
+        );
+        assert!(a.unwrap().is_some());
+        assert!(b.unwrap().is_some());
+        assert_eq!(credentials.0.viewer(None).await.unwrap().0, 1);
+        assert_eq!(provider.refreshes.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
     async fn viewer_refresh_refuses_a_new_deployment() {
         let (credentials, _) = credentials(Some(resolution("https://other.example.com")));
         let key = Path::from("org/repo/v2/history/object");

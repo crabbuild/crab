@@ -30,7 +30,6 @@ pub use view_retention::{ViewReadOperation, ViewRetention, ViewRetentionLease};
 
 /// Refresh window: credentials within 5 minutes of expiry trigger a refresh.
 const REFRESH_WINDOW: Duration = Duration::from_secs(300);
-const CDN_REFRESH_WINDOW: Duration = Duration::from_secs(15);
 const MAX_NEGOTIATED_CREDENTIAL_BYTES: usize = 1024 * 1024;
 
 /// Default retry count for HTTP 5xx errors.
@@ -213,6 +212,7 @@ struct CachedCrabAuthCreds {
     storage_scope: Option<StorageScope>,
     expires_at: SystemTime,
     cdn: Option<CdnViewerGrant>,
+    captured_at: SystemTime,
 }
 
 impl CrabAuthProvider {
@@ -292,25 +292,18 @@ impl CrabAuthProvider {
 
     /// Checks if cached credentials are still valid.
     fn is_cached_valid(cached: Option<&CachedCrabAuthCreds>) -> bool {
-        match cached {
-            Some(c) => {
-                let now = SystemTime::now();
-                match c.expires_at.duration_since(now) {
-                    Ok(remaining) => {
-                        remaining > REFRESH_WINDOW
-                            && c.cdn.as_ref().is_none_or(|grant| {
-                                grant.expiry().is_some_and(|expiry| {
-                                    expiry
-                                        .duration_since(now)
-                                        .is_ok_and(|ttl| ttl > CDN_REFRESH_WINDOW)
-                                })
-                            })
-                    }
-                    Err(_) => false,
-                }
-            }
-            None => false,
-        }
+        let now = SystemTime::now();
+        cached.is_some_and(|cached| {
+            cached
+                .expires_at
+                .duration_since(now)
+                .is_ok_and(|ttl| ttl > REFRESH_WINDOW)
+                && cached.cdn.as_ref().is_none_or(|grant| {
+                    grant
+                        .refresh_at(cached.captured_at)
+                        .is_some_and(|refresh_at| now < refresh_at)
+                })
+        })
     }
 
     fn cached_matches(
@@ -845,6 +838,7 @@ impl CredentialProvider for CrabAuthProvider {
                 "bound Crab Auth reads require a read-only authorization".into(),
             ));
         }
+        let captured_at = SystemTime::now();
         if let Some(grant) = &auth_resp.cdn {
             if approval_pins.is_none() {
                 return Err(invalid_negotiated_response());
@@ -871,7 +865,7 @@ impl CredentialProvider for CrabAuthProvider {
                 prefix,
                 auth_resp.storage_scope.as_ref(),
                 parent,
-                SystemTime::now(),
+                captured_at,
             )?;
         }
         let expires_at = expiry.unwrap_or_else(|| {
@@ -901,6 +895,7 @@ impl CredentialProvider for CrabAuthProvider {
             storage_scope: storage_scope.clone(),
             expires_at,
             cdn: cdn.clone(),
+            captured_at,
         });
         Ok(CredentialResolution {
             credentials: creds,
@@ -1065,6 +1060,7 @@ mod tests {
             expires_at: SystemTime::now() + Duration::from_secs(240),
             storage_scope: None,
             cdn: None,
+            captured_at: SystemTime::now(),
         });
         assert!(!CrabAuthProvider::is_cached_valid(cached.as_ref()));
     }
@@ -1082,8 +1078,45 @@ mod tests {
             expires_at: SystemTime::now() + Duration::from_secs(1800),
             storage_scope: None,
             cdn: None,
+            captured_at: SystemTime::now(),
         });
         assert!(CrabAuthProvider::is_cached_valid(cached.as_ref()));
+    }
+
+    #[test]
+    fn credentials_cache_accepts_a_fresh_short_lived_viewer() {
+        let now = SystemTime::now();
+        let expires_at = now + Duration::from_secs(1800);
+        let viewer_expiry = (now + Duration::from_secs(14))
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let cdn = serde_json::from_value(serde_json::json!({
+            "provider": "cloud_cdn",
+            "origin": "gs://bucket",
+            "base_url": "https://downloads.example.com",
+            "repo_prefix": "repo",
+            "global_prefix": null,
+            "expires_at": viewer_expiry,
+            "grants": [{"prefix": "repo/v2/history/", "credential": "fixture"}],
+        }))
+        .unwrap();
+        let mut cached = CachedCrabAuthCreds {
+            bucket: "bucket".into(),
+            source_prefix: "repo".into(),
+            operation: "fetch".into(),
+            creds: CloudCredentials::Gcp {
+                access_token: "fixture".into(),
+                expires_at,
+            },
+            expires_at,
+            storage_scope: None,
+            cdn: Some(cdn),
+            captured_at: now,
+        };
+        assert!(CrabAuthProvider::is_cached_valid(Some(&cached)));
+        cached.captured_at = now - Duration::from_secs(16);
+        assert!(!CrabAuthProvider::is_cached_valid(Some(&cached)));
     }
 
     #[test]
@@ -1099,6 +1132,7 @@ mod tests {
             expires_at: SystemTime::now() + Duration::from_secs(1800),
             storage_scope: None,
             cdn: None,
+            captured_at: SystemTime::now(),
         };
 
         assert!(CrabAuthProvider::cached_matches(
@@ -1137,6 +1171,7 @@ mod tests {
                 scope_hash,
             }),
             cdn: None,
+            captured_at: SystemTime::now(),
         };
 
         assert!(!CrabAuthProvider::cached_matches(

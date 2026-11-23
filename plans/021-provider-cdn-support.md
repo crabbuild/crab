@@ -286,6 +286,8 @@ options. Managed authority comes from authenticated discovery and grants.
   generation*. Share the in-flight result, including failure, for the lifetime
   of the operation. A cancelled waiter must release its wait without reopening
   the rejected generation. Revalidate before later ranges.
+  Start proactive viewer renewal at most 15 seconds before expiry and use at
+  most half the remaining lifetime at capture for short-lived grants.
   Expiry/key rotation with identical scope can resume at a verification boundary.
   Changed scope or placement cancels the operation and requires fresh resolution.
   The existing refresh path and cache policy live in

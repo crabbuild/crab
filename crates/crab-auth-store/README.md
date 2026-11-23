@@ -70,6 +70,8 @@ refreshes share the same issuer request and result, including when a waiter
 cancels. A replacement must preserve the provider target, physical view,
 deployment and permissions. If refresh fails, the bound read store requires
 fresh resolution. The same origin refresh works without a viewer grant.
+Viewer renewal starts up to 15 seconds before expiry, using at most half the
+grant's remaining lifetime at capture. This leaves time to use short grants.
 Online cache readers share the bound store's renewal check. A warm cache can
 reuse verified bytes while its grant is current and retains the captured view.
 

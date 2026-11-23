@@ -55,7 +55,7 @@ pub(crate) struct ReadAuthority {
     pub(crate) scope: Option<StorageScope>,
     origin: Option<String>,
     pub(crate) viewer: Option<CdnViewerGrant>,
-    expires_at: SystemTime,
+    refresh_at: SystemTime,
 }
 
 impl ReadAuthority {
@@ -65,7 +65,8 @@ impl ReadAuthority {
         viewer: Option<CdnViewerGrant>,
         expires_at: SystemTime,
     ) -> Result<Self> {
-        if expires_at <= SystemTime::now() {
+        let now = SystemTime::now();
+        if expires_at <= now {
             return Err(StorageError::AuthExpired {
                 path: "read grant".into(),
             }
@@ -81,11 +82,18 @@ impl ReadAuthority {
         {
             return Err(crate::cdn::scope_changed().into());
         }
+        let mut refresh_at = expires_at - Duration::from_secs(15);
+        if let Some(viewer) = &viewer {
+            let viewer_refresh = viewer
+                .refresh_at(now)
+                .ok_or_else(crate::cdn::scope_changed)?;
+            refresh_at = refresh_at.min(viewer_refresh);
+        }
         Ok(Self {
             scope,
             origin: origin.map(str::to_owned),
             viewer,
-            expires_at,
+            refresh_at,
         })
     }
 
@@ -100,15 +108,7 @@ impl ReadAuthority {
     }
 
     fn needs_refresh(&self) -> bool {
-        let now = SystemTime::now();
-        let window = Duration::from_secs(15);
-        self.expires_at
-            .duration_since(now)
-            .map_or(true, |ttl| ttl <= window)
-            || self.viewer.as_ref().is_some_and(|viewer| {
-                now.duration_since(SystemTime::UNIX_EPOCH)
-                    .is_ok_and(|epoch| viewer.expires_at <= (epoch + window).as_secs())
-            })
+        self.refresh_at <= SystemTime::now()
     }
 }
 

@@ -195,8 +195,13 @@ mod tests {
             let mut replacement = grant(repo, "updated-access-id", 120);
             replacement.permissions.reverse();
             if use_cdn {
-                // The earlier viewer expiry rotates the whole authorization.
+                // Model a viewer expiring between grant validation and store
+                // use. Its expiry rotates the still-current native credentials.
                 initial.expires_at += time::Duration::seconds(120);
+                initial.cdn.as_mut().unwrap().expires_at = OffsetDateTime::now_utc()
+                    .unix_timestamp()
+                    .try_into()
+                    .unwrap();
             } else {
                 initial.cdn = None;
                 replacement.cdn = None;
