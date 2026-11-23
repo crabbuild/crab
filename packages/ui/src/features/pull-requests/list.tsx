@@ -24,6 +24,11 @@ export function PullList({
         <h2>Pull requests</h2>
         <div className="flex flex-wrap items-center gap-2">
           <Button variant="outline" asChild>
+            <Link href={repoHref(repo, { view: "pulls", action: "queue" })}>
+              Merge queue
+            </Link>
+          </Button>
+          <Button variant="outline" asChild>
             <Link href={repoHref(repo, { view: "labels" })}>
               <TagIcon data-icon="inline-start" />
               Labels

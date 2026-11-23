@@ -11,6 +11,15 @@ export type SessionMode = "local" | "oidc" | "github";
 export type Session = { authenticated: boolean, mode: SessionMode, user: SessionIdentity | null, csrf: string | null, };
 
 // prettier-ignore
+export type MergeQueueState = "waiting" | "preparing" | "candidate_scheduled" | "publishing";
+
+// prettier-ignore
+export type MergeQueueItem = { pull: number, title: string, request_id: string, head_oid: string, state: MergeQueueState, can_remove: boolean, can_prioritize: boolean, };
+
+// prettier-ignore
+export type MergeQueuePage = { items: Array<MergeQueueItem>, next: string | null, };
+
+// prettier-ignore
 export type BranchProtection = { branch: string, required_approvals: number, required_code_owner_reviews?: boolean, require_conversation_resolution?: boolean, require_up_to_date?: boolean, require_merge_queue?: boolean, required_checks: Array<string>, required_integrations?: Array<string>, };
 
 // prettier-ignore

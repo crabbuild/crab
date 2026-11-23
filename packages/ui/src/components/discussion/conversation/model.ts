@@ -58,6 +58,7 @@ export type Action =
         | "team_review_requested"
         | "team_review_request_cancelled"
         | "code_owner_reviews_requested"
+        | "merge_queue_prioritized"
         | "created"
         | "updated"
         | "closed"

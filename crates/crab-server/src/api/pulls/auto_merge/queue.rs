@@ -19,12 +19,12 @@ pub(super) async fn reconcile(
         .as_ref()
         .ok_or(Error::CellContract("Expected a merge queue entry"))?;
     let grant = app::membership(server, principal, repo).await?;
-    let commit = candidate::queue_commit(server, repo, git, pull, job, (base, head)).await?;
+    let commit = candidate::queue_commit(server, repo, git, pull, job, prospective).await?;
     let report =
         queue_requirements(server, repo, pull, &grant, (base, head), commit.as_deref()).await?;
     if report.checks.is_empty() || !report.satisfied {
         return if state.first {
-            stop(server, repo, pull.number, job.id, Stop::RequirementsChanged).await
+            stop_front(server, repo, state, Stop::RequirementsChanged).await
         } else {
             Ok(())
         };
@@ -38,7 +38,8 @@ pub(super) async fn reconcile(
             Some(attempt)
                 if attempt.version == pull.version
                     && attempt.base_oid == base
-                    && attempt.previous_oid == previous =>
+                    && attempt.previous_oid == previous
+                    && attempt.order_revision == state.order_revision =>
             {
                 attempt.clone()
             }
@@ -48,6 +49,7 @@ pub(super) async fn reconcile(
                     version: pull.version,
                     base_oid: base.to_owned(),
                     previous_oid: previous,
+                    order_revision: state.order_revision,
                 };
                 change(
                     server,
@@ -93,10 +95,10 @@ pub(super) async fn reconcile(
         {
             Ok(_) | Err(Error::BranchUpdateChanged) => Ok(()),
             Err(Error::MergeConflict | Error::UnsafeRebase) if state.first => {
-                stop(server, repo, pull.number, job.id, Stop::Conflict).await
+                stop_front(server, repo, state, Stop::Conflict).await
             }
             Err(error) if state.first && path_locked(&error) => {
-                stop(server, repo, pull.number, job.id, Stop::PathLocked).await
+                stop_front(server, repo, state, Stop::PathLocked).await
             }
             Err(error) => Err(error),
         };
@@ -115,7 +117,7 @@ pub(super) async fn reconcile(
         };
         if let Some(reason) = stopped {
             return if state.first && repo.ref_oid(&pull.base_ref).await?.as_deref() == Some(base) {
-                stop(server, repo, pull.number, job.id, reason).await
+                stop_front(server, repo, state, reason).await
             } else {
                 // A failure on a speculative prefix does not eject this pull
                 // until that prefix becomes the actual base branch.
@@ -143,7 +145,7 @@ pub(super) async fn reconcile(
     let input = NewPullMerge {
         author: app::actor(principal)?,
         request_id: job
-            .publication_id(pull.version, base, Some(&commit))
+            .publication_id(pull.version, base, Some(&commit), state.order_revision)
             .to_string(),
         pull_version: pull.version,
         method: job.method,
@@ -155,6 +157,25 @@ pub(super) async fn reconcile(
     };
     let record = merge::admit(server, repo, principal, pull, &input).await?;
     finish(server, repo, principal, job, &record, cancel).await
+}
+
+async fn stop_front(
+    server: &Server,
+    repo: &Repository,
+    state: &cell::State,
+    reason: Stop,
+) -> Result<()> {
+    change(
+        server,
+        repo,
+        Change::Disarm {
+            pull: state.job.pull,
+            id: state.job.id,
+            reason,
+            front_revision: Some(state.order_revision),
+        },
+    )
+    .await
 }
 
 fn check_timed_out(queue: &cell::QueueEntry, timeout_minutes: u16) -> Result<bool> {
