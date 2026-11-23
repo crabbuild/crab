@@ -294,6 +294,7 @@ pub(crate) struct BypassOption {
 
 pub(crate) struct MergePolicy {
     pub protection: Option<BranchProtection>,
+    pub updates_restricted: bool,
     pub rulesets: Vec<String>,
     pub bypass_options: Vec<BypassOption>,
 }
@@ -374,6 +375,7 @@ impl RefPolicy {
         let mut names = Vec::new();
         let mut bypass_options = Vec::new();
         let mut accepted = 0;
+        let mut updates_restricted = false;
         let rules = self.active()?;
         for (id, ruleset) in rules.matches(reference, default_ref) {
             let name = match id {
@@ -381,7 +383,7 @@ impl RefPolicy {
                 RulesetId::Organization { .. } => format!("{} (organization)", ruleset.name),
             };
             names.push(name.clone());
-            if !ruleset.requires_pull() {
+            if !ruleset.requires_pull() && !ruleset.restrict_updates {
                 continue;
             }
             if ruleset.allows_bypass(actor.for_rule(id), true) {
@@ -390,6 +392,10 @@ impl RefPolicy {
                     continue;
                 }
                 bypass_options.push(BypassOption { id, name });
+            }
+            updates_restricted |= ruleset.restrict_updates;
+            if !ruleset.requires_pull() {
+                continue;
             }
             let rule = protection.get_or_insert_with(|| BranchProtection {
                 branch: reference
@@ -430,6 +436,7 @@ impl RefPolicy {
         bypass_options.sort_unstable_by_key(|option| option.id);
         Ok(MergePolicy {
             protection,
+            updates_restricted,
             rulesets: names,
             bypass_options,
         })

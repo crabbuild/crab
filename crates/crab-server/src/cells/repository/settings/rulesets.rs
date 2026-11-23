@@ -109,6 +109,8 @@ pub(crate) struct Ruleset {
     pub include: Vec<String>,
     pub exclude: Vec<String>,
     pub restrict_creations: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub restrict_updates: bool,
     pub restrict_deletions: bool,
     pub require_pull_request: bool,
     pub required_approvals: u8,
@@ -164,6 +166,11 @@ impl Ruleset {
         if self.restrict_deletions && update.new.is_none() {
             return Some("Repository ruleset restricts ref deletion");
         }
+        // PR publication validates its explicitly selected bypasses against
+        // current branch policy when authorizing the exact merge reservation.
+        if !pull && self.restrict_updates && update.old.is_some() && update.new.is_some() {
+            return Some("Repository ruleset restricts ref updates");
+        }
         if !pull && update.old.is_some() && self.require_merge_queue {
             return Some("Repository ruleset requires the merge queue");
         }
@@ -187,7 +194,10 @@ impl Ruleset {
             && self.name.trim() == self.name
             && !self.name.chars().any(char::is_control)
             && (!self.requires_pull() || self.target == Target::Branch)
-            && (self.requires_pull() || self.restrict_creations || self.restrict_deletions)
+            && (self.requires_pull()
+                || self.restrict_creations
+                || self.restrict_updates
+                || self.restrict_deletions)
             && !self.include.is_empty()
             && [&self.include, &self.exclude].into_iter().all(|patterns| {
                 let mut unique = HashSet::new();

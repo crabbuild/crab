@@ -1118,11 +1118,10 @@ async fn commit_prepared(
     plan_id: Option<&str>,
     cancel: &CancellationToken,
 ) -> Result<crab_remote::prepare::CapsuleCommitOutcome> {
-    let checks_branch_policy = matches!(mutation.publication, Publication::PullRequest(_))
-        || mutation
-            .updates
-            .iter()
-            .any(|update| update.name.starts_with("refs/heads/"));
+    let checks_ruleset_policy = matches!(mutation.publication, Publication::PullRequest(_))
+        || mutation.updates.iter().any(|update| {
+            update.name.starts_with("refs/heads/") || update.name.starts_with("refs/tags/")
+        });
     // The policy and LFS leases nest this callback. Boxing it leaves room
     // for object-store I/O on a default debug worker stack.
     let commit = |cancel| {
@@ -1133,7 +1132,7 @@ async fn commit_prepared(
             .await
         })
     };
-    if checks_branch_policy {
+    if checks_ruleset_policy {
         settings::with_ruleset_lease(
             server,
             settings::RulesetScope::Repository(entry),

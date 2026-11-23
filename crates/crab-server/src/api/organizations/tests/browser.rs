@@ -1287,6 +1287,9 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
         ])
         .await;
     browser
+        .run(&["find", "label", "Restrict updates", "click", "--exact"])
+        .await;
+    browser
         .run(&[
             "find",
             "label",
@@ -1321,12 +1324,16 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
         .await;
     let rule = &rulesets["rulesets"][0];
     assert_eq!(rule["required_approvals"], 1);
+    assert_eq!(rule["restrict_updates"], true);
     assert_eq!(
         rule["bypass_actors"],
         json!([{"actor":{"kind":"organization_owner"},"mode":"pull_request"}])
     );
     browser
         .run(&["open", &format!("{}/{owner}/library/pull/1", h.origin)])
+        .await;
+    browser
+        .run(&["wait", "--text", "A ruleset restricts updates to main."])
         .await;
     for label in ["Merge with ruleset bypass", "Confirm bypass and merge"] {
         browser.run(&["wait", "--text", label]).await;

@@ -572,6 +572,7 @@ async fn review_filters_apply_rulesets_to_the_default_ref_in_the_search_snapshot
                 include: vec!["~DEFAULT_BRANCH".into()],
                 exclude: Vec::new(),
                 restrict_creations: false,
+                restrict_updates: false,
                 restrict_deletions: false,
                 require_pull_request: false,
                 required_approvals: 2,

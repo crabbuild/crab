@@ -270,6 +270,7 @@ async fn inherited_rules_follow_repository_targets_and_keep_bypass_sources_disti
     .unwrap();
     let mut entries = entries;
     entries[0]["ruleset"]["require_merge_queue"] = json!(true);
+    entries[0]["ruleset"]["restrict_updates"] = json!(true);
     entries[0]["ruleset"]["bypass_actors"] = json!([
         {"actor":{"kind":"organization_owner"},"mode":"pull_request"},
         {"actor":{"kind":"team","id":team},"mode":"pull_request"},
@@ -285,6 +286,14 @@ async fn inherited_rules_follow_repository_targets_and_keep_bypass_sources_disti
     .unwrap();
     let member = h.json(&pull, &bob).await;
     assert_eq!(member["merge_queue_required"], true);
+    assert_eq!(member["merge_requirements"]["updates_restricted"], true);
+    let frozen = git::git(
+        source.path(),
+        &["push", release_url.as_str(), "feature:main"],
+    )
+    .await;
+    assert!(!frozen.status.success());
+    assert!(String::from_utf8_lossy(&frozen.stderr).contains("restricts ref updates"));
     assert!(
         member["merge_requirements"]["bypass_options"]
             .as_array()

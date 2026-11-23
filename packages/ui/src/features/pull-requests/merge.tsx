@@ -284,6 +284,12 @@ export function MergePanel({
               {requirements.rulesets?.join(", ")}
             </p>
           )}
+          {!unavailable && requirements.updates_restricted && (
+            <p className="merge-blocked-note">
+              A ruleset restricts updates to{" "}
+              <code>{branch(pull.base_ref)}</code>.
+            </p>
+          )}
           {!queued &&
             !unavailable &&
             requirements.head_up_to_date === false && (

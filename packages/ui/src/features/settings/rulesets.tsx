@@ -30,6 +30,7 @@ interface Ruleset {
   include: string[];
   exclude: string[];
   restrict_creations: boolean;
+  restrict_updates?: boolean;
   restrict_deletions: boolean;
   require_pull_request: boolean;
   required_approvals: number;
@@ -374,6 +375,7 @@ function RulesetSummary({
           </li>
         )}
         {rule.restrict_creations && <li>Restrict creations</li>}
+        {rule.restrict_updates && <li>Restrict updates</li>}
         {rule.restrict_deletions && <li>Restrict deletions</li>}
         {(rule.require_pull_request ||
           rule.require_merge_queue ||
@@ -585,6 +587,16 @@ function RulesetForm({
             }
           />{" "}
           Restrict creations
+        </label>
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={Boolean(rule.restrict_updates)}
+            onChange={(event) =>
+              change({ restrict_updates: event.target.checked })
+            }
+          />{" "}
+          Restrict updates
         </label>
         <label className="flex items-center gap-2">
           <input

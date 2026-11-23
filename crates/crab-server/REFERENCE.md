@@ -1118,7 +1118,12 @@ current default branch. A ref qualifies when any include matches and no
 exclude matches. `?` matches one character within a segment. Positive bracket
 classes such as `v[0-9]*` match character ranges.
 
-Both targets can restrict creation and deletion. Branch rulesets can also
+Both targets can restrict creation, updates, and deletion independently.
+**Restrict updates** freezes existing matching refs. An eligible **Always**
+bypass can skip the rule for Git updates. A PR targeting a frozen branch
+requires an explicit, authorized bypass of each applicable freeze rule.
+The merge panel shows the restriction, and publication rechecks it under the
+same policy lease as ruleset changes. Branch rulesets can also
 require a pull request before an existing ref is updated, a minimum number of
 eligible approvals, code owner review, conversation resolution, named checks, and specific connected
 GitHub Actions workflows. Reviews and checks imply the pull request requirement.
@@ -1132,7 +1137,7 @@ required check or workflow.
 `can_manage`. Administrators can see disabled rulesets and replace the complete
 collection with matching `expected_version`. Each entry contains `id` (UUID),
 `name`, `target` (`branch` or `tag`), `enforcement` (`active` or `disabled`),
-`include`, `exclude`, `restrict_creations`, `restrict_deletions`,
+`include`, `exclude`, `restrict_creations`, `restrict_updates`, `restrict_deletions`,
 `require_pull_request`, `required_approvals`, `required_code_owner_reviews`,
 `require_conversation_resolution`, `require_up_to_date`, `require_merge_queue`,
 `required_checks`, and `required_integrations`. Branch-only settings must have

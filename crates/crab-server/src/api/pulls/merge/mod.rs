@@ -89,6 +89,9 @@ pub(super) fn map_receive(error: ReceiveError) -> Error {
         ReceiveError::Settings(error) if matches!(**error, Error::MergeBlocked) => {
             Error::MergeBlocked
         }
+        ReceiveError::Settings(error) if matches!(**error, Error::MergeUpdatesRestricted) => {
+            Error::MergeUpdatesRestricted
+        }
         ReceiveError::Settings(error) if matches!(**error, Error::AutoMergeDisabled) => {
             Error::AutoMergeDisabled
         }
@@ -556,6 +559,7 @@ pub(super) async fn finish_locked(
                     mapped,
                     Error::MergeConflict
                         | Error::MergeBlocked
+                        | Error::MergeUpdatesRestricted
                         | Error::MergeCandidateChecks
                         | Error::MergeQueued
                         | Error::MergeQueueRequired

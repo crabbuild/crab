@@ -416,9 +416,12 @@ async fn promotion_status(
         Ok(()) => "ready",
         Err(Error::MergeCandidateChecks) if checks.is_empty() => "checks_unconfigured",
         Err(Error::MergeCandidateChecks) => "checks_pending",
-        Err(Error::MergeBlocked | Error::MergeUnresolvedConversations | Error::MergeHeadBehind) => {
-            "pull_blocked"
-        }
+        Err(
+            Error::MergeBlocked
+            | Error::MergeUpdatesRestricted
+            | Error::MergeUnresolvedConversations
+            | Error::MergeHeadBehind,
+        ) => "pull_blocked",
         Err(error) => return Err(error),
     };
     Ok((

@@ -104,6 +104,8 @@ pub(crate) enum Error {
     MergePending,
     #[error("Protected branch review requirements are not satisfied")]
     MergeBlocked,
+    #[error("A ruleset restricts updates to the base branch")]
+    MergeUpdatesRestricted,
     #[error("Required checks are not satisfied on the merge candidate")]
     MergeCandidateChecks,
     #[error("Unresolved review conversations block the merge")]
@@ -437,6 +439,11 @@ impl IntoResponse for Error {
                 StatusCode::CONFLICT,
                 "unresolved_conversations",
                 "Resolve all review conversations before merging",
+            ),
+            Self::MergeUpdatesRestricted => (
+                StatusCode::FORBIDDEN,
+                "ruleset_restricts_updates",
+                "A ruleset restricts updates to the base branch",
             ),
             Self::MergeHeadBehind => (
                 StatusCode::CONFLICT,

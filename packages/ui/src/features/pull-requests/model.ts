@@ -100,6 +100,7 @@ export interface PullRequest extends PullSummary {
     rulesets?: string[];
     bypass_options?: { id: RulesetId; name: string }[];
     protected: boolean;
+    updates_restricted?: boolean;
     required_approvals: number;
     approvals: number;
     changes_requested: number;

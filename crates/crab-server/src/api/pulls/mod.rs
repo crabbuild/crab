@@ -310,6 +310,7 @@ async fn pull_view(
         "merge_requirements": {
             "bypass_options": if can_bypass { requirements.bypass_options.as_slice() } else { &[] },
             "protected": requirements.protected,
+            "updates_restricted": requirements.updates_restricted,
             "required_approvals": requirements.required_approvals,
             "rulesets": requirements.rulesets,
             "approvals": requirements.approvals,
@@ -348,6 +349,7 @@ async fn pull_view(
 struct MergeRequirements {
     queue_required: bool,
     protected: bool,
+    updates_restricted: bool,
     rulesets: Vec<String>,
     bypass_options: Vec<crate::repository::settings::BypassOption>,
     required_approvals: usize,
@@ -371,6 +373,9 @@ impl MergeRequirements {
     }
 
     fn enforce(&self) -> Result<()> {
+        if self.updates_restricted {
+            return Err(Error::MergeUpdatesRestricted);
+        }
         if self.unresolved_conversations.is_some_and(|count| count > 0) {
             return Err(Error::MergeUnresolvedConversations);
         }
@@ -513,6 +518,9 @@ async fn requirements(
     requirements.code_owners = code_owners;
     requirements.rulesets = policy.rulesets;
     requirements.bypass_options = policy.bypass_options;
+    requirements.updates_restricted = policy.updates_restricted;
+    requirements.protected |= policy.updates_restricted;
+    requirements.satisfied &= !policy.updates_restricted;
     requirements.unresolved_conversations = unresolved;
     requirements.satisfied &= unresolved.is_none_or(|count| count == 0);
     requirements.head_up_to_date = head_up_to_date;
@@ -601,6 +609,7 @@ fn merge_requirements(
         return MergeRequirements {
             queue_required: false,
             protected: false,
+            updates_restricted: false,
             rulesets: Vec::new(),
             bypass_options: Vec::new(),
             required_approvals: 0,
@@ -640,6 +649,7 @@ fn merge_requirements(
     MergeRequirements {
         queue_required: rule.require_merge_queue,
         protected: true,
+        updates_restricted: false,
         rulesets: Vec::new(),
         bypass_options: Vec::new(),
         required_approvals,
