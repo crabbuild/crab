@@ -75,7 +75,6 @@ zip = { version = "6.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 crab-storage = { workspace = true, features = ["test-support"] }
-crab-xet = { workspace = true }
 ts-rs = { version = "=12.0.1", features = ["uuid-impl"] }
 async-trait = { workspace = true }
 http-body-util = "0.1"

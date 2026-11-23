@@ -15,6 +15,7 @@ const MAX_RESPONSE: usize = 2 * 1024 * 1024;
 pub(crate) struct GitHubActions {
     app_id: u64,
     key: EncodingKey,
+    webhook_secret: Vec<u8>,
     http: reqwest::Client,
     api: Url,
     actor: tokio::sync::OnceCell<String>,
@@ -89,15 +90,39 @@ impl GitHubActions {
             Url::parse("https://api.github.com/").map_err(|source| crate::Error::Identity {
                 source: Box::new(source),
             })?;
-        Self::new(config.app_id, key, api, config.bindings.clone())
+        // Bound secret loading and accept the line ending used by mounted files.
+        let mut webhook_secret = Vec::new();
+        std::fs::File::open(&config.webhook_secret_file)?
+            .take(515)
+            .read_to_end(&mut webhook_secret)?;
+        if webhook_secret.ends_with(b"\r\n") {
+            webhook_secret.truncate(webhook_secret.len() - 2);
+        } else if webhook_secret.ends_with(b"\n") {
+            webhook_secret.pop();
+        }
+        Self::new(
+            config.app_id,
+            key,
+            webhook_secret,
+            api,
+            config.bindings.clone(),
+        )
     }
 
     pub(crate) fn new(
         app_id: u64,
         key: EncodingKey,
+        webhook_secret: Vec<u8>,
         api: Url,
         bindings: Vec<GitHubActionsBinding>,
     ) -> crate::Result<Self> {
+        if !(32..=512).contains(&webhook_secret.len())
+            || !webhook_secret.iter().all(u8::is_ascii_graphic)
+        {
+            return Err(crate::Error::Config(
+                "GitHub App webhook secret must contain 32–512 visible ASCII characters",
+            ));
+        }
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
@@ -110,6 +135,7 @@ impl GitHubActions {
         Ok(Self {
             app_id,
             key,
+            webhook_secret,
             http,
             api,
             actor: tokio::sync::OnceCell::new(),
@@ -117,10 +143,32 @@ impl GitHubActions {
         })
     }
 
-    pub(super) fn has_binding(&self, repository: Uuid) -> bool {
+    pub(super) fn webhook_secret(&self) -> &[u8] {
+        &self.webhook_secret
+    }
+
+    pub(super) fn webhook_target(
+        &self,
+        installation: u64,
+        repository: u64,
+        workflow: u64,
+    ) -> Option<Uuid> {
         self.bindings
             .iter()
-            .any(|binding| binding.crab_repository == repository)
+            .find(|binding| {
+                binding.installation == installation
+                    && binding.github_repository == repository
+                    && binding.workflow == workflow
+            })
+            .map(|binding| binding.crab_repository)
+    }
+
+    pub(super) fn binds(&self, repository: Uuid, github_repository: u64, workflow: u64) -> bool {
+        self.bindings.iter().any(|binding| {
+            binding.crab_repository == repository
+                && binding.github_repository == github_repository
+                && binding.workflow == workflow
+        })
     }
 
     pub(super) fn permits(

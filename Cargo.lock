@@ -3194,7 +3194,6 @@ dependencies = [
  "crab-storage",
  "crab-workflow",
  "crab-write",
- "crab-xet",
  "ed25519-dalek",
  "flate2",
  "fs4",

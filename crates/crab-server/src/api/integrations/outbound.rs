@@ -1,3 +1,5 @@
+use serde::Deserialize;
+
 use super::*;
 use crate::{cells::repository::webhooks as hooks, server::webhooks};
 

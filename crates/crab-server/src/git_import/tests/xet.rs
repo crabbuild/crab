@@ -8,14 +8,6 @@ use crab_metadata::{
     git_visibility::GitVisibilityEdit,
 };
 use crab_storage::{Store, StoreLayout};
-use crab_xet::{
-    hash::{MerkleHash, compute_data_hash},
-    shard::{PushShardSession, file_info_from_placements, xorb_info_from_placements},
-    xorb::{
-        builder::{RunId, XorbBuilder},
-        format::Chunk,
-    },
-};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc};
@@ -24,6 +16,26 @@ use uuid::Uuid;
 
 use super::wait_for_state;
 use crate::test_support::{git, http::Harness};
+
+// Serialized by XorbBuilder and PushShardSession. Each xorb contains one
+// chunk, whose Xet hash is also the xorb hash.
+const SOURCE_FILE: XetFixture = XetFixture {
+    content: b"large file from the source repository",
+    file_key: "6f1c6b951cec7df96d5054fd476fdbfdfdebdf26d37446fa6245b12337774dc8",
+    xorb_hash: "9a4f7e8b495e9d7252e8d666e6003e0a8fa891b1949cee98b04bca6b273dd80f",
+    shard_hash: "67b20323925b2671f9c5289b93b71f6a9916d9c743b2ea5c902f139d3d3dcfc2",
+    xorb: include_bytes!("fixtures/xet/source.xorb"),
+    shard: include_bytes!("fixtures/xet/source.shard"),
+};
+
+const UNRELATED_FILE: XetFixture = XetFixture {
+    content: b"catalog entry outside the forked history",
+    file_key: "b7c02a7ed1d3671b1cbe76d8ae41826597bbbea37d1f0af7dfdd769f0b28f054",
+    xorb_hash: "59f28017a27f33d6597b227d7ac0710f8e9620304303da138eeb046b096129cf",
+    shard_hash: "0c960bdadeaa9fe97df6b35dfe32b36e02bb70ff146e00abb3fb1948aed783a3",
+    xorb: include_bytes!("fixtures/xet/unrelated.xorb"),
+    shard: include_bytes!("fixtures/xet/unrelated.shard"),
+};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn private_fork_publishes_only_verified_xet_dependencies_of_its_history() {
@@ -65,17 +77,15 @@ async fn private_fork_publishes_only_verified_xet_dependencies_of_its_history() 
         .unwrap();
     let layout = &source.layout;
 
-    let content = Bytes::from_static(b"large file from the source repository");
-    let file_hash = blake3::hash(&content);
+    let file_hash = blake3::hash(SOURCE_FILE.content);
     let pointer_text = format!(
         "version https://crab.build/spec/v1\nfile-hash {file_hash}\nsize {}\n",
-        content.len()
+        SOURCE_FILE.content.len()
     );
     let mut catalog = PointerCatalog::new();
-    let (xorb_path, xorb) = write_content(layout, &mut catalog, content).await;
-    let unrelated = Bytes::from_static(b"catalog entry outside the forked history");
-    let unrelated_hash = MerkleHash::from(*blake3::hash(&unrelated).as_bytes()).hex();
-    write_content(layout, &mut catalog, unrelated).await;
+    SOURCE_FILE.stage(layout, &mut catalog).await;
+    UNRELATED_FILE.stage(layout, &mut catalog).await;
+    let xorb_path = layout.xorb_path(SOURCE_FILE.xorb_hash);
     let history = git::history_with_blob(pointer_text.as_bytes());
     let head = history.oids[0].clone();
     let base = crab_metadata::capsule_protocol::load_root(layout)
@@ -143,7 +153,11 @@ async fn private_fork_publishes_only_verified_xet_dependencies_of_its_history() 
             .get(&(owner.to_owned(), "fork".into()))
             .is_none()
     );
-    layout.store().put(&xorb_path, xorb).await.unwrap();
+    layout
+        .store()
+        .put(&xorb_path, Bytes::from_static(SOURCE_FILE.xorb))
+        .await
+        .unwrap();
     h.write(Method::POST, &format!("{status}/resume"), &alice, json!({}))
         .await
         .error_for_status()
@@ -163,9 +177,14 @@ async fn private_fork_publishes_only_verified_xet_dependencies_of_its_history() 
             crab_metadata::capsule_protocol::MAX_CATALOG_BYTES,
         )
         .unwrap();
-    let file_key = MerkleHash::from(*file_hash.as_bytes()).hex();
     let selected = selected
-        .files(&fork.store, &[file_key.clone(), unrelated_hash])
+        .files(
+            &fork.store,
+            &[
+                SOURCE_FILE.file_key.to_owned(),
+                UNRELATED_FILE.file_key.to_owned(),
+            ],
+        )
         .await
         .unwrap();
     assert_eq!(selected.files().len(), 1);
@@ -175,7 +194,7 @@ async fn private_fork_publishes_only_verified_xet_dependencies_of_its_history() 
     crab_read::verify_catalog_file_recipe(
         &fork.layout,
         &pointer,
-        &selected.files()[&file_key],
+        &selected.files()[SOURCE_FILE.file_key],
         &CancellationToken::new(),
     )
     .await
@@ -183,58 +202,55 @@ async fn private_fork_publishes_only_verified_xet_dependencies_of_its_history() 
     h.close().await;
 }
 
-async fn write_content(
-    layout: &StoreLayout<Store>,
-    catalog: &mut PointerCatalog,
-    data: Bytes,
-) -> (object_store::path::Path, Bytes) {
-    let file = MerkleHash::from(*blake3::hash(&data).as_bytes());
-    let size = data.len() as u64;
-    let chunk = compute_data_hash(&data);
-    let mut builder = XorbBuilder::new();
-    builder
-        .push(&Chunk { hash: chunk, data }, RunId(0))
-        .unwrap();
-    let xorb = builder.finalize().unwrap().pop().unwrap();
-    let placements = xorb
-        .placements
-        .iter()
-        .map(|p| (p.chunk_hash, p.clone()))
-        .collect();
-    let recipe = file_info_from_placements(file, &[chunk], &placements).unwrap();
-    let xorb_info = Arc::new(xorb_info_from_placements(xorb.hash, &xorb.placements).unwrap());
-    let mut shards = PushShardSession::new();
-    shards.add_file_bundle(recipe, &[xorb_info]).unwrap();
-    let (shard, shard_hash) = shards.finalize().unwrap().pop().unwrap();
-    catalog
-        .insert_xorb(
-            xorb.hash.hex(),
-            XorbCatalogEntry::new(
-                xorb.bytes.len() as u64,
-                blake3::hash(&xorb.bytes).to_hex().to_string(),
-                vec![XorbChunkEntry::new(chunk.hex(), size as u32)],
-            ),
-        )
-        .unwrap();
-    catalog
-        .insert_shard(
-            shard_hash.hex(),
-            ShardCatalogEntry::new(shard.len() as u64, vec![xorb.hash.hex()]),
-        )
-        .unwrap();
-    catalog
-        .insert_file(file.hex(), FileCatalogEntry::new(size, shard_hash.hex()))
-        .unwrap();
-    let xorb_path = layout.xorb_path(&xorb.hash);
-    layout
-        .store()
-        .put(&xorb_path, xorb.bytes.clone())
-        .await
-        .unwrap();
-    layout
-        .store()
-        .put(&layout.shard_path(&shard_hash), shard.into())
-        .await
-        .unwrap();
-    (xorb_path, xorb.bytes)
+struct XetFixture {
+    content: &'static [u8],
+    file_key: &'static str,
+    xorb_hash: &'static str,
+    shard_hash: &'static str,
+    xorb: &'static [u8],
+    shard: &'static [u8],
+}
+
+impl XetFixture {
+    async fn stage(&self, layout: &StoreLayout<Store>, catalog: &mut PointerCatalog) {
+        let size = u32::try_from(self.content.len()).unwrap();
+        catalog
+            .insert_xorb(
+                self.xorb_hash.to_owned(),
+                XorbCatalogEntry::new(
+                    self.xorb.len() as u64,
+                    blake3::hash(self.xorb).to_hex().to_string(),
+                    vec![XorbChunkEntry::new(self.xorb_hash, size)],
+                ),
+            )
+            .unwrap();
+        catalog
+            .insert_shard(
+                self.shard_hash.to_owned(),
+                ShardCatalogEntry::new(self.shard.len() as u64, vec![self.xorb_hash.to_owned()]),
+            )
+            .unwrap();
+        catalog
+            .insert_file(
+                self.file_key.to_owned(),
+                FileCatalogEntry::new(u64::from(size), self.shard_hash),
+            )
+            .unwrap();
+        layout
+            .store()
+            .put(
+                &layout.xorb_path(self.xorb_hash),
+                Bytes::from_static(self.xorb),
+            )
+            .await
+            .unwrap();
+        layout
+            .store()
+            .put(
+                &layout.shard_path(self.shard_hash),
+                Bytes::from_static(self.shard),
+            )
+            .await
+            .unwrap();
+    }
 }

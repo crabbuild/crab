@@ -41,12 +41,13 @@ pub struct NotificationEmailConfig {
     pub api_key_file: PathBuf,
 }
 
-/// Credentials for the GitHub App that starts queue workflows.
+/// Credentials and route bindings for the operator-managed GitHub App.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GitHubActionsConfig {
     pub app_id: u64,
     pub private_key_file: PathBuf,
+    pub webhook_secret_file: PathBuf,
     pub bindings: Vec<GitHubActionsBinding>,
 }
 
@@ -269,9 +270,12 @@ impl Config {
             }
         }
         if let Some(actions) = &self.github_actions {
-            if actions.app_id == 0 || actions.private_key_file.as_os_str().is_empty() {
+            if actions.app_id == 0
+                || actions.private_key_file.as_os_str().is_empty()
+                || actions.webhook_secret_file.as_os_str().is_empty()
+            {
                 return Err(Error::Config(
-                    "GitHub Actions requires an app ID and private key file",
+                    "GitHub Actions requires an app ID, private key file, and webhook secret file",
                 ));
             }
             let mut bindings = HashSet::new();
@@ -292,7 +296,11 @@ impl Config {
                             binding.branch
                         ))
                         .is_ok()
-                        && bindings.insert(binding)
+                        && bindings.insert((
+                            binding.installation,
+                            binding.github_repository,
+                            binding.workflow,
+                        ))
                 })
             {
                 return Err(Error::Config(
