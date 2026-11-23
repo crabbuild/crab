@@ -1675,9 +1675,10 @@ consumed body bytes, including reads of refs and metadata on the cloud storage
 endpoint. The origin control requires native GET and body evidence. External
 `origin_gets` must cover every observed native GET response, including listing
 requests. External `client_bytes` must cover both native and edge body bytes,
-including incomplete edge bodies. The rejected total also needs any bytes
-discarded by higher-level verification. Measure protocol overhead and
-provider-side origin fills independently.
+including adjacent immutable reads and incomplete edge bodies. Only a completed
+response for the registered read scope can prove a cold fill or warm hit.
+The rejected total also needs any bytes discarded by higher-level verification.
+Measure protocol overhead and provider-side origin fills independently.
 
 For Xet hydration and mount workloads, join every observed viewer request,
 including adjacent Git, catalog, and shard reads. Only responses for the
@@ -1697,7 +1698,8 @@ The AWS fixture includes a companion template for both log streams in
 `us-east-1`.
 The collector joins CloudFront's signed S3 object GETs to viewer keys and
 the timed fetch window. The cold arm needs a successful S3 response with
-body bytes. Use a fresh publication for each pair, keep other CloudFront
+body bytes for a key that completed a viewer read in the registered scope.
+Use a fresh publication for each pair, keep other CloudFront
 traffic outside the measured UTC seconds, and start the warm edge arm
 in a later UTC second than the cold arm's finish. Leave cookie logging
 disabled and keep raw exports on the protected worker.

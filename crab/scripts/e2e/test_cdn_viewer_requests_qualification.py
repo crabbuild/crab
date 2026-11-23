@@ -304,7 +304,8 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                 "sdk_candidate": examples.sdk_candidate(config["scope"], "linux-x86_64"),
             }
             examples.write_git_measurements(root, sdk_registration, "linux-x86_64")
-            snapshot = json.loads(client.read_bytes()) | {"edge_responses": {fingerprint: response}}
+            sdk_response = response | {"scope": config["scope"]}
+            snapshot = json.loads(client.read_bytes()) | {"edge_responses": {fingerprint: sdk_response}}
             pack = "8" * 64
             worktree = {"crab_sha256": "9" * 64, "installed_packs": [pack], "verified_edge_packs": [pack]}
             sdk_records = {

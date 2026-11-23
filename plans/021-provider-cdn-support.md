@@ -688,10 +688,12 @@ and edge payload through redacted observations.
   gate recomputes each summary and checks the complete platform matrix.
   CloudFront, Cloud CDN and Front Door measurements match timed fetches to
   provider logs using hashed viewer request IDs and retain the verified
-  status, cache result, and viewer response bytes. CloudFront verifies
-  signed reads from the approved S3 bucket using the viewer keys and timed
-  window. Its cold arm requires a successful origin body response. The
-  collector can wait for both AWS log streams before returning a cold proof.
+  status, cache result, and viewer response bytes. Cold-fill and warm-hit
+  proof comes from completed requests in the registered read scope.
+  Benchmarks charge adjacent reads to the byte and origin request budgets.
+  CloudFront verifies signed reads from the approved S3 bucket using the viewer
+  keys and timed window. Its cold arm requires a successful origin body response.
+  The collector can wait for both AWS log streams before returning a cold proof.
   Cloud CDN retains cache-fill bytes on viewer log records and joins
   range-fill and validation requests by the provider's parent log-entry ID.
   The collector can read those records directly from Cloud Logging for the

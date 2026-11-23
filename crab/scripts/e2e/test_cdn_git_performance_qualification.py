@@ -407,6 +407,44 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, expected):
                     self.collect()
 
+    def test_cloudfront_adjacent_capsule_fill_cannot_prove_a_cold_git_pack(self) -> None:
+        slot = "near/0001/cold_edge"
+        arm = self.root / slot
+        client = json.loads((arm / "client.json").read_bytes())
+        capsule_id, capsule_key = "c" * 64, "d" * 64
+        capsule_scope = self.registration["scope"].replace("/git/", "/capsule/")
+        self.amend_client(slot, all_edge_attempts=2, edge_responses=client["edge_responses"] | {
+            capsule_id: fixture.range_response(capsule_scope, 16, "miss"),
+        })
+        path = arm / fixture.CDN.VIEWER_REQUEST_FILES["s3"]
+        proof = json.loads(path.read_bytes())
+        proof["records"][capsule_id] = {"status": 206, "cache": "miss", "response_bytes": 16, "key_sha256": capsule_key}
+        origin_id, origin = next(iter(proof["origin_requests"].items()))
+        fixture.json_file(path, proof | {"origin_requests": {origin_id: origin | {"key_sha256": capsule_key}}})
+        with self.assertRaisesRegex(ValueError, "has no logged CloudFront fill"):
+            self.collect()
+        fixture.json_file(path, proof)
+        self.collect()
+
+    def test_git_bandwidth_and_rejected_bytes_include_adjacent_capsule_requests(self) -> None:
+        slot = "near/0001/cold_edge"
+        arm = self.root / slot
+        client = json.loads((arm / "client.json").read_bytes())
+        capsule_id = "c" * 64
+        capsule_scope = self.registration["scope"].replace("/git/", "/capsule/")
+        report = arm / "measurement.json"
+        external = json.loads(report.read_bytes())
+        for complete, size in ((True, external["client_bytes"]), (False, 8)):
+            with self.subTest(complete=complete):
+                response = fixture.range_response(capsule_scope, size) | {"complete": complete}
+                self.amend_client(slot, all_edge_attempts=2, edge_responses=client["edge_responses"] | {capsule_id: response})
+                path = arm / fixture.CDN.VIEWER_REQUEST_FILES["s3"]
+                proof = json.loads(path.read_bytes())
+                proof["records"][capsule_id] = {"status": 206, "cache": "hit", "response_bytes": size, "key_sha256": "d" * 64}
+                fixture.json_file(path, proof)
+                with self.assertRaisesRegex(ValueError, "undercounts observed client bytes"):
+                    self.collect()
+
     def test_cloudfront_warm_and_cold_arms_must_use_distinct_s3_log_seconds(self) -> None:
         self.amend_client("near/0001/warm_edge", started_at_unix_ms=1_011_500, finished_at_unix_ms=1_011_620)
         with self.assertRaisesRegex(ValueError, "CloudFront edge arms must use disjoint S3 log seconds"):
