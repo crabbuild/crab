@@ -38,7 +38,12 @@ pub(crate) async fn serve(request: Request) -> Response {
             && components[0] != "git"
             && (components.len() == 2
                 || (components.len() == 3
-                    && matches!(components[2], "code-search" | "properties" | "rulesets"))
+                    && matches!(
+                        components[2],
+                        "code-search" | "projects" | "properties" | "rulesets"
+                    ))
+                || matches!(components.as_slice(), [_, _, "projects", id]
+                    if uuid::Uuid::parse_str(id).is_ok_and(|id| !id.is_nil()))
                 || matches!(
                     components[2],
                     "tree"
@@ -133,6 +138,20 @@ mod tests {
             ("/team/repo.name/releases/tag/v1.0.0", StatusCode::OK),
             ("/team/repo.name/settings/access", StatusCode::OK),
             ("/team/repo.name/code-search", StatusCode::OK),
+            ("/team/repo.name/projects", StatusCode::OK),
+            (
+                "/team/repo.name/projects/01900000-0000-7000-8000-000000000001",
+                StatusCode::OK,
+            ),
+            ("/team/repo.name/projects/unknown", StatusCode::NOT_FOUND),
+            (
+                "/team/repo.name/projects/00000000-0000-0000-0000-000000000000",
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "/team/repo.name/projects/01900000-0000-7000-8000-000000000001/unknown",
+                StatusCode::NOT_FOUND,
+            ),
             ("/team/repo.name/properties", StatusCode::OK),
             ("/team/repo.name/rulesets", StatusCode::OK),
             ("/team/repo.name/properties/unknown", StatusCode::NOT_FOUND),

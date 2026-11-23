@@ -2700,6 +2700,7 @@ open blocker clears the badge on the next read. Reopening a blocker restores
 it while the relationship is active. Project rows expose the badge only to
 readers with access to the source repository. Planning status remains editable
 independently of the dependency graph.
+Repository Project links open directly and support browser reloads.
 
 The two directions share one version. Use the pair's GET to obtain
 `{active,version}`, then PUT the desired `active` state with that version.
