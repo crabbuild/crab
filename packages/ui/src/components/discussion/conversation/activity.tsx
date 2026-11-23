@@ -77,6 +77,10 @@ function action(event: ActivityEvent): string {
       return "reopened";
     case "pinned":
       return "pinned";
+    case "locked":
+      return "locked the conversation on";
+    case "unlocked":
+      return "unlocked the conversation on";
     case "unpinned":
       return "unpinned";
     case "approved":

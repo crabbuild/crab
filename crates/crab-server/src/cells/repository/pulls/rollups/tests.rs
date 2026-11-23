@@ -128,6 +128,7 @@ async fn review(cell: &RepositoryCell, who: &str, state: ReviewState) {
     let outcome = write::<CreatePullReview>(
         cell,
         CreatePullReviewInput {
+            can_post_locked: false,
             base_revision: None,
             review_teams: Vec::new(),
             pull: 1,

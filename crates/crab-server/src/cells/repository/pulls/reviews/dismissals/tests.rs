@@ -64,6 +64,7 @@ async fn review(cell: &RepositoryCell, name: &str, state: ReviewState) -> PullRe
     let CreatePullReviewOutcome::Created(review) = write::<CreatePullReview>(
         cell,
         CreatePullReviewInput {
+            can_post_locked: false,
             base_revision: None,
             review_teams: Vec::new(),
             pull: 1,
@@ -475,6 +476,7 @@ async fn original_review_receipts_replay_without_restoring_a_dismissed_decision(
     let cell = cell(&server);
     seed(&cell).await;
     let input = CreatePullReviewInput {
+        can_post_locked: false,
         base_revision: None,
         review_teams: Vec::new(),
         pull: 1,

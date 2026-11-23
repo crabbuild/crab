@@ -47,6 +47,7 @@ fn input() -> CreatePullInput {
 }
 fn thread() -> CreatePullReviewThreadInput {
     CreatePullReviewThreadInput {
+        can_post_locked: false,
         pull: 1,
         submission_id: *Uuid::now_v7().as_bytes(),
         author: actor("Alice"),
@@ -169,6 +170,7 @@ async fn every_fresh_pull_mutation_obeys_archive_while_committed_receipts_replay
         write::<CreatePullComment>(
             &cell,
             CreatePullCommentInput {
+                can_post_locked: false,
                 pull: 1,
                 submission_id: *Uuid::now_v7().as_bytes(),
                 author: actor("Alice"),
@@ -182,6 +184,7 @@ async fn every_fresh_pull_mutation_obeys_archive_while_committed_receipts_replay
         write::<CreatePullReview>(
             &cell,
             CreatePullReviewInput {
+                can_post_locked: false,
                 base_revision: None,
                 review_teams: Vec::new(),
                 pull: 1,
@@ -203,6 +206,7 @@ async fn every_fresh_pull_mutation_obeys_archive_while_committed_receipts_replay
         write::<CreatePullReviewReply>(
             &cell,
             CreatePullReviewReplyInput {
+                can_post_locked: false,
                 pull: 1,
                 thread: 1,
                 submission_id: *Uuid::now_v7().as_bytes(),
@@ -260,6 +264,7 @@ async fn every_fresh_pull_mutation_obeys_archive_while_committed_receipts_replay
         &cell,
         revision,
         CreatePullCommentInput {
+            can_post_locked: false,
             pull: 1,
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor("Alice"),
@@ -271,6 +276,7 @@ async fn every_fresh_pull_mutation_obeys_archive_while_committed_receipts_replay
         &cell,
         revision,
         UpdatePullCommentInput {
+            can_post_locked: false,
             key: PullChildKey { pull: 1, number: 1 },
             actor: actor("Alice"),
             version: 1,
@@ -282,6 +288,7 @@ async fn every_fresh_pull_mutation_obeys_archive_while_committed_receipts_replay
         &cell,
         revision,
         CreatePullReviewInput {
+            can_post_locked: false,
             base_revision: None,
             review_teams: Vec::new(),
             pull: 1,
@@ -297,6 +304,7 @@ async fn every_fresh_pull_mutation_obeys_archive_while_committed_receipts_replay
         &cell,
         revision,
         UpdatePullReviewInput {
+            can_post_locked: false,
             key: PullChildKey { pull: 1, number: 1 },
             actor: actor("Bob"),
             version: 1,
@@ -309,6 +317,7 @@ async fn every_fresh_pull_mutation_obeys_archive_while_committed_receipts_replay
         &cell,
         revision,
         UpdatePullReviewThreadInput {
+            can_post_locked: false,
             key: PullReviewThreadKey { pull: 1, number: 1 },
             actor: actor("Alice"),
             can_resolve: true,
@@ -323,6 +332,7 @@ async fn every_fresh_pull_mutation_obeys_archive_while_committed_receipts_replay
         &cell,
         revision,
         CreatePullReviewReplyInput {
+            can_post_locked: false,
             pull: 1,
             thread: 1,
             submission_id: *Uuid::now_v7().as_bytes(),
@@ -335,6 +345,7 @@ async fn every_fresh_pull_mutation_obeys_archive_while_committed_receipts_replay
         &cell,
         revision,
         UpdatePullReviewReplyInput {
+            can_post_locked: false,
             key: PullReviewReplyKey {
                 pull: 1,
                 thread: 1,

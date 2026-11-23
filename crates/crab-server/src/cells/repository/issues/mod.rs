@@ -203,6 +203,15 @@ impl Mutation for CreateComment {
                 comment_from_row(comment)?,
             )));
         }
+        if collaboration::locks::blocked(
+            context,
+            Target::Issue {
+                number: input.issue,
+            },
+            input.can_post_locked,
+        )? {
+            return Ok(MutationResult::Rejected(CreateCommentOutcome::Locked));
+        }
         let record = append_comment(context, input.issue, &input.author, &input.body)?;
         context.sql(&SqlBatch {
             statements: vec![statement(
@@ -573,6 +582,15 @@ impl Mutation for UpdateComment {
             return Ok(MutationResult::Rejected(UpdateCommentOutcome::NotFound));
         };
         let mut comment = comment_from_row(row)?;
+        if collaboration::locks::blocked(
+            context,
+            Target::Issue {
+                number: input.key.issue,
+            },
+            input.can_moderate,
+        )? {
+            return Ok(MutationResult::Rejected(UpdateCommentOutcome::Locked));
+        }
         if !(same_author(&comment.author, &input.actor) || input.can_moderate) {
             return Ok(MutationResult::Rejected(UpdateCommentOutcome::Forbidden));
         }

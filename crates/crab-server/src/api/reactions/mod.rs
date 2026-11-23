@@ -102,6 +102,7 @@ async fn select(
     let summary = match result.output {
         Outcome::Applied(value) => value,
         Outcome::Archived => return Err(Error::Archived),
+        Outcome::Locked => return Err(Error::ConversationLocked),
         Outcome::NotFound => return Err(Error::NotFound),
     };
     Ok(Json(View {

@@ -1,3 +1,4 @@
+import { ConversationLockProvider } from "@/components/discussion/conversation/lock";
 import { repoHref, repositoryRoute } from "@/lib/repository-route";
 
 import { type Repository } from "@/lib/api";
@@ -41,7 +42,15 @@ export function Issues({
           <Link href={repoHref(repo, { view: "issues" })}>Back to issues</Link>
         </div>
       );
-    return <IssueDetail key={number} repo={repo} number={number} csrf={csrf} />;
+    return (
+      <ConversationLockProvider
+        key={`${repo.id}:${number}`}
+        repo={repo}
+        target={`issues/${number}`}
+      >
+        <IssueDetail repo={repo} number={number} csrf={csrf} />
+      </ConversationLockProvider>
+    );
   }
   return <IssueList repo={repo} url={url} csrf={csrf} />;
 }

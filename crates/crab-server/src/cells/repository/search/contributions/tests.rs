@@ -208,6 +208,7 @@ async fn qualified_commenters_cover_all_sources_survive_rebuild_and_follow_sourc
     for i in 0..18 {
         let number = if i < 9 { 1 } else { 2 };
         let comment = CreateCommentInput {
+            can_post_locked: false,
             submission_id: *Uuid::now_v7().as_bytes(),
             issue: number,
             author: issue_commenter.clone(),
@@ -225,6 +226,7 @@ async fn qualified_commenters_cover_all_sources_survive_rebuild_and_follow_sourc
             write::<CreatePullComment>(
                 &cell,
                 CreatePullCommentInput {
+                    can_post_locked: false,
                     submission_id: *Uuid::now_v7().as_bytes(),
                     pull: number,
                     author: pull_commenter.clone(),
@@ -238,6 +240,7 @@ async fn qualified_commenters_cover_all_sources_survive_rebuild_and_follow_sourc
             write::<CreatePullReview>(
                 &cell,
                 CreatePullReviewInput {
+                    can_post_locked: false,
                     base_revision: None,
                     review_teams: Vec::new(),
                     submission_id: *Uuid::now_v7().as_bytes(),
@@ -254,6 +257,7 @@ async fn qualified_commenters_cover_all_sources_survive_rebuild_and_follow_sourc
         let CreatePullReviewThreadOutcome::Created(thread) = write::<CreatePullReviewThread>(
             &cell,
             CreatePullReviewThreadInput {
+                can_post_locked: false,
                 submission_id: *Uuid::now_v7().as_bytes(),
                 pull: number,
                 author: thread_author.clone(),
@@ -277,6 +281,7 @@ async fn qualified_commenters_cover_all_sources_survive_rebuild_and_follow_sourc
             write::<CreatePullReviewReply>(
                 &cell,
                 CreatePullReviewReplyInput {
+                    can_post_locked: false,
                     submission_id: *Uuid::now_v7().as_bytes(),
                     pull: number,
                     thread: thread.number,
@@ -482,6 +487,7 @@ async fn qualified_commenters_cover_all_sources_survive_rebuild_and_follow_sourc
         write::<CreateComment>(
             &cell,
             CreateCommentInput {
+                can_post_locked: false,
                 submission_id: *Uuid::now_v7().as_bytes(),
                 issue: 3,
                 author: owner.clone(),

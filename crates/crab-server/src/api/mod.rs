@@ -12,6 +12,7 @@ mod conversation;
 pub(crate) mod discussion_attachments;
 mod discussion_bulk;
 mod discussion_creation;
+mod discussion_lock;
 mod discussion_search;
 mod discussion_state;
 mod fork_sync;
@@ -550,6 +551,7 @@ pub(crate) fn routes(server: Arc<Server>) -> axum::Router<Arc<Server>> {
         .merge(integrations::routes(Arc::clone(&server)))
         .merge(crate::auth::deploy_tokens::routes(Arc::clone(&server)))
         .merge(conversation::routes(Arc::clone(&server)))
+        .merge(discussion_lock::routes(Arc::clone(&server)))
         .merge(discussion_state::routes(Arc::clone(&server)))
         .merge(discussion_bulk::routes(Arc::clone(&server)))
         .merge(discussion_attachments::routes())

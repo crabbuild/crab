@@ -62,6 +62,7 @@ async fn review(
     let CreatePullReviewOutcome::Created(record) = write::<CreatePullReview>(
         cell,
         CreatePullReviewInput {
+            can_post_locked: false,
             base_revision: None,
             review_teams: Vec::new(),
             pull,

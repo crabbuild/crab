@@ -1,3 +1,7 @@
+import {
+  ConversationLockControl,
+  useConversationLock,
+} from "@/components/discussion/conversation/lock";
 import { mergeMethod } from "./merge-methods";
 import { useEffect, useState } from "react";
 import { OverlayVisibility } from "@/components/ui/use-overlay-state";
@@ -57,6 +61,7 @@ export function PullDetail({
   theme: "light" | "dark";
   codeThemes: CodeThemes;
 }) {
+  const conversationLock = useConversationLock();
   const [reviewDraft, setReviewDraft] = useState<ReviewDraft>();
   const reviewSubmission = useSubmission();
   // Draft and submission identity outlive tab changes and metadata refreshes.
@@ -74,6 +79,7 @@ export function PullDetail({
   }, [pull.data]);
   function refresh() {
     pull.retry();
+    conversationLock?.refresh();
     setEpoch((value) => value + 1);
   }
   const data = current ?? pull.data;
@@ -180,6 +186,12 @@ export function PullDetail({
               )}
             </div>
           </div>
+          <ConversationLockControl
+            repo={repo}
+            target={`pulls/${number}`}
+            csrf={csrf}
+            onChanged={() => setEpoch((value) => value + 1)}
+          />
           <nav className="pull-tabs" aria-label="Pull request">
             <Link
               className={tab === "conversation" ? "active" : ""}
@@ -276,7 +288,11 @@ export function PullDetail({
                   pull={data}
                   csrf={csrf}
                   refresh={refresh}
-                  disabled={pull.loading || Boolean(pull.error)}
+                  disabled={
+                    pull.loading ||
+                    Boolean(pull.error) ||
+                    conversationLock?.lock?.can_post === false
+                  }
                   draft={reviewDraft}
                   onDraft={setReviewDraft}
                   submission={reviewSubmission}

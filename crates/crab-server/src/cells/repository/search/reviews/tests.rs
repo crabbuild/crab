@@ -170,6 +170,7 @@ async fn request_review_cancel_replay_and_refresh_preserve_indexed_participation
     assert_eq!(search(&cell, "review-involves:bob", &bob).await.matching, 0);
     request(&cell, 1, &alice, &bob, true).await;
     let review = CreatePullReviewInput {
+        can_post_locked: false,
         base_revision: None,
         review_teams: Vec::new(),
         submission_id: *Uuid::now_v7().as_bytes(),
@@ -241,6 +242,7 @@ async fn rebuild_pages_review_history_and_sparse_requests_without_changing_versi
         write::<CreatePullReview>(
             &cell,
             CreatePullReviewInput {
+                can_post_locked: false,
                 base_revision: None,
                 review_teams: Vec::new(),
                 submission_id: *Uuid::now_v7().as_bytes(),

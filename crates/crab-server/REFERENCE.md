@@ -2433,6 +2433,7 @@ owner label does not acquire ownership.
 | Milestones | `GET/POST /api/repos/{owner}/{name}/milestones`, `GET/PATCH /api/repos/{owner}/{name}/milestones/{number}`, `GET /api/repos/{owner}/{name}/milestones/{number}/items`; issue/pull `GET/PUT .../{number}/milestone` |
 | Reactions | `PUT /api/repos/{owner}/{name}/reactions/{target}`; discussion responses include personalized summaries |
 | Conversation | `GET /api/repos/{owner}/{name}/issues/{number}/conversation`, `GET /api/repos/{owner}/{name}/pulls/{number}/conversation` |
+| Conversation lock | `GET/PUT /api/repos/{owner}/{name}/issues/{number}/lock` and `GET/PUT /api/repos/{owner}/{name}/pulls/{number}/lock` |
 | Activity | `GET /api/repos/{owner}/{name}/activity`, `GET /api/repos/{owner}/{name}/issues/{number}/activity`, `GET /api/repos/{owner}/{name}/pulls/{number}/activity` |
 | Linked work | Issue/pull `GET .../{number}/links`; `GET/PUT /api/repos/{owner}/{name}/pulls/{pull}/linked-issues/{issue}` |
 
@@ -2620,6 +2621,35 @@ Native issue/PR edit inputs carry `can_triage` instead of their earlier coarse
 management flag. Update fleet peers together before assigning the new role.
 No catalog, canonical repository or discussion-index schema change is needed;
 existing member records remain valid. No alias accepts superseded native inputs.
+
+### Lock a conversation
+
+Open **Lock conversation** on an issue or pull request. Issue locks require
+Moderate or higher. Pull request locks require Write or higher. Pick an optional
+reason and confirm. The conversation displays its lock and reason, and the
+timeline records the lock or unlock.
+
+The posting restriction applies to comments, comment edits, reviews, inline
+threads and replies, and comments submitted with a state change. People with
+lock permission can continue posting. Nobody can change reactions while
+locked. Authorized users can close or reopen a discussion without posting a
+comment. Pending review drafts stay private and can be published when the
+reviewer regains posting access.
+
+`GET .../lock` returns `{version, locked, reason, can_manage, can_post}`.
+An untouched conversation starts unlocked at version zero.
+`PUT .../lock` takes `{version, change}` with
+`change: {kind:"lock", reason}` or `change: {kind:"unlock"}`.
+Supported reasons are `off_topic`, `too_heated`, `resolved`, and `spam`.
+The lock change and its timeline entry commit together. Retry with the original
+version and change to acknowledge an unchanged result. Reload on HTTP 409.
+Blocked contributions receive HTTP 423 with code `conversation_locked`.
+A previously accepted submission can recover its receipt while locked.
+
+Update every API and Repository Cell peer before setting conversation locks.
+Older collaboration writers lack the lock check, and older activity readers
+lack the new event kinds. Existing repositories default to unlocked without
+a migration.
 
 ### Search issues and pull requests
 
@@ -4255,8 +4285,8 @@ namespace and immutable asset bodies in backups. Restoring visible records
 without counters, claims, request ledgers,
 control and immutable roots loses numbering, ownership and retry guarantees.
 
-Discussion deletion, moderation, edit history, broad activity feeds, and
-email delivery remain unimplemented. The isolated RustFS process qualification
+Discussion deletion, comment hiding, edit history, and broader activity and
+email delivery qualification remain pending. The isolated RustFS process qualification
 restores version-selected product roots, including release asset bodies.
 Cross-provider export and restore on a production deployment remain pending.
 

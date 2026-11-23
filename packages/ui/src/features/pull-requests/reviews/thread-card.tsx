@@ -1,3 +1,4 @@
+import { useConversationLock } from "@/components/discussion/conversation/lock";
 import { Author } from "@/components/discussion/author";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
 import { Reactions } from "@/components/discussion/reactions";
@@ -124,8 +125,10 @@ export function ReviewThreadCard({
       ? `line ${thread.start_line}`
       : `lines ${thread.start_line}–${thread.end_line}`;
   const selected = suggestions?.selected.includes(thread.number);
+  const canPost = useConversationLock()?.lock?.can_post !== false;
   async function saveEdit(event: React.FormEvent) {
     event.preventDefault();
+    if (!canPost) return;
     const updated = await mutation.run<PullReviewThread>(
       endpoint(repo, `pulls/${pull.number}/threads/${thread.number}`),
       "PATCH",
@@ -203,7 +206,7 @@ export function ReviewThreadCard({
                     size="sm"
                     variant="default"
                     type="submit"
-                    disabled={mutation.pending || !editBody.trim()}
+                    disabled={!canPost || mutation.pending || !editBody.trim()}
                   >
                     {mutation.pending ? "Saving…" : "Save"}
                   </Button>
@@ -273,7 +276,7 @@ export function ReviewThreadCard({
                 Jump to diff
               </Button>
             )}
-            {thread.can_edit && !repo.archived && !editing && (
+            {thread.can_edit && canPost && !repo.archived && !editing && (
               <Button
                 variant="outline"
                 size="sm"

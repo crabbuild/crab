@@ -120,3 +120,33 @@ test("a changed head requires reload and explicit draft rebasing before a review
     (writes[1] as { request_id: string }).request_id,
   );
 });
+
+test("a locked pull request restricts publishing while leaving its diff readable", async ({
+  page,
+}) => {
+  await mockPullRequest(page);
+  await page.route("**/api/repos/team/project/pulls/1/lock?*", (route) =>
+    route.fulfill({
+      json: {
+        version: 1,
+        locked: true,
+        reason: "resolved",
+        can_manage: false,
+        can_post: false,
+      },
+    }),
+  );
+  await page.goto("/team/project/pull/1/files");
+  await expect(page.getByText("Conversation locked · Resolved")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Review changes" }),
+  ).toBeDisabled();
+  await expect(page.locator(".diff-panel")).toContainText("New content");
+  await page.getByRole("link", { name: "Conversation", exact: true }).click();
+  await expect(
+    page.getByRole("textbox", { name: "Comment", exact: true }),
+  ).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Add reaction" })).toHaveCount(
+    0,
+  );
+});

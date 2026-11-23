@@ -488,6 +488,10 @@ async fn comment(
     let Json(input) = input?;
     let author = actor(&principal)?;
     body(&input.body, true)?;
+    let can_post_locked = app::membership(&server, &principal, &repo)
+        .await?
+        .principal
+        .can_moderate(repo.id);
     let routed = app::repository_cell(&server, &repo)?;
     let output = crate::app::command_output(
         routed
@@ -496,6 +500,7 @@ async fn comment(
                 &routed.target,
                 crate::app::mutation_identity()?,
                 CreateCommentInput {
+                    can_post_locked,
                     submission_id: app::submission_id(&input.request_id)?,
                     issue: number(id)?,
                     author: crate::cells::repository::RepositoryAuthor::from(&author),
@@ -506,6 +511,7 @@ async fn comment(
     )?;
     let comment = match output {
         CreateCommentOutcome::Archived => return Err(Error::Archived),
+        CreateCommentOutcome::Locked => return Err(Error::ConversationLocked),
         CreateCommentOutcome::Created(comment) => comment,
         CreateCommentOutcome::IssueNotFound => return Err(Error::NotFound),
         CreateCommentOutcome::RequestConflict => return Err(Error::RequestConflict),
@@ -611,6 +617,7 @@ async fn edit_comment(
     )?;
     let comment = match output {
         UpdateCommentOutcome::Archived => return Err(Error::Archived),
+        UpdateCommentOutcome::Locked => return Err(Error::ConversationLocked),
         UpdateCommentOutcome::Updated(comment) => comment,
         UpdateCommentOutcome::NotFound => return Err(Error::NotFound),
         UpdateCommentOutcome::Forbidden => return Err(Error::IssueEditPermission),

@@ -1,3 +1,4 @@
+import { useConversationLock } from "@/components/discussion/conversation/lock";
 import { Link } from "@/components/navigation/link";
 import { repoHref } from "@/lib/repository-route";
 import { Editor } from "@/components/discussion/editor";
@@ -82,6 +83,7 @@ export function PullReviewThreads({
   submittingReview: boolean;
   unresolvedOnly: boolean;
 }) {
+  const canPost = useConversationLock()?.lock?.can_post !== false;
   const path = (before?: number) =>
     endpoint(repo, `pulls/${pull.number}/threads`, {
       outdated: "false",
@@ -324,6 +326,7 @@ export function PullReviewThreads({
         clearSelection();
       return;
     }
+    if (!canPost) return;
     const created = await mutation.run<PullReviewThread>(path(), "POST", {
       ...input,
       request_id: submission(input),
@@ -473,7 +476,10 @@ export function PullReviewThreads({
                 type="submit"
                 variant="default"
                 disabled={
-                  mutation.pending || pendingReview.pending || !body.trim()
+                  !canPost ||
+                  mutation.pending ||
+                  pendingReview.pending ||
+                  !body.trim()
                 }
               >
                 {mutation.pending ? "Posting…" : "Comment"}

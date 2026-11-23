@@ -97,6 +97,7 @@ async fn stored(cell: &RepositoryCell, subject: &str) -> Request {
 }
 fn review(subject: &str, state: ReviewState) -> CreatePullReviewInput {
     CreatePullReviewInput {
+        can_post_locked: false,
         base_revision: None,
         review_teams: Vec::new(),
         pull: 1,

@@ -11,6 +11,7 @@ pub(crate) mod conversation;
 pub(crate) mod creation;
 pub(crate) mod lifecycle;
 pub(crate) mod links;
+pub(crate) mod locks;
 pub(crate) mod mention_settings;
 pub(crate) mod mentions;
 pub(crate) mod milestones;

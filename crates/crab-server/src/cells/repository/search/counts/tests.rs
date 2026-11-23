@@ -155,6 +155,7 @@ async fn count_filters_share_live_issue_and_pull_projections_navigation_and_curs
         write::<CreateComment>(
             &cell,
             CreateCommentInput {
+                can_post_locked: false,
                 submission_id: *Uuid::now_v7().as_bytes(),
                 issue: 2,
                 author: actor.clone(),
@@ -170,6 +171,7 @@ async fn count_filters_share_live_issue_and_pull_projections_navigation_and_curs
                 write::<CreatePullComment>(
                     &cell,
                     CreatePullCommentInput {
+                        can_post_locked: false,
                         submission_id: *Uuid::now_v7().as_bytes(),
                         pull,
                         author: actor.clone(),

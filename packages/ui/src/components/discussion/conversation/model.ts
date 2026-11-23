@@ -1,3 +1,4 @@
+import type { LockReason } from "./lock";
 import type { DiscussionAuthor } from "../author";
 import type { ReactionSummary } from "../reactions";
 
@@ -34,6 +35,7 @@ export type Target =
     }
   | { kind: "pull_reply"; pull: number; thread: number; number: number };
 export type Action =
+  | { kind: "locked"; reason: LockReason | null }
   | { kind: "base_changed" | "head_changed"; from: string; to: string }
   | {
       kind: "project_changed" | "project_removed";
@@ -70,6 +72,7 @@ export type Action =
         | "reopened"
         | "pinned"
         | "unpinned"
+        | "unlocked"
         | "approved"
         | "changes_requested"
         | "review_dismissed"

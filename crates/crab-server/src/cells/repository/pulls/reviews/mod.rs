@@ -2,6 +2,7 @@ use super::*;
 use crate::cells::repository::collaboration::{
     Target,
     activity::{self, Action},
+    locks,
 };
 
 pub(crate) struct CreatePullReview;
@@ -72,6 +73,13 @@ impl CreatePullReview {
             return Ok(MutationResult::Success(CreatePullReviewOutcome::Created(
                 record,
             )));
+        }
+        if locks::blocked(
+            context,
+            Target::Pull { number: input.pull },
+            input.can_post_locked,
+        )? {
+            return Ok(MutationResult::Rejected(CreatePullReviewOutcome::Locked));
         }
         super::super::search::index::ensure_ready(context)?;
         let Some(mut pull) = load_pull(context, input.pull)? else {
@@ -222,6 +230,15 @@ impl Mutation for UpdatePullReview {
         validate_body(&input.body, record.state != ReviewState::Approved)?;
         if !same_author(&record.author, &input.actor) {
             return Ok(MutationResult::Rejected(UpdatePullReviewOutcome::Forbidden));
+        }
+        if locks::blocked(
+            context,
+            Target::Pull {
+                number: record.pull,
+            },
+            input.can_post_locked,
+        )? {
+            return Ok(MutationResult::Rejected(UpdatePullReviewOutcome::Locked));
         }
         if record.version != input.version {
             return Ok(MutationResult::Rejected(UpdatePullReviewOutcome::Conflict));

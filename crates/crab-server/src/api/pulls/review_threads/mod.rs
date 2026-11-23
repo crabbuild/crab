@@ -530,6 +530,7 @@ async fn prepare_thread(
         return Err(Error::Invalid("Suggestions can only target added lines"));
     }
     Ok(CreatePullReviewThreadInput {
+        can_post_locked: false,
         pull,
         author: actor.into(),
         submission_id: pull_storage::submission_id(&input.request_id)?,
@@ -613,7 +614,11 @@ async fn create(
         ));
     }
     let comparison = comparison(&server, repo, &pull).await?;
-    let prepared = prepare_thread(&server, pull.number, &actor, &comparison, input).await?;
+    let mut prepared = prepare_thread(&server, pull.number, &actor, &comparison, input).await?;
+    prepared.can_post_locked = app::membership(&server, &principal, repo)
+        .await?
+        .principal
+        .can_write(repo.id);
     let old_blob = prepared.old_blob_oid.clone();
     let new_blob = prepared.new_blob_oid.clone();
     let thread = storage::create_thread(&server, repo, prepared).await?;
@@ -679,6 +684,7 @@ async fn edit(
     let updated = storage::update_thread(
         &server,
         repo,
+        &principal,
         pull.number,
         number,
         storage::PullReviewThreadEdit {

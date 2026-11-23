@@ -399,6 +399,7 @@ async fn edit(
     let review = storage::update_review(
         &server,
         repo,
+        &principal,
         id,
         review_number,
         actor.clone(),

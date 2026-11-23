@@ -50,6 +50,10 @@ pub(crate) enum Action {
     CodeOwnerReviewsRequested,
     MergeQueuePrioritized,
     Updated,
+    Locked {
+        reason: Option<super::locks::Reason>,
+    },
+    Unlocked,
     Closed,
     IssueClosed {
         reason: crate::cells::repository::issues::lifecycle::Reason,
@@ -114,6 +118,8 @@ impl Action {
                     | Self::ParentRemoved { .. }
                     | Self::Created
                     | Self::Updated
+                    | Self::Locked { .. }
+                    | Self::Unlocked
                     | Self::Closed
                     | Self::Reopened
                     | Self::Pinned
@@ -129,6 +135,8 @@ impl Action {
                     | Self::ProjectRemoved { .. }
                     | Self::Created
                     | Self::Updated
+                    | Self::Locked { .. }
+                    | Self::Unlocked
                     | Self::Closed
                     | Self::Reopened
                     | Self::Merged

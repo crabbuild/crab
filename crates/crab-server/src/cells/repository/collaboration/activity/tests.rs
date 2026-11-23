@@ -176,6 +176,7 @@ async fn descending_subject_pages_remain_stable_when_new_events_arrive() {
         write::<CreateComment>(
             &cell,
             CreateCommentInput {
+                can_post_locked: false,
                 issue: 1,
                 submission_id: *Uuid::now_v7().as_bytes(),
                 author: actor("Bob"),
@@ -196,6 +197,7 @@ async fn descending_subject_pages_remain_stable_when_new_events_arrive() {
     write::<CreateComment>(
         &cell,
         CreateCommentInput {
+            can_post_locked: false,
             issue: 1,
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor("Bob"),
@@ -295,6 +297,7 @@ async fn event_sequence_subject_index_and_receipts_survive_native_restart() {
             &repository,
             identity(),
             CreateCommentInput {
+                can_post_locked: false,
                 issue: 1,
                 submission_id: *Uuid::now_v7().as_bytes(),
                 author: actor("Bob"),
@@ -337,6 +340,7 @@ async fn review_threads_replies_and_merge_completion_record_their_actual_targets
     write::<CreateComment>(
         &cell,
         CreateCommentInput {
+            can_post_locked: false,
             issue: 1,
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor("Bob"),
@@ -365,6 +369,7 @@ async fn review_threads_replies_and_merge_completion_record_their_actual_targets
     write::<CreatePullComment>(
         &cell,
         CreatePullCommentInput {
+            can_post_locked: false,
             pull: 1,
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor("Bob"),
@@ -375,6 +380,7 @@ async fn review_threads_replies_and_merge_completion_record_their_actual_targets
     write::<CreatePullReview>(
         &cell,
         CreatePullReviewInput {
+            can_post_locked: false,
             base_revision: None,
             review_teams: Vec::new(),
             pull: 1,
@@ -389,6 +395,7 @@ async fn review_threads_replies_and_merge_completion_record_their_actual_targets
     write::<CreatePullReviewThread>(
         &cell,
         CreatePullReviewThreadInput {
+            can_post_locked: false,
             pull: 1,
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor("Bob"),
@@ -408,6 +415,7 @@ async fn review_threads_replies_and_merge_completion_record_their_actual_targets
     write::<CreatePullReviewReply>(
         &cell,
         CreatePullReviewReplyInput {
+            can_post_locked: false,
             pull: 1,
             thread: 1,
             submission_id: *Uuid::now_v7().as_bytes(),
@@ -419,6 +427,7 @@ async fn review_threads_replies_and_merge_completion_record_their_actual_targets
     write::<UpdatePullReviewThread>(
         &cell,
         UpdatePullReviewThreadInput {
+            can_post_locked: false,
             key: PullReviewThreadKey { pull: 1, number: 1 },
             actor: actor("Alice"),
             can_resolve: true,

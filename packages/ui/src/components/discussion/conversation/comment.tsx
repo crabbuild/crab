@@ -1,3 +1,4 @@
+import { useConversationLock } from "./lock";
 import { useState } from "react";
 import { Author } from "../author";
 import { Reactions } from "../reactions";
@@ -28,6 +29,7 @@ export function CommentCard({
   onSaved: (comment: Comment) => void;
 }) {
   const [draft, setDraft] = useState<{ body: string; version: number }>();
+  const canPost = useConversationLock()?.lock?.can_post !== false;
   const mutation = useMutation(csrf, repo);
   const editTrigger = useReturnFocus<HTMLButtonElement>(Boolean(draft));
   const save = useReturnFocus<HTMLButtonElement>(mutation.conflict);
@@ -51,7 +53,7 @@ export function CommentCard({
           </time>
         </Link>
         {comment.version > 1 && <span className="muted">edited</span>}
-        {comment.can_edit && !repo.archived && !draft && (
+        {comment.can_edit && canPost && !repo.archived && !draft && (
           <Button
             variant="outline"
             ref={editTrigger}
@@ -70,7 +72,7 @@ export function CommentCard({
           className="comment-edit"
           onSubmit={async (event) => {
             event.preventDefault();
-            if (mutation.conflict) return;
+            if (!canPost || mutation.conflict) return;
             const updated = await mutation.run<Comment>(
               endpoint(repo, `${target}/comments/${comment.number}`),
               "PATCH",
@@ -112,7 +114,10 @@ export function CommentCard({
               type="submit"
               variant="default"
               disabled={
-                mutation.pending || mutation.conflict || !draft.body.trim()
+                !canPost ||
+                mutation.pending ||
+                mutation.conflict ||
+                !draft.body.trim()
               }
             >
               Save comment

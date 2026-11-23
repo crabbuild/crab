@@ -1,5 +1,5 @@
 use super::{
-    Subject, SubjectKind,
+    Subject, SubjectKind, Target,
     submissions::{self, Kind},
 };
 use crate::cells::repository::{self, issues::lifecycle::Reason, *};
@@ -22,6 +22,8 @@ pub(crate) struct Input {
     pub subject: Subject,
     pub actor: RepositoryAuthor,
     pub can_triage: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_post_locked: bool,
     pub version: u64,
     pub state: State,
     pub reason: Option<Reason>,
@@ -36,6 +38,7 @@ pub(crate) enum Comment {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Rejection {
+    Locked,
     Archived,
     NotFound,
     Forbidden,
@@ -139,6 +142,21 @@ fn apply(context: &mut Transaction<'_>, input: Input) -> Result<MutationResult<O
     }
     if input.subject.kind == SubjectKind::Issue {
         issues::lifecycle::ensure_ready(context)?;
+    }
+    if input.body.is_some() {
+        let target = match input.subject.kind {
+            SubjectKind::Issue => Target::Issue {
+                number: input.subject.number,
+            },
+            SubjectKind::Pull => Target::Pull {
+                number: input.subject.number,
+            },
+        };
+        if super::locks::blocked(context, target, input.can_post_locked)? {
+            return Ok(MutationResult::Rejected(Outcome::Rejected(
+                Rejection::Locked,
+            )));
+        }
     }
     // The contribution precedes the state event in the timeline. Rejection
     // rolls this scope back before the terminal decision is recorded.

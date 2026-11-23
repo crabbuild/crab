@@ -14,6 +14,7 @@ fn oid(byte: char) -> String {
 
 fn input() -> CreatePullReviewThreadInput {
     CreatePullReviewThreadInput {
+        can_post_locked: false,
         pull: 1,
         submission_id: [1; 16],
         author: author(),

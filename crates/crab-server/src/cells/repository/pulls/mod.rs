@@ -322,6 +322,8 @@ pub(crate) enum UpdatePullOutcome {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreatePullCommentInput {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_post_locked: bool,
     pub pull: u64,
     pub submission_id: [u8; 16],
     pub author: RepositoryAuthor,
@@ -330,6 +332,7 @@ pub(crate) struct CreatePullCommentInput {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum CreatePullCommentOutcome {
+    Locked,
     Archived,
     Created(PullCommentRecord),
     PullNotFound,
@@ -339,6 +342,8 @@ pub(crate) enum CreatePullCommentOutcome {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct UpdatePullCommentInput {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_post_locked: bool,
     pub key: PullChildKey,
     pub actor: RepositoryAuthor,
     pub version: u64,
@@ -347,6 +352,7 @@ pub(crate) struct UpdatePullCommentInput {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum UpdatePullCommentOutcome {
+    Locked,
     Archived,
     Updated(PullCommentRecord),
     NotFound,
@@ -357,6 +363,8 @@ pub(crate) enum UpdatePullCommentOutcome {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreatePullReviewInput {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_post_locked: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub review_teams: Vec<uuid::Uuid>,
     pub pull: u64,
@@ -371,6 +379,7 @@ pub(crate) struct CreatePullReviewInput {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum CreatePullReviewOutcome {
+    Locked,
     Archived,
     Created(PullReviewRecord),
     PullNotFound,
@@ -385,6 +394,8 @@ pub(crate) enum CreatePullReviewOutcome {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct UpdatePullReviewInput {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_post_locked: bool,
     pub key: PullChildKey,
     pub actor: RepositoryAuthor,
     pub version: u64,
@@ -393,6 +404,7 @@ pub(crate) struct UpdatePullReviewInput {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum UpdatePullReviewOutcome {
+    Locked,
     Archived,
     Updated(PullReviewRecord),
     NotFound,

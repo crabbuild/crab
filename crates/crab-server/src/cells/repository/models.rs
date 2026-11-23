@@ -149,6 +149,8 @@ pub(crate) struct IssueRecord {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CreateCommentInput {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_post_locked: bool,
     pub submission_id: [u8; 16],
     pub issue: u64,
     pub author: RepositoryAuthor,
@@ -168,6 +170,7 @@ pub(crate) struct CommentRecord {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum CreateCommentOutcome {
+    Locked,
     Archived,
     Created(CommentRecord),
     IssueNotFound,
@@ -223,6 +226,7 @@ pub(crate) struct UpdateCommentInput {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum UpdateCommentOutcome {
+    Locked,
     Archived,
     Updated(CommentRecord),
     NotFound,

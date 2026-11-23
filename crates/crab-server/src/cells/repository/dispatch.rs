@@ -109,6 +109,9 @@ pub(in crate::cells) fn dispatch_mutation(
         collaboration::state::ChangeState::ID => {
             invoke_mutation::<collaboration::state::ChangeState>(context, input)
         }
+        collaboration::locks::Set::ID => {
+            invoke_mutation::<collaboration::locks::Set>(context, input)
+        }
         #[cfg(test)]
         search::reviews::status::tests::PreviousFormat::ID => {
             invoke_mutation::<search::reviews::status::tests::PreviousFormat>(context, input)
@@ -381,6 +384,7 @@ pub(in crate::cells) fn dispatch_read(
         <collaboration::conversation::ListConversation as Read>::ID => {
             invoke_read::<collaboration::conversation::ListConversation>(context, input)
         }
+        collaboration::locks::Get::ID => invoke_read::<collaboration::locks::Get>(context, input),
         <collaboration::activity::ListActivity as Read>::ID => {
             invoke_read::<collaboration::activity::ListActivity>(context, input)
         }

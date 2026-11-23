@@ -113,6 +113,7 @@ async fn comment(
     let comment = storage::create_comment(
         &server,
         repo,
+        &principal,
         id,
         actor.clone(),
         app::submission(&input.request_id)?,
@@ -184,6 +185,7 @@ async fn edit_comment(
     let comment = storage::update_comment(
         &server,
         repo,
+        &principal,
         app::number(id)?,
         app::number(comment)?,
         actor.clone(),

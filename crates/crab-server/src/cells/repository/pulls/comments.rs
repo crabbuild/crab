@@ -2,6 +2,7 @@ use super::*;
 use crate::cells::repository::collaboration::{
     Target,
     activity::{self, Action},
+    locks,
 };
 
 pub(crate) struct CreatePullComment;
@@ -55,6 +56,13 @@ impl Mutation for CreatePullComment {
             return Ok(MutationResult::Success(CreatePullCommentOutcome::Created(
                 record,
             )));
+        }
+        if locks::blocked(
+            context,
+            Target::Pull { number: input.pull },
+            input.can_post_locked,
+        )? {
+            return Ok(MutationResult::Rejected(CreatePullCommentOutcome::Locked));
         }
         let record = append_comment(context, input.pull, &input.author, &input.body)?;
         context.query("INSERT INTO repository_pull_comment_submissions(pull_number, request_id, payload_digest, comment_number) VALUES (?, ?, ?, ?)", &[integer(record.pull)?, SqlValue::Blob(input.submission_id.to_vec()), SqlValue::Blob(digest.as_bytes().to_vec()), integer(record.number)?])?;
@@ -124,6 +132,15 @@ impl Mutation for UpdatePullComment {
             return Ok(MutationResult::Rejected(
                 UpdatePullCommentOutcome::Forbidden,
             ));
+        }
+        if locks::blocked(
+            context,
+            Target::Pull {
+                number: record.pull,
+            },
+            input.can_post_locked,
+        )? {
+            return Ok(MutationResult::Rejected(UpdatePullCommentOutcome::Locked));
         }
         if record.version != input.version {
             return Ok(MutationResult::Rejected(UpdatePullCommentOutcome::Conflict));

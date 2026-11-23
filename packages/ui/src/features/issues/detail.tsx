@@ -1,3 +1,7 @@
+import {
+  ConversationLockControl,
+  useConversationLock,
+} from "@/components/discussion/conversation/lock";
 import { SubIssues } from "@/features/projects/discussion";
 import { Author } from "@/components/discussion/author";
 import { Reactions } from "@/components/discussion/reactions";
@@ -56,6 +60,7 @@ export function IssueDetail({
   number: number;
   csrf: string;
 }) {
+  const conversationLock = useConversationLock();
   const resource = useRequest<Issue>(endpoint(repo, `issues/${number}`));
   const [issue, setIssue] = useState<Issue>();
   const [editing, setEditing] = useState(false);
@@ -82,7 +87,10 @@ export function IssueDetail({
           <Button
             variant="outline"
             size="sm"
-            onClick={resource.retry}
+            onClick={() => {
+              resource.retry();
+              conversationLock?.refresh();
+            }}
             aria-busy={resource.loading}
           >
             Refresh
@@ -112,6 +120,12 @@ export function IssueDetail({
           {resource.error}
         </p>
       )}
+      <ConversationLockControl
+        repo={repo}
+        target={`issues/${number}`}
+        csrf={csrf}
+        onChanged={() => setMetadataEpoch((value) => value + 1)}
+      />
       <div className="discussion-detail-layout">
         <div className="discussion-main">
           {editing ? (

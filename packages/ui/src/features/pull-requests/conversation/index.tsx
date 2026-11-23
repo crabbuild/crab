@@ -87,7 +87,7 @@ export function PullConversation({
                 busy={busy || refreshing}
                 readOnly={repo.archived}
                 onStateChanged={refresh}
-                actions={(change) =>
+                actions={(change, withComment) =>
                   pull.can_manage &&
                   !repo.archived && (
                     <Button
@@ -109,7 +109,7 @@ export function PullConversation({
                         })
                       }
                     >
-                      {comment.body.trim()
+                      {withComment
                         ? pull.state === "open"
                           ? "Close with comment"
                           : "Reopen with comment"

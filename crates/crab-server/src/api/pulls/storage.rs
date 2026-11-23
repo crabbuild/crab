@@ -334,6 +334,7 @@ pub(super) async fn comment(
 pub(super) async fn create_comment(
     server: &Server,
     repo: &Repository,
+    principal: &crate::auth::Principal,
     pull: u64,
     author: Identity,
     request_id: String,
@@ -347,6 +348,10 @@ pub(super) async fn create_comment(
                 &routed.target,
                 crate::app::mutation_identity()?,
                 CreatePullCommentInput {
+                    can_post_locked: app::membership(server, principal, repo)
+                        .await?
+                        .principal
+                        .can_write(repo.id),
                     pull,
                     submission_id: submission_id(&request_id)?,
                     author: crate::cells::repository::RepositoryAuthor::from(&author),
@@ -356,6 +361,7 @@ pub(super) async fn create_comment(
             .await,
     )? {
         CreatePullCommentOutcome::Archived => Err(Error::Archived),
+        CreatePullCommentOutcome::Locked => Err(Error::ConversationLocked),
         CreatePullCommentOutcome::Created(comment) => Ok(from_comment(comment)),
         CreatePullCommentOutcome::PullNotFound => Err(Error::NotFound),
         CreatePullCommentOutcome::RequestConflict => Err(Error::RequestConflict),
@@ -365,6 +371,7 @@ pub(super) async fn create_comment(
 pub(super) async fn update_comment(
     server: &Server,
     repo: &Repository,
+    principal: &crate::auth::Principal,
     pull: u64,
     number: u64,
     actor: Identity,
@@ -379,6 +386,10 @@ pub(super) async fn update_comment(
                 &routed.target,
                 crate::app::mutation_identity()?,
                 UpdatePullCommentInput {
+                    can_post_locked: app::membership(server, principal, repo)
+                        .await?
+                        .principal
+                        .can_write(repo.id),
                     key: PullChildKey { pull, number },
                     actor: crate::cells::repository::RepositoryAuthor::from(&actor),
                     version,
@@ -388,6 +399,7 @@ pub(super) async fn update_comment(
             .await,
     )? {
         UpdatePullCommentOutcome::Archived => Err(Error::Archived),
+        UpdatePullCommentOutcome::Locked => Err(Error::ConversationLocked),
         UpdatePullCommentOutcome::Updated(comment) => Ok(from_comment(comment)),
         UpdatePullCommentOutcome::NotFound => Err(Error::NotFound),
         UpdatePullCommentOutcome::Forbidden => Err(Error::Forbidden),
@@ -482,6 +494,7 @@ pub(super) async fn create_review(
                 &routed.target,
                 crate::app::mutation_identity()?,
                 CreatePullReviewInput {
+                    can_post_locked: membership.principal.can_write(repo.id),
                     review_teams: membership.review_teams,
                     pull,
                     submission_id: submission_id(&input.request_id)?,
@@ -502,6 +515,7 @@ pub(super) fn review_result(
 ) -> Result<crate::cells::repository::PullReviewRecord> {
     match outcome {
         CreatePullReviewOutcome::Archived => Err(Error::Archived),
+        CreatePullReviewOutcome::Locked => Err(Error::ConversationLocked),
         CreatePullReviewOutcome::Created(review) => Ok(review),
         CreatePullReviewOutcome::PullNotFound => Err(Error::NotFound),
         CreatePullReviewOutcome::PullClosed => {
@@ -520,6 +534,7 @@ pub(super) fn review_result(
 pub(super) async fn update_review(
     server: &Server,
     repo: &Repository,
+    principal: &crate::auth::Principal,
     pull: u64,
     number: u64,
     actor: Identity,
@@ -534,6 +549,10 @@ pub(super) async fn update_review(
                 &routed.target,
                 crate::app::mutation_identity()?,
                 UpdatePullReviewInput {
+                    can_post_locked: app::membership(server, principal, repo)
+                        .await?
+                        .principal
+                        .can_write(repo.id),
                     key: PullChildKey { pull, number },
                     actor: crate::cells::repository::RepositoryAuthor::from(&actor),
                     version,
@@ -543,6 +562,7 @@ pub(super) async fn update_review(
             .await,
     )? {
         UpdatePullReviewOutcome::Archived => Err(Error::Archived),
+        UpdatePullReviewOutcome::Locked => Err(Error::ConversationLocked),
         UpdatePullReviewOutcome::Updated(review) => Ok(review),
         UpdatePullReviewOutcome::NotFound => Err(Error::NotFound),
         UpdatePullReviewOutcome::Forbidden => Err(Error::Forbidden),

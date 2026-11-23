@@ -166,6 +166,7 @@ async fn create_reply(
     let reply = storage::create_reply(
         &server,
         repo,
+        &principal,
         pull.number,
         thread,
         storage::NewPullReviewReply {
@@ -243,6 +244,7 @@ async fn edit_reply(
     let reply = storage::update_reply(
         &server,
         repo,
+        &principal,
         pull.number,
         app::number(thread)?,
         app::number(reply)?,

@@ -148,6 +148,7 @@ fn summary(
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum Outcome {
+    Locked,
     Applied(Summary),
     Archived,
     NotFound,
@@ -179,6 +180,9 @@ impl Mutation for SetReaction {
                 input.target,
                 &input.actor,
             )?)));
+        }
+        if super::locks::blocked(context, input.target, false)? {
+            return Ok(MutationResult::Rejected(Outcome::Locked));
         }
         let mut counts = counts(context, input.target)?;
         let current = counts.get(&input.kind).copied().unwrap_or(0);

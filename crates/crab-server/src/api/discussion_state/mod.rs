@@ -114,6 +114,11 @@ async fn change(
                     subject,
                     actor: (&author).into(),
                     can_triage: membership.principal.can_triage(repo.id),
+                    can_post_locked: super::discussion_lock::can_manage(
+                        &membership.principal,
+                        repo.id,
+                        subject.kind,
+                    ),
                     version: input.version,
                     state: input.state,
                     reason: input.reason,
@@ -125,6 +130,9 @@ async fn change(
     .map_err(IntoResponse::into_response)?;
     let comment = match output {
         Outcome::Applied(comment) => comment,
+        Outcome::Rejected(state::Rejection::Locked) => {
+            return Err(rejected(Error::ConversationLocked).into());
+        }
         Outcome::Rejected(state::Rejection::Archived) => {
             return Err(rejected(Error::Archived).into());
         }

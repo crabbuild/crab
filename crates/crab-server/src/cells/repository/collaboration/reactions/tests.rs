@@ -168,6 +168,7 @@ async fn every_discussion_target_is_scoped_to_its_parent() {
     write::<CreateComment>(
         &cell,
         CreateCommentInput {
+            can_post_locked: false,
             issue: 1,
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor("alice"),
@@ -196,6 +197,7 @@ async fn every_discussion_target_is_scoped_to_its_parent() {
     write::<CreatePullComment>(
         &cell,
         CreatePullCommentInput {
+            can_post_locked: false,
             pull: 1,
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor("alice"),
@@ -206,6 +208,7 @@ async fn every_discussion_target_is_scoped_to_its_parent() {
     write::<CreatePullReview>(
         &cell,
         CreatePullReviewInput {
+            can_post_locked: false,
             base_revision: None,
             review_teams: Vec::new(),
             pull: 1,
@@ -220,6 +223,7 @@ async fn every_discussion_target_is_scoped_to_its_parent() {
     write::<CreatePullReviewThread>(
         &cell,
         CreatePullReviewThreadInput {
+            can_post_locked: false,
             pull: 1,
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor("bob"),
@@ -239,6 +243,7 @@ async fn every_discussion_target_is_scoped_to_its_parent() {
     write::<CreatePullReviewReply>(
         &cell,
         CreatePullReviewReplyInput {
+            can_post_locked: false,
             pull: 1,
             thread: 1,
             submission_id: *Uuid::now_v7().as_bytes(),

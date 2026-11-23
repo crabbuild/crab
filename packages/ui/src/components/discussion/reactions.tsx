@@ -10,6 +10,7 @@ import {
 import { cn } from "@/lib/utils";
 import { SmileyIcon } from "@primer/octicons-react";
 import { endpoint, type Repository } from "@/lib/api";
+import { useConversationLock } from "./conversation/lock";
 import { useMutation } from "./mutations";
 
 const kinds = [
@@ -40,6 +41,8 @@ export function Reactions({
   summary: ReactionSummary;
   csrf: string;
 }) {
+  const lock = useConversationLock()?.lock;
+  const readOnly = repo.archived || lock?.locked;
   const [current, setCurrent] = useState(summary);
   const [open, setOpen] = useState(false);
   const mutation = useMutation(csrf, repo);
@@ -51,6 +54,7 @@ export function Reactions({
     );
   }, [summary]);
   async function select(kind: Kind) {
+    if (readOnly) return;
     setOpen(false);
     const value = await mutation.run<ReactionSummary>(
       endpoint(repo, `reactions/${target}`),
@@ -66,10 +70,10 @@ export function Reactions({
       );
   }
   const visible = kinds.filter(({ kind }) => current.groups[kind].count > 0);
-  if (repo.archived && !visible.length) return null;
+  if (readOnly && !visible.length && !mutation.error) return null;
   return (
     <div className="reaction-bar" role="group" aria-label="Reactions">
-      {!repo.archived && (
+      {!readOnly && (
         <DropdownMenu open={open} onOpenChange={setOpen}>
           <DropdownMenuTrigger asChild>
             <Button
@@ -109,7 +113,7 @@ export function Reactions({
             className={cn("reaction-chip", group.reacted && "reacted")}
             aria-pressed={group.reacted}
             aria-label={`${label}: ${group.count} ${group.count === 1 ? "reaction" : "reactions"}`}
-            disabled={repo.archived || mutation.pending}
+            disabled={readOnly || mutation.pending}
             onClick={() => {
               void select(kind);
             }}

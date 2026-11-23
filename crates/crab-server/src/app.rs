@@ -54,6 +54,10 @@ pub(crate) enum Error {
     Forbidden,
     #[error("You do not have permission to edit this issue or comment")]
     IssueEditPermission,
+    #[error("This conversation is locked")]
+    ConversationLocked,
+    #[error("You do not have permission to lock or unlock this conversation")]
+    ConversationLockPermission,
     #[error("Archived repositories are read-only")]
     Archived,
     #[error("Pull request authors cannot approve or request changes on their own changes")]
@@ -349,6 +353,16 @@ impl IntoResponse for Error {
                 StatusCode::FORBIDDEN,
                 "forbidden",
                 "You do not have permission to edit this issue or comment",
+            ),
+            Self::ConversationLocked => (
+                StatusCode::LOCKED,
+                "conversation_locked",
+                "This conversation is locked",
+            ),
+            Self::ConversationLockPermission => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "You do not have permission to lock or unlock this conversation",
             ),
             Self::Archived => (
                 StatusCode::FORBIDDEN,
