@@ -75,7 +75,7 @@ pub(in crate::api) async fn search(
     .await
     .map_err(|_| {
         (StatusCode::GATEWAY_TIMEOUT, Json(serde_json::json!({
-            "error":{"code":"timeout","message":"Code search timed out. Try a directory or an organization scope."}
+            "error":{"code":"timeout","message":"Code search timed out. Try a directory, repository, or organization scope."}
         }))).into_response()
     })??;
     Ok(read_admission::retain(
@@ -92,7 +92,7 @@ async fn search_page(
     tokens: &Continuations<'_>,
     cancel: &CancellationToken,
 ) -> std::result::Result<Results, Response> {
-    let repositories = visible(server, principal, params.organization)
+    let repositories = visible(server, principal, params.organization, pattern)
         .await
         .map_err(IntoResponse::into_response)?;
     let scope = scope_digest(&repositories);
@@ -179,7 +179,7 @@ async fn search_page(
     // Refresh every grant in scope before releasing excerpts or a continuation.
     // The cursor also seals this scope, so previous pages cannot be continued
     // after a repository leaves the user's view.
-    let current = visible(server, principal, params.organization)
+    let current = visible(server, principal, params.organization, pattern)
         .await
         .map_err(IntoResponse::into_response)?;
     if scope_digest(&current) != scope {
@@ -197,12 +197,16 @@ async fn visible(
     server: &Server,
     principal: &Principal,
     organization: Option<Uuid>,
+    pattern: &Pattern,
 ) -> app::Result<Vec<Arc<Repository>>> {
-    let mut repositories: Vec<_> = catalog::visible(server, principal, None, organization)
-        .await?
-        .into_iter()
-        .map(|row| row.repository)
-        .collect();
+    let mut repositories: Vec<_> = catalog::visible_matching(server, principal, |repo| {
+        organization.is_none_or(|id| repo.organization == Some(id))
+            && pattern.filters.repository_matches(repo)
+    })
+    .await?
+    .into_iter()
+    .map(|row| row.repository)
+    .collect();
     // Stable UUID order lets a continuation locate the same repository without
     // relying on an ACL-sensitive ordinal supplied by the browser.
     repositories.sort_unstable_by_key(|repo| repo.id);
@@ -234,7 +238,8 @@ struct Continuations<'a> {
 impl Continuations<'_> {
     fn seal(&self, data: &[u8]) -> blake3::Hash {
         let mut mac = blake3::Hasher::new_keyed(self.key);
-        mac.update(b"crab-workspace-code-search-v1\0");
+        // Old continuations could refer to the same text with literal semantics.
+        mac.update(b"crab-workspace-code-search-v2\0");
         mac.update(self.context.as_bytes());
         mac.update(data);
         mac.finalize()

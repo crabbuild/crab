@@ -36,13 +36,7 @@ pub(super) async fn inspect(
         }
         candidates.push((i, row));
     }
-    let mut page = Page {
-        commit: snapshot.commit_oid().to_string(),
-        items: Vec::new(),
-        scanned: 0,
-        skipped: 0,
-        next: None,
-    };
+    let mut page = Page::for_commit(snapshot.commit_oid());
     let mut verified = 0;
     'verify: for batch in candidates.chunks(FILE_READ_BATCH) {
         let matches = futures_util::future::try_join_all(batch.iter().map(|(_, row)| async {
@@ -89,6 +83,7 @@ pub(super) async fn inspect(
             .iter()
             .filter(|row| {
                 row.filter.is_none()
+                    && pattern.filters.file_matches(row.path.as_bytes())
                     && (pattern.kind != Kind::Symbol
                         || Syntax::for_path(row.path.as_bytes()).is_some())
             })
@@ -108,6 +103,9 @@ pub(super) async fn inspect(
 }
 
 fn eligible(row: &Row, pattern: &Pattern) -> bool {
+    if !pattern.filters.file_matches(row.path.as_bytes()) {
+        return false;
+    }
     if pattern.kind == Kind::Path {
         return pattern.matcher.is_match(&display_path(row.path.as_bytes()));
     }
