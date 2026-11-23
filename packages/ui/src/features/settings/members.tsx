@@ -26,6 +26,7 @@ import { endpoint, navigate, type Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 import {
   AlertIcon,
+  GearIcon,
   IssueOpenedIcon,
   EyeIcon,
   PencilIcon,
@@ -39,6 +40,11 @@ import { ChevronDownIcon } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import { GroupAccess } from "./groups";
+import {
+  isRepositoryRole,
+  repositoryRoleLabels,
+  repositoryRoles,
+} from "@/lib/repository-roles";
 
 type DraftMember = RepositoryMember & { id: number };
 
@@ -49,31 +55,31 @@ function failureMessage(body: unknown, fallback: string) {
   return typeof message === "string" ? message : fallback;
 }
 
+const memberAccess = {
+  read: {
+    description: "Can view and clone the repository.",
+    Icon: EyeIcon,
+  },
+  triage: {
+    description: "Can manage issues and pull requests without pushing code.",
+    Icon: IssueOpenedIcon,
+  },
+  write: {
+    description: "Can push changes and collaborate on the repository.",
+    Icon: PencilIcon,
+  },
+  maintain: {
+    description: "Can push, edit the description, and configure PR merges.",
+    Icon: GearIcon,
+  },
+  admin: {
+    description: "Can manage repository settings and members.",
+    Icon: ShieldLockIcon,
+  },
+};
+
 function memberAccessDetails(access: RepositoryMember["access"]) {
-  return access === "admin"
-    ? {
-        label: "Admin",
-        description: "Can manage repository settings and members.",
-        Icon: ShieldLockIcon,
-      }
-    : access === "write"
-      ? {
-          label: "Write",
-          description: "Can push changes and collaborate on the repository.",
-          Icon: PencilIcon,
-        }
-      : access === "triage"
-        ? {
-            label: "Triage",
-            description:
-              "Can manage issues and pull requests without pushing code.",
-            Icon: IssueOpenedIcon,
-          }
-        : {
-            label: "Read",
-            description: "Can view and clone the repository.",
-            Icon: EyeIcon,
-          };
+  return { ...memberAccess[access], label: repositoryRoleLabels[access] };
 }
 
 function MemberAccess({ access }: { access: RepositoryMember["access"] }) {
@@ -454,35 +460,28 @@ export function MemberSettings({
                           value={form.access}
                           aria-label="Access level"
                           onValueChange={(access) => {
-                            if (
-                              access === "read" ||
-                              access === "triage" ||
-                              access === "write" ||
-                              access === "admin"
-                            )
+                            if (isRepositoryRole(access))
                               setForm({ ...form, access });
                           }}
                         >
-                          {(["read", "triage", "write", "admin"] as const).map(
-                            (access) => {
-                              const details = memberAccessDetails(access);
-                              const { Icon } = details;
-                              return (
-                                <DropdownMenuRadioItem
-                                  key={access}
-                                  value={access}
-                                >
-                                  <Icon aria-hidden="true" />
-                                  <div>
-                                    <div>{details.label}</div>
-                                    <p className="text-xs text-muted-foreground">
-                                      {details.description}
-                                    </p>
-                                  </div>
-                                </DropdownMenuRadioItem>
-                              );
-                            },
-                          )}
+                          {repositoryRoles.map((access) => {
+                            const details = memberAccessDetails(access);
+                            const { Icon } = details;
+                            return (
+                              <DropdownMenuRadioItem
+                                key={access}
+                                value={access}
+                              >
+                                <Icon aria-hidden="true" />
+                                <div>
+                                  <div>{details.label}</div>
+                                  <p className="text-xs text-muted-foreground">
+                                    {details.description}
+                                  </p>
+                                </div>
+                              </DropdownMenuRadioItem>
+                            );
+                          })}
                         </DropdownMenuRadioGroup>
                       </DropdownMenuContent>
                     </DropdownMenu>

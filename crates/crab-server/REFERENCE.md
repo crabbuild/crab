@@ -811,6 +811,18 @@ shared catalog stores the revision and former owner/name pairs.
 Clients that use an old remote can update it with `git remote set-url origin`
 and the current URL.
 
+### Edit a repository description
+
+Open **Settings → General → Edit description** with Maintain or Admin access.
+The description is one line of up to 350 characters and can be cleared. The
+repository page and catalog use the published description.
+
+`GET /api/repositories/{repository}/description` returns `{description,version}`.
+Send a new description with that version to `PUT` on the same route. An
+outdated version returns HTTP 409 when the submitted text differs from the
+current description. Retry the same text to recover a lost response while it
+is still current. An archived repository requires unarchiving before editing.
+
 ### Transfer repository ownership
 
 In **Settings → General**, a repository administrator can create an offer for a
@@ -1552,7 +1564,7 @@ snapshot.
 
 Administrators can make the same full replacement in **Settings → Members**.
 The browser loads membership only when that section opens, presents stable
-subject, display name, and `read`/`triage`/`write`/`admin` access, and sends the session
+subject, display name, and `read`/`triage`/`write`/`maintain`/`admin` access, and sends the session
 CSRF token with a single revision-guarded replacement. Add, edit, and remove
 are staged locally; removal requires an explicit confirmation. A conflict keeps
 the unsaved draft and requires **Reload members** before another save; it never
@@ -1629,9 +1641,10 @@ crab-server --config server.toml repository set-organization \
 Use an empty `teams` array to bind ownership before granting access. The binding
 preserves the repository UUID, path, and existing individual and signed-group
 grants. Organization owners get repository Admin access. Team grants accept
-Read, Triage, Write, or Admin for up to 100 distinct live team UUIDs in the
-owning organization. Update all serving peers before assigning Admin to a team,
-since earlier servers reject catalog documents containing that role. The
+Read, Triage, Write, Maintain, or Admin for up to 100 distinct live team UUIDs in the
+owning organization. Update all serving peers before assigning Maintain or using
+the new description editor, since earlier servers reject the new catalog fields
+and role value. The
 operator can replace grants for the existing owner using the same command.
 Transfer to another organization requires a separate operation.
 
@@ -2550,14 +2563,14 @@ accessible to repository readers.
 
 ### Separate collaboration triage from code write access
 
-Repository membership supports `read`, `triage`, `write` and `admin` roles.
+Repository membership supports `read`, `triage`, `write`, `maintain` and `admin` roles.
 The collaboration split follows [GitHub’s repository-role reference](https://docs.github.com/en/organizations/managing-user-access-to-your-organizations-repositories/managing-repository-roles/repository-roles-for-an-organization); full role parity remains incomplete.
 Triage can close/reopen other authors’ issues and PRs, apply/remove existing
 labels and assignees, apply milestones, and request/cancel reviews. It cannot
 push code, issue write-scoped Git tokens, merge, change draft readiness on
 another author’s PR, edit another author’s title/body, create/edit label or
 milestone definitions, publish releases, or administer members/settings. Write
-and Admin retain Triage capabilities. Authors retain their existing description
+and higher roles retain Triage capabilities. Authors retain their existing description
 and own-item state controls; archive, pending-merge and version guards still
 apply inside native commands.
 
@@ -2567,8 +2580,14 @@ while `can_merge` still requires code write permission. Role edits use the
 existing revisioned membership catalog and audit chain. Detail capabilities and
 edit admission read durable membership instead of inferring it from a public
 profile or delayed routing snapshot. Rechecks across awaited reads are not an
-atomic cross-authority fence. Maintain, complete moderation and required-review
+atomic cross-authority fence. Complete moderation and required-review
 permission parity remain delivery work.
+
+Maintain inherits Write and can edit the repository description and configure
+ordinary merge methods and auto-merge. Assign it directly or through a team
+or signed OIDC group. A ruleset can explicitly grant repository maintainers
+bypass. Admin controls access, default branch, protections, merge queue
+configuration, archival, and transfer.
 
 Native issue/PR edit inputs carry `can_triage` instead of their earlier coarse
 management flag. Update fleet peers together before assigning the new role.
@@ -3897,11 +3916,12 @@ message for methods that create a single commit.
 | `rebase` | Replays the topic changes as separate linear commits with original authors and messages and new committer metadata |
 
 The browser exposes enabled methods in the pull request. The confirmation
-lets writers edit the merge or squash message. Repository administrators use
+lets writers edit the merge or squash message. Repository maintainers use
 **Settings → General → Pull request merge methods** to choose at least one
 method. `GET /api/repos/{owner}/{name}/settings/merge-methods` returns
 `{version,enabled}`. The `PUT` accepts `{expected_version,enabled}` and rejects
-stale writes. Repositories initially enable all four methods. Pull request
+stale writes. Merge queue fields in that request require Admin. Repositories
+initially enable all four methods. Pull request
 detail returns the enabled list in `merge_methods`.
 
 Direct PR merges reject binary, type, delete/modify, and overlapping text

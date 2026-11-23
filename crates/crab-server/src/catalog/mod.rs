@@ -1,4 +1,5 @@
 pub(crate) mod audit;
+pub(crate) mod description;
 mod read;
 mod rename;
 pub(crate) mod transfer;
@@ -60,7 +61,10 @@ pub struct CatalogRecord {
     #[serde(default, skip_serializing_if = "ownership_epoch_is_initial")]
     pub(crate) ownership_epoch: u32,
     pub application: RepositoryApplicationState,
+    // The creation request matches the original description on replay.
     pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description_edit: Option<description::Description>,
     pub members: Vec<RepositoryMember>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<RepositoryGroup>,
@@ -264,6 +268,10 @@ impl CatalogDocument {
         for record in &self.repositories {
             if record.placement_generation == 0
                 || record.ownership_epoch > record.name_version()
+                || record
+                    .description_edit
+                    .as_ref()
+                    .is_some_and(|edit| !edit.valid_saved())
                 || !names.insert((record.owner.to_lowercase(), record.name.to_lowercase()))
                 || !prefixes.insert(record.prefix.clone())
             {
@@ -477,7 +485,7 @@ impl CatalogRecord {
                 .repository_prefix(&normalized)
                 .map_err(|_| CatalogError::Invalid("repository prefix is invalid"))?,
             default_branch: default_branch.to_owned(),
-            description: self.description.clone(),
+            description: self.description().description,
             members: self.members.clone(),
             groups: self.groups.clone(),
             protected_branches: self.protected_branches.clone(),
@@ -549,6 +557,7 @@ impl CatalogStore {
             ownership_epoch: 0,
             application: RepositoryApplicationState::EmptyCellPending,
             description,
+            description_edit: None,
             members,
             groups: Vec::new(),
             protected_branches: Vec::new(),
@@ -588,6 +597,7 @@ impl CatalogStore {
                 ownership_epoch: 0,
                 application: RepositoryApplicationState::EmptyCellPending,
                 description,
+                description_edit: None,
                 members,
                 groups: Vec::new(),
                 protected_branches: Vec::new(),
@@ -622,6 +632,7 @@ impl CatalogStore {
                 ownership_epoch: 0,
                 application: RepositoryApplicationState::GitImportPending,
                 description,
+                description_edit: None,
                 members,
                 groups: Vec::new(),
                 protected_branches: Vec::new(),
@@ -677,6 +688,7 @@ impl CatalogStore {
             ownership_epoch: 0,
             application: RepositoryApplicationState::EmptyCellPending,
             description,
+            description_edit: None,
             members,
             groups: Vec::new(),
             protected_branches: Vec::new(),

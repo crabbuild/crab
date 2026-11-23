@@ -336,6 +336,10 @@ and session migration paths are supported.
   name's active rules under the source policy lease before catalog publication.
   `server/repository_route.rs` rechecks current authority
   before serving historical addresses from the shared catalog.
+- `catalog/description.rs` owns editable descriptions under the catalog CAS.
+  The original description stays bound to creation replay. Maintain can edit
+  descriptions and ordinary PR merge options. Queue configuration stays with
+  the administrator boundary in `api/pulls/merge_methods.rs`.
 - `api/catalog_browse/` ranks and pages catalog matches. Reuse `api/catalog.rs`
   for current direct, group, organization, and fork grants. Browse reads
   lifecycle settings only for the result page and rechecks access before

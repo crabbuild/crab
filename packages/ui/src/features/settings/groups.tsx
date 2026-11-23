@@ -15,6 +15,11 @@ import {
   NativeSelectOption,
 } from "@/components/ui/native-select";
 import type { RepositoryGroup } from "@/lib/contracts";
+import {
+  isRepositoryRole,
+  repositoryRoleLabels,
+  repositoryRoles,
+} from "@/lib/repository-roles";
 
 export function GroupAccess({
   value,
@@ -69,19 +74,15 @@ export function GroupAccess({
                   value={grant.access}
                   onChange={(event) => {
                     const access = event.target.value;
-                    if (
-                      access === "read" ||
-                      access === "triage" ||
-                      access === "write" ||
-                      access === "admin"
-                    )
+                    if (isRepositoryRole(access))
                       change(index, { ...grant, access });
                   }}
                 >
-                  <NativeSelectOption value="read">Read</NativeSelectOption>
-                  <NativeSelectOption value="triage">Triage</NativeSelectOption>
-                  <NativeSelectOption value="write">Write</NativeSelectOption>
-                  <NativeSelectOption value="admin">Admin</NativeSelectOption>
+                  {repositoryRoles.map((role) => (
+                    <NativeSelectOption key={role} value={role}>
+                      {repositoryRoleLabels[role]}
+                    </NativeSelectOption>
+                  ))}
                 </NativeSelect>
               </Field>
               <Button

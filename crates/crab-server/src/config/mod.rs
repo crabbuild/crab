@@ -214,6 +214,7 @@ pub enum RepositoryAccess {
     Read,
     Triage,
     Write,
+    Maintain,
     Admin,
 }
 
@@ -563,6 +564,10 @@ pub(crate) fn validate_repository(repository: &RepositoryConfig) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+pub(crate) fn valid_repository_description(value: &str) -> bool {
+    value.chars().count() <= 350 && !value.chars().any(char::is_control)
 }
 
 pub(crate) fn valid_repository_component(value: &str) -> bool {

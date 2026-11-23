@@ -56,6 +56,7 @@ pub(crate) enum Enforcement {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum BypassActor {
     RepositoryAdmin,
+    RepositoryMaintain,
     RepositoryWrite,
     OrganizationOwner,
     Team { id: Uuid },
@@ -99,7 +100,7 @@ impl<'a> BypassContext<'a> {
     }
 
     pub(crate) fn allows(self, grants: &[BypassGrant], pull: bool) -> bool {
-        use crate::RepositoryAccess::{Admin, Write};
+        use crate::RepositoryAccess::{Admin, Maintain, Write};
 
         if !self.role.is_some_and(|role| role >= Write) {
             return false;
@@ -108,6 +109,7 @@ impl<'a> BypassContext<'a> {
             (pull || grant.mode == BypassMode::Always)
                 && match grant.actor {
                     BypassActor::RepositoryAdmin => self.role == Some(Admin),
+                    BypassActor::RepositoryMaintain => self.role == Some(Maintain),
                     BypassActor::RepositoryWrite => self.role == Some(Write),
                     BypassActor::OrganizationOwner => self.organization_owner,
                     BypassActor::Team { id } => self.teams.contains(&id),

@@ -14,16 +14,10 @@ import {
 } from "@/components/ui/dialog";
 import { Empty, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { useRequest } from "@/lib/api";
-import type { MemberRepositoryAccess, RepositoryAccess } from "@/lib/contracts";
+import type { MemberRepositoryAccess } from "@/lib/contracts";
 import { repoHref } from "@/lib/repository-route";
+import { repositoryRoleLabels as roleLabels } from "@/lib/repository-roles";
 import { teamHref } from "./teams/model";
-
-const roleLabels: Record<RepositoryAccess, string> = {
-  admin: "Admin",
-  write: "Write",
-  triage: "Triage",
-  read: "Read",
-};
 
 export function MemberAccess({
   organization,

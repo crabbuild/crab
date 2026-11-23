@@ -96,6 +96,7 @@ pub(super) async fn list(
             "description": repository.config.description,
             "access": if current.can_write(repository.id) { "write" } else { "read" },
             "can_admin": current.can_admin(repository.id),
+            "can_maintain": current.can_maintain(repository.id),
             "can_fork": organization_owner && repository.forked_from.is_none(),
             "protection_version": protections.version,
             "protected_branches": protections.rules,
@@ -542,6 +543,15 @@ mod tests {
             created,
             json!({"id":pending.id,"owner":owner,"name":"first-repo"})
         );
+        h.write(
+            Method::PUT,
+            &format!("/api/repositories/{}/description", pending.id),
+            &alice,
+            json!({"version":0,"description":"An edited description"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
         let recovered: Value = h
             .write(Method::POST, route, &alice, request.clone())
             .await

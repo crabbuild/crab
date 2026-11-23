@@ -62,6 +62,10 @@ fn oidc_groups_union_exact_current_grants_without_exceeding_the_token_scope() {
     let scoped = git.with_membership(id, &config, "https://identity.example", None);
     assert!(scoped.can_read(id));
     assert!(!scoped.can_triage(id));
+    config.groups[0].access = RepositoryAccess::Maintain;
+    let maintainer = browser.with_membership(id, &config, "https://identity.example", None);
+    assert!(maintainer.can_maintain(id));
+    assert!(!maintainer.can_admin(id));
     config.groups[0].group = "/engineering".into();
     assert!(
         !browser
@@ -121,6 +125,7 @@ fn repository_administration_stays_out_of_write_scoped_git_tokens() {
         None,
     );
     assert!(git.can_write(Uuid::from_u128(1)));
+    assert!(!git.can_maintain(Uuid::from_u128(1)));
     assert!(!git.can_admin(Uuid::from_u128(1)));
     assert!(
         !Principal::user(active_session())

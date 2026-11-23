@@ -70,6 +70,8 @@ pub(crate) enum Error {
     RepositoryNameProtected,
     #[error("Repository name changes are temporarily unavailable")]
     RepositoryNamePublication(#[source] crab_remote::publication::Error),
+    #[error("The repository description changed. Reload the description before saving")]
+    RepositoryDescriptionChanged,
     #[error("Repository creation failed")]
     RepositorySetup(#[source] Box<crate::Error>),
     #[error("This list changed; reload from the first page")]
@@ -98,8 +100,10 @@ pub(crate) enum Error {
     MergeMethodDisabled,
     #[error("Repository merge methods changed")]
     MergeMethodsChanged,
-    #[error("Administrator access is required to manage merge methods")]
+    #[error("Maintain access is required to manage merge methods")]
     MergeSettingsPermission,
+    #[error("Administrator access is required to manage merge queue settings")]
+    MergeQueueSettingsPermission,
     #[error("Git writes are busy")]
     MergeBusy,
     #[error("Write access is required to merge pull requests")]
@@ -415,7 +419,12 @@ impl IntoResponse for Error {
             Self::MergeSettingsPermission => (
                 StatusCode::FORBIDDEN,
                 "forbidden",
-                "Administrator access is required to manage merge methods",
+                "Maintain access is required to manage merge methods",
+            ),
+            Self::MergeQueueSettingsPermission => (
+                StatusCode::FORBIDDEN,
+                "merge_queue_settings_permission",
+                "Administrator access is required to manage merge queue settings",
             ),
             Self::MergeBusy => (
                 StatusCode::TOO_MANY_REQUESTS,
@@ -636,6 +645,11 @@ impl IntoResponse for Error {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "repository_name_busy",
                 "Repository name changes are temporarily unavailable. Retry the same submission shortly",
+            ),
+            Self::RepositoryDescriptionChanged => (
+                StatusCode::CONFLICT,
+                "repository_description_changed",
+                "The repository description changed. Reload the description before saving",
             ),
             Self::RepositorySetup(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,

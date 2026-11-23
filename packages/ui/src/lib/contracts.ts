@@ -29,7 +29,7 @@ export type FilePreviewState = { "state": "inline", text: string, } | { "state":
 export type FilePreview = { oid: string, size: number, stored_size?: number, mode: string, classification: string, commit: string, generation: number, preview: FilePreviewState, };
 
 // prettier-ignore
-export type RepositoryAccess = "read" | "triage" | "write" | "admin";
+export type RepositoryAccess = "read" | "triage" | "write" | "maintain" | "admin";
 
 // prettier-ignore
 export type RepositoryMember = { subject: string, name: string, access: RepositoryAccess, };

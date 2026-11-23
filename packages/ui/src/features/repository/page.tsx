@@ -420,7 +420,7 @@ export function RepositoryPage({
               icon: HistoryIcon,
               active: view === "activity",
             },
-            ...(repo.can_admin
+            ...(repo.can_admin || repo.can_maintain
               ? [
                   {
                     view: "settings",
@@ -604,7 +604,7 @@ export function RepositoryPage({
             </Suspense>
           </section>
         ) : view === "settings" ? (
-          repo.can_admin ? (
+          repo.can_admin || repo.can_maintain ? (
             <Result state={visibleRefState} timingLabel="Repository references">
               {(data) => (
                 <Suspense
@@ -639,7 +639,7 @@ export function RepositoryPage({
             </Result>
           ) : (
             <div className="notice error" role="alert">
-              Administrator access is required to view repository settings.
+              Maintain access is required to view repository settings.
             </div>
           )
         ) : issuesView ? (

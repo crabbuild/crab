@@ -31,6 +31,7 @@ export interface Repository {
   description: string;
   access: "read" | "write";
   can_admin: boolean;
+  can_maintain?: boolean;
   organization_id?: string;
   archive_version: number;
   archived: boolean;
