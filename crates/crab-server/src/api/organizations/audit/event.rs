@@ -14,6 +14,7 @@ use crate::{
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub(in crate::api) enum AuditAction {
     OrganizationCreated,
+    AutomationChanged,
     OrganizationEdited,
     OrganizationMembership,
     OrganizationInvitation,
@@ -76,6 +77,20 @@ impl From<organization::Event> for RawEvent {
         use organization::Action;
         event.action = match value.action {
             Action::Created => AuditAction::OrganizationCreated,
+            Action::Automation { identity, action } => {
+                use organization::automation::Audit;
+                let label = match action {
+                    Audit::Created => "Created",
+                    Audit::Edited => "Access edited",
+                    Audit::Enabled => "Enabled",
+                    Audit::Disabled => "Disabled",
+                    Audit::Deleted => "Deleted",
+                    Audit::TokenIssued => "Token issued",
+                    Audit::TokenRevoked => "Token revoked",
+                };
+                event.detail = Some(format!("{label} · {identity}"));
+                AuditAction::AutomationChanged
+            }
             Action::Edited { name, description } => {
                 event.detail = Some(
                     match (name, description) {

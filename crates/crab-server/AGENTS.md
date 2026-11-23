@@ -22,6 +22,10 @@ and migration limitations.
    authentication of read-only repository credentials. The repository Cell
    stores versioned digests and expiry. Authentication verifies each transport
    request before binding the principal to that repository UUID.
+   `auth/automation.rs` binds Git-only credentials to an Organization Cell,
+   repository UUID, and current ownership epoch. Its independent grant stays
+   out of human membership and ruleset bypass. The Organization Cell owns
+   issuance, token ceilings, revocation, and audit.
    `auth/accounts.rs` owns durable suspension revisions, with mutations exposed
    only through private `server/management/accounts.rs` and the `accounts` CLI.
 5. `crates/crab-server/src/git/receive/mod.rs` — `receive / publish_objects`: bounded native receive and publication orchestration.

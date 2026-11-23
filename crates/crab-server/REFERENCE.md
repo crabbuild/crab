@@ -4088,6 +4088,35 @@ the recipient's historical decision. Browser cleanup is bounded and scoped to
 its own sessions. The normal suite ignores it because it needs an external browser.
 
 
+### Manage organization automation credentials
+
+Open **Automation** as a signed-in organization owner. Create a named
+identity, choose repositories, and assign Read or Write to each. Read supports
+Git checkout and Git LFS download. Write additionally supports Git pushes and
+Git LFS upload. Branch protection, rulesets and archive checks apply to
+automation. Automation credentials are scoped to Git and Git LFS.
+
+Issue a token for 1 hour, 1 day, 7 days or 30 days. Save the displayed token
+in the CI secret store and use it as the password for Git username `crab`.
+The server stores only a token digest. If the issuance reply is lost, refresh
+the list, revoke the newly created token, and issue a replacement. Each
+organization can have up to 32 identities, each with up to 50 repository
+grants and four active tokens.
+
+A token's grants are bounded by the identity's selected access at issuance.
+Grant removals and downgrades reduce existing tokens. A new token is required
+to use added or upgraded grants. Disabling the identity revokes all its
+tokens. An ordinary rename retains access by repository UUID. A transfer
+ends the grant, including when the repository later returns. Reapprove the
+repository and issue a new token. Automation changes appear in **Audit log**.
+
+`GET /api/organizations/{id}/automation` lists the current revision, identities,
+grants and token metadata. `POST` uses `{expected_version, edit}`, where
+`edit.kind` is `create`, `configure`, `enabled`, `delete`, `issue`, or
+`revoke`. The browser session and CSRF checks govern writes. A stale revision
+returns 409. Upgrade all serving replicas before using automation or
+transferring repositories with the new ownership epoch.
+
 ### Review and export organization audit history
 
 **Audit log** in the organization displays recorded organization, invitation,

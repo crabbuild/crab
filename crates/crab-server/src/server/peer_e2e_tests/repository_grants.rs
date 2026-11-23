@@ -411,6 +411,75 @@ async fn organization_team_removal_revokes_existing_browser_git_and_lfs_access_a
         checkout(&origin_b).send().await.unwrap().status(),
         StatusCode::UNAUTHORIZED
     );
+    let automation = format!("{org_path}/automation");
+    let identity: Value = write(
+        &h,
+        &origin_a,
+        &alice,
+        Method::POST,
+        &automation,
+        json!({"expected_version":0,"edit":{
+            "kind":"create","name":"Central CI",
+            "grants":[{"repository":repo.id,"access":"read"}],
+        }}),
+    )
+    .await
+    .error_for_status()
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let identity = &identity["identity"];
+    let issued: Value = write(
+        &h,
+        &origin_a,
+        &alice,
+        Method::POST,
+        &automation,
+        json!({"expected_version":1,"edit":{"kind":"issue","identity":identity,"hours":1}}),
+    )
+    .await
+    .error_for_status()
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let token = issued["token"].as_str().unwrap();
+    let automation_checkout = |origin: &str| {
+        h.http
+            .get(format!(
+                "{origin}/git/team/private.git/info/refs?service=git-upload-pack"
+            ))
+            .header("Git-Protocol", "version=2")
+            .basic_auth("crab", Some(token))
+    };
+    assert_eq!(
+        automation_checkout(&origin_b)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    write(
+        &h,
+        &origin_a,
+        &alice,
+        Method::POST,
+        &automation,
+        json!({"expected_version":2,"edit":{"kind":"enabled","identity":identity,"enabled":false}}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert_eq!(
+        automation_checkout(&origin_b)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED,
+    );
     for task in [task_a, task_b] {
         task.abort();
         let _ = task.await;

@@ -989,6 +989,7 @@ pub(crate) async fn membership_for_config(
         .map_or_else(Vec::new, |access| access.teams);
     let grant = if let Some(organization) = organization
         && !principal.is_deploy()
+        && principal.automation_credential().is_none()
     {
         crate::repository::access::organization_grants(
             server,
@@ -1006,13 +1007,25 @@ pub(crate) async fn membership_for_config(
     let inherited = grant
         .as_ref()
         .and_then(|grant| crate::repository::access::organization_access(grant, &teams));
-    let principal = principal.with_catalog_membership(
-        snapshot.repository_id,
-        &config,
-        issuer,
-        inherited,
-        snapshot.renamed,
-    );
+    let principal = if let Some(credential) = principal.automation_credential() {
+        credential
+            .authorize(
+                server,
+                principal,
+                organization,
+                snapshot.repository_id,
+                snapshot.ownership_epoch,
+            )
+            .await?
+    } else {
+        principal.with_catalog_membership(
+            snapshot.repository_id,
+            &config,
+            issuer,
+            inherited,
+            snapshot.renamed,
+        )
+    };
     let grant = grant.unwrap_or_default();
     let mut review_teams = grant.teams;
     let mut bypass_teams = grant.bypass_teams.clone();

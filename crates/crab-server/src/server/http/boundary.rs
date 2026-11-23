@@ -315,7 +315,7 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
                 "www-authenticate",
                 "Basic realm=\"Crab Git\", charset=\"UTF-8\"",
             )],
-            "Use a Crab Git access token or a repository deploy token",
+            "Use a Crab Git, deploy, or automation token",
         )
             .into_response()
     } else if denied {
