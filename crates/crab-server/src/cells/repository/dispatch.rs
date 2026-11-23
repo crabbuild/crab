@@ -105,6 +105,7 @@ pub(in crate::cells) fn dispatch_mutation(
             invoke_mutation::<collaboration::submissions::preparation::Prepare>(context, input)
         }
         issues::pins::SetPins::ID => invoke_mutation::<issues::pins::SetPins>(context, input),
+        issues::issue_type::Set::ID => invoke_mutation::<issues::issue_type::Set>(context, input),
         collaboration::bulk::Edit::ID => {
             invoke_mutation::<collaboration::bulk::Edit>(context, input)
         }

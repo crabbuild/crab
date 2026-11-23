@@ -386,7 +386,7 @@ async fn submit<C: Mutation>(
         .map_err(read_error)
 }
 
-async fn policy_write<T: Send + 'static, F, Fut>(
+pub(super) async fn policy_write<T: Send + 'static, F, Fut>(
     server: Arc<Server>,
     organization: Uuid,
     write: F,

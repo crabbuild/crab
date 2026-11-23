@@ -1,4 +1,5 @@
 use super::*;
+pub(crate) mod issue_type;
 pub(crate) mod lifecycle;
 pub(crate) mod pins;
 mod reads;

@@ -1,8 +1,11 @@
 use crate::{
     api::{assignees::Selection, labels, profiles::attribution::Authors, reactions},
     auth::Identity,
-    cells::repository::{
-        CommentRecord, IssueRecord, IssueSummary, RepositoryAuthor, issues::IssueDetail,
+    cells::{
+        organization::issue_types::Definition,
+        repository::{
+            CommentRecord, IssueRecord, IssueSummary, RepositoryAuthor, issues::IssueDetail,
+        },
     },
 };
 use serde_json::{Value, json};
@@ -51,6 +54,7 @@ pub(super) fn summary(
     issue: &IssueSummary,
     labels: &[crate::cells::repository::search::index::LabelSummary],
     assignees: &Selection,
+    issue_type: Option<&Definition>,
 ) -> Value {
     json!({
         "kind": "issue",
@@ -58,6 +62,7 @@ pub(super) fn summary(
         "title": issue.title,
         "state": state_name(issue.state),
         "blocked": issue.blocked,
+        "issue_type": issue_type,
         "state_reason": issue.lifecycle.state_reason,
         "closed_at": issue.lifecycle.closed_at_ms,
         "author": authors.view(&issue.author),

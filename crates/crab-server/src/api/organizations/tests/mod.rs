@@ -12,6 +12,7 @@ use reqwest::Method;
 mod audit;
 mod automation;
 mod codeowners;
+mod issue_types;
 mod repositories;
 mod repository_access;
 mod review_workload;

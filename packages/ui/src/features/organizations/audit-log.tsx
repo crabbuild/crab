@@ -26,6 +26,7 @@ const actions: Record<AuditAction, string> = {
   organization_created: "Organization created",
   automation_changed: "Automation identity changed",
   repository_properties_changed: "Repository properties changed",
+  issue_types_changed: "Issue types changed",
   organization_edited: "Organization updated",
   organization_membership: "Organization membership changed",
   organization_invitation: "Organization invitation",

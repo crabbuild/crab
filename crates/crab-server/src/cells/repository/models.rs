@@ -238,6 +238,8 @@ pub(crate) enum UpdateCommentOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct IssueSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_type: Option<super::issues::issue_type::Selection>,
     pub lifecycle: super::issues::lifecycle::Lifecycle,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub blocked: bool,

@@ -2439,6 +2439,7 @@ owner label does not acquire ownership.
 | Activity | `GET /api/repos/{owner}/{name}/activity`, `GET /api/repos/{owner}/{name}/issues/{number}/activity`, `GET /api/repos/{owner}/{name}/pulls/{number}/activity` |
 | Linked work | Issue/pull `GET .../{number}/links`; `GET/PUT /api/repos/{owner}/{name}/pulls/{pull}/linked-issues/{issue}` |
 | Issue dependencies | `GET .../issues/{number}/dependencies/{blocked_by|blocking}`; `GET/PUT .../issues/{number}/dependencies/{direction}/{other}` |
+| Assign or clear an issue type | `PUT .../issues/{number}/type` |
 
 Every route prefix is `/api/repos/{owner}/{name}`. Browser mutations require the session cookie, canonical `Origin`, and CSRF token.
 
@@ -2727,6 +2728,32 @@ the exclusive `after` cursor to continue. Each direction supports up to 50
 direct dependencies, and Crab rejects self-links, cycles, and graphs that
 exceed the validation work limit. Dependencies track work state and leave
 issue completion to the normal close action.
+
+### Classify issues with organization issue types
+
+Organization owners open **Issue types** to manage up to 25 shared types.
+New organizations start with Task, Bug, and Feature. An owner can add a type,
+edit its name, description, and color, disable or enable it, or delete it.
+Settings changes appear in the organization audit log.
+
+Repository members with triage access or higher can assign or clear a type
+from an issue's **Issue type** control. Readers see the type in the issue
+header and issue list. Renaming a type updates existing badges when the view
+reloads. Disabling hides its badges and removes it from the picker. Enabling
+restores the existing badges. Deletion permanently removes that type from
+the picker and existing issues. Repository transfers clear the effective
+assignment because the receiving organization has its own types.
+
+Owners read `GET /api/organizations/{id}/issue-types` for
+`{version,definitions}` and send `{expected_version,definitions}` to the
+same path with PUT. Each definition has an ID, name, description, color, and
+enabled flag. Issue detail returns `issue_type` and includes `issue_types`
+and `issue_type_version` for triage and higher roles. Send
+`{expected_version,type_id}` to the issue type route to assign, with a null ID
+to clear. An exact retry at the same version recovers a lost response.
+Reload the latest data after HTTP 409.
+Update all serving peers before using the new settings so every peer can
+read the new audit events and handle issue type requests.
 
 ### Edit pull requests and review summaries
 

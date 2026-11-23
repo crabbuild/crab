@@ -2,6 +2,8 @@ use super::*;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct IssueDetail {
+    #[serde(default)]
+    pub(crate) issue_type: issue_type::Assignment,
     pub(crate) lifecycle: Option<lifecycle::Lifecycle>,
     pub(crate) issue: Option<IssueRecord>,
     pub(crate) labels: LabelCatalog,
@@ -32,6 +34,7 @@ impl Read for GetIssueDetail {
             issue.as_ref().is_some_and(|issue| issue.state == 0),
         )?;
         Ok(IssueDetail {
+            issue_type: issue_type::load(context, number)?,
             issue,
             lifecycle,
             labels: ListLabels::execute(context, ())?,
@@ -111,6 +114,7 @@ impl IssueSummary {
         let lifecycle = lifecycle::get(context, number, state != 0)?;
         let blocked = collaboration::dependencies::blocked(context, number, state == 0)?;
         Ok(IssueSummary {
+            issue_type: issue_type::load(context, number)?.selection,
             lifecycle,
             blocked,
             number: result_u64_from_row(row, 0)?,

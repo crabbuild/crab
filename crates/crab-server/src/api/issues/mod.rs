@@ -12,7 +12,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
-    api::{assignees::Selection, labels, profiles::attribution::Authors, reactions},
+    api::{
+        assignees::Selection, labels, organizations::issue_types, profiles::attribution::Authors,
+        reactions,
+    },
     app::{self, Error, Result, actor, body, number, repository, title},
     auth::Principal,
     cells::repository::collaboration::Target,
@@ -44,6 +47,10 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .route(
             "/api/repos/{owner}/{name}/issues/{number}",
             get(detail).patch(edit),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/issues/{number}/type",
+            axum::routing::put(issue_types::assign),
         )
         .route(
             "/api/repos/{owner}/{name}/issues/{number}/comments",
@@ -142,6 +149,14 @@ async fn list(
         }),
     )
     .await?;
+    let types =
+        if page.items.iter().any(
+            |item| matches!(item, DiscussionSummary::Issue(issue) if issue.issue_type.is_some()),
+        ) {
+            issue_types::active(&server, repo.organization).await?
+        } else {
+            Vec::new()
+        };
     let assignees = Selection::load(
         &server,
         &principal,
@@ -156,9 +171,13 @@ async fn list(
         .items
         .iter()
         .map(|item| match item {
-            DiscussionSummary::Issue(issue) => {
-                Ok(view::summary(&authors, issue, &page.labels, &assignees))
-            }
+            DiscussionSummary::Issue(issue) => Ok(view::summary(
+                &authors,
+                issue,
+                &page.labels,
+                &assignees,
+                issue_types::visible(&repo, issue.issue_type, &types),
+            )),
             DiscussionSummary::Pull(pull) => {
                 super::pulls::pull_list_view(&authors, pull, &page.labels, &assignees, &rollups)
             }
@@ -401,10 +420,25 @@ async fn rendered(
     let issue = detail.issue.as_ref().ok_or(Error::NotFound)?;
     let reaction = reactions::one(server, repo, &author, Target::Issue { number: id }).await?;
     let authors = Authors::load(server, principal, std::iter::once(&issue.author)).await?;
+    let types = if principal.can_triage(repo.id) || detail.issue_type.selection.is_some() {
+        issue_types::active(server, repo.organization).await?
+    } else {
+        Vec::new()
+    };
     let assignees = Selection::load(server, principal, repo, issue.assignees.iter()).await?;
-    Ok(Json(view::issue(
+    let mut issue = view::issue(
         &authors, issue, &detail, &author, &assignees, repo.id, &reaction,
-    )?))
+    )?;
+    issue["issue_type"] = json!(issue_types::visible(
+        repo,
+        detail.issue_type.selection,
+        &types
+    ));
+    if repo.organization.is_some() && assignees.principal.can_triage(repo.id) {
+        issue["issue_types"] = json!(types);
+        issue["issue_type_version"] = json!(detail.issue_type.version);
+    }
+    Ok(Json(issue))
 }
 
 async fn comments(

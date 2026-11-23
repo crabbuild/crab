@@ -9,6 +9,7 @@ import {
   FileClockIcon,
   BotIcon,
   ListFilterIcon,
+  TagIcon,
 } from "lucide-react";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
@@ -38,6 +39,7 @@ import { OrganizationAuditLog } from "./audit-log";
 import { OrganizationAutomation } from "./automation";
 import { OrganizationRulesets } from "@/features/settings/rulesets";
 import { OrganizationRepositoryProperties } from "./repository-properties";
+import { OrganizationIssueTypes } from "./issue-types";
 export { OrganizationInvitation } from "./invitations";
 
 export function OrganizationPage({
@@ -108,6 +110,11 @@ export function OrganizationPage({
                         key: "properties",
                         label: "Properties",
                         icon: ListFilterIcon,
+                      },
+                      {
+                        key: "issue-types",
+                        label: "Issue types",
+                        icon: TagIcon,
                       },
                       {
                         key: "automation",
@@ -188,6 +195,8 @@ export function OrganizationPage({
                 organization={id}
                 csrf={csrf}
               />
+            ) : role === "owner" && tab === "issue-types" ? (
+              <OrganizationIssueTypes key={id} organization={id} csrf={csrf} />
             ) : role === "owner" && tab === "automation" ? (
               <OrganizationAutomation organization={id} csrf={csrf} />
             ) : role === "owner" && tab === "audit" ? (

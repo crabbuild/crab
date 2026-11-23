@@ -6,6 +6,7 @@ import {
 import { SubIssues } from "@/features/projects/discussion";
 import { Author } from "@/components/discussion/author";
 import { BlockedBadge } from "@/components/discussion/blocked-badge";
+import { IssueTypeBadge } from "@/components/discussion/issue-type-badge";
 import { Reactions } from "@/components/discussion/reactions";
 import { repoHref } from "@/lib/repository-route";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -29,6 +30,7 @@ import { timestamp } from "@/components/discussion/time";
 import { Comments } from "./comments";
 import { PinIssue } from "./pins";
 import { IssueDependencies } from "./dependencies";
+import { IssueTypeControl } from "./type";
 
 function IssueBadge({ issue }: { issue: Issue }) {
   const { state, state_reason: reason } = issue;
@@ -114,6 +116,7 @@ export function IssueDetail({
       <p className="issue-meta">
         <IssueBadge issue={current} />
         {current.blocked && <BlockedBadge />}
+        {current.issue_type && <IssueTypeBadge type={current.issue_type} />}
         <span className="muted">
           <Author author={current.author} /> opened this issue{" "}
           {timestamp(current.created_at)}
@@ -196,6 +199,20 @@ export function IssueDetail({
             setMetadataEpoch((value) => value + 1);
           }}
         >
+          {!repo.archived &&
+          current.issue_types?.length &&
+          current.issue_type_version !== undefined ? (
+            <IssueTypeControl
+              key={`${current.issue_type_version}:${current.issue_type?.id ?? ""}:${current.issue_types.map((type) => type.id).join(",")}`}
+              repo={repo}
+              csrf={csrf}
+              number={number}
+              version={current.issue_type_version}
+              type={current.issue_type}
+              types={current.issue_types}
+              refresh={resource.retry}
+            />
+          ) : null}
           <IssueDependencies
             repo={repo}
             csrf={csrf}

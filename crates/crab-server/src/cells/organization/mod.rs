@@ -18,6 +18,7 @@ pub(crate) const MAX_VERSION: u64 = 9_007_199_254_740_991;
 pub(crate) mod automation;
 mod commands;
 mod invitations;
+pub(crate) mod issue_types;
 pub(crate) mod projects;
 pub(crate) mod properties;
 mod reads;
@@ -172,6 +173,9 @@ pub(crate) enum Action {
     },
     RepositoryPropertiesChanged {
         repository: Option<Uuid>,
+        version: u64,
+    },
+    IssueTypesChanged {
         version: u64,
     },
     ProjectChanged {
@@ -340,6 +344,7 @@ pub(in crate::cells) fn authorize(
             | properties::GetValues::ID
             | properties::search::MatchRepositories::ID
             | properties::search::Fields::ID
+            | issue_types::Active::ID
             | automation::Verify::ID,
             false,
         ) => return Ok(()),
@@ -351,6 +356,7 @@ pub(in crate::cells) fn authorize(
             | rulesets::Get::ID
             | properties::GetSchema::ID
             | properties::GetSelection::ID
+            | issue_types::Get::ID
             | InspectMemberRepositoryRoles::ID
             | automation::List::ID,
             false,
@@ -366,6 +372,7 @@ pub(in crate::cells) fn authorize(
             | rulesets::Replace::ID
             | properties::SetSchema::ID
             | properties::SetSelection::ID
+            | issue_types::Replace::ID
             | automation::Change::ID,
             true,
         ) => true,
@@ -449,6 +456,8 @@ pub(in crate::cells) fn dispatch_read(
         rulesets::Applicable::ID => invoke_read::<rulesets::Applicable>(context, input),
         rulesets::NameProtection::ID => invoke_read::<rulesets::NameProtection>(context, input),
         properties::GetSchema::ID => invoke_read::<properties::GetSchema>(context, input),
+        issue_types::Get::ID => invoke_read::<issue_types::Get>(context, input),
+        issue_types::Active::ID => invoke_read::<issue_types::Active>(context, input),
         properties::GetValues::ID => invoke_read::<properties::GetValues>(context, input),
         properties::search::MatchRepositories::ID => {
             invoke_read::<properties::search::MatchRepositories>(context, input)
@@ -499,6 +508,7 @@ pub(in crate::cells) fn dispatch_mutation(
         }
         rulesets::Replace::ID => invoke_mutation::<rulesets::Replace>(context, input),
         properties::SetSchema::ID => invoke_mutation::<properties::SetSchema>(context, input),
+        issue_types::Replace::ID => invoke_mutation::<issue_types::Replace>(context, input),
         properties::SetValues::ID => invoke_mutation::<properties::SetValues>(context, input),
         properties::SetSelection::ID => invoke_mutation::<properties::SetSelection>(context, input),
         automation::Change::ID => invoke_mutation::<automation::Change>(context, input),
