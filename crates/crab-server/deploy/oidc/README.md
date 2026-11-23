@@ -110,8 +110,8 @@ Crab offers direct OIDC signup when discovery advertises the standard
 `create` prompt. Restart Crab after changing the provider’s enrollment policy
 to refresh discovery.
 
-Compose mounts the Crab login theme, the branch artwork, and the same theme
-tokens as the application.
+Compose mounts the Crab login theme, logo, and application theme tokens for
+the shared single-column layout.
 For an existing development realm, select **crab** under **Realm settings →
 Themes → Login theme** after installing those theme resources. The theme extends
 Keycloak’s credential forms and uses the browser’s light or dark preference.

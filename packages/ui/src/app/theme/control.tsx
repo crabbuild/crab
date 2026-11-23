@@ -27,6 +27,47 @@ const choices = [
   { value: "dark", label: "Dark", icon: MoonIcon },
 ] as const;
 
+export function AppearanceControl({
+  theme,
+  setTheme,
+}: {
+  theme: Theme;
+  setTheme: (theme: Theme) => void;
+}) {
+  return (
+    <ToggleGroup
+      role="group"
+      type="single"
+      variant="outline"
+      size="sm"
+      spacing={0}
+      aria-label="Appearance"
+      value={theme}
+      onValueChange={(value) => {
+        if (value === "auto" || value === "light" || value === "dark")
+          setTheme(value);
+      }}
+    >
+      {choices.map(({ value, label, icon: Icon }) => (
+        <Tooltip key={value}>
+          <TooltipTrigger asChild>
+            <ToggleGroupItem
+              value={value}
+              aria-label={label}
+              role="button"
+              aria-pressed={theme === value}
+              aria-checked={undefined}
+            >
+              <Icon data-icon="inline-start" />
+            </ToggleGroupItem>
+          </TooltipTrigger>
+          <TooltipContent>Use {label.toLowerCase()} appearance</TooltipContent>
+        </Tooltip>
+      ))}
+    </ToggleGroup>
+  );
+}
+
 export function ThemeControl({
   theme,
   setTheme,
@@ -70,38 +111,7 @@ export function ThemeControl({
           </DropdownMenuRadioGroup>
         </DropdownMenuContent>
       </DropdownMenu>
-      <ToggleGroup
-        role="group"
-        type="single"
-        variant="outline"
-        size="sm"
-        spacing={0}
-        aria-label="Appearance"
-        value={theme}
-        onValueChange={(value) => {
-          if (value === "auto" || value === "light" || value === "dark")
-            setTheme(value);
-        }}
-      >
-        {choices.map(({ value, label, icon: Icon }) => (
-          <Tooltip key={value}>
-            <TooltipTrigger asChild>
-              <ToggleGroupItem
-                value={value}
-                aria-label={label}
-                role="button"
-                aria-pressed={theme === value}
-                aria-checked={undefined}
-              >
-                <Icon data-icon="inline-start" />
-              </ToggleGroupItem>
-            </TooltipTrigger>
-            <TooltipContent>
-              Use {label.toLowerCase()} appearance
-            </TooltipContent>
-          </Tooltip>
-        ))}
-      </ToggleGroup>
+      <AppearanceControl theme={theme} setTheme={setTheme} />
     </div>
   );
 }

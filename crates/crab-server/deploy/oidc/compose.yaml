@@ -16,6 +16,5 @@ services:
       - ./themes/crab/login/resources/css/crab.css:/opt/keycloak/themes/crab/login/resources/css/crab.css:ro
       - ../../../../packages/ui/src/styles/theme.css:/opt/keycloak/themes/crab/login/resources/css/theme.css:ro
       - ./themes/crab/login/resources/fonts:/opt/keycloak/themes/crab/login/resources/fonts:ro
-      - ../../../../packages/ui/src/features/auth/sign-in-art.svg:/opt/keycloak/themes/crab/login/resources/img/sign-in-art.svg:ro
       - ../../../../packages/web/crab.optimized.svg:/opt/keycloak/themes/crab/login/resources/img/crab-mark.svg:ro
     mem_limit: 1g

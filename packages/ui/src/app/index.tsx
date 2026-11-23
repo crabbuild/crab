@@ -1,6 +1,10 @@
 import { ProjectCommandsProvider } from "@/features/projects/commands";
 import { OrganizationProjects } from "@/features/projects/workspace";
-import { ThemeControl, type Theme } from "@/app/theme/control";
+import {
+  AppearanceControl,
+  ThemeControl,
+  type Theme,
+} from "@/app/theme/control";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Badge } from "@/components/ui/badge";
@@ -62,10 +66,6 @@ const WorkspaceCodeSearch = lazy(
 
 export function App() {
   const location = useLocation();
-  useLayoutEffect(() => {
-    if (document.activeElement === document.body)
-      document.getElementById("main")?.focus();
-  }, [location]);
   const [theme, setTheme] = useState<Theme>(() => {
     const saved = localStorage.getItem("crab-theme");
     return saved === "light" || saved === "dark" ? saved : "auto";
@@ -162,6 +162,11 @@ export function App() {
     ? organizationRoute[1]
     : undefined;
   const session = useRequest<Session>("/api/session");
+  const authenticated = session.data?.authenticated;
+  useLayoutEffect(() => {
+    if (document.activeElement === document.body)
+      document.getElementById("main")?.focus();
+  }, [location, authenticated]);
   const teamAccount = !session.data?.authenticated
     ? null
     : session.data.mode === "local"
@@ -237,6 +242,10 @@ export function App() {
       (expectedRepository === null || expectedRepository === repo.id),
   );
   useEffect(() => {
+    if (authenticated === false) {
+      document.title = "Sign in to Crab";
+      return;
+    }
     document.title = repo
       ? `${repo.owner}/${repo.name} · Crab`
       : subscriptions
@@ -253,6 +262,7 @@ export function App() {
                   ? "Search code · Crab"
                   : "Repositories · Crab";
   }, [
+    authenticated,
     repo,
     watched,
     inbox,
@@ -274,6 +284,37 @@ export function App() {
       setImportedRepository(undefined);
     }
   }, [importedRepository, repositoryCatalog.data, url.pathname]);
+  if (session.error || session.loading || !session.data?.authenticated) {
+    return (
+      <TooltipProvider>
+        <main id="main" className="sign-in-page" tabIndex={-1}>
+          {session.error ? (
+            <div className="notice error" role="alert">
+              <h1>Unable to check your session</h1>
+              <p>{session.error}</p>
+              <Button variant="outline" onClick={session.retry}>
+                Try again
+              </Button>
+            </div>
+          ) : session.loading || !session.data ? (
+            <div className="notice" role="status">
+              <Spinner /> Checking your session…
+            </div>
+          ) : (
+            <SignIn
+              mode={session.data.mode}
+              canSignUp={session.data.can_sign_up}
+              url={url}
+            />
+          )}
+          <div className="sign-in-appearance">
+            <AppearanceControl theme={theme} setTheme={setTheme} />
+          </div>
+        </main>
+      </TooltipProvider>
+    );
+  }
+
   return (
     <TooltipProvider>
       <ProjectCommandsProvider
@@ -423,25 +464,7 @@ export function App() {
                 {sessionError}
               </p>
             )}
-            {session.error ? (
-              <div className="notice error" role="alert">
-                <h1>Unable to check your session</h1>
-                <p>{session.error}</p>
-                <Button variant="outline" onClick={session.retry}>
-                  Try again
-                </Button>
-              </div>
-            ) : session.loading || !session.data ? (
-              <div className="notice" role="status">
-                <Spinner /> Checking your session…
-              </div>
-            ) : !session.data.authenticated ? (
-              <SignIn
-                mode={session.data.mode}
-                canSignUp={session.data.can_sign_up}
-                url={url}
-              />
-            ) : codeSearch ? (
+            {codeSearch ? (
               <Suspense
                 fallback={
                   <p role="status" className="notice">
