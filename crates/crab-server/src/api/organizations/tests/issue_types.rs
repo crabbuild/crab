@@ -184,11 +184,155 @@ async fn issue_types_follow_organization_policy_and_live_repository_roles() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn issue_type_filters_count_sparse_results_and_bind_schema_changes() {
+    let (h, alice, org, repo, key) = fixture().await;
+    let root = format!("/api/repos/{key}");
+    let issues = format!("{root}/issues");
+    let schema_path = format!("{org}/issue-types");
+    let schema = h.json(&schema_path, &alice).await;
+    let mut definitions = schema["definitions"].as_array().unwrap().to_vec();
+    let bug = definitions[1]["id"].clone();
+    for title in ["Unclassified", "Second bug", "Newest unclassified"] {
+        repository_write(
+            &h,
+            Method::POST,
+            &issues,
+            &alice,
+            repo,
+            json!({"request_id":Uuid::now_v7(),"title":title,"body":""}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    }
+    let assign = async |number, version, type_id: Value| {
+        repository_write(
+            &h,
+            Method::PUT,
+            &format!("{issues}/{number}/type"),
+            &alice,
+            repo,
+            json!({"expected_version":version,"type_id":type_id}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    };
+    assign(1, 0, bug.clone()).await;
+    assign(3, 0, bug).await;
+
+    let url = |query: &str, before: Option<&str>| {
+        let mut params = url::form_urlencoded::Serializer::new(String::new());
+        params.append_pair("q", query).append_pair("limit", "1");
+        if let Some(before) = before {
+            params.append_pair("before", before);
+        }
+        format!("{issues}?{}", params.finish())
+    };
+    let query = "is:open type:bUG";
+    let first = h.json(&url(query, None), &alice).await;
+    assert_eq!(first["matching"], 2);
+    assert_eq!(first["counts"]["open"], 2);
+    assert_eq!(first["items"][0]["number"], 3);
+    let cursor = first["next"].as_str().unwrap();
+    let next = h.json(&url(query, Some(cursor)), &alice).await;
+    assert_eq!(next["items"][0]["number"], 1);
+    assert_eq!(next["next"], Value::Null);
+    let mixed = h
+        .json(&url("is:open (type:Bug OR no:type)", None), &alice)
+        .await;
+    assert_eq!(mixed["matching"], 4);
+    let completion = h
+        .json(
+            &format!("{root}/discussion-search?query=type%3Ab&cursor=6"),
+            &alice,
+        )
+        .await;
+    assert_eq!(completion["items"][0]["value"], "type:\"Bug\"");
+
+    definitions[1]["name"] = json!("Incident report");
+    h.write(
+        Method::PUT,
+        &schema_path,
+        &alice,
+        json!({"expected_version":0,"definitions":definitions}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let stale = async |query: &str, cursor: &str| {
+        h.http
+            .get(format!("{}{}", h.origin, url(query, Some(cursor))))
+            .header(header::COOKIE, &alice)
+            .send()
+            .await
+            .unwrap()
+            .status()
+    };
+    assert_eq!(stale(query, cursor).await, StatusCode::CONFLICT);
+    assert_eq!(h.json(&url(query, None), &alice).await["matching"], 0);
+    let renamed = "is:open type:\"Incident report\"";
+    let renamed_page = h.json(&url(renamed, None), &alice).await;
+    assert_eq!(renamed_page["matching"], 2);
+    assign(3, 1, Value::Null).await;
+    assert_eq!(
+        stale(renamed, renamed_page["next"].as_str().unwrap()).await,
+        StatusCode::CONFLICT
+    );
+
+    definitions[1]["enabled"] = json!(false);
+    h.write(
+        Method::PUT,
+        &schema_path,
+        &alice,
+        json!({"expected_version":1,"definitions":definitions}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert_eq!(
+        h.json(&url("is:open no:type", None), &alice).await["matching"],
+        4
+    );
+    assert_eq!(h.json(&url(renamed, None), &alice).await["matching"], 0);
+    let menu = h
+        .json(
+            &format!("{root}/discussion-search/issue-types?query=is%3Aopen"),
+            &alice,
+        )
+        .await;
+    assert_eq!(menu["items"].as_array().unwrap().len(), 2);
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    assert_eq!(
+        h.http
+            .get(format!("{}{root}/discussion-search/issue-types", h.origin))
+            .header(header::COOKIE, &bob)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires agent-browser and built embedded UI; uses real OIDC/native Cells"]
 async fn native_browser_manages_and_assigns_issue_types() {
     use crate::test_support::http::browser::Browser;
 
-    let (h, _, org, _, key) = fixture().await;
+    let (h, alice, org, repo, key) = fixture().await;
+    repository_write(
+        &h,
+        Method::POST,
+        &format!("/api/repos/{key}/issues"),
+        &alice,
+        repo,
+        json!({"request_id":Uuid::now_v7(),"title":"Not yet classified","body":""}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
     let browser = Browser::new("issue-types");
     let settings = format!(
         "{}/-/organizations/{}?tab=issue-types",
@@ -225,6 +369,11 @@ async fn native_browser_manages_and_assigns_issue_types() {
         .await;
     click("link", "← Back to issues").await;
     browser.run(&["wait", "--text", "Reliability"]).await;
+    browser.run(&["wait", "--text", "Not yet classified"]).await;
+    click("button", "Filter by issue type").await;
+    browser.run(&["wait", "[role='option'][id]"]).await;
+    click("option", "Reliability").await;
+    browser.run(&["wait", "--fn", "new URL(location.href).searchParams.get('q')?.includes('type:') && document.body.textContent.includes('Classify this report') && !document.body.textContent.includes('Not yet classified')"]).await;
 
     browser.run(&["open", &settings]).await;
     browser.run(&["wait", "--text", "Reliability"]).await;

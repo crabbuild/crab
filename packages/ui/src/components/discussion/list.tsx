@@ -203,6 +203,14 @@ export function DiscussionListControls({
               onSelect={(q) => change({ q })}
             />
           ))}
+          {view === "issues" && repo.organization_id && (
+            <DiscussionFilter
+              kind="issue-types"
+              repo={repo}
+              query={discussionQuery(url, view)}
+              onSelect={(q) => change({ q })}
+            />
+          )}
           {lock && (
             <DropdownMenu modal={false}>
               <DropdownMenuTrigger asChild>

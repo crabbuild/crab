@@ -14,6 +14,7 @@ use std::sync::Arc;
 mod assignees;
 mod authors;
 mod composer;
+pub(super) mod issue_types;
 mod people;
 pub(super) mod review_teams;
 mod reviews;
@@ -59,6 +60,10 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .route(
             "/api/repos/{owner}/{name}/discussion-search/milestones",
             get(milestones),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/discussion-search/issue-types",
+            get(issue_types::options),
         )
         .route(
             "/api/repos/{owner}/{name}/discussion-search/authors",
@@ -131,6 +136,7 @@ async fn complete(
     {
         review_teams::complete(&server, &principal, &repo, &input, &mut result, &prefix).await?;
     }
+    issue_types::complete(&server, &repo, &input, &mut result).await?;
     // Recheck the durable grant after the awaited read: the materialized
     // repository may still contain a member whose access has been revoked.
     app::membership(&server, &principal, &repo).await?;
@@ -202,6 +208,7 @@ impl ListParameters {
             assignees: Vec::new(),
             review_context: None,
             review_teams: Default::default(),
+            issue_types: None,
         };
         input.validate().map_err(app::Error::Invalid)?;
         Ok(input)

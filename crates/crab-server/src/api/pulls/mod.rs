@@ -762,6 +762,7 @@ async fn list(
     let mut input = params.input("is:open")?;
     let review_teams =
         super::discussion_search::resolve_people(&server, &principal, repo, &mut input).await?;
+    let type_scope = super::discussion_search::issue_types::bind(&server, repo, &mut input).await?;
     let review_source = input
         .review_context
         .as_ref()
@@ -779,6 +780,7 @@ async fn list(
         page.items.iter().map(|pull| &pull.author),
     )
     .await?;
+    super::discussion_search::issue_types::verify(&server, repo, type_scope.as_ref()).await?;
     let assignees = Selection::load(
         &server,
         &principal,

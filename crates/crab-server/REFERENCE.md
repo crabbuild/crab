@@ -2418,6 +2418,7 @@ owner label does not acquire ownership.
 | Merge | `POST /api/repos/{owner}/{name}/pulls/{number}/merge` |
 | Label search choices | `GET /api/repos/{owner}/{name}/discussion-search/labels` |
 | Milestone search choices | `GET /api/repos/{owner}/{name}/discussion-search/milestones` |
+| Issue type search choices | `GET /api/repos/{owner}/{name}/discussion-search/issue-types` |
 | Markdown suggestions | `GET /api/repos/{owner}/{name}/discussion-search/{mentions,team-mentions,references}` |
 | Team mention settings | `GET/PUT /api/repos/{owner}/{name}/mention-settings` |
 | Account notification inbox | `GET /api/notifications`, `GET /api/notifications/unread`, `PUT /api/notifications/{id}/state`, `POST /api/notifications/bulk`, `POST /api/notifications/unsubscribe` |
@@ -2816,6 +2817,18 @@ Quote spaces, commas, colons or escaped quotation marks as literal title content
 issues and PRs. Counts use the same authoritative predicate as results.
 Prefix a term or qualifier with `-` to exclude it. Missing-metadata qualifiers
 cannot be negated. Unknown qualifiers and malformed syntax return 400.
+
+For organization repositories, open **Types** above the issue list or add
+`type:"Incident report"` to the search. Names match case-insensitively. Use
+`no:type` to find issues without an enabled type. Disabling an issue type
+hides it from search and puts its assigned issues in the **No type** results
+until it is enabled again. Type filters compose with text, state, and other
+qualifiers. The menu replaces top-level type filters and preserves grouped
+conditions. Search suggestions include enabled type names as you type.
+
+Counts and pages use the same indexed type filter. Type changes or assignment
+changes can invalidate a continuation cursor. Return to the first page after
+a stale-cursor response.
 
 Count qualifiers `comments`, `reactions`, and `interactions` accept a nonnegative
 integer, `>n`, `>=n`, `<n`, `<=n`, inclusive `n..n`, `n..*`, or `*..n`.

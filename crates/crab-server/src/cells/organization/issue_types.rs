@@ -29,7 +29,7 @@ pub(crate) struct Definition {
     pub enabled: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS), ts(rename = "IssueTypeSchema"))]
 pub(crate) struct Schema {
     pub version: u64,
@@ -73,14 +73,12 @@ impl Read for Active {
     const CLASS: &'static str = CLASS;
     const ID: u32 = 61;
     type Input = ();
-    type Output = Vec<Definition>;
+    type Output = Schema;
 
     fn execute(context: &mut Transaction<'_>, (): ()) -> Result<Self::Output> {
-        Ok(schema(context)?
-            .definitions
-            .into_iter()
-            .filter(|definition| definition.enabled)
-            .collect())
+        let mut current = schema(context)?;
+        current.definitions.retain(|definition| definition.enabled);
+        Ok(current)
     }
 }
 

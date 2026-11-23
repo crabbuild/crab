@@ -41,7 +41,7 @@ pub(in crate::cells) fn dispatch_mutation(
     #[cfg(test)]
     let maintenance = maintenance
         || id == projection::tests::Historical::ID
-        || id == search::index::tests::LockFixture::ID;
+        || id == search::index::tests::IndexFixture::ID;
     if !maintenance {
         search::index::ensure_ready(context)?;
     }
@@ -125,8 +125,8 @@ pub(in crate::cells) fn dispatch_mutation(
             invoke_mutation::<collaboration::minimization::Set>(context, input)
         }
         #[cfg(test)]
-        search::index::tests::LockFixture::ID => {
-            invoke_mutation::<search::index::tests::LockFixture>(context, input)
+        search::index::tests::IndexFixture::ID => {
+            invoke_mutation::<search::index::tests::IndexFixture>(context, input)
         }
         collaboration::locks::Set::ID => {
             invoke_mutation::<collaboration::locks::Set>(context, input)

@@ -79,12 +79,9 @@ async fn replace(
 }
 
 // Only callers with an authorized repository boundary use these definitions.
-pub(in crate::api) async fn active(
-    server: &Server,
-    organization: Option<Uuid>,
-) -> Result<Vec<Definition>> {
+pub(in crate::api) async fn active(server: &Server, organization: Option<Uuid>) -> Result<Schema> {
     let Some(organization) = organization else {
-        return Ok(Vec::new());
+        return Ok(Schema::default());
     };
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     Ok(cells
@@ -142,6 +139,7 @@ pub(in crate::api) async fn assign(
             if let Some(id) = input.type_id
                 && !active(&server, Some(organization))
                     .await?
+                    .definitions
                     .iter()
                     .any(|definition| definition.id == id)
             {

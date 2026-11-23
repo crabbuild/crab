@@ -1,4 +1,5 @@
 use super::*;
+use crate::cells::repository::issues::issue_type::search as issue_types;
 
 /// Start or advance preparation using its expected generation and version.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -56,6 +57,15 @@ impl Mutation for RebuildIndex {
                     ));
                 }
                 locks::install(context)?;
+                issue_types::install(context)?;
+                if current
+                    .as_ref()
+                    .is_some_and(|state| state.format == 15 && state.progress.is_none())
+                {
+                    let next = building(generation, SearchIndexPhase::IssueTypes);
+                    context.put_document(STATE_KEY, &next)?;
+                    return progress(context);
+                }
                 // A ready format 14 already has every other projection.
                 // Copy only canonical lock records and keep the existing rows.
                 if current
@@ -138,6 +148,9 @@ impl Mutation for RebuildIndex {
                         locks::step(context, build, SubjectKind::Issue)?
                     }
                     SearchIndexPhase::PullLocks => locks::step(context, build, SubjectKind::Pull)?,
+                    SearchIndexPhase::IssueTypes => {
+                        issue_types::backfill(context, &mut build.after, BATCH)?
+                    }
                     SearchIndexPhase::Reviews => super::super::reviews::reviews(context)?,
                     SearchIndexPhase::ReviewRequests => super::super::reviews::requests(context)?,
                     SearchIndexPhase::Milestones => {
@@ -270,7 +283,16 @@ impl Mutation for RebuildIndex {
                             build.phase = SearchIndexPhase::PullLocks;
                             build.after = 0;
                         }
-                        SearchIndexPhase::PullLocks => current.progress = None,
+                        SearchIndexPhase::PullLocks => {
+                            let mut after = 0;
+                            if issue_types::backfill(context, &mut after, BATCH)? {
+                                current.progress = None;
+                            } else {
+                                build.phase = SearchIndexPhase::IssueTypes;
+                                build.after = after;
+                            }
+                        }
+                        SearchIndexPhase::IssueTypes => current.progress = None,
                     }
                 }
                 current

@@ -143,6 +143,14 @@ pub(crate) fn team_prefix(input: &CompletionInput) -> Result<Option<String>, &'s
         .map(value_prefix))
 }
 
+pub(crate) fn issue_type_prefix(input: &CompletionInput) -> Result<Option<String>, &'static str> {
+    let (start, _, cursor) = replacement(input)?;
+    let prefix = input.query[start..cursor]
+        .trim_start_matches('-')
+        .to_lowercase();
+    Ok(prefix.strip_prefix("type:").map(value_prefix))
+}
+
 pub(crate) fn append_qualified_values(
     input: &CompletionInput,
     result: &mut Suggestions,
@@ -248,7 +256,7 @@ fn suggestions(
                 });
             }
         }
-    } else {
+    } else if !prefix.starts_with("type:") {
         for (value, description) in [
             ("is:open", "Open work"),
             ("is:closed", "Closed work, including merged pull requests"),
@@ -269,6 +277,8 @@ fn suggestions(
             ("no:assignee", "Unassigned work"),
             ("milestone:", "Filter by repository milestone"),
             ("no:milestone", "Work without a milestone"),
+            ("type:", "Filter by issue type"),
+            ("no:type", "Issues without a type"),
             ("author:", "Filter by public username"),
             ("commenter:", "Filter discussion participants"),
             ("author:@me", "Work created by you"),

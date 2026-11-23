@@ -8,6 +8,7 @@ pub(crate) mod completion;
 pub(crate) mod contributions;
 mod counts;
 pub(crate) mod index;
+pub(crate) mod issue_types;
 pub(crate) mod labels;
 pub(crate) mod milestones;
 mod navigation;
@@ -55,6 +56,7 @@ enum Term {
     Text(String),
     Label(Vec<String>),
     Milestone(String),
+    IssueType(String),
     State(SubjectState),
     Reason(super::issues::lifecycle::Reason),
     Kind(SubjectKind),
@@ -70,9 +72,14 @@ enum Metadata {
     Label,
     Assignee,
     Milestone,
+    IssueType,
 }
 
 impl Query {
+    pub(crate) fn uses_issue_types(&self) -> bool {
+        self.expression.has_term(issue_types::is_type)
+    }
+
     fn names(&self, select: fn(&Term) -> Option<&str>) -> std::collections::BTreeSet<String> {
         fn collect(
             expression: &Expression,
@@ -365,6 +372,7 @@ fn atom_expression(atom: &str) -> Result<Expression, &'static str> {
                 }
             }),
             "milestone" => Term::Milestone(unquote(value)?.to_lowercase()),
+            "type" => Term::IssueType(unquote(value)?.to_lowercase()),
             "is" | "state" => match unquote(value)?.to_ascii_lowercase().as_str() {
                 "open" => Term::State(SubjectState::Open),
                 "closed" => Term::State(SubjectState::Closed),
@@ -391,10 +399,11 @@ fn atom_expression(atom: &str) -> Result<Expression, &'static str> {
                     "label" => Term::Missing(Metadata::Label),
                     "assignee" => Term::Missing(Metadata::Assignee),
                     "milestone" => Term::Missing(Metadata::Milestone),
+                    "type" => Term::Missing(Metadata::IssueType),
                     "reason" => Term::Missing(Metadata::Reason),
                     _ => {
                         return Err(
-                            "Search no qualifier supports label, assignee, milestone and reason",
+                            "Search no qualifier supports label, assignee, milestone, type and reason",
                         );
                     }
                 }

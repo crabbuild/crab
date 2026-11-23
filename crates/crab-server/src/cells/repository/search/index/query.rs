@@ -47,6 +47,8 @@ pub(crate) struct SearchInput {
     pub review_context: Option<super::super::reviews::status::Context>,
     #[serde(default)]
     pub review_teams: super::super::reviews::teams::Bindings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_types: Option<super::super::issue_types::Binding>,
 }
 impl Default for SearchInput {
     fn default() -> Self {
@@ -60,6 +62,7 @@ impl Default for SearchInput {
             assignees: Vec::new(),
             review_context: None,
             review_teams: Default::default(),
+            issue_types: None,
         }
     }
 }
@@ -69,6 +72,11 @@ impl SearchInput {
             return Err("Discussion page size must be 1–50");
         }
         Query::parse(self.query.as_deref())?;
+        if self.issue_types.as_ref().is_some_and(|types| {
+            types.organization.is_nil() || types.names.len() > 25 || types.version > MAX_NUMBER
+        }) {
+            return Err("Issue type search scope is invalid");
+        }
         if let Some(cursor) = self.before.as_deref() {
             Cursor::decode(cursor)?;
         }
@@ -185,6 +193,7 @@ struct Bindings<'a> {
     assignees: &'a [super::super::assignees::Binding],
     review: Option<super::super::reviews::status::Bound>,
     review_teams: &'a super::super::reviews::teams::Bindings,
+    issue_types: &'a Option<super::super::issue_types::Binding>,
     archived: bool,
     now_ms: i64,
 }
@@ -201,6 +210,7 @@ impl<'a> Bindings<'a> {
             review: None,
             values: Vec::new(),
             review_teams: &input.review_teams,
+            issue_types: &input.issue_types,
             archived,
             now_ms,
         };
@@ -227,6 +237,29 @@ impl<'a> Bindings<'a> {
             .find(|binding| binding.name == name)?
             .identity?;
         Some(self.bind(SqlValue::Blob(identity.to_vec())))
+    }
+
+    fn issue_type_matches(&mut self, name: Option<&str>) -> Option<String> {
+        let types = self.issue_types.as_ref()?;
+        let ids = match name {
+            Some(name) => vec![*types.names.get(name)?],
+            None => types.names.values().copied().collect(),
+        };
+        if ids.is_empty() {
+            return None;
+        }
+        let organization = SqlValue::Blob(types.organization.as_bytes().to_vec());
+        let epoch = SqlValue::Integer(i64::from(types.ownership_epoch));
+        let organization = self.bind(organization);
+        let epoch = self.bind(epoch);
+        let ids = ids
+            .into_iter()
+            .map(|id| self.bind(SqlValue::Blob(id.as_bytes().to_vec())))
+            .collect::<Vec<_>>()
+            .join(",");
+        Some(format!(
+            "SELECT issue FROM repository_issue_type_index WHERE organization = {organization} AND ownership_epoch = {epoch} AND type_id IN ({ids})"
+        ))
     }
 }
 
@@ -293,6 +326,7 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         &input.assignees,
         &input.review_context,
         &input.review_teams,
+        &input.issue_types,
         review.as_ref().map(|prepared| &prepared.approvals),
     ))?)
     .to_hex()
@@ -624,6 +658,14 @@ fn scoped_expression(
             Term::Missing(Metadata::Label) => "NOT EXISTS (SELECT 1 FROM discussion_index_labels dl JOIN repository_labels l ON l.number = dl.label WHERE dl.document = d.rowid AND l.deleted_version IS NULL)".into(),
             Term::Missing(Metadata::Assignee) => "NOT EXISTS (SELECT 1 FROM discussion_index_assignees a WHERE a.document = d.rowid)".into(),
             Term::Missing(Metadata::Milestone) => "NOT EXISTS (SELECT 1 FROM discussion_index_milestones m WHERE m.document = d.rowid)".into(),
+            Term::IssueType(name) => bindings.issue_type_matches(Some(name)).map_or_else(
+                || "0".into(),
+                |matches| format!("d.kind = 0 AND d.number IN ({matches})"),
+            ),
+            Term::Missing(Metadata::IssueType) => bindings.issue_type_matches(None).map_or_else(
+                || "d.kind = 0".into(),
+                |matches| format!("d.kind = 0 AND d.number NOT IN ({matches})"),
+            ),
         }
     })
 }

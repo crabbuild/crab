@@ -563,6 +563,20 @@ Cell transaction. Posting and search evaluate expiry from the Cell clock. There
 is no background expiry write. Lock-filtered cursors expire at the earliest
 future lock deadline and bind the repository archive state.
 
+### Issue type search preparation
+
+Discussion index format 16 adds a sparse index of issue type assignments.
+Update serving peers together and run
+`cells rebuild-search --owner OWNER --name REPO` on existing repositories.
+For ready format-15 indexes, this copies only existing assignments in bounded
+batches and retains the text and other metadata indexes. Older indexes follow
+their existing preparation paths. The server serves indexed traffic after
+preparation reaches the ready state. A new generation invalidates old cursors.
+
+Assignment writes update the filter index and the search revision in the same
+Repository Cell transaction. Filtered requests bind enabled type IDs from the
+organization, the definition version, and the repository's ownership epoch.
+
 ## Team review search preparation
 
 Discussion index format 14 adds pending team request rows to each PR search

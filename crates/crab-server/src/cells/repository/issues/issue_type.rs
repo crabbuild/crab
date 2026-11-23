@@ -3,6 +3,9 @@ use uuid::Uuid;
 
 use super::*;
 
+pub(in crate::cells::repository) mod search;
+
+const PREFIX: &str = "issues/v1/types/";
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct Selection {
     pub id: Uuid,
@@ -17,7 +20,7 @@ pub(crate) struct Assignment {
 }
 
 fn key(number: u64) -> String {
-    format!("issues/v1/types/{number:016x}")
+    format!("{PREFIX}{number:016x}")
 }
 
 pub(super) fn load(context: &Transaction<'_>, number: u64) -> crate::cells::Result<Assignment> {
@@ -72,6 +75,9 @@ impl Mutation for Set {
             selection: input.selection,
         };
         context.put_document(&key(input.number), &next)?;
+        // Canonical assignments, filter rows, and pagination advance together.
+        search::project(context, input.number, next.selection)?;
+        super::super::search::index::invalidate_cursors(context)?;
         Ok(MutationResult::Success(Outcome::Saved(next)))
     }
 }

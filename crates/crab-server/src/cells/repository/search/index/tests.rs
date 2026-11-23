@@ -537,18 +537,19 @@ async fn state_counters_equal_their_navigation_queries_across_boolean_and_litera
     fixtures::close(&server).await;
 }
 
-pub(in crate::cells::repository) struct LockFixture;
+pub(in crate::cells::repository) struct IndexFixture;
 
 #[derive(Deserialize, Serialize)]
-pub(in crate::cells::repository) enum LockFixtureInput {
+pub(in crate::cells::repository) enum IndexFixtureInput {
     Format14,
+    Format15,
     ShortDeadline { number: u64 },
 }
 
-impl Mutation for LockFixture {
+impl Mutation for IndexFixture {
     const CLASS: &'static str = CLASS;
     const ID: u32 = 985;
-    type Input = LockFixtureInput;
+    type Input = IndexFixtureInput;
     type Output = Option<u64>;
 
     fn execute(
@@ -556,14 +557,21 @@ impl Mutation for LockFixture {
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         let deadline = match input {
-            LockFixtureInput::Format14 => {
+            IndexFixtureInput::Format15 => {
+                let mut current = state(context)?.unwrap();
+                current.format = 15;
+                context.put_document(STATE_KEY, &current)?;
+                context.install_schema("DROP TABLE repository_issue_type_index;")?;
+                None
+            }
+            IndexFixtureInput::Format14 => {
                 let mut current = state(context)?.unwrap();
                 current.format = 14;
                 context.put_document(STATE_KEY, &current)?;
                 context.install_schema("DROP TABLE discussion_index_locks;")?;
                 None
             }
-            LockFixtureInput::ShortDeadline { number } => {
+            IndexFixtureInput::ShortDeadline { number } => {
                 let subject = Subject {
                     kind: SubjectKind::Issue,
                     number,
@@ -620,7 +628,7 @@ async fn temporary_locks_expire_in_enforcement_and_search_and_invalidate_continu
         Outcome::Saved(_, false)
     ));
 
-    let deadline = write::<LockFixture>(&cell, LockFixtureInput::ShortDeadline { number: 1 })
+    let deadline = write::<IndexFixture>(&cell, IndexFixtureInput::ShortDeadline { number: 1 })
         .await
         .unwrap();
     let comment = || CreateCommentInput {
@@ -736,7 +744,7 @@ async fn format_14_preparation_pages_existing_locks_and_preserves_other_indexes(
     else {
         panic!("index not ready")
     };
-    write::<LockFixture>(&cell, LockFixtureInput::Format14).await;
+    write::<IndexFixture>(&cell, IndexFixtureInput::Format14).await;
     let generation = Uuid::now_v7();
     let mut result = write::<RebuildIndex>(
         &cell,
@@ -783,4 +791,95 @@ async fn format_14_preparation_pages_existing_locks_and_preserves_other_indexes(
     .await;
     assert_eq!(filtered.matching, 10);
     server.shutdown_runtimes().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn format_15_preparation_pages_existing_issue_type_assignments() {
+    use crate::cells::repository::issues::issue_type;
+    use crate::cells::repository::search::issue_types::Binding;
+    let server = fixtures::fixture().await;
+    let cell = cell(&server);
+    let selection = issue_type::Selection {
+        id: Uuid::now_v7(),
+        organization: Uuid::now_v7(),
+        ownership_epoch: 1,
+    };
+    for number in 1..=10 {
+        create(&cell, "Searchable report", "Details").await;
+        assert!(matches!(
+            write::<issue_type::Set>(
+                &cell,
+                issue_type::SetInput {
+                    number,
+                    expected_version: 0,
+                    selection: Some(selection),
+                }
+            )
+            .await,
+            issue_type::Outcome::Saved(_),
+        ));
+    }
+    let SearchIndexStatus::Ready {
+        generation: previous,
+        revision,
+    } = cell
+        .client
+        .query::<GetSearchIndexStatus>(&cell.target, None, ())
+        .await
+        .unwrap()
+        .output
+    else {
+        panic!("index not ready")
+    };
+    write::<IndexFixture>(&cell, IndexFixtureInput::Format15).await;
+    let generation = Uuid::now_v7();
+    let mut result = write::<RebuildIndex>(
+        &cell,
+        RebuildSearchInput::Begin {
+            expected: Some(previous),
+            generation,
+        },
+    )
+    .await;
+    for after in [0, 8] {
+        let RebuildSearchOutcome::Progress {
+            status: SearchIndexStatus::Building { progress, .. },
+        } = result
+        else {
+            panic!("index finished before reading all assignments")
+        };
+        assert_eq!(
+            (progress.phase, progress.after),
+            (SearchIndexPhase::IssueTypes, after)
+        );
+        result = write::<RebuildIndex>(
+            &cell,
+            RebuildSearchInput::Step {
+                generation,
+                version: progress.version,
+            },
+        )
+        .await;
+    }
+    assert!(matches!(result, RebuildSearchOutcome::Progress {
+        status: SearchIndexStatus::Ready { generation: new, revision: unchanged }
+    } if generation == new && revision == unchanged));
+    for (epoch, expected) in [(1, 10), (2, 0)] {
+        let result = page(
+            &cell,
+            SearchInput {
+                query: Some("report type:bug".into()),
+                issue_types: Some(Binding {
+                    organization: selection.organization,
+                    ownership_epoch: epoch,
+                    version: 0,
+                    names: [("bug".into(), selection.id)].into(),
+                }),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(result.matching, expected);
+    }
+    fixtures::close(&server).await;
 }

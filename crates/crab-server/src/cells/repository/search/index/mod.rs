@@ -8,7 +8,7 @@ use crate::cells::repository::collaboration::{Subject, SubjectKind};
 use crate::cells::repository::{MAX_NUMBER, SqlBatch, integer, result_u64, statement};
 
 const STATE_KEY: &str = "discussion-search/v1/state";
-const FORMAT: u16 = 15;
+const FORMAT: u16 = 16;
 const BATCH: usize = 8;
 pub(super) const MAX_DIRTY: usize = 128;
 
@@ -41,6 +41,7 @@ pub enum SearchIndexPhase {
     Conversation,
     IssueLocks,
     PullLocks,
+    IssueTypes,
 }
 
 /// The bounded preparation cursor and compare-and-swap version.
@@ -116,6 +117,7 @@ fn revision(context: &Transaction<'_>) -> crate::cells::Result<u64> {
 pub(crate) fn initialize(context: &Transaction<'_>, generation: Uuid) -> crate::cells::Result<()> {
     context.install_schema(include_str!("schema.sql"))?;
     locks::install(context)?;
+    super::super::issues::issue_type::search::install(context)?;
     super::contributions::install(context)?;
     crate::cells::repository::collaboration::conversation::install(context)?;
     context.put_document(

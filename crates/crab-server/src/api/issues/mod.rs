@@ -120,6 +120,8 @@ async fn list(
     let mut input = params.input("is:issue is:open")?;
     let review_teams =
         super::discussion_search::resolve_people(&server, &principal, &repo, &mut input).await?;
+    let type_scope =
+        super::discussion_search::issue_types::bind(&server, &repo, &mut input).await?;
     let review_source = input
         .review_context
         .as_ref()
@@ -149,14 +151,19 @@ async fn list(
         }),
     )
     .await?;
+    let unfiltered_types;
     let types =
-        if page.items.iter().any(
+        if let Some(scope) = &type_scope {
+            &scope.definitions[..]
+        } else if page.items.iter().any(
             |item| matches!(item, DiscussionSummary::Issue(issue) if issue.issue_type.is_some()),
         ) {
-            issue_types::active(&server, repo.organization).await?
+            unfiltered_types = issue_types::active(&server, repo.organization).await?;
+            &unfiltered_types.definitions[..]
         } else {
-            Vec::new()
+            &[]
         };
+    super::discussion_search::issue_types::verify(&server, &repo, type_scope.as_ref()).await?;
     let assignees = Selection::load(
         &server,
         &principal,
@@ -176,7 +183,7 @@ async fn list(
                 issue,
                 &page.labels,
                 &assignees,
-                issue_types::visible(&repo, issue.issue_type, &types),
+                issue_types::visible(&repo, issue.issue_type, types),
             )),
             DiscussionSummary::Pull(pull) => {
                 super::pulls::pull_list_view(&authors, pull, &page.labels, &assignees, &rollups)
@@ -421,7 +428,9 @@ async fn rendered(
     let reaction = reactions::one(server, repo, &author, Target::Issue { number: id }).await?;
     let authors = Authors::load(server, principal, std::iter::once(&issue.author)).await?;
     let types = if principal.can_triage(repo.id) || detail.issue_type.selection.is_some() {
-        issue_types::active(server, repo.organization).await?
+        issue_types::active(server, repo.organization)
+            .await?
+            .definitions
     } else {
         Vec::new()
     };
