@@ -2,6 +2,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { type Change, type Repository } from "@/lib/api";
+import { useBrowserPreference } from "@/lib/browser-preference";
 import { type CodeThemes } from "@/lib/code-theme";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { DiffView } from "./file";
@@ -34,6 +35,10 @@ export function ChangeWorkspace({
   const heading = `${idPrefix}changed-files-heading`;
   const [selectedPath, setSelectedPath] = useState<string>();
   const [filter, setFilter] = useState({ path: "", hideViewed: false });
+  const [whitespace, setWhitespace] = useBrowserPreference(
+    `crab-diff-whitespace-${review?.preferenceScope ?? "comparison"}`,
+    ["show", "hide"],
+  );
   const [dismissedTarget, setDismissedTarget] = useState<DiffTarget>();
   const target =
     review?.target === dismissedTarget ? undefined : review?.target;
@@ -141,6 +146,17 @@ export function ChangeWorkspace({
               Hide viewed
             </label>
           )}
+          <label className="inline-flex items-center gap-2 text-sm">
+            <Checkbox
+              aria-label="Hide whitespace"
+              checked={whitespace === "hide"}
+              onCheckedChange={(checked) => {
+                setDismissedTarget(review?.target);
+                setWhitespace(checked === true ? "hide" : "show");
+              }}
+            />
+            Hide whitespace
+          </label>
           {(filter.path || filter.hideViewed) && (
             <Button
               size="sm"
@@ -189,6 +205,7 @@ export function ChangeWorkspace({
                   codeThemes={codeThemes}
                   eager={index === 0}
                   review={review}
+                  hideWhitespace={whitespace === "hide"}
                   target={change.path_hex === revealedPath ? target : undefined}
                 />
               ))}

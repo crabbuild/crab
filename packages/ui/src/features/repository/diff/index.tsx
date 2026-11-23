@@ -47,7 +47,7 @@ export function ChangeComparison({
     <Result state={state}>
       {(value) => (
         <ChangeWorkspace
-          key={`${value.base ?? "root"}:${value.commit}`}
+          key={`${review?.preferenceScope ?? "comparison"}:${value.base ?? "root"}:${value.commit}`}
           changes={value.changes}
           repo={repo}
           rev={rev}

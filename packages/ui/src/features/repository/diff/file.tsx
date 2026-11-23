@@ -13,10 +13,15 @@ import {
   enableCodeKeyboardScroll,
   type CodeThemes,
 } from "@/lib/code-theme";
-import type { DiffLineAnnotation, SelectedLineRange } from "@pierre/diffs";
-import { MultiFileDiff } from "@pierre/diffs/react";
+import {
+  parseDiffFromFile,
+  type DiffLineAnnotation,
+  type SelectedLineRange,
+} from "@pierre/diffs";
+import { FileDiff } from "@pierre/diffs/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { DiffReviewState, DiffTarget, InlineDiffThread } from "./model";
+import { diffIgnoringWhitespace } from "./whitespace";
 
 function changeVariant(kind: string) {
   if (kind === "Added") return "success" as const;
@@ -35,6 +40,7 @@ export function DiffView({
   eager,
   review,
   target,
+  hideWhitespace,
 }: {
   id: string;
   repo: Pick<Repository, "owner" | "name">;
@@ -46,6 +52,7 @@ export function DiffView({
   eager: boolean;
   review?: DiffReviewState;
   target?: DiffTarget;
+  hideWhitespace: boolean;
 }) {
   const panel = useRef<HTMLElement>(null);
   const [load, setLoad] = useState(eager);
@@ -53,12 +60,18 @@ export function DiffView({
     const node = panel.current;
     if (!node || !target) return;
     setLoad(true);
+    const previousFocus = document.activeElement;
     node.scrollIntoView({ block: "center" });
     const focusAnnotation = () => {
       const annotation = node.querySelector<HTMLButtonElement>(
         `[data-thread-number="${target.thread}"]`,
       );
-      annotation?.focus({ preventScroll: true });
+      if (
+        document.activeElement === previousFocus ||
+        document.activeElement === document.body
+      ) {
+        annotation?.focus({ preventScroll: true });
+      }
       return annotation !== null;
     };
     if (focusAnnotation()) return;
@@ -105,11 +118,11 @@ export function DiffView({
         ? {
             enableLineSelection: true,
             onLineSelected: (range: SelectedLineRange | null) =>
-              review.onLineSelected(change.path_hex, range),
+              review.onLineSelected(change, range),
           }
         : {}),
     }),
-    [change.path_hex, codeThemes, review, style, theme],
+    [change, codeThemes, review, style, theme],
   );
   const files = useMemo(() => {
     const data = state.data;
@@ -154,6 +167,36 @@ export function DiffView({
         })),
     [change.path_hex, review?.threads],
   );
+  const complete =
+    !state.data?.old?.text_truncated && !state.data?.new?.text_truncated;
+  const filteredDiff = useMemo(
+    () =>
+      hideWhitespace && complete && files?.oldFile && files.newFile
+        ? diffIgnoringWhitespace(files.oldFile, files.newFile)
+        : undefined,
+    [complete, files, hideWhitespace],
+  );
+  const anchor =
+    target &&
+    lineAnnotations.find(({ metadata }) => metadata.number === target.thread);
+  const revealWhitespace = !!(
+    filteredDiff &&
+    anchor &&
+    !filteredDiff.hunks.some((hunk) => {
+      const start =
+        anchor.side === "additions" ? hunk.additionStart : hunk.deletionStart;
+      const count =
+        anchor.side === "additions" ? hunk.additionCount : hunk.deletionCount;
+      return (
+        anchor.metadata.start_line >= start &&
+        anchor.metadata.end_line < start + count
+      );
+    })
+  );
+  const renderedDiff = useMemo(() => {
+    if (filteredDiff && !revealWhitespace) return filteredDiff;
+    return files ? parseDiffFromFile(files.oldFile, files.newFile) : undefined;
+  }, [files, filteredDiff, revealWhitespace]);
   return (
     <section
       ref={panel}
@@ -208,29 +251,40 @@ export function DiffView({
       {load ? (
         <Result state={state}>
           {() =>
-            files ? (
-              <MultiFileDiff<InlineDiffThread>
-                key={`${theme}:${codeThemes.light}:${codeThemes.dark}`}
-                {...files}
-                options={options}
-                lineAnnotations={lineAnnotations}
-                renderAnnotation={(annotation) => {
-                  const thread = annotation.metadata;
-                  return (
-                    <button
-                      type="button"
-                      className="inline-review-annotation"
-                      data-thread-number={thread.number}
-                      aria-label={`Open review thread #${thread.number}`}
-                      onClick={() => review?.onThreadSelected(thread)}
-                    >
-                      {review?.renderAnnotation?.(thread) ??
-                        `Comment #${thread.number}`}
-                    </button>
-                  );
-                }}
-                style={diffColors}
-              />
+            filteredDiff && !revealWhitespace && !filteredDiff.hunks.length ? (
+              <div className="notice">
+                No text changes with whitespace hidden.
+              </div>
+            ) : renderedDiff ? (
+              <>
+                {revealWhitespace && (
+                  <p className="notice">
+                    Showing whitespace for the selected review comment.
+                  </p>
+                )}
+                <FileDiff<InlineDiffThread>
+                  key={`${theme}:${codeThemes.light}:${codeThemes.dark}`}
+                  fileDiff={renderedDiff}
+                  options={options}
+                  lineAnnotations={lineAnnotations}
+                  renderAnnotation={(annotation) => {
+                    const thread = annotation.metadata;
+                    return (
+                      <button
+                        type="button"
+                        className="inline-review-annotation"
+                        data-thread-number={thread.number}
+                        aria-label={`Open review thread #${thread.number}`}
+                        onClick={() => review?.onThreadSelected(thread)}
+                      >
+                        {review?.renderAnnotation?.(thread) ??
+                          `Comment #${thread.number}`}
+                      </button>
+                    );
+                  }}
+                  style={diffColors}
+                />
+              </>
             ) : (
               <div className="notice">
                 Binary content changed. Browse the corresponding revision to

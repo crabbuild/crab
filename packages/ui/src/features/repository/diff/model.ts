@@ -34,10 +34,11 @@ export interface DiffTarget {
 }
 
 export interface DiffReviewState {
+  preferenceScope: string;
   threads: InlineDiffThread[];
   target?: DiffTarget;
   isViewed?: (file: Change) => boolean;
-  onLineSelected: (pathHex: string, range: SelectedLineRange | null) => void;
+  onLineSelected: (file: Change, range: SelectedLineRange | null) => void;
   onThreadSelected: (thread: InlineDiffThread) => void;
   fileSummary?: (pathHex: string) => DiffReviewFileSummary | null;
   fileSummaryVersion?: string;

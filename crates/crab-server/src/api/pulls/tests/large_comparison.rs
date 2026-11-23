@@ -41,7 +41,7 @@ async fn native_large_pull_opens_a_file_and_publishes_an_exact_review_anchor() {
     git(path, &["config", "core.filemode", "false"]).await;
     std::fs::create_dir(path.join("replacement")).unwrap();
     for (file, text) in [
-        ("README.md", "base\n"),
+        ("README.md", "base text\n"),
         ("tool.sh", "echo fixture\n"),
         ("unchanged.txt", "stable\n"),
         ("deleted.txt", "previous content\n"),
@@ -55,7 +55,7 @@ async fn native_large_pull_opens_a_file_and_publishes_an_exact_review_anchor() {
     git(path, &["switch", "-c", "feature"]).await;
     git(path, &["rm", "-r", "replacement", "deleted.txt"]).await;
     std::fs::write(path.join("replacement"), "replacement text\n").unwrap();
-    std::fs::write(path.join("README.md"), "base\nnew review line\n").unwrap();
+    std::fs::write(path.join("README.md"), "base  text\nnew review line\n").unwrap();
     for directory in 0..64 {
         let directory_path = path.join(format!("unrelated/part-{directory:02}"));
         std::fs::create_dir_all(&directory_path).unwrap();
@@ -192,8 +192,8 @@ async fn native_large_pull_opens_a_file_and_publishes_an_exact_review_anchor() {
             &bob,
         )
         .await;
-    assert_eq!(diff["old"]["text"], "base\n");
-    assert_eq!(diff["new"]["text"], "base\nnew review line\n");
+    assert_eq!(diff["old"]["text"], "base text\n");
+    assert_eq!(diff["new"]["text"], "base  text\nnew review line\n");
     let review_path = format!("{REPO}/pulls/1/threads");
     h.write(
         Method::POST,
@@ -245,6 +245,20 @@ async fn native_large_pull_opens_a_file_and_publishes_an_exact_review_anchor() {
         .await;
     browser
         .run(&["wait", "--fn", "document.querySelectorAll('.diff-panel').length === 1 && document.querySelector('.diff-panel').dataset.changePath === 'README.md'"])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "checkbox",
+            "click",
+            "--name",
+            "Hide whitespace",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", "--fn", "(() => { const diff = document.querySelector('.diff-panel diffs-container')?.shadowRoot; return diff?.querySelector('[data-column-number=\"2\"][data-line-type=\"change-addition\"]') && !diff.querySelector('[data-column-number=\"1\"][data-line-type=\"change-addition\"]'); })()"])
         .await;
     browser
         .run(&[

@@ -3319,6 +3319,14 @@ request uses the saved progress for the exact comparison. **Jump to diff**
 reveals a filtered file and focuses its review annotation. The filter
 controls retain their values so you can resume the same review scope.
 
+**Hide whitespace** compares complete text files without spaces, tabs, or
+other ASCII whitespace within each line. The diff keeps line breaks,
+original text, and original line numbers. Added, deleted, binary, and truncated
+files use their normal presentation. If a review comment is outside the shown
+hunks, **Jump to diff** opens the original hunk without changing the preference.
+The browser remembers the choice per pull request. Branch comparisons and
+commit pages share a separate preference.
+
 If either branch is deleted, the conversation and original OIDs remain visible while live comparison becomes unavailable. A completed merge retains its pre-merge comparison after source deletion.
 
 Reviews record `commented`, `approved`, or `changes_requested` against the exact current head. Pull authors cannot approve or request changes on their own pull. Advancing the head marks older reviews as not current.

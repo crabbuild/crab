@@ -16,7 +16,13 @@ import {
   type DiffTarget,
   type InlineDiffThread,
 } from "@/features/repository/diff/model";
-import { endpoint, useLocation, useRequest, type Repository } from "@/lib/api";
+import {
+  endpoint,
+  useLocation,
+  useRequest,
+  type Change,
+  type Repository,
+} from "@/lib/api";
 import type { CodeThemes } from "@/lib/code-theme";
 import type { SelectedLineRange } from "@pierre/diffs";
 import { useMemo, useState } from "react";
@@ -42,7 +48,7 @@ function isResolvedThread(thread: InlineDiffThread) {
 }
 
 type ThreadSelection = {
-  pathHex: string;
+  file: Change;
   range: SelectedLineRange;
   base: string;
   head: string;
@@ -174,18 +180,19 @@ export function PullReviewThreads({
     setDiffTarget({ pathHex: thread.path_hex, thread: thread.number });
   }
   const review: DiffReviewState = {
+    preferenceScope: `${repo.id}-${pull.number}`,
     threads: currentItems,
     target: diffTarget,
     isViewed: viewed.isViewed,
     renderFileActions: viewed.renderFileActions,
-    onLineSelected(pathHex, range) {
+    onLineSelected(file, range) {
       if (!range || range.endSide || !preview || pull.merge_pending) {
         clearSelection();
         return;
       }
       mutation.reset();
       setSelection({
-        pathHex,
+        file,
         range,
         base: preview.base,
         head: preview.commit,
@@ -250,7 +257,7 @@ export function PullReviewThreads({
         selectedSide === "new" && suggestionEnabled ? suggestion : null,
       base_oid: selection.base,
       head_oid: selection.head,
-      path_hex: selection.pathHex,
+      path_hex: selection.file.path_hex,
       side: selectedSide,
       start_line: selectedStart,
       end_line: selectedEnd,
@@ -354,8 +361,11 @@ export function PullReviewThreads({
               Comment on selected lines
             </h3>
             <p className="muted">
-              {selectedSide === "old" ? "Old" : "New"} lines {selectedStart}–
-              {selectedEnd} · <code>{selection.pathHex}</code>
+              {selectedSide === "old" ? "Old" : "New"}{" "}
+              {selectedStart === selectedEnd
+                ? `line ${selectedStart}`
+                : `lines ${selectedStart}–${selectedEnd}`}{" "}
+              · <code className="wrap-anywhere">{selection.file.path}</code>
             </p>
             <Editor
               id="inline-review-body"

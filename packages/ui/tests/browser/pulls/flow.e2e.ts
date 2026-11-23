@@ -425,6 +425,86 @@ test("pending review comments survive reload and retry the same submission", asy
   expect(submissions).toHaveLength(2);
 });
 
+test("hide whitespace remembers the pull and can reveal a suppressed review anchor", async ({
+  page,
+}) => {
+  const fixture = await mockPullRequest(page);
+  const middle = Array.from(
+    { length: 7 },
+    (_, index) => `stable line ${index}\n`,
+  ).join("");
+  const content = (oid: string, text: string) => ({
+    oid,
+    text,
+    size: text.length,
+    mode: "100644",
+    classification: "OrdinaryGit",
+    text_truncated: false,
+  });
+  await page.route("**/api/repos/team/project/diff?**", (route) =>
+    route.fulfill({
+      json: {
+        base: fixture.mergeBase,
+        commit: fixture.pull().head_oid,
+        path: "README.md",
+        old: content("c".repeat(40), `let value = 1;\n${middle}old result\n`),
+        new: content("d".repeat(40), `let value=1;\n${middle}new result\n`),
+      },
+    }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/repos/team/project/pulls/2",
+    (route) =>
+      route.fulfill({
+        json: {
+          ...fixture.pull(),
+          number: 2,
+          title: "Another pull with the same commits",
+        },
+      }),
+  );
+  await page.goto("/team/project/pull/1/files");
+  const whitespace = page.getByRole("checkbox", {
+    name: "Hide whitespace",
+    exact: true,
+  });
+  const formattingLine = page.locator(
+    '.diff-panel [data-column-number="1"][data-line-type="change-addition"]',
+  );
+  const substantiveLine = page.locator(
+    '.diff-panel [data-column-number="9"][data-line-type="change-addition"]',
+  );
+  await expect(formattingLine).toBeVisible();
+  await whitespace.check();
+  await expect(formattingLine).toHaveCount(0);
+  await expect(substantiveLine).toBeVisible();
+  await substantiveLine.click();
+  const composer = page.getByRole("form", {
+    name: "Comment on selected lines",
+  });
+  await expect(composer).toContainText("README.md");
+  await expect(composer).toContainText("9");
+  await page.reload();
+  await expect(whitespace).toBeChecked();
+  await expect(substantiveLine).toBeVisible();
+  await expect(formattingLine).toHaveCount(0);
+  await page.getByRole("button", { name: "Jump to diff", exact: true }).click();
+  await expect(
+    page.getByText("Showing whitespace for the selected review comment."),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Open review thread #1" }),
+  ).toBeFocused();
+  await expect(formattingLine).toBeVisible();
+  await expect(whitespace).toBeChecked();
+  await page.goto("/team/project/pull/2/files");
+  await expect(
+    page.getByRole("heading", { name: /Another pull with the same commits/ }),
+  ).toBeVisible();
+  await expect(whitespace).not.toBeChecked();
+  await expect(formattingLine).toBeVisible();
+});
+
 test("selected suggestions commit together on the inspected head", async ({
   page,
 }) => {
