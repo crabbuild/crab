@@ -82,10 +82,14 @@ on:
       - "crates/crab-cache/src/local_cache/lfs_file.rs"
       - "crates/crab-cache/src/private_fs.rs"
       - "crates/crab-cache/src/private_fs/windows.rs"
+      - "crates/crab-auth/src/cdn.rs"
       - "crates/crab-auth/src/crab_auth_client.rs"
       - "crates/crab-auth/src/managed/**"
       - "crates/crab-auth/Cargo.toml"
+      - "crates/crab-auth-store/src/cdn.rs"
+      - "crates/crab-auth-store/src/managed_read.rs"
       - "crates/crab-auth-store/src/managed_repository.rs"
+      - "crates/crab-auth-store/src/refreshing_store.rs"
       - "crates/crab-sdk/Cargo.toml"
       - "crates/build/service_metadata.rs"
       - "crates/crab-server/Cargo.toml"
@@ -187,10 +191,14 @@ on:
       - "crates/crab-cache/src/local_cache/lfs_file.rs"
       - "crates/crab-cache/src/private_fs.rs"
       - "crates/crab-cache/src/private_fs/windows.rs"
+      - "crates/crab-auth/src/cdn.rs"
       - "crates/crab-auth/src/crab_auth_client.rs"
       - "crates/crab-auth/src/managed/**"
       - "crates/crab-auth/Cargo.toml"
+      - "crates/crab-auth-store/src/cdn.rs"
+      - "crates/crab-auth-store/src/managed_read.rs"
       - "crates/crab-auth-store/src/managed_repository.rs"
+      - "crates/crab-auth-store/src/refreshing_store.rs"
       - "crates/crab-sdk/Cargo.toml"
       - "crates/build/service_metadata.rs"
       - "crates/crab-server/Cargo.toml"
@@ -242,7 +250,7 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # RustFS 1.0.0 GA; this immutable index covers Linux amd64 and arm64.
@@ -343,7 +351,9 @@ jobs:
             [[ "$qualification" == *"$feature"* ]]
           done
           cargo test --locked -p crab-storage --lib 'cdn::'
-          cargo test --locked -p crab-auth --lib --features oidc-client managed::client::tests
+          cargo test --locked -p crab-auth --lib --features crab-auth-client managed::client::tests
+          cargo test --locked -p crab-auth --lib --features crab-auth-client crab_auth_client::tests
+          cargo test --locked -p crab-auth-store --lib --features managed-service,operator-cdn
           cargo test --locked -p crab-storage --lib --features provider-cdn-qualification 'cdn::'
           cargo test --locked -p crab-read --lib \
             --features local-staging,crab-storage/provider-cdn-qualification 'hydrator::'
