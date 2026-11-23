@@ -78,11 +78,7 @@ impl Read for List {
                 .map(|(_, pull)| *pull)
                 .collect::<Vec<_>>()
         } else {
-            context
-                .documents::<u64>(&prefix, None, width)?
-                .into_iter()
-                .map(|(_, pull)| pull)
-                .collect()
+            window::pulls(context, &input.branch, width)?
         };
         let order_revision = priority::revision(context, &input.branch)?;
         let first = window.first().copied();
@@ -301,6 +297,86 @@ mod tests {
             [1]
         );
         assert!(last.next.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn queue_build_window_reaches_one_hundred_entries() {
+        use crate::cells::repository::{
+            ReplaceMergeMethods, ReplaceMergeMethodsInput, ReplaceMergeMethodsOutcome,
+        };
+
+        let server = crate::test_support::server::fixture().await;
+        let repo = &server.repositories.values()[0];
+        let cell = server.cells().unwrap().repository(repo.id).unwrap();
+        let actor = author();
+        let configured = cell
+            .client
+            .command::<ReplaceMergeMethods>(
+                &cell.target,
+                crate::app::mutation_identity().unwrap(),
+                ReplaceMergeMethodsInput {
+                    expected_version: 0,
+                    enabled: MergeMethod::ALL.to_vec(),
+                    auto_merge: None,
+                    merge_queue: None,
+                    merge_queue_method: None,
+                    merge_queue_builds: Some(100),
+                    merge_queue_timeout_minutes: None,
+                    merge_queue_branches: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            configured.output,
+            ReplaceMergeMethodsOutcome::Saved(_)
+        ));
+
+        let ids = seed_queue(&cell, &actor, 101).await;
+        let get = async |pull| {
+            cell.client
+                .query::<Get>(&cell.target, None, pull)
+                .await
+                .unwrap()
+                .output
+                .unwrap()
+        };
+        let bounded = get(2).await;
+        assert_eq!(
+            bounded
+                .ahead
+                .unwrap()
+                .into_iter()
+                .map(|prior| prior.pull)
+                .collect::<Vec<_>>(),
+            (3..=101).rev().collect::<Vec<_>>(),
+        );
+        assert!(get(1).await.ahead.is_none());
+        let test = async |pull: u64| {
+            cell.client
+                .command::<Edit>(
+                    &cell.target,
+                    crate::app::mutation_identity().unwrap(),
+                    Change::Test {
+                        pull,
+                        id: ids[(101 - pull) as usize],
+                        attempt: QueueTest {
+                            request_id: Uuid::now_v7(),
+                            version: 1,
+                            base_oid: "a".repeat(40),
+                            previous_oid: None,
+                            order_revision: 0,
+                        },
+                        configured_queue_required: true,
+                        ruleset_queue_required: false,
+                    },
+                )
+                .await
+                .unwrap()
+                .output
+        };
+        assert!(matches!(test(2).await, Outcome::Saved));
+        assert!(matches!(test(1).await, Outcome::Disabled));
     }
 
     #[tokio::test(flavor = "multi_thread")]

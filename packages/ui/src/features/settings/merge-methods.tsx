@@ -161,7 +161,7 @@ function MergeMethodForm({
         (entry.method ||
           entry.builds !== undefined ||
           entry.timeout_minutes !== undefined) &&
-        (entry.builds === undefined || allowedNumber(entry.builds, 8)) &&
+        (entry.builds === undefined || allowedNumber(entry.builds, 100)) &&
         (entry.timeout_minutes === undefined ||
           allowedNumber(entry.timeout_minutes, 720)),
     );
@@ -178,7 +178,7 @@ function MergeMethodForm({
   const builds = Number(queueBuilds);
   const timeout = Number(queueTimeout);
   const valid =
-    allowedNumber(builds, 8) && allowedNumber(timeout, 720) && validOverrides;
+    allowedNumber(builds, 100) && allowedNumber(timeout, 720) && validOverrides;
   const mutation = useMutation(csrf, repo);
   const changed =
     autoMerge !== (settings.auto_merge ?? false) ||
@@ -306,7 +306,7 @@ function MergeMethodForm({
           <Input
             type="number"
             min={1}
-            max={8}
+            max={100}
             step={1}
             required
             value={queueBuilds}
@@ -367,7 +367,7 @@ function MergeMethodForm({
                 <Input
                   type="number"
                   min={1}
-                  max={8}
+                  max={100}
                   step={1}
                   placeholder={String(builds)}
                   value={entry.builds}

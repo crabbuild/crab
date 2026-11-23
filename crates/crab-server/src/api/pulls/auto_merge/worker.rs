@@ -29,7 +29,7 @@ pub(crate) async fn run(server: Arc<Server>) -> crate::Result<()> {
             let repo = &repos[(start + index) % repos.len()];
             let result = pending(&server, repo, pages.get(&repo.id).copied()).await;
             match result {
-                Ok(page) => {
+                Ok(mut page) => {
                     let before = page
                         .last()
                         .filter(|_| page.len() == cell::PAGE)
@@ -39,6 +39,7 @@ pub(crate) async fn run(server: Arc<Server>) -> crate::Result<()> {
                     } else {
                         pages.remove(&repo.id);
                     }
+                    page.sort_by_key(Job::sweep_order);
                     jobs.extend(page.into_iter().map(|job| (repo, job)));
                 }
                 Err(error) => {
