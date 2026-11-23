@@ -3824,7 +3824,7 @@ Encoded output can contain at most 192 KiB. Requests can contain at most 256 KiB
 
 ### Send repository webhooks
 
-Add one approved receiver per repository UUID in the server configuration. Set
+Add up to 20 distinct approved receivers per repository UUID in the server configuration. Set
 `auth.state_key_file` to the same file on every serving peer. The destination
 must use HTTPS with no URL credentials, query, or fragment. The sender verifies
 TLS and does not follow redirects.
@@ -3833,15 +3833,24 @@ TLS and does not follow redirects.
 [[outbound_webhooks]]
 repository = "01900000-0000-7000-8000-000000000101"
 url = "https://ci.example.test/events"
+
+[[outbound_webhooks]]
+repository = "01900000-0000-7000-8000-000000000101"
+url = "https://audit.example.test/events"
 ```
 
-A repository administrator opens **Settings → Webhooks**, chooses **Git pushes**
-and/or **Pull requests**, and copies the signing secret to the receiver. The
-browser can only enable the exact endpoint assigned by the operator. Saving
-again creates a new secret and cancels outstanding deliveries for the former
-subscription. Removing or changing the configured endpoint stops delivery to
-that endpoint as peers take up the new configuration. Roll out consistent
-receiver assignments across the fleet before enabling subscriptions.
+A repository administrator opens **Settings → Webhooks**, selects a destination,
+chooses **Git pushes** and/or **Pull requests**, and copies the signing secret
+to that receiver. Each endpoint has its own subscriptions, secret, and
+delivery history. Saving creates a new secret for that endpoint and cancels
+its outstanding deliveries. Removing an approved endpoint stops delivery to
+it as peers take up the new configuration. Roll out consistent receiver
+assignments across the fleet before enabling subscriptions.
+
+The settings read lists destinations with opaque IDs and includes the selected
+destination's subscription and recent deliveries. Use `?destination=<id>`
+with reads and mutations. A mutation can omit the selector when the repository
+has exactly one approved receiver.
 
 Crab POSTs a JSON object with `repository` (the stable UUID), `delivery` (the
 delivery UUID), `occurred_at_ms`, and `data`. `X-Crab-Event` is `push` or
@@ -3867,9 +3876,9 @@ hex-encoded HMAC-SHA256), then deduplicate by delivery UUID before processing.
   the PR's recorded comparison. A browser head-branch switch emits the
   recorded new comparison without `head_change`.
 
-A branch update emits one synchronization event for each open PR already
-tracking that repository and branch when publication reserves delivery. A
-private fork's update is sent by the upstream PR repository's subscription
+A branch update emits one synchronization event per subscribed receiver for
+each open PR already tracking that repository and branch when publication
+reserves delivery. A private fork's update uses the upstream PR repository's subscriptions
 even when the fork has no webhook. The worker skips a PR closed, reopened,
 or rerouted before it expands the publication into deliveries. Deleting a
 branch emits a push event when subscribed. Delivery is asynchronous, so check the current PR
@@ -3879,9 +3888,10 @@ Publication and delivery are separate. The worker resolves the committed Git
 plan before queueing or sending a ref event. An unconfirmed plan is cancelled
 after an hour. Delivery retries reuse the UUID and payload. A 2xx response confirms
 delivery. Other responses and connection failures retry after 10 and 20
-seconds, then remain visible as failed. **Recent deliveries** shows up to 50
-entries and the last ten HTTP outcomes per entry. An administrator can redeliver
-completed deliveries for the current subscription. Disabling a webhook prevents
+seconds, then remain visible as failed. **Recent deliveries** shows the selected
+receiver's entries within the repository's latest 50 deliveries and the last
+ten HTTP outcomes per entry. An administrator can redeliver completed deliveries
+for that receiver's current subscription. Disabling a webhook prevents
 new delivery attempts and cannot recall a request that already reached the
 receiver.
 

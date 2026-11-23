@@ -1,4 +1,5 @@
 use super::{collaboration::next_version, pulls::PullRecord, *};
+use crate::config::MAX_OUTBOUND_WEBHOOKS;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -18,6 +19,22 @@ pub(crate) struct Subscription {
     pub destination: String,
     pub push: bool,
     pub pull_request: bool,
+}
+
+fn subscriptions(context: &Transaction<'_>) -> crate::cells::Result<Vec<(String, Subscription)>> {
+    // The original singleton document is itself a member of this prefix.
+    // Keeping its key and shape preserves pending deliveries and signing IDs.
+    let rows = context.documents_after(ACTIVE, None, MAX_OUTBOUND_WEBHOOKS + 1)?;
+    if rows.len() > MAX_OUTBOUND_WEBHOOKS {
+        return Err(crate::cells::Error::Invalid("Too many active webhooks"));
+    }
+    Ok(rows)
+}
+
+fn is_active(context: &Transaction<'_>, subscription: &Subscription) -> crate::cells::Result<bool> {
+    Ok(subscriptions(context)?
+        .iter()
+        .any(|(_, current)| current == subscription))
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -151,13 +168,13 @@ pub(super) fn pull(
     if matches!(action, PullAction::Reopened | PullAction::Synchronize) {
         sync::route_changed(context, record.number)?;
     }
-    let Some(subscription) = context
-        .document::<Subscription>(ACTIVE)?
-        .filter(|hook| hook.pull_request)
-    else {
-        return Ok(());
-    };
-    enqueue(context, subscription, pull_event(record, action, None))
+    for (_, hook) in subscriptions(context)?
+        .into_iter()
+        .filter(|(_, hook)| hook.pull_request)
+    {
+        enqueue(context, hook, pull_event(record, action, None))?;
+    }
+    Ok(())
 }
 
 fn pull_event(record: &PullRecord, action: PullAction, head_change: Option<HeadChange>) -> Event {
@@ -196,12 +213,6 @@ impl Mutation for QueuePush {
         context: &mut Transaction<'_>,
         plan: String,
     ) -> crate::cells::Result<MutationResult<()>> {
-        let Some(subscription) = context
-            .document::<Subscription>(ACTIVE)?
-            .filter(|hook| hook.push)
-        else {
-            return Ok(MutationResult::Rejected(()));
-        };
         if plan.len() != 64 || blake3::Hash::from_hex(&plan).is_err() {
             return Err(crate::cells::Error::Invalid(
                 "Invalid webhook publication plan",
@@ -211,7 +222,16 @@ impl Mutation for QueuePush {
         if context.document::<bool>(&recorded)?.is_some() {
             return Ok(MutationResult::Rejected(()));
         }
-        enqueue(context, subscription, Event::Push { plan })?;
+        let mut subscriptions = subscriptions(context)?
+            .into_iter()
+            .filter(|(_, hook)| hook.push)
+            .peekable();
+        if subscriptions.peek().is_none() {
+            return Ok(MutationResult::Rejected(()));
+        }
+        for (_, hook) in subscriptions {
+            enqueue(context, hook, Event::Push { plan: plan.clone() })?;
+        }
         context.put_document(&recorded, &true)?;
         Ok(MutationResult::Success(()))
     }
@@ -220,6 +240,7 @@ impl Mutation for QueuePush {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ConfigureInput {
+    pub destination: String,
     pub expected: Option<Uuid>,
     pub subscription: Option<Subscription>,
 }
@@ -235,31 +256,39 @@ impl Mutation for Configure {
         context: &mut Transaction<'_>,
         input: ConfigureInput,
     ) -> crate::cells::Result<MutationResult<bool>> {
-        let current = context.document::<Subscription>(ACTIVE)?;
-        if current == input.subscription {
+        let active = subscriptions(context)?;
+        let current = active
+            .iter()
+            .find(|(_, hook)| hook.destination == input.destination);
+        if current.map(|(_, hook)| hook) == input.subscription.as_ref() {
             return Ok(MutationResult::Rejected(true));
         }
-        if input.expected != current.as_ref().map(|hook| hook.id) {
+        if input.expected != current.map(|(_, hook)| hook.id) {
             return Ok(MutationResult::Rejected(false));
         }
         if let Some(next) = &input.subscription
             && (settings::archived(context)?
                 || next.id.is_nil()
-                || input.expected == Some(next.id)
+                || active.iter().any(|(_, hook)| hook.id == next.id)
+                || (current.is_none() && active.len() >= MAX_OUTBOUND_WEBHOOKS)
                 || !(next.push || next.pull_request)
+                || next.destination != input.destination
                 || next.destination.len() != 64
                 || blake3::Hash::from_hex(&next.destination).is_err()
                 || context.document::<bool>(&revoked(next.id))?.is_some())
         {
             return Ok(MutationResult::Rejected(false));
         }
-        if let Some(current) = current {
-            context.put_document(&revoked(current.id), &true)?;
+        if let Some((_, hook)) = current {
+            context.put_document(&revoked(hook.id), &true)?;
         }
         if let Some(next) = input.subscription {
-            context.put_document(ACTIVE, &next)?;
-        } else {
-            context.delete_document(ACTIVE)?;
+            let key = current
+                .map(|(key, _)| key.clone())
+                .unwrap_or_else(|| format!("{ACTIVE}/{}", input.destination));
+            context.put_document(&key, &next)?;
+        } else if let Some((key, _)) = current {
+            context.delete_document(key)?;
         }
         Ok(MutationResult::Success(true))
     }
@@ -267,7 +296,7 @@ impl Mutation for Configure {
 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct Snapshot {
-    pub subscription: Option<Subscription>,
+    pub subscriptions: Vec<Subscription>,
     pub deliveries: Vec<Delivery>,
 }
 
@@ -279,7 +308,10 @@ impl Read for View {
     type Output = Snapshot;
     fn execute(context: &mut Transaction<'_>, _: ()) -> crate::cells::Result<Snapshot> {
         Ok(Snapshot {
-            subscription: context.document(ACTIVE)?,
+            subscriptions: subscriptions(context)?
+                .into_iter()
+                .map(|(_, hook)| hook)
+                .collect(),
             deliveries: context
                 .documents::<Delivery>(TASKS, None, MAX_HISTORY)?
                 .into_iter()
@@ -314,10 +346,13 @@ pub(crate) struct Current;
 impl Read for Current {
     const CLASS: &'static str = CLASS;
     const ID: u32 = 432;
-    type Input = ();
-    type Output = Option<Subscription>;
-    fn execute(context: &mut Transaction<'_>, _: ()) -> crate::cells::Result<Self::Output> {
-        context.document(ACTIVE)
+    type Input = Subscription;
+    type Output = bool;
+    fn execute(
+        context: &mut Transaction<'_>,
+        input: Subscription,
+    ) -> crate::cells::Result<Self::Output> {
+        is_active(context, &input)
     }
 }
 
@@ -338,7 +373,7 @@ impl Mutation for Claim {
             .document::<Delivery>(&key(id))?
             .ok_or(crate::cells::Error::Invalid("Missing webhook delivery"))?;
         context.delete_document(&scheduled)?;
-        if context.document::<Subscription>(ACTIVE)?.as_ref() != Some(&delivery.subscription) {
+        if !is_active(context, &delivery.subscription)? {
             complete(context, &mut delivery, Status::Cancelled)?;
             return Ok(MutationResult::Success(None));
         }
@@ -468,7 +503,7 @@ impl Mutation for Retry {
             return Ok(MutationResult::Rejected(false));
         };
         if delivery.subscription.destination != destination
-            || context.document::<Subscription>(ACTIVE)?.as_ref() != Some(&delivery.subscription)
+            || !is_active(context, &delivery.subscription)?
         {
             return Ok(MutationResult::Rejected(false));
         }

@@ -1,5 +1,5 @@
 use openidconnect::IssuerUrl;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use url::{Host, Url};
@@ -7,6 +7,8 @@ use url::{Host, Url};
 use serde::Deserialize;
 
 use crate::{Error, Result};
+
+pub(crate) const MAX_OUTBOUND_WEBHOOKS: usize = 20;
 
 /// Server listeners, object-storage root, and browser identity configuration.
 #[derive(Clone, Debug, Deserialize)]
@@ -243,14 +245,18 @@ impl Config {
 
     pub(crate) fn validate(&self) -> Result<()> {
         if !self.outbound_webhooks.is_empty() {
-            let mut repositories = HashSet::new();
+            let mut receivers = HashSet::new();
+            let mut counts = HashMap::new();
             if !self
                 .auth
                 .as_ref()
                 .is_some_and(|auth| auth.state_key_file.is_some())
                 || !self.outbound_webhooks.iter().all(|hook| {
+                    let count = counts.entry(hook.repository).or_insert(0);
+                    *count += 1;
                     !hook.repository.is_nil()
-                        && repositories.insert(hook.repository)
+                        && receivers.insert((hook.repository, hook.url.as_str()))
+                        && *count <= MAX_OUTBOUND_WEBHOOKS
                         && hook.url.as_str().len() <= 1024
                         && hook.url.scheme() == "https"
                         && hook.url.host().is_some()
@@ -261,7 +267,7 @@ impl Config {
                 })
             {
                 return Err(Error::Config(
-                    "outbound webhooks require a shared auth state key and one HTTPS receiver without credentials, query, or fragment per repository",
+                    "outbound webhooks require a shared auth state key and up to 20 distinct HTTPS receivers without credentials, query, or fragment per repository",
                 ));
             }
         }

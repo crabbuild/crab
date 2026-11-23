@@ -28,7 +28,7 @@ pub(in crate::cells::repository) fn route_changed(
 pub(crate) struct Reservation {
     pub plan: String,
     pub source: Option<Uuid>,
-    pub destination: String,
+    pub destinations: Vec<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -61,12 +61,13 @@ impl Mutation for Reserve {
         context: &mut Transaction<'_>,
         input: Reservation,
     ) -> crate::cells::Result<MutationResult<()>> {
-        let Some(subscription) = context
-            .document::<Subscription>(ACTIVE)?
-            .filter(|current| current.pull_request && current.destination == input.destination)
-        else {
+        let mut receivers = subscriptions(context)?
+            .into_iter()
+            .filter(|(_, hook)| hook.pull_request && input.destinations.contains(&hook.destination))
+            .peekable();
+        if receivers.peek().is_none() {
             return Ok(MutationResult::Rejected(()));
-        };
+        }
         if blake3::Hash::from_hex(&input.plan).is_err()
             || input.source.is_some_and(|id| id.is_nil())
         {
@@ -90,18 +91,21 @@ impl Mutation for Reserve {
             return Ok(MutationResult::Rejected(()));
         }
         let now = timestamp(context.now_ms())?;
-        let job = Job {
-            id: Uuid::now_v7(),
-            plan: input.plan,
-            source: input.source,
-            subscription,
-            queued_at: now,
-            due: now,
-            route_revision: route_revision(context)?,
-            cursor: 0,
-            last_pull,
-        };
-        context.put_document(&job.key(), &job)?;
+        let route_revision = route_revision(context)?;
+        for (_, subscription) in receivers {
+            let job = Job {
+                id: Uuid::now_v7(),
+                plan: input.plan.clone(),
+                source: input.source,
+                subscription,
+                queued_at: now,
+                due: now,
+                route_revision,
+                cursor: 0,
+                last_pull,
+            };
+            context.put_document(&job.key(), &job)?;
+        }
         context.put_document(&recorded, &true)?;
         Ok(MutationResult::Success(()))
     }
@@ -226,7 +230,7 @@ impl Mutation for Advance {
             return Ok(MutationResult::Rejected(()));
         };
         context.delete_document(&key)?;
-        if context.document::<Subscription>(ACTIVE)?.as_ref() != Some(&job.subscription) {
+        if !is_active(context, &job.subscription)? {
             return Ok(MutationResult::Success(()));
         }
         let now = timestamp(context.now_ms())?;

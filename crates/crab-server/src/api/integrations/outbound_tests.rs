@@ -135,7 +135,7 @@ async fn drain(h: &Harness) {
 #[tokio::test]
 async fn outbound_delivery_binds_publication_and_replays_signed_bytes() {
     let (endpoint, received, target) = receiver(false).await;
-    let h = Harness::with_webhook_receiver(endpoint, None).await;
+    let h = Harness::with_webhook_receivers([endpoint], None).await;
     let alice = h.login().await;
     let id = Uuid::now_v7();
     let configure =
@@ -257,9 +257,165 @@ async fn outbound_delivery_binds_publication_and_replays_signed_bytes() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires agent-browser and the embedded UI with native Git and Cells"]
+async fn native_browser_isolates_subscriptions_and_delivery_history_by_destination() {
+    let (first, first_events, first_target) = receiver(false).await;
+    let (second, second_events, second_target) = receiver(false).await;
+    let keys = [&first, &second].map(crate::server::webhooks::destination);
+    let h = Harness::with_webhook_receivers([first, second], None).await;
+    let alice = h.login().await;
+    stock_push(&h, &alice).await;
+    let no_selection = h.write(Method::POST, PATH, &alice,
+        json!({"kind":"configure","id":Uuid::now_v7(),"expected":null,"push":true,"pull_request":true})).await;
+    assert_eq!(no_selection.status(), StatusCode::BAD_REQUEST);
+
+    let browser = Browser::new("webhook-destinations");
+    browser
+        .run(&[
+            "open",
+            &format!("{}/team/private/settings/webhooks", h.origin),
+        ])
+        .await;
+    browser
+        .run(&["wait", "--text", "Continue to sign in"])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Continue to sign in",
+        ])
+        .await;
+    let picker = "#webhook-destination-picker";
+    let select = async |key: &str| {
+        browser.run(&["wait", picker]).await;
+        browser.run(&["select", picker, key]).await;
+        browser
+            .run(&[
+                "wait",
+                "--fn",
+                &format!("document.querySelector('{picker}')?.value === '{key}'"),
+            ])
+            .await;
+    };
+    for key in &keys {
+        select(key).await;
+        browser
+            .run(&[
+                "find",
+                "role",
+                "button",
+                "click",
+                "--name",
+                "Enable webhook",
+                "--exact",
+            ])
+            .await;
+        browser.run(&["wait", "--text", "Hide secret"]).await;
+        browser.run(&["wait", "--text", "Disable webhook"]).await;
+    }
+
+    open(
+        &h,
+        &alice,
+        &json!({
+            "request_id":Uuid::now_v7(),"title":"Notify both receivers","body":"",
+            "base_ref":"refs/heads/main","head_ref":"refs/heads/feature",
+        }),
+    )
+    .await;
+    let checkout = checkout_feature(&h, &alice).await;
+    let remote = git_remote(&h, &alice, "team", "private").await;
+    let head = advance_feature(checkout.path(), remote.as_str()).await;
+    drain(&h).await;
+
+    let first_rows = first_events.lock().await.clone();
+    let second_rows = second_events.lock().await.clone();
+    let paths = keys
+        .each_ref()
+        .map(|key| format!("{PATH}?destination={key}"));
+    let repo = h.server.repositories.values()[0].id;
+    let mut secrets = Vec::new();
+    for (path, rows) in paths.iter().zip([&first_rows, &second_rows]) {
+        let view = h.json(path, &alice).await;
+        let subscription = Uuid::parse_str(view["subscription"]["id"].as_str().unwrap()).unwrap();
+        let secret = crate::server::webhooks::secret(&h.server, repo, subscription).unwrap();
+        assert_eq!(rows.len(), 3);
+        let history = view["deliveries"].as_array().unwrap();
+        assert_eq!(history.len(), rows.len());
+        for row in rows {
+            assert!(
+                history
+                    .iter()
+                    .any(|entry| entry["id"] == json!(row.id) && entry["status"] == "delivered")
+            );
+            let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+            mac.update(&row.body);
+            let digest = blake3::Hash::from_bytes(mac.finalize().into_bytes().into());
+            assert_eq!(row.signature, format!("sha256={digest}"));
+        }
+        assert!(rows.iter().any(|row| {
+            let payload: Value = serde_json::from_slice(&row.body).unwrap();
+            payload["data"]["action"] == "synchronize" && payload["data"]["head_sha"] == head
+        }));
+        secrets.push(secret);
+    }
+    assert!(
+        secrets[0] != secrets[1],
+        "receivers must use different secrets"
+    );
+    assert!(
+        first_rows
+            .iter()
+            .all(|first| second_rows.iter().all(|second| first.id != second.id))
+    );
+    let delivery = &h.json(&paths[0], &alice).await["deliveries"][0];
+    let cross_retry = h
+        .write(
+            Method::POST,
+            &paths[1],
+            &alice,
+            json!({"kind":"redeliver","id":delivery["id"],"version":delivery["version"]}),
+        )
+        .await;
+    assert_eq!(cross_retry.status(), StatusCode::CONFLICT);
+
+    select(&keys[0]).await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Disable webhook",
+            "--exact",
+        ])
+        .await;
+    browser.run(&["wait", "--text", "Enable webhook"]).await;
+    select(&keys[1]).await;
+    browser
+        .run(&["wait", "--text", "Pull Request Head Updated"])
+        .await;
+    advance_feature(checkout.path(), remote.as_str()).await;
+    drain(&h).await;
+    assert_eq!(first_events.lock().await.len(), 3);
+    assert_eq!(second_events.lock().await.len(), 5);
+    drop(browser);
+    h.close().await;
+    for target in [first_target, second_target] {
+        target.abort();
+        let _ = target.await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires agent-browser and the embedded UI with native Git and Cells"]
 async fn native_browser_enables_an_outbound_webhook_and_reads_the_delivered_pull() {
     let (endpoint, received, target) = receiver(true).await;
-    let h = Harness::with_webhook_receiver(endpoint, None).await;
+    let h = Harness::with_webhook_receivers([endpoint], None).await;
     let alice = h.login().await;
     stock_push(&h, &alice).await;
     let worker = tokio::spawn(crate::server::webhooks::run(h.server.clone()));
@@ -424,7 +580,7 @@ async fn enable_push(h: &Harness, account: &str) {
 #[tokio::test]
 async fn browser_writes_emit_exact_public_refs_even_when_a_branch_address_is_reused() {
     let (endpoint, received, target) = receiver(false).await;
-    let h = Harness::with_webhook_receiver(endpoint, None).await;
+    let h = Harness::with_webhook_receivers([endpoint], None).await;
     let alice = h.login().await;
     let head = stock_push(&h, &alice).await;
     enable_push(&h, &alice).await;
@@ -592,7 +748,7 @@ async fn browser_writes_emit_exact_public_refs_even_when_a_branch_address_is_reu
 #[ignore = "requires agent-browser and embedded assets for browser Git write and delivery verification"]
 async fn native_browser_file_edit_triggers_a_push_webhook() {
     let (endpoint, received, target) = receiver(false).await;
-    let h = Harness::with_webhook_receiver(endpoint, None).await;
+    let h = Harness::with_webhook_receivers([endpoint], None).await;
     let alice = h.login().await;
     let before = stock_push(&h, &alice).await;
     enable_push(&h, &alice).await;
