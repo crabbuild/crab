@@ -928,7 +928,7 @@ async fn product_read_records_one_redacted_transfer_for_its_actual_scope() {
     attempt
         .payload_observation()
         .unwrap()
-        .record_verified_git_pack(pack_hash);
+        .record_verified_git_pack(pack_hash, path.as_ref());
     request.await.unwrap();
 
     let events = capture.events.lock().unwrap();
@@ -978,6 +978,12 @@ async fn product_read_records_one_redacted_transfer_for_its_actual_scope() {
             .iter()
             .find_map(|event| event.0.get("git_pack_blake3")),
         Some(&format!("\"{}\"", pack_hash.to_hex()))
+    );
+    assert_eq!(
+        events
+            .iter()
+            .find_map(|event| event.0.get("git_pack_key_sha256")),
+        Some(&format!("\"{:x}\"", Sha256::digest(path.as_ref())))
     );
     let transitions: Vec<_> = events
         .iter()

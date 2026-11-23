@@ -106,6 +106,8 @@ def write_product_viewer_proof(client_path: Path, key_sha256: str | None = None,
                                    filename: str = CDN.PRODUCT_VIEWER_RECORD) -> None:
     raw = client_path.read_bytes()
     client = json.loads(raw)
+    if key_sha256 is None and client.get("verified_edge_pack_keys"):
+        key_sha256 = client["verified_edge_pack_keys"][0]
     edge = client["scope"].split("/", 1)[0]
     records = {}
     proof = {"schema": f"crab.{edge}-viewer-requests/v1", "client_report_sha256": hashlib.sha256(raw).hexdigest(),
@@ -133,6 +135,7 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, nati
     managed = CDN.is_managed_cli_git_scope(registration["scope"])
     cli = CDN.requires_cli_workload(registration["scope"])
     cli_lfs = CDN.requires_cli_lfs_workload(registration["scope"])
+    cli_git = cli and CDN.scope_parts(registration["scope"])[3] == "git"
     capsule = cli and CDN.scope_parts(registration["scope"])[3] == "capsule"
     payload_bytes = CDN.cli_payload_bytes(registration)
     action = CDN.cli_action_name(registration["scope"])
@@ -207,6 +210,8 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, nati
                     client["managed_grant"] = registration["managed_issuer"] | {"grant_version": 2}
                     if arm == "origin":
                         client["managed_grant"].update(approval_sha256=None, grant_version=1)
+                if cli_git:
+                    client["verified_edge_pack_keys"] = []
                 if capsule:
                     control = hashlib.sha256(f"{location}/{index}/capsule-range".encode()).hexdigest()
                     client["capsule_controls"] = [control] if arm != "origin" else []
@@ -219,6 +224,8 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, nati
                     key_sha256 = hashlib.sha256(f"{location}/{index}/key".encode()).hexdigest()
                     if cli_lfs:
                         key_sha256 = hashlib.sha256(f"{FIXTURE_PREFIX}/{CDN.lfs_object_path(blob)}".encode()).hexdigest()
+                    if cli_git:
+                        client["verified_edge_pack_keys"].append(key_sha256)
                     proof[request_id] = {"status": 206, "response_bytes": 800, "cache": cache, "key_sha256": key_sha256}
                     if provider == "s3":
                         proof[request_id].update(cloudfront_framing(metrics["edge_bytes"]))
@@ -533,6 +540,8 @@ class CdnQualificationTests(unittest.TestCase):
         })
         public = "publication_sha256" in self.registration
         transition = {"transition_key_sha256": self.object_key} if public else {}
+        if public and "verified_edge_pack_keys" in fetch:
+            fetch["verified_edge_pack_keys"] = [self.object_key]
         fetch_path = records / "fetch.json"
         native_scopes = ["cloudfront/private/cli/capsule/direct"] if self.scope == "cloudfront/private/cli/git/direct" else []
         json_file(fetch_path, fetch | {"publication_sha256": receipt, "origin_only_scopes": native_scopes} | transition)
@@ -549,6 +558,8 @@ class CdnQualificationTests(unittest.TestCase):
             rollback["managed_grant"] = self.registration["managed_issuer"] | {"approval_sha256": None, "grant_version": 1}
         if "capsule_controls" in rollback:
             rollback["capsule_controls"] = []
+        if "verified_edge_pack_keys" in rollback:
+            rollback["verified_edge_pack_keys"] = []
         if public:
             start = fetch["started_at_unix_ms"] - 30
             json_file(records / CDN.GIT_PRIOR_EXPORT_RECORD, rollback | transition | {
@@ -1160,6 +1171,14 @@ class CdnQualificationTests(unittest.TestCase):
                 self.rejected("CDN viewer request did not read the approved LFS object")
                 for path, raw in records.items():
                     path.write_bytes(raw)
+
+    def test_cli_git_provider_logs_must_identify_the_verified_pack_layer(self) -> None:
+        self.configure("s3", "private", "direct")
+        product = self.directory / CDN.GIT_PRODUCT_DIR / CDN.PRODUCT_VIEWER_RECORD
+        proof = json.loads(product.read_bytes())
+        next(iter(proof["records"].values()))["key_sha256"] = "0" * 64
+        json_file(product, proof)
+        self.rejected("provider logs did not confirm the verified Git pack layers")
 
     def test_rejects_generic_rotation_trace(self) -> None:
         self.configure("s3", "private", "direct")

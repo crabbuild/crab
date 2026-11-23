@@ -223,6 +223,7 @@ class CdnSdkWorkloadQualificationTests(unittest.TestCase):
         event = {"target": "crab_storage::cdn::transfer", "fields": {
             "message": "CDN verified Git payload", "provider": "s3", "access": "private",
             "consumer": "sdk", "family": "git", "profile": "direct", "source": "edge", "git_pack_blake3": pack,
+            "git_pack_key_sha256": "a" * 64,
         }}
         for action in ("clone", "fetch"):
             with self.subTest(action=action):

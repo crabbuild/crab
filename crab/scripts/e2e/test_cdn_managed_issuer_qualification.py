@@ -95,7 +95,8 @@ class CdnManagedIssuerQualificationTests(unittest.TestCase):
                     event(TARGET, **route, message=EVENT, status=200, cache="hit", elapsed_ms=1, range=False,
                           range_start=0, object_bytes=len(BODY), requested_bytes=len(BODY),
                           bytes=len(BODY), complete=True, request_sha256="6" * 64),
-                    event(TARGET, **route, message=VERIFIED_GIT_EVENT, source="edge"),
+                    event(TARGET, **route, message=VERIFIED_GIT_EVENT, source="edge",
+                          git_pack_blake3="a" * 64, git_pack_key_sha256="b" * 64),
                 ])
             if role == "v1_peer":
                 traces.append(event(NATIVE_TARGET, provider=provider, message="Native object store read", method="get",
@@ -120,7 +121,7 @@ class CdnManagedIssuerQualificationTests(unittest.TestCase):
                                "binding_sha256": registration["viewer_binding_sha256"] if version == 2 else "",
                                "public_export_sha256": "", "cache_root_sha256": str(version) * 64},
                     "edge_responses": responses, "native_traffic": measure_native(lines, config["scope"]),
-                    "origin_only_scopes": [],
+                    "origin_only_scopes": [], "verified_edge_pack_keys": ["b" * 64] if version == 2 else [],
                 }
                 path = "git-product/fetch.json" if version == 2 else "traces/rollback.json"
                 write_json(root / path, client)

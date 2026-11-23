@@ -626,8 +626,9 @@ and edge payload through redacted observations.
   the commit. The release gate derives direct CLI Git, capsule, and LFS
   product evidence from the exact publication receipt and its
   ordered fetch and retirement records. The retained product fetch must
-  match provider viewer logs, including the exact LFS object and delivery of
-  the exact new object for public transitions. The fixture owner separately proves
+  match provider viewer logs for the exact verified Git pack layers or LFS
+  object, including delivery of the newly approved object for public transitions.
+  The fixture owner separately proves
   storage and export cleanup. The read-only cleanup collector verifies empty
   native inventories for the exact test prefix, records live and historical
   inventory results, and binds public exports separately. The release gate
@@ -709,7 +710,8 @@ and edge payload through redacted observations.
   Every scoped viewer request in a warm-edge sample must be a
   provider-confirmed hit. Each warm payload object must appear in its paired
   cold edge sample. At least one warm hit must serve an object filled in
-  that cold sample.
+  that cold sample. Only layers that supplied verified Git packs can witness
+  cold fills and warm payload reuse for CLI Git.
   Benchmarks charge adjacent reads to the byte and origin request budgets.
   CloudFront verifies signed reads from the approved S3 bucket using the viewer
   keys and timed window. Its cold arm requires a successful origin body response.

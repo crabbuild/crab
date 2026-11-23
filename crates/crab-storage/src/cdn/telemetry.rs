@@ -205,7 +205,7 @@ pub struct PayloadObservation {
 enum PayloadIdentity<'a> {
     None,
     GitBlob(&'a [u8]),
-    GitPack(blake3::Hash),
+    GitPack(blake3::Hash, &'a str),
     LfsKey(&'a str),
     XorbKey(&'a str),
 }
@@ -245,9 +245,9 @@ impl PayloadObservation {
         }
     }
 
-    /// Report an edge pack after its complete authenticated BLAKE3 digest matches.
-    pub fn record_verified_git_pack(self, hash: blake3::Hash) {
-        self.record("edge", PayloadIdentity::GitPack(hash));
+    /// Report an edge pack and its physical layer after its authenticated BLAKE3 digest matches.
+    pub fn record_verified_git_pack(self, hash: blake3::Hash, key: &str) {
+        self.record("edge", PayloadIdentity::GitPack(hash, key));
         if let Some(public) = self.public {
             public.record(self.policy, self.family, "verified_edge", None);
         }
@@ -309,18 +309,19 @@ impl PayloadObservation {
             CdnReadFamily::Xorb => "CDN verified xorb payload",
             _ => "CDN verified Git payload",
         };
-        let (oid, pack, lfs, xorb) = match identity {
-            PayloadIdentity::None => (None, None, None, None),
-            PayloadIdentity::GitBlob(oid) => {
-                (Some(format!("{:x}", Sha256::digest(oid))), None, None, None)
-            }
-            PayloadIdentity::GitPack(pack) => (None, Some(pack.to_hex()), None, None),
-            PayloadIdentity::LfsKey(key) => {
-                (None, None, Some(format!("{:x}", Sha256::digest(key))), None)
-            }
-            PayloadIdentity::XorbKey(key) => {
-                (None, None, None, Some(format!("{:x}", Sha256::digest(key))))
-            }
+        let fingerprint = |bytes: &[u8]| Some(format!("{:x}", Sha256::digest(bytes)));
+        let (oid, pack, pack_key, lfs, xorb) = match identity {
+            PayloadIdentity::None => (None, None, None, None, None),
+            PayloadIdentity::GitBlob(oid) => (fingerprint(oid), None, None, None, None),
+            PayloadIdentity::GitPack(pack, key) => (
+                None,
+                Some(pack.to_hex()),
+                fingerprint(key.as_bytes()),
+                None,
+                None,
+            ),
+            PayloadIdentity::LfsKey(key) => (None, None, None, fingerprint(key.as_bytes()), None),
+            PayloadIdentity::XorbKey(key) => (None, None, None, None, fingerprint(key.as_bytes())),
         };
         tracing::event!(
             target: TARGET,
@@ -334,6 +335,7 @@ impl PayloadObservation {
             source,
             git_blob_oid_sha256 = oid.as_deref(),
             git_pack_blake3 = pack.as_ref().map(|digest| digest.as_str()),
+            git_pack_key_sha256 = pack_key.as_deref(),
             lfs_key_sha256 = lfs.as_deref(),
             xorb_key_sha256 = xorb.as_deref(),
             "{message}"

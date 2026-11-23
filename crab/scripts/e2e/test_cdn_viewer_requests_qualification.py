@@ -142,6 +142,8 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
             examples.write_git_measurements(root, registration, "linux-x86_64")
             client = root / "near/0001/cold_edge/client.json"
             report = json.loads(client.read_bytes())
+            key = f"{config['fixture_prefix']}/{PACK}"
+            report["verified_edge_pack_keys"] = [hashlib.sha256(key.encode()).hexdigest()]
             viewer_id = "raw-viewer-id"
             viewer_digest = hashlib.sha256(viewer_id.encode()).hexdigest()
             response = next(iter(report["edge_responses"].values()))
@@ -149,7 +151,6 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
             examples.json_file(client, report | {"edge_responses": {viewer_digest: response}})
             started = datetime.fromtimestamp(report["started_at_unix_ms"] // 1000, timezone.utc)
             timestamp = started.strftime("%d/%b/%Y:%H:%M:%S +0000")
-            key = f"{config['fixture_prefix']}/{PACK}"
             viewer_prefix = "AWSLogs/123456789012/CloudFront/"
             origin_prefix = "origin/123456789012/us-east-1/fixture-bucket/"
             viewer_key = viewer_prefix + "1970/01/02/00/viewer.gz"
@@ -265,6 +266,8 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
             examples.write_git_measurements(root, registration, "linux-x86_64")
             client = root / "near/0001/cold_edge/client.json"
             report = json.loads(client.read_bytes())
+            key = f"{config['fixture_prefix']}/{PACK}"
+            report["verified_edge_pack_keys"] = [hashlib.sha256(key.encode()).hexdigest()]
             viewer_id = "fixture-request_V1=="
             fingerprint = hashlib.sha256(viewer_id.encode()).hexdigest()
             response = next(iter(report["edge_responses"].values())) | {"range_start": 3}
@@ -276,7 +279,6 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
             actual = (f"1970-01-01\t{viewer_id}\tfixture.example.com\tGET\t{prefix}{PACK}\thttps\t206\t620\tMiss\t192.0.2.1"
                       f"\t{response['bytes']}\t3\t{response['bytes'] + 2}\n")
             unrelated = actual.replace(viewer_id, "unrelated-request").replace("fixture.example.com", "other.example.com")
-            key = f"{config['fixture_prefix']}/{PACK}"
             at = report["started_at_unix_ms"] // 1000
             timestamp = datetime.fromtimestamp(at, timezone.utc).strftime("%d/%b/%Y:%H:%M:%S %z")
             origin_line = (
@@ -381,11 +383,13 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
             examples.write_git_measurements(root, registration, "linux-x86_64")
             client = root / "near/0001/cold_edge/client.json"
             report = json.loads(client.read_bytes())
+            key = f"{config['fixture_prefix']}/{PACK}"
+            report["verified_edge_pack_keys"] = [hashlib.sha256(key.encode()).hexdigest()]
             tag = f"crab-cdn-qualification/{'0a' * 16}"
             fingerprint = hashlib.sha256(tag.encode()).hexdigest()
             response = next(iter(report["edge_responses"].values()))
             digest = examples.json_file(client, report | {"edge_responses": {fingerprint: response}})
-            request = {"requestMethod": "GET", "requestUrl": f"https://{host}/{config['fixture_prefix']}/{PACK}",
+            request = {"requestMethod": "GET", "requestUrl": f"https://{host}/{key}",
                        "responseSize": "620", "status": 206, "userAgent": tag, "remoteIp": "192.0.2.1",
                        "cacheFillBytes": "4096", "cacheLookup": True}
             resource = {"type": "http_load_balancer", "labels": {"project_id": project, "forwarding_rule_name": rule}}
@@ -626,13 +630,15 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                 examples.write_git_measurements(root, registration, "linux-x86_64")
                 client = root / "near/0001/warm_edge/client.json"
                 report = json.loads(client.read_bytes())
+                key = f"{config['fixture_prefix']}/{PACK}"
+                report["verified_edge_pack_keys"] = [hashlib.sha256(key.encode()).hexdigest()]
                 reference = "0uniqueFrontDoorViewerReference=="
                 request_id = hashlib.sha256(reference.encode()).hexdigest()
                 response = next(iter(report["edge_responses"].values()))
                 digest = examples.json_file(client, report | {"edge_responses": {request_id: response}})
                 resource = (f"/SUBSCRIPTIONS/{deployment['subscription']}/RESOURCEGROUPS/TEST/PROVIDERS/MICROSOFT.CDN/"
                             "PROFILES/TEST-CDN")
-                properties = {"trackingReference": reference, "requestUri": f"https://{host}:443/{config['fixture_prefix']}/{PACK}",
+                properties = {"trackingReference": reference, "requestUri": f"https://{host}:443/{key}",
                               "endpoint": host, "isReceivedFromClient": True, "httpStatusCode": "206", "responseBytes": "620",
                               "httpMethod": "GET", "cacheStatus": "REMOTE_HIT", "clientIp": "192.0.2.1"}
                 viewer = {"category": "FrontdoorAccessLog", "resourceId": resource, "properties": properties}
@@ -642,7 +648,6 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                 blob_resource = (f"/subscriptions/{deployment['subscription']}/resourceGroups/test/providers/Microsoft.Storage/"
                                  f"storageAccounts/{account}/blobServices/default")
                 principal, correlation = "7abb6400-a5b4-4fed-a638-fcd011a29292", "77777777-0000-1111-2222-333333333333"
-                key = f"{config['fixture_prefix']}/{PACK}"
                 at = report["started_at_unix_ms"] + 1
                 timestamp = datetime.fromtimestamp(at / 1000, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "1234Z")
                 blob = {"category": "StorageRead", "resourceId": blob_resource, "operationName": "GetBlob",

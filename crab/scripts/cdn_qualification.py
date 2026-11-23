@@ -1602,6 +1602,8 @@ def validate_git_fetch(
         expected = expected | {"managed_grant"}
     if family == "capsule":
         expected = expected | {"capsule_controls"}
+    if family == "git":
+        expected = expected | {"verified_edge_pack_keys"}
     if prior or (isinstance(value, dict) and "transition_key_sha256" in value):
         require(access == "public" and mode in ("edge", "prior_export") and isinstance(value, dict)
                 and matches(SHA256, value.get("transition_key_sha256")),
@@ -1642,6 +1644,11 @@ def validate_git_fetch(
             and positive(client["native_writes"]) and client["visible_new_ref"] is True,
             f"{label} did not verify the published payload")
     verify_git_traffic(client, edge, label)
+    if family == "git":
+        pack_keys = client["verified_edge_pack_keys"]
+        require(isinstance(pack_keys, list) and len(pack_keys) <= min(1024, client["verified_edge_payloads"])
+                and all(matches(SHA256, key) for key in pack_keys) and pack_keys == sorted(set(pack_keys))
+                and bool(pack_keys) == (mode == "edge"), f"{label} has invalid verified Git pack layers")
     if family == "capsule":
         controls = client["capsule_controls"]
         maximum = client["local_payload_hits" if mode == "warm_local" else "verified_edge_payloads"]
@@ -1998,6 +2005,7 @@ def verify_viewer_requests(
         lfs_key = hashlib.sha256(f"{cli_lfs_prefix}/{path}".encode()).hexdigest()
     service_read = client.get("schema") == "crab.cdn-service-read/v1"
     transition_key = client.get("transition_key_sha256")
+    pack_keys = client.get("verified_edge_pack_keys")
     verified_transition = False
     proof_fields = {"schema", "client_report_sha256", "records"}
     if keyed_origin:
@@ -2092,6 +2100,10 @@ def verify_viewer_requests(
         require(client["edge_attempts"] == attempts and all(client[key] == count for key, count in observed_transfer.items()),
                 "CDN transfer totals disagree with the logged responses")
     require(transition_key is None or verified_transition, "CDN logs did not confirm the new export object")
+    if pack_keys is not None:
+        require(selected_payload_keys.issuperset(pack_keys), "provider logs did not confirm the verified Git pack layers")
+        # A Git metadata or index fetch cannot witness a pack cache fill.
+        selected_payload_keys.intersection_update(pack_keys)
     if keyed_origin:
         service, viewer, timestamp, precision = (
             ("S3", "CloudFront", "at_unix_s", 1000) if edge == "cloudfront"
@@ -2129,6 +2141,7 @@ def verify_viewer_requests(
     # describe a linked GET or a fill shared by several viewers.
     origin_gets = sum(max(origin_gets_by_key[key], int(viewer_fill_by_key[key] > 0)) for key in keys)
     fill_bytes = sum(max(viewer_fill_by_key[key], origin_fill_by_key[key]) for key in keys)
+    filled_payload_keys.intersection_update(selected_payload_keys)
     return ViewerRequestMetrics(logged_ids, origin_gets, fill_bytes, selected_payload_keys, filled_payload_keys, completed_cache)
 
 

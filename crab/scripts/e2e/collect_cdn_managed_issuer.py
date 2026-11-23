@@ -123,7 +123,9 @@ def collect_managed_issuer(
                 "managed product action did not exit with the expected result")
         responses = {}
         origin_only_scopes = set()
-        traffic = measure(lines, report["scope"], edge_responses=responses, origin_only_scopes=origin_only_scopes)
+        pack_keys = set()
+        traffic = measure(lines, report["scope"], edge_responses=responses, origin_only_scopes=origin_only_scopes,
+                          verified_git_pack_keys=pack_keys)
         native = measure_native(lines, report["scope"])
         if managed_git:
             require(grant["operation"] == "Fetch" and resolved["repository_sha256"] == issuer["repository_sha256"],
@@ -137,6 +139,7 @@ def collect_managed_issuer(
                 require(client["managed_grant"] == grant_fingerprints(grant)
                         and all(client[key] == value for key, value in traffic.items())
                         and client["edge_responses"] == responses and client["native_traffic"] == native
+                        and client["verified_edge_pack_keys"] == sorted(pack_keys)
                         and client["origin_only_scopes"] == sorted(origin_only_scopes),
                         "managed issuer capture does not account for the retained product traffic and grant")
                 require(client["publication_sha256"] == action["publication_sha256"]

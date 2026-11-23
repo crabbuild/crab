@@ -1200,8 +1200,9 @@ The workload's separate receipt records the native Git publication.
 Then run `fetch` with the same arguments and
 the configured reader credentials. The workload verifies the advertised
 commit and blob SHA-256 and requires both a completed CDN GET and an
-accepted edge Git payload for the approved scope. It emits the measured
-results as redacted JSON.
+accepted edge Git pack for the approved scope. The product and regional
+records include redacted fingerprints of the pack layers whose bytes passed
+verification. Provider logs must confirm completed reads of those layers.
 
 Use `fetch-origin` with the same receipt on a worker configured for native
 origin access. Before returning a measured payload, Crab confirms the

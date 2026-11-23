@@ -425,27 +425,33 @@ def fetch_once(
         require(observed_bytes == expected_bytes, "fetched bytes differ from the writer payload")
         observed = hashlib.file_digest(source, "sha256").hexdigest()
     require(observed == record["sha256"], "fetched bytes differ from the writer payload")
-    authority = {}
+    evidence = {}
     if managed is not None:
         events, grant = managed_observation(run, managed, origin=not binding, rejected=False)
-        authority = {"managed_grant": grant}
+        evidence["managed_grant"] = grant
         if managed_capture is not None:
             retain_managed_observation(managed_capture, run, events, payload)
     lines = run.stderr.splitlines()
     edge_responses = {}
     origin_only_scopes = set()
     capsule_controls = {}
+    git_pack_keys = set()
     lfs_key = None
     if crab is not None:
         physical_key = f"{target['repository_prefix']}/{lfs_object_path(record['sha256'])}"
         lfs_key = hashlib.sha256(physical_key.encode()).hexdigest()
     metrics = measure(lines, record["scope"], edge_responses=edge_responses, expected_lfs_key=lfs_key,
-                      origin_only_scopes=origin_only_scopes, capsule_controls=capsule_controls)
+                      origin_only_scopes=origin_only_scopes, capsule_controls=capsule_controls,
+                      verified_git_pack_keys=git_pack_keys)
     if proof is not None:
         verify_transition_events(lines, record["scope"], proof)
     action = cli_action_name(record["scope"])
     capsule_source = "local" if primed else "edge"
-    capsule = {"capsule_controls": sorted(capsule_controls.get(capsule_source, ()))} if scope_parts(record["scope"])[3] == "capsule" else {}
+    family = scope_parts(record["scope"])[3]
+    if family == "capsule":
+        evidence["capsule_controls"] = sorted(capsule_controls.get(capsule_source, ()))
+    elif family == "git":
+        evidence["verified_edge_pack_keys"] = sorted(git_pack_keys)
     return {
         "schema": f"crab.cdn-{action}/v1", "name": action, "expected_sha256": record["sha256"],
         "observed_sha256": observed, "expected_bytes": expected_bytes, "observed_bytes": observed_bytes,
@@ -454,12 +460,14 @@ def fetch_once(
         "platform": guard.platform, "candidate": guard.candidate,
         "reader": verified_read(lines, read) | guard.fingerprints, "edge_responses": edge_responses,
         "native_traffic": measure_native(lines, record["scope"]), "origin_only_scopes": sorted(origin_only_scopes),
-    } | metrics | authority | capsule
+    } | metrics | evidence
 
 
 def require_edge_fetch(result: dict) -> None:
     require(result["observed_edge_gets"] > 0, "fetch produced no completed edge GET for the approved scope")
     require(result["verified_edge_payloads"] > 0, "fetch did not accept a verified edge payload for the approved scope")
+    require("verified_edge_pack_keys" not in result or result["verified_edge_pack_keys"],
+            "fetch did not verify an edge Git pack layer")
 
 
 def fetch(

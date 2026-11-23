@@ -109,6 +109,7 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
                 scope = f"{edge}/private/cli/git/direct"
                 self.registration.update(scope=scope, candidate=fixture.cli_candidate(scope, PLATFORM))
                 fixture.write_git_measurements(self.root, self.registration, PLATFORM)
+                self.amend_client("near/0001/warm_edge", verified_edge_pack_keys=["f" * 64])
                 path = self.root / "near/0001/warm_edge" / fixture.CDN.VIEWER_REQUEST_FILES[provider]
                 proof = json.loads(path.read_bytes())
                 next(iter(proof["records"].values()))["key_sha256"] = "f" * 64
@@ -123,7 +124,8 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         request, other_key = "e" * 64, "f" * 64
         responses = client["edge_responses"] | {request: fixture.range_response(self.registration["scope"], 8)}
         self.amend_client(cold_slot, edge_responses=responses, all_edge_attempts=2, edge_attempts=2,
-                          observed_edge_gets=2, edge_hits=1, edge_bytes=16)
+                          observed_edge_gets=2, edge_hits=1, edge_bytes=16, verified_edge_payloads=2,
+                          verified_edge_pack_keys=sorted(client["verified_edge_pack_keys"] + [other_key]))
 
         log_name = fixture.CDN.VIEWER_REQUEST_FILES["s3"]
         cold_log = cold / log_name
@@ -134,6 +136,7 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         fixture.json_file(cold_log, cold_proof)
 
         warm_log = cold.with_name("warm_edge") / log_name
+        self.amend_client("near/0001/warm_edge", verified_edge_pack_keys=[other_key])
         warm_proof = json.loads(warm_log.read_bytes())
         next(iter(warm_proof["records"].values()))["key_sha256"] = other_key
         fixture.json_file(warm_log, warm_proof)

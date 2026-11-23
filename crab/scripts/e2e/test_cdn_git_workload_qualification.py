@@ -160,6 +160,9 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             "                if capsule_scope:\n"
             "                    key = 'b' if local and (origin.parent / 'wrong-capsule-control').exists() else 'a'\n"
             "                    proof.update(message='CDN verified capsule control', capsule_control_blake3=key * 64)\n"
+            "                elif family == 'git' and not local:\n"
+            "                    key = approved['fixture_prefix'] + '/' + approved['object_path']\n"
+            "                    proof.update(git_pack_blake3='a' * 64, git_pack_key_sha256=hashlib.sha256(key.encode()).hexdigest())\n"
             "                print(json.dumps({'target':'crab_storage::cdn::transfer', 'fields': policy | proof}),\n"
             "                    file=sys.stderr, flush=True)\n"
             "                cache.mkdir(parents=True, exist_ok=True)\n"
@@ -201,7 +204,7 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         self.assertEqual(published["candidate"]["binary_sha256"], hashlib.sha256(self.helper.read_bytes()).hexdigest())
         fetched = self.run_phase("fetch")
         publication = json.loads(self.receipt.read_bytes())
-        self.assertEqual(fetched.keys(), GIT_FETCH_FIELDS)
+        self.assertEqual(fetched.keys(), GIT_FETCH_FIELDS | {"verified_edge_pack_keys"})
         self.assertEqual(fetched["observed_sha256"], fetched["expected_sha256"])
         self.assertEqual(fetched["publication_oid"], publication["oid"])
         self.assertLessEqual(fetched["started_at_unix_ms"], fetched["finished_at_unix_ms"])
@@ -469,7 +472,8 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         result = self.call("fetch", *flags)
         self.assertEqual(result.returncode, 0, result.stderr)
         fetched = json.loads(result.stdout)
-        self.assertEqual(set(fetched), GIT_FETCH_FIELDS | {"transition_key_sha256"})
+        pack_fields = {"verified_edge_pack_keys"} if family == "git" else set()
+        self.assertEqual(set(fetched), GIT_FETCH_FIELDS | {"transition_key_sha256"} | pack_fields)
         self.assertEqual(fetched["transition_key_sha256"], key)
         self.assertEqual(fetched["name"], f"{family}-fetch")
         self.assertEqual(prior_fetch["arm"], "prior_export")
