@@ -51,13 +51,14 @@ fn decode(line: &[u8]) -> Option<Value> {
                 && unsigned(fields, "bytes")
         }
         ("crab_storage::cdn::transfer", "CDN immutable GET") => {
-            fields.len() == 15
+            fields.len() == 16
                 && route(fields)
                 && http_status(fields)
                 && unsigned(fields, "bytes")
                 && unsigned(fields, "elapsed_ms")
                 && unsigned(fields, "object_bytes")
                 && unsigned(fields, "requested_bytes")
+                && unsigned(fields, "range_start")
                 && fields.get("range").is_some_and(Value::is_boolean)
                 && fields.get("complete").is_some_and(Value::is_boolean)
                 && matches!(value("cache"), "hit" | "miss" | "unknown")
@@ -139,7 +140,7 @@ mod tests {
             "fields": {
                 "message": "CDN immutable GET", "provider": "s3", "access": "private",
                 "consumer": "sdk", "profile": "direct", "family": "xorb",
-                "status": 206, "cache": "hit", "range": true, "object_bytes": 32,
+                "status": 206, "cache": "hit", "range": true, "range_start": 8, "object_bytes": 32,
                 "requested_bytes": 8, "bytes": 8, "complete": true, "elapsed_ms": 1,
                 "request_sha256": "a".repeat(64),
             },
@@ -148,7 +149,7 @@ mod tests {
             decode(&serde_json::to_vec(&event).unwrap()),
             Some(event.clone())
         );
-        event["fields"]["object_bytes"] = serde_json::json!("unexpected string");
+        event["fields"]["range_start"] = serde_json::json!("unexpected string");
         assert!(decode(&serde_json::to_vec(&event).unwrap()).is_none());
     }
 

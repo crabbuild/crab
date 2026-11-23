@@ -67,8 +67,8 @@ The origin and log bucket must belong
 to the same account and Region. The companion sets up CloudFront standard
 logging v2 with UTC hourly partitions and the tab-separated W3C fields the
 evidence collector expects. It records the response's Content-Length when
-present and the inclusive Content-Range endpoints. Qualification checks the
-range width and object bounds against the client's completed read. CloudFront's
+present and the inclusive Content-Range endpoints. Qualification checks both
+endpoints against the client's completed read. CloudFront's
 total response bytes also include headers. [Standard log fields](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/standard-logs-reference.html)
 It selects neither cookies nor query strings. Keep CloudFront cookie logging
 disabled at the distribution. [CloudFront logging v2](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/standard-logging.html)

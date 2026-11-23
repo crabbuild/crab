@@ -181,7 +181,8 @@ PRODUCT_COUNTERS = {
     "incomplete_edge_bytes", "edge_elapsed_ms_total", "verified_edge_payloads", "all_edge_attempts", "local_payload_hits",
 }
 EDGE_RESPONSE_FIELDS = {
-    "family", "status", "cache", "range", "object_bytes", "requested_bytes", "bytes", "complete", "elapsed_ms",
+    "family", "status", "cache", "range", "range_start", "object_bytes", "requested_bytes", "bytes",
+    "complete", "elapsed_ms",
 }
 GIT_CLIENT_METRICS = {"elapsed_ms", "edge_hits", "edge_misses", "edge_unknown", "edge_bytes", "local_payload_hits"}
 GIT_EXTERNAL_METRICS = METRICS - GIT_CLIENT_METRICS
@@ -1636,16 +1637,17 @@ def validate_git_fetch(
 
 
 def verify_edge_response(response: dict[str, Any]) -> None:
-    status, ranged, requested, size = (
-        response["status"], response["range"], response["requested_bytes"], response["object_bytes"],
+    status, ranged, start, requested, size = (
+        response["status"], response["range"], response["range_start"], response["requested_bytes"],
+        response["object_bytes"],
     )
     require(isinstance(response["family"], str) and response["family"] in FAMILIES
             and type(status) is int and (status == 0 or 100 <= status <= 599)
             and response["cache"] in ("hit", "miss", "unknown")
             and type(response["complete"]) is bool and type(ranged) is bool
             and all(type(response[key]) is int and 0 <= response[key] < 2**64
-                    for key in ("bytes", "elapsed_ms", "object_bytes", "requested_bytes"))
-            and (0 < requested <= size if ranged else requested == size)
+                    for key in ("bytes", "elapsed_ms", "range_start", "object_bytes", "requested_bytes"))
+            and (requested > 0 and start + requested <= size if ranged else start == 0 and requested == size)
             and (status != 0 or response["bytes"] == 0),
             "invalid CDN transfer observation")
     if response["complete"]:
@@ -1928,8 +1930,9 @@ def verify_cloudfront_framing(row: dict[str, Any], response: dict[str, Any]) -> 
     require(length is None or length == response["bytes"],
             "CloudFront logged Content-Length disagrees with the completed read")
     if response["range"]:
-        require(span is not None and span[1] < response["object_bytes"]
-                and span[1] - span[0] + 1 == response["requested_bytes"],
+        start = response["range_start"]
+        end = start + response["requested_bytes"] - 1
+        require(end < response["object_bytes"] and span == [start, end],
                 "CloudFront logged range disagrees with the completed read")
     else:
         require(span is None, "CloudFront logged a partial range for a completed full read")

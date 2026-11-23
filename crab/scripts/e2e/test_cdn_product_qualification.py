@@ -17,7 +17,7 @@ def event(**fields):
     payload = {
         "message": PRODUCT.EVENT, "provider": "s3", "access": "private", "consumer": "cli",
         "family": "git", "profile": "direct", "status": 200, "cache": "hit",
-        "range": False, "object_bytes": 8, "requested_bytes": 8, "bytes": 8,
+        "range": False, "range_start": 0, "object_bytes": 8, "requested_bytes": 8, "bytes": 8,
         "complete": True, "elapsed_ms": 10, "request_sha256": "",
     }
     return json.dumps({"target": PRODUCT.TARGET, "fields": payload | fields}).encode()
@@ -118,6 +118,8 @@ class CdnProductQualificationTests(unittest.TestCase):
         for change, error in (
             ({"object_bytes": 4}, "invalid CDN transfer observation"),
             ({"range": True, "requested_bytes": 0}, "invalid CDN transfer observation"),
+            ({"range": True, "range_start": 1}, "invalid CDN transfer observation"),
+            ({"range_start": 1}, "invalid CDN transfer observation"),
             ({"range": True, "requested_bytes": 4, "status": 206}, "inconsistent completed CDN response"),
             ({"elapsed_ms": True}, "invalid CDN transfer observation"),
         ):
@@ -128,14 +130,15 @@ class CdnProductQualificationTests(unittest.TestCase):
         responses = {}
         observed = PRODUCT.measure([
             event(request_sha256="a" * 64),
-            event(family="capsule", request_sha256="b" * 64, status=206, range=True, object_bytes=24),
+            event(family="capsule", request_sha256="b" * 64, status=206, range=True, range_start=4, object_bytes=24),
         ], SCOPE, edge_responses=responses)
         self.assertEqual(responses["a" * 64], {
-            "scope": SCOPE, "family": "git", "status": 200, "cache": "hit", "range": False, "object_bytes": 8,
+            "scope": SCOPE, "family": "git", "status": 200, "cache": "hit", "range": False, "range_start": 0, "object_bytes": 8,
             "requested_bytes": 8, "bytes": 8, "complete": True, "elapsed_ms": 10,
         })
         self.assertEqual(responses["b" * 64], responses["a" * 64] | {
-            "scope": SCOPE.replace("/git/", "/capsule/"), "family": "capsule", "status": 206, "range": True, "object_bytes": 24,
+            "scope": SCOPE.replace("/git/", "/capsule/"), "family": "capsule", "status": 206,
+            "range": True, "range_start": 4, "object_bytes": 24,
         })
         self.assertEqual(observed["observed_edge_gets"], 1)
         with self.assertRaisesRegex(ValueError, "duplicate CDN viewer request fingerprint"):

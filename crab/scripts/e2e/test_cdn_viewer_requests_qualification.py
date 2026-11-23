@@ -23,6 +23,12 @@ from test_cdn_transport_qualification import PACK, fixture
 
 
 class CdnViewerRequestQualificationTests(unittest.TestCase):
+    def test_cloudfront_log_rejects_a_shifted_range_with_the_same_width(self):
+        response = examples.range_response("cloudfront/private/cli/git/direct", 8) | {"range_start": 3}
+        examples.CDN.verify_cloudfront_framing(examples.cloudfront_framing(8, range_start=3), response)
+        with self.assertRaisesRegex(ValueError, "logged range disagrees with the completed read"):
+            examples.CDN.verify_cloudfront_framing(examples.cloudfront_framing(8, range_start=4), response)
+
     def test_mount_sparse_reader_verifies_exact_offset_and_total_size(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -261,7 +267,7 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
             report = json.loads(client.read_bytes())
             viewer_id = "fixture-request_V1=="
             fingerprint = hashlib.sha256(viewer_id.encode()).hexdigest()
-            response = next(iter(report["edge_responses"].values()))
+            response = next(iter(report["edge_responses"].values())) | {"range_start": 3}
             digest = examples.json_file(client, report | {"edge_responses": {fingerprint: response}})
             log = root / "export.w3c"
             prefix = f"/crab/{config['fixture_prefix']}/"
@@ -287,6 +293,8 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                 (unrelated, origin_line, "must cover each measured viewer attempt"),
                 (actual, "", "no logged fill from the approved CDN origin"),
                 (actual.replace(f"\t3\t{response['bytes'] + 2}\n", "\t3\t3\n"), origin_line,
+                 "CloudFront logged range disagrees with the completed read"),
+                (actual.replace(f"\t3\t{response['bytes'] + 2}\n", f"\t4\t{response['bytes'] + 3}\n"), origin_line,
                  "CloudFront logged range disagrees with the completed read"),
                 (actual.replace(f"\t3\t{response['bytes'] + 2}\n", "\t-\t-\n"), origin_line,
                  "CloudFront logged range disagrees with the completed read"),

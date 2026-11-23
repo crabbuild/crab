@@ -459,7 +459,12 @@ impl CdnTransport {
             };
             let transfer = async {
                 let mut observation = context.and_then(|context| {
-                    telemetry::Transfer::start(context, size, expected, range.is_some())
+                    telemetry::Transfer::start(
+                        context,
+                        size,
+                        expected,
+                        range.as_ref().map(|range| range.start),
+                    )
                 });
                 let request = match &mut observation {
                     Some(observation) => observation.prepare_request(request),

@@ -93,7 +93,7 @@ class CdnManagedIssuerQualificationTests(unittest.TestCase):
                 route = {"provider": provider, "access": "private", "consumer": "cli", "family": "git", "profile": "managed"}
                 traces.extend([
                     event(TARGET, **route, message=EVENT, status=200, cache="hit", elapsed_ms=1, range=False,
-                          object_bytes=len(BODY), requested_bytes=len(BODY),
+                          range_start=0, object_bytes=len(BODY), requested_bytes=len(BODY),
                           bytes=len(BODY), complete=True, request_sha256="6" * 64),
                     event(TARGET, **route, message=VERIFIED_GIT_EVENT, source="edge"),
                 ])

@@ -83,7 +83,8 @@ class SdkHydrationQualificationTests(unittest.TestCase):
                     whole = fault == "whole"
                     observations.extend([
                         ("crab_storage::cdn::transfer", route | {"message": "CDN immutable GET", "status": 200 if whole else 206,
-                         "object_bytes": 1024, "requested_bytes": 1024 if whole else 64, "bytes": 1024 if whole else 64,
+                         "range_start": 0, "object_bytes": 1024, "requested_bytes": 1024 if whole else 64,
+                         "bytes": 1024 if whole else 64,
                          "cache": "hit", "range": not whole, "complete": True, "elapsed_ms": 1, "request_sha256": "d" * 64}),
                         ("crab_storage::cdn::transfer", route | {"message": "CDN verified xorb payload", "source": "edge",
                          "xorb_key_sha256": key_sha256}),
@@ -168,7 +169,7 @@ class SdkHydrationQualificationTests(unittest.TestCase):
                 if edge or fault == "origin-edge":
                     observations.extend([
                         ("crab_storage::cdn::transfer", route | {"message": "CDN immutable GET", "status": 206,
-                         "object_bytes": 1024, "requested_bytes": 64,
+                         "range_start": 0, "object_bytes": 1024, "requested_bytes": 64,
                          "bytes": 64, "cache": "hit", "range": True, "complete": True, "elapsed_ms": 1,
                          "request_sha256": "d" * 64}),
                         ("crab_storage::cdn::transfer", route | {"message": "CDN verified xorb payload",

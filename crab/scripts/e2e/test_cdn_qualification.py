@@ -94,7 +94,7 @@ def service_candidate(scope: str, platform: str) -> dict:
 
 def range_response(scope: str, size: int, cache: str = "hit") -> dict:
     return {"scope": scope, "family": CDN.scope_parts(scope)[3], "status": 206, "cache": cache, "bytes": size, "complete": True,
-            "range": True, "object_bytes": 2 * size, "requested_bytes": size, "elapsed_ms": 1}
+            "range": True, "range_start": 0, "object_bytes": 2 * size, "requested_bytes": size, "elapsed_ms": 1}
 
 
 def cloudfront_framing(length: int, *, range_start: int | None = 0) -> dict:
@@ -116,7 +116,9 @@ def write_product_viewer_proof(client_path: Path, key_sha256: str | None = None,
         log = {"status": response["status"], "cache": response["cache"], "response_bytes": response["bytes"],
                "key_sha256": key_sha256 or "8" * 64}
         if edge == "cloudfront":
-            log.update(cloudfront_framing(response["requested_bytes"], range_start=0 if response["range"] else None))
+            log.update(cloudfront_framing(
+                response["requested_bytes"], range_start=response["range_start"] if response["range"] else None,
+            ))
         elif edge == "cloud-cdn":
             log.update(cache_fill_bytes=0, origin_requests={})
         records[request] = log

@@ -34,7 +34,8 @@ read selected upfront keeps its ordinary deadline.
 Streamed LFS and file-backed reads split an admitted object into requests no
 larger than the qualified range size or the 8 MiB transport buffer.
 CDN transfer diagnostics retain SHA-256 request fingerprints for joining
-qualification fetches to provider logs. CloudFront and Front Door use
+qualification fetches to provider logs. They include the requested byte
+offset and length. CloudFront and Front Door use
 response request IDs. The Cloud CDN measurement worker opts into a
 per-request User-Agent tag, which the backend bucket excludes from its cache key.
 The public export digest comes from the verified receipt attached to the
