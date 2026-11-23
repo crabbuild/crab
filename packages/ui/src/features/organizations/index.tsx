@@ -6,6 +6,7 @@ import {
   UsersIcon,
   FolderKanbanIcon,
   BookMarkedIcon,
+  FileClockIcon,
 } from "lucide-react";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
@@ -31,6 +32,7 @@ import type { Commands } from "./teams/commands";
 import { Invitations } from "./invitations";
 import { OrganizationRepositories } from "./repositories";
 import { MemberAccess } from "./repository-access";
+import { OrganizationAuditLog } from "./audit-log";
 import { OrganizationRulesets } from "@/features/settings/rulesets";
 export { OrganizationInvitation } from "./invitations";
 
@@ -99,6 +101,11 @@ export function OrganizationPage({
                         icon: ShieldCheckIcon,
                       },
                       {
+                        key: "audit",
+                        label: "Audit log",
+                        icon: FileClockIcon,
+                      },
+                      {
                         key: "settings",
                         label: "Settings",
                         icon: SettingsIcon,
@@ -160,6 +167,8 @@ export function OrganizationPage({
               <Invitations endpoint={endpoint} id={id} csrf={csrf} />
             ) : role === "owner" && tab === "rulesets" ? (
               <OrganizationRulesets key={id} organization={id} csrf={csrf} />
+            ) : role === "owner" && tab === "audit" ? (
+              <OrganizationAuditLog id={id} url={url} />
             ) : role === "owner" && tab === "settings" ? (
               <Settings
                 key={organization.version}

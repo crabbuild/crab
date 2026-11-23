@@ -25,6 +25,7 @@ use crate::{
     server::Server,
 };
 
+pub(super) mod audit;
 pub(super) mod invitations;
 mod projects;
 pub(super) mod repository_access;
@@ -70,6 +71,7 @@ mod tests;
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .merge(invitations::routes())
+        .merge(audit::routes())
         .merge(repository_access::routes())
         .merge(teams::routes())
         .route("/api/organizations/{id}", get(own).patch(edit))

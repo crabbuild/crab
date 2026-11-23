@@ -253,6 +253,8 @@ impl CatalogStore {
         } = decision
         {
             document.allow_transfer(record)?;
+            let outgoing =
+                super::audit::Scope::for_record(record, super::audit::Action::TransferredOut);
             let previous = record.membership_digest()?;
             let offer = offer.clone();
             if let Recipient::Account { identity } = &offer.recipient
@@ -296,8 +298,10 @@ impl CatalogStore {
                 }
             };
             let digest = new.membership_digest()?;
+            let incoming =
+                super::audit::Scope::for_record(new, super::audit::Action::TransferredIn);
             document.advance_transfer()?;
-            document.pending_membership_audit = Some(MembershipAuditEvent {
+            document.queue_membership_audit(MembershipAuditEvent {
                 id: Uuid::now_v7(),
                 repository_id: repository,
                 actor,
@@ -307,6 +311,7 @@ impl CatalogStore {
                 occurred_at: u64::try_from(now_ms / 1_000)
                     .map_err(|_| CatalogError::Invalid("system clock is before epoch"))?,
                 previous: document.membership_audit_head.clone(),
+                organizations: outgoing.into_iter().chain(incoming).collect(),
             });
             document.normalize();
         } else {

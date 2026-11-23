@@ -9,6 +9,7 @@ use crate::{
 use axum::http::{StatusCode, header};
 use reqwest::Method;
 
+mod audit;
 mod codeowners;
 mod repositories;
 mod repository_access;

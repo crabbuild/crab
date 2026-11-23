@@ -165,6 +165,10 @@ not grant native Organization or team authority. Tests stay with these owners.
 grant inspection from a catalog revision and the Organization Cell's current
 team memberships. Its native read shares the same team-epoch predicate as
 repository authorization. The public view omits provider identity and claims.
+`api/organizations/audit/` pages and exports owner-only audit history from
+immutable Organization events and catalog membership events. `catalog/audit.rs`
+records event-time scope and chain links in the catalog CAS outbox. Never
+infer a historical organization from a repository's current placement.
 `api/catalog.rs` composes personal and organization repository creation using
 the durable catalog reservation and shared Git and Cell initializer.
 `cells/organization/repositories.rs` records owner-authorized submissions.

@@ -1,9 +1,10 @@
+pub(crate) mod audit;
 mod read;
 mod rename;
 pub(crate) mod transfer;
 pub(crate) use rename::Rename;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -123,6 +124,8 @@ pub struct CatalogDocument {
     pub repositories: Vec<CatalogRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub membership_audit_head: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    organization_audit_heads: BTreeMap<Uuid, audit::Position>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_membership_audit: Option<MembershipAuditEvent>,
 }
@@ -170,6 +173,8 @@ pub struct MembershipAuditEvent {
     pub occurred_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    organizations: Vec<audit::Scope>,
 }
 
 impl Default for CatalogDocument {
@@ -179,6 +184,7 @@ impl Default for CatalogDocument {
             version: 0,
             repositories: Vec::new(),
             membership_audit_head: None,
+            organization_audit_heads: BTreeMap::new(),
             pending_membership_audit: None,
         }
     }
@@ -205,16 +211,13 @@ impl CatalogDocument {
         }
         if let Some(event) = &self.pending_membership_audit {
             if event.repository_version != self.version
-                || !valid_actor(&event.actor)
-                || event.occurred_at == 0
-                || event.id.is_nil()
+                || !event.valid()
+                || !self.valid_pending_scopes(event)
                 || !self
                     .repositories
                     .iter()
                     .any(|record| record.id == event.repository_id)
                 || event.previous != self.membership_audit_head
-                || !valid_digest(&event.previous_members_digest)
-                || !valid_digest(&event.new_members_digest)
             {
                 return Err(CatalogError::Invalid("membership audit event is invalid"));
             }
@@ -235,6 +238,13 @@ impl CatalogDocument {
             .is_some_and(|path| !valid_audit_path(path))
         {
             return Err(CatalogError::Invalid("membership audit chain is invalid"));
+        }
+        if self
+            .organization_audit_heads
+            .iter()
+            .any(|(owner, position)| owner.is_nil() || !position.valid(self.version))
+        {
+            return Err(CatalogError::Invalid("organization audit chain is invalid"));
         }
         let records: HashMap<_, _> = self
             .repositories
@@ -816,7 +826,7 @@ impl CatalogStore {
             .version
             .checked_add(1)
             .ok_or(CatalogError::Invalid("catalog version overflowed"))?;
-        document.pending_membership_audit = Some(MembershipAuditEvent {
+        document.queue_membership_audit(MembershipAuditEvent {
             id: Uuid::now_v7(),
             repository_id: updated.id,
             actor,
@@ -828,6 +838,9 @@ impl CatalogStore {
                 .map_err(|_| CatalogError::Invalid("system clock is before epoch"))?
                 .as_secs(),
             previous: document.membership_audit_head.clone(),
+            organizations: audit::Scope::for_record(&updated, audit::Action::AccessChanged)
+                .into_iter()
+                .collect(),
         });
         document.validate(&self.root)?;
         if self.write_document(&document, etag).await? {
@@ -843,10 +856,8 @@ impl CatalogStore {
         let Some(event) = document.pending_membership_audit.clone() else {
             return Ok(());
         };
-        let relative_path = format!(
-            "{MEMBERSHIP_AUDIT_RELATIVE_PREFIX}/{}-{}.json",
-            event.repository_version, event.id
-        );
+        let position = event.position();
+        let relative_path = position.path();
         let path = self.root.path(&relative_path);
         match self
             .root
@@ -870,6 +881,11 @@ impl CatalogStore {
         // Catalog roots are portable backup units. Persisting a root-qualified
         // key here would make an otherwise byte-exact restore prefix-dependent.
         document.membership_audit_head = Some(relative_path);
+        for scope in &event.organizations {
+            document
+                .organization_audit_heads
+                .insert(scope.organization, position);
+        }
         document.pending_membership_audit = None;
         document.validate(&self.root)?;
         let _ = self.write_document(&document, etag).await?;
@@ -1004,7 +1020,7 @@ impl CatalogStore {
             document.repositories.push(record.clone());
             document.normalize();
             if !record.members.is_empty() || record.organization.is_some() {
-                document.pending_membership_audit = Some(MembershipAuditEvent {
+                document.queue_membership_audit(MembershipAuditEvent {
                     id: Uuid::now_v7(),
                     repository_id: record.id,
                     actor: match &mode {
@@ -1022,6 +1038,9 @@ impl CatalogStore {
                         .map_err(|_| CatalogError::Invalid("system clock is before epoch"))?
                         .as_secs(),
                     previous: document.membership_audit_head.clone(),
+                    organizations: audit::Scope::for_record(&record, audit::Action::Registered)
+                        .into_iter()
+                        .collect(),
                 });
             }
             document.validate(&self.root)?;

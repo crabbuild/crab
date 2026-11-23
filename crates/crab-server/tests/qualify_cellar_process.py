@@ -611,6 +611,18 @@ with open(run / "commands.log", "w") as log:
         assert request("/api/profile")["profile"] == actor_profile
         assert request(organization_root) == organization_before
         assert request(organization_root + "/members") == organization_members
+        audit_repository = request(organization_root + "/repositories/creation", {
+            "request_id": str(uuid.uuid4()), "name": "audit-qualification", "description": "",
+        })
+        audit_path = organization_root + "/audit-log"
+        audit_history = request(audit_path)
+        assert {event["action"] for event in audit_history["items"]} >= {
+            "organization_created", "organization_edited", "repository_registered",
+        }
+        filtered_audit = request(audit_path + "?action=repository_registered&repository=audit-qualification")
+        assert len(filtered_audit["items"]) == 1
+        assert filtered_audit["items"][0]["repository"]["id"] == audit_repository["id"]
+        assert request(audit_path + "?action=repository_registered&export=json") == filtered_audit["items"]
         index_request({"action": "step", "generation": generation, "version": building["progress"]["version"]})
         try:
             request(issue_search)
@@ -778,6 +790,7 @@ with open(run / "commands.log", "w") as log:
         forced_status = crash() if args.recovery else stop()
         server = start()
         wait()
+        assert request(audit_path) == audit_history
         if large_file:
             large_files.verify(cmd, run, origin, large_file, "restart", env)
         for path, body, comment, expected_count in state_actions:
@@ -800,7 +813,7 @@ with open(run / "commands.log", "w") as log:
             assert {key: value[key] for key in saved} == saved
             assert request(path + "/milestone")["milestone"]["number"] == milestone["number"]
         if args.recovery:
-            paths = ["/api/profile", organization_root, organization_root + "/members",
+            paths = ["/api/profile", organization_root, organization_root + "/members", audit_path,
                      "/api/repos/team/project/issues", "/api/repos/team/project/pulls", pins_path]
             saved = {path: request(path) for path in paths}
             remote = origin + "/git/team/project.git"
@@ -889,6 +902,7 @@ with open(run / "commands.log", "w") as log:
             "issue_state_private_preparation": True,
             "organization_explicit_bootstrap": True,
             "organization_metadata_restart": True,
+            "organization_audit_restart": True,
             "organization_last_owner_guard": True,
             "organization_profile_enrichment_restart": True,
             "actor_directory_restart": True,
