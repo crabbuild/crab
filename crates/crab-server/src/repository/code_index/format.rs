@@ -3,7 +3,7 @@ use bytes::{Buf, BufMut, Bytes};
 use crab_remote_git::GitPath;
 use gix_hash::ObjectId;
 
-const MAGIC: &[u8; 8] = b"CRABIDX1";
+const MAGIC: &[u8; 8] = b"CRABIDX2";
 const OID_BYTES: usize = 20;
 const CHECKSUM: usize = 32;
 const MASK_BYTES: usize = 256;
@@ -19,7 +19,16 @@ pub(crate) struct Mask {
 
 impl Mask {
     pub(super) fn from_text(text: &str) -> Self {
-        let mut bits = [0; MASK_BYTES];
+        let mut mask = Self {
+            bits: [0; MASK_BYTES],
+            ascii: true,
+        };
+        mask.insert(text);
+        mask
+    }
+
+    pub(super) fn insert(&mut self, text: &str) {
+        self.ascii &= text.is_ascii();
         for window in text.as_bytes().windows(3) {
             let gram = u32::from_le_bytes([
                 window[0].to_ascii_lowercase(),
@@ -31,12 +40,8 @@ impl Mask {
             let hash = (mixed ^ (mixed >> 16)).wrapping_mul(0x85ebca6b);
             for hash in [hash, hash.rotate_left(11)] {
                 let bit = hash as usize % (MASK_BYTES * 8);
-                bits[bit / 8] |= 1 << (bit % 8);
+                self.bits[bit / 8] |= 1 << (bit % 8);
             }
-        }
-        Self {
-            bits,
-            ascii: text.is_ascii(),
         }
     }
 
@@ -60,11 +65,15 @@ pub(crate) struct Row {
     pub(crate) path: GitPath,
     pub(crate) oid: ObjectId,
     pub(crate) filter: Option<Mask>,
+    pub(crate) symbols: Option<Box<Mask>>,
 }
 
 impl Row {
     pub(super) fn encoded_size(&self) -> usize {
-        ROW_HEADER + self.path.as_bytes().len() + self.filter.as_ref().map_or(0, |_| MASK_BYTES)
+        ROW_HEADER
+            + self.path.as_bytes().len()
+            + MASK_BYTES
+                * (usize::from(self.filter.is_some()) + usize::from(self.symbols.is_some()))
     }
 }
 
@@ -81,9 +90,10 @@ impl Index {
             rows.shrink_to_fit();
         }
         let weight = size
-            + rows
-                .as_ref()
-                .map_or(0, |rows| rows.capacity() * size_of::<Row>());
+            + rows.as_ref().map_or(0, |rows| {
+                rows.capacity() * size_of::<Row>()
+                    + rows.iter().filter(|row| row.symbols.is_some()).count() * size_of::<Mask>()
+            });
         Self {
             tree,
             rows,
@@ -102,19 +112,13 @@ impl Index {
                 let path = row.path.as_bytes();
                 out.put_u32_le(u32::try_from(path.len()).map_err(|_| Error::Invalid)?);
                 out.extend(row.oid.as_bytes());
-                out.put_u8(match &row.filter {
-                    None => 0,
-                    Some(mask) => {
-                        if mask.ascii {
-                            1
-                        } else {
-                            2
-                        }
-                    }
-                });
+                out.put_u8(flag(row.filter.as_ref()) | (flag(row.symbols.as_deref()) << 2));
                 out.extend(path);
-                if let Some(mask) = &row.filter {
-                    out.extend(mask.bits);
+                for mask in [row.filter.as_ref(), row.symbols.as_deref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    out.extend_from_slice(&mask.bits);
                 }
             }
         }
@@ -139,6 +143,7 @@ impl Index {
             return Err(Error::Invalid);
         }
         let mut rows: Vec<Row> = Vec::new();
+        let mut weight = size;
         while !data.is_empty() {
             if data.len() < ROW_HEADER {
                 return Err(Error::Invalid);
@@ -146,14 +151,7 @@ impl Index {
             let len = data.get_u32_le() as usize;
             let oid = oid(&data.split_to(OID_BYTES))?;
             let flags = data.get_u8();
-            let mask_bytes = if flags == 0 { 0 } else { MASK_BYTES };
-            if flags > 2
-                || len == 0
-                || data
-                    .len()
-                    .checked_sub(len)
-                    .is_none_or(|left| left < mask_bytes)
-            {
+            if len == 0 || len > data.len() || flags > 0b1010 {
                 return Err(Error::Invalid);
             }
             let path = GitPath::new(data.split_to(len))?;
@@ -163,26 +161,46 @@ impl Index {
             {
                 return Err(Error::Invalid);
             }
-            let filter = if flags == 0 {
-                None
-            } else {
-                let bits = data
-                    .split_to(MASK_BYTES)
-                    .as_ref()
-                    .try_into()
-                    .map_err(|_| Error::Invalid)?;
-                Some(Mask {
-                    bits,
-                    ascii: flags == 1,
-                })
-            };
-            if size + (rows.len() + 1) * size_of::<Row>() > super::CACHE_BYTES {
+            let filter = read_mask(&mut data, flags & 0b11)?;
+            let symbols = read_mask(&mut data, flags >> 2)?;
+            if symbols.is_some() && filter.is_none() {
                 return Err(Error::Invalid);
             }
-            rows.push(Row { path, oid, filter });
+            weight += size_of::<Row>() + symbols.as_ref().map_or(0, |_| size_of::<Mask>());
+            if weight > super::CACHE_BYTES {
+                return Err(Error::Invalid);
+            }
+            rows.push(Row {
+                path,
+                oid,
+                filter,
+                symbols: symbols.map(Box::new),
+            });
         }
         Ok(Self::new(tree, Some(rows), size))
     }
+}
+
+fn flag(mask: Option<&Mask>) -> u8 {
+    mask.map_or(0, |mask| if mask.ascii { 1 } else { 2 })
+}
+
+fn read_mask(data: &mut Bytes, flag: u8) -> Result<Option<Mask>, Error> {
+    if flag == 0 {
+        return Ok(None);
+    }
+    if flag > 2 || data.len() < MASK_BYTES {
+        return Err(Error::Invalid);
+    }
+    let bits = data
+        .split_to(MASK_BYTES)
+        .as_ref()
+        .try_into()
+        .map_err(|_| Error::Invalid)?;
+    Ok(Some(Mask {
+        bits,
+        ascii: flag == 1,
+    }))
 }
 
 pub(super) fn tree(data: &[u8]) -> Result<ObjectId, Error> {
@@ -210,13 +228,22 @@ mod tests {
                 path,
                 oid: ObjectId::from([2; OID_BYTES]),
                 filter: Some(Mask::from_text("fn main() {}")),
+                symbols: Some(Box::new(Mask::from_text("main"))),
             }]),
-            OVERHEAD + ROW_HEADER + 11 + MASK_BYTES,
+            OVERHEAD + ROW_HEADER + 11 + 2 * MASK_BYTES,
         );
         let encoded = index.encode().unwrap();
         let loaded = Index::decode(encoded.clone()).unwrap();
         assert_eq!(loaded.tree, index.tree);
-        assert_eq!(loaded.rows.unwrap()[0].path.as_bytes(), b"src/main.rs");
+        let rows = loaded.rows.unwrap();
+        assert_eq!(rows[0].path.as_bytes(), b"src/main.rs");
+        assert!(
+            rows[0]
+                .symbols
+                .as_ref()
+                .unwrap()
+                .may_contain(&Mask::query("main", true).unwrap(), true)
+        );
 
         let mut damaged = encoded.to_vec();
         damaged[HEADER + ROW_HEADER] ^= 1;

@@ -8,14 +8,6 @@ const HEADER: usize = 16 + 32;
 const CHECKSUM: usize = 32;
 const MAX_PAYLOAD: usize = HEADER + 20 + MAX_CURSOR_PATH;
 
-#[derive(Clone, Copy, Default, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum Kind {
-    #[default]
-    Content,
-    Path,
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::api) struct Parameters {
@@ -61,13 +53,8 @@ pub(in crate::api) async fn search(
     let _cancel_on_drop = cancel.clone().drop_guard();
     let terms = params.q.trim();
     let directory = params.directory.as_deref().unwrap_or("");
-    let pattern = Pattern::new(
-        terms,
-        directory,
-        params.case_sensitive,
-        matches!(params.kind, Kind::Path),
-    )
-    .map_err(IntoResponse::into_response)?;
+    let pattern = Pattern::new(terms, directory, params.case_sensitive, params.kind)
+        .map_err(IntoResponse::into_response)?;
     let context = serde_json::to_vec(&(
         &actor.issuer,
         &actor.subject,

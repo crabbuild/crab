@@ -153,6 +153,7 @@ export function repoHref(
   } else {
     suffix = `/${view}`;
   }
+  if (view === "code-search" && kind) filters.kind = kind;
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(filters))
     if (value) query.set(key, value);

@@ -37,12 +37,13 @@ export default function WorkspaceCodeSearch({ url }: { url: URL }) {
   if (organization) params.set("organization", organization);
   const q = url.searchParams.get("q")?.trim() ?? "";
   const directory = url.searchParams.get("directory") ?? "";
-  const paths = url.searchParams.get("kind") === "path";
+  const mode = url.searchParams.get("kind");
+  const kind = mode === "path" || mode === "symbol" ? mode : "content";
   const caseSensitive = url.searchParams.get("case_sensitive") === "true";
   const scope = params.toString();
   if (q) params.set("q", q);
   if (directory) params.set("directory", directory);
-  if (paths) params.set("kind", "path");
+  if (kind !== "content") params.set("kind", kind);
   if (caseSensitive) params.set("case_sensitive", "true");
   const [attempt, setAttempt] = useState(0);
   const search = params.toString();
@@ -81,7 +82,8 @@ export default function WorkspaceCodeSearch({ url }: { url: URL }) {
             .trim()
             .replace(/\/+$/, "");
           if (path) selected.set("directory", path);
-          if (values.get("kind") === "path") selected.set("kind", "path");
+          const kind = values.get("kind");
+          if (kind === "path" || kind === "symbol") selected.set("kind", kind);
           if (values.has("case_sensitive"))
             selected.set("case_sensitive", "true");
           const href = `/-/code-search?${selected}`;
@@ -117,12 +119,13 @@ export default function WorkspaceCodeSearch({ url }: { url: URL }) {
             <NativeSelect
               id="workspace-search-kind"
               name="kind"
-              defaultValue={paths ? "path" : "content"}
+              defaultValue={kind}
             >
               <NativeSelectOption value="content">
                 File contents
               </NativeSelectOption>
               <NativeSelectOption value="path">File paths</NativeSelectOption>
+              <NativeSelectOption value="symbol">Symbols</NativeSelectOption>
             </NativeSelect>
           </Field>
           <Field className="min-w-44 flex-1">
@@ -179,7 +182,7 @@ function WorkspaceResults({ search }: { search: string }) {
             <p role="status" className="text-sm text-muted-foreground">
               {scanned} {scanned === 1 ? "path" : "paths"} scanned on this page
               {skipped > 0 &&
-                ` · ${skipped} files skipped (large, binary, or stored separately)`}
+                ` · ${skipped} files skipped (size, format, or parsing limits)`}
             </p>
             <ul
               className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground"
