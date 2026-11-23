@@ -58,6 +58,12 @@ on:
       - "crates/crab-sdk/examples/cdn-sdk-read.rs"
       - "crates/crab-sdk/build.rs"
       - "crates/crab-remote-git/src/reader/edge_entry.rs"
+      - "crates/crab-read/Cargo.toml"
+      - "crates/crab-read/src/hydrator.rs"
+      - "crates/crab-read/src/hydrator/**"
+      - "crates/crab-read/src/read_retention.rs"
+      - "crates/crab-read/src/store_client.rs"
+      - "crates/crab-read/src/store_client/**"
       - "crab/scripts/e2e/collect_cdn_git_native_ref.py"
       - "crab/examples/cdn-native-ref.rs"
       - "crab/scripts/e2e/test_cdn_git_workload_qualification.py"
@@ -71,6 +77,7 @@ on:
       - "crates/crab-lfs/tests/cdn_observation.rs"
       - "crates/crab-cache-store/Cargo.toml"
       - "crates/crab-cache-store/src/lfs.rs"
+      - "crates/crab-cache-store/src/xorb_read.rs"
       - "crates/crab-cache/src/local_cache/lfs_file.rs"
       - "crates/crab-cache/src/private_fs.rs"
       - "crates/crab-cache/src/private_fs/windows.rs"
@@ -155,6 +162,12 @@ on:
       - "crates/crab-sdk/examples/cdn-sdk-read.rs"
       - "crates/crab-sdk/build.rs"
       - "crates/crab-remote-git/src/reader/edge_entry.rs"
+      - "crates/crab-read/Cargo.toml"
+      - "crates/crab-read/src/hydrator.rs"
+      - "crates/crab-read/src/hydrator/**"
+      - "crates/crab-read/src/read_retention.rs"
+      - "crates/crab-read/src/store_client.rs"
+      - "crates/crab-read/src/store_client/**"
       - "crab/scripts/e2e/collect_cdn_git_native_ref.py"
       - "crab/examples/cdn-native-ref.rs"
       - "crab/scripts/e2e/test_cdn_git_workload_qualification.py"
@@ -168,6 +181,7 @@ on:
       - "crates/crab-lfs/tests/cdn_observation.rs"
       - "crates/crab-cache-store/Cargo.toml"
       - "crates/crab-cache-store/src/lfs.rs"
+      - "crates/crab-cache-store/src/xorb_read.rs"
       - "crates/crab-cache/src/local_cache/lfs_file.rs"
       - "crates/crab-cache/src/private_fs.rs"
       - "crates/crab-cache/src/private_fs/windows.rs"
@@ -319,6 +333,8 @@ jobs:
           cargo test --locked -p crab-storage --lib 'cdn::'
           cargo test --locked -p crab-auth --lib --features oidc-client managed::client::tests
           cargo test --locked -p crab-storage --lib --features provider-cdn-qualification 'cdn::'
+          cargo test --locked -p crab-read --lib \
+            --features local-staging,crab-storage/provider-cdn-qualification 'hydrator::'
           cargo test --locked -p crab-sdk --features local,service --example cdn-sdk-read
           cargo test --locked -p crab-lfs --test cdn_observation
           cargo test --locked -p crab-lfs --test cdn_observation --features crab-storage/provider-cdn-qualification
