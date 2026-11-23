@@ -430,7 +430,7 @@ async fn organization_import_requires_current_ownership_and_resumes_under_anothe
         .await;
     assert_eq!(listed["repositories"][0]["id"], json!(repository_id));
     assert_eq!(
-        listed["repositories"][0]["organization"],
+        listed["repositories"][0]["organization_id"],
         json!(organization)
     );
     assert_eq!(listed["repositories"][0]["can_admin"], json!(true));
