@@ -146,13 +146,7 @@ export function PullReviewThreads({
     navigation.retry();
     refresh();
   }
-  const suggestions = useSuggestionBatch(
-    repo,
-    pull,
-    csrf,
-    currentItems,
-    refreshThreads,
-  );
+  const suggestions = useSuggestionBatch(repo, pull, csrf, refreshThreads);
   const headRepo = pull.head_repository ?? repo;
   const comparison = usePullComparison(
     headRepo,
@@ -521,7 +515,7 @@ export function PullReviewThreads({
                   <Button
                     size="sm"
                     disabled={suggestions.pending}
-                    onClick={() => suggestions.review(suggestions.selected)}
+                    onClick={() => suggestions.review()}
                   >
                     {suggestions.pending
                       ? "Committing…"
@@ -549,6 +543,7 @@ export function PullReviewThreads({
                   onJumpToDiff={jumpToDiff}
                   refresh={refreshThreads}
                   suggestions={suggestions}
+                  allowBatch
                 />
               ))
             ) : (

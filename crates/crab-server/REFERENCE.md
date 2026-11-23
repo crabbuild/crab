@@ -3357,7 +3357,8 @@ reach conversations beyond the loaded pages. Current comments open at their
 diff anchor without clearing file filters. Outdated comments open in the
 outdated conversations list. The review header counts all conversations for
 the current comparison, and file badges indicate when their counts cover only
-loaded conversations.
+loaded conversations. Sign-in preserves conversation and diff anchors in
+shared review links.
 
 `GET .../threads/navigation` accepts an optional `around` thread number and
 returns `base_oid`, `head_oid`, and a `summary`. The summary contains
@@ -3409,9 +3410,12 @@ IDs after a lost response, even if a new draft or comparison now exists.
 Deploy the updated server peers and bundled browser UI together.
 
 Repository writers can apply a single suggestion or select up to 20 and commit
-them together. The commit dialog shows the destination branch and lets the
-writer edit the commit message. Crab uses the writer's ordinary Git identity
-and credits each other suggestion author once in `Co-authored-by` trailers.
+them together. A batch keeps its selected comment versions while the writer
+navigates between threads, including threads beyond the loaded page. The
+commit dialog lists the selected paths and lines, allows removing suggestions,
+and shows the destination branch and editable commit message. Crab uses the
+writer's ordinary Git identity and credits each other suggestion author once in
+`Co-authored-by` trailers.
 `POST .../suggestions` takes
 `{expected_head, threads: [{number, version}], message?}` and returns `{commit}`.
 Crab checks the selected comment versions, comparison, current file blobs,

@@ -450,11 +450,14 @@ export function App() {
                 )}
                 <Button
                   variant="default"
-                  onClick={() =>
+                  onClick={() => {
+                    const search = url.searchParams.has("auth_error")
+                      ? ""
+                      : url.search;
                     window.location.assign(
-                      `/auth/login?${new URLSearchParams({ return_to: url.pathname + (url.searchParams.has("auth_error") ? "" : url.search) })}`,
-                    )
-                  }
+                      `/auth/login?${new URLSearchParams({ return_to: url.pathname + search + url.hash })}`,
+                    );
+                  }}
                 >
                   {session.data.mode === "github"
                     ? "Continue with GitHub"

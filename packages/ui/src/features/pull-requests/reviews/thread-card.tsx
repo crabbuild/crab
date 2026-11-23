@@ -51,16 +51,10 @@ export function LinkedReviewThread({
   const thread = useRequest<PullReviewThread>(
     endpoint(repo, `pulls/${pull.number}/threads/${number}`),
   );
-  const suggestions = useSuggestionBatch(
-    repo,
-    pull,
-    csrf,
-    thread.data ? [thread.data] : [],
-    () => {
-      thread.retry();
-      refresh();
-    },
-  );
+  const suggestions = useSuggestionBatch(repo, pull, csrf, () => {
+    thread.retry();
+    refresh();
+  });
   return (
     <section
       className="inline-review-list"
@@ -107,6 +101,7 @@ export function ReviewThreadCard({
   onJumpToDiff,
   refresh,
   suggestions,
+  allowBatch,
   linked,
   reply,
 }: {
@@ -117,6 +112,7 @@ export function ReviewThreadCard({
   onJumpToDiff?: (thread: PullReviewThread) => void;
   refresh: () => void;
   suggestions?: SuggestionBatch;
+  allowBatch?: boolean;
   linked?: boolean;
   reply?: number;
 }) {
@@ -243,11 +239,11 @@ export function ReviewThreadCard({
                   <Button
                     size="sm"
                     disabled={suggestions.pending}
-                    onClick={() => suggestions.review([thread.number])}
+                    onClick={() => suggestions.review(thread)}
                   >
                     Apply suggestion
                   </Button>
-                  {!linked && (
+                  {allowBatch && (
                     <label className="inline-flex items-center gap-2 text-sm">
                       <Checkbox
                         checked={selected}
@@ -256,9 +252,7 @@ export function ReviewThreadCard({
                           suggestions.pending ||
                           (suggestions.atLimit && !selected)
                         }
-                        onCheckedChange={() =>
-                          suggestions.toggle(thread.number)
-                        }
+                        onCheckedChange={() => suggestions.toggle(thread)}
                       />
                       Include in batch
                     </label>

@@ -431,5 +431,191 @@ async fn native_large_pull_opens_a_file_and_publishes_an_exact_review_anchor() {
         ])
         .await;
     drop(browser);
+    commit_suggestions_across_pages(&h, path, &remote, token, &bob).await;
     h.close().await;
+}
+
+async fn commit_suggestions_across_pages(
+    h: &Harness,
+    source: &std::path::Path,
+    remote: &str,
+    token: &str,
+    reviewer: &str,
+) {
+    let comparison = h
+        .json(
+            &format!("{REPO}/changes?base=refs/heads/main&rev=refs/heads/feature&merge_base=true"),
+            reviewer,
+        )
+        .await;
+    let head = comparison["commit"].as_str().unwrap();
+    let rows = comparison["changes"].as_array().unwrap();
+    assert_eq!(rows.len(), 516);
+    let threads = format!("{REPO}/pulls/1/threads");
+    let readme = "README.md";
+    let other = "unrelated/part-00/0.txt";
+    for number in 35..=66 {
+        let (path, line, replacement) = match number {
+            35 => (readme, 2, Some("Reviewed change")),
+            36 => (other, 1, Some("Reviewed second file")),
+            _ => (readme, 2, None),
+        };
+        let row = rows.iter().find(|row| row["path"] == path).unwrap();
+        let created: Value = h
+            .write(
+                Method::POST,
+                &threads,
+                reviewer,
+                json!({
+                    "request_id":Uuid::now_v7(), "body":format!("Follow-up {number}"),
+                    "base_oid":comparison["base"], "head_oid":head, "path_hex":row["path_hex"],
+                    "side":"new", "start_line":line, "end_line":line, "suggested_text":replacement,
+                }),
+            )
+            .await
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(created["number"], number);
+    }
+    let page = h.json(&format!("{threads}?outdated=false"), reviewer).await;
+    assert!(page["items"].as_array().unwrap().iter().all(|thread| {
+        thread["number"].as_u64().unwrap() > 36 && thread["suggested_text"].is_null()
+    }));
+
+    // The reviewer writes the suggestions. A different browser account
+    // applies the batch, which exercises the real co-author trailer path.
+    h.provider.mode.lock().await.clear();
+    let browser = Browser::new("pr-batch");
+    browser
+        .run(&[
+            "open",
+            &format!("{}/team/private/pull/1/files#review-diff-36", h.origin),
+        ])
+        .await;
+    browser
+        .run(&["wait", "--text", "Continue to sign in"])
+        .await;
+    click(&browser, "button", "Continue to sign in").await;
+    browser
+        .run(&["wait", "--url", "**/pull/1/files#review-diff-36"])
+        .await;
+    click(&browser, "checkbox", "Select suggestion from thread #36").await;
+    click(&browser, "button", "Next unresolved").await;
+    click(&browser, "checkbox", "Select suggestion from thread #35").await;
+    browser
+        .run(&[
+            "wait",
+            "--fn",
+            "document.getElementById('review-thread-36') === null",
+        ])
+        .await;
+    click(&browser, "button", "Commit suggestions (2)").await;
+    browser
+        .run(&["wait", "--text", "Commit 2 suggestions"])
+        .await;
+    browser
+        .run(&[
+            "wait",
+            "--fn",
+            "(() => { const list = document.querySelector('ul[aria-label=\"Selected suggestions\"]'); return list?.children.length === 2 && list.textContent.includes('README.md') && list.textContent.includes('unrelated/part-00/0.txt'); })()",
+        ])
+        .await;
+    h.write(
+        Method::PATCH,
+        &format!("{threads}/35"),
+        reviewer,
+        json!({"version":1,"body":"Refined suggestion after selection"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    click(&browser, "button", "Commit changes").await;
+    browser
+        .run(&["wait", "--text", "A selected suggestion changed."])
+        .await;
+    assert!(with_http_token(source, token, &["fetch", remote, "feature"]).await);
+    assert_eq!(git(source, &["rev-parse", "FETCH_HEAD"]).await, head);
+    click(&browser, "button", "Remove suggestion from thread #35").await;
+    click(&browser, "button", "Cancel").await;
+    browser
+        .run(&["wait", "--fn", "!document.querySelector('[role=dialog]')"])
+        .await;
+    browser
+        .run(&["wait", "--text", "Commit suggestions (1)"])
+        .await;
+    click(&browser, "button", "Refresh").await;
+    browser
+        .run(&["wait", "--text", "Refined suggestion after selection"])
+        .await;
+    click(&browser, "checkbox", "Select suggestion from thread #35").await;
+    click(&browser, "button", "Commit suggestions (2)").await;
+    let message = "Apply the cross-file review batch";
+    browser
+        .run(&["fill", "[role='dialog'] input[maxlength='256']", message])
+        .await;
+    click(&browser, "button", "Commit changes").await;
+    browser
+        .run(&["wait", "--text", "Committed suggestions in"])
+        .await;
+
+    assert!(with_http_token(source, token, &["fetch", remote, "feature"]).await);
+    let commit = git(source, &["rev-parse", "FETCH_HEAD"]).await;
+    browser
+        .run(&["wait", &format!("a[href*='/commit/{commit}']")])
+        .await;
+    assert_eq!(git(source, &["rev-parse", "FETCH_HEAD^"]).await, head);
+    assert_eq!(
+        git(
+            source,
+            &[
+                "diff-tree",
+                "--no-commit-id",
+                "--name-only",
+                "-r",
+                "FETCH_HEAD"
+            ],
+        )
+        .await,
+        format!("{readme}\n{other}")
+    );
+    assert_eq!(
+        git(source, &["show", "FETCH_HEAD:README.md"]).await,
+        "base  text\nReviewed change"
+    );
+    assert_eq!(
+        git(source, &["show", "FETCH_HEAD:unrelated/part-00/0.txt"]).await,
+        "Reviewed second file"
+    );
+    let body = git(source, &["log", "-1", "--format=%B", "FETCH_HEAD"]).await;
+    assert!(body.starts_with(message));
+    let coauthors: Vec<_> = body
+        .lines()
+        .filter(|line| line.starts_with("Co-authored-by: "))
+        .collect();
+    assert_eq!(coauthors.len(), 1);
+    assert!(coauthors[0].starts_with("Co-authored-by: Bob <"));
+    assert_eq!(
+        git(source, &["log", "-1", "--format=%cn", "FETCH_HEAD"]).await,
+        "Alice"
+    );
+    drop(browser);
+}
+
+async fn click(browser: &Browser, role: &str, name: &str) {
+    let selector = if role == "checkbox" {
+        "[role=checkbox]"
+    } else {
+        "button"
+    };
+    let ready = format!(
+        "Array.from(document.querySelectorAll('{selector}')).some(el => (el.getAttribute('aria-label') ?? el.textContent.trim()) === {} && el.getClientRects().length && !el.disabled)",
+        json!(name),
+    );
+    browser.run(&["wait", "--fn", &ready]).await;
+    browser
+        .run(&["find", "role", role, "click", "--name", name, "--exact"])
+        .await;
 }

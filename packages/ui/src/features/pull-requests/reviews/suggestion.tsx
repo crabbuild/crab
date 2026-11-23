@@ -20,6 +20,22 @@ import type { PullRequest, PullReviewThread } from "../model";
 
 const batchLimit = 20;
 
+type SelectedSuggestion = Pick<
+  PullReviewThread,
+  "number" | "version" | "path" | "start_line" | "end_line"
+>;
+
+type Batch = {
+  head: string;
+  baseRevision: PullRequest["base_revision"];
+  threads: SelectedSuggestion[];
+};
+
+function selection(thread: PullReviewThread): SelectedSuggestion {
+  const { number, version, path, start_line, end_line } = thread;
+  return { number, version, path, start_line, end_line };
+}
+
 export function canApplySuggestion(thread: PullReviewThread) {
   return (
     thread.suggested_text !== null &&
@@ -35,72 +51,52 @@ export function useSuggestionBatch(
   repo: Repository,
   pull: PullRequest,
   csrf: string,
-  threads: PullReviewThread[],
   refresh: () => void,
 ) {
   const destination = pull.head_repository ?? repo;
   const mutation = useMutation(csrf, destination);
   const trigger = useRef<HTMLElement>(null);
-  const [batch, setBatch] = useState<{
-    head: string;
-    threads: Array<Pick<PullReviewThread, "number" | "version">>;
-  }>();
+  const [batch, setBatch] = useState<Batch>();
   const [commit, setCommit] = useState<string>();
-  const [intent, setIntent] = useState<{
-    head: string;
-    threads: Array<Pick<PullReviewThread, "number" | "version">>;
-  }>();
+  const [intent, setIntent] = useState<Batch & { fromBatch: boolean }>();
   const [message, setMessage] = useState("");
   const enabled = pull.can_apply_suggestions && !repo.archived;
-  const selected =
-    batch?.head === pull.head_oid
-      ? batch.threads.filter((item) =>
-          threads.some(
-            (thread) =>
-              thread.number === item.number &&
-              thread.version === item.version &&
-              canApplySuggestion(thread),
-          ),
-        )
-      : [];
-  function toggle(number: number) {
-    const thread = threads.find((item) => item.number === number);
-    if (!thread || !canApplySuggestion(thread)) return;
-    const next = selected.some((item) => item.number === number)
-      ? selected.filter((item) => item.number !== number)
-      : [...selected, { number, version: thread.version }];
-    if (next.length <= batchLimit)
-      setBatch({ head: pull.head_oid, threads: next });
+  const comparison = { head: pull.head_oid, baseRevision: pull.base_revision };
+  const current = (value: Batch) =>
+    value.head === comparison.head &&
+    value.baseRevision === comparison.baseRevision;
+  // A selected thread can leave the mounted page during navigation. Keep
+  // its captured version so publication can validate the batch as selected.
+  const selected = batch && current(batch) ? batch.threads : [];
+  function toggle(thread: PullReviewThread) {
+    if (!canApplySuggestion(thread)) return;
+    const next = selected.some((item) => item.number === thread.number)
+      ? selected.filter((item) => item.number !== thread.number)
+      : [...selected, selection(thread)];
+    if (next.length <= batchLimit) setBatch({ ...comparison, threads: next });
   }
-  function review(ids: number[]) {
-    if (!enabled || mutation.pending || !ids.length) return;
-    const selectedThreads = ids.flatMap((id) => {
-      const thread = threads.find((item) => item.number === id);
-      return thread && canApplySuggestion(thread)
-        ? [{ number: thread.number, version: thread.version }]
-        : [];
-    });
-    if (selectedThreads.length !== ids.length) return;
+  function review(thread?: PullReviewThread) {
+    if (!enabled || mutation.pending || (thread && !canApplySuggestion(thread)))
+      return;
+    const threads = thread ? [selection(thread)] : selected;
+    if (!threads.length) return;
     mutation.reset();
     trigger.current =
       document.activeElement instanceof HTMLElement
         ? document.activeElement
         : null;
-    setIntent({ head: pull.head_oid, threads: selectedThreads });
+    setIntent({ ...comparison, threads, fromBatch: thread === undefined });
     setMessage(`Apply review suggestions from pull request #${pull.number}`);
   }
-  const stale =
-    intent &&
-    (intent.head !== pull.head_oid ||
-      intent.threads.some(
-        ({ number, version }) =>
-          !threads.some(
-            (thread) =>
-              thread.number === number &&
-              thread.version === version &&
-              canApplySuggestion(thread),
-          ),
-      ));
+  const stale = intent && !current(intent);
+  function remove(number: number) {
+    if (!intent?.fromBatch || stale || mutation.pending) return;
+    const threads = intent.threads.filter((item) => item.number !== number);
+    const next = threads.length ? { ...intent, threads } : undefined;
+    mutation.reset();
+    setBatch(next);
+    setIntent(next);
+  }
   async function apply() {
     if (!intent || stale || !enabled || mutation.pending || !message.trim())
       return;
@@ -111,7 +107,10 @@ export function useSuggestionBatch(
       "POST",
       {
         expected_head: intent.head,
-        threads: intent.threads,
+        threads: intent.threads.map(({ number, version }) => ({
+          number,
+          version,
+        })),
         message: message.trim(),
       },
     );
@@ -127,6 +126,7 @@ export function useSuggestionBatch(
     selected: selected.map((thread) => thread.number),
     toggle,
     review,
+    remove,
     apply,
     commit,
     destination,
@@ -142,9 +142,11 @@ export function useSuggestionBatch(
     },
     pending: mutation.pending,
     error:
-      mutation.error && mutation.status === undefined
-        ? "Crab couldn’t confirm the commit. Refresh the branch before trying again."
-        : mutation.error,
+      mutation.code === "file_changed"
+        ? "A selected suggestion changed. Refresh the review and select its current version."
+        : mutation.error && mutation.status === undefined
+          ? "Crab couldn’t confirm the commit. Refresh the branch before trying again."
+          : mutation.error,
     atLimit: selected.length >= batchLimit,
   };
 }
@@ -216,6 +218,40 @@ export function SuggestionCommit({
               void suggestions.apply();
             }}
           >
+            {intent?.fromBatch && (
+              <ul
+                aria-label="Selected suggestions"
+                className="max-h-40 divide-y overflow-y-auto"
+              >
+                {intent.threads.map((thread) => (
+                  <li
+                    key={thread.number}
+                    className="flex items-center justify-between gap-2 py-1.5"
+                  >
+                    <span className="min-w-0 text-sm">
+                      <code className="break-all">{thread.path}</code>
+                      <span className="text-muted-foreground">
+                        {" "}
+                        ·{" "}
+                        {thread.start_line === thread.end_line
+                          ? `line ${thread.start_line}`
+                          : `lines ${thread.start_line}–${thread.end_line}`}
+                      </span>
+                    </span>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      aria-label={`Remove suggestion from thread #${thread.number}`}
+                      disabled={pending || stale}
+                      onClick={() => suggestions.remove(thread.number)}
+                    >
+                      Remove
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            )}
             <FieldGroup>
               <Field>
                 <FieldLabel htmlFor={id}>Commit message</FieldLabel>
