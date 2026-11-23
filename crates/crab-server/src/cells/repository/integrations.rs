@@ -23,8 +23,16 @@ pub(crate) struct Connection {
     pub github_repository: u64,
     pub workflow: u64,
     pub credential: Uuid,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    app_managed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch: Option<dispatches::Configuration>,
+}
+
+impl Connection {
+    pub(crate) fn app_managed(&self) -> bool {
+        self.app_managed || self.dispatch.is_some()
+    }
 }
 
 fn connections(context: &Transaction<'_>) -> crate::cells::Result<Vec<Connection>> {
@@ -51,6 +59,8 @@ pub(crate) enum Change {
         name: String,
         github_repository: u64,
         workflow: u64,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        app_managed: bool,
     },
     Dispatch {
         id: Uuid,
@@ -98,6 +108,7 @@ impl Mutation for Edit {
                 name,
                 github_repository,
                 workflow,
+                app_managed,
             } => {
                 checks::validate_name(&name)?;
                 validate_number(github_repository)?;
@@ -108,6 +119,7 @@ impl Mutation for Edit {
                     github_repository,
                     workflow,
                     credential: id,
+                    app_managed,
                     dispatch: None,
                 };
                 if let Some(current) = rows.iter().find(|row| row.id == id) {
@@ -171,6 +183,9 @@ impl Mutation for Edit {
                 {
                     return Ok(Rejected(Changed::Conflict));
                 }
+                // A workflow that used the operator's App cannot regain a
+                // per-connection signing key when queue dispatch is cleared.
+                current.app_managed = current.app_managed() || dispatch.is_some();
                 current.dispatch = dispatch;
                 Changed::Saved(current.clone())
             }
@@ -239,11 +254,18 @@ pub(crate) struct Delivery {
     pub connection: Uuid,
     pub id: Uuid,
     pub digest: [u8; 32],
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub app_managed: bool,
 }
 
 impl Delivery {
     fn key(&self) -> String {
-        format!("ci/v1/deliveries/{}/{}", self.connection, self.id)
+        let scope = if self.app_managed {
+            "app-deliveries"
+        } else {
+            "deliveries"
+        };
+        format!("ci/v1/{scope}/{}/{}", self.connection, self.id)
     }
 }
 
@@ -325,12 +347,17 @@ struct Cursor {
     version: u64,
 }
 
-fn run_key(connection: Uuid, oid: &str, generation: Option<Uuid>) -> String {
+fn run_key(connection: &Connection, oid: &str, generation: Option<Uuid>) -> String {
+    let id = connection.id;
     if let Some(generation) = generation {
-        format!("ci/v1/dispatched-runs/{connection}/{generation}/{oid}")
-    } else {
-        format!("ci/v1/runs/{connection}/{oid}")
+        return format!("ci/v1/dispatched-runs/{id}/{generation}/{oid}");
     }
+    let scope = if connection.app_managed() {
+        "app-runs"
+    } else {
+        "runs"
+    };
+    format!("ci/v1/{scope}/{id}/{oid}")
 }
 
 #[derive(Deserialize, Serialize)]
@@ -380,7 +407,7 @@ impl Read for ReadRequirements {
                     .filter(|_| input.queued_candidate)
                     .map(|config| config.id);
                 let run = if let Some(cursor) =
-                    context.document::<Cursor>(&run_key(row.id, &input.oid, generation))?
+                    context.document::<Cursor>(&run_key(&row, &input.oid, generation))?
                 {
                     let detail = GetCheckRun::execute(
                         context,
@@ -440,6 +467,7 @@ impl Mutation for Record {
             return Ok(Rejected(Reported::Revoked));
         };
         if connection.credential != input.credential
+            || connection.app_managed() != input.delivery.app_managed
             || connection.github_repository != input.github_repository
             || connection.workflow != input.workflow
         {
@@ -460,7 +488,12 @@ impl Mutation for Record {
         for number in [input.run_id, input.run_number, input.attempt] {
             validate_number(number)?;
         }
-        let identity = format!("ci/v1/run-identities/{id}/{}", input.run_id);
+        let identity_scope = if input.delivery.app_managed {
+            "app-run-identities"
+        } else {
+            "run-identities"
+        };
+        let identity = format!("ci/v1/{identity_scope}/{id}/{}", input.run_id);
         let origin = (input.oid.as_str(), input.run_number);
         if let Some(saved) = context.document::<(String, u64)>(&identity)? {
             if (saved.0.as_str(), saved.1) != origin {
@@ -486,7 +519,7 @@ impl Mutation for Record {
         } else {
             None
         };
-        let key = run_key(id, &input.oid, generation);
+        let key = run_key(&connection, &input.oid, generation);
         let order = (input.run_number, input.attempt);
         let current = context.document::<Cursor>(&key)?;
         let same_run = current.as_ref().filter(|row| row.order == order);

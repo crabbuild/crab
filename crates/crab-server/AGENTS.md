@@ -92,7 +92,9 @@ receipts, bounded accepted-delivery history, and workflow attempt ordering. It
 reads active providers and their exact-commit results from one snapshot for merge
 admission. `api/integrations/`
 owns signed GitHub deliveries, operator-bound workflow dispatch, and scoped Git
-checkout. Dispatch reservations and run binding live in
+checkout. The operator App webhook authenticates before resolving an exact
+installation/repository/workflow binding. The Repository Cell keeps standalone
+and App results separate so a signing authority change requires a new result. Dispatch reservations and run binding live in
 `cells/repository/integrations/dispatches.rs`.
 `cells/repository/webhooks.rs` owns outbound subscriptions, leased deliveries,
 and bounded completed history. `server/webhooks.rs` signs and sends only to

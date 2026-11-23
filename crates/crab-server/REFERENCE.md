@@ -3723,22 +3723,25 @@ receiver.
 
 ### Connect GitHub Actions
 
-Crab accepts GitHub.com workflow-run deliveries from a private GitHub App.
-Use a GitHub source repository that has the same commits as the Crab repository
+Crab accepts signed GitHub.com workflow-run deliveries. An operator can use
+one private GitHub App for multiple workflows, or a repository administrator
+can use a dedicated push-check connection. Use a GitHub source repository that has the same commits as the Crab repository
 and an Actions workflow triggered by pushes to the branches under review.
 The Crab public URL must be reachable by GitHub. All serving replicas need
 the same `auth.state_key_file`.
 
-1. A Crab repository administrator opens **Settings → Integrations**, enters
-   the GitHub repository ID and workflow ID, and chooses the check name.
+1. Open **Settings → Integrations** as a repository administrator. Enter
+   the GitHub repository ID and workflow ID, and choose the check name.
    Use `gh api repos/OWNER/REPO --jq .id` and
    `gh api repos/OWNER/REPO/actions/workflows --jq '.workflows[] | [.id, .path] | @tsv'`
    to find the IDs.
    [Repository API](https://docs.github.com/en/rest/repos/repos#get-a-repository)
    · [Workflows API](https://docs.github.com/en/rest/actions/workflows#list-repository-workflows)
-2. Configure a private GitHub App with the displayed webhook URL and secret,
-   read-only Actions repository permission, and the **Workflow run** event.
-   Install the app on the source repository.
+2. For a dedicated connection, configure a private GitHub App with the
+   displayed webhook URL and secret, read-only Actions repository permission,
+   and the **Workflow run** event. Install the app on the source repository.
+   A workflow marked **Managed by the server GitHub App** uses the shared
+   endpoint and operator-managed signing credential described below.
    [GitHub App registration](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app)
    · [GitHub workflow-run event](https://docs.github.com/en/webhooks/webhook-events-and-payloads#workflow_run)
 3. Push the same commit to Crab and the GitHub source. Open the Crab pull
@@ -3752,12 +3755,11 @@ the same `auth.state_key_file`.
    check cannot stand in for it.
 
 The webhook verifies the signature over the raw request before parsing the
-workflow. Connection credentials cover one Crab repository UUID, GitHub
-repository ID, and workflow ID. The server derives the secret from the shared
-state key and returns it only on an administrator's connect or rotate request.
-Rotate the secret in Crab and then update the GitHub App. Rotation retains
-already accepted runs. Disconnecting immediately rejects new deliveries and
-leaves referring branch rules blocked until edited.
+workflow. For dedicated connections, Crab derives the secret from the shared
+state key and returns it to a repository administrator on connect or rotate.
+Rotate that secret in Crab and update the dedicated GitHub App. Rotation retains
+accepted runs. Disconnecting blocks new deliveries and leaves referring branch
+rules blocked until edited.
 Incoming deliveries are limited to 1 MiB and a repository can connect up to
 16 workflows. The pull request shows the workflow's exact head SHA and opens
 the corresponding GitHub run. Redelivery is idempotent and older runs and
@@ -3783,18 +3785,22 @@ rejected requests. Use the GitHub App's delivery log to diagnose or retry a
 failed request. Secret rotation retains history, and disconnecting deletes the
 connection's history. [GitHub App delivery log](https://docs.github.com/en/webhooks/testing-and-troubleshooting-webhooks/viewing-webhook-deliveries#viewing-webhook-deliveries-for-github-apps)
 
-#### Start GitHub Actions for a merge queue candidate
+#### Configure the server GitHub App
 
-An operator configures a GitHub App with **Actions: Read and write**, installs it
-on the workflow repository, and authorizes that workflow and its trusted
-definition branch for the Crab repository UUID from `GET /api/repos`. Put the
-App's private key on every serving replica. Crab requests an installation token
-scoped to the bound GitHub repository and Actions permission when dispatching.
+Configure one private GitHub App with **Actions: Read and write** permission
+and subscribe to **Workflow run**. Set its webhook URL to
+`https://git.example.com/webhooks/github-actions/app` using Crab's public HTTPS
+origin. Save the same webhook secret in the App and in a private file mounted
+on every Crab replica. Use a randomly generated secret of 32–512 visible
+ASCII characters. Install the App on the source repositories. Mount its
+private key on each replica and configure the exact repository, installation,
+workflow and trusted branch bindings:
 
 ```toml
 [github_actions]
 app_id = 7
 private_key_file = "/run/secrets/github-actions.pem"
+webhook_secret_file = "/run/secrets/github-actions-webhook"
 
 [[github_actions.bindings]]
 crab_repository = "01900000-0000-7000-8000-000000000001"
@@ -3804,16 +3810,34 @@ workflow = 456
 branch = "main"
 ```
 
+Each installation, GitHub repository and workflow tuple can route to one Crab
+repository. Add another binding for each workflow the App should report.
+Crab validates the App signature before looking up that tuple. The signature
+authenticates the installation claims, and required checks still use the exact
+Crab commit and connection. The App's signing secret stays with the operator.
+To rotate it, update GitHub and the mounted files, then restart all serving
+replicas. Redeliver any reports interrupted by the rollout.
+
+Upgrade all replicas together and point the App at the shared URL. Existing
+queue-dispatch connections use the App route after upgrade. A standalone
+connection can switch by setting up queue dispatch after the operator adds its
+binding, or by disconnecting and connecting it again. Switching to the App
+requires a fresh signed head result. Clearing queue dispatch retains App
+signing for head reports. Use **Disconnect** to revoke a connection and block
+its use in branch rules.
+
+#### Start GitHub Actions for a merge queue candidate
+
+In Crab, select **Set up queue dispatch** on an authorized connection. The
+server requests an installation token scoped to that repository and to Actions.
 Use a private Actions repository to test private Crab source. Define the
 workflow on the default branch and the bound branch. Store Crab's canonical
-HTTPS origin without a trailing slash in
-the Actions variable `CRAB_ORIGIN`. In Crab, open **Settings → Integrations**,
-connect the workflow webhook as above, and select **Set up queue dispatch**.
+HTTPS origin without a trailing slash in the Actions variable `CRAB_ORIGIN`.
 Save the displayed checkout token as the Actions secret
 `CRAB_QUEUE_READ_TOKEN`. Continue reporting signed head checks through the same
 required connection. Use a separate Actions secret name in each workflow if
 several connections share the Actions repository. Rotate the Actions secret
-when changing dispatch settings or rotating the webhook secret.
+when changing dispatch settings or rotating the queue checkout token.
 
 Add the dispatch trigger and job below to the connected workflow. Keep its
 existing push trigger and run the push jobs only on push events. Add your

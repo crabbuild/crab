@@ -15,6 +15,8 @@ export interface Connection {
   github_repository: number;
   workflow: number;
   credential_version: string;
+  app_managed: boolean;
+  app_bound: boolean;
   url: string;
   dispatch?: {
     id: string;
@@ -26,7 +28,6 @@ export interface Connection {
 
 export interface Connections {
   available: boolean;
-  dispatch_available?: boolean;
   items: Connection[];
 }
 
@@ -65,7 +66,8 @@ export function IntegrationSettings({
     );
     if (!result) return false;
     setCredentials(
-      "connection" in result && (result.secret || result.fetch_token)
+      "connection" in result &&
+        (result.secret || result.fetch_token || result.connection.app_managed)
         ? result
         : undefined,
     );
@@ -122,6 +124,12 @@ export function IntegrationSettings({
               for mirroring their current commit in the Checks tab.
             </p>
           )}
+          {credentials.connection.app_managed && (
+            <p className="text-sm text-muted-foreground">
+              This workflow receives reports through the server’s GitHub App.
+              The server operator manages its webhook secret.
+            </p>
+          )}
           {credentials.fetch_token && (
             <p className="text-sm text-muted-foreground">
               Save the queue checkout token as{" "}
@@ -133,9 +141,10 @@ export function IntegrationSettings({
             {
               id: "ci-url",
               label: "Webhook URL",
-              value: credentials.secret
-                ? credentials.connection.url
-                : undefined,
+              value:
+                credentials.secret || credentials.connection.app_managed
+                  ? credentials.connection.url
+                  : undefined,
             },
             {
               id: "ci-secret",
@@ -192,7 +201,7 @@ export function IntegrationSettings({
       )}
       <Failure message={mutation.error} />
       <Result state={connections} timingLabel="CI connections">
-        {({ available, dispatch_available, items }) => (
+        {({ available, items }) => (
           <section
             className="settings-section"
             aria-labelledby="github-actions-title"
@@ -226,6 +235,13 @@ export function IntegrationSettings({
                           GitHub repository {connection.github_repository} ·
                           workflow {connection.workflow}
                         </p>
+                        {connection.app_managed && (
+                          <p className="text-sm text-muted-foreground">
+                            {connection.app_bound
+                              ? "Managed by the server GitHub App"
+                              : "Server GitHub App binding unavailable"}
+                          </p>
+                        )}
                         {connection.dispatch && (
                           <p className="text-sm text-muted-foreground">
                             Queue dispatch on {connection.dispatch.repository} ·{" "}
@@ -238,7 +254,7 @@ export function IntegrationSettings({
                           repo={repo}
                           connection={connection}
                         />
-                        {(dispatch_available || connection.dispatch) &&
+                        {(connection.app_bound || connection.dispatch) &&
                           !repo.archived && (
                             <Button
                               size="sm"
@@ -254,17 +270,25 @@ export function IntegrationSettings({
                                 : "Set up queue dispatch"}
                             </Button>
                           )}
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={mutation.pending || !available}
-                          aria-label={`Rotate secret for ${connection.name}`}
-                          onClick={() =>
-                            setConfirmation({ connection, kind: "rotate" })
-                          }
-                        >
-                          Rotate secret
-                        </Button>
+                        {(!connection.app_managed || connection.dispatch) && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={mutation.pending || !available}
+                            aria-label={
+                              connection.app_managed
+                                ? `Rotate queue checkout token for ${connection.name}`
+                                : `Rotate secret for ${connection.name}`
+                            }
+                            onClick={() =>
+                              setConfirmation({ connection, kind: "rotate" })
+                            }
+                          >
+                            {connection.app_managed
+                              ? "Rotate queue checkout token"
+                              : "Rotate secret"}
+                          </Button>
+                        )}
                         <Button
                           size="sm"
                           variant="outline"
@@ -282,7 +306,7 @@ export function IntegrationSettings({
                       <DispatchForm
                         key={connection.id}
                         connection={connection}
-                        available={!!dispatch_available}
+                        available={connection.app_bound}
                         pending={mutation.pending}
                         onSave={edit}
                         onCancel={() => setDispatchConnection(undefined)}
@@ -296,7 +320,9 @@ export function IntegrationSettings({
                       >
                         <p className="text-sm">
                           {confirmation.kind === "rotate"
-                            ? "Update the GitHub App with the new secret after rotating."
+                            ? confirmation.connection.app_managed
+                              ? "Update the workflow’s checkout secret after rotating."
+                              : "Update the GitHub App with the new secret after rotating."
                             : "Branch rules that require this workflow will block merges until the rule is updated."}
                         </p>
                         <div className="flex flex-wrap gap-2">
