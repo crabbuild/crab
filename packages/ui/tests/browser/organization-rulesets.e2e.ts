@@ -21,6 +21,15 @@ test("owners target repositories and repository admins see inherited rules as re
     protection_version: 0,
     protected_branches: [],
   };
+  const sandbox = {
+    ...repo,
+    id: "00000000-0000-4000-8000-000000000051",
+    name: "project-sandbox",
+  };
+  const bindings = [repo, sandbox].map(({ id }, index) => ({
+    repository: { id, ownership_epoch: 1 },
+    version: index,
+  }));
   let rulesets: {
     ruleset: { id: string; name: string };
     repositories: unknown;
@@ -31,6 +40,7 @@ test("owners target repositories and repository admins see inherited rules as re
     definitions: [] as Array<{ id: string; name: string }>,
   };
   let values = { version: 0, overrides: {} };
+  let accepted: unknown;
   await page.route("**/api/session", (route) =>
     route.fulfill({
       json: {
@@ -46,7 +56,7 @@ test("owners target repositories and repository admins see inherited rules as re
     (route) => {
       const limit = new URL(route.request().url()).searchParams.get("limit");
       if (limit !== null) expect(Number(limit)).toBeLessThanOrEqual(50);
-      return route.fulfill({ json: { repositories: [repo] } });
+      return route.fulfill({ json: { repositories: [repo, sandbox] } });
     },
   );
   await page.route(
@@ -106,20 +116,44 @@ test("owners target repositories and repository admins see inherited rules as re
     },
   );
   await page.route(
-    (url) => url.pathname === "/api/repos/team/project/properties",
+    (url) =>
+      url.pathname === `/api/organizations/${id}/repository-properties/values`,
     (route) => {
-      if (route.request().method() === "PUT") {
-        expect(route.request().headers()["x-crab-repository-id"]).toBe(repo.id);
-        const input = route.request().postDataJSON();
-        expect(input).toEqual({
-          schema_version: schema.version,
-          expected_version: values.version,
-          overrides: { [schema.definitions[0].id]: false },
+      const property = schema.definitions[0].id;
+      if (route.request().method() === "GET") {
+        const url = new URL(route.request().url());
+        expect(url.searchParams.get("repositories")).toBe(
+          `${repo.id},${sandbox.id}`,
+        );
+        return route.fulfill({
+          json: {
+            schema,
+            repositories: bindings,
+            effective: { [property]: { kind: "mixed" } },
+          },
         });
-        values = { version: values.version + 1, overrides: input.overrides };
       }
-      return route.fulfill({ json: { schema, values } });
+      expect(route.request().headers()["x-csrf-token"]).toBe("fixture-csrf");
+      const input = route.request().postDataJSON();
+      if (accepted) {
+        expect(input).toEqual(accepted);
+        return route.fulfill({ json: { updated: 2 } });
+      }
+      expect(input).toEqual({
+        request_id: expect.any(String),
+        issued_at_ms: expect.any(Number),
+        schema_version: schema.version,
+        repositories: bindings,
+        changes: { [property]: true },
+      });
+      accepted = input;
+      values = { version: values.version + 1, overrides: input.changes };
+      return route.abort("failed");
     },
+  );
+  await page.route(
+    (url) => url.pathname === "/api/repos/team/project/properties",
+    (route) => route.fulfill({ json: { schema, values } }),
   );
   await page.route(
     (url) => url.pathname === "/api/repos/team/project/rulesets",
@@ -189,14 +223,26 @@ test("owners target repositories and repository admins see inherited rules as re
   await expect(
     page.getByRole("button", { name: "Edit regulated" }),
   ).toBeVisible();
-  await page
-    .getByRole("combobox", { name: "Repository", exact: true })
-    .selectOption(repo.id);
+  await page.getByRole("button", { name: "Select this page" }).click();
+  await page.getByRole("button", { name: "Edit properties" }).click();
+  await expect(page.getByText("Mixed values", { exact: false })).toBeVisible();
+  const action = page.getByRole("combobox", {
+    name: "Action for regulated",
+    exact: true,
+  });
+  await action.selectOption("set");
   await page
     .getByRole("combobox", { name: "regulated", exact: true })
-    .selectOption("false");
+    .selectOption("true");
+  await expectNoAccessibilityViolations(page);
   await page.getByRole("button", { name: "Save repository values" }).click();
-  await expect(page.getByText("Repository values saved.")).toBeVisible();
+  const retry = page.getByRole("button", { name: "Retry save" });
+  await expect(retry).toBeVisible();
+  await expect(action).toBeDisabled();
+  await retry.click();
+  await expect(
+    page.getByText("Repository values saved for 2 repositories."),
+  ).toBeVisible();
   await page.getByRole("link", { name: "Rulesets", exact: true }).click();
   await page.getByRole("button", { name: "Edit Release policy" }).click();
   await page.getByLabel("Repository targeting").selectOption("properties");
@@ -207,15 +253,15 @@ test("owners target repositories and repository admins see inherited rules as re
   await page
     .getByRole("combobox", { name: "Property", exact: true })
     .selectOption(schema.definitions[0].id);
-  await page.getByLabel("Matching value").selectOption("false");
+  await page.getByLabel("Matching value").selectOption("true");
   await expectNoAccessibilityViolations(page);
   await page.getByRole("button", { name: "Save ruleset" }).click();
   await expect(
-    page.getByText("regulated matches false", { exact: false }),
+    page.getByText("regulated matches true", { exact: false }),
   ).toBeVisible();
   expect(rulesets[0].repositories).toEqual({
     kind: "properties",
-    conditions: [{ property: schema.definitions[0].id, value: false }],
+    conditions: [{ property: schema.definitions[0].id, value: true }],
   });
 
   await page.goto("/team/project/settings/rulesets");
@@ -236,5 +282,10 @@ test("owners target repositories and repository admins see inherited rules as re
   await expect(
     page.getByRole("heading", { name: "Repository properties" }),
   ).toBeVisible();
-  await expect(page.getByText("regulated · false")).toBeVisible();
+  await expect(
+    page.locator("dl").getByText("regulated", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.locator("dl").getByText("true", { exact: true }),
+  ).toBeVisible();
 });

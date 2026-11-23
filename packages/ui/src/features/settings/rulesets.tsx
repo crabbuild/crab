@@ -12,7 +12,7 @@ import {
   propertySchemaPath,
   type PropertyDefinition,
   type PropertySchema,
-} from "@/features/organizations/repository-properties";
+} from "@/features/organizations/property-fields";
 import { type Connections } from "./integrations";
 import {
   RulesetBypassEditor,

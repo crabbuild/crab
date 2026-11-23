@@ -6,34 +6,21 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
 
-export type PropertyValue = boolean | string | string[];
-export type PropertyKind =
-  | "text"
-  | "boolean"
-  | "single_select"
-  | "multi_select";
-
-export interface PropertyDefinition {
-  id: string;
-  name: string;
-  description: string;
-  kind: PropertyKind;
-  options: string[];
-  default: PropertyValue | null;
-}
-
-export interface PropertySchema {
-  version: number;
-  definitions: PropertyDefinition[];
-}
+import { BulkPropertyValues } from "./bulk-property-values";
+import {
+  PropertyInput,
+  control,
+  display,
+  propertySchemaPath,
+  type PropertyDefinition,
+  type PropertyKind,
+  type PropertySchema,
+  type PropertyValue,
+} from "./property-fields";
 
 interface PropertyView {
   schema: PropertySchema;
   values: { version: number; overrides: Record<string, PropertyValue> };
-}
-
-export function propertySchemaPath(organization: string) {
-  return `/api/organizations/${encodeURIComponent(organization)}/repository-properties`;
 }
 
 const kinds = {
@@ -42,93 +29,6 @@ const kinds = {
   single_select: "Single select",
   multi_select: "Multi select",
 } satisfies Record<PropertyKind, string>;
-
-const control = "w-full rounded-md border bg-background px-3 py-2 text-sm";
-
-function display(value: PropertyValue) {
-  return Array.isArray(value) ? value.join(", ") : String(value);
-}
-
-export function PropertyInput({
-  label,
-  definition,
-  value,
-  unset,
-  onChange,
-}: {
-  label: string;
-  definition: PropertyDefinition;
-  value: PropertyValue | null;
-  unset: string;
-  onChange: (value: PropertyValue | null) => void;
-}) {
-  if (definition.kind === "multi_select") {
-    const selected = Array.isArray(value) ? value : [];
-    return (
-      <fieldset className="grid gap-1 rounded-md border p-3">
-        <legend className="font-medium">{label}</legend>
-        {definition.options.map((option) => (
-          <label className="flex items-center gap-2" key={option}>
-            <input
-              type="checkbox"
-              checked={selected.includes(option)}
-              onChange={(event) => {
-                const next = event.target.checked
-                  ? [...selected, option]
-                  : selected.filter((item) => item !== option);
-                onChange(next.length ? next : null);
-              }}
-            />
-            {option}
-          </label>
-        ))}
-        {!selected.length && (
-          <span className="text-sm text-muted-foreground">{unset}</span>
-        )}
-      </fieldset>
-    );
-  }
-  if (definition.kind === "text") {
-    return (
-      <label className="grid gap-1">
-        {label}
-        <Input
-          value={typeof value === "string" ? value : ""}
-          placeholder={unset}
-          maxLength={75}
-          onChange={(event) => onChange(event.target.value || null)}
-        />
-      </label>
-    );
-  }
-  return (
-    <label className="grid gap-1">
-      {label}
-      <select
-        className={control}
-        value={value === null ? "" : display(value)}
-        onChange={(event) => {
-          const next = event.target.value;
-          onChange(
-            next === ""
-              ? null
-              : definition.kind === "boolean"
-                ? next === "true"
-                : next,
-          );
-        }}
-      >
-        <option value="">{unset}</option>
-        {(definition.kind === "boolean"
-          ? ["true", "false"]
-          : definition.options
-        ).map((option) => (
-          <option key={option}>{option}</option>
-        ))}
-      </select>
-    </label>
-  );
-}
 
 export function OrganizationRepositoryProperties({
   organization,
@@ -139,14 +39,6 @@ export function OrganizationRepositoryProperties({
 }) {
   const path = propertySchemaPath(organization);
   const schema = useRequest<PropertySchema>(path);
-  const [search, setSearch] = useState("");
-  const [selected, setSelected] = useState<Repository>();
-  const repositories = useRequest<{
-    repositories: Repository[];
-    next?: string;
-  }>(
-    `/api/repos?${new URLSearchParams({ organization, q: search, limit: "50" })}`,
-  );
   return (
     <section className="grid gap-6">
       <h2 className="text-lg font-semibold">Repository properties</h2>
@@ -161,62 +53,7 @@ export function OrganizationRepositoryProperties({
           />
         )}
       </Result>
-      <div className="grid gap-3">
-        <h3 className="font-semibold">Set repository values</h3>
-        <label className="grid gap-1">
-          Find a repository
-          <Input
-            type="search"
-            maxLength={200}
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-          />
-        </label>
-        <Result state={repositories} timingLabel="Repositories for properties">
-          {({ repositories, next }) => (
-            <>
-              <label className="grid gap-1">
-                Repository
-                <select
-                  id="repository-property-target"
-                  className={control}
-                  value={selected?.id ?? ""}
-                  onChange={(event) => {
-                    setSelected(
-                      repositories.find(
-                        (repo) => repo.id === event.target.value,
-                      ),
-                    );
-                  }}
-                >
-                  <option value="">Choose a repository</option>
-                  {selected &&
-                    !repositories.some((repo) => repo.id === selected.id) && (
-                      <option value={selected.id}>{selected.name}</option>
-                    )}
-                  {repositories.map((repo) => (
-                    <option key={repo.id} value={repo.id}>
-                      {repo.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {next && (
-                <p className="text-sm text-muted-foreground">
-                  Refine the search to see more repositories.
-                </p>
-              )}
-            </>
-          )}
-        </Result>
-        {selected && (
-          <RepositoryProperties
-            key={`${selected.id}:${schema.data?.version ?? ""}`}
-            repo={selected}
-            csrf={csrf}
-          />
-        )}
-      </div>
+      <BulkPropertyValues organization={organization} csrf={csrf} />
     </section>
   );
 }
@@ -457,128 +294,41 @@ function Definitions({
   );
 }
 
-export function RepositoryProperties({
-  repo,
-  csrf,
-}: {
-  repo: Repository;
-  csrf?: string;
-}) {
-  const path = endpoint(repo, "properties");
-  const request = useRequest<PropertyView>(path);
+export function RepositoryProperties({ repo }: { repo: Repository }) {
+  const request = useRequest<PropertyView>(endpoint(repo, "properties"));
   return (
     <Result state={request} timingLabel="Repository property values">
-      {(view) => (
-        <Values
-          key={`${view.schema.version}:${view.values.version}`}
-          initial={view}
-          path={path}
-          repo={repo}
-          csrf={csrf}
-          refresh={request.retry}
-        />
-      )}
+      {({ schema, values }) =>
+        schema.definitions.length ? (
+          <dl className="grid gap-3">
+            {schema.definitions.map((definition) => {
+              const value = values.overrides[definition.id];
+              return (
+                <div
+                  key={definition.id}
+                  className="grid gap-1 rounded-md border p-3"
+                >
+                  <dt className="font-medium">{definition.name}</dt>
+                  <dd>
+                    {value !== undefined
+                      ? display(value)
+                      : definition.default === null
+                        ? "Unset"
+                        : `Default · ${display(definition.default)}`}
+                  </dd>
+                  {definition.description && (
+                    <dd className="text-sm text-muted-foreground">
+                      {definition.description}
+                    </dd>
+                  )}
+                </div>
+              );
+            })}
+          </dl>
+        ) : (
+          <p>No repository properties have been defined.</p>
+        )
+      }
     </Result>
-  );
-}
-
-function Values({
-  initial,
-  path,
-  repo,
-  csrf,
-  refresh,
-}: {
-  initial: PropertyView;
-  path: string;
-  repo: Repository;
-  csrf?: string;
-  refresh: () => void;
-}) {
-  const [view, setView] = useState(initial);
-  const [overrides, setOverrides] = useState(initial.values.overrides);
-  const [saved, setSaved] = useState(false);
-  const mutation = useMutation(csrf ?? "", repo);
-  if (!view.schema.definitions.length)
-    return <p>No repository properties have been defined.</p>;
-  return (
-    <form
-      id="repository-property-values"
-      className="grid gap-3 rounded-md border p-4"
-      onSubmit={async (event) => {
-        event.preventDefault();
-        if (!csrf) return;
-        const result = await mutation.run<PropertyView>(path, "PUT", {
-          schema_version: view.schema.version,
-          expected_version: view.values.version,
-          overrides,
-        });
-        if (result) {
-          setView(result);
-          setOverrides(result.values.overrides);
-          setSaved(true);
-        }
-      }}
-    >
-      {view.schema.definitions.map((definition) => {
-        const value = overrides[definition.id] ?? null;
-        const inherited =
-          definition.default === null
-            ? "Unset"
-            : `Default · ${display(definition.default)}`;
-        return (
-          <div key={definition.id} className="grid gap-1">
-            {csrf ? (
-              <PropertyInput
-                label={definition.name}
-                definition={definition}
-                value={value}
-                unset={inherited}
-                onChange={(next) => {
-                  setSaved(false);
-                  setOverrides((current) => {
-                    const updated = { ...current };
-                    if (next === null) delete updated[definition.id];
-                    else updated[definition.id] = next;
-                    return updated;
-                  });
-                }}
-              />
-            ) : (
-              <p>
-                <strong>{definition.name}</strong> ·{" "}
-                {value === null ? inherited : display(value)}
-              </p>
-            )}
-            {definition.description && (
-              <p className="text-sm text-muted-foreground">
-                {definition.description}
-              </p>
-            )}
-          </div>
-        );
-      })}
-      {csrf && (
-        <Button
-          type="submit"
-          className="justify-self-start"
-          disabled={mutation.pending}
-        >
-          Save repository values
-        </Button>
-      )}
-      {saved && <p role="status">Repository values saved.</p>}
-      <Failure message={mutation.error} />
-      {mutation.conflict && (
-        <Button
-          className="justify-self-start"
-          type="button"
-          variant="outline"
-          onClick={refresh}
-        >
-          Reload values
-        </Button>
-      )}
-    </form>
   );
 }

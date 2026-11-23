@@ -7,7 +7,7 @@ import { useRequest, type Repository } from "@/lib/api";
 import {
   PropertyInput,
   type PropertyDefinition,
-} from "@/features/organizations/repository-properties";
+} from "@/features/organizations/property-fields";
 
 interface Condition {
   property: string;

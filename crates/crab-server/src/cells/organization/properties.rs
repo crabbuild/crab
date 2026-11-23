@@ -4,6 +4,7 @@ use super::*;
 
 const KEY: &str = "organization/v1/repository-properties";
 const MAX_PROPERTIES: usize = 50;
+pub(crate) const MAX_BATCH: usize = 50;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -156,11 +157,16 @@ pub(crate) struct View {
 
 fn view(context: &Transaction<'_>, repository: Repository) -> Result<View> {
     let schema = schema(context)?;
-    let mut values: Values = context.document(&repository.key()?)?.unwrap_or_default();
+    let values = values(context, &schema, &repository.key()?)?;
+    Ok(View { schema, values })
+}
+
+fn values(context: &Transaction<'_>, schema: &Schema, key: &str) -> Result<Values> {
+    let mut values: Values = context.document(key)?.unwrap_or_default();
     values
         .overrides
         .retain(|id, _| schema.definition(*id).is_some());
-    Ok(View { schema, values })
+    Ok(values)
 }
 
 pub(super) fn effective(
@@ -339,19 +345,183 @@ impl Mutation for SetValues {
         if current.values.overrides == input.overrides {
             return Ok(MutationResult::Success(Outcome::Saved(current)));
         }
-        current.values = Values {
-            version: current.values.version + 1,
-            overrides: input.overrides,
-        };
-        context.put_document(&input.repository.key()?, &current.values)?;
-        advance(
-            context,
-            input.actor,
-            Action::RepositoryPropertiesChanged {
-                repository: Some(input.repository.id),
-                version: current.values.version,
-            },
-        )?;
+        current.values.overrides = input.overrides;
+        save_values(context, input.actor, input.repository, &mut current.values)?;
         Ok(MutationResult::Success(Outcome::Saved(current)))
+    }
+}
+
+fn save_values(
+    context: &Transaction<'_>,
+    actor: Uuid,
+    repository: Repository,
+    values: &mut Values,
+) -> Result<()> {
+    values.version += 1;
+    context.put_document(&repository.key()?, values)?;
+    advance(
+        context,
+        actor,
+        Action::RepositoryPropertiesChanged {
+            repository: Some(repository.id),
+            version: values.version,
+        },
+    )
+}
+
+fn valid_selection(ids: impl ExactSizeIterator<Item = Uuid>) -> bool {
+    let mut unique = HashSet::new();
+    let mut ids = ids;
+    (1..=MAX_BATCH).contains(&ids.len()) && ids.all(|id| !id.is_nil() && unique.insert(id))
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct VersionedRepository {
+    pub repository: Repository,
+    pub version: u64,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum SelectionValue {
+    Shared { value: Option<PropertyValue> },
+    Mixed,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct SelectionView {
+    pub schema: Schema,
+    pub repositories: Vec<VersionedRepository>,
+    pub effective: BTreeMap<Uuid, SelectionValue>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Selection {
+    pub actor: Uuid,
+    pub repositories: Vec<Repository>,
+}
+
+pub(crate) struct GetSelection;
+impl Read for GetSelection {
+    const CLASS: &'static str = CLASS;
+    const ID: u32 = 56;
+    type Input = Selection;
+    type Output = SelectionView;
+
+    fn execute(context: &mut Transaction<'_>, selection: Selection) -> Result<SelectionView> {
+        if !valid_selection(selection.repositories.iter().map(|repo| repo.id)) {
+            return Err(Error::Invalid("invalid repository property selection"));
+        }
+        let schema = schema(context)?;
+        let mut repositories = Vec::with_capacity(selection.repositories.len());
+        let mut effective = BTreeMap::new();
+        for repository in selection.repositories {
+            let current = values(context, &schema, &repository.key()?)?;
+            repositories.push(VersionedRepository {
+                repository,
+                version: current.version,
+            });
+            for definition in &schema.definitions {
+                let value = current
+                    .overrides
+                    .get(&definition.id)
+                    .or(definition.default.as_ref());
+                match effective.entry(definition.id) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(SelectionValue::Shared {
+                            value: value.cloned(),
+                        });
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        if matches!(entry.get(), SelectionValue::Shared { value: previous } if previous.as_ref() != value)
+                        {
+                            entry.insert(SelectionValue::Mixed);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(SelectionView {
+            schema,
+            repositories,
+            effective,
+        })
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UpdateSelection {
+    pub actor: Uuid,
+    pub schema_version: u64,
+    pub repositories: Vec<VersionedRepository>,
+    pub changes: BTreeMap<Uuid, Option<PropertyValue>>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct SelectionReceipt {
+    pub updated: usize,
+}
+
+pub(crate) struct SetSelection;
+impl Mutation for SetSelection {
+    const CLASS: &'static str = CLASS;
+    const ID: u32 = 56;
+    type Input = UpdateSelection;
+    type Output = Outcome<SelectionReceipt>;
+
+    fn execute(
+        context: &mut Transaction<'_>,
+        input: UpdateSelection,
+    ) -> Result<MutationResult<Self::Output>> {
+        let schema = schema(context)?;
+        if schema.version != input.schema_version {
+            return Ok(MutationResult::Rejected(Outcome::Conflict));
+        }
+        if !valid_selection(input.repositories.iter().map(|row| row.repository.id))
+            || input.changes.is_empty()
+            || !input.changes.iter().all(|(id, value)| {
+                schema.definition(*id).is_some_and(|definition| {
+                    value.as_ref().is_none_or(|value| definition.accepts(value))
+                })
+            })
+        {
+            return Ok(MutationResult::Rejected(Outcome::Invalid));
+        }
+        // Collect every valid edit before writing. A changed schema or a stale
+        // repository leaves all selected values and audit events untouched.
+        let mut pending = Vec::new();
+        for row in input.repositories {
+            let mut current = values(context, &schema, &row.repository.key()?)?;
+            if row.version != current.version || current.version >= MAX_VERSION - 1 {
+                return Ok(MutationResult::Rejected(Outcome::Conflict));
+            }
+            let changes = input
+                .changes
+                .iter()
+                .any(|(id, value)| current.overrides.get(id) != value.as_ref());
+            if changes {
+                for (id, value) in &input.changes {
+                    match value {
+                        Some(value) => {
+                            current.overrides.insert(*id, value.clone());
+                        }
+                        None => {
+                            current.overrides.remove(id);
+                        }
+                    }
+                }
+                pending.push((row.repository, current));
+            }
+        }
+        let updated = pending.len();
+        for (repository, mut values) in pending {
+            save_values(context, input.actor, repository, &mut values)?;
+        }
+        Ok(MutationResult::Success(Outcome::Saved(SelectionReceipt {
+            updated,
+        })))
     }
 }

@@ -1193,9 +1193,13 @@ and current write access to the repository.
 ### Manage repository properties
 
 Open **Organization → Properties** to define text, boolean, single-select, or
-multi-select fields and set values for an individual repository. A default
-applies to repositories with no override, including new repositories.
-Clear an override to restore the default. Repository readers can open
+multi-select fields. Select up to 50 repositories across search pages and
+choose **Edit properties**. The editor shows shared and mixed values. For
+each field you can keep existing values, set an override, or restore defaults.
+A default applies to repositories with no override, including new repositories.
+One save applies the entire selection. A stale selection prevents every write
+in the batch. Retry a lost response with the same submission to recover the
+original receipt. Repository readers can open
 **Repository properties** from the repository's **Rulesets** page.
 Organization owners manage definitions and overrides.
 
@@ -1212,6 +1216,12 @@ definitions and `PUT` with `expected_version` and `definitions` to replace
 them. Use `GET /api/repos/{owner}/{name}/properties` for the definitions and
 versioned overrides. A repository `PUT` accepts `schema_version`,
 `expected_version`, and the complete `overrides` object keyed by property UUID.
+Organization owners can use `GET /api/organizations/{id}/repository-properties/values?repositories={uuid},{uuid}`
+to capture the schema, repository IDs, ownership epochs, value versions, and
+effective values. A `PUT` to the same path takes a `request_id`, `issued_at_ms`,
+`schema_version`, the captured `repositories`, and a `changes` map keyed by
+property UUID. Use `null` to clear an override. Reuse the same payload after
+a lost response. The receipt contains the number of repositories updated.
 Remove a rule's reference before deleting a definition. Retained definitions
 keep their type and allow existing select values to remain valid.
 

@@ -933,16 +933,32 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
         .await;
     browser
         .run(&[
-            "select",
-            "#repository-property-target",
-            repository["id"].as_str().unwrap(),
+            "find", "role", "checkbox", "click", "--name", "library", "--exact",
+        ])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Edit properties",
+            "--exact",
         ])
         .await;
     browser
         .run(&["wait", "#repository-property-values select"])
         .await;
     browser
-        .run(&["select", "#repository-property-values select", "false"])
+        .run(&["select", "#repository-property-values select", "set"])
+        .await;
+    browser
+        .run(&[
+            "select",
+            "#repository-property-values select:has(option[value='false'])",
+            "false",
+        ])
         .await;
     browser
         .run(&[
@@ -956,7 +972,11 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
         ])
         .await;
     browser
-        .run(&["wait", "--text", "Repository values saved."])
+        .run(&[
+            "wait",
+            "--text",
+            "Repository values saved for 1 repository.",
+        ])
         .await;
     let saved = h
         .json(&format!("/api/repos/{owner}/library/properties"), &alice)

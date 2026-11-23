@@ -344,6 +344,7 @@ pub(in crate::cells) fn authorize(
             | ListInvitations::ID
             | rulesets::Get::ID
             | properties::GetSchema::ID
+            | properties::GetSelection::ID
             | InspectMemberRepositoryRoles::ID
             | automation::List::ID,
             false,
@@ -359,6 +360,7 @@ pub(in crate::cells) fn authorize(
             | rulesets::Replace::ID
             | properties::SetSchema::ID
             | properties::SetValues::ID
+            | properties::SetSelection::ID
             | automation::Change::ID,
             true,
         ) => true,
@@ -442,6 +444,7 @@ pub(in crate::cells) fn dispatch_read(
         rulesets::Applicable::ID => invoke_read::<rulesets::Applicable>(context, input),
         properties::GetSchema::ID => invoke_read::<properties::GetSchema>(context, input),
         properties::GetValues::ID => invoke_read::<properties::GetValues>(context, input),
+        properties::GetSelection::ID => invoke_read::<properties::GetSelection>(context, input),
         repositories::Owners::ID => invoke_read::<repositories::Owners>(context, input),
         teams::MentionMembers::ID => invoke_read::<teams::MentionMembers>(context, input),
         automation::List::ID => invoke_read::<automation::List>(context, input),
@@ -487,6 +490,7 @@ pub(in crate::cells) fn dispatch_mutation(
         rulesets::Replace::ID => invoke_mutation::<rulesets::Replace>(context, input),
         properties::SetSchema::ID => invoke_mutation::<properties::SetSchema>(context, input),
         properties::SetValues::ID => invoke_mutation::<properties::SetValues>(context, input),
+        properties::SetSelection::ID => invoke_mutation::<properties::SetSelection>(context, input),
         automation::Change::ID => invoke_mutation::<automation::Change>(context, input),
         Edit::ID => invoke_mutation::<Edit>(context, input),
         ChangeMember::ID => invoke_mutation::<ChangeMember>(context, input),
