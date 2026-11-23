@@ -134,12 +134,14 @@ export function ConflictReview<
   },
 >({
   url,
+  repositoryId,
   onResolve,
 }: {
   url: string;
+  repositoryId?: string;
   onResolve: (latest: T, choice: "draft" | "saved") => void;
 }) {
-  const latest = useRequest<T>(url);
+  const latest = useRequest<T>(url, repositoryId);
   const panel = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (document.activeElement === document.body) panel.current?.focus();

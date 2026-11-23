@@ -152,8 +152,11 @@ export function Conversation({
                     />
                   ) : (
                     <ReviewCard
+                      onEdited={(value) =>
+                        history.upsert({ kind: "review", value })
+                      }
                       onVisibilityChanged={history.retry}
-                      onSaved={() => {
+                      onDismissed={() => {
                         history.refresh();
                         onChanged?.();
                       }}

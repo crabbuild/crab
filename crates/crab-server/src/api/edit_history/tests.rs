@@ -140,14 +140,12 @@ async fn edit_history_preserves_attribution_and_redaction_hides_adjacent_compari
     h.close().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn pull_history_records_description_reviews_comments_inline_suggestions_and_replies() {
-    let (h, alice, bob) = issue().await;
+async fn create_pull(h: &Harness, author: &str) -> (Value, String) {
     let token: Value = h
         .write(
             Method::POST,
             "/api/git-token",
-            &alice,
+            author,
             json!({"owner":"team","repository":"private","access":"write"}),
         )
         .await
@@ -162,10 +160,17 @@ async fn pull_history_records_description_reviews_comments_inline_suggestions_an
     let source = tempfile::tempdir().unwrap();
     let head = git::push_review_branches(source.path(), remote.as_str()).await;
     let pull: Value = h.write(
-        Method::POST, &format!("{ROOT}/pulls"), &alice,
+        Method::POST, &format!("{ROOT}/pulls"), author,
         json!({"request_id":Uuid::now_v7(),"title":"Track review edits","body":"Original pull description",
             "base_ref":"refs/heads/main","head_ref":"refs/heads/feature"}),
     ).await.error_for_status().unwrap().json().await.unwrap();
+    (pull, head)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pull_history_records_description_reviews_comments_inline_suggestions_and_replies() {
+    let (h, alice, bob) = issue().await;
+    let (pull, head) = create_pull(&h, &alice).await;
     for (route, input) in [
         (
             "pulls/1/comments",
@@ -371,6 +376,116 @@ async fn embedded_browser_compares_and_removes_an_authored_comment_revision() {
     assert_eq!(
         h.json(&history, &bob).await["items"][0]["redaction"]["author"]["name"],
         "Bob"
+    );
+    browser.run(&["close"]).await;
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires agent-browser and the built embedded UI against the native catalog"]
+async fn embedded_browser_edits_pull_content_and_submitted_review_without_losing_newer_fields() {
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    let (pull, head) = create_pull(&h, &alice).await;
+    let review_path = format!("{ROOT}/pulls/1/reviews/1");
+    h.write(
+        Method::POST,
+        &format!("{ROOT}/pulls/1/reviews"),
+        &alice,
+        json!({"request_id":Uuid::now_v7(),"body":"First review summary","state":"commented","commit_oid":head}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+
+    let browser = Browser::new("pull-edits");
+    let page = format!("{}/team/private/pull/1", h.origin);
+    browser.run(&["open", &page]).await;
+    browser.sign_in().await;
+    browser
+        .run(&["wait", "--text", "Original pull description"])
+        .await;
+    let click = async |name: &str| {
+        browser
+            .run(&["find", "role", "button", "click", "--name", name, "--exact"])
+            .await;
+    };
+    click("Edit pull request").await;
+    browser
+        .run(&["fill", "#edit-pull-description-title", "Updated pull title"])
+        .await;
+    let latest = patch(
+        &h,
+        &alice,
+        "pulls/1",
+        json!({"version":pull["version"],"body":"Description from another tab"}),
+    )
+    .await;
+    click("Save changes").await;
+    browser
+        .run(&["wait", "--text", "Newer content was saved"])
+        .await;
+    browser
+        .run(&["wait", "--text", "Continue with my draft"])
+        .await;
+    click("Continue with my draft").await;
+    click("Save changes").await;
+    browser
+        .run(&["wait", "--fn", "!document.querySelector('[role=dialog]')"])
+        .await;
+    browser.run(&["wait", "--text", "Updated pull title"]).await;
+    browser
+        .run(&["wait", "--text", "Description from another tab"])
+        .await;
+    let saved = h.json(&format!("{ROOT}/pulls/1"), &alice).await;
+    assert_eq!(saved["title"], "Updated pull title");
+    assert_eq!(saved["body"], latest["body"]);
+    let root_history = h.json(&history("pulls/1"), &alice).await;
+    assert_eq!(root_history["items"].as_array().unwrap().len(), 1);
+
+    click("Edit pull request").await;
+    browser
+        .run(&["fill", "#edit-pull-description", "Revised pull description"])
+        .await;
+    click("Save changes").await;
+    browser
+        .run(&["wait", "--fn", "!document.querySelector('[role=dialog]')"])
+        .await;
+    browser
+        .run(&["wait", "--text", "Revised pull description"])
+        .await;
+    let saved = h.json(&format!("{ROOT}/pulls/1"), &alice).await;
+    assert_eq!(saved["title"], "Updated pull title");
+    assert_eq!(saved["body"], "Revised pull description");
+    assert_eq!(saved["has_edit_history"], true);
+
+    browser
+        .run(&["wait", "--text", "First review summary"])
+        .await;
+    click("Edit review summary").await;
+    browser
+        .run(&["fill", "#edit-review-1", "Revised review summary"])
+        .await;
+    click("Save changes").await;
+    browser
+        .run(&["wait", "--text", "Revised review summary"])
+        .await;
+    let review = h.json(&review_path, &alice).await;
+    assert_eq!(review["body"], "Revised review summary");
+    assert_eq!(review["state"], "commented");
+    assert_eq!(review["commit_oid"], head);
+    assert_eq!(review["has_edit_history"], true);
+    browser
+        .run(&["open", &format!("{page}#pullrequestreview-1")])
+        .await;
+    browser
+        .run(&["wait", "--text", "Revised review summary"])
+        .await;
+    assert!(
+        browser
+            .run(&["snapshot"])
+            .await
+            .contains("Review #1 permalink")
     );
     browser.run(&["close"]).await;
     h.close().await;

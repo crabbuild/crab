@@ -3,13 +3,14 @@ import {
   useConversationLock,
 } from "@/components/discussion/conversation/lock";
 import { mergeMethod } from "./merge-methods";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { OverlayVisibility } from "@/components/ui/use-overlay-state";
 import { useSubmission } from "@/components/discussion/hooks";
 import { Author } from "@/components/discussion/author";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
 import { PullChecks } from "./candidate-checks";
 import { ChangeBase } from "./change-base";
+import { EditPullRequest } from "./edit";
 import type { CodeThemes } from "@/lib/code-theme";
 import { DiscussionMetadata } from "@/components/discussion/metadata";
 import { repoHref, repositoryRoute } from "@/lib/repository-route";
@@ -70,13 +71,14 @@ export function PullDetail({
   const pull = useRequest<PullRequest>(path);
   const [current, setCurrent] = useState<PullRequest>();
   const [epoch, setEpoch] = useState(0);
+  const accept = useCallback((incoming: PullRequest) => {
+    setCurrent((old) =>
+      old && old.version > incoming.version ? old : incoming,
+    );
+  }, []);
   useEffect(() => {
-    const incoming = pull.data;
-    if (incoming)
-      setCurrent((old) =>
-        old && old.version > incoming.version ? old : incoming,
-      );
-  }, [pull.data]);
+    if (pull.data) accept(pull.data);
+  }, [pull.data, accept]);
   function refresh() {
     pull.retry();
     conversationLock?.refresh();
@@ -138,9 +140,17 @@ export function PullDetail({
             </Alert>
           )}
           <div className="pull-title">
-            <h2>
-              {data.title} <span className="muted">#{data.number}</span>
-            </h2>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <h2>
+                {data.title} <span className="muted">#{data.number}</span>
+              </h2>
+              <EditPullRequest
+                repo={repo}
+                pull={data}
+                csrf={csrf}
+                accept={accept}
+              />
+            </div>
             <div className="pull-summary">
               <PullBadge pull={data} />
               {data.merge ? (

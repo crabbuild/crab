@@ -2685,6 +2685,14 @@ reads, attachments, and discussion search retain the original content. Update
 serving peers together before hiding comments to enable the new activity events
 and batched presentation response. Existing comments need no migration.
 
+### Edit pull requests and review summaries
+
+Pull request authors can choose **Edit pull request** beside the title to update
+the title and description. Review authors can choose **Edit review summary** on
+a submitted review. These edits preserve the review decision, reviewed commit,
+and permalink. If a newer version was saved, the editor keeps the draft and
+asks the author to compare it with the current content before saving again.
+
 ### View edit history
 
 Choose **edited** on an issue or PR description, comment, review, inline

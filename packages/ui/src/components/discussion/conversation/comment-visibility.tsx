@@ -88,6 +88,7 @@ export function CommentVisibility({
   target,
   minimization,
   onChanged,
+  retainDraft = false,
   children,
 }: {
   repo: Repository;
@@ -95,6 +96,7 @@ export function CommentVisibility({
   target: string;
   minimization?: CommentMinimization | null;
   onChanged: () => void;
+  retainDraft?: boolean;
   children: ReactNode;
 }) {
   const controls = useCommentVisibility();
@@ -255,9 +257,9 @@ export function CommentVisibility({
                 {!open && recover}
               </div>
             )}
-            {children}
           </>
         )}
+        {(visible || retainDraft) && children}
       </div>
     </>
   );
