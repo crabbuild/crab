@@ -9,6 +9,14 @@ async fn native_browser_queue_publishes_tested_commits_in_admission_order() {
     let h = Harness::new(false).await;
     let writer = h.login().await;
     let root = "/api/repos/team/private";
+    let members = format!("{root}/members");
+    let revision = h.json(&members, &writer).await["revision"].clone();
+    h.write(Method::PUT, &members, &writer, json!({"expected_revision":revision,"members":[
+        {"subject":"alice-id","name":"Alice","access":"admin"}, {"subject":"bob-id","name":"Bob","access":"read"}],"groups":[]}))
+        .await.error_for_status().unwrap();
+    *h.provider.mode.lock().await = "member".into();
+    let reader = h.login().await;
+    *h.provider.mode.lock().await = "valid".into();
     let token: Value = h
         .write(
             Method::POST,
@@ -128,6 +136,80 @@ async fn native_browser_queue_publishes_tested_commits_in_admission_order() {
         h.json(&format!("{second}/auto-merge"), &writer).await["request"]["first"],
         false
     );
+
+    let queue_endpoint = format!("{root}/pulls/queue?branch=refs%2Fheads%2Fintegration");
+    let visible = h.json(&queue_endpoint, &reader).await;
+    assert_eq!(visible["items"][0]["title"], "feature");
+    assert_eq!(visible["items"][0]["can_remove"], false);
+    assert_eq!(
+        h.write(
+            Method::DELETE,
+            &format!("{first}/auto-merge"),
+            &reader,
+            json!({"request_id":visible["items"][0]["request_id"]})
+        )
+        .await
+        .status(),
+        reqwest::StatusCode::FORBIDDEN
+    );
+    browser
+        .run(&["wait", "--fn", "!document.querySelector('[role=dialog]')"])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "link",
+            "click",
+            "--name",
+            "View merge queue",
+            "--exact",
+        ])
+        .await;
+    browser.run(&["wait", "--text", "#2 feature-two"]).await;
+    browser
+        .run(&["wait", "--fn", "Array.from(document.querySelectorAll('ol[aria-label=\"Queued pull requests\"] li a:first-child'), a => a.textContent.trim()).join(',') === '#1 feature,#2 feature-two'"])
+        .await;
+    browser
+        .run(&["select", "#merge-queue-branch", "refs/heads/main"])
+        .await;
+    browser
+        .run(&[
+            "wait",
+            "--text",
+            "No pull requests are queued for this branch.",
+        ])
+        .await;
+    browser
+        .run(&["select", "#merge-queue-branch", "refs/heads/integration"])
+        .await;
+    browser
+        .run(&["wait", "[aria-label='Remove pull request #2 from queue']"])
+        .await;
+    browser
+        .run(&["click", "[aria-label='Remove pull request #2 from queue']"])
+        .await;
+    browser
+        .run(&[
+            "wait",
+            "--text",
+            "Removed pull request #2 from the merge queue.",
+        ])
+        .await;
+    assert_eq!(
+        h.json(&queue_endpoint, &writer).await["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["pull"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        [1]
+    );
+    browser
+        .run(&["open", &format!("{}/team/private/pull/2", h.origin)])
+        .await;
+    click("Add to merge queue").await;
+    click("Confirm merge queue entry").await;
 
     // Start the worker after the enqueues to exercise durable discovery.
     let worker = tokio::spawn(crate::api::auto_merge::run(Arc::clone(&h.server)));

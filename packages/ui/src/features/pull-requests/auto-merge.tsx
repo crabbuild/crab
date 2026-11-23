@@ -201,6 +201,21 @@ export function AutoMerge({
                 : mergeMethod(scheduled.method).label + " at"}{" "}
               <code>{short(scheduled.head_oid)}</code> ·{" "}
               {scheduled.scheduled_by}
+              {scheduled.queue && (
+                <>
+                  {" · "}
+                  <Link
+                    className="underline"
+                    href={repoHref(repo, {
+                      view: "pulls",
+                      action: "queue",
+                      branch: pull.base_ref,
+                    })}
+                  >
+                    View merge queue
+                  </Link>
+                </>
+              )}
               {scheduled.queue && scheduled.testing && (
                 <>
                   {" · "}

@@ -1,6 +1,8 @@
 use super::*;
 use uuid::Uuid;
 
+pub(crate) mod list;
+
 const ACTIVE: &str = "collaboration/v1/auto-merge/active/";
 const QUEUE: &str = "collaboration/v1/merge-queue/";
 const QUEUE_SEQUENCE: &str = "collaboration/v1/merge-queue-sequence";

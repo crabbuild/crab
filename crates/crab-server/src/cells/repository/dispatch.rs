@@ -414,6 +414,9 @@ pub(in crate::cells) fn dispatch_read(
         }
         pull_auto_merge::Get::ID => invoke_read::<pull_auto_merge::Get>(context, input),
         pull_auto_merge::Pending::ID => invoke_read::<pull_auto_merge::Pending>(context, input),
+        pull_auto_merge::list::List::ID => {
+            invoke_read::<pull_auto_merge::list::List>(context, input)
+        }
         <GetRepositoryLifecycle as Read>::ID => {
             invoke_read::<GetRepositoryLifecycle>(context, input)
         }

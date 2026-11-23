@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use axum::{
     Extension, Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     routing::get,
 };
 use serde::Deserialize;
@@ -32,10 +32,47 @@ const TTL: Duration = Duration::from_secs(300);
 type Address = (String, String, u64);
 
 pub(super) fn routes() -> Router<Arc<Server>> {
-    Router::new().route(
-        "/api/repos/{owner}/{name}/pulls/{number}/auto-merge",
-        get(detail).put(enable).delete(disable),
-    )
+    Router::new()
+        .route("/api/repos/{owner}/{name}/pulls/queue", get(list_queue))
+        .route(
+            "/api/repos/{owner}/{name}/pulls/{number}/auto-merge",
+            get(detail).put(enable).delete(disable),
+        )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueueQuery {
+    branch: String,
+    before: Option<String>,
+}
+
+async fn list_queue(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name)): Path<(String, String)>,
+    Query(input): Query<QueueQuery>,
+) -> Result<Json<cell::list::Page>> {
+    let repo = app::repository(&server, &principal, &(owner, name))?;
+    let access = app::membership(&server, &principal, &repo).await?;
+    let routed = app::repository_cell(&server, &repo)?;
+    let page = app::query_output(
+        routed
+            .client
+            .query::<cell::list::List>(
+                &routed.target,
+                None,
+                cell::list::Query {
+                    branch: input.branch,
+                    before: input.before,
+                    actor: (&app::actor(&principal)?).into(),
+                    can_write: access.principal.can_write(repo.id),
+                },
+            )
+            .await,
+    )?;
+    app::membership(&server, &principal, &repo).await?;
+    Ok(Json(page))
 }
 
 #[derive(Deserialize)]

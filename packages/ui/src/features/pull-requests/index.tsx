@@ -6,6 +6,7 @@ import { Link } from "@/components/navigation/link";
 import { NewPull } from "./create";
 import { PullDetail } from "./detail";
 import { PullList } from "./list";
+import { MergeQueue } from "./merge-queue";
 
 export function PullRequests({
   repo,
@@ -22,7 +23,10 @@ export function PullRequests({
   theme: "light" | "dark";
   codeThemes: CodeThemes;
 }) {
-  const pull = repositoryRoute(url)?.pull;
+  const route = repositoryRoute(url);
+  if (route?.action === "queue")
+    return <MergeQueue repo={repo} refs={refs} url={url} csrf={csrf} />;
+  const pull = route?.pull;
   if (pull === "new")
     return repo.archived ? (
       <div className="notice">

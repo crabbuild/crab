@@ -1,0 +1,266 @@
+use super::*;
+use crate::cells::{Error, Result};
+
+const LIMIT: usize = 16;
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct Query {
+    pub branch: String,
+    pub before: Option<String>,
+    pub actor: RepositoryAuthor,
+    pub can_write: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(rename = "MergeQueueState"))]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum EntryState {
+    Waiting,
+    Preparing,
+    CandidateScheduled,
+    Publishing,
+}
+
+#[derive(Deserialize, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(rename = "MergeQueueItem"))]
+pub(crate) struct Entry {
+    pull: u64,
+    title: String,
+    request_id: Uuid,
+    head_oid: String,
+    state: EntryState,
+    can_remove: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(rename = "MergeQueuePage"))]
+pub(crate) struct Page {
+    items: Vec<Entry>,
+    next: Option<String>,
+}
+
+pub(crate) struct List;
+impl Read for List {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
+    const ID: u32 = 440;
+    type Input = Query;
+    type Output = Page;
+
+    fn execute(context: &mut Transaction<'_>, input: Query) -> Result<Page> {
+        super::super::operations::validate_ref(&input.branch)?;
+        validate_author(&input.actor)?;
+        let prefix = queue_prefix(&input.branch);
+        if let Some(before) = &input.before
+            && !before.strip_prefix(&prefix).is_some_and(|key| {
+                key.len() == 16
+                    && key
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+        {
+            return Err(Error::Invalid(
+                "Merge queue cursor is invalid for this branch",
+            ));
+        }
+
+        let rows = context.documents::<u64>(&prefix, input.before.as_deref(), LIMIT + 1)?;
+        let settings = settings::merge_methods::load_for_ref(context, &input.branch)?;
+        let width = usize::from(settings.merge_queue_builds);
+        let window = if input.before.is_none() {
+            rows.iter()
+                .take(width)
+                .map(|(_, pull)| *pull)
+                .collect::<Vec<_>>()
+        } else {
+            context
+                .documents::<u64>(&prefix, None, width)?
+                .into_iter()
+                .map(|(_, pull)| pull)
+                .collect()
+        };
+        let next = (rows.len() > LIMIT).then(|| rows[LIMIT - 1].0.clone());
+        let mut items = Vec::with_capacity(rows.len().min(LIMIT));
+        for (position, number) in rows.into_iter().take(LIMIT) {
+            let Some(job) = context.document::<Job>(&key(ACTIVE, number))? else {
+                return Err(Error::Invalid("Merge queue entry has no active job"));
+            };
+            let Some(queue) = job.queue.filter(|queue| {
+                job.base_ref == input.branch && queue_key(&job.base_ref, queue.sequence) == position
+            }) else {
+                return Err(Error::Invalid("Merge queue entry does not match its key"));
+            };
+            // A queue row only needs the current PR summary and authority.
+            // Avoid loading descriptions, review decisions, and merge receipts.
+            let pull = context.query(
+                "SELECT title, version, author_issuer, author_subject, pending_merge IS NOT NULL
+                 FROM repository_pulls WHERE number=?",
+                &[integer(number)?],
+            )?;
+            let [row] = pull.rows.as_slice() else {
+                return Err(Error::Invalid("Merge queue entry has no pull request"));
+            };
+            let version = result_u64_from_row(row, 1)?;
+            let publishing = result_u64_from_row(row, 4)? != 0;
+            let owns_pull = input.actor.issuer == result_text(row, 2)?
+                && input.actor.subject == result_text(row, 3)?;
+            let state = if publishing {
+                EntryState::Publishing
+            } else if !window.contains(&number) {
+                EntryState::Waiting
+            } else if queue.testing.is_some_and(|test| test.version == version) {
+                EntryState::CandidateScheduled
+            } else {
+                EntryState::Preparing
+            };
+            items.push(Entry {
+                pull: number,
+                title: result_text(row, 0)?,
+                request_id: job.id,
+                head_oid: job.head_oid,
+                state,
+                can_remove: !publishing && (input.can_write || owns_pull),
+            });
+        }
+        Ok(Page { items, next })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn branch_queue_pages_follow_admission_order_across_removals() {
+        let server = crate::test_support::server::fixture().await;
+        let repo = &server.repositories.values()[0];
+        let cell = server.cells().unwrap().repository(repo.id).unwrap();
+        let actor = RepositoryAuthor {
+            issuer: "https://identity.test".into(),
+            subject: "writer".into(),
+            name: "Writer".into(),
+        };
+        let branch = "refs/heads/main";
+        let base_oid = "a".repeat(40);
+        let head_oid = "b".repeat(40);
+        for _ in 0..=LIMIT {
+            let opened = cell
+                .client
+                .command::<CreatePull>(
+                    &cell.target,
+                    crate::app::mutation_identity().unwrap(),
+                    CreatePullInput {
+                        code_owner_requests: Default::default(),
+                        metadata: Default::default(),
+                        draft: false,
+                        submission_id: *Uuid::now_v7().as_bytes(),
+                        author: actor.clone(),
+                        title: "Queued change".into(),
+                        body: String::new(),
+                        base_ref: branch.into(),
+                        base_oid: base_oid.clone(),
+                        head_ref: "refs/heads/feature".into(),
+                        head_repository: None,
+                        head_oid: head_oid.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(matches!(opened.output, CreatePullOutcome::Created(_)));
+        }
+        let mut ids = Vec::new();
+        for pull in (1..=LIMIT as u64 + 1).rev() {
+            let id = Uuid::now_v7();
+            ids.push(id);
+            let result = cell
+                .client
+                .command::<Edit>(
+                    &cell.target,
+                    crate::app::mutation_identity().unwrap(),
+                    Change::Arm {
+                        version: 1,
+                        job: Job {
+                            pull,
+                            id,
+                            actor: actor.clone(),
+                            base_ref: branch.into(),
+                            head_ref: "refs/heads/feature".into(),
+                            head_repository: None,
+                            head_oid: head_oid.clone(),
+                            initial_base_oid: base_oid.clone(),
+                            initial_version: 1,
+                            generation: 0,
+                            queue_method_revision: 0,
+                            comparison_revision: None,
+                            method: MergeMethod::MergeCommit,
+                            message: String::new(),
+                            queue: None,
+                        },
+                        queue: true,
+                        configured_queue_required: true,
+                        ruleset_queue_required: false,
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(matches!(result.output, Outcome::Saved));
+        }
+        let read = async |branch: &str, before| {
+            cell.client
+                .query::<List>(
+                    &cell.target,
+                    None,
+                    Query {
+                        branch: branch.into(),
+                        before,
+                        actor: actor.clone(),
+                        can_write: false,
+                    },
+                )
+                .await
+        };
+        let first = read(branch, None).await.unwrap().output;
+        assert_eq!(
+            first
+                .items
+                .iter()
+                .map(|entry| entry.pull)
+                .collect::<Vec<_>>(),
+            (2..=LIMIT as u64 + 1).rev().collect::<Vec<_>>()
+        );
+        assert!(matches!(first.items[0].state, EntryState::Preparing));
+        assert!(matches!(first.items[1].state, EntryState::Waiting));
+        assert!(first.items.iter().all(|entry| entry.can_remove));
+
+        assert!(
+            read("refs/heads/another", first.next.clone())
+                .await
+                .is_err()
+        );
+        let result = cell
+            .client
+            .command::<Edit>(
+                &cell.target,
+                crate::app::mutation_identity().unwrap(),
+                Change::Disarm {
+                    pull: 2,
+                    id: ids[LIMIT - 1],
+                    reason: Stop::Canceled,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(result.output, Outcome::Saved));
+        let last = read(branch, first.next).await.unwrap().output;
+        assert_eq!(
+            last.items
+                .iter()
+                .map(|entry| entry.pull)
+                .collect::<Vec<_>>(),
+            [1]
+        );
+        assert!(last.next.is_none());
+    }
+}
