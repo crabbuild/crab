@@ -4421,6 +4421,68 @@ async fn ahead_history_excludes_every_base_ancestor_and_binds_both_commits() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn ahead_history_pages_keep_first_parent_order_when_the_index_changes() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let graph = publish_complete_graph(&fixture, true).await;
+    let cancellation = CancellationToken::new();
+    let indexed = fixture
+        .repository
+        .with_commit_graph(&graph, &cancellation)
+        .await
+        .unwrap();
+    let page = async |repository: &crab_remote_git::RemoteGitRepository,
+                      limit: usize,
+                      after: Option<PageCursor>| {
+        let operation = repository
+            .operation(OperationKind::History, &cancellation)
+            .await?;
+        let result = async {
+            let head = repository
+                .snapshot(&Revision::Reference("main".into()), &operation)
+                .await?;
+            let base = repository
+                .snapshot(&Revision::Commit(fixture.semantic_base_commit), &operation)
+                .await?;
+            head.ahead_history(&base, &PageRequest::new(limit, after)?, &operation)
+                .await
+        }
+        .await;
+        operation.finish(result).await
+    };
+    for (first_capture, second_capture) in [
+        (&fixture.repository, &indexed),
+        (&indexed, &fixture.repository),
+    ] {
+        let first = page(first_capture, 2, None).await.unwrap();
+        assert_eq!(first.items.len(), 2);
+        assert_eq!(first.items[1].oid, fixture.root_commit);
+        let cursor = first.next.unwrap();
+        assert_eq!(&cursor.as_bytes()[..2], &[2, 4]);
+        let resumed = page(second_capture, 1, Some(cursor)).await.unwrap();
+        assert_eq!(resumed.items.len(), 1);
+        assert_eq!(resumed.items[0].oid, fixture.side_commit);
+        assert!(resumed.next.is_none());
+    }
+
+    // The tagged cursor had no order field. Its indexed offset still counts
+    // the higher-generation side parent before the first parent.
+    let first = page(&indexed, 1, None).await.unwrap();
+    let mut released = vec![1, 4];
+    released.extend_from_slice(first.items[0].oid.as_bytes());
+    released.extend_from_slice(fixture.semantic_base_commit.as_bytes());
+    released.extend_from_slice(&1u64.to_be_bytes());
+    let released = PageCursor::from_bytes(released).unwrap();
+    let second = page(&indexed, 1, Some(released)).await.unwrap();
+    assert_eq!(second.items[0].oid, fixture.side_commit);
+    let cursor = second.next.unwrap();
+    assert_eq!(&cursor.as_bytes()[..2], &[1, 4]);
+    let last = page(&indexed, 1, Some(cursor)).await.unwrap();
+    assert_eq!(last.items[0].oid, fixture.root_commit);
+    assert!(last.next.is_none());
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn indexed_ahead_history_spends_history_budget_on_topic_commits() {
     let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
     let graph = publish_complete_graph(&fixture, true).await;

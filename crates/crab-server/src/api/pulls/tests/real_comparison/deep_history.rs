@@ -4,6 +4,7 @@ use crab_remote_git::{OperationKind, OperationLimits, RepositoryOptions, Revisio
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires loopback RustFS, stock Git, and the embedded Chromium UI"]
 async fn deep_pull_commit_pages_match_git_and_render_in_the_browser() {
+    use std::collections::BTreeSet;
     use std::fmt::Write as _;
     use std::process::Stdio;
     use tokio::io::AsyncWriteExt as _;
@@ -54,6 +55,16 @@ async fn deep_pull_commit_pages_match_git_and_render_in_the_browser() {
     }
     let topic = git_ok(source, &["rev-parse", "feature"]).await;
     let tree = git_ok(source, &["rev-parse", "feature^{tree}"]).await;
+    let side = git_ok(
+        source,
+        &["commit-tree", &tree, "-p", &common, "-m", "Side lane first"],
+    )
+    .await;
+    let side_tip = git_ok(
+        source,
+        &["commit-tree", &tree, "-p", &side, "-m", "Side lane tip"],
+    )
+    .await;
     let head = git_ok(
         source,
         &[
@@ -61,6 +72,8 @@ async fn deep_pull_commit_pages_match_git_and_render_in_the_browser() {
             &tree,
             "-p",
             &topic,
+            "-p",
+            &side_tip,
             "-p",
             &older,
             "-m",
@@ -70,7 +83,12 @@ async fn deep_pull_commit_pages_match_git_and_render_in_the_browser() {
     .await;
     git_ok(source, &["update-ref", "refs/heads/feature", &head]).await;
     let base = git_ok(source, &["rev-parse", "main"]).await;
-    let expected = git_ok(source, &["rev-list", "main..feature"]).await;
+    let git_range = git_ok(source, &["rev-list", "main..feature"]).await;
+    let expected = [head.clone(), topic, side_tip, side];
+    assert_eq!(
+        expected.iter().map(String::as_str).collect::<BTreeSet<_>>(),
+        git_range.lines().collect(),
+    );
     assert_eq!(
         git_ok(source, &["merge-base", "main", "feature"]).await,
         common
@@ -180,15 +198,20 @@ async fn deep_pull_commit_pages_match_git_and_render_in_the_browser() {
         .unwrap();
     assert_eq!(pull["number"], 1);
 
-    let range = format!("{api}/commits?rev={head}&base={base}&limit=1");
+    let range = format!("{api}/commits?rev={head}&base={base}&limit=2");
     let started = Instant::now();
     let first = h.json(&range, &alice).await;
     let next = first["next"].as_str().unwrap().to_owned();
     let second = h.json(&format!("{range}&cursor={next}"), &alice).await;
-    for (page, oid) in [&first, &second].into_iter().zip(expected.lines()) {
-        assert_eq!(page["items"].as_array().unwrap().len(), 1);
-        assert_eq!(page["items"][0]["oid"], oid);
-    }
+    let actual = [&first, &second]
+        .into_iter()
+        .flat_map(|page| page["items"].as_array().unwrap())
+        .map(|commit| commit["oid"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual,
+        expected.iter().map(String::as_str).collect::<Vec<_>>()
+    );
     assert!(second["next"].is_null());
     eprintln!(
         "deep pull history cold_pages_ms={}",
@@ -219,10 +242,14 @@ async fn deep_pull_commit_pages_match_git_and_render_in_the_browser() {
             "find", "role", "link", "click", "--name", "Commits", "--exact",
         ])
         .await;
-    for message in ["Topic merge", "Topic file"] {
+    for message in [
+        "Topic merge",
+        "Topic file",
+        "Side lane tip",
+        "Side lane first",
+    ] {
         browser.run(&["wait", "--text", message]).await;
     }
-    drop(browser);
 
     let started = Instant::now();
     assert!(
@@ -253,6 +280,12 @@ async fn deep_pull_commit_pages_match_git_and_render_in_the_browser() {
 
     let resumed = h.json(&format!("{range}&cursor={next}"), &alice).await;
     assert_eq!(resumed, second);
+    assert_eq!(h.json(&range, &alice).await, first);
+    browser.run(&["reload"]).await;
+    browser.run(&["wait", "--text", "Side lane first"]).await;
+    let snapshot = browser.run(&["snapshot"]).await;
+    assert!(snapshot.find("Topic file").unwrap() < snapshot.find("Side lane tip").unwrap());
+    drop(browser);
     drop(permit);
     h.close().await;
 }

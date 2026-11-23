@@ -3368,9 +3368,11 @@ verified parent links proves that all topic paths end in the known shared
 history. Inconclusive cases retain the bounded base walk. The native RustFS
 fixture builds 10,050 shared commits and a topic merge with a parent below the
 merge base. It checks the unindexed merge base with a ten-commit read budget and
-opens a PR against the inspected tips. Two unindexed one-item commit pages match
-`git rev-list` and Chromium shows the commits before graph publication. The
-same continuation still yields the expected page after publication. Run with the
+opens a PR against the inspected tips. Two unindexed pages cover both topic
+lanes, and their commit membership matches `git rev-list`. New continuations
+page in stored Git parent order. While Chromium displays the commits, the
+fixture publishes the graph and verifies that the existing cursor yields the
+same page and that the browser retains the same lane order. Run with the
 same RustFS environment and built UI using
 `cargo test -p crab-server --lib --locked deep_pull_commit_pages_match_git_and_render_in_the_browser -- --ignored --nocapture`.
 

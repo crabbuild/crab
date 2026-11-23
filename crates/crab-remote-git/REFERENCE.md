@@ -265,9 +265,13 @@ History remains authoritative over verified raw commit objects. New first-parent
 history continuations carry the next verified raw parent, so resumed pages do
 page-sized work without replaying newer commits. Page size may change between
 requests. Version-1 history cursors from `v2.0.0-alpha.1` retain their offset
-meaning, prefix traversal, and work charges. All-parent and ahead-history
-continuations retain their existing traversal order and codec. With a matching
-Capsule commit graph, ahead history checks each visited commit against the
+meaning, prefix traversal, and work charges. All-parent continuations retain
+their existing traversal order and codec. New ahead-history ranges follow the
+verified Git parent order depth-first, so a published or removed commit graph
+cannot change the next offset. Their version-2 cursor binds that order and both
+tips. Version-1 cursors from `v2.0.0-alpha.1` retain the tagged graph-dependent
+ordering and continue issuing version-1 offsets. With a matching Capsule
+commit graph, ahead history checks each visited commit against the
 base's authenticated ancestor set. A shared commit and its parents are excluded
 without decoding them as raw commits. The head walk still reads verified raw
 commits and follows their parent links. Cross-repository comparisons use the

@@ -20,6 +20,7 @@ use gix_hash::ObjectId;
 use crate::commit_graph::CommitGraphIndex;
 use crate::objects::{find_tree_entry_index, materialize_tree, parse_blob};
 use crate::state::RepositoryState;
+use crate::traversal::AheadHistoryOrder;
 use crate::{
     ArchiveEntry, ArchiveStream, Blame, BlameRange, BlameUnsupportedReason, Blob, BlobMetadata,
     BudgetDimension, ChangeKind, Commit, CommitSummary, Comparison, ContentClassification,
@@ -112,7 +113,7 @@ impl RemoteGitSnapshot {
     ) -> Result<Page<Commit>> {
         self.ensure_operation(operation)?;
         base.ensure_operation(base_operation)?;
-        let skip = match page.after() {
+        let (skip, order) = match page.after() {
             Some(cursor) => {
                 let decoded = cursor.decode_ahead_history()?;
                 if decoded.start != self.commit_oid || decoded.base != base.commit_oid {
@@ -120,9 +121,9 @@ impl RemoteGitSnapshot {
                         reason: CursorError::ContextMismatch,
                     });
                 }
-                decoded.skip
+                (decoded.skip, decoded.order)
             }
-            None => 0,
+            None => (0, AheadHistoryOrder::Parents),
         };
         if self.commit_oid == base.commit_oid {
             return Ok(Page {
@@ -136,6 +137,12 @@ impl RemoteGitSnapshot {
             Walked(HashSet<ObjectId>),
         }
         let graph = base.commit_graph.as_deref();
+        // Alpha.1 offsets counted commits in the order of their captured graph.
+        // New offsets follow Git parent order regardless of index readiness.
+        let ordering_graph = match order {
+            AheadHistoryOrder::Legacy => self.commit_graph.as_deref(),
+            AheadHistoryOrder::Parents => None,
+        };
         let mut prefetched = HashMap::new();
         let base_ancestors = match graph.filter(|graph| graph.has_ancestor_sets()) {
             Some(graph) => BaseAncestors::Indexed(graph),
@@ -184,13 +191,7 @@ impl RemoteGitSnapshot {
                 None => ahead::read_commit(oid, operation).await?,
             };
             let commit = &commit.value;
-            queue_all_parents(
-                &mut pending,
-                commit,
-                self.commit_graph.as_deref(),
-                operation,
-            )
-            .await?;
+            queue_all_parents(&mut pending, commit, ordering_graph, operation).await?;
             if traversed >= skip {
                 operation
                     .charge(
@@ -222,6 +223,7 @@ impl RemoteGitSnapshot {
                 self.commit_oid,
                 base.commit_oid,
                 next_skip,
+                order,
             ))
         } else {
             None
