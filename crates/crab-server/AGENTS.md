@@ -23,7 +23,10 @@ and migration limitations.
    stores versioned digests and expiry. Authentication verifies each transport
    request before binding the principal to that repository UUID.
    `auth/accounts.rs` owns durable suspension revisions, with mutations exposed
-   only through private `server/management/accounts.rs` and the `accounts` CLI.
+   through private `server/management/accounts.rs` and the `accounts` CLI.
+   `auth/scim/` owns the bearer-only user directory and its durable pending
+   change. Reconciliation applies managed state through the same account
+   revision authority while preserving independent operator holds.
 5. `crates/crab-server/src/git/receive/mod.rs` — `receive / publish_objects`: bounded native receive and publication orchestration.
 
 Trace one path: `crates/crab-server/src/main.rs` → `src/cli/mod.rs` → `serve` in

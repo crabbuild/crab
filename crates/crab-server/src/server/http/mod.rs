@@ -15,6 +15,7 @@ pub(crate) fn router(server: Arc<Server>) -> Router {
         .merge(git_import::routes(Arc::clone(&server)))
         .merge(git::routes())
         .merge(auth::routes())
+        .merge(auth::scim::routes(Arc::clone(&server)))
         .route("/livez", get(|| async { Json(json!({"status": "ok"})) }))
         .fallback(assets::serve)
         // Wrap every domain router and fallback in the same identity/mutation

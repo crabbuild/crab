@@ -271,6 +271,7 @@ async fn history_http_continuations_cross_shared_key_replicas_and_restart_but_no
                 client_id: "fixture".into(),
                 client_secret_file: None,
                 state_key_file: key_file.map(std::path::Path::to_path_buf),
+                scim_token_file: None,
                 github: None,
             },
             &root,

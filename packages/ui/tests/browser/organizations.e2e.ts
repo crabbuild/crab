@@ -5,6 +5,7 @@ import {
 } from "./accessibility";
 import type {
   Invitation,
+  MemberRepositoryAccess,
   OrganizationMembership,
   Organization,
   OrganizationRole,
@@ -201,6 +202,36 @@ async function fixture(page: Page) {
   });
   return state;
 }
+
+test("owners see identity-provider management and blocked access in People", async ({
+  page,
+}) => {
+  await fixture(page);
+  await page.route(
+    `**/api/organizations/${id}/members/${alice}/repository-access?*`,
+    (route) =>
+      route.fulfill({
+        json: {
+          account: "suspended",
+          managed: true,
+          items: [],
+          next: null,
+        } satisfies MemberRepositoryAccess,
+      }),
+  );
+  await page.goto(root);
+  await page
+    .getByRole("button", { name: "View repository access for Alice" })
+    .click();
+  const dialog = page.getByRole("dialog", { name: "Repository access" });
+  await expect(
+    dialog.getByText("Provisioned by identity provider"),
+  ).toBeVisible();
+  await expect(dialog.getByRole("alert")).toContainText(
+    "Sign-in and user Git credentials are blocked for this account",
+  );
+  await expectNoAccessibilityViolations(page);
+});
 
 test("owners invite by stable account, preserve a conflicted form, and cancel without granting membership", async ({
   page,

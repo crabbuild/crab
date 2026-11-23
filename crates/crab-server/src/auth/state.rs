@@ -470,10 +470,7 @@ impl AuthState {
             self.store.get_with_etag_bounded(marker_path, 8 * 1024),
             self.read_account(account_path),
         );
-        Some((
-            serde_json::from_slice(&marker.ok()?.0).ok()?,
-            account.ok()?.0,
-        ))
+        Some((serde_json::from_slice(&marker.ok()?.0).ok()?, account.ok()?))
     }
 
     pub(super) async fn cleanup_marker(
