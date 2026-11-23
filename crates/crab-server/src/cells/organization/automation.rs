@@ -102,7 +102,7 @@ fn epoch(context: &Transaction<'_>) -> Result<u64> {
 pub(crate) struct List;
 impl Read for List {
     const CLASS: &'static str = CLASS;
-    const ID: u32 = 49;
+    const ID: u32 = 52;
     type Input = Caller;
     type Output = Snapshot;
 
@@ -160,7 +160,7 @@ pub(crate) struct Verified {
 pub(crate) struct Verify;
 impl Read for Verify {
     const CLASS: &'static str = CLASS;
-    const ID: u32 = 50;
+    const ID: u32 = 53;
     type Input = VerifyInput;
     type Output = Option<Verified>;
 
