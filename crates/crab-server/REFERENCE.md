@@ -657,6 +657,9 @@ it as an absence.
 The server builds a default-branch index in the background and keeps one
 current published artifact per repository in object storage. It contains paths
 and separate trigram filters for file text and supported definition names.
+Index construction follows the verified tree and checks each blob's size
+before reconstructing its contents. Eligible objects reuse the packed bytes
+from the size check. Search uses the same bounded read to verify candidates.
 Larger files get larger text filters to reduce false positives. An
 index answers only for its exact Git tree. Crab verifies returned paths, text,
 and definition locations against Git. It reuses unchanged blobs' filters when
@@ -703,6 +706,12 @@ an HTTP error and used 1,325 observed backend reads. Per-mode p95 page
 latency was 87 ms for path, 168 ms for literal, 101 ms for regex, and 116 ms
 for Boolean content and symbols. These are measurements from one unoptimized
 server on arm64 macOS with loopback RustFS.
+
+Repeating the same workload with the bounded blob read reduced observed
+backend reads during search and index construction from 57,511 to 51,489.
+The largest build took 153 seconds. Warm search used 1,259 backend reads
+across 81 successful pages. Per-mode p95 page latency was 75 ms for path,
+110 ms for literal, 60 ms for regex, and 88 ms for Boolean content and symbols.
 
 ### Create a repository in the browser
 

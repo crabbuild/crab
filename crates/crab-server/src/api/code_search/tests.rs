@@ -102,6 +102,21 @@ async fn code_search_pins_its_pages_and_requires_current_repository_access() {
         .await;
     assert_eq!(sensitive["items"], json!([]));
 
+    let repo = h.server.repositories.values()[0].clone();
+    code_index::reconcile(&h.server, &repo, &h.server.cancellation)
+        .await
+        .unwrap();
+    let indexed = h
+        .json("/api/code-search?directory=src&q=CAF%C3%89.*", &reader)
+        .await;
+    assert_eq!(indexed["indexed_repositories"], 1);
+    assert_eq!(indexed["groups"][0]["commit"], head);
+    assert_eq!(indexed["skipped"], 2);
+    let hits = indexed["groups"][0]["files"].as_array().unwrap();
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0]["path"], "src/nested/a.rs");
+    assert_eq!(hits[1]["path"], "src/z.rs");
+
     let catalog = h.server.catalog().unwrap();
     let mut access = catalog.membership("team", "private").await.unwrap().members;
     access.retain(|member| member.subject != "bob-id");
@@ -818,6 +833,17 @@ async fn persistent_code_index_prunes_a_sparse_search_and_refreshes_after_public
     assert_eq!(page["groups"][0]["files"][0]["path"], "src/target.rs");
     assert_eq!(page["indexed_repositories"], 1);
     assert_eq!(page["next"], Value::Null);
+
+    let duplicates = h
+        .json(
+            "/api/code-search?q=content%3Aordinary+AND+%28path%3Asrc%2Fpart-000.rs+OR+path%3Asrc%2Fpart-001.rs%29",
+            &alice,
+        )
+        .await;
+    let hits = duplicates["groups"][0]["files"].as_array().unwrap();
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0]["path"], "src/part-000.rs");
+    assert_eq!(hits[1]["path"], "src/part-001.rs");
 
     let expression = url::form_urlencoded::Serializer::new(String::new())
         .append_pair(

@@ -792,6 +792,39 @@ impl OperationContext {
         self.read_object_uncharged(oid).await
     }
 
+    /// Read a verified Git object if its declared final size is at most `maximum`.
+    ///
+    /// An oversized root returns `None` before its final body is reconstructed.
+    /// Supporting delta bases and all fetched data still use the operation's
+    /// ordinary limits. Callers must prove that the object is visible.
+    pub async fn read_object_at_most(
+        &self,
+        oid: gix_hash::ObjectId,
+        maximum: u64,
+    ) -> Result<Option<crate::RemoteGitObject>> {
+        check_cancelled(&self.cancellation)?;
+        self.budget
+            .charge(BudgetDimension::LogicalObjects, 1)
+            .await?;
+        let reader = self.state.reader.as_ref().ok_or(Error::EmptyRepository)?;
+        let session = self
+            .session
+            .as_ref()
+            .and_then(TrackedLocatorSession::session)
+            .ok_or(Error::InternalInvariant {
+                invariant: "non-empty operation has no locator session",
+            })?;
+        let read: futures_util::future::BoxFuture<'_, Result<Option<GitObject>>> =
+            Box::pin(reader.read_with_session_at_most(
+                session,
+                oid,
+                maximum,
+                &self.budget,
+                &self.cancellation,
+            ));
+        read.instrument(self.span.clone()).await
+    }
+
     async fn read_object_uncharged(&self, oid: gix_hash::ObjectId) -> Result<GitObject> {
         let reader = self.state.reader.as_ref().ok_or(Error::EmptyRepository)?;
         let session = self

@@ -46,7 +46,6 @@ impl Pattern {
 
     pub(super) async fn inspect_entry(
         &self,
-        snapshot: &RemoteGitSnapshot,
         entry: &TreeEntry,
         scope: &Facts,
         operation: &OperationContext,
@@ -66,8 +65,7 @@ impl Pattern {
             Truth::Yes => return Ok((matched(Vec::new(), false), false)),
             Truth::Unknown => (),
         }
-        let Some(text) = code_index::text(snapshot, &entry.path, entry.oid, operation).await?
-        else {
+        let Some(text) = code_index::text(entry.oid, operation).await? else {
             // An unreadable body supplies no evidence either way for NOT.
             return Ok((Inspection::Skipped, true));
         };

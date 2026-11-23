@@ -6,8 +6,8 @@ pub(crate) use format::{Index, Mask, QueryMask, Row};
 
 use bytes::Bytes;
 use crab_remote_git::{
-    ContentClassification, GitPath, OperationContext, OperationKind, RemoteGitRepository,
-    RemoteGitSnapshot, Revision, TreeListingItem, TreeListingRequest,
+    BudgetDimension, OperationContext, OperationKind, RemoteGitRepository, RemoteGitSnapshot,
+    Revision, TreeListingItem, TreeListingRequest,
 };
 use crab_storage::{ETag, StorageError};
 use gix_hash::ObjectId;
@@ -73,21 +73,32 @@ impl Cache {
 }
 
 pub(crate) async fn text(
-    snapshot: &RemoteGitSnapshot,
-    path: &GitPath,
     oid: ObjectId,
     operation: &OperationContext,
 ) -> crab_remote_git::Result<Option<String>> {
-    let metadata = operation.read_object_metadata(oid).await?;
-    if metadata.size > MAX_FILE_BYTES {
+    // The caller already proved the blob and path through the pinned Git tree.
+    let Some(blob) = operation.read_object_at_most(oid, MAX_FILE_BYTES).await? else {
         return Ok(None);
+    };
+    if blob.kind != gix_object::Kind::Blob {
+        return Err(crab_remote_git::Error::ObjectKind {
+            oid,
+            expected: gix_object::Kind::Blob,
+            actual: blob.kind,
+        });
     }
-    let blob = snapshot.read_blob(path, operation).await?;
-    if blob.metadata.classification != ContentClassification::OrdinaryGit || blob.bytes.contains(&0)
+    operation
+        .charge(BudgetDimension::ResponseBytes, blob.data.len() as u64)
+        .await?;
+    if blob.data.contains(&0)
+        || !matches!(
+            crab_git::classify(&blob.data),
+            crab_git::PointerKind::NotAPointer
+        )
     {
         return Ok(None);
     }
-    Ok(String::from_utf8(blob.bytes.to_vec()).ok())
+    Ok(std::str::from_utf8(&blob.data).ok().map(str::to_owned))
 }
 
 pub(crate) async fn load(
@@ -253,9 +264,7 @@ async fn build(
                     let syntax = symbols::Syntax::for_path(entry.path.as_bytes());
                     let data = match previous.get(&(entry.oid, syntax)) {
                         Some(row) => BuildData::Reused(row.filter.clone(), row.symbols.clone()),
-                        None => BuildData::Text(
-                            text(snapshot, &entry.path, entry.oid, &operation).await?,
-                        ),
+                        None => BuildData::Text(text(entry.oid, &operation).await?),
                     };
                     Ok((entry.path.clone(), entry.oid, syntax, data))
                 }))

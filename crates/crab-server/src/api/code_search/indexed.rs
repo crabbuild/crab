@@ -74,9 +74,7 @@ pub(super) async fn inspect(
                     invariant: "code index path disagreed with the pinned Git tree",
                 });
             }
-            pattern
-                .inspect_entry(snapshot, &entry, scope, operation)
-                .await
+            pattern.inspect_entry(&entry, scope, operation).await
         }))
         .await?;
         verified += matches.iter().filter(|(_, read)| *read).count();

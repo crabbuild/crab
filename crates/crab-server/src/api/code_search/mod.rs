@@ -338,9 +338,7 @@ async fn inspect(
         let found = futures_util::future::try_join_all(batch.iter().map(|item| async move {
             match item {
                 TreeListingItem::Blob(entry) => {
-                    pattern
-                        .inspect_entry(snapshot, entry, scope, operation)
-                        .await
+                    pattern.inspect_entry(entry, scope, operation).await
                 }
                 TreeListingItem::CommonPrefix(_) => Err(Error::InternalInvariant {
                     invariant: "ungrouped code search received a grouped path",

@@ -3018,6 +3018,61 @@ async fn reads_ref_delta_from_object_store_ranges() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn capped_read_checks_the_final_delta_size_and_verifies_eligible_bytes() {
+    for kind in [DeltaKind::Ref, DeltaKind::Ofs] {
+        let fixture = publish(kind, false, RepositoryOptions::default()).await;
+        let cancellation = CancellationToken::new();
+        let operation = fixture
+            .repository
+            .operation(OperationKind::Content, &cancellation)
+            .await
+            .unwrap();
+        let maximum = fixture.expected.len() as u64;
+        fixture.backend.reset_pack_gets();
+        let result = async {
+            let oversized = operation
+                .read_object_at_most(fixture.target, maximum - 1)
+                .await?;
+            assert!(oversized.is_none());
+            assert_eq!(
+                fixture.backend.pack_gets(),
+                1,
+                "oversized delta opened its base"
+            );
+            let object = operation
+                .read_object_at_most(fixture.target, maximum)
+                .await?;
+            assert_eq!(object.unwrap().data.as_ref(), fixture.expected);
+            fixture.backend.reset_pack_gets();
+            assert!(
+                operation
+                    .read_object_at_most(fixture.target, maximum - 1)
+                    .await?
+                    .is_none()
+            );
+            assert_eq!(fixture.backend.pack_gets(), 0);
+            Ok(())
+        }
+        .await;
+        operation.finish(result).await.unwrap();
+        fixture.runtime.shutdown().await;
+    }
+
+    let fixture = publish(DeltaKind::Ref, true, RepositoryOptions::default()).await;
+    let operation = fixture
+        .repository
+        .operation(OperationKind::Content, &CancellationToken::new())
+        .await
+        .unwrap();
+    let read = operation.read_object_at_most(fixture.target, 0).await;
+    assert!(matches!(
+        operation.finish(read).await,
+        Err(Error::PackedEntryCrcMismatch { .. })
+    ));
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn concurrent_cold_blob_reads_are_single_flight_and_warm_reads_hit_cache() {
     let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
     let setup_cancellation = CancellationToken::new();
