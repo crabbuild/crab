@@ -58,19 +58,30 @@ pub(crate) async fn github_workflow_delivery(
     signed: &Value,
     body: &Value,
 ) -> StatusCode {
+    github_workflow_request(&h.http, url, secret, delivery, signed, body)
+        .send()
+        .await
+        .unwrap()
+        .status()
+}
+
+pub(crate) fn github_workflow_request(
+    client: &reqwest::Client,
+    url: &str,
+    secret: &str,
+    delivery: Uuid,
+    signed: &Value,
+    body: &Value,
+) -> reqwest::RequestBuilder {
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
     mac.update(&serde_json::to_vec(signed).unwrap());
     let signature = blake3::Hash::from_bytes(mac.finalize().into_bytes().into());
-    h.http
+    client
         .post(url)
         .header("x-github-event", "workflow_run")
         .header("x-github-delivery", delivery.to_string())
         .header("x-hub-signature-256", format!("sha256={signature}"))
         .json(body)
-        .send()
-        .await
-        .unwrap()
-        .status()
 }
 
 impl Harness {

@@ -1,5 +1,5 @@
 use std::{
-    net::TcpListener,
+    net::{SocketAddr, TcpListener},
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -20,9 +20,10 @@ use crate::test_support::{
 };
 
 pub(super) struct Replica {
-    config: PathBuf,
+    pub(super) config: PathBuf,
     pub(super) data: PathBuf,
     pub(super) origin: String,
+    management: SocketAddr,
 }
 
 pub(super) struct ProcessFixture {
@@ -32,7 +33,7 @@ pub(super) struct ProcessFixture {
     pub(super) client: Client,
     pub(super) first: Replica,
     pub(super) second: Replica,
-    _files: IdentityFiles,
+    tls: IdentityFiles,
     _issuer_task: AbortOnDropHandle<()>,
 }
 
@@ -114,6 +115,7 @@ scim_token_file = {scim_key:?}
                 config,
                 data,
                 origin: origin.into(),
+                management,
             }
         };
         let first = config("first", api_a, management_a, &origin_a);
@@ -147,7 +149,7 @@ scim_token_file = {scim_key:?}
             client,
             first,
             second,
-            _files: files,
+            tls: files,
             _issuer_task: AbortOnDropHandle::new(issuer_task),
         }
     }
@@ -158,6 +160,35 @@ scim_token_file = {scim_key:?}
 
     pub(super) async fn start(&self, replica: &Replica) -> Child {
         start(&self.binary, &replica.config, &self.client, &replica.origin).await
+    }
+
+    pub(super) async fn handoff(&self, replica: &Replica, process: Child) {
+        let endpoint = format!("https://{}", replica.management).parse().unwrap();
+        let tls = self.tls.config(endpoint);
+        let mut pem = std::fs::read(tls.peer_certificate).unwrap();
+        pem.extend(std::fs::read(tls.peer_private_key).unwrap());
+        let identity = reqwest::Identity::from_pem(&pem).unwrap();
+        let ca = reqwest::Certificate::from_pem(&std::fs::read(tls.peer_ca).unwrap()).unwrap();
+        let client = Client::builder()
+            .use_rustls_tls()
+            .no_proxy()
+            .tls_built_in_root_certs(false)
+            .identity(identity)
+            .add_root_certificate(ca)
+            .resolve("localhost", replica.management)
+            .timeout(Duration::from_secs(15))
+            .build()
+            .unwrap();
+        let port = replica.management.port();
+        let response = client
+            .post(format!(
+                "https://localhost:{port}/internal/cells/v1/scale-down"
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        wait(process).await;
     }
 }
 
@@ -215,8 +246,12 @@ async fn start(binary: &Path, config: &Path, client: &Client, origin: &str) -> C
     process
 }
 
-pub(super) async fn stop(mut process: Child) {
+pub(super) async fn stop(process: Child) {
     run(Command::new("kill").args(["-TERM", &process.id().unwrap().to_string()])).await;
+    wait(process).await;
+}
+
+async fn wait(mut process: Child) {
     assert!(
         tokio::time::timeout(Duration::from_secs(60), process.wait())
             .await

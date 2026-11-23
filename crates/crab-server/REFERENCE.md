@@ -4178,6 +4178,14 @@ requires a fresh signed head result. Clearing queue dispatch retains App
 signing for head reports. Use **Disconnect** to revoke a connection and block
 its use in branch rules.
 
+The RustFS CI gate runs two standalone servers with an App signing fixture.
+It verifies that a manual check with the same name, an unbound installation,
+an older commit, and a downgraded reviewer cannot authorize a protected merge.
+It uses authenticated scale-down to transfer ownership, retries an unread
+merge reply through the surviving replica, and fetches the exact checked
+commit using stock Git. A live App installation exercises delivery from
+GitHub and remains part of deployment qualification.
+
 #### Start GitHub Actions for a merge queue candidate
 
 In Crab, select **Set up queue dispatch** on an authorized connection. The

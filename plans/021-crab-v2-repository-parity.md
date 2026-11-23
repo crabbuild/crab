@@ -234,7 +234,7 @@ criticality and adoption dependencies.
 
 | Priority | Remaining delivery | Acceptance evidence |
 | --- | --- | --- |
-| P0 | Qualify the protected PR path with one live GitHub App. Exercise stock Git and the browser from branch update through review, exact-commit CI and protected merge. | With a deployed App and object store, prove that a revoked reviewer, an old head, and a wrong check provider cannot satisfy policy. Force a lost publication reply and peer handoff, then fetch the intended merge with stock Git. [Required check behavior](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks) |
+| P0 | The two-process RustFS gate exercises signed workflow reports, current reviewer eligibility, protected Git writes, stale merge attempts, and retry on a surviving replica. Repeat the protected PR path with the browser and one live GitHub App. | With a deployed App and object store, prove that a revoked reviewer, an old head, and a wrong check provider cannot satisfy policy. Force a lost publication reply and peer handoff, then fetch the intended merge with stock Git. [Required check behavior](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks) |
 | P0 | Qualify enterprise operations on the first supported deployment. RustFS fixtures restore exact live object versions and prove SCIM revocation of existing browser and Git credentials across two server processes and a restart. Cover authenticated ingress, least-privilege storage access, revocation, and rollback on the target deployment. | Restore an isolated repository and its access records on a fresh deployment. Prove the old browser and Git credentials are denied across replicas after deprovisioning, and measure recovery time and data loss against the operator's targets. [Enterprise qualification](../crates/crab-server/CELLAR.md) |
 | P1 | Organization owners can filter and export committed SCIM team links, roster updates, and unlinks. The RustFS gate verifies automation token revocation across two Git-serving processes, including a push admitted before revocation and denial after restart. Qualify provisioning and group synchronization with one live IdP and repeat Git revocation qualification on the target deployment. Extend audit coverage to additional security events, streaming, and enterprise-wide views. | An administrator provisions or disables a user via one IdP and sees effective repository access and the audit decision. Prove exact subject mapping, cross-replica revocation, group reconciliation, service credential revocation, and administrator-only export. [SCIM provisioning](https://docs.github.com/en/enterprise-cloud@latest/admin/managing-iam/provisioning-user-accounts-with-scim) · [Enterprise audit](https://docs.github.com/en/enterprise-cloud@latest/admin/concepts/security-and-compliance/audit-log-for-an-enterprise) |
 | P1 | Scale the daily review and discovery paths. Measure cold indexing and concurrent Boolean, symbol, content, and path search on a production-shaped catalog. Qualify large-diff review on more representative projects. | Track search latency, object-store reads, and index readiness under concurrent use. Preserve commit-pinned results and current access across browser navigation and continuation. [Code search syntax](https://docs.github.com/en/search-github/github-code-search/understanding-github-code-search-syntax) |
@@ -375,6 +375,13 @@ Prove one private repository from an author’s browser and stock Git through a 
   that leave the selected check unchanged. Embedded Chromium refreshed
   Integrations after a signed report and showed the exact commit. The native
   lost-merge-reply and ordered-queue browser regressions also passed.
+
+- The RustFS process gate verifies protected merges across two standalone
+  servers with a signed App fixture. A same-name manual check, an unbound
+  installation, and a previously passing result for an older commit cannot
+  authorize publication. A downgraded reviewer no longer counts. After a
+  fresh approval and workflow result, the original merge request recovers
+  through the surviving replica with the same commit and timestamp.
 
 - Repository transfer passed the production UI build, 76 focused native
   tests, 120 UI unit tests, nine Playwright cases, and three embedded
