@@ -104,9 +104,8 @@ def write_product_viewer_proof(client_path: Path, key_sha256: str | None = None,
     if edge != "cloud-cdn":
         proof["origin_requests"] = {}
     for request, response in client["edge_responses"].items():
-        log = {"status": response["status"], "cache": response["cache"], "response_bytes": response["bytes"]}
-        if edge != "cloud-cdn" or key_sha256 is not None:
-            log["key_sha256"] = key_sha256 or "8" * 64
+        log = {"status": response["status"], "cache": response["cache"], "response_bytes": response["bytes"],
+               "key_sha256": key_sha256 or "8" * 64}
         if edge == "cloud-cdn":
             log.update(cache_fill_bytes=0, origin_requests={})
         records[request] = log
@@ -199,10 +198,9 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, nati
                     cache = "miss" if arm == "cold_edge" else "hit"
                     family = CDN.scope_parts(registration["scope"])[3]
                     client["edge_responses"][request_id] = range_response(family, metrics["edge_bytes"], cache)
-                    proof[request_id] = {"status": 206, "response_bytes": 800, "cache": cache}
+                    key_sha256 = hashlib.sha256(f"{location}/{index}/key".encode()).hexdigest()
+                    proof[request_id] = {"status": 206, "response_bytes": 800, "cache": cache, "key_sha256": key_sha256}
                     if provider in ("s3", "azure"):
-                        key_sha256 = hashlib.sha256(f"{location}/{index}/key".encode()).hexdigest()
-                        proof[request_id]["key_sha256"] = key_sha256
                         if arm == "cold_edge":
                             origin_id = hashlib.sha256(f"{location}/{index}/origin".encode()).hexdigest()
                             time = {"at_unix_s": started // 1000} if provider == "s3" else {"at_unix_ms": started}
@@ -632,9 +630,8 @@ class CdnQualificationTests(unittest.TestCase):
             "reader": reader | {"binding_sha256": "e" * 64,
                                 "public_export_sha256": self.registration.get("publication_sha256", "")},
         })
-        log = {"status": 206, "cache": "hit", "response_bytes": 30}
-        if edge != "cloud-cdn" or lfs_key or transition:
-            log["key_sha256"] = lfs_key or transition.get("transition_key_sha256", "8" * 64)
+        log = {"status": 206, "cache": "hit", "response_bytes": 30,
+               "key_sha256": lfs_key or transition.get("transition_key_sha256", "8" * 64)}
         proof = {"schema": f"crab.{edge}-viewer-requests/v1", "client_report_sha256": client, "records": {request: log}}
         if edge == "cloud-cdn":
             log.update(cache_fill_bytes=0, origin_requests={})

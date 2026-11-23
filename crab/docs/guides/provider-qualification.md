@@ -1715,10 +1715,11 @@ records have yet to arrive. [Cloud Logging entries.list](https://docs.cloud.goog
 The workload sends a random per-request User-Agent tag for qualification.
 The attested backend
 bucket keeps that header out of the cache key. The collector joins viewer
-records by the tag and retains Google's `cacheFillBytes` from each matched
-viewer record. It joins Cloud CDN's range-fill and validation requests on
-`parentInsertId` and retains their hashed IDs, methods, status codes, and fill
-bytes. A `byte_range_caching` viewer hit with a linked successful origin fill
+records by the tag and retains each object's key fingerprint and Google's
+`cacheFillBytes` from each matched viewer record. It joins Cloud CDN's
+range-fill and validation requests on `parentInsertId` and retains their
+hashed IDs, methods, status codes, and fill bytes. A `byte_range_caching`
+viewer hit with a linked successful origin fill
 counts as a miss in qualification. A linked validation also rules out a fully
 warm hit. Include both kinds of log entry and give delayed child entries time
 to arrive. Larger objects can require an extra priming read before Cloud CDN
@@ -1726,9 +1727,11 @@ starts caching ranges. Run that read between the cold and warm measurements
 when needed, and keep it outside both timed intervals. [Cloud CDN caching](https://docs.cloud.google.com/cdn/docs/caching) · [Cloud CDN request logs](https://docs.cloud.google.com/cdn/docs/logging)
 
 The benchmark requires external measurements to cover the
-logged origin GETs in addition to client-native GETs. The fill-byte minimum is
-the higher of the total from distinct origin records and the largest viewer
-record, since viewer and origin records can describe the same fill.
+logged origin GETs in addition to client-native GETs. For each object key,
+the fill-byte minimum is the higher of the total from its distinct origin
+records and its largest viewer record. Multiple viewer records can describe
+the same fill. Requests for distinct keys cannot share one fill, so the
+benchmark adds the per-key minimums.
 Every cold arm must show positive fill bytes on a completed viewer response
 with payload bytes or on its associated successful origin GET. Error
 responses still count toward the reported byte floor.

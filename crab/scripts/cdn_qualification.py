@@ -8,6 +8,7 @@ import math
 import re
 import subprocess
 import sys
+from collections import defaultdict
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Callable, NamedTuple
@@ -1858,7 +1859,6 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
     keyed_origin = edge in ("cloudfront", "front-door")
     xorb_key = client.get("xorb_key_sha256")
     lfs_key = client.get("lfs_key_sha256")
-    object_key = xorb_key or lfs_key
     service = client.get("schema") == "crab.cdn-service-read/v1"
     transition_key = client.get("transition_key_sha256")
     verified_transition = False
@@ -1874,14 +1874,14 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
     require(isinstance(records, dict) and records.keys() == expected.keys()
             and len(records) == client["all_edge_attempts"],
             "CDN logs must cover each measured viewer attempt exactly once")
-    record_fields = {"status", "cache", "response_bytes"}
+    record_fields = {"status", "cache", "response_bytes", "key_sha256"}
     if edge == "cloud-cdn":
         record_fields |= {"cache_fill_bytes", "origin_requests"}
-    if keyed_origin or object_key is not None or transition_key is not None:
-        record_fields.add("key_sha256")
     viewer_keys = set()
     logged_ids = set(records)
-    origin_gets = child_fill_bytes = viewer_fill_bytes = 0
+    origin_gets = fill_bytes = 0
+    viewer_fill_by_key: dict[str, int] = defaultdict(int)
+    child_fill_by_key: dict[str, int] = defaultdict(int)
     successful_fill = False
     completed_cache = {}
     observed_transfer = dict.fromkeys(("edge_hits", "edge_misses", "edge_unknown", "edge_bytes", "incomplete_edge_bytes"), 0)
@@ -1895,15 +1895,13 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
                 and type(row["response_bytes"]) is int and row["response_bytes"] >= response["bytes"],
                 "CDN log status or response bytes disagree with the client")
         cache = row["cache"]
-        if keyed_origin or object_key is not None or transition_key is not None:
-            require(matches(SHA256, row["key_sha256"]), "invalid CDN object key fingerprint")
-            require(xorb_key is None or (row["key_sha256"] == xorb_key) == count_response,
-                    "CDN viewer request did not read the approved hydration xorb")
-            require(lfs_key is None or row["key_sha256"] == lfs_key,
-                    "CDN viewer request did not read the approved service LFS object")
-            viewer_keys.add(row["key_sha256"])
-            if row["key_sha256"] == transition_key and served_payload:
-                verified_transition = True
+        key = row["key_sha256"]
+        require(matches(SHA256, key), "invalid CDN object key fingerprint")
+        require(xorb_key is None or (key == xorb_key) == count_response,
+                "CDN viewer request did not read the approved hydration xorb")
+        require(lfs_key is None or key == lfs_key, "CDN viewer request did not read the approved service LFS object")
+        viewer_keys.add(key)
+        verified_transition |= key == transition_key and served_payload
         if (xorb_key is not None or service) and count_response:
             if response["complete"]:
                 require(response["status"] in (200, 206), "completed CDN response did not return object bytes")
@@ -1918,7 +1916,7 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
                     "Cloud CDN log has invalid reported cache fill bytes")
             supplied_from_origin = positive(row["cache_fill_bytes"])
             if count_response:
-                viewer_fill_bytes = max(viewer_fill_bytes, row["cache_fill_bytes"])
+                viewer_fill_by_key[key] = max(viewer_fill_by_key[key], row["cache_fill_bytes"])
             children = row["origin_requests"]
             require(isinstance(children, dict), "invalid Cloud CDN origin requests")
             for origin_id, value in children.items():
@@ -1930,7 +1928,7 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
                 logged_ids.add(origin_id)
                 if count_response:
                     origin_gets += origin["method"] == "GET"
-                    child_fill_bytes += origin["cache_fill_bytes"]
+                    child_fill_by_key[key] += origin["cache_fill_bytes"]
                     supplied_from_origin |= (origin["method"] == "GET" and origin["status"] in (200, 206)
                                              and positive(origin["cache_fill_bytes"]))
             if count_response and served_payload:
@@ -1974,16 +1972,17 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
             origin_keys.add(origin["key_sha256"])
             origin_gets += 1
             if origin["status"] in (200, 206):
-                child_fill_bytes += origin["response_body_bytes"]
+                fill_bytes += origin["response_body_bytes"]
                 successful_fill |= positive(origin["response_body_bytes"])
         # These providers join origin GETs by key and time. If a key touched
         # origin in this arm, its viewer hits alone cannot prove a warm read.
         completed_cache = {request_id: cache for request_id, cache in completed_cache.items()
                            if cache != "hit" or records[request_id]["key_sha256"] not in origin_keys}
-    # Collapsed traffic and separate range-fills can describe the same bytes
-    # at both levels. Use the strongest floor without adding overlapping totals.
-    return ViewerRequestMetrics(logged_ids, origin_gets, max(viewer_fill_bytes, child_fill_bytes),
-                                successful_fill, completed_cache)
+    # Cloud CDN can report one fill at both levels or collapse same-key
+    # requests. Distinct keys cannot share a fill and add to the floor.
+    fill_bytes += sum(max(viewer_bytes, child_fill_by_key.get(key, 0))
+                      for key, viewer_bytes in viewer_fill_by_key.items())
+    return ViewerRequestMetrics(logged_ids, origin_gets, fill_bytes, successful_fill, completed_cache)
 
 
 def verify_product_viewer_requests(raw: bytes, client: dict[str, Any], client_raw: bytes, edge: str) -> set[str]:

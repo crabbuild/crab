@@ -378,6 +378,7 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                         self.assertEqual(json.loads(retained), {
                             "schema": "crab.cloud-cdn-viewer-requests/v1", "client_report_sha256": digest,
                             "records": {fingerprint: {"status": 206, "response_bytes": 620, "cache": "miss",
+                                                     "key_sha256": hashlib.sha256(f"{config['fixture_prefix']}/{PACK}".encode()).hexdigest(),
                                                      "cache_fill_bytes": 4096, "origin_requests": {
                                                          hashlib.sha256(b"range-fill").hexdigest():
                                                          {"method": "GET", "status": 206, "cache_fill_bytes": 2048},
@@ -385,7 +386,7 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                                                          {"method": "GET", "status": 304, "cache_fill_bytes": 0},
                                                      }}},
                         })
-                        for private in (tag, host, project, rule, "192.0.2.1", "range-fill", "validation", "unrelated-origin"):
+                        for private in (tag, host, project, rule, PACK, "192.0.2.1", "range-fill", "validation", "unrelated-origin"):
                             self.assertNotIn(private, retained)
 
             expected = output.read_bytes()

@@ -263,6 +263,36 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "CDN log requests were reused across arms"):
             self.collect()
 
+    def test_cloud_cdn_fill_floor_adds_distinct_object_keys(self) -> None:
+        scope = "cloud-cdn/private/cli/git/direct"
+        self.registration.update(scope=scope, candidate=fixture.cli_candidate(scope, PLATFORM))
+        fixture.write_git_measurements(self.root, self.registration, PLATFORM)
+        arm = self.root / "near/0001/cold_edge"
+        log = arm / fixture.CDN.VIEWER_REQUEST_FILES["gcs"]
+        proof = json.loads(log.read_bytes())
+        viewer = next(iter(proof["records"].values()))
+        viewer.update(cache_fill_bytes=12, origin_requests={"a" * 64: {
+            "method": "GET", "status": 206, "cache_fill_bytes": 16,
+        }})
+        proof["records"]["b" * 64] = viewer | {"origin_requests": {}}
+        proof["records"]["c" * 64] = viewer | {"key_sha256": "9" * 64, "cache_fill_bytes": 9, "origin_requests": {}}
+
+        client_path = arm / "client.json"
+        client = json.loads(client_path.read_bytes())
+        response = next(iter(client["edge_responses"].values()))
+        client.update(edge_responses=dict.fromkeys(proof["records"], response), all_edge_attempts=3,
+                      edge_attempts=3, observed_edge_gets=3, edge_misses=3, edge_bytes=3 * response["bytes"])
+        digest = fixture.json_file(client_path, client)
+        fixture.json_file(log, proof | {"client_report_sha256": digest})
+
+        report = arm / "measurement.json"
+        external = json.loads(report.read_bytes()) | {"client_report_sha256": digest, "origin_gets": 2}
+        fixture.json_file(report, external | {"origin_fill_bytes": 24})
+        with self.assertRaisesRegex(ValueError, "undercounts logged CDN cache fill bytes"):
+            self.collect()
+        fixture.json_file(report, external | {"origin_fill_bytes": 25})
+        self.assertEqual(self.collect()["near"]["pairs"][0]["cold_edge"]["origin_fill_bytes"], 25)
+
     def test_cloud_cdn_cli_cold_arm_requires_a_successful_fill(self) -> None:
         scope = "cloud-cdn/private/cli/git/direct"
         self.registration.update(scope=scope, candidate=fixture.cli_candidate(scope, PLATFORM))

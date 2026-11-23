@@ -406,8 +406,8 @@ def cloud_cdn_logs(exports: Iterable[object], client: dict, fixture: dict) -> di
     deployment = deployment_target(fixture, "cloud-cdn")
     project, rule = deployment["project"], deployment["forwarding_rule"]
     base = fixture_base(fixture["base_url"])
-    prefix = f"{base.path.rstrip('/')}/{fixture['fixture_prefix']}{fixture['view_suffix']}/"
-    needs_key = any(client.get(name) for name in ("xorb_key_sha256", "lfs_key_sha256", "transition_key_sha256"))
+    base_path = base.path.rstrip("/") + "/"
+    prefix = f"{base_path}{fixture['fixture_prefix']}{fixture['view_suffix']}/"
     records, inserts, origin_entries = {}, {}, []
     for entries in exports:
         require(isinstance(entries, list), "expected a JSON array exported from Cloud Logging")
@@ -439,11 +439,10 @@ def cloud_cdn_logs(exports: Iterable[object], client: dict, fixture: dict) -> di
             require(type(status) is int and 100 <= status <= 599 and re.fullmatch(r"[0-9]{1,19}", size)
                     and re.fullmatch(r"[0-9]{1,19}", fill) and isinstance(insert_id, str) and bool(insert_id),
                     "Cloud CDN log has invalid status, byte counts or log entry ID")
+            key = url.path.removeprefix(base_path)
             record = {"status": status, "response_bytes": int(size), "cache_fill_bytes": int(fill),
+                      "key_sha256": hashlib.sha256(key.encode()).hexdigest(),
                       "cache": cloud_cdn_cache_status(request, payload.get("statusDetails")), "origin_requests": {}}
-            if needs_key:
-                key = url.path.removeprefix(base.path.rstrip("/") + "/")
-                record["key_sha256"] = hashlib.sha256(key.encode()).hexdigest()
             require(fingerprint not in records or (records[fingerprint] == record and inserts[fingerprint] == insert_id),
                     "Cloud CDN exports disagree about one viewer request")
             records[fingerprint], inserts[fingerprint] = record, insert_id
