@@ -36,10 +36,44 @@ async fn projects_are_native_versioned_and_repository_authorized() {
     );
     h.write(Method::POST,&format!("{ROOT}/issues"),&alice,json!({"request_id":Uuid::now_v7(),"title":"Native linked issue","body":"Private discussion body"})).await.error_for_status().unwrap();
     h.write(Method::POST,&path,&alice,json!({"request_id":Uuid::now_v7(),"command":{"kind":"item","project":id,"version":0,"item":{"id":Uuid::now_v7(),"subject":{"kind":"issue","number":1},"title":"","body":"","status":"Todo","priority":0,"start":null,"end":null,"values":{}}}})).await.error_for_status().unwrap();
+    h.write(
+        Method::POST,
+        &format!("{ROOT}/issues"),
+        &alice,
+        json!({"request_id":Uuid::now_v7(),"title":"Unblock the release","body":""}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    h.write(
+        Method::PUT,
+        &format!("{ROOT}/issues/1/dependencies/blocked_by/2"),
+        &alice,
+        json!({"version":0,"active":true}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
     let page = h.json(&format!("{ROOT}/projects/{id}/items"), &alice).await;
     assert_eq!(
         page["page"]["items"][0]["work"]["title"],
         "Native linked issue"
+    );
+    assert_eq!(page["page"]["items"][0]["blocked"], true);
+    h.write(
+        Method::PATCH,
+        &format!("{ROOT}/issues/2"),
+        &alice,
+        json!({"version":1,"state":"closed"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let unblocked = h.json(&format!("{ROOT}/projects/{id}/items"), &alice).await;
+    assert_ne!(unblocked["page"]["items"][0]["blocked"], true);
+    assert_eq!(
+        unblocked["page"]["items"][0]["version"],
+        page["page"]["items"][0]["version"]
     );
     let history = h
         .json(&format!("{ROOT}/projects/{id}/history?after=0"), &alice)

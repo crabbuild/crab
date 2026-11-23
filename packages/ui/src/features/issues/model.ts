@@ -8,6 +8,7 @@ export type IssueStateReason = "completed" | "not_planned" | "reopened";
 export interface Issue extends Comment {
   title: string;
   state: "open" | "closed";
+  blocked?: boolean;
   state_reason: IssueStateReason | null;
   closed_at: number | null;
   labels: RepositoryLabel[];
@@ -26,6 +27,7 @@ export type IssueListItem = DiscussionTotals & {
     | "version"
     | "title"
     | "state"
+    | "blocked"
     | "state_reason"
     | "closed_at"
     | "created_at"

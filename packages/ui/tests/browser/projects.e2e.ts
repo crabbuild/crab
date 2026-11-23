@@ -232,6 +232,7 @@ async function setup(page: Page) {
             next: null,
             items: entries.map((item) => ({
               version: revisions.get(item.id),
+              blocked: item.subject?.kind === "issue",
               item,
               work: item.subject
                 ? {
@@ -317,6 +318,8 @@ test("templates, linked issue and PR items, board moves, roadmap dates, saved se
     page.getByRole("link", { name: "Ship project management", exact: true }),
   ).toBeVisible();
   await expect(page.getByText("1/2", { exact: true })).toBeVisible();
+  const blocked = page.getByText("Blocked", { exact: true });
+  await expect(blocked).toBeVisible();
   await page.getByLabel("Status for Ship project management").click();
   await page.getByRole("option", { name: "In progress", exact: true }).click();
   await expect(
@@ -331,6 +334,7 @@ test("templates, linked issue and PR items, board moves, roadmap dates, saved se
       })
       .getByRole("link", { name: "Ship project management", exact: true }),
   ).toBeVisible();
+  await expect(blocked).toBeVisible();
   await page
     .getByRole("button", { name: "Edit Ship project management", exact: true })
     .click();
@@ -341,6 +345,7 @@ test("templates, linked issue and PR items, board moves, roadmap dates, saved se
   await expect(
     page.getByRole("table", { name: "Project roadmap" }),
   ).toBeVisible();
+  await expect(blocked).toBeVisible();
   await expect(
     page.getByRole("button", { name: /Schedule Ship project management/ }),
   ).toBeVisible();

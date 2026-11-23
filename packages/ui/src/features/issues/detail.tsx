@@ -5,6 +5,7 @@ import {
 } from "@/components/discussion/conversation/lock";
 import { SubIssues } from "@/features/projects/discussion";
 import { Author } from "@/components/discussion/author";
+import { BlockedBadge } from "@/components/discussion/blocked-badge";
 import { Reactions } from "@/components/discussion/reactions";
 import { repoHref } from "@/lib/repository-route";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -112,6 +113,7 @@ export function IssueDetail({
       </div>
       <p className="issue-meta">
         <IssueBadge issue={current} />
+        {current.blocked && <BlockedBadge />}
         <span className="muted">
           <Author author={current.author} /> opened this issue{" "}
           {timestamp(current.created_at)}
@@ -198,7 +200,10 @@ export function IssueDetail({
             repo={repo}
             csrf={csrf}
             issue={number}
-            onChanged={() => setMetadataEpoch((value) => value + 1)}
+            onChanged={() => {
+              setMetadataEpoch((value) => value + 1);
+              resource.retry();
+            }}
           />
           <PinIssue
             repo={repo}

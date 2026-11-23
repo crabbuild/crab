@@ -237,6 +237,8 @@ pub(crate) enum UpdateCommentOutcome {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct IssueSummary {
     pub lifecycle: super::issues::lifecycle::Lifecycle,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocked: bool,
     pub number: u64,
     pub author: RepositoryAuthor,
     pub title: String,

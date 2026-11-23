@@ -515,9 +515,11 @@ The Repository Cell records the issue pair, version tombstone, and both active
 direction indexes under `collaboration/v1/issue-dependencies/`. Validation and
 both indexes commit with one activity event indexed into both conversations.
 Each mutation walks a bounded set of existing edges before adding a blocker.
-List reads join current issue state and titles. Existing repositories need no
-dependency preparation. Update serving peers together before writing dependency
-events.
+List reads join current issue state and titles. Issue and Project reads derive
+blocked state from the active blocker prefix and current issue rows in the same
+snapshot. A close or reopen requires no updates to dependent issues or project
+items. Existing repositories need no dependency preparation. Update serving
+peers together before enabling the new reads and writes.
 
 ## Discussion edit history
 

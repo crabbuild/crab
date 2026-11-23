@@ -2694,6 +2694,13 @@ and shows its current state. Repository readers can view relationships. Triage
 and higher roles can find issues by title or number, then add or remove a
 relationship from either issue.
 
+Issue details, issue lists, and repository and organization Projects show
+**Blocked** when an open issue has at least one open blocker. Closing the last
+open blocker clears the badge on the next read. Reopening a blocker restores
+it while the relationship is active. Project rows expose the badge only to
+readers with access to the source repository. Planning status remains editable
+independently of the dependency graph.
+
 The two directions share one version. Use the pair's GET to obtain
 `{active,version}`, then PUT the desired `active` state with that version.
 Version zero describes a pair that has never changed. Repeating the last

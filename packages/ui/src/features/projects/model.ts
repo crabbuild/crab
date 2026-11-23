@@ -76,6 +76,7 @@ export interface Row {
   version: number;
   repository?: Pick<Repository, "id" | "owner" | "name"> | null;
   restricted?: boolean;
+  blocked?: boolean;
   item: Item;
   work: Work | null;
   assignees: RepositoryAssignee[];

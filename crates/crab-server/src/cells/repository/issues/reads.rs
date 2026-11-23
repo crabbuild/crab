@@ -5,6 +5,8 @@ pub(crate) struct IssueDetail {
     pub(crate) lifecycle: Option<lifecycle::Lifecycle>,
     pub(crate) issue: Option<IssueRecord>,
     pub(crate) labels: LabelCatalog,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) blocked: bool,
 }
 
 pub(crate) struct GetIssueDetail;
@@ -24,10 +26,16 @@ impl Read for GetIssueDetail {
             .as_ref()
             .map(|issue| lifecycle::get(context, issue.number, issue.state != 0))
             .transpose()?;
+        let blocked = collaboration::dependencies::blocked(
+            context,
+            number,
+            issue.as_ref().is_some_and(|issue| issue.state == 0),
+        )?;
         Ok(IssueDetail {
             issue,
             lifecycle,
             labels: ListLabels::execute(context, ())?,
+            blocked,
         })
     }
 }
@@ -101,8 +109,10 @@ impl IssueSummary {
         let state = u8::try_from(result_u64_from_row(row, 5)?)
             .map_err(|_| crate::cells::Error::Invalid("indexed issue state is invalid"))?;
         let lifecycle = lifecycle::get(context, number, state != 0)?;
+        let blocked = collaboration::dependencies::blocked(context, number, state == 0)?;
         Ok(IssueSummary {
             lifecycle,
+            blocked,
             number: result_u64_from_row(row, 0)?,
             author: RepositoryAuthor {
                 issuer: result_text(row, 1)?,
@@ -110,8 +120,7 @@ impl IssueSummary {
                 name: result_text(row, 3)?,
             },
             title: result_text(row, 4)?,
-            state: u8::try_from(result_u64_from_row(row, 5)?)
-                .map_err(|_| crate::cells::Error::Invalid("indexed issue state is invalid"))?,
+            state,
             label_ids: decode_label_ids(result_blob(row, 6)?)?,
             assignees: assignments::decode(result_blob(row, 7)?)?,
             version: result_u64_from_row(row, 8)?,

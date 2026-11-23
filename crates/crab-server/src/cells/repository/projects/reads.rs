@@ -1,3 +1,4 @@
+use super::super::collaboration::{SubjectState, dependencies};
 use super::*;
 
 pub(crate) struct WorkSummaries;
@@ -11,6 +12,8 @@ pub(crate) struct WorkQuery {
 #[serde(deny_unknown_fields)]
 pub(crate) struct WorkDetails {
     pub work: SubjectSummary,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocked: bool,
     pub assignees: Vec<super::super::assignments::Assignee>,
     pub progress: Option<hierarchy::Progress>,
     pub parent: Option<SubjectSummary>,
@@ -26,6 +29,11 @@ fn work_details(
     let Some(work) = subject.summary(context)? else {
         return Ok(None);
     };
+    let blocked = dependencies::blocked(
+        context,
+        subject.number,
+        subject.kind == SubjectKind::Issue && work.state == SubjectState::Open,
+    )?;
     let (progress, parent) = if subject.kind == SubjectKind::Issue {
         (
             Some(hierarchy::progress(context, subject.number)?),
@@ -56,6 +64,7 @@ fn work_details(
     .ok_or(Error::Invalid("project links source is missing"))?;
     Ok(Some(WorkDetails {
         work,
+        blocked,
         assignees,
         progress,
         parent,
@@ -166,6 +175,8 @@ pub(crate) struct Row {
     pub version: u64,
     pub item: Item,
     pub work: Option<SubjectSummary>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocked: bool,
     pub assignees: Vec<super::super::assignments::Assignee>,
     pub progress: Option<hierarchy::Progress>,
     pub parent: Option<SubjectSummary>,
@@ -274,6 +285,7 @@ impl Read for Items {
                     .unwrap_or_default(),
                 item: entry,
                 work: details.as_ref().map(|details| details.work.clone()),
+                blocked: details.as_ref().is_some_and(|details| details.blocked),
                 progress: details
                     .as_ref()
                     .and_then(|details| details.progress.clone()),

@@ -7,7 +7,7 @@ use crate::cells::{
     Error, Result,
     application::{Mutation, MutationResult, Read, Transaction},
     repository::{
-        CLASS, MAX_NUMBER, RepositoryAuthor, advance_revision, settings, validate_author,
+        CLASS, MAX_NUMBER, RepositoryAuthor, advance_revision, integer, settings, validate_author,
         validate_number,
     },
 };
@@ -76,6 +76,37 @@ fn issue(number: u64) -> Subject {
         kind: SubjectKind::Issue,
         number,
     }
+}
+
+pub(in crate::cells::repository) fn blocked(
+    context: &Transaction<'_>,
+    number: u64,
+    open: bool,
+) -> Result<bool> {
+    if !open {
+        return Ok(false);
+    }
+    let edges =
+        context.documents_after::<Edge>(&Direction::BlockedBy.prefix(number), None, LIMIT)?;
+    if edges.is_empty() {
+        return Ok(false);
+    }
+    let numbers = edges
+        .into_iter()
+        .map(|(_, edge)| integer(edge.number))
+        .collect::<Result<Vec<_>>>()?;
+    let placeholders = std::iter::repeat_n("?", numbers.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    // Read the blocker states in this issue snapshot. Closing a blocker needs no
+    // dependent fan-out, and unblocked issues only read their empty edge prefix.
+    let rows = context.query(
+        &format!(
+            "SELECT 1 FROM repository_issues WHERE number IN ({placeholders}) AND state = 0 LIMIT 1"
+        ),
+        &numbers,
+    )?;
+    Ok(!rows.rows.is_empty())
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]

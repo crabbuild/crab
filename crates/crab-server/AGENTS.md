@@ -243,7 +243,8 @@ windows with public authors, reactions and selected-head review freshness.
 `links/` owns versioned issue/PR relationships and both subject indexes; its
 single activity event is indexed into both timelines.
 `dependencies.rs` owns the versioned issue graph, its active direction indexes,
-and bounded cycle checking. It shares one dependency event between both issues.
+and bounded cycle checking. It shares one dependency event between both issues
+and computes blocked status for issue and Project reads in the source snapshot.
 `collaboration/mentions.rs` records Markdown mentions with the source body.
 `collaboration/mention_settings.rs` owns versioned aliases. `server/mentions.rs`
 delivers the durable outbox to `cells/directory/notifications.rs`.

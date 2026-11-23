@@ -6,7 +6,7 @@ use crate::cells::repository::collaboration::{
     Target,
     activity::{self, Action},
 };
-pub(crate) use reads::{GetComment, GetIssue, GetIssueDetail, ListComments};
+pub(crate) use reads::{GetComment, GetIssue, GetIssueDetail, IssueDetail, ListComments};
 
 pub(crate) struct CreateIssue;
 

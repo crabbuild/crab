@@ -1,4 +1,5 @@
 import { AssigneeAvatars } from "@/components/discussion/metadata";
+import { BlockedBadge } from "@/components/discussion/blocked-badge";
 import { useRef, useState } from "react";
 import {
   CircleDotIcon,
@@ -84,6 +85,7 @@ export function ItemTitle({
               {row.restricted ? "Repository access required" : "Draft note"}
             </span>
           )}
+          {row.blocked && !row.restricted && <BlockedBadge />}
           {row.parent && source && (
             <Link href={workHref(source, row.parent.subject)}>
               Sub-issue of #{row.parent.subject.number}

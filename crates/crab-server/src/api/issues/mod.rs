@@ -398,23 +398,13 @@ async fn rendered(
             .query::<GetIssueDetail>(&routed.target, minimum, id)
             .await,
     )?;
-    let issue = detail.issue.ok_or(Error::NotFound)?;
-    let lifecycle = detail
-        .lifecycle
-        .ok_or(Error::CellContract("Issue lifecycle is missing"))?;
+    let issue = detail.issue.as_ref().ok_or(Error::NotFound)?;
     let reaction = reactions::one(server, repo, &author, Target::Issue { number: id }).await?;
     let authors = Authors::load(server, principal, std::iter::once(&issue.author)).await?;
     let assignees = Selection::load(server, principal, repo, issue.assignees.iter()).await?;
     Ok(Json(view::issue(
-        &authors,
-        &issue,
-        &lifecycle,
-        &author,
-        &detail.labels.labels,
-        &assignees,
-        repo.id,
-        &reaction,
-    )))
+        &authors, issue, &detail, &author, &assignees, repo.id, &reaction,
+    )?))
 }
 
 async fn comments(

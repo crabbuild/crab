@@ -173,6 +173,49 @@ async fn dependency_cycle_checks_serialize_competing_edges() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn issue_lists_and_details_follow_the_last_open_blocker() {
+    let (h, alice, bob) = issues(&["Ship the release", "Prepare notes", "Run final checks"]).await;
+    for number in [2, 3] {
+        update(&h, &alice, &format!("{BLOCKED}/{number}"), true, 0)
+            .await
+            .error_for_status()
+            .unwrap();
+    }
+    async fn verify(h: &Harness, bob: &str, blocked: bool) {
+        let issue = h.json(&format!("{REPO}/issues/1"), bob).await;
+        let page = h.json(&format!("{REPO}/issues?q=is:issue"), bob).await;
+        let row = page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|issue| issue["number"] == 1)
+            .unwrap();
+        assert_eq!(row["blocked"], blocked);
+        assert_eq!(issue["blocked"], blocked);
+    }
+    verify(&h, &bob, true).await;
+    for (number, version, state, expected) in [
+        (2, 1, "closed", true),
+        (3, 1, "closed", false),
+        (2, 2, "open", true),
+        (1, 1, "closed", false),
+        (1, 2, "open", true),
+    ] {
+        h.write(
+            Method::PATCH,
+            &format!("{REPO}/issues/{number}"),
+            &alice,
+            json!({"version":version,"state":state}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+        verify(&h, &bob, expected).await;
+    }
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn dependency_pages_keep_exclusive_cursors_at_the_direction_limit() {
     let (h, alice, _) = issues(&["Release task"; 52]).await;
     for number in 2..=51 {
@@ -209,6 +252,29 @@ async fn dependency_pages_keep_exclusive_cursors_at_the_direction_limit() {
 async fn browser_adds_a_blocker_and_removes_it_from_the_other_issue() {
     let (h, alice, bob) = issues(&["Ship the release", "Prepare release notes"]).await;
     triage(&h, &alice).await;
+    let project = Uuid::now_v7();
+    for command in [
+        json!({"kind":"create","id":project,"name":"Release plan","template":"kanban"}),
+        json!({"kind":"item","project":project,"version":0,"item":{
+            "id":Uuid::now_v7(),"subject":{"kind":"issue","number":1},
+            "title":"","body":"","status":"Todo","priority":0,"start":null,"end":null,"values":{}
+        }}),
+    ] {
+        let saved: Value = h
+            .write(
+                Method::POST,
+                &format!("{REPO}/projects/commands"),
+                &alice,
+                json!({"request_id":Uuid::now_v7(),"command":command}),
+            )
+            .await
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(saved["outcome"], "applied");
+    }
     let browser = Browser::new("issue-dependencies");
     browser
         .run(&["open", &format!("{}/team/private/issues/1", h.origin)])
@@ -258,6 +324,14 @@ async fn browser_adds_a_blocker_and_removes_it_from_the_other_issue() {
         h.json(BLOCKED, &bob).await["items"][0]["work"]["title"],
         "Prepare release notes"
     );
+    let blocked_badge = "Array.from(document.querySelectorAll('[data-slot=badge]')).some(e => e.textContent.trim() === 'Blocked')";
+    browser.run(&["wait", "--fn", blocked_badge]).await;
+    let list = format!("{}/team/private/issues", h.origin);
+    browser.run(&["open", &list]).await;
+    browser.run(&["wait", "--fn", blocked_badge]).await;
+    let project_page = format!("{}/team/private/projects/{project}", h.origin);
+    browser.run(&["open", &project_page]).await;
+    browser.run(&["wait", "--fn", blocked_badge]).await;
     browser
         .run(&["open", &format!("{}/team/private/issues/2", h.origin)])
         .await;
@@ -279,6 +353,16 @@ async fn browser_adds_a_blocker_and_removes_it_from_the_other_issue() {
         .await;
     assert_eq!(h.json(BLOCKING, &bob).await["items"], json!([]));
     assert_eq!(h.json(BLOCKED, &bob).await["items"], json!([]));
+    for page in [&list, &project_page] {
+        browser.run(&["open", page]).await;
+        browser.run(&["wait", "--text", "Ship the release"]).await;
+        assert!(
+            !browser
+                .run(&["snapshot"])
+                .await
+                .contains("StaticText \"Blocked\"")
+        );
+    }
     browser.run(&["close"]).await;
     h.close().await;
 }
