@@ -790,6 +790,7 @@ impl CdnReadAttempt {
     ///
     /// The transfer must observe cancellation during remote I/O and finish any
     /// in-flight writes before returning. Its destination must be caller-private.
+    /// Recheck bound read authority before returning a successful staged result.
     pub async fn with_file_deadline<T, E: From<StorageError>>(
         &self,
         cancel: &CancellationToken,
@@ -798,19 +799,23 @@ impl CdnReadAttempt {
         let transfer_cancel = cancel.child_token();
         let work = transfer(&transfer_cancel);
         tokio::pin!(work);
-        tokio::select! {
+        let value = tokio::select! {
             biased;
             () = tokio::time::sleep_until(self.deadline()) => {
                 transfer_cancel.cancel();
                 let _ = work.await;
-                Err(cdn_deadline_exceeded().into())
+                return Err(cdn_deadline_exceeded().into());
             }
-            result = &mut work => {
-                let value = result?;
-                self.check_deadline()?;
-                Ok(value)
-            }
+            result = &mut work => result?,
+        };
+        // Staging and digest verification can outlive the grant that fetched
+        // the bytes. Writes have drained, so this check can be cancelled.
+        tokio::select! {
+            biased;
+            () = transfer_cancel.cancelled() => return Err(StorageError::Cancelled.into()),
+            checked = self.within_deadline(self.store.check_read_authority()) => checked?,
         }
+        Ok(value)
     }
 
     /// Fetch exact bytes for caller-owned verification. None means the entire

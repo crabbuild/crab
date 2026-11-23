@@ -33,6 +33,8 @@ the read owner and apply before obtaining an edge viewer credential. A native
 read selected upfront keeps its ordinary deadline.
 Streamed LFS and file-backed reads split an admitted object into requests no
 larger than the qualified range size or the 8 MiB transport buffer.
+File-backed transfers drain staging writes and recheck bound read authority
+within the same deadline before returning the staged result.
 CDN transfer diagnostics retain SHA-256 request fingerprints for joining
 qualification fetches to provider logs. They include the requested byte
 offset and length. CloudFront and Front Door use

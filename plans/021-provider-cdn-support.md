@@ -321,6 +321,8 @@ ranges are unavailable, an admitted LFS object of up to 8 MiB can use one
 whole-object GET. Both paths verify the complete SHA-256 digest.
 CDN-aware LFS streams recheck the captured grant before releasing buffered
 bytes, including queued output from the service's disk cache.
+Staged CDN-aware LFS, Git pack, and capsule downloads recheck the captured
+grant after draining file writes and within their original deadline.
 Complete xorb reads use those same bounded batches when the object is
 admitted for ranges and exceeds the full-GET profile. Verify the assembled
 xorb before returning any decoded chunks.

@@ -60,6 +60,7 @@ on:
       - "crates/crab-sdk/build.rs"
       - "crates/crab-remote-git/src/reader/edge_entry.rs"
       - "crates/crab-read/Cargo.toml"
+      - "crates/crab-read/src/capsule_payload.rs"
       - "crates/crab-read/src/hydrator.rs"
       - "crates/crab-read/src/hydrator/**"
       - "crates/crab-read/src/read_retention.rs"
@@ -75,6 +76,7 @@ on:
       - "crab/scripts/e2e/test_add_commit_push_source.py"
       - "crates/crab-storage/**"
       - "crates/crab-lfs/src/object_store.rs"
+      - "crates/crab-lfs/src/object_store/stream_tests.rs"
       - "crates/crab-lfs/tests/cdn_observation.rs"
       - "crates/crab-cache-store/Cargo.toml"
       - "crates/crab-cache-store/src/lfs.rs"
@@ -169,6 +171,7 @@ on:
       - "crates/crab-sdk/build.rs"
       - "crates/crab-remote-git/src/reader/edge_entry.rs"
       - "crates/crab-read/Cargo.toml"
+      - "crates/crab-read/src/capsule_payload.rs"
       - "crates/crab-read/src/hydrator.rs"
       - "crates/crab-read/src/hydrator/**"
       - "crates/crab-read/src/read_retention.rs"
@@ -184,6 +187,7 @@ on:
       - "crab/scripts/e2e/test_add_commit_push_source.py"
       - "crates/crab-storage/**"
       - "crates/crab-lfs/src/object_store.rs"
+      - "crates/crab-lfs/src/object_store/stream_tests.rs"
       - "crates/crab-lfs/tests/cdn_observation.rs"
       - "crates/crab-cache-store/Cargo.toml"
       - "crates/crab-cache-store/src/lfs.rs"
@@ -357,9 +361,13 @@ jobs:
           cargo test --locked -p crab-storage --lib --features provider-cdn-qualification 'cdn::'
           cargo test --locked -p crab-read --lib \
             --features local-staging,crab-storage/provider-cdn-qualification 'hydrator::'
+          cargo test --locked -p crab-read --lib \
+            --features local-staging,crab-storage/provider-cdn-qualification layered_payload_cdn_verifies_the_window
           cargo test --locked -p crab-sdk --features local,service --example cdn-sdk-read
           cargo test --locked -p crab-lfs --test cdn_observation
           cargo test --locked -p crab-lfs --test cdn_observation --features crab-storage/provider-cdn-qualification
+          cargo test --locked -p crab-lfs -p crab-cache-store --lib \
+            --features crab-cache-store/lfs after_grant_loss
           cargo test --locked -p crab-cache --lib --features local-cache \
             lfs_read_and_reservation_report_the_same_physical_root
 

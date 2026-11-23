@@ -1,7 +1,10 @@
 use std::{
     collections::BTreeMap,
     fmt::Debug,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use object_store::{ObjectStoreExt, memory::InMemory};
@@ -1213,6 +1216,62 @@ async fn edge_and_origin_restart_share_request_admission() {
             .load(std::sync::atomic::Ordering::Relaxed),
         2
     );
+    request.await.unwrap();
+}
+
+#[tokio::test]
+async fn staged_file_requires_current_authority_after_the_transfer() {
+    struct Grant(AtomicBool);
+
+    #[async_trait::async_trait]
+    impl crate::ReadAuthorization for Grant {
+        async fn check(&self) -> Result<()> {
+            if self.0.load(Ordering::Relaxed) {
+                Ok(())
+            } else {
+                Err(StorageError::Forbidden {
+                    path: "fixture grant expired".into(),
+                })
+            }
+        }
+    }
+
+    let (cdn, request) = endpoint(
+        "HTTP/1.1 206 Partial Content\r\nContent-Length: 6\r\nContent-Range: bytes 0-5/6\r\n\r\n012345",
+    )
+    .await;
+    let path = Path::from(format!("org/repo/v2/history/ab/{}", "abcd".repeat(16)));
+    let target = [8; 32];
+    let grant = Arc::new(Grant(AtomicBool::new(true)));
+    let store = Store::new(Arc::new(InMemory::new()))
+        .with_target_identity(target)
+        .with_read_authorization(grant.clone(), "org/repo")
+        .unwrap()
+        .with_cdn_route(CdnRoute::new(
+            target,
+            "org/repo".into(),
+            None,
+            CdnAccess::Public,
+            cdn,
+            Duration::from_secs(5),
+        ))
+        .unwrap();
+    let attempt = store.cdn_attempt(&path).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("staging");
+    let result = attempt
+        .with_file_deadline(&CancellationToken::new(), async |cancel| {
+            let mut digest = Sha256::new();
+            let complete = attempt
+                .download(6, 0..6, &file, cancel, |bytes| digest.update(bytes))
+                .await?;
+            assert!(complete);
+            assert_eq!(digest.finalize(), Sha256::digest(b"012345"));
+            grant.0.store(false, Ordering::Relaxed);
+            Ok::<_, StorageError>(())
+        })
+        .await;
+    assert!(matches!(result, Err(StorageError::ReadRejected { .. })));
     request.await.unwrap();
 }
 
