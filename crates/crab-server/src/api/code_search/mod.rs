@@ -26,6 +26,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 mod indexed;
+mod qualifiers;
 pub(super) mod workspace;
 
 const PAGE_ENTRIES: usize = 128;
@@ -64,6 +65,18 @@ struct Page {
     scanned: usize,
     skipped: usize,
     next: Option<String>,
+}
+
+impl Page {
+    fn for_commit(commit: ObjectId) -> Self {
+        Self {
+            commit: commit.to_string(),
+            items: Vec::new(),
+            scanned: 0,
+            skipped: 0,
+            next: None,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -131,7 +144,7 @@ pub(super) async fn search(
             paths: PAGE_ENTRIES,
             results: limit,
             duration: Duration::from_secs(20),
-            use_index: params.kind == Kind::Symbol,
+            use_index: pattern.kind == Kind::Symbol,
         },
         &cancellation,
     )
@@ -171,12 +184,16 @@ struct Pattern {
     kind: Kind,
     case_sensitive: bool,
     mask: Option<code_index::Mask>,
+    filters: qualifiers::Filters,
 }
 
 impl Pattern {
     fn new(terms: &str, path: &str, case_sensitive: bool, kind: Kind) -> Result<Self, ApiError> {
-        if terms.is_empty() || terms.chars().count() > 128 || terms.chars().any(char::is_control) {
-            return Err(ApiError::Input("Enter 1–128 characters to search for"));
+        let (literal, kind, filters) = qualifiers::Filters::parse(terms, kind)?;
+        if literal.chars().count() > 128 {
+            return Err(ApiError::Input(
+                "Search text may contain up to 128 characters",
+            ));
         }
         if path.len() > 1024
             || path.chars().any(char::is_control)
@@ -185,7 +202,7 @@ impl Pattern {
             return Err(ApiError::Input("Enter a repository directory path"));
         }
         let directory = GitPath::new(path.as_bytes().to_vec())?;
-        let matcher = RegexBuilder::new(&regex::escape(terms))
+        let matcher = RegexBuilder::new(&regex::escape(&literal))
             .case_insensitive(!case_sensitive)
             .build()
             .map_err(|_| ApiError::Input("The search term could not be compiled"))?;
@@ -194,7 +211,8 @@ impl Pattern {
             directory,
             kind,
             case_sensitive,
-            mask: code_index::Mask::query(terms, case_sensitive),
+            mask: code_index::Mask::query(&literal, case_sensitive),
+            filters,
         })
     }
 }
@@ -252,6 +270,16 @@ async fn scan_repository(
     let found = async {
         let snapshot = repository.snapshot(&revision, &operation).await?;
         let mut acceleration = Acceleration::Scanning;
+        if !pattern.filters.repository_matches(repo) {
+            let commit = snapshot.commit_oid();
+            return Ok(Scan {
+                commit,
+                result: Page::for_commit(commit),
+                after: None,
+                acceleration,
+                verified: 0,
+            });
+        }
         if window.use_index {
             match code_index::load(server, repo, snapshot.root_tree_oid()).await {
                 Ok(Some(index)) => {
@@ -306,19 +334,16 @@ async fn inspect(
     )?;
     let listings = snapshot.list_tree_blobs(&request, operation).await?;
     let entries = listings.items;
-    let mut result = Page {
-        commit: snapshot.commit_oid().to_string(),
-        items: Vec::new(),
-        scanned: 0,
-        skipped: 0,
-        next: None,
-    };
+    let mut result = Page::for_commit(snapshot.commit_oid());
     let mut examined = 0;
     let mut verified = 0;
     'scan: for batch in entries.chunks(FILE_READ_BATCH) {
         let found = futures_util::future::try_join_all(batch.iter().map(|item| async move {
             match item {
                 TreeListingItem::Blob(entry) => {
+                    if !pattern.filters.file_matches(entry.path.as_bytes()) {
+                        return Ok(Inspection::NoMatch);
+                    }
                     if pattern.kind == Kind::Path {
                         let path = display_path(entry.path.as_bytes());
                         if pattern.matcher.is_match(&path) {
@@ -345,7 +370,8 @@ async fn inspect(
             verified += batch
                 .iter()
                 .filter(|item| {
-                    pattern.kind != Kind::Symbol || Syntax::for_path(item.path()).is_some()
+                    pattern.filters.file_matches(item.path())
+                        && (pattern.kind != Kind::Symbol || Syntax::for_path(item.path()).is_some())
                 })
                 .count();
         }
@@ -531,7 +557,8 @@ impl Tokens<'_> {
 
     fn signature(&self, payload: &[u8]) -> blake3::Hash {
         let mut hash = blake3::Hasher::new_keyed(self.key);
-        hash.update(b"crab-code-search-v1\0");
+        // The same raw text can resolve to a different query after qualifiers.
+        hash.update(b"crab-code-search-v2\0");
         hash.update(self.repository.as_bytes());
         hash.update(payload);
         hash.finalize()

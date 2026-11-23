@@ -367,12 +367,144 @@ async fn workspace_search_organization_scope_follows_the_current_catalog() {
         .await;
     assert_eq!(result["groups"].as_array().unwrap().len(), 1);
     assert_eq!(result["groups"][0]["id"], created["id"]);
+    for scope in [owner.to_owned(), organization.to_string()] {
+        let result = h.json(&format!("{root}+org%3A{scope}"), &alice).await;
+        assert_eq!(result["groups"].as_array().unwrap().len(), 1);
+        assert_eq!(result["groups"][0]["id"], created["id"]);
+    }
     *h.provider.mode.lock().await = "member".into();
     let reader = h.login().await;
     let result = h
         .json(&format!("{root}&organization={organization}"), &reader)
         .await;
     assert_eq!(result["groups"], json!([]));
+    assert_eq!(
+        h.json(&format!("{root}+org%3A{owner}"), &reader).await["groups"],
+        json!([])
+    );
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn code_search_qualifiers_filter_pinned_results_without_widening_access() {
+    let h = Harness::new(false).await;
+    h.add_repository("restricted").await;
+    let alice = h.login().await;
+    let (_, _, head) = searchable_repository(
+        &h,
+        &alice,
+        "team",
+        "private",
+        [
+            ("src/direct.rs".into(), "fn qualified_needle() {}\n".into()),
+            (
+                "src/nested/code.rs".into(),
+                "fn qualified_needle() {}\n".into(),
+            ),
+            (
+                "src/elsewhere.py".into(),
+                "def qualified_needle(): pass\n".into(),
+            ),
+            (
+                "docs/src/example.rs".into(),
+                "fn qualified_needle() {}\n".into(),
+            ),
+            (
+                "docs/release notes.md".into(),
+                "repo:team/restricted\n".into(),
+            ),
+        ],
+    )
+    .await;
+    searchable_repository(
+        &h,
+        &alice,
+        "team",
+        "restricted",
+        [("src/hidden.rs".into(), "fn qualified_needle() {}\n".into())],
+    )
+    .await;
+    let catalog = h.server.catalog().unwrap();
+    let mut members = catalog
+        .membership("team", "restricted")
+        .await
+        .unwrap()
+        .members;
+    members.retain(|member| member.subject != "bob-id");
+    catalog
+        .set_members("team", "restricted", members, true)
+        .await
+        .unwrap();
+    *h.provider.mode.lock().await = "member".into();
+    let reader = h.login().await;
+    let qualified =
+        "q=repo%3ATEAM%2Fprivate+language%3ARust+path%3A%2Fsrc%2F**%2F*+symbol%3Aqualified_needle";
+    let private = h
+        .server
+        .repositories
+        .get(&("team".into(), "private".into()))
+        .unwrap();
+    for indexed in [false, true] {
+        if indexed {
+            code_index::reconcile(&h.server, &private, &h.server.cancellation)
+                .await
+                .unwrap();
+        }
+        let result = h
+            .json(&format!("/api/code-search?{qualified}"), &reader)
+            .await;
+        assert_eq!(result["indexed_repositories"], usize::from(indexed));
+        assert_eq!(result["groups"].as_array().unwrap().len(), 1);
+        let group = &result["groups"][0];
+        assert_eq!(group["commit"], head);
+        let files = group["files"].as_array().unwrap();
+        assert_eq!(
+            files
+                .iter()
+                .map(|hit| hit["path"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["src/direct.rs", "src/nested/code.rs"]
+        );
+        assert_eq!(files[0]["lines"][0]["matched"], "qualified_needle");
+    }
+
+    let hidden = h
+        .json(
+            "/api/code-search?q=repo%3Ateam%2Frestricted+symbol%3Aqualified_needle",
+            &reader,
+        )
+        .await;
+    let absent = h
+        .json(
+            "/api/code-search?q=repo%3Ateam%2Fmissing+symbol%3Aqualified_needle",
+            &reader,
+        )
+        .await;
+    assert_eq!(hidden, absent);
+    assert_eq!(hidden["groups"], json!([]));
+
+    let query = "/api/repos/team/private/code-search?q=path%3A%22release+notes%22+content%3A%22repo%3Ateam%2Frestricted%22";
+    let literal = h.json(query, &reader).await;
+    assert_eq!(literal["items"][0]["path"], "docs/release notes.md");
+    assert_eq!(
+        literal["items"][0]["lines"][0]["matched"],
+        "repo:team/restricted"
+    );
+
+    let endpoint = "/api/repos/team/private/code-search?limit=1";
+    let first = h.json(&format!("{endpoint}&{qualified}"), &reader).await;
+    let cursor = first["next"].as_str().unwrap();
+    let response = h
+        .http
+        .get(format!(
+            "{}{endpoint}&q=path%3Adocs&cursor={cursor}",
+            h.origin
+        ))
+        .header(reqwest::header::COOKIE, &reader)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     h.close().await;
 }
 
@@ -442,6 +574,21 @@ async fn native_browser_finds_symbols_across_repositories_and_opens_the_definiti
     browser.run(&["wait", "--text", "private.rs"]).await;
     browser
         .run(&["wait", "--text", "Index used for 2 repositories"])
+        .await;
+    browser
+        .run(&[
+            "fill",
+            "#workspace-search-text",
+            "repo:team/library language:rust path:*.rs symbol:workspace_needle",
+        ])
+        .await;
+    browser
+        .run(&[
+            "find", "role", "button", "click", "--name", "Search", "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", "--text", "Index used for 1 repository"])
         .await;
     let link = format!("a[href*='/blob/{head}/library.rs'][href$='#L2']");
     browser.run(&["wait", &link]).await;

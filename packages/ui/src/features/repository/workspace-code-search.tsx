@@ -4,7 +4,7 @@ import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Field, FieldLabel } from "@/components/ui/field";
+import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
   NativeSelect,
@@ -91,7 +91,7 @@ export default function WorkspaceCodeSearch({ url }: { url: URL }) {
           else navigate(href);
         }}
       >
-        <div className="flex flex-wrap items-end gap-3">
+        <div className="flex flex-wrap items-start gap-3">
           <Field className="min-w-52 flex-1">
             <FieldLabel htmlFor="workspace-search-text">Search text</FieldLabel>
             <Input
@@ -99,16 +99,21 @@ export default function WorkspaceCodeSearch({ url }: { url: URL }) {
               name="q"
               type="search"
               required
-              maxLength={128}
+              maxLength={512}
+              aria-describedby="workspace-search-qualifiers"
               defaultValue={q}
             />
+            <FieldDescription id="workspace-search-qualifiers">
+              Try <code>repo:owner/name</code>, <code>language:rust</code>, or{" "}
+              <code>path:src/</code> to narrow results.
+            </FieldDescription>
           </Field>
-          <Button type="submit">
+          <Button className="mt-6" type="submit">
             <SearchIcon data-icon="inline-start" />
             Search
           </Button>
           {q && (
-            <Button asChild variant="ghost">
+            <Button asChild className="mt-6" variant="ghost">
               <Link href={form}>Clear search</Link>
             </Button>
           )}

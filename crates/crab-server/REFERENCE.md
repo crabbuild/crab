@@ -553,6 +553,23 @@ one repository. Select a branch, tag, or full commit, optionally restrict the
 search to an exact directory, and select **Match case** when needed. Each
 excerpt links to its file and line at the commit searched.
 
+Add qualifiers to the search text to narrow a query. For example,
+`language:rust path:/src/**/*.rs symbol:parse` finds Rust definitions in
+`src` and its subdirectories. Use `repo:owner/name` to select an exact
+repository and `org:` with the organization namespace from the repository
+URL or its UUID. Both selectors use current repository access. A query
+containing only filters lists matching file paths.
+
+`path:` matches a case-insensitive substring of the repository-relative path.
+Start it with `/` to anchor it at the root. Use `*` or `?` within one path
+component and `**` across directories. Quotes keep wildcards literal and
+allow spaces, as in `path:"release notes"`. Repeated path filters must all match.
+`language:` uses the file extension and accepts C, C++, C#, CSS, Go, HTML,
+Java, JavaScript, JSON, Kotlin, Markdown, PHP, Python, Ruby, Rust, Shell,
+SQL, Swift, TOML, TypeScript, XML, and YAML. `symbol:` and `content:` select
+the search mode and supply the literal term. Quote text such as
+`"repo:owner/name"` to search for the qualifier itself.
+
 `GET /api/repos/{owner}/{name}/code-search` takes `q`, optional `rev`, an
 optional directory `path`, `kind=content|path|symbol` (default `content`),
 `case_sensitive` (default `false`), `limit`
@@ -562,6 +579,8 @@ optional directory `path`, `kind=content|path|symbol` (default `content`),
 `matched`, and `after`. Supply the same search parameters with `next`
 to continue. A cursor binds the repository UUID, commit, and search filters.
 Subsequent pages use the pinned commit even if the selected branch advances.
+The search text accepts up to 512 characters, including up to 128 for the
+literal match.
 Every request checks current repository access before returning any matches.
 
 Each page scans up to 128 files in canonical path order. Indexed symbol search
@@ -582,9 +601,10 @@ scope. [GitHub symbol search](https://docs.github.com/en/search-github/github-co
 
 Open **Search code** from the global header, or **Search organization code**
 from an organization's repository list. Search file contents, paths, or definitions on
-default branches. Use an exact directory and **Match case** to narrow the
-scan. Results name the repository and link to the exact Git commit, file,
-and matching line.
+default branches. Use the same qualifiers, exact directory, and **Match case**
+controls as repository search. A continuation binds the full query and the
+current readable repository scope selected by its qualifiers. Results name
+the repository and link to the exact Git commit, file, and matching line.
 
 `GET /api/code-search` takes `q`, optional `organization` UUID and
 `directory`, `kind=content|path|symbol` (default `content`), `case_sensitive`,

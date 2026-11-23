@@ -4,7 +4,7 @@ import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Field, FieldLabel } from "@/components/ui/field";
+import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
   NativeSelect,
@@ -150,19 +150,24 @@ function SearchForm({
           );
       }}
     >
-      <div className="flex flex-wrap items-end gap-3">
+      <div className="flex flex-wrap items-start gap-3">
         <Field className="min-w-56 flex-1">
           <FieldLabel htmlFor="code-search-term">Search text</FieldLabel>
           <Input
             id="code-search-term"
             type="search"
             required
-            maxLength={128}
+            maxLength={512}
+            aria-describedby="code-search-qualifiers"
             value={terms}
             onChange={(event) => setTerms(event.target.value)}
           />
+          <FieldDescription id="code-search-qualifiers">
+            Narrow with <code>path:</code> or <code>language:</code>. Use{" "}
+            <code>symbol:</code> to find definitions.
+          </FieldDescription>
         </Field>
-        <Button type="submit" disabled={!terms.trim()}>
+        <Button className="mt-6" type="submit" disabled={!terms.trim()}>
           <SearchIcon data-icon="inline-start" /> Search
         </Button>
       </div>
