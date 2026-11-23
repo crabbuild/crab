@@ -101,7 +101,7 @@ pub(in crate::cells::repository) fn complete_closure(
     // The publication, not the retrying user's permissions or present HEAD,
     // authorized these issue state changes. Commit them with the PR transition.
     for issue in captured.issues {
-        issues::close_by_pull(context, issue, pull, actor)?;
+        issues::close_linked_issue(context, issue, issues::ClosingSource::Pull(pull), actor)?;
     }
     if !captured.keyword_issues.is_empty() {
         context.put_document(&published_keywords_key(pull), &captured.keyword_issues)?;

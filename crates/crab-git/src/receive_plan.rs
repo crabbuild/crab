@@ -16,7 +16,9 @@ type SourceError = Box<dyn std::error::Error + Send + Sync>;
 
 mod changed_paths;
 mod visibility;
-pub use visibility::{RefVisibility, VisibilitySource, plan_visibility};
+pub use visibility::{
+    CommitObserver, RefVisibility, VisibilitySource, plan_visibility, plan_visibility_with_commits,
+};
 
 /// One exact ref comparison and replacement; `None` represents absence/deletion.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -361,6 +363,14 @@ impl<'a, S: GraphSource, C: Fn() -> bool> Validator<'a, S, C> {
         Ok(())
     }
     fn load(&mut self, oid: ObjectId) -> Result<Node> {
+        self.load_observing(oid, None)
+    }
+
+    fn load_observing(
+        &mut self,
+        oid: ObjectId,
+        observe: Option<&mut CommitObserver<'_>>,
+    ) -> Result<Node> {
         if let Some(node) = self.nodes.get(&oid) {
             return Ok(node.clone());
         }
@@ -395,11 +405,16 @@ impl<'a, S: GraphSource, C: Fn() -> bool> Validator<'a, S, C> {
                 reason: "object identity mismatch",
             });
         }
-        let node = self.parse(oid, object)?;
+        let node = self.parse(oid, object, observe)?;
         self.nodes.insert(oid, node.clone());
         Ok(node)
     }
-    fn parse(&mut self, oid: ObjectId, object: BaseObject) -> Result<Node> {
+    fn parse(
+        &mut self,
+        oid: ObjectId,
+        object: BaseObject,
+        observe: Option<&mut CommitObserver<'_>>,
+    ) -> Result<Node> {
         let mut links = Vec::new();
         let mut tree = Vec::new();
         let parse_error = |source| ReceivePlanError::Parse { oid, source };
@@ -428,6 +443,9 @@ impl<'a, S: GraphSource, C: Fn() -> bool> Validator<'a, S, C> {
                 }
                 links.push((commit.tree(), Kind::Tree));
                 links.extend(commit.parents().map(|parent| (parent, Kind::Commit)));
+                if let Some(observe) = observe {
+                    observe(oid, commit.message.as_bytes())?;
+                }
             }
             Kind::Tree => {
                 let mut previous = None;

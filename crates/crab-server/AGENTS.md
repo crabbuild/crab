@@ -71,6 +71,9 @@ the Cell mutation.
 `cells/repository/collaboration/links/closure.rs` captures opt-in issue closures
 under the Git publication policy lease and applies them at native merge
 completion. `links/keywords.rs` interprets closing references in Markdown prose.
+`links/commits.rs` reserves issue closures discovered by the exact default-ref
+visibility walk and applies them once the publication receipt proves the ref
+edit. `repository/commit_closures.rs` reconciles live and interrupted writes.
 The discussion index projects pending references by base ref and completed
 references from the publication snapshot used for receipt recovery.
 `api/pulls/auto_merge/worker.rs` sweeps waiting requests and uses the standard

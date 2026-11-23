@@ -45,7 +45,12 @@ export type Action =
       number: number;
       title: string;
     }
-  | { kind: "issue_closed"; reason: "completed" | "not_planned"; pull?: number }
+  | {
+      kind: "issue_closed";
+      reason: "completed" | "not_planned";
+      pull?: number;
+      commit?: string;
+    }
   | {
       kind: "issue_close_reason_changed";
       from: "completed" | "not_planned" | null;

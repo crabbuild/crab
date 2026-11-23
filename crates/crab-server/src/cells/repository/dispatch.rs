@@ -5,7 +5,7 @@ use super::collaboration::milestones::{
 use super::collaboration::reactions::{GetReactions, SetReaction};
 use super::collaboration::{
     attachments,
-    links::{GetLink, ListLinks, SetLink},
+    links::{GetLink, ListLinks, SetLink, commits as commit_closures},
     mention_settings, mentions, watches,
 };
 use super::*;
@@ -167,6 +167,8 @@ pub(in crate::cells) fn dispatch_mutation(
         }
         <SetPullReadiness as Mutation>::ID => invoke_mutation::<SetPullReadiness>(context, input),
         <SetLink as Mutation>::ID => invoke_mutation::<SetLink>(context, input),
+        commit_closures::Reserve::ID => invoke_mutation::<commit_closures::Reserve>(context, input),
+        commit_closures::Resolve::ID => invoke_mutation::<commit_closures::Resolve>(context, input),
         <SetReaction as Mutation>::ID => invoke_mutation::<SetReaction>(context, input),
         <CreateMilestone as Mutation>::ID => invoke_mutation::<CreateMilestone>(context, input),
         <EditMilestone as Mutation>::ID => invoke_mutation::<EditMilestone>(context, input),
@@ -429,6 +431,7 @@ pub(in crate::cells) fn dispatch_read(
         webhooks::HasWork::ID => invoke_read::<webhooks::HasWork>(context, input),
         webhooks::Current::ID => invoke_read::<webhooks::Current>(context, input),
         webhooks::sync::Next::ID => invoke_read::<webhooks::sync::Next>(context, input),
+        commit_closures::Next::ID => invoke_read::<commit_closures::Next>(context, input),
         integrations::List::ID => invoke_read::<integrations::List>(context, input),
         integrations::dispatches::Get::ID => {
             invoke_read::<integrations::dispatches::Get>(context, input)

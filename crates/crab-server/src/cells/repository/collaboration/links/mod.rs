@@ -10,7 +10,8 @@ const ROOT: &str = "collaboration/v1/links";
 const MAX_CLOSING_ISSUES: usize = 10;
 
 mod closure;
-mod keywords;
+pub(crate) mod commits;
+pub(crate) mod keywords;
 pub(in crate::cells::repository) use closure::{
     capture_closure, clear_closure, complete_closure, projected_keywords,
 };

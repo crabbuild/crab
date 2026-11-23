@@ -1,6 +1,7 @@
 //! Repository reads, pinned browse snapshots, and maintenance ownership.
 
 pub(crate) mod code_index;
+pub(crate) mod commit_closures;
 pub(crate) mod maintenance;
 pub(crate) mod projection;
 pub(crate) mod settings;

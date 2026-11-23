@@ -2264,6 +2264,15 @@ edit. The `linked-issues/{issue}` edit route addresses the manual link.
 Default-branch changes and PR retargeting affect the active links.
 Completed merges retain the captured links and the issue's closure event.
 
+The same keywords in a commit message close repository-local issues when that
+commit becomes reachable from the default branch through Crab Server. This
+includes Git pushes, browser commits and the commits actually published by a
+pull request merge. A topic branch push leaves the issue open. The issue
+timeline links to the exact closing commit and identifies the authenticated
+publisher. Crab verifies the committed ref receipt before applying closure
+and recovers pending closures after an interruption. A ref publication can
+contain up to 100 distinct closing issue references across its new commits.
+
 Before serving existing repositories, deploy all peers and run
 `cells rebuild-search --owner OWNER --name REPO` to prepare discussion index
 format 13. This indexes existing descriptions and preserves prior issue states.

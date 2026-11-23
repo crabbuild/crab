@@ -55,6 +55,8 @@ pub(crate) enum Action {
         reason: crate::cells::repository::issues::lifecycle::Reason,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pull: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commit: Option<String>,
     },
     IssueCloseReasonChanged {
         from: Option<crate::cells::repository::issues::lifecycle::Reason>,
@@ -205,6 +207,18 @@ impl Action {
         } = self
         {
             validate_number(*pull)?;
+        }
+        if let Self::IssueClosed {
+            pull,
+            commit: Some(commit),
+            reason,
+        } = self
+            && (pull.is_some()
+                || *reason != super::super::issues::lifecycle::Reason::Completed
+                || commit.len() != 40
+                || gix_hash::ObjectId::from_hex(commit.as_bytes()).is_err())
+        {
+            return Err(crate::cells::Error::Invalid("invalid closing commit"));
         }
         if !valid {
             return Err(crate::cells::Error::Invalid(

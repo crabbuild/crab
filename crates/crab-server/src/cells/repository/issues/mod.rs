@@ -345,7 +345,7 @@ impl UpdateIssue {
         context: &Transaction<'_>,
         mut issue: IssueRecord,
         input: UpdateIssueInput,
-        closing_pull: Option<u64>,
+        closing_source: Option<ClosingSource<'_>>,
     ) -> crate::cells::Result<MutationResult<UpdateIssueOutcome>> {
         let was_closed = issue.state != 0;
         let edited = input
@@ -470,7 +470,14 @@ impl UpdateIssue {
                     reason: lifecycle
                         .state_reason
                         .ok_or(crate::cells::Error::Invalid("new closure has no reason"))?,
-                    pull: closing_pull,
+                    pull: closing_source.and_then(|source| match source {
+                        ClosingSource::Pull(number) => Some(number),
+                        ClosingSource::Commit(_) => None,
+                    }),
+                    commit: closing_source.and_then(|source| match source {
+                        ClosingSource::Commit(oid) => Some(oid.to_owned()),
+                        ClosingSource::Pull(_) => None,
+                    }),
                 }
             };
             activity::append(context, target, &input.actor, action)?;
@@ -497,10 +504,16 @@ impl UpdateIssue {
     }
 }
 
-pub(in crate::cells::repository) fn close_by_pull(
+#[derive(Clone, Copy)]
+pub(in crate::cells::repository) enum ClosingSource<'a> {
+    Pull(u64),
+    Commit(&'a str),
+}
+
+pub(in crate::cells::repository) fn close_linked_issue(
     context: &mut Transaction<'_>,
     number: u64,
-    pull: u64,
+    source: ClosingSource<'_>,
     actor: &RepositoryAuthor,
 ) -> crate::cells::Result<()> {
     let Some(issue) = GetIssue::execute(context, number)?.filter(|issue| issue.state == 0) else {
@@ -519,7 +532,7 @@ pub(in crate::cells::repository) fn close_by_pull(
         assignees: None,
     };
     if matches!(
-        UpdateIssue::apply_update(context, issue, input, Some(pull))?,
+        UpdateIssue::apply_update(context, issue, input, Some(source))?,
         MutationResult::Rejected(_)
     ) {
         return Err(crate::cells::Error::Invalid(

@@ -140,6 +140,7 @@ async fn state_and_content_changes_are_ordered_and_rejected_or_noop_edits_emit_n
                 Action::IssueClosed {
                     reason: crate::cells::repository::issues::lifecycle::Reason::Completed,
                     pull: None,
+                    commit: None,
                 }
             ),
             (2, Action::Updated),

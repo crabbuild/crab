@@ -47,10 +47,23 @@ fn additive_visibility_reuses_only_the_reached_prior_tip_and_excludes_unreachabl
         (Kind::Blob, b"unreachable".to_vec()),
     ]);
     for (tip, added) in [(new, vec![new]), (tagged, sorted([new, tagged]))] {
+        let mut commits = Vec::new();
         assert_eq!(
-            plan_visibility(&incoming, tip, &mut source, graph_limits(), || false).unwrap(),
+            plan_visibility_with_commits(
+                &incoming,
+                tip,
+                &mut source,
+                graph_limits(),
+                || false,
+                Some(&mut |oid, message| {
+                    commits.push((oid, message.to_vec()));
+                    Ok(())
+                })
+            )
+            .unwrap(),
             RefVisibility::Additive { base: old, added }
         );
+        assert_eq!(commits, vec![(new, b"new\n".to_vec())]);
     }
     assert!(
         source.source.reads.is_empty(),
@@ -95,12 +108,25 @@ fn rewrite_expands_shared_subtrees_without_retaining_old_history_or_unrelated_vi
     let body = commit(root, &[], "rewritten root");
     let new = object_id(Kind::Commit, &body);
     let incoming = incoming(&[(Kind::Tree, new_tree), (Kind::Commit, body)]);
+    let mut commits = Vec::new();
     assert_eq!(
-        plan_visibility(&incoming, new, &mut source, graph_limits(), || false).unwrap(),
+        plan_visibility_with_commits(
+            &incoming,
+            new,
+            &mut source,
+            graph_limits(),
+            || false,
+            Some(&mut |oid, _| {
+                commits.push(oid);
+                Ok(())
+            })
+        )
+        .unwrap(),
         RefVisibility::Replacement {
             objects: sorted([new, root, subtree_oid, shared])
         }
     );
+    assert_eq!(commits, vec![new]);
     assert_eq!(
         source.source.reads,
         vec![subtree_oid],

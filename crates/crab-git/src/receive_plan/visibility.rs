@@ -24,6 +24,9 @@ pub enum RefVisibility {
     Replacement { objects: Vec<ObjectId> },
 }
 
+/// Observes the verified messages of commits outside the pinned prior closure.
+pub type CommitObserver<'a> = dyn FnMut(ObjectId, &[u8]) -> Result<()> + Send + 'a;
+
 /// Computes exact ref reachability without a clone or local object database.
 ///
 /// Reuses a prior closure only after finding its actual tip in the new graph.
@@ -39,6 +42,18 @@ pub fn plan_visibility<S: VisibilitySource, C: Fn() -> bool>(
     limits: GraphLimits,
     cancelled: C,
 ) -> Result<RefVisibility> {
+    plan_visibility_with_commits(incoming, new, source, limits, cancelled, None)
+}
+
+/// Computes exact ref reachability and optionally observes newly reachable commits.
+pub fn plan_visibility_with_commits<S: VisibilitySource, C: Fn() -> bool>(
+    incoming: &IncomingPack,
+    new: ObjectId,
+    source: &mut S,
+    limits: GraphLimits,
+    cancelled: C,
+    observe: Option<&mut CommitObserver<'_>>,
+) -> Result<RefVisibility> {
     let prior = source.prior_tip();
     let mut validator = Validator::new(incoming, source, limits, cancelled);
     validator.step()?;
@@ -50,7 +65,7 @@ pub fn plan_visibility<S: VisibilitySource, C: Fn() -> bool>(
             reason: "prior visibility does not contain its ref tip",
         });
     }
-    let (objects, prior_members) = validator.visibility_walk(new, prior.is_some())?;
+    let (objects, prior_members) = validator.visibility_walk(new, prior.is_some(), observe)?;
     if let Some(prior) = prior {
         if objects.contains_key(&prior) {
             return Ok(RefVisibility::Additive {
@@ -63,7 +78,7 @@ pub fn plan_visibility<S: VisibilitySource, C: Fn() -> bool>(
         }
         // Pruned members are safe only when their whole prior closure is still
         // reachable. Forced rewrites must expand them so old visibility cannot leak.
-        let (objects, _) = validator.visibility_walk(new, false)?;
+        let (objects, _) = validator.visibility_walk(new, false, None)?;
         return Ok(RefVisibility::Replacement {
             objects: objects.into_keys().collect(),
         });
@@ -84,6 +99,7 @@ impl<S: VisibilitySource, C: Fn() -> bool> Validator<'_, S, C> {
         &mut self,
         new: ObjectId,
         prune_prior: bool,
+        mut observe: Option<&mut CommitObserver<'_>>,
     ) -> Result<(BTreeMap<ObjectId, Kind>, HashSet<ObjectId>)> {
         let mut objects = BTreeMap::new();
         let mut prior_members = HashSet::new();
@@ -91,12 +107,20 @@ impl<S: VisibilitySource, C: Fn() -> bool> Validator<'_, S, C> {
         while let Some((oid, expected)) = pending.pop() {
             self.step()?;
             let visited = objects.get(&oid).copied();
+            let prior_member = visited.is_none() && prune_prior && self.prior_contains(oid)?;
+            let mut observer = if prior_member {
+                None
+            } else {
+                observe.as_deref_mut()
+            };
             let kind = match visited {
                 Some(kind) => kind,
-                None if self.incoming.object(&oid).is_some() => self.load(oid)?.kind,
+                None if self.incoming.object(&oid).is_some() => {
+                    self.load_observing(oid, observer.as_deref_mut())?.kind
+                }
                 None => match self.trusted_kind(oid)? {
                     Some(kind) => kind,
-                    None => self.load(oid)?.kind,
+                    None => self.load_observing(oid, observer.as_deref_mut())?.kind,
                 },
             };
             if let Some(expected) = expected
@@ -112,14 +136,14 @@ impl<S: VisibilitySource, C: Fn() -> bool> Validator<'_, S, C> {
                 continue;
             }
             objects.insert(oid, kind);
-            if prune_prior && self.prior_contains(oid)? {
+            if prior_member {
                 prior_members.insert(oid);
                 continue;
             }
             // A proven blob is a leaf. Commits, trees and tags still need their
             // outgoing edges even if another ref's proof already covers them.
             if kind != Kind::Blob {
-                let node = self.load(oid)?;
+                let node = self.load_observing(oid, observer)?;
                 if node.kind != kind {
                     return Err(ReceivePlanError::Kind {
                         oid,

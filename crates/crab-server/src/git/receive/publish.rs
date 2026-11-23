@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     io::{BufRead, BufReader},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -19,7 +19,8 @@ use super::{
 };
 use crate::{
     auth::Principal,
-    repository::{MaintenanceTrigger, Repository, settings},
+    cells::repository::collaboration::links::{commits, keywords},
+    repository::{MaintenanceTrigger, Repository, commit_closures, settings},
     server::{Server, webhooks},
 };
 
@@ -416,7 +417,9 @@ async fn run_request(
     let request = &request;
     let defer_readiness = input.defer_readiness;
     let plan_id = input.plan_id.clone().or_else(|| {
-        if sends_publication_webhook(server, principal, entry, &request.updates) {
+        if sends_publication_webhook(server, principal, entry, &request.updates)
+            || tracks_issue_closures(server, principal, &request.updates)
+        {
             // A ref can be deleted and recreated with identical old and new
             // OIDs. Give an unplanned write its own receipt for this operation.
             Some(
@@ -551,6 +554,31 @@ struct RefMutation<'a> {
     publication: &'a Publication,
     has_branch: bool,
     initial_head: Option<(crab_write::capsule_protocol::RootSnapshot, String, String)>,
+    closing_ref: Option<&'a crab_git::receive_plan::RefUpdate>,
+    closing_issues: BTreeMap<u64, String>,
+}
+
+fn tracks_issue_closures(
+    server: &Server,
+    principal: &Principal,
+    updates: &[crab_git::receive_plan::RefUpdate],
+) -> bool {
+    server.cells().is_some()
+        && principal.import_grant().is_none()
+        && updates.iter().any(|update| {
+            update.name.starts_with("refs/heads/")
+                && update.new.is_some()
+                && update.old != update.new
+        })
+}
+
+fn updated_default<'a>(
+    updates: &'a [crab_git::receive_plan::RefUpdate],
+    default_ref: &str,
+) -> Option<&'a crab_git::receive_plan::RefUpdate> {
+    updates.iter().find(|update| {
+        update.name == default_ref && update.new.is_some() && update.old != update.new
+    })
 }
 
 impl RefMutation<'_> {
@@ -756,11 +784,16 @@ async fn publish_attempt(
                 update.name.clone(),
             )
         });
-    let mutation = RefMutation {
+    let closing_ref = tracks_issue_closures(server, principal, &request.updates)
+        .then(|| updated_default(&request.updates, view.head()))
+        .flatten();
+    let mut mutation = RefMutation {
         updates: &request.updates,
         publication: &input.publication,
         has_branch,
         initial_head,
+        closing_ref,
+        closing_issues: BTreeMap::new(),
     };
     let policy = if defer_readiness {
         settings::import_ref_policy(server, entry).await?
@@ -803,10 +836,32 @@ async fn publish_attempt(
         rewritten_ref,
         inspect_visible_tip,
     );
+    let closing_issues = Arc::new(Mutex::new(BTreeMap::new()));
+    let commit_observer = closing_ref.map(|update| {
+        let issues = Arc::clone(&closing_issues);
+        let observe: Box<crab_git::receive_plan::CommitObserver<'static>> =
+            Box::new(move |oid, message| {
+                if message.contains(&b'#') {
+                    let mut issues = issues
+                        .lock()
+                        .map_err(|_| crab_git::receive_plan::ReceivePlanError::Cancelled)?;
+                    for number in keywords::numbers(&String::from_utf8_lossy(message)) {
+                        issues.entry(number).or_insert_with(|| oid.to_string());
+                    }
+                    if issues.len() > commits::MAX_CLOSURES {
+                        return Err(crab_git::receive_plan::ReceivePlanError::Limit(
+                            "closing issue references",
+                        ));
+                    }
+                }
+                Ok(())
+            });
+        (update.name.clone(), observe)
+    });
     let scratch = server
         .local_staging
         .scratch(Arc::clone(&attempt.directory))?;
-    let prepared = match crab_remote::prepare::prepare_capsule(
+    let prepared = match crab_remote::prepare::prepare_capsule_with_commit_observer(
         repository.clone(),
         visibility,
         scratch,
@@ -815,6 +870,7 @@ async fn publish_attempt(
         visibility_bases,
         cancel,
         options,
+        commit_observer,
     )
     .await
     .map_err(validate::map_error)
@@ -831,6 +887,9 @@ async fn publish_attempt(
                     reason,
                     ..
                 }) => *reason,
+                ReceiveError::Graph(crab_git::receive_plan::ReceivePlanError::Limit(
+                    "closing issue references",
+                )) => "too many closing issue references",
                 _ => "incoming refs or graph rejected",
             };
             receive_wire::report(&mut bytes, &request.updates, unpack, Some(reason))?;
@@ -838,6 +897,8 @@ async fn publish_attempt(
         }
         Err(error) => return Err(error),
     };
+    mutation.closing_issues =
+        std::mem::take(&mut *closing_issues.lock().map_err(|_| ReceiveError::Cancelled)?);
     let changed_path_hashes = prepared.plan().changed_path_hashes().clone();
     let dependency_limits = dependency_limits();
     let pointers = prepared.plan().pointers();
@@ -1100,7 +1161,7 @@ async fn commit_authorized(
     if !current.principal.can_write(entry.id) {
         return Err(ReceiveError::Forbidden);
     }
-    principal.identity().ok_or(ReceiveError::Forbidden)?;
+    let identity = principal.identity().ok_or(ReceiveError::Forbidden)?;
     if principal.import_grant().is_none()
         && crate::repository::settings::load_lifecycle(server, entry)
             .await
@@ -1109,13 +1170,30 @@ async fn commit_authorized(
     {
         return Err(ReceiveError::Archived);
     }
+    let closure_default = if tracks_issue_closures(server, principal, mutation.updates) {
+        Some(entry.default_ref().await?)
+    } else {
+        None
+    };
+    let closing_ref = if let Some(default_ref) = &closure_default {
+        let update = updated_default(mutation.updates, default_ref);
+        if update != mutation.closing_ref {
+            return Err(ReceiveError::DefaultBranchChanged);
+        }
+        update
+    } else {
+        None
+    };
     let bypassed = if !matches!(mutation.publication, Publication::PullRequest(_)) {
         let policy = if principal.import_grant().is_some() {
             settings::import_ref_policy(server, entry).await?
         } else {
             settings::load_ref_policy(server, entry).await?
         };
-        let default_ref = policy.default_ref(entry).await?;
+        let default_ref = match closure_default {
+            Some(reference) => reference,
+            None => policy.default_ref(entry).await?,
+        };
         let organization_teams = policy.organization_teams(server, &current).await?;
         let actor = current
             .bypass_context(entry.id)
@@ -1162,11 +1240,41 @@ async fn commit_authorized(
         // cannot lose the event. Delivery requires the exact plan receipt.
         webhooks::reserve_publication(server, entry, plan, mutation.updates).await?;
     }
+    let mut closing_publication = None;
+    if let Some(update) = closing_ref
+        && !mutation.closing_issues.is_empty()
+    {
+        let plan = plan_id.ok_or(ReceiveError::Request(
+            "Missing issue closure publication plan",
+        ))?;
+        let publication = commits::Publication {
+            plan: plan.to_owned(),
+            reference: update.name.clone(),
+            before: update.old.map(|old| old.to_string()),
+            after: update.new.ok_or(ReceiveError::BranchChanged)?.to_string(),
+        };
+        if commit_closures::reserve(
+            server,
+            entry,
+            commits::Reservation {
+                publication: publication.clone(),
+                actor: (&identity).into(),
+                issues: mutation.closing_issues,
+            },
+        )
+        .await?
+        {
+            closing_publication = Some(publication);
+        }
+    }
     let outcome = artifacts
         .commit(plan_id, TTL, cancel)
         .await
         .map_err(validate::map_error)?;
     if let crab_remote::prepare::CapsuleCommitOutcome::Committed { transaction_id } = &outcome {
+        if let Some(publication) = closing_publication {
+            commit_closures::finish(server, entry, publication).await;
+        }
         if !bypassed.is_empty() {
             tracing::info!(repository = %entry.id, %transaction_id, rulesets = ?bypassed, "Git publication used ruleset bypass");
         }

@@ -191,6 +191,19 @@ export function ActivityItem({
             </Link>
           </>
         )}
+        {event.action.kind === "issue_closed" && event.action.commit && (
+          <>
+            {" via commit "}
+            <Link
+              href={repoHref(repo, {
+                view: "commit",
+                rev: event.action.commit,
+              })}
+            >
+              <code>{event.action.commit.slice(0, 7)}</code>
+            </Link>
+          </>
+        )}
         <Link
           className="muted"
           href={href ?? parentHref}
