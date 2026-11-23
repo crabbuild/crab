@@ -190,7 +190,6 @@ fn acquire(server: &Server) -> std::result::Result<read_admission::Admission, Re
 struct Pattern {
     query: Arc<QueryPlan>,
     directory: GitPath,
-    case_sensitive: bool,
     uses_text: bool,
     has_symbols: bool,
 }
@@ -209,7 +208,6 @@ impl Pattern {
             has_symbols: query.leaves.iter().any(qualifiers::Predicate::uses_symbols),
             query: Arc::new(query),
             directory: GitPath::new(path.as_bytes().to_vec())?,
-            case_sensitive,
         })
     }
 }

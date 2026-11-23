@@ -3,6 +3,8 @@ use bytes::{Buf, BufMut, Bytes};
 use crab_remote_git::GitPath;
 use gix_hash::ObjectId;
 
+mod regex_mask;
+
 const MAGIC: &[u8; 8] = b"CRABIDX2";
 const OID_BYTES: usize = 20;
 const CHECKSUM: usize = 32;
@@ -49,10 +51,10 @@ impl Mask {
         (text.len() >= 3 && (case_sensitive || text.is_ascii())).then(|| Self::from_text(text))
     }
 
-    pub(crate) fn may_contain(&self, query: &Self, case_sensitive: bool) -> bool {
+    pub(crate) fn may_contain(&self, query: &Self, check_non_ascii: bool) -> bool {
         // Regex case folding can match an ASCII query to non-ASCII text.
         // Those files remain candidates unless the search is case-sensitive.
-        (!case_sensitive && !self.ascii)
+        (!check_non_ascii && !self.ascii)
             || query
                 .bits
                 .iter()

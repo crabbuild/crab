@@ -25,7 +25,7 @@ impl Pattern {
             }
             let Predicate::Text {
                 kind,
-                mask: Some(mask),
+                filter: Some(query),
                 ..
             } = term
             else {
@@ -38,7 +38,7 @@ impl Pattern {
             };
             // The filter proves absence only. A positive filter must still
             // reach Git, including when the term appears under NOT.
-            if filter.is_some_and(|filter| !filter.may_contain(mask, self.case_sensitive)) {
+            if filter.is_some_and(|filter| !query.may_contain(filter)) {
                 *fact = Truth::No;
             }
         }

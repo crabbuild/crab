@@ -62,8 +62,10 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
   repository, organization, language, and path filters, plus explicit content
   and symbol terms. Regular expressions work across content, paths, and
   definitions. Both searches support Boolean expressions with grouped,
-  quoted, and scoped terms. Representative large-catalog qualification
-  remains open.
+  quoted, and scoped terms. The index can exclude ASCII candidates using
+  trigrams required by a regex. A native fixture covers a 4,097-path regex
+  search across an empty page, and a mixed-case fixture verifies Unicode
+  results against Git. Representative large-catalog qualification remains open.
 - The account-wide in-app inbox delivers assignments, individual and team
   review requests, individual mentions, and configured closed-team mentions.
   Read state is durable, the inbox can filter by reason, and links target the
@@ -304,6 +306,13 @@ Prove one private repository from an author’s browser and stock Git through a 
   matching and index refresh after a push. Embedded Chromium opened a
   match at the exact commit and line. A standalone RustFS process built
   the index from a stock Git push and reused it immediately after restart.
+
+- An offline check used one selective case-insensitive expression per pinned
+  snapshot. Across 13,199 eligible text paths, the filter admitted 3,376
+  candidates and retained all five exact matches. The snapshots were
+  TanStack Query `ee47993724e5`, MinIO `07c3a429bfed`, Eclipse Platform UI
+  `e3bbb556534a`, and Zod `d2b135cfb7a3`. This measures candidate reduction.
+  Large-catalog HTTP latency and concurrent load still need qualification.
 
 - Workspace code and path search passed the standalone server and production
   UI builds, four native search and catalog tests, 120 UI unit tests, and

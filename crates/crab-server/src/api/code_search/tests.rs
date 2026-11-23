@@ -648,16 +648,26 @@ async fn indexed_expression_continues_after_an_empty_bounded_page() {
     code_index::reconcile(&h.server, &repo, &h.server.cancellation)
         .await
         .unwrap();
-    let query = "/api/code-search?q=path%3A%2Fz-report%5C.txt%24%2F";
-    let first = h.json(query, &alice).await;
-    assert_eq!(first["indexed_repositories"], 1);
-    assert_eq!(first["scanned"], indexed::COMPLEX_PATHS_PER_PAGE);
-    assert_eq!(first["groups"], json!([]));
-    let after = first["next"].as_str().unwrap();
-    let second = h.json(&format!("{query}&cursor={after}"), &alice).await;
-    assert_eq!(second["groups"][0]["commit"], head);
-    assert_eq!(second["groups"][0]["files"][0]["path"], "src/z-report.txt");
-    assert_eq!(second["next"], Value::Null);
+    for (expression, verified) in [
+        (r"path:/z-report\.txt$/", 0),
+        ("content:/rep(?:ort|lay)/", 1),
+    ] {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("q", expression)
+            .finish();
+        let query = format!("/api/code-search?{query}");
+        let first = h.json(&query, &alice).await;
+        assert_eq!(first["indexed_repositories"], 1);
+        assert_eq!(first["scanned"], indexed::COMPLEX_PATHS_PER_PAGE);
+        assert_eq!(first["verified"], 0);
+        assert_eq!(first["groups"], json!([]));
+        let after = first["next"].as_str().unwrap();
+        let second = h.json(&format!("{query}&cursor={after}"), &alice).await;
+        assert_eq!(second["groups"][0]["commit"], head);
+        assert_eq!(second["groups"][0]["files"][0]["path"], "src/z-report.txt");
+        assert_eq!(second["verified"], verified);
+        assert_eq!(second["next"], Value::Null);
+    }
     h.close().await;
 }
 
@@ -807,6 +817,23 @@ async fn persistent_code_index_prunes_a_sparse_search_and_refreshes_after_public
     assert_eq!(page["indexed_repositories"], 1);
     assert_eq!(page["next"], Value::Null);
 
+    let expression = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair(
+            "q",
+            r"content:/(?:const|let)\s+stable_unique_search_target\s*=/",
+        )
+        .append_pair("directory", "src")
+        .finish();
+    let before = std::time::Instant::now();
+    let regex = h
+        .json(&format!("/api/code-search?{expression}"), &alice)
+        .await;
+    eprintln!("regex examined 514 index rows in {:?}", before.elapsed());
+    assert_eq!(regex["scanned"], 514);
+    assert_eq!(regex["verified"], 2);
+    assert_eq!(regex["groups"][0]["files"][0]["path"], "src/target.rs");
+    assert_eq!(regex["next"], Value::Null);
+
     let symbols = h
         .json(
             "/api/code-search?q=stable_unique_search_symbol&kind=symbol",
@@ -829,6 +856,16 @@ async fn persistent_code_index_prunes_a_sparse_search_and_refreshes_after_public
         "Kelvin"
     );
     assert_eq!(unicode["indexed_repositories"], 1);
+    let inline = h
+        .json(
+            "/api/code-search?q=%2F%28%3Fi%29kelvin%2F&case_sensitive=true",
+            &alice,
+        )
+        .await;
+    assert_eq!(
+        inline["groups"][0]["files"][0]["lines"][0]["matched"],
+        "Kelvin"
+    );
     let short = h.json("/api/code-search?q=42&directory=src", &alice).await;
     assert_eq!(short["verified"], 32);
     assert!(short["next"].is_string());

@@ -641,9 +641,11 @@ the same commit until its scan finishes.
 An indexed Boolean or regex query examines at most 4,096 path rows per
 repository per page. Follow the continuation even after a page with no
 matches. The index can prove a literal absent through its trigram filter.
-A possible match stays eligible until the pinned Git file can be checked.
-Regex terms use Git verification directly. An unreadable file has unknown
-content, so a negated content term cannot treat it as an absence.
+For regular expressions, Crab also checks trigrams required by every possible
+ASCII match. Alternation, repetition, and inline case flags are accounted for.
+Expressions without required trigrams and non-ASCII candidates stay eligible
+for exact Git verification. An unreadable file has unknown content, so a
+negated content term cannot treat it as an absence.
 
 The server builds a default-branch index in the background and keeps one
 published artifact per repository in object storage. It contains paths and

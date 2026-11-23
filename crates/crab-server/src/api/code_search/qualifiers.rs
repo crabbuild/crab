@@ -1,8 +1,12 @@
 use super::{ApiError, Kind, Repository, Syntax};
 use regex::{Regex, RegexBuilder};
+use regex_syntax::ParserBuilder;
 use uuid::Uuid;
 
+use crate::repository::code_index::Mask;
+
 const MAX_QUERY_CHARS: usize = 512;
+const EXPRESSION_NEST_LIMIT: u32 = 32;
 
 enum Term {
     Literal(String),
@@ -46,7 +50,7 @@ pub(super) fn compile_expression(pattern: &str, case_sensitive: bool) -> Result<
         .case_insensitive(!case_sensitive)
         .size_limit(256 * 1024)
         .dfa_size_limit(1024 * 1024)
-        .nest_limit(32)
+        .nest_limit(EXPRESSION_NEST_LIMIT)
         .build()
         .map_err(|_| {
             ApiError::Input("Use a valid regular expression with a supported size and syntax")
@@ -134,8 +138,19 @@ pub(super) enum Predicate {
     Text {
         kind: Kind,
         matcher: Regex,
-        mask: Option<Box<super::code_index::Mask>>,
+        filter: Option<Box<QueryFilter>>,
     },
+}
+
+pub(super) struct QueryFilter {
+    required: Mask,
+    check_non_ascii: bool,
+}
+
+impl QueryFilter {
+    pub(super) fn may_contain(&self, indexed: &Mask) -> bool {
+        indexed.may_contain(&self.required, self.check_non_ascii)
+    }
 }
 
 impl QueryPlan {
@@ -226,7 +241,7 @@ impl Predicate {
                     "symbol" => Kind::Symbol,
                     _ => kind,
                 };
-                let (matcher, mask) = match term {
+                let (matcher, required) = match term {
                     Term::Literal(literal) => {
                         if literal.chars().count() > 128 {
                             return Err(ApiError::Input(
@@ -240,17 +255,29 @@ impl Predicate {
                                 .map_err(|_| {
                                     ApiError::Input("The search term could not be compiled")
                                 })?,
-                            super::code_index::Mask::query(&literal, case_sensitive).map(Box::new),
+                            Mask::query(&literal, case_sensitive),
                         )
                     }
                     Term::Expression(pattern) => {
-                        (compile_expression(&pattern, case_sensitive)?, None)
+                        let matcher = compile_expression(&pattern, case_sensitive)?;
+                        let hir = ParserBuilder::new()
+                            .case_insensitive(!case_sensitive)
+                            .nest_limit(EXPRESSION_NEST_LIMIT)
+                            .build()
+                            .parse(&pattern)
+                            .ok();
+                        (matcher, hir.as_ref().and_then(Mask::from_regex))
                     }
                 };
                 Self::Text {
                     kind,
                     matcher,
-                    mask,
+                    filter: required.map(|required| {
+                        Box::new(QueryFilter {
+                            required,
+                            check_non_ascii: case_sensitive && !expression,
+                        })
+                    }),
                 }
             }
         };
