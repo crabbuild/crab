@@ -2435,6 +2435,7 @@ owner label does not acquire ownership.
 | Conversation | `GET /api/repos/{owner}/{name}/issues/{number}/conversation`, `GET /api/repos/{owner}/{name}/pulls/{number}/conversation` |
 | Conversation lock | `GET/PUT /api/repos/{owner}/{name}/issues/{number}/lock` and `GET/PUT /api/repos/{owner}/{name}/pulls/{number}/lock` |
 | Comment visibility | `PUT /api/repos/{owner}/{name}/comment-visibility/{target}` |
+| Edit history | `GET /api/repos/{owner}/{name}/edit-history/{target}` and `DELETE ...?revision={number}` |
 | Activity | `GET /api/repos/{owner}/{name}/activity`, `GET /api/repos/{owner}/{name}/issues/{number}/activity`, `GET /api/repos/{owner}/{name}/pulls/{number}/activity` |
 | Linked work | Issue/pull `GET .../{number}/links`; `GET/PUT /api/repos/{owner}/{name}/pulls/{pull}/linked-issues/{issue}` |
 
@@ -2683,6 +2684,30 @@ reload on HTTP 409. Minimization controls the default display. Authorized API
 reads, attachments, and discussion search retain the original content. Update
 serving peers together before hiding comments to enable the new activity events
 and batched presentation response. Existing comments need no migration.
+
+### View edit history
+
+Choose **edited** on an issue or PR description, comment, review, inline
+comment, or reply. Repository readers can compare the text before and after
+an edit and see its time and editor. Inline history includes suggested
+replacements. History starts with the first recorded edit after upgrading.
+Title, state, and metadata changes do not create a body revision.
+
+The original captured version and the 99 newest intermediate versions are
+retained. The after panel is unavailable when the adjacent version was
+removed or fell outside retention. The content author or a repository
+writer can remove a historical version. The timeline of edits still shows
+when it was edited and who edited it, along with the removal attribution.
+Removal applies to served history. Backups and object versions follow
+the deployment’s retention policy.
+
+`GET .../edit-history/{target}` returns `{items,next}`. The page lists up
+to 30 edit headers newest first. Continue with the exclusive `before` cursor.
+Use `?revision={number}` to receive `{revision,before,after,can_redact}`;
+each available text version contains a `body` and an optional `suggestion`.
+Use `DELETE .../edit-history/{target}?revision={number}` to remove that
+retained version. The action is idempotent. The `has_edit_history` field
+on discussion cards identifies contributions with recorded versions.
 
 ### Search issues and pull requests
 
@@ -4322,8 +4347,8 @@ namespace and immutable asset bodies in backups. Restoring visible records
 without counters, claims, request ledgers,
 control and immutable roots loses numbering, ownership and retry guarantees.
 
-Discussion deletion, edit history, and broader activity and email delivery
-qualification remain pending. The isolated RustFS process qualification
+Discussion deletion and broader activity and email delivery qualification
+remain pending. The isolated RustFS process qualification
 restores version-selected product roots, including release asset bodies.
 Cross-provider export and restore on a production deployment remain pending.
 
@@ -4758,7 +4783,7 @@ The server is complete only when a real account can perform the workflow and obs
 | GitHub-quality design | Themes, responsive layouts, accessible controls, navigation, and loading/error behavior across workflows | In progress |
 | Team identity and authorization | OIDC, sessions, membership, permissions, isolation, revocation, CSRF, and administration | In progress; browser and CLI membership replacement are audited, and back-channel logout revokes delivered exact-identity sessions |
 | Git hosting | Authenticated fetch and push, exact branch/tag lifecycle, protection, publication, and independent-client proof | In progress; additional crash phases and coexistence qualification remain |
-| Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; moderation, edit history, and email delivery qualification remain |
+| Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; discussion deletion and email delivery qualification remain |
 | Repository management | CLI create/adopt/list, archive, settings, search, import, and audited administration | In progress; browser creation/import and audit history remain |
 | Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Native process restart, owner handoff, and version-selected RustFS restore tested. Native metrics and shutdown wiring implemented. Deployment restore, crash matrices, upgrades, and provider qualification remain |
 | Quality gates | API, UI, accessibility, realistic repositories, security, package smoke, and measured performance | In progress |

@@ -1,3 +1,4 @@
+import { EditHistory } from "./edit-history";
 import { CommentVisibility } from "./comment-visibility";
 import { useConversationLock } from "./lock";
 import { useState } from "react";
@@ -55,7 +56,13 @@ export function CommentCard({
             {timestamp(comment.created_at)}
           </time>
         </Link>
-        {comment.version > 1 && <span className="muted">edited</span>}
+        {comment.has_edit_history && (
+          <EditHistory
+            repo={repo}
+            csrf={csrf}
+            target={`${target}/comments/${comment.number}`}
+          />
+        )}
       </header>
       <CommentVisibility
         repo={repo}

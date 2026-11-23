@@ -1,3 +1,4 @@
+import { EditHistory } from "./edit-history";
 import { CommentVisibility } from "./comment-visibility";
 import { ReviewDismissal } from "@/features/pull-requests/reviews/dismissal";
 import { RelativeTime } from "../time";
@@ -81,6 +82,13 @@ export function ReviewCard({
             {timestamp(review.created_at)}
           </time>
         </Link>
+        {review.has_edit_history && (
+          <EditHistory
+            repo={repo}
+            csrf={csrf}
+            target={`${target}/reviews/${review.number}`}
+          />
+        )}
         <ReviewDismissal
           repo={repo}
           target={target}

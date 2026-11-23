@@ -60,6 +60,8 @@ pub(crate) enum Error {
     ConversationLockPermission,
     #[error("You do not have permission to hide or unhide comments here")]
     CommentModerationPermission,
+    #[error("Only the author or a repository writer can remove edit history")]
+    EditHistoryPermission,
     #[error("Archived repositories are read-only")]
     Archived,
     #[error("Pull request authors cannot approve or request changes on their own changes")]
@@ -370,6 +372,11 @@ impl IntoResponse for Error {
                 StatusCode::FORBIDDEN,
                 "forbidden",
                 "You do not have permission to hide or unhide comments here",
+            ),
+            Self::EditHistoryPermission => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Only the author or a repository writer can remove edit history",
             ),
             Self::Archived => (
                 StatusCode::FORBIDDEN,

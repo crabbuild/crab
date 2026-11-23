@@ -1,3 +1,4 @@
+import { EditHistory } from "@/components/discussion/conversation/edit-history";
 import { Author } from "@/components/discussion/author";
 import { Reactions } from "@/components/discussion/reactions";
 import { DiscussionMarkdown } from "@/components/discussion/markdown";
@@ -46,6 +47,9 @@ export function PullConversation({
             <Author author={pull.author} />
           </strong>
           <span className="muted">commented {timestamp(pull.created_at)}</span>
+          {pull.has_edit_history && (
+            <EditHistory repo={repo} csrf={csrf} target={target} />
+          )}
         </header>
         <DiscussionMarkdown>{pull.body}</DiscussionMarkdown>
         <Reactions

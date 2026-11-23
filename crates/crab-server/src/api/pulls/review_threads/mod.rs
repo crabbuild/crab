@@ -278,6 +278,7 @@ fn thread_view(
         "author": authors.view(&thread.author),
         "body": thread.body,
         "reactions": reactions,
+        "has_edit_history": reactions.has_edit_history,
         "minimization": reactions.minimization,
         "suggested_text": thread.suggested_text,
         "base_oid": thread.base_oid,

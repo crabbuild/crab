@@ -24,6 +24,8 @@ use crate::{
 pub(super) struct View {
     #[serde(skip)]
     pub(super) minimization: Option<crate::cells::repository::collaboration::minimization::State>,
+    #[serde(skip)]
+    pub(super) has_edit_history: bool,
     revision: u64,
     groups: BTreeMap<Kind, Group>,
 }
@@ -76,6 +78,7 @@ async fn select(
         revision: result.receipt.revision,
         groups: summary.groups,
         minimization: None,
+        has_edit_history: false,
     }))
 }
 
@@ -118,6 +121,7 @@ pub(super) async fn read(
                 revision: observed.receipt.revision,
                 groups: value.groups,
                 minimization: value.minimization,
+                has_edit_history: value.has_edit_history,
             })
         })
         .collect()

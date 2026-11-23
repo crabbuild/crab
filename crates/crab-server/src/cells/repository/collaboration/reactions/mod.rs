@@ -60,6 +60,8 @@ pub(crate) struct Summary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub minimization: Option<super::minimization::State>,
     pub groups: BTreeMap<Kind, Group>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_edit_history: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -148,6 +150,7 @@ fn summary(
     Ok(Summary {
         groups,
         minimization: None,
+        has_edit_history: false,
     })
 }
 
@@ -256,6 +259,7 @@ impl Read for GetReactions {
                 }
                 let mut card = summary(context, target, &input.actor)?;
                 card.minimization = super::minimization::load(context, target)?;
+                card.has_edit_history = super::edit_history::exists(context, target)?;
                 Ok(Some(card))
             })
             .collect()

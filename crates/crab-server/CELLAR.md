@@ -509,6 +509,22 @@ digest encoding and validation. Public HTTP cannot supply bindings.
 Update peers together; there is no old list-shape reader or source-scan fallback.
 Review-status predicates are described below.
 
+## Discussion edit history
+
+Edit history records the previous body with the native edit event. Inline
+thread edits also capture the previous suggestion. This write, the canonical
+edit, and its receipt share the Repository Cell transaction. Metadata and text
+live in separate bounded documents, so listing headers does not read the
+text and control-heavy Markdown fits the document budget. The original
+captured version and the last 99 intermediate versions are retained.
+
+Revision removal deletes its text keys while keeping an attributed tombstone.
+The next retained revision supplies the after panel only when its predecessor
+matches the selected edit. Removed and pruned versions therefore remain
+unavailable through adjacent comparisons. This change requires no schema
+preparation or backfill. Upgrade serving peers together before processing
+edits so every writer records history.
+
 ## Conversation lock search preparation
 
 Discussion index format 15 adds a sparse projection of the canonical issue and

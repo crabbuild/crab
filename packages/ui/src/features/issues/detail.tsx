@@ -1,3 +1,4 @@
+import { EditHistory } from "@/components/discussion/conversation/edit-history";
 import {
   ConversationLockControl,
   useConversationLock,
@@ -150,7 +151,13 @@ export function IssueDetail({
                 <time dateTime={new Date(current.created_at).toISOString()}>
                   {timestamp(current.created_at)}
                 </time>
-                {current.version > 1 && <span className="muted">edited</span>}
+                {current.has_edit_history && (
+                  <EditHistory
+                    repo={repo}
+                    csrf={csrf}
+                    target={`issues/${number}`}
+                  />
+                )}
               </header>
               <DiscussionMarkdown>{current.body}</DiscussionMarkdown>
               <Reactions

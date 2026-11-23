@@ -7,6 +7,7 @@ import type { DiscussionAuthor } from "../author";
 import type { ReactionSummary } from "../reactions";
 
 export interface Comment {
+  has_edit_history?: boolean;
   minimization?: CommentMinimization | null;
   reactions: ReactionSummary;
   number: number;

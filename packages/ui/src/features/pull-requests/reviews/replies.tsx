@@ -1,3 +1,4 @@
+import { EditHistory } from "@/components/discussion/conversation/edit-history";
 import { CommentVisibility } from "@/components/discussion/conversation/comment-visibility";
 import { useConversationLock } from "@/components/discussion/conversation/lock";
 import { Author } from "@/components/discussion/author";
@@ -189,6 +190,13 @@ function ReviewReplyItem({
         minimization={reply.minimization}
         onChanged={refresh}
       >
+        {reply.has_edit_history && (
+          <EditHistory
+            repo={repo}
+            csrf={csrf}
+            target={`pulls/${pull.number}/threads/${thread.number}/replies/${reply.number}`}
+          />
+        )}
         {editing ? (
           <form className="review-reply-edit" onSubmit={save}>
             <Editor

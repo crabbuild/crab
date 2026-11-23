@@ -232,6 +232,7 @@ impl Mutation for UpdatePullReviewThread {
                 .suggested_text
                 .as_ref()
                 .is_some_and(|value| value != &record.suggested_text);
+        let previous_suggestion = edited.then(|| record.suggested_text.clone()).flatten();
         let now = timestamp(context.now_ms())?;
         let previous_body = input
             .body
@@ -262,6 +263,12 @@ impl Mutation for UpdatePullReviewThread {
         };
         if edited {
             let source = activity::append(context, target, &input.actor, Action::Updated)?;
+            crate::cells::repository::collaboration::edit_history::record(
+                context,
+                &source,
+                previous_body.as_deref().unwrap_or(&record.body),
+                previous_suggestion.as_deref(),
+            )?;
             if let Some(previous) = previous_body.as_deref() {
                 crate::cells::repository::collaboration::body_written(
                     context,

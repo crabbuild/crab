@@ -273,6 +273,7 @@ async fn pull_view(
         "title": pull.title,
         "body": pull.body,
         "reactions": reaction,
+        "has_edit_history": reaction.has_edit_history,
         "state": pull.state,
         "author": authors.view(&pull.author),
         "base_ref": pull.base_ref,

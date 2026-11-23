@@ -51,6 +51,7 @@ export interface RequiredCheckReport {
 }
 
 export interface PullRequest extends PullSummary {
+  has_edit_history?: boolean;
   reactions: ReactionSummary;
   body: string;
   version: number;
@@ -142,6 +143,7 @@ export interface CodeOwnersReport {
 }
 
 export interface PullReviewThread extends InlineDiffThread {
+  has_edit_history?: boolean;
   reactions: ReactionSummary;
   path: string;
   base_oid: string;
@@ -160,6 +162,7 @@ export interface PullReviewThread extends InlineDiffThread {
 }
 
 export interface PullReviewReply {
+  has_edit_history?: boolean;
   minimization?: CommentMinimization | null;
   reactions: ReactionSummary;
   number: number;

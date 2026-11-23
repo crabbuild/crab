@@ -1,3 +1,4 @@
+import { EditHistory } from "@/components/discussion/conversation/edit-history";
 import {
   CommentVisibility,
   useCommentVisibility,
@@ -209,6 +210,9 @@ export function ReviewThreadCard({
             minimization={thread.minimization}
             onChanged={refresh}
           >
+            {thread.has_edit_history && (
+              <EditHistory repo={repo} csrf={csrf} target={target} />
+            )}
             <div className="review-thread-body">
               {editing ? (
                 <form className="review-thread-edit" onSubmit={saveEdit}>
