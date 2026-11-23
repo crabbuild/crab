@@ -431,6 +431,7 @@ test("header controls remain reachable on narrow screens in both themes", async 
 }) => {
   await openDiscussion(page);
   const header = page.locator(".global-header");
+  const gitAccess = header.getByLabel("Git access", { exact: true });
   for (const theme of ["light", "dark"]) {
     await header
       .locator(`[aria-label="${theme === "light" ? "Light" : "Dark"}"]`)
@@ -457,14 +458,14 @@ test("header controls remain reachable on narrow screens in both themes", async 
             .map((control) => control.textContent?.trim()),
         );
       expect(obscured, `${theme} at ${width}px`).toEqual([]);
-      await header.getByText("Git access", { exact: true }).click();
+      await gitAccess.click();
       const popover = header.locator(".git-popover");
       await expect(popover.getByRole("heading")).toBeVisible();
       const bounds = await popover.boundingBox();
       expect(bounds).not.toBeNull();
       expect(bounds!.x).toBeGreaterThanOrEqual(0);
       expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
-      await header.getByText("Git access", { exact: true }).click();
+      await gitAccess.click();
     }
   }
 });

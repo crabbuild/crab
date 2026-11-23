@@ -2135,6 +2135,9 @@ main {
 .clone-menu {
   position: relative;
 }
+.git-access-icon {
+  display: none;
+}
 .git-access summary,
 .clone-menu summary {
   color: var(--foreground);
@@ -2145,6 +2148,26 @@ main {
   font-size: var(--text-caption);
   background: var(--background);
   white-space: nowrap;
+}
+@media (max-width: 375px) {
+  .git-access > summary {
+    display: flex;
+    width: --spacing(9);
+    height: --spacing(9);
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    list-style: none;
+  }
+  .git-access > summary::-webkit-details-marker {
+    display: none;
+  }
+  .git-access-label {
+    display: none;
+  }
+  .git-access-icon {
+    display: block;
+  }
 }
 .git-popover {
   color: var(--foreground);
@@ -6469,6 +6492,7 @@ main {
   }
   .header-actions {
     flex-basis: 100%;
+    gap: --spacing(1);
   }
   .brand-mark {
     width: 28px;
