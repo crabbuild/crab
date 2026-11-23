@@ -1,6 +1,8 @@
 use std::io::Write;
 use std::sync::Arc;
 
+mod artifact;
+pub use artifact::{ArtifactPointer, CapturedArtifact};
 mod buffer;
 mod chunk_page;
 pub use chunk_page::FileChunkPage;
@@ -442,7 +444,7 @@ impl ShardHydrator {
     ///
     /// The worker owns and closes the selected lookup. The caller must run and
     /// drain it with the transfer's admission. Dropping the stream cancels it.
-    pub fn prepare_captured_range_stream(
+    fn prepare_captured_range_stream(
         &self,
         pointer: &Pointer,
         range: std::ops::Range<u64>,

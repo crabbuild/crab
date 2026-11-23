@@ -10,14 +10,11 @@ use crab_coordination::{
     read_retention::{ReadRetentionLease, RetainedReadRoot},
     read_retention_runtime::{ReadRetentionCapture, RetainedRead},
 };
-use crab_metadata::{
-    capsule_protocol::{MAX_CATALOG_BYTES, PointerCatalogLookup, store_read_capture},
-    file_index_lookup::SharedFileIndexLookup,
+use crab_metadata::capsule_protocol::{
+    MAX_CATALOG_BYTES, PointerCatalogLookup, store_read_capture,
 };
-use crab_read::{ReadError, capsule_protocol::CapsuleRepositoryView};
+use crab_read::{ArtifactPointer, ReadError, capsule_protocol::CapsuleRepositoryView};
 use crab_storage::{Store, StoreLayout};
-use crab_types::pointer::Pointer;
-use crab_xet::hash::MerkleHash;
 use futures_util::StreamExt;
 use uuid::Uuid;
 
@@ -96,21 +93,22 @@ pub(super) async fn download(
     entry: &Repository,
     capture: Capture,
     view: CapsuleRepositoryView,
-    pointer: Pointer,
+    pointer: ArtifactPointer,
     method: Method,
     headers: &HeaderMap,
 ) -> Result<Response, ApiError> {
-    let hash = blake3::Hash::from_bytes(pointer.file_hash);
+    let hash = pointer.hash();
+    let size = pointer.size();
     let etag = format!("\"blake3-{hash}\"");
     let requested = if method == Method::GET {
-        match lfs::requested_range(headers, pointer.size, &etag) {
+        match lfs::requested_range(headers, size, &etag) {
             Ok(range) => range,
             Err(_) => {
                 return Ok((
                     StatusCode::RANGE_NOT_SATISFIABLE,
                     [
                         (header::ACCEPT_RANGES, "bytes".to_owned()),
-                        (header::CONTENT_RANGE, format!("bytes */{}", pointer.size)),
+                        (header::CONTENT_RANGE, format!("bytes */{size}")),
                     ],
                 )
                     .into_response());
@@ -120,26 +118,10 @@ pub(super) async fn download(
         None
     };
     let catalog = view.pointer_catalog_lookup(&entry.layout, MAX_CATALOG_BYTES)?;
-    let range = requested.clone().unwrap_or(0..pointer.size);
+    let range = requested.clone().unwrap_or(0..size);
     let cancel = server.cancellation.child_token();
     let guard = cancel.clone().drop_guard();
-    let key = MerkleHash::from(pointer.file_hash).hex();
-    let files = catalog
-        .files(&entry.store, std::slice::from_ref(&key))
-        .await
-        .map_err(ReadError::from)?;
-    let binding = files
-        .files()
-        .get(&key)
-        .ok_or(ReadError::UnauthorizedObject)?;
-    if binding.size() != pointer.size {
-        return Err(ReadError::CorruptObject {
-            path: key,
-            reason: "committed pointer and catalog file sizes differ".into(),
-        }
-        .into());
-    }
-    drop(files);
+    let artifact = pointer.bind(entry.layout.clone(), catalog).await?;
     let body = if method == Method::HEAD || range.is_empty() {
         capture.validate().await?;
         if range.is_empty() && hash != blake3::hash(b"") {
@@ -159,33 +141,30 @@ pub(super) async fn download(
                 return Err(ReadError::from(error).into());
             }
         };
-        let retained = capture.retain(&entry.layout, &view, &catalog).await?;
-        let lookup = SharedFileIndexLookup::for_pointer_catalog(entry.layout.clone(), catalog);
+        let retained = capture
+            .retain(&entry.layout, &view, artifact.catalog())
+            .await?;
         let staging = server
             .local_staging
             .create(CACHE_METADATA_BYTES, &cancel)
             .await
             .map_err(io::Error::other)
             .map_err(ReadError::from)?;
-        let layout = entry.layout.clone();
         let cache_admission = Arc::clone(&permit);
-        let (hydrator, staging) = tokio::task::spawn_blocking(move || {
+        let stream_range = range.clone();
+        let stream_cancel = cancel.clone();
+        let ((stream, work), staging) = tokio::task::spawn_blocking(move || {
             let _admission = cache_admission;
-            let local =
-                crab_cache::LocalCache::with_limits(staging.path().join("cache"), 0_u64, Some(0));
-            let store = crab_cache_store::CachingStore::new_with_local_cache(
-                layout.store().clone(),
-                crab_cache_store::CacheConfig::default(),
-                Arc::new(local),
+            let prepared = artifact.prepare_range(
+                &staging.path().join("cache"),
+                retained,
+                stream_range,
+                &stream_cancel,
             )?;
-            let hydrator = crab_read::ReadRuntimeBuilder::new(store, layout, 4).build()?;
-            Ok::<_, ReadError>((hydrator, staging))
+            Ok::<_, ReadError>((prepared, staging))
         })
         .await
         .map_err(|error| ReadError::Io(io::Error::other(error)))??;
-        let (stream, work) = hydrator
-            .with_read_retention(retained)
-            .prepare_captured_range_stream(&pointer, range.clone(), lookup, &cancel)?;
         let worker_permit = Arc::clone(&permit);
         server.receives.spawn(async move {
             let _owned = (staging, worker_permit);
@@ -221,7 +200,7 @@ pub(super) async fn download(
         .into_response();
     if let Some(range) = requested {
         *response.status_mut() = StatusCode::PARTIAL_CONTENT;
-        let value = format!("bytes {}-{}/{}", range.start, range.end - 1, pointer.size);
+        let value = format!("bytes {}-{}/{size}", range.start, range.end - 1);
         if let Ok(value) = value.parse() {
             response.headers_mut().insert(header::CONTENT_RANGE, value);
         }

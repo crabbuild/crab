@@ -40,8 +40,8 @@ pub use fetch_admission::{
 };
 #[cfg(feature = "hydration")]
 pub use hydrator::{
-    FileChunkPage, ReadRuntimeBuilder, ReadStoreLayout, ReconstructionStream, ReconstructionWork,
-    ShardHydrator, verify_reconstruction_stream,
+    ArtifactPointer, CapturedArtifact, FileChunkPage, ReadRuntimeBuilder, ReadStoreLayout,
+    ReconstructionStream, ReconstructionWork, ShardHydrator, verify_reconstruction_stream,
 };
 #[cfg(feature = "hydration")]
 pub use integrity::{verify_catalog_file_recipe, verify_origin_recipe};

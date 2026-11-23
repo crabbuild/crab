@@ -90,8 +90,7 @@ pub(super) async fn download(
     }
     // The verified commit and path supply the only allowed object identity and size.
     let mut response = if let Some((capture, view)) = captured {
-        let pointer = crab_types::pointer::Pointer::parse(&object.data)
-            .map_err(crab_read::ReadError::from)?;
+        let pointer = crab_read::ArtifactPointer::parse(&object.data)?;
         native::download(&server, &entry, capture, view, pointer, method, &headers).await?
     } else {
         let transfer = async {
