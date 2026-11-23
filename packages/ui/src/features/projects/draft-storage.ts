@@ -131,7 +131,9 @@ function definition(value: unknown): boolean {
         optionalString(view.status) &&
         typeof view.hide_closed === "boolean" &&
         (view.show_issue_type === undefined ||
-          typeof view.show_issue_type === "boolean"),
+          typeof view.show_issue_type === "boolean") &&
+        (view.issue_type_filter === undefined ||
+          optionalString(view.issue_type_filter)),
     )
   );
 }

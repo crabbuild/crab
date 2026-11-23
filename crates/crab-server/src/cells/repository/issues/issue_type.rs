@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use super::*;
 
-pub(in crate::cells::repository) mod search;
+pub(crate) mod search;
 
 const PREFIX: &str = "issues/v1/types/";
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

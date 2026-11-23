@@ -204,6 +204,8 @@ pub(crate) struct ItemQuery {
     pub status: Option<String>,
     pub hide_closed: bool,
     pub default_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_type: Option<issue_type::search::Scope>,
 }
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -267,7 +269,7 @@ impl Read for Items {
         if input.after.is_some() && input.revision != Some(revision) {
             return Err(Error::StaleSearch);
         }
-        let predicate = "FROM repository_project_items p LEFT JOIN repository_issues i ON p.kind=0 AND p.number=i.number LEFT JOIN repository_pulls r ON p.kind=1 AND p.number=r.number WHERE p.project=? AND (? IS NULL OR p.id=?) AND (? IS NULL OR p.status=?) AND (?=0 OR COALESCE(i.state,r.state,0)=0) AND instr(lower(COALESCE(i.title,r.title,json_extract(p.data,'$.title'))),lower(?))>0";
+        let mut predicate = "FROM repository_project_items p LEFT JOIN repository_issues i ON p.kind=0 AND p.number=i.number LEFT JOIN repository_pulls r ON p.kind=1 AND p.number=r.number WHERE p.project=? AND (? IS NULL OR p.id=?) AND (? IS NULL OR p.status=?) AND (?=0 OR COALESCE(i.state,r.state,0)=0) AND instr(lower(COALESCE(i.title,r.title,json_extract(p.data,'$.title'))),lower(?))>0".to_owned();
         let mut args = vec![
             id(project.id),
             input.item.map(id).unwrap_or(SqlValue::Null),
@@ -285,6 +287,11 @@ impl Read for Items {
             SqlValue::Integer(i64::from(input.hide_closed)),
             SqlValue::Text(input.query),
         ];
+        if let Some(scope) = input.issue_type {
+            let (condition, values) = scope.predicate(context)?;
+            predicate.push_str(&format!(" AND ({condition})"));
+            args.extend(values);
+        }
         let count = context.query(
             &format!("SELECT p.status,COUNT(*) {predicate} GROUP BY p.status"),
             &args,

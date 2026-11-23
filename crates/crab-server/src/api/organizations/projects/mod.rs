@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc};
 use uuid::Uuid;
 mod history;
+mod type_filter;
 
 pub(super) fn routes() -> Router<Arc<Server>> {
     Router::new()
@@ -141,18 +142,34 @@ async fn detail(
             .await,
     )?;
     let mut repositories = Vec::new();
+    let mut type_source = None;
     for linked in &view.repositories {
         if let Some(repo) = accessible(&server, &principal, *linked).await? {
+            if repo.organization == Some(id) && type_source.is_none() {
+                type_source = Some(Arc::clone(&repo));
+            }
             repositories.push(repository(&repo));
         }
     }
+    let mut types = if type_source.is_some() {
+        issue_types::active(&server, Some(id)).await?.definitions
+    } else {
+        Vec::new()
+    };
     let current = project(&server, id, actor, selected).await?;
+    if let Some(repo) = type_source {
+        match app::membership(&server, &principal, &repo).await {
+            Ok(_) => (),
+            Err(Error::NotFound) => types.clear(),
+            Err(error) => return Err(error),
+        }
+    }
     app::account(&principal)?;
     if current.project.version != view.project.version {
         return Err(Error::PageChanged);
     }
     Ok(Json(
-        json!({"project":public_project(&current.project),"can_manage":current.can_manage,"repositories":repositories,"restricted_repositories":view.repositories.len()-repositories.len(),"lead":profiles.first().cloned().flatten()}),
+        json!({"project":public_project(&current.project),"can_manage":current.can_manage,"repositories":repositories,"restricted_repositories":view.repositories.len()-repositories.len(),"lead":profiles.first().cloned().flatten(),"issue_types":types}),
     ))
 }
 #[derive(Default, Deserialize)]
@@ -163,6 +180,8 @@ struct Filter {
     status: Option<String>,
     repository: Option<Uuid>,
     item: Option<Uuid>,
+    issue_type: Option<String>,
+    type_cursor: Option<String>,
 }
 async fn items(
     State(server): State<Arc<Server>>,
@@ -172,6 +191,7 @@ async fn items(
 ) -> Result<Json<Value>> {
     let actor = actor(&server, &principal).await?;
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    let type_scope = type_filter::resolve(&server, &principal, id, selected, actor, &input).await?;
     let page = cells
         .query::<projects::Items>(
             Address::Organization(id),
@@ -184,6 +204,7 @@ async fn items(
                 status: input.status,
                 repository: input.repository,
                 item: input.item,
+                matched: type_scope.as_ref().map(|filter| filter.matched.clone()),
             },
         )
         .await
@@ -206,7 +227,12 @@ async fn items(
     }
     let mut work = BTreeMap::new();
     let mut repositories = BTreeMap::new();
-    let mut types = None;
+    let mut types = type_scope.as_ref().and_then(|filter| {
+        filter
+            .types
+            .as_ref()
+            .map(|schema| schema.definitions.clone())
+    });
     for (repository_id, subjects) in grouped {
         let Some(repo) = accessible(&server, &principal, repository_id).await? else {
             continue;
@@ -299,12 +325,15 @@ async fn items(
         })
     }).collect::<Vec<_>>();
     let current = project(&server, id, actor, selected).await?;
+    if let Some(filter) = &type_scope {
+        filter.verify(&server, &principal, id).await?;
+    }
     app::account(&principal)?;
     if current.project.version != page.view.project.version {
         return Err(Error::PageChanged);
     }
     Ok(Json(
-        json!({"page":{"project":public_project(&current.project),"items":rows,"next":page.next,"counts":page.counts,"total":page.total,"revision":page.view.project.version,"issue_types":types.unwrap_or_default()},"can_manage":current.can_manage}),
+        json!({"page":{"project":public_project(&current.project),"items":rows,"next":page.next,"counts":page.counts,"total":page.total,"revision":page.view.project.version,"issue_types":types.unwrap_or_default(),"type_cursor":type_scope.map(|filter| filter.cursor)},"can_manage":current.can_manage}),
     ))
 }
 #[derive(Deserialize)]

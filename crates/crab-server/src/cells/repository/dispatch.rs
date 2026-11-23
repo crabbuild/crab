@@ -335,6 +335,9 @@ pub(in crate::cells) fn dispatch_read(
         projects::GetHistory::ID => invoke_read::<projects::GetHistory>(context, input),
         projects::Candidates::ID => invoke_read::<projects::Candidates>(context, input),
         projects::WorkSummaries::ID => invoke_read::<projects::WorkSummaries>(context, input),
+        issues::issue_type::search::Match::ID => {
+            invoke_read::<issues::issue_type::search::Match>(context, input)
+        }
         projects::Items::ID => invoke_read::<projects::Items>(context, input),
         projects::Memberships::ID => invoke_read::<projects::Memberships>(context, input),
         projects::hierarchy::GetHierarchy::ID => {

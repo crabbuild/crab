@@ -30,6 +30,7 @@ import { DraftRecovery } from "../drafts";
 import { checkpointDraft, itemDraft, readDraft } from "../draft-storage";
 import { projectEndpoint, type ItemPage, type Row } from "../model";
 import { ProjectSettings } from "../settings";
+import { ProjectTypeFilter } from "../issue-type";
 import { ProjectBoard, ProjectTable, ProjectRoadmap } from "../views";
 import { FieldSelect } from "@/components/ui/field-select";
 import { ProjectProperties } from "./forms";
@@ -155,13 +156,20 @@ function PlanningWorkspace({
       (view) => view.id === url.searchParams.get("pv"),
     ) ?? project.definition.views[0];
   const status = url.searchParams.get("status") ?? selected.status ?? "";
+  const issueType =
+    url.searchParams.get("issue_type") ?? selected.issue_type_filter ?? "";
   const repository = url.searchParams.get("repository") ?? "";
   const after = url.searchParams.get("after") ?? undefined;
   const resource = useRequest<{ page: ItemPage; can_manage: boolean }>(
     projectEndpoint({ organization }, `${project.id}/items`, {
       status: !overview && status ? status : undefined,
       repository: !overview && repository ? repository : undefined,
+      issue_type: !overview && issueType ? issueType : undefined,
       after: overview ? undefined : after,
+      type_cursor:
+        !overview && after
+          ? (url.searchParams.get("type_cursor") ?? undefined)
+          : undefined,
       version: after
         ? (url.searchParams.get("version") ?? undefined)
         : undefined,
@@ -175,6 +183,7 @@ function PlanningWorkspace({
     }
     next.searchParams.delete("after");
     next.searchParams.delete("version");
+    next.searchParams.delete("type_cursor");
     navigate(next.pathname + next.search);
   }
   useEffect(() => {
@@ -302,6 +311,7 @@ function PlanningWorkspace({
             status: undefined,
             repository: undefined,
             layout: undefined,
+            issue_type: undefined,
           })
         }
       >
@@ -337,16 +347,21 @@ function PlanningWorkspace({
         <TabsContent value={overview ? "overview" : selected.id}>
           <div className="workspace-project-content">
             <div className="workspace-project-work">
-              {resource.error && (after || status || repository) && (
-                <Button
-                  variant="outline"
-                  onClick={() =>
-                    filters({ status: undefined, repository: undefined })
-                  }
-                >
-                  Reset filters
-                </Button>
-              )}
+              {resource.error &&
+                (after || status || repository || issueType) && (
+                  <Button
+                    variant="outline"
+                    onClick={() =>
+                      filters({
+                        status: "",
+                        repository: undefined,
+                        issue_type: "",
+                      })
+                    }
+                  >
+                    Reset filters
+                  </Button>
+                )}
               <Result state={resource}>
                 {({ page }) =>
                   overview ? (
@@ -449,6 +464,11 @@ function PlanningWorkspace({
                             })
                           }
                         />
+                        <ProjectTypeFilter
+                          types={detail.issue_types ?? []}
+                          value={issueType}
+                          onChange={(value) => filters({ issue_type: value })}
+                        />
                         <span className="text-sm text-muted-foreground">
                           {page.total.toLocaleString()}{" "}
                           {page.total === 1 ? "item" : "items"}
@@ -476,9 +496,11 @@ function PlanningWorkspace({
                               <FolderKanbanIcon />
                             </EmptyMedia>
                             <EmptyTitle>
-                              {page.total
-                                ? "No items on this page"
-                                : "Bring your work together"}
+                              {issueType && !page.total
+                                ? "No work matches this view"
+                                : page.total
+                                  ? "No items on this page"
+                                  : "Bring your work together"}
                             </EmptyTitle>
                             <EmptyDescription>
                               Link repositories, then add existing issues, pull
@@ -509,6 +531,11 @@ function PlanningWorkspace({
                                 "version",
                                 String(page.project.version),
                               );
+                              if (page.type_cursor)
+                                next.searchParams.set(
+                                  "type_cursor",
+                                  page.type_cursor,
+                                );
                               navigate(next.pathname + next.search);
                             }}
                           >
@@ -611,6 +638,7 @@ function PlanningWorkspace({
           target={{ organization }}
           project={project}
           issueTypes
+          typeChoices={detail.issue_types ?? []}
           onClose={() => setSettings(false)}
         />
       )}

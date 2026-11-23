@@ -37,6 +37,7 @@ export interface View {
   status: string | null;
   hide_closed: boolean;
   show_issue_type?: boolean;
+  issue_type_filter?: string | null;
 }
 export interface Field {
   id: string;
@@ -95,6 +96,7 @@ export interface ItemPage {
   next: string | null;
   counts: Record<string, number>;
   issue_types?: IssueType[];
+  type_cursor?: string | null;
   total: number;
 }
 export interface Listing {

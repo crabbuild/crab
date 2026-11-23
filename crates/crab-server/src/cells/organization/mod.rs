@@ -430,6 +430,7 @@ pub(in crate::cells) fn dispatch_read(
         projects::List::ID => invoke_read::<projects::List>(context, input),
         projects::Get::ID => invoke_read::<projects::Get>(context, input),
         projects::Items::ID => invoke_read::<projects::Items>(context, input),
+        projects::TypeSources::ID => invoke_read::<projects::TypeSources>(context, input),
         teams::GetPreparation::ID => invoke_read::<teams::GetPreparation>(context, input),
         teams::List::ID => invoke_read::<teams::List>(context, input),
         teams::ResolveReviewTeams::ID => invoke_read::<teams::ResolveReviewTeams>(context, input),

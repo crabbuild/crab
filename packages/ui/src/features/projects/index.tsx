@@ -32,6 +32,8 @@ import { DiscussionMarkdown } from "@/components/discussion/markdown";
 import { CreateProject } from "./create";
 import { ItemEditor } from "./item";
 import { ProjectSettings } from "./settings";
+import { ProjectTypeFilter } from "./issue-type";
+import type { IssueType } from "@/lib/contracts";
 import { ProjectBoard, ProjectTable, ProjectRoadmap } from "./views";
 import { useProjectCommands } from "./commands";
 import { ProjectHistory } from "./history";
@@ -184,9 +186,11 @@ function ProjectDetail({
   url: URL;
   id: string;
 }) {
-  const resource = useRequest<{ project: Project; can_manage: boolean }>(
-    endpoint(repo, `projects/${id}`),
-  );
+  const resource = useRequest<{
+    project: Project;
+    can_manage: boolean;
+    issue_types?: IssueType[];
+  }>(endpoint(repo, `projects/${id}`));
   return (
     <Result state={resource} timingLabel="Project settings">
       {(data) => (
@@ -195,6 +199,7 @@ function ProjectDetail({
           url={url}
           initial={data.project}
           canManage={data.can_manage}
+          typeChoices={data.issue_types ?? []}
         />
       )}
     </Result>
@@ -205,11 +210,13 @@ function ProjectWorkspace({
   url,
   initial,
   canManage,
+  typeChoices,
 }: {
   repo: Repository;
   url: URL;
   initial: Project;
   canManage: boolean;
+  typeChoices: IssueType[];
 }) {
   const [project, setProject] = useState(initial);
   const [editing, setEditing] = useState<Row | "new" | { draft: string }>();
@@ -219,6 +226,9 @@ function ProjectWorkspace({
     project.definition.views[0];
   const query = url.searchParams.get("q") ?? selected.query;
   const status = url.searchParams.get("status") ?? selected.status ?? "";
+  const issueType = repo.organization_id
+    ? (url.searchParams.get("issue_type") ?? selected.issue_type_filter ?? "")
+    : "";
   const hidden = url.searchParams.has("hide_closed")
     ? url.searchParams.get("hide_closed") === "true"
     : selected.hide_closed;
@@ -230,7 +240,11 @@ function ProjectWorkspace({
       q: query,
       status: status || undefined,
       hide_closed: String(hidden),
+      issue_type: issueType || undefined,
       after,
+      type_cursor: after
+        ? (url.searchParams.get("type_cursor") ?? undefined)
+        : undefined,
       revision: after
         ? (url.searchParams.get("revision") ?? undefined)
         : undefined,
@@ -246,6 +260,7 @@ function ProjectWorkspace({
     }
     next.searchParams.delete("after");
     next.searchParams.delete("revision");
+    next.searchParams.delete("type_cursor");
     navigate(next.pathname + next.search);
   }
   useEffect(() => {
@@ -352,6 +367,7 @@ function ProjectWorkspace({
             q: undefined,
             status: undefined,
             hide_closed: undefined,
+            issue_type: undefined,
           })
         }
       >
@@ -421,6 +437,13 @@ function ProjectWorkspace({
               onValueChange={(value) => filters({ hide_closed: value })}
               options={{ false: "All work", true: "Open work" }}
             />
+            {repo.organization_id && (
+              <ProjectTypeFilter
+                types={typeChoices}
+                value={issueType}
+                onChange={(value) => filters({ issue_type: value })}
+              />
+            )}
             <Button variant="outline" type="submit">
               Apply
             </Button>
@@ -437,6 +460,11 @@ function ProjectWorkspace({
               <RefreshCwIcon />
             </Button>
           </form>
+          {resource.error && after && (
+            <Button variant="outline" onClick={() => filters({})}>
+              First page
+            </Button>
+          )}
           <Result state={resource} timingLabel="Project items">
             {({ page, can_manage }) => (
               <>
@@ -488,12 +516,12 @@ function ProjectWorkspace({
                         <FolderKanbanIcon />
                       </EmptyMedia>
                       <EmptyTitle>
-                        {query || status || hidden
+                        {query || status || hidden || issueType
                           ? "No work matches this view"
                           : "Your project starts here"}
                       </EmptyTitle>
                       <EmptyDescription>
-                        {query || status || hidden
+                        {query || status || hidden || issueType
                           ? "Change the filters to see more work."
                           : "Add an issue or pull request, create an issue, or capture a draft note."}
                       </EmptyDescription>
@@ -529,6 +557,11 @@ function ProjectWorkspace({
                             "revision",
                             String(page.revision),
                           );
+                          if (page.type_cursor)
+                            next.searchParams.set(
+                              "type_cursor",
+                              page.type_cursor,
+                            );
                           navigate(next.pathname + next.search);
                         }}
                       >
@@ -570,6 +603,7 @@ function ProjectWorkspace({
           target={{ repo }}
           project={project}
           issueTypes={!!repo.organization_id}
+          typeChoices={typeChoices}
           onClose={() => setSettings(false)}
         />
       )}

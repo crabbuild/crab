@@ -173,6 +173,12 @@ async fn project_issue_type_fields_follow_source_permissions_and_assignment() {
     assert_eq!(restricted["page"]["items"][0]["restricted"], true);
     assert_eq!(restricted["page"]["items"][0]["issue_type"], Value::Null);
     assert_eq!(restricted["page"]["issue_types"], json!([]));
+    let filter = format!(
+        "{shared_items}?issue_type={}",
+        types[1]["id"].as_str().unwrap()
+    );
+    let hidden_matches = h.json(&filter, &reader).await;
+    assert_eq!(hidden_matches["page"]["total"], 0);
     let members = format!("{root}/members");
     for (access, version) in [("read", Value::Null), ("triage", json!(1))] {
         let acl = h.json(&members, &alice).await;
@@ -184,6 +190,7 @@ async fn project_issue_type_fields_follow_source_permissions_and_assignment() {
         assert_eq!(visible["can_manage"], false);
         assert_eq!(visible["page"]["items"][0]["issue_type"]["name"], "Bug");
         assert_eq!(visible["page"]["items"][0]["issue_type_version"], version);
+        assert_eq!(h.json(&filter, &reader).await["page"]["total"], 1);
     }
     types[1]["name"] = json!("Incident");
     h.write(
@@ -256,6 +263,24 @@ async fn native_browser_edits_project_issue_type_field() {
     click("option", "Bug").await;
     click("button", "Save issue type").await;
     browser.run(&["wait", "--fn", "document.querySelector('table.project-table button[aria-label^=\"Change issue type for\"]')?.textContent.includes('Bug')"]).await;
+    click("combobox", "Filter by issue type").await;
+    click("option", "No type").await;
+    browser
+        .run(&["wait", "--text", "No work matches this view"])
+        .await;
+    click("combobox", "Filter by issue type").await;
+    click("option", "Bug").await;
+    browser.run(&["wait", "table.project-table"]).await;
+    click("button", "Settings").await;
+    click("tab", "Views").await;
+    click("combobox", "Issue type filter for Table").await;
+    click("option", "Bug").await;
+    click("button", "Save project settings").await;
+    browser
+        .run(&["wait", "--fn", "!document.querySelector('[role=dialog]')"])
+        .await;
+    browser.run(&["open", &project]).await;
+    browser.run(&["wait", "--fn", "document.querySelector('[aria-label=\"Filter by issue type\"]')?.textContent.includes('Bug')"]).await;
     click("link", "Classify this report").await;
     browser
         .run(&[
@@ -264,6 +289,195 @@ async fn native_browser_edits_project_issue_type_field() {
             "document.querySelector('.issue-meta')?.textContent.includes('Bug')",
         ])
         .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn project_type_filter_counts_matching_rows_across_repositories_and_pages() {
+    let (h, alice, org, first, key) = fixture().await;
+    let first_root = format!("/api/repos/{key}");
+    let workspace = format!("{org}/projects");
+    let repository_projects = format!("{first_root}/projects");
+    let shared = project_with_issue(&h, &alice, &workspace, first, true, true).await;
+    let local = project_with_issue(&h, &alice, &repository_projects, first, false, true).await;
+    let second: Value = h
+        .write(
+            Method::POST,
+            &format!("{org}/repositories/creation"),
+            &alice,
+            json!({"request_id":Uuid::now_v7(),"name":"hardware","description":""}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let second_id = second["id"].as_str().unwrap().parse().unwrap();
+    let second_root = format!("/api/repos/{}/hardware", second["owner"].as_str().unwrap());
+    let submit = async |command| {
+        let reply: Value = h
+            .write(
+                Method::POST,
+                &format!("{workspace}/commands"),
+                &alice,
+                json!({"request_id":Uuid::now_v7(),"command":command}),
+            )
+            .await
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(reply["outcome"], "applied", "{reply}");
+    };
+    let current = h.json(&format!("{workspace}/{shared}"), &alice).await;
+    submit(json!({"kind":"repository","project":shared,"version":current["project"]["version"],"repository":second_id,"linked":true})).await;
+    let schema_path = format!("{org}/issue-types");
+    let schema = h.json(&schema_path, &alice).await;
+    let definition = &schema["definitions"][1];
+    let bug = definition["id"].as_str().unwrap();
+    for (root, repo, total) in [(&first_root, first, 52), (&second_root, second_id, 1)] {
+        for number in 1..=total {
+            if repo != first || number != 1 {
+                repository_write(
+                    &h, Method::POST, &format!("{root}/issues"), &alice, repo,
+                    json!({"request_id":Uuid::now_v7(),"title":format!("Filter proof {number}"),"body":""}),
+                ).await.error_for_status().unwrap();
+            }
+            if repo == first && number == 2 {
+                let result: Value = repository_write(
+                    &h, Method::POST, &format!("{repository_projects}/commands"), &alice, repo,
+                    json!({"request_id":Uuid::now_v7(),"command":{
+                        "kind":"item","project":local,"version":0,"item":{"id":Uuid::now_v7(),"subject":{"kind":"issue","number":number},
+                        "title":"","body":"","status":"Todo","priority":0,"start":null,"end":null,"values":{}}
+                    }}),
+                ).await.error_for_status().unwrap().json().await.unwrap();
+                assert_eq!(result["outcome"], "applied");
+            } else {
+                repository_write(
+                    &h,
+                    Method::PUT,
+                    &format!("{root}/issues/{number}/type"),
+                    &alice,
+                    repo,
+                    json!({"expected_version":0,"type_id":bug}),
+                )
+                .await
+                .error_for_status()
+                .unwrap();
+            }
+            if repo != first || number != 1 {
+                submit(json!({"kind":"item","project":shared,"version":0,"repository":repo,"item":{
+                    "id":Uuid::now_v7(),"subject":{"kind":"issue","number":number},"title":"","body":"",
+                    "status":if repo==second_id {"Done"} else {"Todo"},"priority":0,"start":null,"end":null,"values":{}
+                }})).await;
+            }
+        }
+    }
+    let shared_items = format!("{workspace}/{shared}/items");
+    let filtered = format!("{shared_items}?issue_type={bug}");
+    let first_page = h.json(&filtered, &alice).await;
+    let page = &first_page["page"];
+    assert_eq!(page["total"], 52);
+    assert_eq!(page["counts"]["Todo"], 51);
+    assert_eq!(page["counts"]["Done"], 1);
+    assert_eq!(page["items"].as_array().unwrap().len(), 50);
+    let continuation = format!(
+        "{filtered}&after={}&version={}&type_cursor={}",
+        page["next"].as_str().unwrap(),
+        page["revision"],
+        page["type_cursor"].as_str().unwrap()
+    );
+    let second_page = h.json(&continuation, &alice).await;
+    assert_eq!(second_page["page"]["items"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        second_page["page"]["items"][1]["repository"]["id"],
+        json!(second_id)
+    );
+    assert_eq!(
+        second_page["page"]["items"][1]["work"]["subject"]["number"],
+        1
+    );
+    assert_eq!(
+        h.json(
+            &format!("{filtered}&repository={second_id}&status=Done"),
+            &alice
+        )
+        .await["page"]["total"],
+        1
+    );
+    for path in [
+        &shared_items,
+        &format!("{repository_projects}/{local}/items"),
+    ] {
+        let untyped = h.json(&format!("{path}?issue_type=none"), &alice).await;
+        assert_eq!(untyped["page"]["total"], 1);
+        assert_eq!(untyped["page"]["items"][0]["work"]["subject"]["number"], 2);
+    }
+    assert_eq!(
+        h.json(
+            &format!("{repository_projects}/{local}/items?issue_type={bug}"),
+            &alice
+        )
+        .await["page"]["total"],
+        1
+    );
+
+    repository_write(
+        &h,
+        Method::PUT,
+        &format!("{second_root}/issues/1/type"),
+        &alice,
+        second_id,
+        json!({"expected_version":1,"type_id":null}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert_eq!(
+        h.http
+            .get(format!("{}{continuation}", h.origin))
+            .header(header::COOKIE, &alice)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(h.json(&filtered, &alice).await["page"]["total"], 51);
+    let draft: Value = repository_write(
+        &h, Method::POST, &format!("{repository_projects}/commands"), &alice, first,
+        json!({"request_id":Uuid::now_v7(),"command":{
+            "kind":"item","project":local,"version":0,"item":{"id":Uuid::now_v7(),"subject":null,
+            "title":"A draft","body":"","status":"Todo","priority":0,"start":null,"end":null,"values":{}}
+        }}),
+    ).await.error_for_status().unwrap().json().await.unwrap();
+    assert_eq!(draft["outcome"], "applied");
+    let mut definitions = schema["definitions"].as_array().unwrap().to_vec();
+    definitions[1]["enabled"] = json!(false);
+    h.write(
+        Method::PUT,
+        &schema_path,
+        &alice,
+        json!({"expected_version":0,"definitions":definitions}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let missing = h
+        .json(
+            &format!("{repository_projects}/{local}/items?issue_type=none"),
+            &alice,
+        )
+        .await;
+    assert_eq!(missing["page"]["total"], 2);
+    assert!(
+        missing["page"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["work"]["subject"]["kind"] == "issue")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

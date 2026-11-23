@@ -90,6 +90,78 @@ pub(crate) struct ItemsQuery {
     pub status: Option<String>,
     pub repository: Option<Uuid>,
     pub item: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched: Option<MatchedItems>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MatchedItems {
+    pub project_version: u64,
+    pub items: Vec<Uuid>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TypeSourcesQuery {
+    pub actor: Uuid,
+    pub project: Uuid,
+    pub repository: Option<Uuid>,
+    pub item: Option<Uuid>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TypeSource {
+    pub repository: Uuid,
+    pub item: Uuid,
+    pub number: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TypeSourcePage {
+    pub project_version: u64,
+    pub items: Vec<TypeSource>,
+}
+
+pub(crate) struct TypeSources;
+impl Read for TypeSources {
+    const CLASS: &'static str = super::super::CLASS;
+    const ID: u32 = 35;
+    type Input = TypeSourcesQuery;
+    type Output = Option<TypeSourcePage>;
+
+    fn execute(context: &mut Transaction<'_>, input: TypeSourcesQuery) -> Result<Self::Output> {
+        let Some(project) = load(context, input.project)? else {
+            return Ok(None);
+        };
+        // The work cap bounds the cross-Cell join. Read UUIDs and issue
+        // numbers alone so attachment, title and draft data stay on their cells.
+        let repository = input.repository.map(blob).unwrap_or(SqlValue::Null);
+        let item = input.item.map(blob).unwrap_or(SqlValue::Null);
+        let rows = context.query(
+            "SELECT repository,id,number FROM organization_project_items WHERE project=? AND kind=0 AND (? IS NULL OR repository=?) AND (? IS NULL OR id=?) ORDER BY repository,number LIMIT ?",
+            &[blob(input.project), repository.clone(), repository, item.clone(), item, integer(MAX_ITEMS + 1)?],
+        )?;
+        if rows.rows.len() as u64 > MAX_ITEMS {
+            return Err(Error::Invalid("Project issue type source limit exceeded"));
+        }
+        let items = rows
+            .rows
+            .iter()
+            .map(|row| {
+                Ok(TypeSource {
+                    repository: uuid(&row[0])?,
+                    item: uuid(&row[1])?,
+                    number: uint(&row[2])?,
+                })
+            })
+            .collect::<Result<_>>()?;
+        Ok(Some(TypeSourcePage {
+            project_version: project.version,
+            items,
+        }))
+    }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Entry {
@@ -127,6 +199,20 @@ impl Read for Items {
             ));
         }
         if input
+            .matched
+            .as_ref()
+            .is_some_and(|matched| matched.project_version != view.project.version)
+        {
+            return Err(Error::StaleSearch);
+        }
+        if input
+            .matched
+            .as_ref()
+            .is_some_and(|matched| matched.items.len() as u64 > MAX_ITEMS)
+        {
+            return Err(Error::Invalid("Project issue type result limit exceeded"));
+        }
+        if input
             .status
             .as_ref()
             .is_some_and(|status| !view.project.definition.statuses.contains(status))
@@ -140,12 +226,47 @@ impl Read for Items {
             .map(SqlValue::Text)
             .unwrap_or(SqlValue::Null);
         let selected = input.item.map(blob).unwrap_or(SqlValue::Null);
-        let counts=context.query("SELECT status,COUNT(*) FROM organization_project_items WHERE project=? AND (? IS NULL OR repository=?) AND (? IS NULL OR id=?) GROUP BY status",&[blob(input.project),repository.clone(),repository.clone(),selected.clone(),selected.clone()])?.rows.iter().map(|row|Ok((text(&row[0])?,uint(&row[1])?))).collect::<Result<BTreeMap<_,_>>>()?;
+        let mut predicate = "FROM organization_project_items WHERE project=? AND (? IS NULL OR repository=?) AND (? IS NULL OR id=?)".to_owned();
+        let mut bindings = vec![
+            blob(input.project),
+            repository.clone(),
+            repository,
+            selected.clone(),
+            selected,
+        ];
+        if let Some(matched) = input.matched {
+            let ids = matched
+                .items
+                .iter()
+                .map(|id| id.simple().to_string())
+                .collect::<Vec<_>>();
+            predicate.push_str(" AND lower(hex(id)) IN (SELECT value FROM json_each(?))");
+            bindings.push(SqlValue::Text(serde_json::to_string(&ids)?));
+        }
+        let counts = context
+            .query(
+                &format!("SELECT status,COUNT(*) {predicate} GROUP BY status"),
+                &bindings,
+            )?
+            .rows
+            .iter()
+            .map(|row| Ok((text(&row[0])?, uint(&row[1])?)))
+            .collect::<Result<BTreeMap<_, _>>>()?;
         let total = match &input.status {
             Some(status) => *counts.get(status).unwrap_or(&0),
             None => counts.values().sum(),
         };
-        let rows=context.query("SELECT data FROM organization_project_items WHERE project=? AND id>? AND (? IS NULL OR status=?) AND (? IS NULL OR repository=?) AND (? IS NULL OR id=?) ORDER BY id LIMIT 51",&[blob(input.project),blob(input.after.unwrap_or(Uuid::nil())),status.clone(),status,repository.clone(),repository,selected.clone(),selected])?;
+        bindings.extend([
+            blob(input.after.unwrap_or(Uuid::nil())),
+            status.clone(),
+            status,
+        ]);
+        let rows = context.query(
+            &format!(
+                "SELECT data {predicate} AND id>? AND (? IS NULL OR status=?) ORDER BY id LIMIT 51"
+            ),
+            &bindings,
+        )?;
         let mut items = rows
             .rows
             .iter()

@@ -43,6 +43,8 @@ pub(crate) struct View {
     pub hide_closed: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub show_issue_type: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_type_filter: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -149,6 +151,9 @@ impl Definition {
                     && text_valid(&v.name, 60, true)
                     && text_valid(&v.query, 256, false)
                     && v.status.as_ref().is_none_or(|s| self.statuses.contains(s))
+                    && v.issue_type_filter.as_deref().is_none_or(|value| {
+                        super::issues::issue_type::search::Filter::parse(value).is_ok()
+                    })
             })
     }
 }

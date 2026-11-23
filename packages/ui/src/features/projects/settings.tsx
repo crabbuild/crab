@@ -24,15 +24,19 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useProjectCommands, CommandError } from "./commands";
 import type { Project, Field as ProjectField, Layout } from "./model";
 import { useProjectDraft } from "./drafts";
+import { ProjectTypeFilter } from "./issue-type";
+import type { IssueType } from "@/lib/contracts";
 export function ProjectSettings({
   target,
   project,
   issueTypes,
+  typeChoices,
   onClose,
 }: {
   target: import("./model").ProjectTarget;
   project: Project;
   issueTypes: boolean;
+  typeChoices: IssueType[];
   onClose: () => void;
 }) {
   const saved = useProjectDraft(
@@ -481,28 +485,56 @@ export function ProjectSettings({
                         </Field>
                       )}
                       {issueTypes && (
-                        <Field orientation="horizontal">
-                          <Checkbox
-                            id={`${id}-issue-type-${view.id}`}
-                            checked={view.show_issue_type ?? false}
-                            onCheckedChange={(value) =>
-                              setDraft({
-                                ...draft,
-                                views: draft.views.map((current, n) =>
-                                  n === i
-                                    ? {
-                                        ...current,
-                                        show_issue_type: value === true,
-                                      }
-                                    : current,
-                                ),
-                              })
-                            }
-                          />
-                          <FieldLabel htmlFor={`${id}-issue-type-${view.id}`}>
-                            Show issue type in {view.name}
-                          </FieldLabel>
-                        </Field>
+                        <>
+                          <Field>
+                            <FieldLabel
+                              htmlFor={`${id}-issue-type-filter-${view.id}`}
+                            >
+                              Issue type filter
+                            </FieldLabel>
+                            <ProjectTypeFilter
+                              id={`${id}-issue-type-filter-${view.id}`}
+                              label={`Issue type filter for ${view.name}`}
+                              types={typeChoices}
+                              value={view.issue_type_filter ?? ""}
+                              onChange={(issueType) =>
+                                setDraft({
+                                  ...draft,
+                                  views: draft.views.map((current, n) =>
+                                    n === i
+                                      ? {
+                                          ...current,
+                                          issue_type_filter: issueType || null,
+                                        }
+                                      : current,
+                                  ),
+                                })
+                              }
+                            />
+                          </Field>
+                          <Field orientation="horizontal">
+                            <Checkbox
+                              id={`${id}-issue-type-${view.id}`}
+                              checked={view.show_issue_type ?? false}
+                              onCheckedChange={(value) =>
+                                setDraft({
+                                  ...draft,
+                                  views: draft.views.map((current, n) =>
+                                    n === i
+                                      ? {
+                                          ...current,
+                                          show_issue_type: value === true,
+                                        }
+                                      : current,
+                                  ),
+                                })
+                              }
+                            />
+                            <FieldLabel htmlFor={`${id}-issue-type-${view.id}`}>
+                              Show issue type in {view.name}
+                            </FieldLabel>
+                          </Field>
+                        </>
                       )}
                       <Button
                         type="button"

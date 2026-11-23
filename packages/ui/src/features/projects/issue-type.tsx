@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { IssueTypeBadge } from "@/components/discussion/issue-type-badge";
 import { Button } from "@/components/ui/button";
+import { FieldSelect } from "@/components/ui/field-select";
 import {
   Popover,
   PopoverContent,
@@ -11,6 +12,39 @@ import type { Repository } from "@/lib/api";
 import type { IssueType } from "@/lib/contracts";
 import { useProjectCommands } from "./commands";
 import type { Row } from "./model";
+
+export function ProjectTypeFilter({
+  types,
+  value,
+  onChange,
+  label = "Filter by issue type",
+  id,
+}: {
+  types: IssueType[];
+  value: string;
+  onChange: (value: string) => void;
+  label?: string;
+  id?: string;
+}) {
+  const options = {
+    all: "All issue types",
+    none: "No type",
+    ...Object.fromEntries(types.map((type) => [type.id, type.name])),
+  };
+  return (
+    <FieldSelect
+      id={id}
+      label={label}
+      value={value || "all"}
+      options={
+        value && !Object.hasOwn(options, value)
+          ? { ...options, [value]: "Unavailable type" }
+          : options
+      }
+      onValueChange={(selected) => onChange(selected === "all" ? "" : selected)}
+    />
+  );
+}
 
 export function ProjectIssueType({
   row,

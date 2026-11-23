@@ -10,7 +10,10 @@ mod reads;
 use crate::cells::planning as ledger;
 pub(crate) use commands::{Change, Command, Outcome, Request};
 pub(crate) use history::{GetHistory, HistoryQuery};
-pub(crate) use reads::{Get, Items, ItemsQuery, List, ListQuery, ProjectKey, View};
+pub(crate) use reads::{
+    Get, Items, ItemsQuery, List, ListQuery, MatchedItems, ProjectKey, TypeSources,
+    TypeSourcesQuery, View,
+};
 
 const READY: &str = "organization/projects/v1/ready";
 const MAX_ITEMS: u64 = 5000;
@@ -187,7 +190,7 @@ pub(in crate::cells::organization) fn handles(operation: u32, mutation: bool) ->
     } else {
         matches!(
             operation,
-            GetPreparation::ID | List::ID | Get::ID | Items::ID | GetHistory::ID
+            GetPreparation::ID | List::ID | Get::ID | Items::ID | GetHistory::ID | TypeSources::ID
         )
     }
 }

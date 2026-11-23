@@ -2773,6 +2773,17 @@ item pages supply the enabled `issue_types` and an `issue_type` per available
 issue. The item has an `issue_type_version` when the source repository permits
 an edit. Submit changes through the source issue type route.
 
+Choose **Filter by issue type** above the Project view to narrow its items.
+Use **No type** to find issues without an enabled type. Set **Issue type
+filter** in **Settings** → **Views** to save that filter. A saved filter uses
+the type ID, so it follows a renamed type.
+
+Both Project item endpoints accept `issue_type` with an enabled type UUID
+or `none`. Organization Project filters count issues from readable
+same-organization repositories. Counts and pagination use the complete
+matching set. Include the returned `type_cursor` with a filtered continuation.
+A stale result or changed access requires restarting from the first page.
+
 ### Edit pull requests and review summaries
 
 Pull request authors can choose **Edit pull request** beside the title to update
