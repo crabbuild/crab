@@ -8,7 +8,6 @@ import {
   FieldDescription,
   FieldGroup,
   FieldLabel,
-  FieldLegend,
   FieldSet,
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
@@ -103,8 +102,8 @@ export function MentionSettings({
                 }
               }}
             >
-              <FieldSet disabled={disabled} className="min-w-0 gap-5">
-                <FieldGroup className="grid gap-4 sm:grid-cols-2">
+              <FieldSet disabled={disabled} className="min-w-0 gap-5 p-4">
+                <FieldGroup className="grid gap-5 sm:grid-cols-2">
                   <Field className="min-w-0">
                     <FieldLabel htmlFor={`${id}-organization`}>
                       Organization ID
@@ -167,6 +166,8 @@ export function MentionSettings({
                     onChange={(teams) => change({ ...current, teams })}
                   />
                 )}
+              </FieldSet>
+              <div className="grid gap-3 border-t px-4 py-3">
                 <div className="flex flex-wrap gap-2">
                   <Button
                     type="submit"
@@ -177,6 +178,7 @@ export function MentionSettings({
                   {current.organization !== null && (
                     <Button
                       variant="outline"
+                      disabled={disabled}
                       onClick={() =>
                         change({
                           ...current,
@@ -190,41 +192,41 @@ export function MentionSettings({
                     </Button>
                   )}
                 </div>
-              </FieldSet>
-              {feedback && (
-                <p className="settings-help" role="status">
-                  {feedback}
-                </p>
-              )}
-              {mutation.error && (
-                <p className="settings-help error" role="alert">
-                  {mutation.error}
-                </p>
-              )}
-              {mutation.conflict && (
-                <div className="flex flex-wrap items-center gap-2 pt-3">
-                  <Button
-                    variant="outline"
-                    disabled={!latest.data}
-                    onClick={() => {
-                      if (!latest.data) return;
-                      setSaved(latest.data);
-                      setDraft(undefined);
-                      mutation.reset();
-                    }}
-                  >
-                    Discard draft and load saved settings
-                  </Button>
-                  {latest.loading && (
-                    <span role="status">Loading saved settings…</span>
-                  )}
-                  {latest.error && (
-                    <Button variant="ghost" onClick={latest.retry}>
-                      Retry loading saved settings
+                {feedback && (
+                  <p className="text-sm text-muted-foreground" role="status">
+                    {feedback}
+                  </p>
+                )}
+                {mutation.error && (
+                  <p className="text-sm text-destructive" role="alert">
+                    {mutation.error}
+                  </p>
+                )}
+                {mutation.conflict && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      variant="outline"
+                      disabled={!latest.data}
+                      onClick={() => {
+                        if (!latest.data) return;
+                        setSaved(latest.data);
+                        setDraft(undefined);
+                        mutation.reset();
+                      }}
+                    >
+                      Discard draft and load saved settings
                     </Button>
-                  )}
-                </div>
-              )}
+                    {latest.loading && (
+                      <span role="status">Loading saved settings…</span>
+                    )}
+                    {latest.error && (
+                      <Button variant="ghost" onClick={latest.retry}>
+                        Retry loading saved settings
+                      </Button>
+                    )}
+                  </div>
+                )}
+              </div>
             </form>
           );
         }}
@@ -272,25 +274,30 @@ function TeamAliases({
   }
 
   return (
-    <FieldSet disabled={disabled} className="min-w-0 gap-4">
-      <FieldLegend>Team aliases</FieldLegend>
-      <FieldDescription>
-        Only closed teams can be added. Team aliases do not grant repository
-        access.
-      </FieldDescription>
+    <FieldSet
+      disabled={disabled}
+      className="min-w-0 gap-4"
+      aria-labelledby={`${id}-heading`}
+    >
+      <div className="grid gap-1 border-t pt-4">
+        <h3 id={`${id}-heading`} className="font-semibold">
+          Team aliases
+        </h3>
+        <FieldDescription>
+          Only closed teams can be added. Team aliases do not grant repository
+          access.
+        </FieldDescription>
+      </div>
       {aliases.map((alias) => {
         const name =
           closed.find(({ team }) => team.id === alias.id)?.team.name ??
           addedNames[alias.id];
         return (
-          <div
-            key={alias.id}
-            className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2 sm:max-w-md"
-          >
-            <Field className="min-w-0">
-              <FieldLabel htmlFor={`${id}-${alias.id}`} className="break-all">
-                Alias for {name ?? alias.id}
-              </FieldLabel>
+          <Field key={alias.id} className="min-w-0 sm:max-w-md">
+            <FieldLabel htmlFor={`${id}-${alias.id}`} className="wrap-anywhere">
+              Alias for {name ?? alias.id}
+            </FieldLabel>
+            <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
               <Input
                 id={`${id}-${alias.id}`}
                 value={alias.slug}
@@ -308,29 +315,29 @@ function TeamAliases({
                   )
                 }
               />
-              {namespace && alias.slug && (
-                <FieldDescription className="break-all">
-                  <code>
-                    @{namespace}/{alias.slug}
-                  </code>
-                </FieldDescription>
-              )}
-            </Field>
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label={`Remove alias for ${name ?? alias.id}`}
-              onClick={() =>
-                onChange(aliases.filter((team) => team.id !== alias.id))
-              }
-            >
-              <TrashIcon />
-            </Button>
-          </div>
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label={`Remove alias for ${name ?? alias.id}`}
+                onClick={() =>
+                  onChange(aliases.filter((team) => team.id !== alias.id))
+                }
+              >
+                <TrashIcon />
+              </Button>
+            </div>
+            {namespace && alias.slug && (
+              <FieldDescription className="wrap-anywhere">
+                <code>
+                  @{namespace}/{alias.slug}
+                </code>
+              </FieldDescription>
+            )}
+          </Field>
         );
       })}
-      <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end">
-        <Field>
+      <div className="flex flex-wrap items-end gap-3">
+        <Field className="min-w-0 flex-[1_1_14rem]">
           <FieldLabel htmlFor={`${id}-search`}>Find a team</FieldLabel>
           <div className="flex gap-2">
             <Input
@@ -349,7 +356,7 @@ function TeamAliases({
             </Button>
           </div>
         </Field>
-        <Field>
+        <Field className="min-w-0 flex-[1_1_12rem]">
           <FieldLabel htmlFor={`${id}-team`}>Closed team</FieldLabel>
           <NativeSelect
             id={`${id}-team`}

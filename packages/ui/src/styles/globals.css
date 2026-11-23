@@ -3391,6 +3391,15 @@ main {
 .settings-content {
   min-width: 0;
 }
+.outbound-webhooks,
+.outbound-webhooks > .timing-widget {
+  display: grid;
+  align-content: start;
+  gap: --spacing(5);
+}
+.outbound-webhooks > .settings-title {
+  margin-bottom: 0;
+}
 .account-settings {
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);

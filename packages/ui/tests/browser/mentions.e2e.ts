@@ -86,6 +86,13 @@ test("a repository administrator can configure and clear a team alias", async ({
   });
   await page.reload();
   await expect(alias).toHaveValue("platform");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByText("@engineering/platform")).toBeVisible();
+  const input = await alias.boundingBox();
+  const remove = await page
+    .getByRole("button", { name: "Remove alias for Platform" })
+    .boundingBox();
+  expect(Math.abs(input!.y - remove!.y)).toBeLessThan(3);
   await page.getByRole("button", { name: "Clear binding" }).click();
   await page.getByRole("button", { name: "Save settings" }).click();
   await expect(feedback).toBeVisible();

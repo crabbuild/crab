@@ -4,7 +4,13 @@ import { useMutation } from "@/components/discussion/mutations";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
-import { FieldLabel } from "@/components/ui/field";
+import {
+  Field,
+  FieldDescription,
+  FieldLabel,
+  FieldLegend,
+  FieldSet,
+} from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
   NativeSelect,
@@ -75,7 +81,10 @@ export function OutboundWebhooks({
   }
 
   return (
-    <section className="settings-content" aria-labelledby="webhooks-title">
+    <section
+      className="settings-content outbound-webhooks"
+      aria-labelledby="webhooks-title"
+    >
       <div className="settings-title">
         <div>
           <h2 id="webhooks-title">Webhooks</h2>
@@ -105,7 +114,10 @@ export function OutboundWebhooks({
         </section>
       )}
       {mutation.error && (
-        <div className="notice error" role="alert">
+        <div
+          className="settings-section flex flex-col items-start gap-3 p-4 text-sm text-destructive"
+          role="alert"
+        >
           <p>{mutation.error}</p>
           {mutation.status === 409 && (
             <Button
@@ -136,8 +148,10 @@ export function OutboundWebhooks({
             >
               <header>
                 <div className="min-w-0">
-                  <h3 id="webhook-destination">Destination</h3>
-                  <p className="break-all">
+                  <h3 id="webhook-destination" className="font-semibold">
+                    Destination
+                  </h3>
+                  <p className="mt-1 text-sm wrap-anywhere">
                     {destination ??
                       (selected
                         ? "This destination is no longer approved."
@@ -160,38 +174,40 @@ export function OutboundWebhooks({
                   </Button>
                 )}
               </header>
-              {destinations.length > 1 && (
-                <div className="grid gap-2 border-t px-4 py-3">
-                  <FieldLabel htmlFor="webhook-destination-picker">
-                    Webhook destination
-                  </FieldLabel>
-                  <NativeSelect
-                    id="webhook-destination-picker"
-                    className="w-full"
-                    value={selected ?? ""}
-                    disabled={mutation.pending}
-                    onChange={(event) => {
-                      setSecret(undefined);
-                      mutation.reset();
-                      setDestinationKey(event.target.value);
-                    }}
-                  >
-                    {destinations.map(({ id, url }) => (
-                      <NativeSelectOption key={id} value={id}>
-                        {url ?? `Former destination ${short(id)}`}
-                      </NativeSelectOption>
-                    ))}
-                  </NativeSelect>
-                </div>
-              )}
-              {selected && destination && !repo.archived && (
-                <EventsForm
-                  key={`${selected}:${subscription?.id ?? ""}`}
-                  subscription={subscription}
-                  pending={mutation.pending}
-                  change={(body) => change(selected, body)}
-                />
-              )}
+              <div className="divide-y">
+                {destinations.length > 1 && (
+                  <Field className="min-w-0 p-4">
+                    <FieldLabel htmlFor="webhook-destination-picker">
+                      Webhook destination
+                    </FieldLabel>
+                    <NativeSelect
+                      id="webhook-destination-picker"
+                      className="w-full max-w-xl"
+                      value={selected ?? ""}
+                      disabled={mutation.pending}
+                      onChange={(event) => {
+                        setSecret(undefined);
+                        mutation.reset();
+                        setDestinationKey(event.target.value);
+                      }}
+                    >
+                      {destinations.map(({ id, url }) => (
+                        <NativeSelectOption key={id} value={id}>
+                          {url ?? `Former destination ${short(id)}`}
+                        </NativeSelectOption>
+                      ))}
+                    </NativeSelect>
+                  </Field>
+                )}
+                {selected && destination && !repo.archived && (
+                  <EventsForm
+                    key={`${selected}:${subscription?.id ?? ""}`}
+                    subscription={subscription}
+                    pending={mutation.pending}
+                    change={(body) => change(selected, body)}
+                  />
+                )}
+              </div>
             </section>
             <section
               className="settings-section"
@@ -199,16 +215,18 @@ export function OutboundWebhooks({
             >
               <header>
                 <div>
-                  <h3 id="webhook-deliveries">Recent deliveries</h3>
+                  <h3 id="webhook-deliveries" className="font-semibold">
+                    Recent deliveries
+                  </h3>
                 </div>
                 <Button size="sm" variant="outline" onClick={settings.retry}>
                   Refresh deliveries
                 </Button>
               </header>
               {deliveries.length ? (
-                <ul className="divide-y border-t">
+                <ul className="divide-y">
                   {deliveries.map((delivery) => (
-                    <li className="grid gap-2 p-4" key={delivery.id}>
+                    <li className="grid min-w-0 gap-3 p-4" key={delivery.id}>
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div className="grid gap-1">
                           <strong className="text-sm capitalize">
@@ -249,7 +267,7 @@ export function OutboundWebhooks({
                             pull: String(delivery.pull),
                             repository_id: repo.id,
                           })}
-                          className="w-fit text-sm underline"
+                          className="w-fit text-sm underline underline-offset-2"
                         >
                           Pull request #{delivery.pull}
                         </Link>
@@ -263,14 +281,14 @@ export function OutboundWebhooks({
                         </p>
                       )}
                       <details className="text-sm">
-                        <summary className="w-fit cursor-pointer">
+                        <summary className="w-fit cursor-pointer font-medium">
                           Delivery details · {delivery.attempts}{" "}
                           {delivery.attempts === 1 ? "attempt" : "attempts"}
                         </summary>
-                        <p className="mt-1 break-all font-mono text-xs">
+                        <p className="mt-2 wrap-anywhere font-mono text-xs">
                           {delivery.id}
                         </p>
-                        <ul className="mt-1 text-xs text-muted-foreground">
+                        <ul className="mt-2 grid gap-1 text-xs text-muted-foreground">
                           {delivery.recent_attempts.map((attempt, index) => (
                             <li key={`${attempt.at}-${index}`}>
                               {timeFormat.format(attempt.at)} ·{" "}
@@ -285,7 +303,7 @@ export function OutboundWebhooks({
                   ))}
                 </ul>
               ) : (
-                <p className="border-t px-4 py-3 text-sm text-muted-foreground">
+                <p className="p-4 text-sm text-muted-foreground">
                   No outgoing deliveries yet.
                 </p>
               )}
@@ -320,20 +338,22 @@ function EventsForm({
     void change({ ...intent, id: requestId(intent) });
   }
   return (
-    <form className="grid gap-3 border-t p-4" onSubmit={submit}>
-      <fieldset className="grid gap-2">
-        <legend className="mb-2 text-sm font-medium">Events</legend>
-        <label className="flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={push}
-            onChange={(event) => setPush(event.target.checked)}
-          />{" "}
-          Git pushes
-        </label>
-        <p className="text-xs text-muted-foreground">
-          Includes branch and tag changes made in Crab.
-        </p>
+    <form className="grid gap-4 p-4" onSubmit={submit}>
+      <FieldSet className="gap-3">
+        <FieldLegend variant="label">Events</FieldLegend>
+        <div className="grid gap-1">
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={push}
+              onChange={(event) => setPush(event.target.checked)}
+            />{" "}
+            Git pushes
+          </label>
+          <FieldDescription className="ps-5">
+            Includes branch and tag changes made in Crab.
+          </FieldDescription>
+        </div>
         <label className="flex items-center gap-2 text-sm">
           <input
             type="checkbox"
@@ -342,7 +362,7 @@ function EventsForm({
           />{" "}
           Pull requests
         </label>
-      </fieldset>
+      </FieldSet>
       {subscription && (
         <p className="text-sm text-muted-foreground">
           Saving replaces the signing secret and cancels outstanding deliveries

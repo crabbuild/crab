@@ -7,6 +7,7 @@ test("webhook setup recovers its secret and redelivery keeps the delivery ID", a
 }) => {
   const { lifecycle } = await mockPullRequest(page);
   const deliveryId = "01900000-0000-7000-8000-000000000101";
+  const destination = "https://ci.example.test/hooks/repository-events";
   let subscription: {
     id: string;
     push: boolean;
@@ -56,7 +57,12 @@ test("webhook setup recovers its secret and redelivery keeps the delivery ID", a
       if (request.method() === "GET")
         return route.fulfill({
           json: {
-            destination: "https://ci.example.test/events",
+            destinations: [
+              { id: "ci", url: destination },
+              { id: "audit", url: "https://audit.example.test/events" },
+            ],
+            selected: "ci",
+            destination,
             subscription,
             active: subscription !== null,
             deliveries: subscription
@@ -66,6 +72,7 @@ test("webhook setup recovers its secret and redelivery keeps the delivery ID", a
                     event: "pull_request",
                     action: "opened",
                     pull: 1,
+                    head_change: null,
                     queued_at: 1770000000000,
                     status,
                     attempts: 3,
@@ -115,6 +122,15 @@ test("webhook setup recovers its secret and redelivery keeps the delivery ID", a
 
   await page.goto("/team/project/settings/webhooks");
   await expect(page.getByRole("heading", { name: "Webhooks" })).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByLabel("Webhook destination")).toHaveValue("ci");
+  const receiver = await page
+    .getByRole("region", { name: "Destination", exact: true })
+    .boundingBox();
+  const deliveries = await page
+    .getByRole("region", { name: "Recent deliveries" })
+    .boundingBox();
+  expect(deliveries!.y - (receiver!.y + receiver!.height)).toBeGreaterThan(12);
   await page.getByRole("checkbox", { name: "Git pushes" }).uncheck();
   const enable = page.getByRole("button", { name: "Enable webhook" });
   await enable.click();

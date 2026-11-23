@@ -262,6 +262,7 @@
 #keycloak-bg #kc-social-providers .pf-v5-c-button {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 0.75rem;
   min-height: var(--sign-in-action-height);
   padding-inline: 0.875rem;
