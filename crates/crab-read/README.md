@@ -332,6 +332,8 @@ The path API makes cold, low-coverage reads with bounded xorb requests.
 High-coverage reads may cache a complete verified xorb. The in-memory API
 retains its non-installing whole-xorb source read so VFS windows preserve
 one-request fetch and decoded-range reuse.
+With a retained view, reconstruction checks the claim before opening a file
+destination and holds it through worker completion.
 
 The pointer and metadata remain the source of truth; caches only change where
 immutable bytes are fetched from.

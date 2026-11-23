@@ -335,8 +335,7 @@ impl ShardHydrator {
         if cancel.is_cancelled() {
             return Err(ReadError::Cancelled);
         }
-        let file = std::fs::File::create(dest)?;
-        self.reconstruct_to_writer_with_cancel(ptr, file, None, cancel)
+        self.reconstruct_writer(ptr, || Ok(std::fs::File::create(dest)?), None, None, cancel)
             .await
     }
 
@@ -358,37 +357,14 @@ impl ShardHydrator {
         dest: &std::path::Path,
     ) -> Result<u64> {
         let (start, end) = checked_range(ptr.size, start, end, "reconstruct_range_to_path")?;
-        let file = std::fs::File::create(dest)?;
-        if start >= end {
-            return Ok(0);
-        }
-
-        let file_hash = MerkleHash::from(ptr.file_hash);
-        let client = self
-            .store_client_for_pointer(ptr, None)
-            .with_xorb_read_mode(XorbReadMode::Selective);
-        let cancel = CancellationToken::new();
-        let _cancel_on_drop = cancel.clone().drop_guard();
-        let (_, bytes_written) = self
-            .reconstruct_bounded_to_writer(
-                client,
-                file_hash,
-                file,
-                Some(FileRange::new(start, end)),
-                end - start,
-                &cancel,
-            )
-            .await?;
-        if bytes_written != end - start {
-            return Err(ReadError::CorruptObject {
-                path: file_hash.hex(),
-                reason: format!(
-                    "reconstruction size mismatch: expected {}, got {bytes_written}",
-                    end - start
-                ),
-            });
-        }
-        Ok(bytes_written)
+        self.reconstruct_writer(
+            ptr,
+            || Ok(std::fs::File::create(dest)?),
+            Some((FileRange::new(start, end), XorbReadMode::Selective)),
+            None,
+            &CancellationToken::new(),
+        )
+        .await
     }
 
     /// Reconstruct a pointer into a blocking writer and verify its hash.
@@ -411,7 +387,7 @@ impl ShardHydrator {
     where
         W: Write + Send + 'static,
     {
-        self.reconstruct_writer(ptr, writer, None, file_index_lookup, cancel)
+        self.reconstruct_writer(ptr, || Ok(writer), None, file_index_lookup, cancel)
             .await
     }
 
@@ -443,8 +419,17 @@ impl ShardHydrator {
         if range.is_empty() {
             return Ok(0);
         }
-        self.reconstruct_writer(ptr, writer, Some(range), file_index_lookup, cancel)
-            .await
+        self.reconstruct_writer(
+            ptr,
+            || Ok(writer),
+            Some((
+                FileRange::new(range.start, range.end),
+                XorbReadMode::SelectiveCdn,
+            )),
+            file_index_lookup,
+            cancel,
+        )
+        .await
     }
 
     /// Stream an exact range with bounded backpressure and drop cancellation.
@@ -463,8 +448,8 @@ impl ShardHydrator {
     async fn reconstruct_writer<W>(
         &self,
         ptr: &Pointer,
-        writer: W,
-        range: Option<std::ops::Range<u64>>,
+        open_writer: impl FnOnce() -> Result<W> + Send,
+        range: Option<(FileRange, XorbReadMode)>,
         file_index_lookup: Option<&SharedFileIndexLookup>,
         cancel: &CancellationToken,
     ) -> Result<u64>
@@ -472,7 +457,7 @@ impl ShardHydrator {
         W: Write + Send + 'static,
     {
         crate::read_retention::read(self.retention.as_ref(), cancel, |pin, cancel| async move {
-            self.reconstruct_pinned_writer(ptr, writer, range, file_index_lookup, &cancel, pin)
+            self.reconstruct_pinned_writer(ptr, open_writer, range, file_index_lookup, &cancel, pin)
                 .await
         })
         .await
@@ -481,8 +466,8 @@ impl ShardHydrator {
     async fn reconstruct_pinned_writer<W>(
         &self,
         ptr: &Pointer,
-        writer: W,
-        range: Option<std::ops::Range<u64>>,
+        open_writer: impl FnOnce() -> Result<W> + Send,
+        range: Option<(FileRange, XorbReadMode)>,
         file_index_lookup: Option<&SharedFileIndexLookup>,
         cancel: &CancellationToken,
         pin: Option<Arc<crab_coordination::read_retention_runtime::ReadRetentionPin>>,
@@ -493,34 +478,27 @@ impl ShardHydrator {
         if cancel.is_cancelled() {
             return Err(ReadError::Cancelled);
         }
-        let expected_size = range
-            .as_ref()
-            .map_or(ptr.size, |range| range.end - range.start);
-        let full = range.is_none();
-        let mode = if full {
-            XorbReadMode::Whole
-        } else {
-            XorbReadMode::SelectiveCdn
-        };
+        // A rejected retained read must not create or truncate its file.
+        let writer = open_writer()?;
+        let (range, mode) = range.map_or((None, XorbReadMode::Whole), |(range, mode)| {
+            (Some(range), mode)
+        });
+        let expected_size = range.map_or(ptr.size, |range| range.end - range.start);
+        if range.is_some() && expected_size == 0 {
+            return Ok(0);
+        }
         let file_hash = MerkleHash::from(ptr.file_hash);
         let client = self
             .store_client_for_pointer(ptr, file_index_lookup)
             .with_xorb_read_mode(mode)
             .with_read_retention(pin)
             .with_cancellation(cancel.clone());
-        if full {
+        if range.is_none() {
             self.preflight_shard_coverage(&client, ptr).await?;
         }
 
         let (actual_hash, bytes_written) = self
-            .reconstruct_bounded_to_writer(
-                client,
-                file_hash,
-                writer,
-                range.map(|range| FileRange::new(range.start, range.end)),
-                expected_size,
-                cancel,
-            )
+            .reconstruct_bounded_to_writer(client, file_hash, writer, range, expected_size, cancel)
             .await?;
 
         if let Some(actual_hash) = actual_hash
@@ -1447,6 +1425,52 @@ mod tests {
                 .await,
             Err(crate::ReadError::Retention(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn closed_retention_preserves_file_destinations() {
+        use crab_coordination::read_retention::{ReadRetentionLease, RetainedReadRoot};
+        use crab_coordination::read_retention_runtime::ReadRetentionSession;
+
+        let directory = tempfile::tempdir().unwrap();
+        let (hydrator, pointer, original) =
+            reconstruction_fixture(&directory.path().join("cache"), false).await;
+        let session = ReadRetentionSession::default();
+        let root = RetainedReadRoot::new(blake3::hash(b"capture").to_hex().to_string(), 7).unwrap();
+        let lease = ReadRetentionLease::create(
+            Arc::new(object_store::memory::InMemory::new()),
+            "repo/v2/readers/owner/claim".into(),
+            root,
+        )
+        .await
+        .unwrap();
+        let hydrator =
+            hydrator.with_read_retention(session.capture().unwrap().retain(lease).unwrap());
+        let destination = directory.path().join("selected");
+        let written = hydrator
+            .reconstruct_range_to_path(&pointer, 1024, 8192, &destination)
+            .await
+            .unwrap();
+        assert_eq!(written, 8192 - 1024);
+        assert_eq!(std::fs::read(&destination).unwrap(), original[1024..8192]);
+
+        session.shutdown().await.unwrap();
+        std::fs::write(&destination, b"existing data").unwrap();
+        for range in [Some((1024, 8192)), Some((7, 7)), None] {
+            let result = match range {
+                Some((start, end)) => {
+                    hydrator
+                        .reconstruct_range_to_path(&pointer, start, end, &destination)
+                        .await
+                }
+                None => hydrator.reconstruct_to_path(&pointer, &destination).await,
+            };
+            assert!(
+                matches!(result, Err(crate::ReadError::Retention(_))),
+                "{result:?}"
+            );
+            assert_eq!(std::fs::read(&destination).unwrap(), b"existing data");
+        }
     }
 
     #[tokio::test]
