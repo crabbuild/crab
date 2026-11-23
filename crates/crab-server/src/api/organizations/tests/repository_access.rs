@@ -1,20 +1,20 @@
 use super::{repositories::repository_write, *};
 use crate::test_support::http::{browser::Browser, organizations::bootstrap};
 
-struct AccessFixture {
-    h: Harness,
-    organization: Uuid,
-    owner_id: Uuid,
+pub(super) struct AccessFixture {
+    pub(super) h: Harness,
+    pub(super) organization: Uuid,
+    pub(super) owner_id: Uuid,
     member: Uuid,
     team: Uuid,
-    alice: String,
-    bob: String,
-    org: String,
+    pub(super) alice: String,
+    pub(super) bob: String,
+    pub(super) org: String,
     repository: String,
 }
 
 impl AccessFixture {
-    async fn new() -> Self {
+    pub(super) async fn new() -> Self {
         let h = Harness::new(false).await;
         let (organization, owner_id, member) = bootstrap(&h).await;
         let alice = h.login().await;
@@ -143,7 +143,7 @@ impl AccessFixture {
         })).await.error_for_status().unwrap();
     }
 
-    async fn get(&self, path: &str, cookie: &str) -> reqwest::Response {
+    pub(super) async fn get(&self, path: &str, cookie: &str) -> reqwest::Response {
         self.h
             .http
             .get(format!("{}{path}", self.h.origin))

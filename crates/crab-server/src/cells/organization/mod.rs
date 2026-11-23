@@ -13,7 +13,7 @@ use super::{
 
 pub(in crate::cells) const CLASS: &str = "Organization";
 pub(in crate::cells) const NAMESPACE: &str = "ORGANIZATIONS";
-const MAX_VERSION: u64 = 9_007_199_254_740_991;
+pub(crate) const MAX_VERSION: u64 = 9_007_199_254_740_991;
 
 mod commands;
 mod invitations;
@@ -34,8 +34,8 @@ pub(crate) use invitations::{
     InvitationState, InvitationView, Invite, InviteInput, ListInvitations,
 };
 pub(crate) use reads::{
-    Caller, Collection, GetMember, GetOrganization, ListActivity, ListMembers, MemberKey, Page,
-    PageCursor, PageQuery,
+    ActivityQuery, Caller, Collection, GetMember, GetOrganization, ListActivity, ListMembers,
+    MemberKey, Page, PageCursor, PageQuery,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]

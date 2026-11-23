@@ -86,6 +86,18 @@ export type OrganizationMembership = { actor: string, role: OrganizationRole, ve
 export type OrganizationMembers = { can_manage: boolean, items: Array<OrganizationMembership>, next: string | null, revision: number, };
 
 // prettier-ignore
+export type AuditAction = "organization_created" | "organization_edited" | "organization_membership" | "organization_invitation" | "rulesets_changed" | "project_changed" | "team_created" | "team_edited" | "team_deleted" | "team_membership" | "team_creation_policy" | "repository_registered" | "repository_access_changed" | "repository_transferred_in" | "repository_transferred_out";
+
+// prettier-ignore
+export type AuditRepository = { id: string, name: string, };
+
+// prettier-ignore
+export type AuditEvent = { id: string, occurred_at_ms: number, action: AuditAction, actor: string | null, actor_profile: ActorSummary | null, operator: boolean, account: string | null, team: string | null, project: string | null, repository: AuditRepository | null, detail: string | null, };
+
+// prettier-ignore
+export type AuditPage = { items: Array<AuditEvent>, next: string | null, };
+
+// prettier-ignore
 export type MemberAccessAccount = "active" | "suspended" | "provider_unavailable";
 
 // prettier-ignore

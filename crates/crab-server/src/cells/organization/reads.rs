@@ -155,7 +155,7 @@ impl Read for ListActivity {
         if !(1..=50).contains(&input.limit)
             || input
                 .before
-                .is_some_and(|value| value == 0 || value > MAX_VERSION)
+                .is_some_and(|value| value == 0 || value > MAX_VERSION + 1)
         {
             return Err(Error::Invalid("organization activity page is invalid"));
         }
