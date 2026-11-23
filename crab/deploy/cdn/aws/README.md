@@ -106,7 +106,7 @@ can describe the given stack, read the origin bucket's logging configuration,
 and list and read both prefixes of its log bucket. The worker checks the
 stack's distribution and bucket against the approved fixture. It lists
 the relevant UTC viewer hours and S3 event days and removes raw downloads
-after each collection attempt. Use `--aws-log-wait-seconds`
+after each collection attempt. Use `--log-wait-seconds`
 to poll for delayed records and `--require-origin-fill` for a cold sample.
 S3 and CloudFront log delivery is best effort. A sample with missing
 required records remains unqualified after the wait. [CloudFront log delivery](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/standard-logs-reference.html) · [S3 log delivery](https://docs.aws.amazon.com/AmazonS3/latest/userguide/ServerLogs.html)

@@ -1723,7 +1723,7 @@ collector checks the companion outputs and the origin logging target. It
 fetches the relevant UTC CloudFront hours and S3 event days from the two
 private log prefixes, using expected-owner and ETag checks, and retains only
 the redacted proof. To wait for delivery, pass
-`--aws-log-wait-seconds` with the polling window in seconds. Pass
+`--log-wait-seconds` with the polling window in seconds. Pass
 `--require-origin-fill` for the cold arm so the collector also waits for a
 matching successful S3 response with body bytes. With local exports, the
 same flag reports a missing origin fill immediately. Use time-filtered local
@@ -1734,8 +1734,9 @@ approved project and forwarding rule through the Cloud Logging API. The
 active `gcloud` identity needs `logging.logEntries.list` on the fixture
 project. The collector includes a minute on either side of the timed read
 for clock skew and origin fills. It follows bounded pagination and writes
-only the verified redacted proof. Retry after log delivery if the required
-records have yet to arrive. [Cloud Logging entries.list](https://docs.cloud.google.com/logging/docs/reference/v2/rest/v2/entries/list)
+only the verified redacted proof. Pass `--log-wait-seconds` with
+`--require-origin-fill` for cold samples so the collector can wait for
+the related origin entries. [Cloud Logging entries.list](https://docs.cloud.google.com/logging/docs/reference/v2/rest/v2/entries/list)
 
 The workload sends a random per-request User-Agent tag for qualification.
 The attested backend
@@ -1766,6 +1767,7 @@ responses still count toward the reported byte floor.
 python3 -B crab/scripts/e2e/collect_cdn_viewer_requests.py \
   --fixture "$approved_fixture_json" --configuration-sha256 "$approved_configuration_sha256" \
   --client "$arm_directory/client.json" --gcp-logging --require-origin-fill \
+  --log-wait-seconds 300 \
   --output "$arm_directory/cloud-cdn-requests.json"
 ```
 
@@ -1796,8 +1798,9 @@ Azure Storage and use `--azure-monitor` in place of the viewer and Blob log
 file flags. Use an Azure CLI identity that can read the resources' diagnostic
 settings and read blobs from the configured log containers. The collector
 looks up the enabled destination for each category and reads its hourly
-archives around the timed action. Private collection reads the profile's
-managed identity from ARM. Public collection still takes the Azure Public
+archives around the timed action. Pass `--log-wait-seconds` to wait for
+the viewer and Blob records in a cold sample. Private collection reads the
+profile's managed identity from ARM. Public collection takes the Azure Public
 service-tags file through `--azure-origin-authority`.
 [Diagnostic settings API](https://learn.microsoft.com/en-us/rest/api/monitor/diagnostic-settings/list?view=rest-monitor-2021-05-01-preview) · [Azure Monitor archive layout](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/resource-logs)
 
@@ -1805,6 +1808,7 @@ service-tags file through `--azure-origin-authority`.
 python3 -B crab/scripts/e2e/collect_cdn_viewer_requests.py \
   --fixture "$approved_fixture_json" --configuration-sha256 "$approved_configuration_sha256" \
   --client "$arm_directory/client.json" --azure-monitor --require-origin-fill \
+  --log-wait-seconds 300 \
   --output "$arm_directory/front-door-requests.json"
 ```
 

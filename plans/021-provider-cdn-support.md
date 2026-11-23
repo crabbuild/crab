@@ -698,6 +698,9 @@ and edge payload through redacted observations.
   keys and timed window. Its cold arm requires a successful origin body response.
   The collector lists the timed CloudFront hours and S3 event dates and can
   wait for both streams before returning a cold proof.
+  Live Cloud Logging and Azure Monitor collection can also poll for delayed
+  viewer records and origin fills. Invalid records and provider API errors
+  terminate collection.
   Cloud CDN retains cache-fill bytes on viewer log records and joins
   range-fill and validation requests by the provider's parent log-entry ID.
   The collector can read those records directly from Cloud Logging for the

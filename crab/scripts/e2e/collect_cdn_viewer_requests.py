@@ -470,22 +470,41 @@ def cloud_cdn_logs(exports: Iterable[object], client: dict, fixture: dict) -> di
     return records
 
 
-def aws_viewer_evidence(fixture: dict, client: dict, digest: str, args: argparse.Namespace) -> dict:
-    deadline = time.monotonic() + args.aws_log_wait_seconds
-    # CloudFront and S3 deliver separately. Recheck each snapshot before
-    # waiting so API errors and malformed logs terminate collection.
-    while True:
+def viewer_log_snapshot(fixture: dict, client: dict, digest: str, edge: str, args: argparse.Namespace) -> dict:
+    proof = {"schema": f"crab.{edge}-viewer-requests/v1", "client_report_sha256": digest}
+    if args.aws_log_stack is not None:
         with TemporaryDirectory(prefix="crab-cdn-aws-logs-") as temporary:
             viewer_logs, origin_logs = download_logs(fixture, client, args.aws_log_stack, args.aws_profile, Path(temporary))
             records = cloudfront_logs(viewer_logs, client, fixture)
-            origins = s3_cloudfront_reads(origin_logs, records, fixture, client)
+            proof["origin_requests"] = s3_cloudfront_reads(origin_logs, records, fixture, client)
+    elif edge == "cloudfront":
+        records = cloudfront_logs(args.log, client, fixture)
+        proof["origin_requests"] = s3_cloudfront_reads(args.s3_origin_log, records, fixture, client)
+    elif args.azure_monitor:
+        records, proof["origin_requests"] = azure_monitor_records(fixture, client, args.azure_origin_authority)
+    elif edge == "front-door":
+        records = front_door_logs((read_json_log(path) for path in args.log), client, fixture)
+        origins = (read_json_log(path) for path in args.azure_blob_log)
+        authority = read_json_log(args.azure_origin_authority)
+        proof["origin_requests"] = azure_blob_front_door_reads(origins, authority, records, fixture, client)
+    else:
+        exports = gcp_logging_pages(fixture, client) if args.gcp_logging else (read_json_log(path) for path in args.log)
+        records = cloud_cdn_logs(exports, client, fixture)
+    return proof | {"records": records}
+
+
+def viewer_evidence(fixture: dict, client: dict, digest: str, edge: str, args: argparse.Namespace) -> dict:
+    deadline = time.monotonic() + args.log_wait_seconds
+    # Viewer and origin records can arrive separately. Every attempt checks
+    # a fresh snapshot, and invalid data or API errors stop collection.
+    while True:
+        proof = viewer_log_snapshot(fixture, client, digest, edge, args)
+        records = proof["records"]
         if records.keys() == client["edge_responses"].keys():
-            proof = {"schema": "crab.cloudfront-viewer-requests/v1", "client_report_sha256": digest,
-                     "records": records, "origin_requests": origins}
-            observed = verify_viewer_requests(proof, client, digest, "cloudfront")
+            observed = verify_viewer_requests(proof, client, digest, edge)
             if observed.successful_fill or not args.require_origin_fill:
                 return proof
-            missing = "no logged CloudFront fill from the approved S3 origin"
+            missing = "no logged fill from the approved CDN origin"
         else:
             missing = "CDN logs must cover each measured viewer attempt exactly once"
         remaining = deadline - time.monotonic()
@@ -511,14 +530,15 @@ def main() -> int:
     parser.add_argument("--azure-origin-authority", type=Path,
                         help="ARM Front Door profile JSON for private rows, Azure Public service tags JSON for public rows")
     parser.add_argument("--aws-profile", help="AWS CLI profile used for read-only companion log collection")
-    parser.add_argument("--aws-log-wait-seconds", type=int, default=0,
-                        help="poll for missing AWS companion logs within this window")
+    parser.add_argument("--log-wait-seconds", type=int, default=0,
+                        help="poll for missing records from the live log source within this window")
     parser.add_argument("--require-origin-fill", action="store_true",
                         help="require logged origin body bytes for a cold edge read")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     try:
-        require(0 <= args.aws_log_wait_seconds <= 24 * 60 * 60, "AWS log wait must be between 0 and 86400 seconds")
+        require(0 <= args.log_wait_seconds <= 24 * 60 * 60, "log wait must be between 0 and 86400 seconds")
+        require(not args.log_wait_seconds or not args.log, "log polling requires a live provider source")
         require(not args.output.exists() and not args.output.is_symlink(), "viewer evidence output must be new")
         fixture = approved_fixture(args.fixture, args.configuration_sha256)
         edge, access, _, family, _ = scope_parts(fixture["scope"])
@@ -529,7 +549,7 @@ def main() -> int:
             require(edge == "cloudfront" and not args.s3_origin_log,
                     "AWS log stack collection requires a CloudFront fixture and no local viewer or origin files")
         else:
-            require(args.aws_profile is None and not args.aws_log_wait_seconds, "AWS log options require a companion stack")
+            require(args.aws_profile is None, "AWS profile requires a companion stack")
             require(bool(args.s3_origin_log) == (edge == "cloudfront"),
                     "CloudFront viewer evidence requires S3 origin access logs")
         require(bool(args.azure_blob_log) == (edge == "front-door" and not args.azure_monitor),
@@ -597,27 +617,7 @@ def main() -> int:
                 "the timed fetch lacks a CDN request fingerprint for each viewer attempt")
         require(not args.require_origin_fill or client["arm"] == "edge", "origin fill requires a timed edge read")
         digest = hashlib.sha256(raw).hexdigest()
-        if args.aws_log_stack is not None:
-            proof = aws_viewer_evidence(fixture, client, digest, args)
-        else:
-            proof = {"schema": f"crab.{edge}-viewer-requests/v1", "client_report_sha256": digest}
-            if edge == "cloudfront":
-                records = cloudfront_logs(args.log, client, fixture)
-                proof["origin_requests"] = s3_cloudfront_reads(args.s3_origin_log, records, fixture, client)
-            elif edge == "front-door":
-                if args.azure_monitor:
-                    records, proof["origin_requests"] = azure_monitor_records(fixture, client, args.azure_origin_authority)
-                else:
-                    records = front_door_logs((read_json_log(path) for path in args.log), client, fixture)
-                    origins = (read_json_log(path) for path in args.azure_blob_log)
-                    authority = read_json_log(args.azure_origin_authority)
-                    proof["origin_requests"] = azure_blob_front_door_reads(origins, authority, records, fixture, client)
-            else:
-                exports = gcp_logging_pages(fixture, client) if args.gcp_logging else (read_json_log(path) for path in args.log)
-                records = cloud_cdn_logs(exports, client, fixture)
-            proof["records"] = records
-            observed = verify_viewer_requests(proof, client, digest, edge)
-            require(not args.require_origin_fill or observed.successful_fill, "no logged fill from the approved CDN origin")
+        proof = viewer_evidence(fixture, client, digest, edge, args)
         with args.output.open("x", encoding="utf-8") as destination:
             destination.write(json.dumps(proof, sort_keys=True) + "\n")
     except (ValueError, OSError) as error:

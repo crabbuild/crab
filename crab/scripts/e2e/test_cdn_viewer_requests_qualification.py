@@ -216,7 +216,7 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                 self.assertFalse(output.exists())
                 downloaded.clear()
                 delivered.clear()
-                with (patch.object(sys, "argv", arguments + ["--aws-log-wait-seconds", "1"]),
+                with (patch.object(sys, "argv", arguments + ["--log-wait-seconds", "1"]),
                       patch.object(COLLECT.time, "monotonic", side_effect=[0, 1]),
                       patch.object(COLLECT.time, "sleep") as sleep):
                     self.assertEqual(COLLECT.main(), 1)
@@ -229,7 +229,7 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                     self.assertTrue(all(not raw.parent.exists() for raw in downloaded))
                     delivered.add(next(pending))
 
-                with (patch.object(sys, "argv", arguments + ["--aws-log-wait-seconds", "180"]),
+                with (patch.object(sys, "argv", arguments + ["--log-wait-seconds", "180"]),
                       patch.object(COLLECT.time, "monotonic", side_effect=[0, 0, 60]),
                       patch.object(COLLECT.time, "sleep", side_effect=receive_log) as sleep):
                     self.assertEqual(COLLECT.main(), 0)
@@ -465,6 +465,18 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                         self.assertEqual(COLLECT.main(), 1)
                         self.assertIn(reason, errors.getvalue())
                         self.assertFalse(output.exists())
+                viewer_only = viewer | {"httpRequest": request | {"cacheFillBytes": "0"}}
+                pages = iter(({}, {"entries": [viewer_only]}, {"entries": [viewer_only, origin]}))
+                with (patch.object(sys, "argv", [*api_command, "--log-wait-seconds", "180"]),
+                      patch.object(COLLECT.time, "monotonic", side_effect=[0, 0, 60]),
+                      patch.object(COLLECT.time, "sleep") as sleep):
+                    self.assertEqual(COLLECT.main(), 0)
+                    self.assertEqual(sleep.call_count, 2)
+                proof = json.loads(output.read_bytes())
+                self.assertEqual(proof["records"][fingerprint]["origin_requests"], {
+                    hashlib.sha256(b"range-fill").hexdigest(): {"method": "GET", "status": 206, "cache_fill_bytes": 2048},
+                })
+                output.unlink()
 
             config |= {"scope": "cloud-cdn/private/sdk/xorb/direct", "base_url": f"https://{host}/crab",
                        "view_suffix": "/acl-views/v2/" + "2" * 64 + "/1-" + "3" * 64,
@@ -713,12 +725,27 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                     self.assertEqual(COLLECT.main(), 0)
                     self.assertEqual(output.read_bytes(), expected)
                     output.unlink()
+                    saved_origin = origin_log.read_bytes()
+                    examples.json_file(origin_log, {"records": []})
+
+                    def receive_origin(_seconds):
+                        self.assertFalse(output.exists())
+                        origin_log.write_bytes(saved_origin)
+
+                    with (patch.object(sys, "argv", [*api_command, "--log-wait-seconds", "180"]),
+                          patch.object(COLLECT.time, "sleep", side_effect=receive_origin) as sleep):
+                        self.assertEqual(COLLECT.main(), 0)
+                        sleep.assert_called_once_with(60)
+                    self.assertEqual(output.read_bytes(), expected)
+                    output.unlink()
                     destinations[resource.lower()].append({"properties": {
                         "storageAccountId": f"{group}/providers/Microsoft.Storage/storageAccounts/otherlogs",
                         "logs": [{"categoryGroup": "allLogs", "enabled": True}],
                     }})
-                    with redirect_stderr(StringIO()) as errors:
+                    with (patch.object(sys, "argv", [*api_command, "--log-wait-seconds", "180"]),
+                          patch.object(COLLECT.time, "sleep") as sleep, redirect_stderr(StringIO()) as errors):
                         self.assertEqual(COLLECT.main(), 1)
+                        sleep.assert_not_called()
                     self.assertIn("expected one Azure storage destination", errors.getvalue())
                     self.assertNotIn("otherlogs", errors.getvalue())
                     self.assertFalse(output.exists())
