@@ -1914,6 +1914,27 @@ class ViewerRequestMetrics(NamedTuple):
     completed_cache: dict[str, str]
 
 
+def verify_cloudfront_framing(row: dict[str, Any], response: dict[str, Any]) -> None:
+    length = row["content_length"]
+    span = row["content_range"]
+    require(length is None or (type(length) is int and 0 <= length < 2**64),
+            "CloudFront log has invalid Content-Length")
+    require(span is None or (isinstance(span, list) and len(span) == 2
+                             and all(type(offset) is int for offset in span)
+                             and 0 <= span[0] <= span[1] < 2**64),
+            "CloudFront log has invalid Content-Range endpoints")
+    if not response["complete"]:
+        return
+    require(length is None or length == response["bytes"],
+            "CloudFront logged Content-Length disagrees with the completed read")
+    if response["range"]:
+        require(span is not None and span[1] < response["object_bytes"]
+                and span[1] - span[0] + 1 == response["requested_bytes"],
+                "CloudFront logged range disagrees with the completed read")
+    else:
+        require(span is None, "CloudFront logged a partial range for a completed full read")
+
+
 def verify_viewer_requests(
     value: Any, client: dict[str, Any], client_digest: str, edge: str, *, include_adjacent_origin: bool = False,
 ) -> ViewerRequestMetrics:
@@ -1935,7 +1956,9 @@ def verify_viewer_requests(
             and len(records) == client["all_edge_attempts"],
             "CDN logs must cover each measured viewer attempt exactly once")
     record_fields = {"status", "cache", "response_bytes", "key_sha256"}
-    if edge == "cloud-cdn":
+    if edge == "cloudfront":
+        record_fields |= {"content_length", "content_range"}
+    elif edge == "cloud-cdn":
         record_fields |= {"cache_fill_bytes", "origin_requests"}
     viewer_keys = set()
     selected_payload_keys = set()
@@ -1955,6 +1978,8 @@ def verify_viewer_requests(
                 and row["cache"] in ("hit", "miss", "unknown")
                 and type(row["response_bytes"]) is int and row["response_bytes"] >= response["bytes"],
                 "CDN log status or response bytes disagree with the client")
+        if edge == "cloudfront":
+            verify_cloudfront_framing(row, response)
         cache = row["cache"]
         key = row["key_sha256"]
         require(matches(SHA256, key), "invalid CDN object key fingerprint")

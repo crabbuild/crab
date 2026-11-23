@@ -282,6 +282,16 @@ jobs:
             "$publisher_python" -B "crab/deploy/cdn/$provider/test_publish_export.py"
           done
 
+      - name: Verify CloudFront fixture templates
+        run: |
+          tools="$RUNNER_TEMP/cdn-cfn-lint"
+          python3 -m venv "$tools"
+          "$tools/bin/python" -m pip install --disable-pip-version-check 'cfn-lint==1.61.0'
+          "$tools/bin/cfn-lint" --regions us-east-1 --template \
+            crab/deploy/cdn/aws/cloudfront.yaml \
+            crab/deploy/cdn/aws/public-export.yaml \
+            crab/deploy/cdn/aws/qualification-logs.yaml
+
       - name: Verify Cloud CDN fixture plans
         shell: bash
         env:

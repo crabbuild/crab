@@ -83,6 +83,7 @@ assert.ok(viewerFields, 'CloudFront delivery selects the measured fields explici
 assert.deepEqual(viewerFields.trim().split('\n').map((line) => line.trim().slice(2)), [
   'date', 'time', 'x-edge-request-id', 'x-host-header', 'cs-method', 'cs-uri-stem',
   'cs-protocol', 'sc-status', 'sc-bytes', 'x-edge-response-result-type',
+  'sc-content-len', 'sc-range-start', 'sc-range-end',
 ]);
 assert.match(logTemplate, /OutputFormat: w3c/);
 assert.match(logTemplate, /FieldDelimiter: "\\t"/);

@@ -97,6 +97,11 @@ def range_response(scope: str, size: int, cache: str = "hit") -> dict:
             "range": True, "object_bytes": 2 * size, "requested_bytes": size, "elapsed_ms": 1}
 
 
+def cloudfront_framing(length: int, *, range_start: int | None = 0) -> dict:
+    return {"content_length": length,
+            "content_range": None if range_start is None else [range_start, range_start + length - 1]}
+
+
 def write_product_viewer_proof(client_path: Path, key_sha256: str | None = None, *,
                                    filename: str = CDN.PRODUCT_VIEWER_RECORD) -> None:
     raw = client_path.read_bytes()
@@ -110,7 +115,9 @@ def write_product_viewer_proof(client_path: Path, key_sha256: str | None = None,
     for request, response in client["edge_responses"].items():
         log = {"status": response["status"], "cache": response["cache"], "response_bytes": response["bytes"],
                "key_sha256": key_sha256 or "8" * 64}
-        if edge == "cloud-cdn":
+        if edge == "cloudfront":
+            log.update(cloudfront_framing(response["requested_bytes"], range_start=0 if response["range"] else None))
+        elif edge == "cloud-cdn":
             log.update(cache_fill_bytes=0, origin_requests={})
         records[request] = log
     json_file(client_path.parent / filename, proof)
@@ -208,6 +215,8 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, nati
                     client["edge_responses"][request_id] = range_response(registration["scope"], metrics["edge_bytes"], cache)
                     key_sha256 = hashlib.sha256(f"{location}/{index}/key".encode()).hexdigest()
                     proof[request_id] = {"status": 206, "response_bytes": 800, "cache": cache, "key_sha256": key_sha256}
+                    if provider == "s3":
+                        proof[request_id].update(cloudfront_framing(metrics["edge_bytes"]))
                     if provider in ("s3", "azure"):
                         if arm == "cold_edge":
                             origin_id = hashlib.sha256(f"{location}/{index}/origin".encode()).hexdigest()
@@ -649,6 +658,8 @@ class CdnQualificationTests(unittest.TestCase):
         log = {"status": 206, "cache": "hit", "response_bytes": 30,
                "key_sha256": lfs_key or transition.get("transition_key_sha256", "8" * 64)}
         proof = {"schema": f"crab.{edge}-viewer-requests/v1", "client_report_sha256": client, "records": {request: log}}
+        if edge == "cloudfront":
+            log.update(cloudfront_framing(response["bytes"]))
         if edge == "cloud-cdn":
             log.update(cache_fill_bytes=0, origin_requests={})
         else:
@@ -1808,7 +1819,9 @@ class CdnQualificationTests(unittest.TestCase):
                                     "edge_responses": read["edge_responses"] | {fingerprint: response},
                                 })
                                 logged = {"status": 206, "cache": "hit", "response_bytes": size, "key_sha256": "f" * 64}
-                                if provider == "gcs":
+                                if provider == "s3":
+                                    logged.update(cloudfront_framing(size))
+                                elif provider == "gcs":
                                     logged.update(cache_fill_bytes=0, origin_requests={})
                                 json_file(log_path, proof | {"client_report_sha256": digest,
                                                              "records": proof["records"] | {fingerprint: logged}})

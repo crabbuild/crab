@@ -297,11 +297,12 @@ sha256 = "{approval}"
         request = "desktop-viewer-request"
         request_sha256 = hashlib.sha256(request.encode()).hexdigest()
         record["edge_responses"] = {request_sha256: record["edge_responses"]["d" * 64]}
+        size = record["edge_responses"][request_sha256]["bytes"]
         digest = json_file(client, record)
         logs.write_text("#Fields: x-edge-request-id x-host-header cs-method cs-uri-stem cs-protocol sc-status "
-                        "sc-bytes x-edge-response-result-type\n"
+                        "sc-bytes x-edge-response-result-type sc-content-len sc-range-start sc-range-end\n"
                         f"{request}\tfixture.example.com\tGET\t/crab/{config['fixture_prefix']}/{config['object_path']}"
-                        "\thttps\t206\t128\tHit\n", encoding="utf-8")
+                        f"\thttps\t206\t128\tHit\t{size}\t0\t{size - 1}\n", encoding="utf-8")
         command = ["collect", "--fixture", str(self.args.fixture), "--configuration-sha256", self.args.configuration_sha256,
                    "--client", str(client), "--log", str(logs), "--s3-origin-log", str(origin_logs), "--output", str(output)]
         with patch.object(sys, "argv", command):

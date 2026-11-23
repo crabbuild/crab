@@ -39,7 +39,8 @@ from run_cdn_transport_checks import (  # noqa: E402
 
 
 LOG_FIELDS = {b"x-edge-request-id", b"x-host-header", b"cs-method", b"cs-uri-stem", b"cs-protocol",
-              b"sc-status", b"sc-bytes", b"x-edge-response-result-type"}
+              b"sc-status", b"sc-bytes", b"x-edge-response-result-type",
+              b"sc-content-len", b"sc-range-start", b"sc-range-end"}
 CF_CACHE_STATUS = {b"Hit": "hit", b"Miss": "miss"}
 AZURE_CACHE_STATUS = {"HIT": "hit", "REMOTE_HIT": "hit", "MISS": "miss"}
 GCS_VIEWER_AGENT = re.compile(r"crab-cdn-qualification/[0-9a-f]{32}")
@@ -55,6 +56,13 @@ S3_CLOUDFRONT_READ = re.compile(
     rb'\S+ \S+ \S+ (?:"[^"]*"|-) "Amazon CloudFront" \S+ \S+ SigV4 \S+ AuthHeader (?P<host>\S+)(?: .*)?'
 )
 AZURE_BLOB_TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?Z")
+
+
+def cloudfront_byte_field(value: bytes) -> int | None:
+    if value == b"-":
+        return None
+    require(re.fullmatch(rb"[0-9]{1,20}", value) is not None, "invalid CloudFront log byte field")
+    return int(value)
 
 
 def cloudfront_logs(paths: list[Path], client: dict, fixture: dict) -> dict:
@@ -88,7 +96,11 @@ def cloudfront_logs(paths: list[Path], client: dict, fixture: dict) -> dict:
                     status, size = event[b"sc-status"], event[b"sc-bytes"]
                     require(re.fullmatch(rb"[1-5][0-9]{2}", status) and re.fullmatch(rb"[0-9]{1,20}", size),
                             "CloudFront log has invalid HTTP status or response size")
+                    start = cloudfront_byte_field(event[b"sc-range-start"])
+                    end = cloudfront_byte_field(event[b"sc-range-end"])
                     record = {"status": int(status), "response_bytes": int(size),
+                              "content_length": cloudfront_byte_field(event[b"sc-content-len"]),
+                              "content_range": [start, end] if start is not None or end is not None else None,
                               "key_sha256": hashlib.sha256(path_name.removeprefix(base_path)).hexdigest(),
                               "cache": CF_CACHE_STATUS.get(event[b"x-edge-response-result-type"], "unknown")}
                     require(fingerprint not in records or records[fingerprint] == record,

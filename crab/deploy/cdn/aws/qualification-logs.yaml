@@ -116,6 +116,9 @@ Resources:
         - sc-status
         - sc-bytes
         - x-edge-response-result-type
+        - sc-content-len
+        - sc-range-start
+        - sc-range-end
 
 Outputs:
   LogBucket:

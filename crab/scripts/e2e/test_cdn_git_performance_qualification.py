@@ -69,6 +69,9 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         proof_path = directory / fixture.CDN.VIEWER_REQUEST_FILES["s3"]
         proof = json.loads(proof_path.read_bytes())
         proof["records"][request].update(status=updated["status"], cache=updated["cache"])
+        proof["records"][request].update(fixture.cloudfront_framing(
+            updated["requested_bytes"], range_start=0 if updated["range"] else None,
+        ))
         fixture.json_file(proof_path, proof)
 
     def amend_client(self, path: str, **changes: object) -> None:
@@ -166,6 +169,7 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         log = directory / fixture.CDN.VIEWER_REQUEST_FILES["s3"]
         proof = json.loads(log.read_bytes())
         proof["records"][request] = {"status": 206, "cache": "hit", "response_bytes": 8, "key_sha256": "d" * 64}
+        proof["records"][request].update(fixture.cloudfront_framing(8))
         fixture.json_file(log, proof)
         self.collect()
 
@@ -420,6 +424,7 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         path = arm / fixture.CDN.VIEWER_REQUEST_FILES["s3"]
         proof = json.loads(path.read_bytes())
         proof["records"][capsule_id] = {"status": 206, "cache": "miss", "response_bytes": 16, "key_sha256": capsule_key}
+        proof["records"][capsule_id].update(fixture.cloudfront_framing(16))
         origin_id, origin = next(iter(proof["origin_requests"].items()))
         fixture.json_file(path, proof | {"origin_requests": {origin_id: origin | {"key_sha256": capsule_key}}})
         with self.assertRaisesRegex(ValueError, "has no logged CloudFront fill"):
@@ -442,6 +447,7 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
                 path = arm / fixture.CDN.VIEWER_REQUEST_FILES["s3"]
                 proof = json.loads(path.read_bytes())
                 proof["records"][capsule_id] = {"status": 206, "cache": "hit", "response_bytes": size, "key_sha256": "d" * 64}
+                proof["records"][capsule_id].update(fixture.cloudfront_framing(size))
                 fixture.json_file(path, proof)
                 with self.assertRaisesRegex(ValueError, "undercounts observed client bytes"):
                     self.collect()
@@ -463,6 +469,8 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
                 proof = json.loads(log.read_bytes())
                 records = proof["records"]
                 records[viewer_id] = {"status": 206, "cache": "hit", "response_bytes": 8, "key_sha256": key}
+                if provider == "s3":
+                    records[viewer_id].update(fixture.cloudfront_framing(8))
                 start = client["started_at_unix_ms"]
                 if provider == "gcs":
                     records[viewer_id].update(cache_fill_bytes=0, origin_requests={
@@ -630,6 +638,7 @@ class DesktopGitPerformanceQualificationTests(unittest.TestCase):
         viewer_path = arm / "cloudfront-requests.json"
         proof = json.loads(viewer_path.read_bytes())
         proof["records"][new_id] = {"status": 206, "cache": "hit", "response_bytes": 512, "key_sha256": "d" * 64}
+        proof["records"][new_id].update(fixture.cloudfront_framing(500))
         fixture.json_file(viewer_path, proof | {"client_report_sha256": digest})
         external = arm / "measurement.json"
         fixture.json_file(external, json.loads(external.read_bytes()) | {"client_report_sha256": digest})

@@ -54,8 +54,12 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
             "edge_responses": {"c" * 64: xorb_response, "d" * 64: shard_response},
         }
         proof = {"schema": "crab.cloudfront-viewer-requests/v1", "client_report_sha256": "e" * 64,
-                 "records": {"c" * 64: {"status": 206, "cache": "hit", "response_bytes": 64, "key_sha256": xorb_key},
-                             "d" * 64: {"status": 200, "cache": "miss", "response_bytes": 64, "key_sha256": shard_key}},
+                 "records": {
+                     "c" * 64: {"status": 206, "cache": "hit", "response_bytes": 64, "key_sha256": xorb_key}
+                     | examples.cloudfront_framing(64),
+                     "d" * 64: {"status": 200, "cache": "miss", "response_bytes": 64, "key_sha256": shard_key}
+                     | examples.cloudfront_framing(64, range_start=None),
+                 },
                  "origin_requests": {"f" * 64: {"key_sha256": shard_key, "at_unix_s": 1, "status": 200,
                                                  "response_body_bytes": 64}}}
         cdn.verify_sparse_xorb_traffic(read, 1024)
@@ -103,12 +107,13 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                          "--configuration-sha256", configuration, "--output", str(output), "--log", str(logs),
                          "--s3-origin-log", str(origins)]
             header = ("#Fields: x-edge-request-id x-host-header cs-method cs-uri-stem cs-protocol "
-                      "sc-status sc-bytes x-edge-response-result-type\n")
+                      "sc-status sc-bytes x-edge-response-result-type sc-content-len sc-range-start sc-range-end\n")
             wrong_key = key.rsplit("/xorbs/", 1)[0] + "/xorbs/bb/" + "b" * 64
             stderr = StringIO()
             with patch.object(sys, "argv", arguments), redirect_stderr(stderr):
                 for observed, expected in ((wrong_key, 1), (key, 0)):
-                    logs.write_text(header + f"{request_id}\tfixture.example.com\tGET\t/crab/{observed}\thttps\t206\t128\tHit\n")
+                    logs.write_text(header + f"{request_id}\tfixture.example.com\tGET\t/crab/{observed}\thttps\t206\t128\tHit"
+                                    f"\t{response['bytes']}\t0\t{response['bytes'] - 1}\n")
                     self.assertEqual(COLLECT.main(), expected)
                 proof = json.loads(output.read_bytes())
                 self.assertEqual(next(iter(proof["records"].values()))["key_sha256"], record["xorb_key_sha256"])
@@ -151,8 +156,9 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
             }
             viewer = gzip.compress(
                 ("#Fields: x-edge-request-id x-host-header cs-method cs-uri-stem cs-protocol sc-status sc-bytes "
-                 "x-edge-response-result-type\n"
-                 f"{viewer_id}\tfixture.example.com\tGET\t/crab/{key}\thttps\t206\t620\tMiss\n").encode(),
+                 "x-edge-response-result-type sc-content-len sc-range-start sc-range-end\n"
+                 f"{viewer_id}\tfixture.example.com\tGET\t/crab/{key}\thttps\t206\t620\tMiss"
+                 f"\t-\t0\t{response['bytes'] - 1}\n").encode(),
             )
             origin = (f'owner fixture-bucket [{timestamp}] 192.0.2.1 fixture-principal raw-origin-id '
                       f'REST.GET.OBJECT {key} "GET /{key} HTTP/1.1" 206 - 4096 5000 4 1 "-" "Amazon CloudFront" '
@@ -260,8 +266,9 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
             log = root / "export.w3c"
             prefix = f"/crab/{config['fixture_prefix']}/"
             header = ("#Version: 1.0\n#Fields: date x-edge-request-id x-host-header cs-method cs-uri-stem cs-protocol "
-                      "sc-status sc-bytes x-edge-response-result-type c-ip\n")
-            actual = (f"1970-01-01\t{viewer_id}\tfixture.example.com\tGET\t{prefix}{PACK}\thttps\t206\t620\tMiss\t192.0.2.1\n")
+                      "sc-status sc-bytes x-edge-response-result-type c-ip sc-content-len sc-range-start sc-range-end\n")
+            actual = (f"1970-01-01\t{viewer_id}\tfixture.example.com\tGET\t{prefix}{PACK}\thttps\t206\t620\tMiss\t192.0.2.1"
+                      f"\t{response['bytes']}\t3\t{response['bytes'] + 2}\n")
             unrelated = actual.replace(viewer_id, "unrelated-request").replace("fixture.example.com", "other.example.com")
             key = f"{config['fixture_prefix']}/{PACK}"
             at = report["started_at_unix_ms"] // 1000
@@ -279,6 +286,15 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
             for records, s3, reason in (
                 (unrelated, origin_line, "must cover each measured viewer attempt"),
                 (actual, "", "no logged fill from the approved CDN origin"),
+                (actual.replace(f"\t3\t{response['bytes'] + 2}\n", "\t3\t3\n"), origin_line,
+                 "CloudFront logged range disagrees with the completed read"),
+                (actual.replace(f"\t3\t{response['bytes'] + 2}\n", "\t-\t-\n"), origin_line,
+                 "CloudFront logged range disagrees with the completed read"),
+                (actual.replace(f"\t3\t{response['bytes'] + 2}\n",
+                                f"\t{response['object_bytes']}\t{response['object_bytes'] + response['bytes'] - 1}\n"),
+                 origin_line, "CloudFront logged range disagrees with the completed read"),
+                (actual.replace(f"\t{response['bytes']}\t3\t", "\t1\t3\t"), origin_line,
+                 "CloudFront logged Content-Length disagrees with the completed read"),
                 (actual.replace(prefix, "/other/"), origin_line, "outside the approved viewer host or repository prefix"),
                 (actual + actual.replace("620", "619"), origin_line, "exports disagree about one viewer request"),
                 (actual, origin_line + origin_line.replace("4096", "4100"), "exports disagree about one origin request"),
@@ -303,7 +319,10 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                         key_hash = hashlib.sha256(key.encode()).hexdigest()
                         self.assertEqual(json.loads(retained), {
                             "schema": "crab.cloudfront-viewer-requests/v1", "client_report_sha256": digest,
-                            "records": {fingerprint: {"status": 206, "response_bytes": 620, "cache": "miss", "key_sha256": key_hash}},
+                            "records": {
+                                fingerprint: {"status": 206, "response_bytes": 620, "cache": "miss", "key_sha256": key_hash}
+                                | examples.cloudfront_framing(response["bytes"], range_start=3),
+                            },
                             "origin_requests": {hashlib.sha256(b"s3-origin-id").hexdigest(): {
                                 "key_sha256": key_hash, "at_unix_s": at, "status": 206, "response_body_bytes": 4096,
                             }},
