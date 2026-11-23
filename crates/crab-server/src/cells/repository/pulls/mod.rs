@@ -20,7 +20,7 @@ pub(crate) enum PullState {
 }
 
 impl PullState {
-    const fn code(self) -> u8 {
+    pub(super) const fn code(self) -> u8 {
         match self {
             Self::Open => 0,
             Self::Closed => 1,
@@ -464,7 +464,7 @@ pub(crate) use merge::{
     TransitionPullMerge,
 };
 
-mod storage;
+pub(super) mod storage;
 use storage::{
     author_from_row, bounded_child_page, comment_from_row, decode_record, encode_record,
     insert_pull_statement, list_child_rows, load_comment, load_comment_query, load_pull,

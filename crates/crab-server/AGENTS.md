@@ -100,7 +100,10 @@ and App results separate so a signing authority change requires a new result. Di
 and bounded completed history. `server/webhooks.rs` signs and sends only to
 the approved receiver. Public Git ref writes from HTTP Git and the browser
 reserve before publication and recover through the immutable plan receipt.
-PR mutations queue in their Cell transaction.
+`webhooks/sync.rs` expands committed branch updates into signed PR deliveries
+using bounded open-pull pages. A private fork reserves this work in its upstream
+Cell. Page advancement and delivery records commit together. PR mutations queue
+lifecycle events in their Cell transaction.
 Private `cells prepare-review-state` installs the empty feature relation on
 existing repositories, without rewriting reviews or receipts. `reviews/pending.rs`
 owns private drafts and atomic review publication through the existing review

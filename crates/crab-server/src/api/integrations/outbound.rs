@@ -35,12 +35,14 @@ async fn settings(
     let active = current.is_some_and(|hook| Some(&hook.destination) == binding.as_ref());
     let deliveries = snapshot.deliveries.into_iter().map(|delivery| {
         use hooks::Event;
-        let (event, action, pull) = match delivery.event {
-            Event::Push { .. } => ("push", None, None),
-            Event::PullRequest { action, number, .. } => ("pull_request", Some(action), Some(number)),
+        let (event, action, pull, head_change) = match delivery.event {
+            Event::Push { .. } => ("push", None, None, None),
+            Event::PullRequest { action, number, head_change, .. } => {
+                ("pull_request", Some(action), Some(number), head_change)
+            }
         };
         json!({
-            "id":delivery.id,"event":event,"action":action,"pull":pull,"queued_at":delivery.queued_at,
+            "id":delivery.id,"event":event,"action":action,"pull":pull,"head_change":head_change,"queued_at":delivery.queued_at,
             "status":delivery.status,"attempts":delivery.attempts,"http_status":delivery.http_status,
             "version":delivery.version,"recent_attempts":delivery.recent_attempts,
             "can_redeliver":active && current == Some(&delivery.subscription) && matches!(delivery.status, hooks::Status::Failed | hooks::Status::Delivered),

@@ -12,7 +12,7 @@ pub(super) fn store_head_repository(
     context.put_document(&head_repository_key(number), &repository)
 }
 
-pub(super) fn head_repository(
+pub(in crate::cells::repository) fn head_repository(
     context: &Transaction<'_>,
     number: u64,
 ) -> crate::cells::Result<Option<uuid::Uuid>> {
@@ -99,7 +99,7 @@ fn pull_select() -> &'static str {
     "SELECT number, create_request_id, author_issuer, author_subject, author_name, title, body, state, base_ref, base_oid, head_ref, head_oid, label_ids, assignees, pending_merge, completed_merge, version, created_at_ms, updated_at_ms FROM repository_pulls WHERE number = ?"
 }
 
-pub(super) fn load_pull(
+pub(in crate::cells::repository) fn load_pull(
     context: &Transaction<'_>,
     number: u64,
 ) -> crate::cells::Result<Option<PullRecord>> {

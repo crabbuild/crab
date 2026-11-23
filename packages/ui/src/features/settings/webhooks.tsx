@@ -6,6 +6,7 @@ import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
+import { short } from "@/lib/format";
 import { repoHref } from "@/lib/repository-route";
 
 type Subscription = {
@@ -19,6 +20,7 @@ type Delivery = {
   event: "push" | "pull_request";
   action: string | null;
   pull: number | null;
+  head_change: { before: string | null; after: string } | null;
   queued_at: number;
   status: "queued" | "sending" | "delivered" | "failed" | "cancelled";
   attempts: number;
@@ -176,7 +178,9 @@ export function OutboundWebhooks({
                           <strong className="text-sm capitalize">
                             {delivery.event === "push"
                               ? "Push"
-                              : `Pull request ${delivery.action?.replaceAll("_", " ") ?? ""}`}
+                              : delivery.action === "synchronize"
+                                ? "Pull request head updated"
+                                : `Pull request ${delivery.action?.replaceAll("_", " ") ?? ""}`}
                           </strong>
                           <span className="text-sm text-muted-foreground">
                             <span className="capitalize">
@@ -213,6 +217,14 @@ export function OutboundWebhooks({
                         >
                           Pull request #{delivery.pull}
                         </Link>
+                      )}
+                      {delivery.head_change && (
+                        <p className="text-sm">
+                          Head commit{" "}
+                          <code title={delivery.head_change.after}>
+                            {short(delivery.head_change.after)}
+                          </code>
+                        </p>
                       )}
                       <details className="text-sm">
                         <summary className="w-fit cursor-pointer">
