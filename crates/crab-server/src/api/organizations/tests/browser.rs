@@ -907,12 +907,12 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
     browser
         .run(&["wait", "--text", "Team review requested"])
         .await;
-    let inbox = format!("/api/notifications?repository={repo_id}");
-    h.deliver_notifications(owner, "library").await;
-    assert_eq!(h.json(&inbox, &bob).await["items"], json!([]));
     browser.run(&["reload"]).await;
     let cancel = "[aria-label='Cancel review request for team Engineering']";
     browser.run(&["wait", cancel]).await;
+    let inbox = format!("/api/notifications?repository={repo_id}");
+    h.deliver_notifications(owner, "library").await;
+    assert_eq!(h.json(&inbox, &bob).await["items"], json!([]));
     browser.run(&["click", cancel]).await;
     browser.run(&["wait", "--text", "No reviews yet."]).await;
     let reviewers = h.json(&format!("{pulls}/1/reviewers"), &alice).await;

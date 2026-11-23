@@ -69,10 +69,6 @@ pub(super) fn routes() -> Router<Arc<Server>> {
             axum::routing::post(cancel),
         )
         .route("/api/organizations/{id}/teams/{team}", get(own))
-        .route(
-            "/api/organizations/{id}/teams/{team}/review-routing",
-            get(review_routing),
-        )
         .route("/api/organizations/{id}/teams/{team}/members", get(members))
         .route(
             "/api/organizations/{id}/teams/{team}/candidates",
@@ -81,6 +77,10 @@ pub(super) fn routes() -> Router<Arc<Server>> {
         .route(
             "/api/organizations/{id}/teams/{team}/members/{person}",
             get(membership),
+        )
+        .route(
+            "/api/organizations/{id}/teams/{team}/review-routing",
+            get(review_routing),
         )
 }
 #[derive(Default, Deserialize)]
@@ -184,6 +184,21 @@ async fn own(
     app::account(&principal)?;
     Ok(Json(view))
 }
+async fn policy(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<native::Policy>> {
+    let actor = actor(&server, &principal).await?;
+    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    let policy = cells
+        .query::<native::GetPolicy>(target(id)?, None, Caller { actor })
+        .await
+        .map_err(read_error)?
+        .output;
+    app::account(&principal)?;
+    Ok(Json(policy))
+}
 async fn review_routing(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
@@ -204,21 +219,6 @@ async fn review_routing(
     Ok(Json(settings))
 }
 
-async fn policy(
-    State(server): State<Arc<Server>>,
-    Extension(principal): Extension<Principal>,
-    Path(id): Path<Uuid>,
-) -> Result<Json<native::Policy>> {
-    let actor = actor(&server, &principal).await?;
-    let cells = server.cells().ok_or(Error::CellUnavailable)?;
-    let policy = cells
-        .query::<native::GetPolicy>(target(id)?, None, Caller { actor })
-        .await
-        .map_err(read_error)?
-        .output;
-    app::account(&principal)?;
-    Ok(Json(policy))
-}
 enum People {
     Members,
     Candidates,

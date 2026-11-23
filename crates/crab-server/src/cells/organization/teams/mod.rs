@@ -12,7 +12,6 @@ mod commands;
 mod preparation;
 mod reads;
 pub(crate) mod repository_access;
-pub(crate) mod review_routing;
 pub(super) use access::{authorize, handles};
 pub(crate) use commands::{Cancel, Change, Command, Outcome, Request};
 pub use preparation::OrganizationTeamState;
@@ -25,6 +24,8 @@ pub(crate) use reads::{
 pub(crate) use repository_access::{
     GetRepositoryTeamAccess, RepositoryTeamAccess, RepositoryTeams,
 };
+
+pub(crate) mod review_routing;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

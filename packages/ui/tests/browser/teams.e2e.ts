@@ -215,6 +215,23 @@ async function fixture(page: Page, local = false) {
         status: 404,
         json: { error: { message: "Team not found" } },
       });
+    const routingTeam = new RegExp(
+      `^${base}/teams/([^/]+)/review-routing$`,
+    ).exec(path)?.[1];
+    if (routingTeam) {
+      if (!state.teams.some((view) => view.team.id === routingTeam))
+        return route.fulfill({
+          status: 404,
+          json: { error: { message: "Team not found" } },
+        });
+      return route.fulfill({
+        json: state.reviewRouting.get(routingTeam) ?? {
+          version: 0,
+          algorithm: "disabled",
+          reviewers: 1,
+        },
+      });
+    }
     if (path === `${base}/teams/policy`)
       return route.fulfill({ json: state.policy });
     if (path === `${base}/teams`)
@@ -238,7 +255,7 @@ async function fixture(page: Page, local = false) {
         },
       });
     const match = new RegExp(
-      `^${base}/teams/([^/]+)(?:/(members|candidates|review-routing))?$`,
+      `^${base}/teams/([^/]+)(?:/(members|candidates))?$`,
     ).exec(path);
     if (match) {
       const team = match[1],
@@ -249,14 +266,6 @@ async function fixture(page: Page, local = false) {
           json: { error: { message: "Team not found" } },
         });
       if (!match[2]) return route.fulfill({ json: view });
-      if (match[2] === "review-routing")
-        return route.fulfill({
-          json: state.reviewRouting.get(team) ?? {
-            version: 0,
-            algorithm: "disabled",
-            reviewers: 1,
-          },
-        });
       const members = state.members.get(team)!;
       const items =
         match[2] === "members"
