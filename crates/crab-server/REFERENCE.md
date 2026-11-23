@@ -545,6 +545,10 @@ effective `base` and `commit`. Unrelated histories return 422 `no_merge_base`.
 When several best ancestors exist, the read selects the lowest object ID for
 stable file and review anchors. Git merge-commit generation requires a single
 best ancestor and asks the author to resolve more complex histories in Git.
+Per-file diffs and review anchors resolve the selected path at those commits
+and read its blob-backed content. A mode change counts as a file change even
+when both sides have the same blob ID. The complete change list has its own
+comparison budget.
 
 ### Search repository code
 

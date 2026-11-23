@@ -318,18 +318,20 @@ pub(super) async fn execute(
     operation.finish(result).await
 }
 
-async fn optional_blob(
+async fn comparison_side(
     snapshot: &RemoteGitSnapshot,
     path: &GitPath,
     operation: &crab_remote_git::OperationContext,
-) -> crab_remote_git::Result<Option<Blob>> {
+) -> crab_remote_git::Result<(Option<TreeEntry>, Option<Blob>)> {
     let Some(entry) = snapshot.entry(path, operation).await? else {
-        return Ok(None);
+        return Ok((None, None));
     };
-    if !matches!(entry.kind, EntryKind::Blob | EntryKind::Symlink) {
-        return Ok(None);
-    }
-    snapshot.read_blob(path, operation).await.map(Some)
+    let blob = if matches!(entry.kind, EntryKind::Blob | EntryKind::Symlink) {
+        Some(snapshot.read_blob(path, operation).await?)
+    } else {
+        None
+    };
+    Ok((Some(entry), blob))
 }
 
 pub(super) fn revision(
@@ -547,19 +549,20 @@ async fn comparison_blobs_for_snapshots(
     path: &GitPath,
     operation: &crab_remote_git::OperationContext,
 ) -> crab_remote_git::Result<ComparisonBlobs> {
-    let old = match base {
-        Some(base) => optional_blob(base, path, operation).await?,
-        None => None,
+    let (old_entry, old) = match base {
+        Some(base) => comparison_side(base, path, operation).await?,
+        None => (None, None),
     };
-    let new = optional_blob(head, path, operation).await?;
-    let changed = match base {
-        Some(base) => head
-            .compare(base, operation)
-            .await?
-            .changes
-            .iter()
-            .any(|change| change.path.as_bytes() == path.as_bytes()),
-        None => new.is_some(),
+    let (new_entry, new) = comparison_side(head, path, operation).await?;
+    // A comparison emits changed leaves and type replacements. A directory
+    // that remains a directory only contributes changes for its descendants.
+    let changed = match (old_entry, new_entry) {
+        (Some(old), Some(new)) => {
+            (old.kind != EntryKind::Tree || new.kind != EntryKind::Tree)
+                && (old.oid != new.oid || old.mode != new.mode || old.kind != new.kind)
+        }
+        (Some(entry), None) | (None, Some(entry)) => entry.kind != EntryKind::Tree,
+        (None, None) => false,
     };
     Ok(ComparisonBlobs { old, new, changed })
 }

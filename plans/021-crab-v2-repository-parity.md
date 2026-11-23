@@ -6,6 +6,10 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
 
 - Compare and create now share merge-base reads and submit the inspected tips.
   Native submission decisions preserve both successful and stale attempts.
+  Per-file diffs and inline review anchors now resolve one path at the pinned
+  commits. A native 516-file fixture with diverged branches verified diff reads
+  and review anchors under an entry budget the full comparison exceeds.
+  Chromium opened the selected diff and rendered the persisted annotation.
 - Protected merge checks direct reviewer grants, evaluates same-name statuses
   and check runs together, leases both refs and reconciles with a durable receipt.
   The prior tag's pending records still use their tagged retry contract.
