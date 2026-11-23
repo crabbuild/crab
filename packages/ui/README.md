@@ -90,6 +90,10 @@ and downloads retain their own reads and limits. The tagged `/file` endpoint and
 Diff's embedded-content shape remain separate contracts; the UI never retries
 the old endpoint after a preview request fails.
 
+`FilePreview.lfs_size` describes the stored Git LFS object. The file toolbar
+offers its download and the raw pointer at the displayed commit. The browser
+streams downloads using the signed-in repository session.
+
 Build the UI once, then use this checkout's external Cargo directory to check or
 regenerate the contract:
 

@@ -16,6 +16,7 @@ mod discussion_state;
 mod fork_sync;
 mod issues;
 mod labels;
+mod lfs_content;
 mod links;
 mod members;
 mod milestones;
@@ -572,6 +573,10 @@ pub(crate) fn routes(server: Arc<Server>) -> axum::Router<Arc<Server>> {
         .route(
             "/api/repos/{owner}/{name}/archive",
             axum::routing::get(archive::download),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/lfs-content",
+            axum::routing::get(lfs_content::download),
         )
         .route(
             "/api/repos/{owner}/{name}/{action}",

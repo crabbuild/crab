@@ -6,8 +6,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use crab_remote_git::{
-    Blob, BudgetDimension, Commit, CommitSummary, OperationContext, PageCursor, RemoteGitSnapshot,
-    TreeEntry,
+    Blob, BudgetDimension, Commit, CommitSummary, ContentClassification, OperationContext,
+    PageCursor, RemoteGitSnapshot, TreeEntry,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -30,6 +30,9 @@ pub(super) enum FilePreviewState {
 pub(super) struct FilePreview {
     oid: String,
     size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    lfs_size: Option<u64>,
     mode: String,
     classification: String,
     commit: String,
@@ -73,6 +76,9 @@ pub(super) async fn file_preview_metadata(
     let mut value = FilePreview {
         oid: metadata.oid.to_string(),
         size: metadata.git_size,
+        lfs_size: metadata
+            .logical_size
+            .filter(|_| metadata.classification == ContentClassification::LfsPointer),
         mode: format!("{:06o}", metadata.mode.raw()),
         classification: format!("{:?}", metadata.classification),
         commit: snapshot.commit_oid().to_string(),
@@ -366,6 +372,7 @@ mod tests {
             let value = FilePreview {
                 oid: "\"\\\u{1}".repeat(20),
                 size: u64::MAX,
+                lfs_size: Some(u64::MAX),
                 mode: "\"\\\u{1}".repeat(20),
                 classification: "\"\\\u{1}".repeat(20),
                 commit: "\"\\\u{1}".repeat(20),

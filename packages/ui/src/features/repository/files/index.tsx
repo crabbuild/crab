@@ -113,13 +113,14 @@ export function FileView({
   const state = useRequest<FilePreviewContent>(
     endpoint(repo, "file-preview", { rev, path_hex: path }),
   );
+  const lfs = state.data?.classification === "LfsPointer";
   const previewState = state.data?.preview.state;
   const text =
     state.data?.preview.state === "inline" ? state.data.preview.text : null;
   const [presentation, setView] = useState<"code" | "preview">(
     previewFirst ? "preview" : "code",
   );
-  const view = blameView ? "blame" : presentation;
+  const view = lfs ? "code" : blameView ? "blame" : presentation;
   const [blamePaneWidth, setBlamePaneWidth] = useState(
     DEFAULT_BLAME_PANE_WIDTH,
   );
@@ -279,11 +280,12 @@ export function FileView({
     }),
     [codeThemes, symbolLanguage, theme],
   );
-  const activePreview: PreviewDescriptor | null =
-    preview ??
-    (state.data && state.data.preview.state !== "inline"
-      ? { kind: "generic", label: "File inspector" }
-      : null);
+  const activePreview: PreviewDescriptor | null = lfs
+    ? null
+    : (preview ??
+      (state.data && state.data.preview.state !== "inline"
+        ? { kind: "generic", label: "File inspector" }
+        : null));
   const symbols =
     view === "code" && symbolsOpen && symbolLanguage && text !== null ? (
       <CodeSymbolsPanel
@@ -361,10 +363,13 @@ export function FileView({
                     )}
                 </ToggleGroup>
                 <span className="file-metadata muted">
-                  {content.preview.state !== "inline"
-                    ? unavailablePreview[content.preview.state].title
-                    : `${content.preview.text === "" ? 0 : content.preview.text.split("\n").length - Number(content.preview.text.endsWith("\n"))} lines`}{" "}
-                  <span aria-hidden="true">·</span> {formatSize(content.size)}
+                  {lfs
+                    ? "Git LFS"
+                    : content.preview.state !== "inline"
+                      ? unavailablePreview[content.preview.state].title
+                      : `${content.preview.text === "" ? 0 : content.preview.text.split("\n").length - Number(content.preview.text.endsWith("\n"))} lines`}{" "}
+                  <span aria-hidden="true">·</span>{" "}
+                  {formatSize(content.lfs_size ?? content.size)}
                 </span>
               </div>
               <div className="file-actions">
@@ -388,8 +393,13 @@ export function FileView({
                     </Button>
                   )}
                 <Button asChild variant="outline" size="sm">
-                  <a href={endpoint(repo, "blob", { rev, path_hex: path })}>
-                    Raw
+                  <a
+                    href={endpoint(repo, "blob", {
+                      rev: lfs ? content.commit : rev,
+                      path_hex: path,
+                    })}
+                  >
+                    {lfs ? "Raw pointer" : "Raw"}
                   </a>
                 </Button>
                 {text !== null && (
@@ -413,10 +423,15 @@ export function FileView({
                 )}
                 <Button asChild variant="outline" size="icon-sm">
                   <a
-                    href={endpoint(repo, "blob", { rev, path_hex: path })}
+                    href={endpoint(repo, lfs ? "lfs-content" : "blob", {
+                      rev: lfs ? content.commit : rev,
+                      path_hex: path,
+                    })}
                     download={name.split("/").pop()}
-                    aria-label="Download raw file"
-                    title="Download raw file"
+                    aria-label={
+                      lfs ? "Download Git LFS file" : "Download raw file"
+                    }
+                    title={lfs ? "Download Git LFS file" : "Download raw file"}
                   >
                     <DownloadIcon data-icon="inline-start" />
                   </a>
@@ -465,7 +480,7 @@ export function FileView({
             </div>
           </div>
           <div className="file-body">
-            {content.classification !== "OrdinaryGit" && (
+            {content.classification === "CrabPointer" && (
               <div className="file-note">
                 Git object classification: {content.classification}. Downloads
                 contain the exact stored Git blob.

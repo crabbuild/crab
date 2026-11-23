@@ -965,7 +965,17 @@ Preview parsers are loaded only for the selected format and run in the signed-in
 
 Relative links stay inside the selected repository revision. Relative raster images load through the signature-checked `asset` endpoint. SVG, other local formats, and external images remain links. This prevents repository content from becoming same-origin active content or forcing signed-in browsers to contact third-party hosts.
 
-Crab and LFS pointer blobs download as the exact Git pointer bytes. The HTTP application does not hydrate pointer-backed artifacts in browser file views.
+The file view shows the declared size of Git LFS files. **Download Git LFS
+file** streams the stored object for the displayed commit. **Raw pointer**
+downloads the committed pointer text. The ordinary `/blob` endpoint and ZIP
+archives still serve the exact Git representation of pointer blobs.
+
+`GET /api/repos/{owner}/{name}/lfs-content?rev=COMMIT&path_hex=PATH` requires
+read access, a reachable full SHA-1 commit, and a valid Git LFS pointer at
+that path. The server selects the object ID and size from the verified blob
+and streams through the Git LFS transfer budget and integrity checks. The
+response supports single byte ranges and `If-Range` with the object ETag.
+Native Crab pointers continue to use the raw Git download action.
 
 ### Stream a repository archive
 

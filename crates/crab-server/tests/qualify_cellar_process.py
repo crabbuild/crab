@@ -791,6 +791,7 @@ with open(run / "commands.log", "w") as log:
         if args.large_file_bytes:
             large_file = large_files.prepare(cmd, run, origin, args.large_file_bytes, env)
             large_files.verify_resume(run, origin, large_file)
+            large_files.verify_file_view_range(run, origin, large_file)
 
         if args.recovery:
             repo_path = "/api/repos/team/project"
@@ -978,6 +979,7 @@ with open(run / "commands.log", "w") as log:
                 "stock_git_lfs": True,
                 "native_push_origin_verification": True,
                 "range_resume": True,
+                "pinned_file_view_range": True,
                 "process_restart": True,
             }
         if recovery:
