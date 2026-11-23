@@ -330,8 +330,10 @@ for every delivered xorb range. A linked Cloud CDN range fill or validation
 rules out a warm hit. A CloudFront or Front Door origin GET for the same xorb
 within the timed arm also rules out a warm hit. The verified sparse warm read
 can prove the exact ranged limits on that xorb while the complete workload
-proves any enabled full-GET limit. Xorb fill is measured
-separately from adjacent Git, shard, and catalog fetches. Live sparse reports
+proves any enabled full-GET limit. Full and sparse reads join adjacent Git,
+shard, and catalog requests to provider logs. Only the approved xorb counts
+toward xorb fill and cache-hit proof. The complete-read benchmark includes
+adjacent traffic in its byte and origin request totals. Live sparse reports
 remain open.
 Record each qualified profile's full-object, range and duration limits and
 enforce them before sending the first edge request. Xorb hydration reuses

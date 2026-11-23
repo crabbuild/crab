@@ -1859,6 +1859,44 @@ class CdnQualificationTests(unittest.TestCase):
                 json_file(log, proof)
                 self.rejected("transfer totals disagree with the logged responses")
 
+    def test_hydration_benchmark_charges_adjacent_reads_without_crediting_their_fills(self) -> None:
+        self.configure("gcs", "private", "direct", consumer="sdk", family="xorb")
+        cold = self.directory / CDN.GIT_BENCHMARK_DIR / "near/0001/cold_edge"
+        client = cold / "client.json"
+        read = json.loads(client.read_bytes())
+        shard_request, shard_key = "8" * 64, "9" * 64
+        read["edge_responses"][shard_request] = range_response("shard", 12, "miss") | {
+            "status": 200, "range": False, "object_bytes": 12,
+        }
+        digest = json_file(client, read | {"all_edge_attempts": 2})
+
+        log = cold / CDN.VIEWER_REQUEST_FILES["gcs"]
+        proof = json.loads(log.read_bytes()) | {"client_report_sha256": digest}
+        xorb = next(iter(proof["records"].values()))
+        proof["records"][shard_request] = {"status": 200, "cache": "miss", "response_bytes": 12,
+                                         "key_sha256": shard_key, "cache_fill_bytes": 12, "origin_requests": {
+                                             "7" * 64: {"method": "GET", "status": 200, "cache_fill_bytes": 12},
+                                         }}
+        json_file(log, proof)
+
+        measurement = cold / "measurement.json"
+        totals = {"origin_gets": read["native_traffic"]["get_responses"] + 1, "origin_fill_bytes": 20,
+                  "client_bytes": read["native_traffic"]["body_bytes"] + read["edge_bytes"] + 12}
+        measured = json.loads(measurement.read_bytes()) | {"client_report_sha256": digest} | totals
+        for name, error in (("origin_gets", "undercounts observed native GET responses"),
+                            ("origin_fill_bytes", "undercounts logged CDN cache fill bytes"),
+                            ("client_bytes", "undercounts observed client bytes")):
+            with self.subTest(name=name):
+                json_file(measurement, measured | {name: totals[name] - 1})
+                self.rejected(error)
+        json_file(measurement, measured)
+        self.report["performance"]["near"]["pairs"][0]["cold_edge"].update(totals)
+        result = self.command()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        xorb["cache_fill_bytes"] = 0
+        json_file(log, proof)
+        self.rejected("has no logged Cloud CDN fill")
+
     def test_public_sdk_release_requires_ordinary_export_transition_calls(self) -> None:
         self.configure("gcs", "public", "direct", consumer="sdk")
         policy = self.directory / "qualified-scopes.txt"

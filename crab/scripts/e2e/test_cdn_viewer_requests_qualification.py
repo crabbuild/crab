@@ -38,7 +38,7 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "different payload bytes"):
                 MOUNT.read_mounted_file(path, spec | {"payload_bytes": len(payload) + 1}, {}, root)
 
-    def test_sparse_mount_does_not_treat_adjacent_metadata_as_xorb_fill(self):
+    def test_xorb_reads_do_not_treat_adjacent_metadata_as_xorb_fill(self):
         cdn = examples.CDN
         xorb_key = "a" * 64
         shard_key = "b" * 64
@@ -58,8 +58,15 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                  "origin_requests": {"f" * 64: {"key_sha256": shard_key, "at_unix_s": 1, "status": 200,
                                                  "response_body_bytes": 64}}}
         cdn.verify_sparse_xorb_traffic(read, 1024)
-        observed = cdn.verify_viewer_requests(proof, read, "e" * 64, "cloudfront")
-        self.assertEqual((observed.fill_bytes, observed.successful_fill, observed.completed_cache), (0, False, {"c" * 64: "hit"}))
+        for schema in (cdn.MOUNT_XORB_RANGE_READ, "crab.cdn-mount-xorb-read/v1", "crab.cdn-sdk-hydration/v1"):
+            with self.subTest(schema=schema):
+                client = read | {"schema": schema}
+                observed = cdn.verify_viewer_requests(proof, client, "e" * 64, "cloudfront")
+                measured = cdn.verify_viewer_requests(proof, client, "e" * 64, "cloudfront", include_adjacent_origin=True)
+                self.assertEqual((observed.origin_gets, observed.fill_bytes), (0, 0))
+                self.assertEqual((measured.origin_gets, measured.fill_bytes), (1, 64))
+                self.assertFalse(measured.successful_fill)
+                self.assertEqual(measured.completed_cache, {"c" * 64: "hit"})
         proof["origin_requests"]["1" * 64] = {"key_sha256": xorb_key, "at_unix_s": 1, "status": 206, "response_body_bytes": 512}
         observed = cdn.verify_viewer_requests(proof, read, "e" * 64, "cloudfront")
         self.assertEqual((observed.fill_bytes, observed.completed_cache), (512, {}))

@@ -1669,6 +1669,12 @@ including incomplete edge bodies. The rejected total also needs any bytes
 discarded by higher-level verification. Measure protocol overhead and
 provider-side origin fills independently.
 
+For Xet hydration and mount workloads, join every observed viewer request,
+including adjacent Git, catalog, and shard reads. Only responses for the
+approved xorb count toward its payload counters or cold-fill and warm-hit
+proof. Include the adjacent reads in the benchmark's client bytes, native and
+CDN origin GETs, and origin fill bytes.
+
 For each timed fetch that made edge attempts, collect provider viewer
 evidence beside `client.json`. For CloudFront, write
 `cloudfront-requests.json` from the approved distribution's standard

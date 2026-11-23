@@ -1855,7 +1855,9 @@ class ViewerRequestMetrics(NamedTuple):
     completed_cache: dict[str, str]
 
 
-def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: str, edge: str) -> ViewerRequestMetrics:
+def verify_viewer_requests(
+    value: Any, client: dict[str, Any], client_digest: str, edge: str, *, include_adjacent_origin: bool = False,
+) -> ViewerRequestMetrics:
     keyed_origin = edge in ("cloudfront", "front-door")
     xorb_key = client.get("xorb_key_sha256")
     lfs_key = client.get("lfs_key_sha256")
@@ -1869,7 +1871,6 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
     require(proof["schema"] == f"crab.{edge}-viewer-requests/v1" and proof["client_report_sha256"] == client_digest,
             "CDN viewer evidence differs from the measured fetch")
     expected = client["edge_responses"]
-    sparse_xorb = client.get("schema") in (MOUNT_XORB_RANGE_READ, SDK_XORB_RANGE_READ)
     records = proof["records"]
     require(isinstance(records, dict) and records.keys() == expected.keys()
             and len(records) == client["all_edge_attempts"],
@@ -1879,16 +1880,16 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
         record_fields |= {"cache_fill_bytes", "origin_requests"}
     viewer_keys = set()
     logged_ids = set(records)
-    origin_gets = fill_bytes = 0
+    origin_gets_by_key: dict[str, int] = defaultdict(int)
     viewer_fill_by_key: dict[str, int] = defaultdict(int)
-    child_fill_by_key: dict[str, int] = defaultdict(int)
+    origin_fill_by_key: dict[str, int] = defaultdict(int)
     successful_fill = False
     completed_cache = {}
     observed_transfer = dict.fromkeys(("edge_hits", "edge_misses", "edge_unknown", "edge_bytes", "incomplete_edge_bytes"), 0)
     for request_id, record in records.items():
         row = fields(record, record_fields, "CDN viewer log record")
         response = expected[request_id]
-        count_response = not sparse_xorb or response["family"] == "xorb"
+        selected = xorb_key is None or response["family"] == "xorb"
         served_payload = response["status"] in (200, 206) and response["complete"] and response["bytes"] > 0
         require(type(row["status"]) is int and row["status"] == response["status"]
                 and row["cache"] in ("hit", "miss", "unknown")
@@ -1897,12 +1898,12 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
         cache = row["cache"]
         key = row["key_sha256"]
         require(matches(SHA256, key), "invalid CDN object key fingerprint")
-        require(xorb_key is None or (key == xorb_key) == count_response,
+        require(xorb_key is None or (key == xorb_key) == selected,
                 "CDN viewer request did not read the approved hydration xorb")
         require(lfs_key is None or key == lfs_key, "CDN viewer request did not read the approved service LFS object")
         viewer_keys.add(key)
         verified_transition |= key == transition_key and served_payload
-        if (xorb_key is not None or service) and count_response:
+        if (xorb_key is not None or service) and selected:
             if response["complete"]:
                 require(response["status"] in (200, 206), "completed CDN response did not return object bytes")
                 if response["bytes"]:
@@ -1915,8 +1916,7 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
             require(type(row["cache_fill_bytes"]) is int and row["cache_fill_bytes"] >= 0,
                     "Cloud CDN log has invalid reported cache fill bytes")
             supplied_from_origin = positive(row["cache_fill_bytes"])
-            if count_response:
-                viewer_fill_by_key[key] = max(viewer_fill_by_key[key], row["cache_fill_bytes"])
+            viewer_fill_by_key[key] = max(viewer_fill_by_key[key], row["cache_fill_bytes"])
             children = row["origin_requests"]
             require(isinstance(children, dict), "invalid Cloud CDN origin requests")
             for origin_id, value in children.items():
@@ -1926,25 +1926,24 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
                         and type(origin["cache_fill_bytes"]) is int and origin["cache_fill_bytes"] >= 0,
                         "invalid or repeated Cloud CDN origin request")
                 logged_ids.add(origin_id)
-                if count_response:
-                    origin_gets += origin["method"] == "GET"
-                    child_fill_by_key[key] += origin["cache_fill_bytes"]
-                    supplied_from_origin |= (origin["method"] == "GET" and origin["status"] in (200, 206)
-                                             and positive(origin["cache_fill_bytes"]))
-            if count_response and served_payload:
+                origin_gets_by_key[key] += origin["method"] == "GET"
+                origin_fill_by_key[key] += origin["cache_fill_bytes"]
+                supplied_from_origin |= (origin["method"] == "GET" and origin["status"] in (200, 206)
+                                         and positive(origin["cache_fill_bytes"]))
+            if served_payload:
                 # Cloud CDN can log byte_range_caching for a request whose
                 # missing ranges were filled by linked backend GETs.
-                successful_fill |= supplied_from_origin
+                successful_fill |= selected and supplied_from_origin
                 if supplied_from_origin and cache == "hit":
                     cache = "miss"
                 elif children and cache == "hit":
                     cache = "unknown"
         if response["complete"] and response["cache"] != "unknown":
             require(response["cache"] in (row["cache"], cache), "CDN log cache result disagrees with the completed response")
-        if count_response and served_payload and cache in ("hit", "miss"):
+        if selected and served_payload and cache in ("hit", "miss"):
             completed_cache[request_id] = cache
     if xorb_key is not None or service:
-        attempts = sum(response["family"] == "xorb" for response in expected.values()) if sparse_xorb else len(records)
+        attempts = sum(response["family"] == "xorb" for response in expected.values()) if xorb_key is not None else len(records)
         require(client["edge_attempts"] == attempts and all(client[key] == count for key, count in observed_transfer.items()),
                 "CDN transfer totals disagree with the logged responses")
     require(transition_key is None or verified_transition, "CDN logs did not confirm the new export object")
@@ -1967,21 +1966,23 @@ def verify_viewer_requests(value: Any, client: dict[str, Any], client_digest: st
                     and type(origin["response_body_bytes"]) is int and origin["response_body_bytes"] >= 0,
                     f"{service} origin request does not match the timed {viewer} request")
             logged_ids.add(origin_id)
-            if sparse_xorb and origin["key_sha256"] != xorb_key:
-                continue
-            origin_keys.add(origin["key_sha256"])
-            origin_gets += 1
+            key = origin["key_sha256"]
+            origin_keys.add(key)
+            origin_gets_by_key[key] += 1
             if origin["status"] in (200, 206):
-                fill_bytes += origin["response_body_bytes"]
-                successful_fill |= positive(origin["response_body_bytes"])
+                origin_fill_by_key[key] += origin["response_body_bytes"]
+                successful_fill |= (xorb_key is None or key == xorb_key) and positive(origin["response_body_bytes"])
         # These providers join origin GETs by key and time. If a key touched
         # origin in this arm, its viewer hits alone cannot prove a warm read.
         completed_cache = {request_id: cache for request_id, cache in completed_cache.items()
                            if cache != "hit" or records[request_id]["key_sha256"] not in origin_keys}
+    # Xorb fills prove payload delivery. Benchmarks also charge for origin
+    # traffic from adjacent reads, without using it as xorb cache evidence.
+    keys = viewer_keys if xorb_key is None or include_adjacent_origin else {xorb_key}
+    origin_gets = sum(origin_gets_by_key[key] for key in keys)
     # Cloud CDN can report one fill at both levels or collapse same-key
     # requests. Distinct keys cannot share a fill and add to the floor.
-    fill_bytes += sum(max(viewer_bytes, child_fill_by_key.get(key, 0))
-                      for key, viewer_bytes in viewer_fill_by_key.items())
+    fill_bytes = sum(max(viewer_fill_by_key[key], origin_fill_by_key[key]) for key in keys)
     return ViewerRequestMetrics(logged_ids, origin_gets, fill_bytes, successful_fill, completed_cache)
 
 
@@ -2979,6 +2980,7 @@ def collect_git_performance(
                     viewer_log = read_git_record(inputs / slot / log_name, limit=GIT_FETCH_RECORD_LIMIT)
                     traffic = verify_viewer_requests(
                         decode(viewer_log), client, digest, PROVIDERS[provider][0],
+                        include_adjacent_origin=hydration,
                     )
                     require(provider_request_ids.isdisjoint(traffic.request_ids), "CDN log requests were reused across arms")
                     provider_request_ids.update(traffic.request_ids)
@@ -3017,8 +3019,8 @@ def collect_git_performance(
                         f"{label} is missing fetch memory or disk measurements")
                 incomplete = client["incomplete_edge_bytes"]
                 transferred = measured["edge_bytes"] + incomplete
-                if desktop:
-                    # Product counters select Git. Cost and bandwidth cover every viewer request.
+                if desktop or hydration:
+                    # Product counters select payloads. Cost and bandwidth cover every viewer request.
                     responses = client["edge_responses"].values()
                     transferred = max(transferred, sum(row["bytes"] for row in responses))
                     incomplete = max(incomplete, sum(row["bytes"] for row in responses if not row["complete"]))
