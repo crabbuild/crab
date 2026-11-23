@@ -86,6 +86,9 @@ assert.deepEqual(viewerFields.trim().split('\n').map((line) => line.trim().slice
 ]);
 assert.match(logTemplate, /OutputFormat: w3c/);
 assert.match(logTemplate, /FieldDelimiter: "\\t"/);
+assert.match(logTemplate, /DestinationResourceArn: !Sub '\$\{LogBucket\.Arn\}\/AWSLogs\/\$\{AWS::AccountId\}\/CloudFront'/);
+assert.match(logTemplate, /S3EnableHiveCompatiblePath: false/);
+assert.match(logTemplate, /S3SuffixPath: '\{yyyy\}\/\{MM\}\/\{dd\}\/\{HH\}\/'/);
 assert.match(logTemplate, /BucketOwnerEnforced/);
 assert.match(logTemplate, /BlockPublicPolicy: true/);
 assert.match(logTemplate, /IgnorePublicAcls: true/);

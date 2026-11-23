@@ -1718,8 +1718,9 @@ For the AWS companion, replace `--log` and `--s3-origin-log` with
 `--aws-log-stack "$approved_logs_stack"`. Add `--aws-profile` for local
 inspection or use the protected worker's default AWS credentials. The
 collector checks the companion outputs and the origin logging target. It
-fetches only from the two private log prefixes, using expected-owner and
-ETag checks, and retains only the redacted proof. To wait for delivery, pass
+fetches the relevant UTC CloudFront hours and S3 event days from the two
+private log prefixes, using expected-owner and ETag checks, and retains only
+the redacted proof. To wait for delivery, pass
 `--aws-log-wait-seconds` with the polling window in seconds. Pass
 `--require-origin-fill` for the cold arm so the collector also waits for a
 matching successful S3 response with body bytes. With local exports, the

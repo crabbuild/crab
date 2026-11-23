@@ -93,7 +93,7 @@ Resources:
     Properties:
       Name: !Sub 'crab-cdn-${DistributionId}-s3'
       DeliveryDestinationType: S3
-      DestinationResourceArn: !GetAtt LogBucket.Arn
+      DestinationResourceArn: !Sub '${LogBucket.Arn}/AWSLogs/${AWS::AccountId}/CloudFront'
       OutputFormat: w3c
 
   ViewerDelivery:
@@ -103,6 +103,8 @@ Resources:
       DeliverySourceName: !Ref ViewerSource
       DeliveryDestinationArn: !GetAtt ViewerDestination.Arn
       FieldDelimiter: "\t"
+      S3EnableHiveCompatiblePath: false
+      S3SuffixPath: '{yyyy}/{MM}/{dd}/{HH}/'
       RecordFields:
         - date
         - time

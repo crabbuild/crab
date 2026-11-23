@@ -13,6 +13,8 @@ from run_cdn_transport_checks import deployment_target, origin_bucket
 
 
 REGION = "us-east-1"
+HOUR = 3600
+DAY = 24 * HOUR
 STACK_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,127}")
 STACK_ARN = re.compile(r"arn:aws:cloudformation:us-east-1:([0-9]{12}):stack/([A-Za-z][A-Za-z0-9-]*)/[A-Za-z0-9-]+")
 ETAG = re.compile(r'"[\x21\x23-\x7e]+"')
@@ -21,7 +23,7 @@ LIST_LIMIT = 1000
 DOWNLOAD_LIMIT = 128
 
 
-def log_destination(fixture: dict, stack: str, profile: str | None) -> tuple[str, str, str]:
+def log_destination(fixture: dict, stack: str, profile: str | None) -> tuple[str, str, str, str]:
     require(matches(STACK_NAME, stack), "AWS log collection requires the named qualification companion stack")
     deployment = deployment_target(fixture, "cloudfront")
     require(deployment["region"] == REGION, "AWS log companion requires a us-east-1 fixture")
@@ -55,9 +57,9 @@ def log_destination(fixture: dict, stack: str, profile: str | None) -> tuple[str
     status = logging.get("LoggingEnabled")
     require(isinstance(status, dict) and status.get("TargetBucket") == bucket and status.get("TargetPrefix") == "origin/"
             and not status.get("TargetGrants")
-            and status.get("TargetObjectKeyFormat", {"SimplePrefix": {}}) == {"SimplePrefix": {}},
-            "S3 origin access logging does not point to the approved companion bucket and prefix")
-    return owner, bucket, viewer_prefix
+            and status.get("TargetObjectKeyFormat") == {"PartitionedPrefix": {"PartitionDateSource": "EventTime"}},
+            "S3 origin access logging needs EventTime partitions in the approved companion bucket and prefix")
+    return owner, bucket, viewer_prefix, f"origin/{owner}/{REGION}/{origin}/"
 
 
 def log_objects(profile: str | None, owner: str, bucket: str, prefix: str, start: int) -> list[tuple[str, int, str]]:
@@ -105,12 +107,24 @@ def copy_log(profile: str | None, owner: str, bucket: str, obj: tuple[str, int, 
     return remaining
 
 
+def event_prefixes(prefix: str, start: int, finish: int, interval: int, date_format: str) -> list[str]:
+    return [prefix + datetime.fromtimestamp(at, timezone.utc).strftime(date_format)
+            for at in range(start // interval * interval, finish + 1, interval)]
+
+
 def download_logs(fixture: dict, client: dict, stack: str, profile: str | None, scratch: Path) -> tuple[list[Path], list[Path]]:
-    require(positive(client.get("started_at_unix_ms")), "AWS log download needs a timed client action")
-    owner, bucket, viewer_prefix = log_destination(fixture, stack, profile)
-    since = client["started_at_unix_ms"] // 1000
-    viewers = log_objects(profile, owner, bucket, viewer_prefix, since)
-    origins = log_objects(profile, owner, bucket, "origin/", since)
+    started, finished = (client.get(key) for key in ("started_at_unix_ms", "finished_at_unix_ms"))
+    require(positive(started) and positive(finished) and 0 <= finished - started <= HOUR * 1000,
+            "AWS log download needs a timed client action of at most one hour")
+    owner, bucket, viewer_prefix, origin_prefix = log_destination(fixture, stack, profile)
+    since, until = started // 1000, finished // 1000
+    # Search by event time so delayed delivery stays in the measured partitions.
+    # Viewer timestamps can straddle an hour when the runner clock differs.
+    viewer_start = max(0, since - 60)
+    viewers = [obj for prefix in event_prefixes(viewer_prefix, viewer_start, until + 60, HOUR, "%Y/%m/%d/%H/")
+               for obj in log_objects(profile, owner, bucket, prefix, viewer_start)]
+    origins = [obj for prefix in event_prefixes(origin_prefix, since, until, DAY, "%Y/%m/%d/")
+               for obj in log_objects(profile, owner, bucket, prefix, since)]
     require(len(viewers) + len(origins) <= DOWNLOAD_LIMIT, "too many log objects for one qualification read")
     require(sum(obj[1] for obj in viewers + origins) <= LOG_BYTES,
             "AWS qualification logs exceed the download size limit")

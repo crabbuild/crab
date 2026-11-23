@@ -65,14 +65,16 @@ as `OriginBucketName`. Use the `Bucket` output for the private fixture or
 remove the `s3://` prefix from the public fixture's `ExportOrigin` output.
 The origin and log bucket must belong
 to the same account and Region. The companion sets up CloudFront standard
-logging v2 with the tab-separated W3C fields the evidence collector expects.
+logging v2 with UTC hourly partitions and the tab-separated W3C fields the
+evidence collector expects.
 It selects neither cookies nor query strings. Keep CloudFront cookie logging
 disabled at the distribution. [CloudFront logging v2](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/standard-logging.html)
 
 After the companion is ready, check the fixture origin's current server
 access logging configuration. If it has no destination, enable logging to
-the companion's `LogBucket` with target prefix `origin/`. If it already
-has a destination, verify that it matches the companion or use a new
+the companion's `LogBucket` with target prefix `origin/` and
+`PartitionDateSource: EventTime`. If it already has a destination, verify
+that it matches these settings or use a new
 fixture. Set the expected bucket owner on both API calls. For example,
 after verifying these values against the two stacks' outputs:
 
@@ -82,7 +84,8 @@ aws s3api get-bucket-logging --profile crab --region us-east-1 \
 
 # Run only for the dedicated fixture with an empty logging configuration.
 logging_status=$(jq -n --arg bucket "$fixture_log_bucket" \
-  '{LoggingEnabled: {TargetBucket: $bucket, TargetPrefix: "origin/"}}')
+  '{LoggingEnabled: {TargetBucket: $bucket, TargetPrefix: "origin/",
+    TargetObjectKeyFormat: {PartitionedPrefix: {PartitionDateSource: "EventTime"}}}}')
 aws s3api put-bucket-logging --profile crab --region us-east-1 \
   --bucket "$fixture_origin" --expected-bucket-owner "$fixture_account" \
   --bucket-logging-status "$logging_status"
@@ -101,8 +104,9 @@ To collect from the companion directly, pass `--aws-log-stack` to the
 collector in place of the local log flags. Use the read-only identity that
 can describe the given stack, read the origin bucket's logging configuration,
 and list and read both prefixes of its log bucket. The worker checks the
-stack's distribution and bucket against the approved fixture, then removes
-raw downloads after each collection attempt. Use `--aws-log-wait-seconds`
+stack's distribution and bucket against the approved fixture. It lists
+the relevant UTC viewer hours and S3 event days and removes raw downloads
+after each collection attempt. Use `--aws-log-wait-seconds`
 to poll for delayed records and `--require-origin-fill` for a cold sample.
 S3 and CloudFront log delivery is best effort. A sample with missing
 required records remains unqualified after the wait. [CloudFront log delivery](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/standard-logs-reference.html) · [S3 log delivery](https://docs.aws.amazon.com/AmazonS3/latest/userguide/ServerLogs.html)

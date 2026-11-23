@@ -134,12 +134,21 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
             viewer_id = "raw-viewer-id"
             viewer_digest = hashlib.sha256(viewer_id.encode()).hexdigest()
             response = next(iter(report["edge_responses"].values()))
+            report.update(started_at_unix_ms=86_399_900, finished_at_unix_ms=86_400_100)
             examples.json_file(client, report | {"edge_responses": {viewer_digest: response}})
             started = datetime.fromtimestamp(report["started_at_unix_ms"] // 1000, timezone.utc)
             timestamp = started.strftime("%d/%b/%Y:%H:%M:%S +0000")
             key = f"{config['fixture_prefix']}/{PACK}"
             viewer_prefix = "AWSLogs/123456789012/CloudFront/"
-            viewer_key, origin_key = viewer_prefix + "viewer.gz", "origin/origin-log"
+            origin_prefix = "origin/123456789012/us-east-1/fixture-bucket/"
+            viewer_key = viewer_prefix + "1970/01/02/00/viewer.gz"
+            origin_key = origin_prefix + "1970/01/01/origin-log"
+            partitions = {
+                viewer_prefix + "1970/01/01/23/": None,
+                viewer_prefix + "1970/01/02/00/": viewer_key,
+                origin_prefix + "1970/01/01/": origin_key,
+                origin_prefix + "1970/01/02/": None,
+            }
             viewer = gzip.compress(
                 ("#Fields: x-edge-request-id x-host-header cs-method cs-uri-stem cs-protocol sc-status sc-bytes "
                  "x-edge-response-result-type\n"
@@ -154,6 +163,7 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                       "OriginBucket": "fixture-bucket", "DistributionId": "EDIST12345"}
             etag = '"snapshot"'
             downloaded = []
+            logging_format = {"PartitionedPrefix": {"PartitionDateSource": "EventTime"}}
             arguments = ["collect", "--fixture", str(fixture_path), "--client", str(client),
                          "--configuration-sha256", configuration, "--output", str(output),
                          "--aws-log-stack", "crab-logs", "--aws-profile", "crab", "--require-origin-fill"]
@@ -169,11 +179,13 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
                                         "Outputs": [{"OutputKey": k, "OutputValue": v} for k, v in values.items()]}]}
                 if operation == "get-bucket-logging":
                     self.assertIn("fixture-bucket", args)
-                    return {"LoggingEnabled": {"TargetPrefix": "origin/", "TargetBucket": "fixture-logs"}}
+                    return {"LoggingEnabled": {"TargetPrefix": "origin/", "TargetBucket": "fixture-logs",
+                                               "TargetObjectKeyFormat": logging_format}}
                 self.assertIn("fixture-logs", args)
                 if operation == "list-objects-v2":
                     prefix = args[args.index("--prefix") + 1]
-                    log = viewer_key if prefix == viewer_prefix else origin_key
+                    self.assertIn(prefix, partitions)
+                    log = partitions[prefix]
                     contents = [{"Key": prefix + "older", "Size": 100, "ETag": etag, "LastModified": "1970-01-01T00:00:01Z"}]
                     if log in delivered:
                         contents.append({"Key": log, "Size": len(objects[log]), "ETag": etag, "LastModified": started.isoformat()})
@@ -188,6 +200,9 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
 
             with patch.object(AWS_LOGS, "aws", aws), patch.object(sys, "argv", arguments):
                 with patch.dict(values, {"DistributionId": "OTHER1234"}):
+                    self.assertEqual(COLLECT.main(), 1)
+                    self.assertFalse(output.exists())
+                with patch.dict(logging_format, {"PartitionedPrefix": {"PartitionDateSource": "DeliveryTime"}}):
                     self.assertEqual(COLLECT.main(), 1)
                     self.assertFalse(output.exists())
                 self.assertFalse(downloaded)
