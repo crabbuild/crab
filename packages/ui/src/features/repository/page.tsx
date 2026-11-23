@@ -52,6 +52,7 @@ import { FileNavigation } from "./files/navigation";
 import { LatestCommit } from "./latest-commit";
 import { ForkSync } from "./fork-sync";
 import { RepositoryRefControls, RepositoryToolbar } from "./toolbar";
+import { TopicLinks } from "./topic-links";
 
 const RepositoryTree = lazy(() =>
   import("./tree").then((module) => ({ default: module.RepositoryTree })),
@@ -758,6 +759,7 @@ export function RepositoryPage({
                 <div className="notice">
                   <h2>This repository is empty</h2>
                   <p>Push an initial commit with Crab to start browsing.</p>
+                  {overview && <TopicLinks names={repo.topics} />}
                 </div>
               ) : rev ? (
                 <>
@@ -1056,6 +1058,7 @@ export function RepositoryPage({
                               <p>
                                 {repo.description || "No description provided."}
                               </p>
+                              <TopicLinks names={repo.topics} />
                               <div className="about-links">
                                 <Link
                                   href={repoHref(repo, {

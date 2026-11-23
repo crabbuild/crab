@@ -7,7 +7,7 @@ use crate::{
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires agent-browser and the built embedded UI against the native catalog"]
-async fn native_browser_maintainer_edits_description_and_merge_options() {
+async fn native_browser_maintainer_edits_topics_description_and_merge_options() {
     let store =
         crab_storage::Store::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
     let h = Harness::new_with_store_and_prefix(false, false, store, "repository-maintainer").await;
@@ -90,6 +90,57 @@ async fn native_browser_maintainer_edits_description_and_merge_options() {
             .await["auto_merge"],
         true
     );
+    click("Edit topics").await;
+    browser.run(&["wait", "--text", "New topic"]).await;
+    browser
+        .run(&[
+            "find",
+            "label",
+            "New topic",
+            "fill",
+            "Release-Team",
+            "--exact",
+        ])
+        .await;
+    browser.run(&["press", "Enter"]).await;
+    browser
+        .run(&["wait", "[aria-label='Remove topic release-team']"])
+        .await;
+    click("Save topics").await;
+    browser
+        .run(&["wait", "a[href='/?q=topic%3Arelease-team']"])
+        .await;
+    assert_eq!(
+        h.json(&format!("/api/repositories/{repo}/topics"), &bob)
+            .await,
+        json!({"names":["release-team"],"version":1})
+    );
+    browser
+        .run(&["open", &format!("{}/team/private", h.origin)])
+        .await;
+    browser
+        .run(&["wait", "a[href='/?q=topic%3Arelease-team']"])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "link",
+            "click",
+            "--name",
+            "release-team",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", "--url", "**q=topic%3Arelease-team"])
+        .await;
+    browser
+        .run(&[
+            "wait",
+            "[aria-label='Repository results'] a[href='/team/private']",
+        ])
+        .await;
     browser.run(&["close"]).await;
     h.close().await;
 }

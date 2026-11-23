@@ -72,6 +72,8 @@ pub(crate) enum Error {
     RepositoryNamePublication(#[source] crab_remote::publication::Error),
     #[error("The repository description changed. Reload the description before saving")]
     RepositoryDescriptionChanged,
+    #[error("The repository topics changed. Reload the topics before saving")]
+    RepositoryTopicsChanged,
     #[error("Repository creation failed")]
     RepositorySetup(#[source] Box<crate::Error>),
     #[error("This list changed; reload from the first page")]
@@ -650,6 +652,11 @@ impl IntoResponse for Error {
                 StatusCode::CONFLICT,
                 "repository_description_changed",
                 "The repository description changed. Reload the description before saving",
+            ),
+            Self::RepositoryTopicsChanged => (
+                StatusCode::CONFLICT,
+                "repository_topics_changed",
+                "The repository topics changed. Reload the topics before saving",
             ),
             Self::RepositorySetup(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,

@@ -1,4 +1,5 @@
 use super::*;
+use crate::catalog::topics::valid_topic;
 use crate::cells::organization::properties::search::{MAX_TERMS, Term};
 
 pub(super) struct Query {
@@ -6,6 +7,8 @@ pub(super) struct Query {
     pub terms: Vec<Term>,
     pub archived: Option<bool>,
     pub fork: Option<bool>,
+    topics: Vec<(String, bool)>,
+    topic_counts: Vec<(u16, u16, bool)>,
 }
 
 const INVALID_TERM: &str = "Use props.NAME:VALUE and quote values containing spaces";
@@ -17,6 +20,8 @@ impl Query {
         let mut terms = Vec::new();
         let mut archived = None;
         let mut fork = None;
+        let mut topics = Vec::new();
+        let mut topic_counts = Vec::new();
         while !source.trim_start().is_empty() {
             source = source.trim_start();
             let boundary = source.find(char::is_whitespace).unwrap_or(source.len());
@@ -26,6 +31,24 @@ impl Query {
                 .strip_prefix('-')
                 .map_or((false, word), |term| (true, term));
             if let Some((name, value)) = qualified.split_once(':') {
+                if name.eq_ignore_ascii_case("topic") {
+                    let value = value.to_ascii_lowercase();
+                    if !valid_topic(&value) {
+                        return Err(Error::Invalid(
+                            "Use topic:NAME with letters, digits, or hyphens",
+                        ));
+                    }
+                    topics.push((value, exclude));
+                    source = end;
+                    continue;
+                }
+                if name.eq_ignore_ascii_case("topics") {
+                    let (min, max) = count_range(value)
+                        .ok_or(Error::Invalid("Use topics:N, topics:>N, or topics:N..M"))?;
+                    topic_counts.push((min, max, exclude));
+                    source = end;
+                    continue;
+                }
                 if name.eq_ignore_ascii_case("archived") {
                     let value = if value.eq_ignore_ascii_case("true") {
                         true
@@ -116,11 +139,26 @@ impl Query {
             terms,
             archived,
             fork,
+            topics,
+            topic_counts,
         })
     }
 
     pub(super) fn filtered(&self) -> bool {
-        !self.terms.is_empty() || self.archived.is_some() || self.fork.is_some()
+        !self.terms.is_empty()
+            || self.archived.is_some()
+            || self.fork.is_some()
+            || !self.topics.is_empty()
+            || !self.topic_counts.is_empty()
+    }
+
+    pub(super) fn matches_topics(&self, names: &[String]) -> bool {
+        self.topics
+            .iter()
+            .all(|(name, exclude)| names.binary_search(name).is_ok() != *exclude)
+            && self.topic_counts.iter().all(|&(min, max, exclude)| {
+                (usize::from(min)..=usize::from(max)).contains(&names.len()) != exclude
+            })
     }
 
     pub(super) fn cursor_key(
@@ -148,8 +186,50 @@ impl Query {
             digest.update(b"crab-server.repository-state.v1");
             digest.update(&[state(self.archived), state(self.fork)]);
         }
+        if !self.topics.is_empty() || !self.topic_counts.is_empty() {
+            digest.update(b"crab-server.repository-topics.v1");
+            digest.update(&(self.topics.len() as u64).to_le_bytes());
+            for (name, exclude) in &self.topics {
+                hash_field(&mut digest, name.as_bytes());
+                digest.update(&[u8::from(*exclude)]);
+            }
+            for &(min, max, exclude) in &self.topic_counts {
+                digest.update(&min.to_le_bytes());
+                digest.update(&max.to_le_bytes());
+                digest.update(&[u8::from(exclude)]);
+            }
+        }
         digest
     }
+}
+
+fn count_range(value: &str) -> Option<(u16, u16)> {
+    let number = |digits: &str| {
+        digits
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+            .then(|| digits.parse::<u16>().ok())
+            .flatten()
+    };
+    if let Some((min, max)) = value.split_once("..") {
+        let (min, max) = (number(min)?, number(max)?);
+        return (min <= max).then_some((min, max));
+    }
+    if let Some(min) = value.strip_prefix(">=") {
+        return Some((number(min)?, u16::MAX));
+    }
+    if let Some(max) = value.strip_prefix("<=") {
+        return Some((0, number(max)?));
+    }
+    if let Some(min) = value.strip_prefix('>') {
+        return Some((number(min)?.saturating_add(1), u16::MAX));
+    }
+    if let Some(max) = value.strip_prefix('<') {
+        let max = number(max)?;
+        return Some(if max == 0 { (1, 0) } else { (0, max - 1) });
+    }
+    let exact = number(value)?;
+    Some((exact, exact))
 }
 
 fn state(value: Option<bool>) -> u8 {

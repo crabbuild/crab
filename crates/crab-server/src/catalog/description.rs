@@ -42,7 +42,32 @@ impl CatalogStore {
                 "Enter a single-line description of up to 350 characters",
             ));
         }
+        self.edit_metadata(expected_revision, repository, |record| {
+            let current = record.description();
+            if current.description == input.description {
+                return Ok(false);
+            }
+            if current.version != input.version || current.version >= MAX_NUMBER - 1 {
+                return Err(CatalogError::Conflict);
+            }
+            record.description_edit = Some(Description {
+                description: input.description,
+                version: current.version + 1,
+            });
+            Ok(true)
+        })
+        .await
+    }
+
+    pub(super) async fn edit_metadata(
+        &self,
+        expected_revision: u64,
+        repository: Uuid,
+        edit: impl FnOnce(&mut CatalogRecord) -> Result<bool, CatalogError>,
+    ) -> Result<CatalogDocument, CatalogError> {
         let (mut document, etag) = self.load_for_mutation().await?;
+        // The HTTP caller authorized this exact catalog revision. A concurrent
+        // access change must be reauthorized before editing the repository.
         if document.version != expected_revision {
             return Err(CatalogError::Conflict);
         }
@@ -54,17 +79,9 @@ impl CatalogStore {
                     && record.application == super::RepositoryApplicationState::CellReady
             })
             .ok_or(CatalogError::NotFound)?;
-        let current = record.description();
-        if current.description == input.description {
+        if !edit(record)? {
             return Ok(document);
         }
-        if current.version != input.version || current.version >= MAX_NUMBER - 1 {
-            return Err(CatalogError::Conflict);
-        }
-        record.description_edit = Some(Description {
-            description: input.description,
-            version: current.version + 1,
-        });
         document.version = document
             .version
             .checked_add(1)

@@ -29,6 +29,7 @@ export interface Repository {
   owner: string;
   name: string;
   description: string;
+  topics?: string[];
   access: "read" | "write";
   can_admin: boolean;
   can_maintain?: boolean;

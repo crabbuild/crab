@@ -823,6 +823,25 @@ outdated version returns HTTP 409 when the submitted text differs from the
 current description. Retry the same text to recover a lost response while it
 is still current. An archived repository requires unarchiving before editing.
 
+### Classify a repository with topics
+
+Open **Settings → General → Edit topics** with Maintain or Admin access.
+Add up to 20 topics of 1–50 ASCII letters, digits, or hyphens each. Crab saves
+lowercase names in alphabetical order and removes duplicates. Topic links on
+repository pages and catalog results open a filtered repository list. Topics
+are visible to people who can read the repository.
+
+`GET /api/repositories/{repository}/topics` returns `{names,version}`.
+`PUT` takes the complete topic list with its captured version. An outdated
+version returns HTTP 409 for a different list. Retry the same list to recover
+a lost response while it is still current. Archived repositories must be
+unarchived for edits. Upgrade serving peers together before editing topics.
+
+The home and organization catalogs accept `topic:release-engineering`,
+`-topic:legacy`, and topic counts such as `topics:0`, `topics:>2`, or
+`topics:1..3`. Combine them with text and other repository filters.
+Continuations bind the query and the matching readable catalog scope.
+
 ### Transfer repository ownership
 
 In **Settings → General**, a repository administrator can create an offer for a

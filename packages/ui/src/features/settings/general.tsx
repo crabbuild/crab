@@ -8,6 +8,7 @@ import { ArchiveSettings } from "./archive";
 import { DescriptionSettings } from "./description";
 import { MergeMethodSettings } from "./merge-methods";
 import { RenameSettings } from "./rename";
+import { TopicSettings } from "./topics";
 import { TransferSettings } from "./transfer";
 
 const names = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
@@ -38,6 +39,11 @@ export function GeneralSettings({
         />
       )}
       <DescriptionSettings
+        repo={repo}
+        csrf={csrf}
+        onRepositoryChanged={onRepositoryChanged}
+      />
+      <TopicSettings
         repo={repo}
         csrf={csrf}
         onRepositoryChanged={onRepositoryChanged}

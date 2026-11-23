@@ -9,10 +9,11 @@ import { navigate, useRequest, type Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 import { RepositoryPropertyFilters } from "./catalog-property-filters";
 import { RepositoryStateFilters } from "./catalog-state-filters";
+import { TopicLinks } from "./topic-links";
 
 type Entry = Pick<
   Repository,
-  "id" | "owner" | "name" | "description" | "archived"
+  "id" | "owner" | "name" | "description" | "archived" | "topics"
 >;
 type Page = {
   repositories: (Entry & { fork: boolean })[];
@@ -78,8 +79,8 @@ export function BrowseRepositories({
           aria-label="Search repositories"
           placeholder={
             organization
-              ? "Search by name, description, or property"
-              : "Search by name, owner, or description"
+              ? "Search names or use topic: and props. filters"
+              : "Search names, descriptions, or topic:name"
           }
           maxLength={200}
           defaultValue={query}
@@ -141,6 +142,10 @@ export function BrowseRepositories({
                         {repo.description}
                       </p>
                     )}
+                    <TopicLinks
+                      names={repo.topics}
+                      href={(topic) => href(`topic:${topic}`)}
+                    />
                   </li>
                 ))}
               </ul>

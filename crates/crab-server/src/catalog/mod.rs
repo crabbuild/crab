@@ -2,6 +2,7 @@ pub(crate) mod audit;
 pub(crate) mod description;
 mod read;
 mod rename;
+pub(crate) mod topics;
 pub(crate) mod transfer;
 pub(crate) use rename::Rename;
 
@@ -65,6 +66,8 @@ pub struct CatalogRecord {
     pub description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     description_edit: Option<description::Description>,
+    #[serde(default, skip_serializing_if = "topics::Topics::is_initial")]
+    pub(crate) topics: topics::Topics,
     pub members: Vec<RepositoryMember>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<RepositoryGroup>,
@@ -268,16 +271,20 @@ impl CatalogDocument {
         for record in &self.repositories {
             if record.placement_generation == 0
                 || record.ownership_epoch > record.name_version()
-                || record
-                    .description_edit
-                    .as_ref()
-                    .is_some_and(|edit| !edit.valid_saved())
                 || !names.insert((record.owner.to_lowercase(), record.name.to_lowercase()))
                 || !prefixes.insert(record.prefix.clone())
             {
                 return Err(CatalogError::Invalid(
                     "repository IDs, names, prefixes, and placement generations must be valid and unique",
                 ));
+            }
+            if record
+                .description_edit
+                .as_ref()
+                .is_some_and(|edit| !edit.valid_saved())
+                || !record.topics.valid_saved()
+            {
+                return Err(CatalogError::Invalid("repository metadata is invalid"));
             }
             if let Some(upstream) = record.forked_from {
                 record.access_record(records.get(&upstream).copied())?;
@@ -558,6 +565,7 @@ impl CatalogStore {
             application: RepositoryApplicationState::EmptyCellPending,
             description,
             description_edit: None,
+            topics: topics::Topics::default(),
             members,
             groups: Vec::new(),
             protected_branches: Vec::new(),
@@ -598,6 +606,7 @@ impl CatalogStore {
                 application: RepositoryApplicationState::EmptyCellPending,
                 description,
                 description_edit: None,
+                topics: topics::Topics::default(),
                 members,
                 groups: Vec::new(),
                 protected_branches: Vec::new(),
@@ -633,6 +642,7 @@ impl CatalogStore {
                 application: RepositoryApplicationState::GitImportPending,
                 description,
                 description_edit: None,
+                topics: topics::Topics::default(),
                 members,
                 groups: Vec::new(),
                 protected_branches: Vec::new(),
@@ -689,6 +699,7 @@ impl CatalogStore {
             application: RepositoryApplicationState::EmptyCellPending,
             description,
             description_edit: None,
+            topics: topics::Topics::default(),
             members,
             groups: Vec::new(),
             protected_branches: Vec::new(),

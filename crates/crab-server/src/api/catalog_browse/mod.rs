@@ -36,6 +36,8 @@ struct Entry<'a> {
     owner: &'a str,
     name: &'a str,
     description: &'a str,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    topics: &'a [String],
     archived: bool,
     fork: bool,
 }
@@ -93,12 +95,16 @@ pub(super) async fn list(
     let property_organization = search
         .organization
         .filter(|_| property_filter && !scoped.is_empty());
+    let mut topics = HashMap::new();
     let mut ranked: Vec<_> = scoped
         .into_iter()
         .filter_map(|row| {
-            ranks
-                .remove(&row.repository.id)
-                .map(|rank| (rank, row.repository))
+            let priority = ranks.remove(&row.repository.id)?;
+            if !query.matches_topics(&row.topics) {
+                return None;
+            }
+            topics.insert(row.repository.id, row.topics);
+            Some((priority, row.repository))
         })
         .collect();
     ranked.sort_by(|(rank_a, a), (rank_b, b)| {
@@ -192,6 +198,7 @@ pub(super) async fn list(
                     && fresh.config.owner == repo.config.owner
                     && fresh.config.name == repo.config.name
                     && fresh.config.description == repo.config.description
+                    && topics.get(&repo.id) == Some(&row.topics)
                     && fresh.organization == repo.organization
                     && fresh.ownership_epoch == repo.ownership_epoch
                     && fresh.forked_from == repo.forked_from
@@ -221,6 +228,7 @@ pub(super) async fn list(
             owner: &repo.config.owner,
             name: &repo.config.name,
             description: &repo.config.description,
+            topics: topics.get(&repo.id).map_or(&[], Vec::as_slice),
             archived: lifecycle.archived,
             fork: repo.forked_from.is_some(),
         })
