@@ -4427,8 +4427,16 @@ affected account, team, project, or repository where recorded. Names from
 account profiles reflect the current public profile. Historical repository
 names reflect the event's own organization at the time it was recorded.
 
+Filter by **Identity provider group sync** to see committed SCIM team links,
+roster synchronizations, and unlinks. Events identify the team, Crab SCIM group
+ID, group revision, and counts of roster entries added or updated and removed.
+Link and unlink events identify the organization owner. Automatic roster
+synchronization is attributed to SCIM. Replaying an already committed group
+revision does not append another event. Upgrade all serving replicas before
+recording the new event type.
+
 `GET /api/organizations/{id}/audit-log` accepts an exact `action` (for
-example `repository_access_changed`), actor and affected `account` UUIDs,
+example `team_group_sync`), actor and affected `account` UUIDs,
 `repository` name, inclusive `since_ms`, exclusive `until_ms`, and
 `limit` from 1 to 50. The actor filter parameter is `actor`. Continue with
 the returned `next` as `after` and the original filters, even after an

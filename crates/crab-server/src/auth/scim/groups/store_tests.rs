@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::test_support::http::{Harness, TEST_SCIM_TOKEN, organizations};
+use crate::test_support::http::{Harness, TEST_SCIM_TOKEN, browser::Browser, organizations};
 use reqwest::Method;
 
 async fn scim(h: &Harness, method: Method, path: &str, value: Value) -> reqwest::Response {
@@ -34,11 +34,16 @@ async fn user(h: &Harness, subject: &str) -> Uuid {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn synced_roster_revokes_existing_git_credentials_and_recovers_interrupted_projection() {
+    let (h, _) = exercise_group_sync().await;
+    h.close().await;
+}
+
+async fn exercise_group_sync() -> (Harness, Uuid) {
     let h = Harness::scim().await;
     let alice_id = user(&h, "alice-id").await;
     let bob_id = user(&h, "bob-id").await;
     let outsider_id = user(&h, "outsider-id").await;
-    let (org, _, bob_actor) = organizations::bootstrap(&h).await;
+    let (org, alice_actor, bob_actor) = organizations::bootstrap(&h).await;
     let alice = h.login().await;
     *h.provider.mode.lock().await = "member".into();
     let bob = h.login().await;
@@ -119,6 +124,9 @@ async fn synced_roster_revokes_existing_git_credentials_and_recovers_interrupted
     );
     for target in [team, auxiliary] {
         let path = format!("{base}/teams/{target}/identity-group");
+        let members = format!("{base}/teams/{target}/members");
+        let before = h.json(&members, &alice).await;
+        assert_eq!(before["items"][0]["actor"], json!(alice_actor));
         let selected = h.json(&path, &alice).await;
         h.write(
             Method::PUT,
@@ -129,9 +137,7 @@ async fn synced_roster_revokes_existing_git_credentials_and_recovers_interrupted
         .await
         .error_for_status()
         .unwrap();
-        let roster = h
-            .json(&format!("{base}/teams/{target}/members"), &alice)
-            .await;
+        let roster = h.json(&members, &alice).await;
         assert_eq!(roster["can_manage"], false);
         assert_eq!(roster["items"].as_array().unwrap().len(), 1);
         assert_eq!(roster["items"][0]["actor"], json!(bob_actor));
@@ -246,6 +252,15 @@ async fn synced_roster_revokes_existing_git_credentials_and_recovers_interrupted
         assert_eq!(roster["items"].as_array().unwrap().len(), 1);
         assert_ne!(roster["items"][0]["actor"], json!(bob_actor));
     }
+    // Recover the same intent after the team writes have already committed.
+    let (mut settled, cas) = directory.load().await.unwrap();
+    settled.pending = pending.pending;
+    assert!(directory.save(&settled, cas).await.unwrap());
+    scim(&h, Method::GET, &resource, Value::Null)
+        .await
+        .error_for_status()
+        .unwrap();
+    assert!(directory.load().await.unwrap().0.pending.is_none());
     scim(&h, Method::DELETE, &resource, Value::Null)
         .await
         .error_for_status()
@@ -265,5 +280,108 @@ async fn synced_roster_revokes_existing_git_credentials_and_recovers_interrupted
     .error_for_status()
     .unwrap();
     assert_eq!(h.json(&binding, &alice).await["group"], Value::Null);
+
+    let audit = format!("{base}/audit-log?action=team_group_sync");
+    let request = |path: &str, cookie: &str| {
+        h.http
+            .get(format!("{}{path}", h.origin))
+            .header(header::COOKIE, cookie)
+    };
+    assert_eq!(
+        request(&audit, &bob).send().await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+    let history = h.json(&audit, &alice).await;
+    let events = history["items"].as_array().unwrap();
+    assert_eq!(events.len(), 11);
+    let primary = events
+        .iter()
+        .filter(|event| event["team"] == json!(team))
+        .rev();
+    let expected = [
+        ("Linked", 1, 1, 1, Some(alice_actor)),
+        ("Synchronized", 2, 0, 1, None),
+        ("Synchronized", 3, 1, 0, None),
+        ("Synchronized", 4, 1, 1, None),
+        ("Synchronized", 5, 0, 1, None),
+        ("Unlinked", 5, 0, 0, Some(alice_actor)),
+    ];
+    assert_eq!(primary.clone().count(), expected.len());
+    for (event, (change, revision, updated, removed, actor)) in primary.zip(expected) {
+        assert_eq!(event["actor"], json!(actor));
+        assert_eq!(event["operator"], json!(actor.is_none()));
+        assert_eq!(
+            event["detail"],
+            format!(
+                "{change} · Group {group} · Revision {revision} · {updated} added or updated · {removed} removed"
+            )
+        );
+    }
+    let export: Value = request(&format!("{audit}&export=json"), &alice)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(export, history["items"]);
+    (h, org)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires agent-browser and a built embedded UI with isolated native SCIM state"]
+async fn native_browser_filters_and_exports_scim_team_sync_events() {
+    let (h, org) = exercise_group_sync().await;
+    *h.provider.mode.lock().await = String::new();
+    let browser = Browser::new("scim-audit");
+    let url = format!("{}/-/organizations/{org}?tab=audit", h.origin);
+    browser.run(&["open", &url]).await;
+    browser
+        .run(&["wait", "--text", "Continue to sign in"])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Continue to sign in",
+            "--exact",
+        ])
+        .await;
+    browser.run(&["wait", "#audit-action"]).await;
+    browser
+        .run(&["select", "#audit-action", "team_group_sync"])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Apply filters",
+            "--exact",
+        ])
+        .await;
+    browser.run(&["wait", "--fn", "location.search.includes('team_group_sync') && [...document.querySelectorAll('tbody tr')].some(row => row.innerText.includes('Identity provider group sync') && row.innerText.includes('SCIM') && row.innerText.includes('1 added or updated · 1 removed'))"]).await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Export CSV",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", "--text", "Audit export complete."])
+        .await;
+    browser.run(&["close"]).await;
     h.close().await;
 }

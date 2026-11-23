@@ -22,6 +22,7 @@ pub(in crate::api) enum AuditAction {
     ProjectChanged,
     TeamCreated,
     TeamEdited,
+    TeamGroupSync,
     TeamDeleted,
     TeamMembership,
     TeamCreationPolicy,
@@ -65,9 +66,9 @@ impl From<organization::Event> for RawEvent {
             id: format!("organization:{}", value.revision),
             occurred_at_ms: value.created_at_ms,
             action: AuditAction::OrganizationCreated,
-            actor: Some(value.actor),
+            actor: value.actor,
             actor_profile: None,
-            operator: false,
+            operator: value.actor.is_none(),
             account: None,
             team: None,
             project: None,
@@ -140,6 +141,26 @@ impl From<organization::Event> for RawEvent {
             Action::TeamEdited { team } => {
                 event.team = Some(team);
                 AuditAction::TeamEdited
+            }
+            Action::TeamGroupSync {
+                team,
+                group,
+                group_revision,
+                change,
+                updated,
+                removed,
+            } => {
+                use organization::teams::sync::AuditChange;
+                let label = match change {
+                    AuditChange::Linked => "Linked",
+                    AuditChange::Synchronized => "Synchronized",
+                    AuditChange::Unlinked => "Unlinked",
+                };
+                event.team = Some(team);
+                event.detail = Some(format!(
+                    "{label} · Group {group} · Revision {group_revision} · {updated} added or updated · {removed} removed"
+                ));
+                AuditAction::TeamGroupSync
             }
             Action::TeamDeleted { team } => {
                 event.team = Some(team);

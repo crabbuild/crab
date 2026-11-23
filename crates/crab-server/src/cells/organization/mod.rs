@@ -178,6 +178,14 @@ pub(crate) enum Action {
     TeamEdited {
         team: Uuid,
     },
+    TeamGroupSync {
+        team: Uuid,
+        group: Uuid,
+        group_revision: u64,
+        change: teams::sync::AuditChange,
+        updated: u64,
+        removed: u64,
+    },
     TeamDeleted {
         team: Uuid,
     },
@@ -209,20 +217,20 @@ pub(crate) enum Action {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Event {
     pub revision: u64,
-    pub actor: Uuid,
+    pub actor: Option<Uuid>,
     pub action: Action,
     pub created_at_ms: u64,
 }
 const EVENTS: &str = "organization/v1/events/";
-fn advance_revision(context: &Transaction<'_>) -> Result<u64> {
+fn advance(context: &Transaction<'_>, actor: Uuid, action: Action) -> Result<()> {
+    append_event(context, Some(actor), action)
+}
+fn append_event(context: &Transaction<'_>, actor: Option<Uuid>, action: Action) -> Result<()> {
     let result = context.query("UPDATE organization_identity SET app_revision = app_revision + 1 WHERE singleton = 1 AND app_revision < 9007199254740991 RETURNING app_revision", &[])?;
     let Some([value]) = result.rows.first().map(Vec::as_slice) else {
         return Err(Error::Invalid("organization revision limit reached"));
     };
-    uint(value)
-}
-fn advance(context: &Transaction<'_>, actor: Uuid, action: Action) -> Result<()> {
-    let revision = advance_revision(context)?;
+    let revision = uint(value)?;
     let created_at_ms = u64::try_from(context.now_ms())
         .map_err(|_| Error::Invalid("organization clock is negative"))?;
     context.put_document(

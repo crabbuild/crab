@@ -95,7 +95,7 @@ export type OrganizationMembership = { actor: string, role: OrganizationRole, ve
 export type OrganizationMembers = { can_manage: boolean, items: Array<OrganizationMembership>, next: string | null, revision: number, };
 
 // prettier-ignore
-export type AuditAction = "organization_created" | "automation_changed" | "organization_edited" | "organization_membership" | "organization_invitation" | "rulesets_changed" | "project_changed" | "team_created" | "team_edited" | "team_deleted" | "team_membership" | "team_creation_policy" | "repository_registered" | "repository_access_changed" | "repository_transferred_in" | "repository_transferred_out";
+export type AuditAction = "organization_created" | "automation_changed" | "organization_edited" | "organization_membership" | "organization_invitation" | "rulesets_changed" | "project_changed" | "team_created" | "team_edited" | "team_group_sync" | "team_deleted" | "team_membership" | "team_creation_policy" | "repository_registered" | "repository_access_changed" | "repository_transferred_in" | "repository_transferred_out";
 
 // prettier-ignore
 export type AuditRepository = { id: string, name: string, };

@@ -32,6 +32,7 @@ const actions: Record<AuditAction, string> = {
   project_changed: "Project changed",
   team_created: "Team created",
   team_edited: "Team updated",
+  team_group_sync: "Identity provider group sync",
   team_deleted: "Team deleted",
   team_membership: "Team membership changed",
   team_creation_policy: "Team creation policy changed",
@@ -255,7 +256,11 @@ function AuditRow({
               : event.actor}
           </Link>
         ) : event.operator ? (
-          "Operator"
+          event.action === "team_group_sync" ? (
+            "SCIM"
+          ) : (
+            "Operator"
+          )
         ) : (
           "Account unavailable"
         )}
