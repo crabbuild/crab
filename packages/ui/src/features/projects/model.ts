@@ -1,4 +1,4 @@
-import type { RepositoryAssignee } from "@/lib/contracts";
+import type { IssueType, RepositoryAssignee } from "@/lib/contracts";
 import { type Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 export type Subject = { kind: "issue" | "pull"; number: number };
@@ -36,6 +36,7 @@ export interface View {
   query: string;
   status: string | null;
   hide_closed: boolean;
+  show_issue_type?: boolean;
 }
 export interface Field {
   id: string;
@@ -77,6 +78,8 @@ export interface Row {
   repository?: Pick<Repository, "id" | "owner" | "name"> | null;
   restricted?: boolean;
   blocked?: boolean;
+  issue_type?: IssueType | null;
+  issue_type_version?: number | null;
   item: Item;
   work: Work | null;
   assignees: RepositoryAssignee[];
@@ -91,6 +94,7 @@ export interface ItemPage {
   items: Row[];
   next: string | null;
   counts: Record<string, number>;
+  issue_types?: IssueType[];
   total: number;
 }
 export interface Listing {

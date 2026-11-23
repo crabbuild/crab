@@ -149,6 +149,7 @@ pub(crate) fn templates() -> Vec<Template> {
                         query: String::new(),
                         status: None,
                         hide_closed: false,
+                        show_issue_type: false,
                     })
                     .collect(),
                 is_template: false,

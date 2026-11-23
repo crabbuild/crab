@@ -1,5 +1,6 @@
 import { AssigneeAvatars } from "@/components/discussion/metadata";
 import { BlockedBadge } from "@/components/discussion/blocked-badge";
+import { IssueTypeBadge } from "@/components/discussion/issue-type-badge";
 import { useRef, useState } from "react";
 import {
   CircleDotIcon,
@@ -34,6 +35,7 @@ import { Link } from "@/components/navigation/link";
 import { cn } from "@/lib/utils";
 import type { Repository } from "@/lib/api";
 import { priorities, workHref, type Row, type ItemPage } from "./model";
+import { ProjectIssueType } from "./issue-type";
 export function WorkIcon({ row }: { row: Row }) {
   const Icon = row.restricted
     ? LockKeyholeIcon
@@ -57,9 +59,11 @@ export function WorkIcon({ row }: { row: Row }) {
 export function ItemTitle({
   repo,
   row,
+  showIssueType,
 }: {
   repo?: Pick<Repository, "owner" | "name">;
   row: Row;
+  showIssueType?: boolean;
 }) {
   const source = row.repository ?? repo;
   return (
@@ -86,6 +90,9 @@ export function ItemTitle({
             </span>
           )}
           {row.blocked && !row.restricted && <BlockedBadge />}
+          {showIssueType && !row.restricted && row.issue_type && (
+            <IssueTypeBadge type={row.issue_type} />
+          )}
           {row.parent && source && (
             <Link href={workHref(source, row.parent.subject)}>
               Sub-issue of #{row.parent.subject.number}
@@ -139,18 +146,23 @@ export function ProjectTable({
   editable,
   onEdit,
   onStatus,
+  showIssueType,
+  onIssueTypeChange,
 }: {
-  repo?: Pick<Repository, "owner" | "name">;
+  repo?: Pick<Repository, "id" | "owner" | "name">;
   page: ItemPage;
   editable: boolean;
   onEdit: (row: Row) => void;
   onStatus: (row: Row, status: string) => void;
+  showIssueType?: boolean;
+  onIssueTypeChange?: () => void;
 }) {
   return (
     <Table className="project-table">
       <TableHeader>
         <TableRow>
           <TableHead>Title</TableHead>
+          {showIssueType && <TableHead>Type</TableHead>}
           <TableHead>Assignees</TableHead>
           <TableHead>Status</TableHead>
           <TableHead>Priority</TableHead>
@@ -172,6 +184,16 @@ export function ProjectTable({
             <TableCell>
               <ItemTitle repo={repo} row={row} />
             </TableCell>
+            {showIssueType && (
+              <TableCell>
+                <ProjectIssueType
+                  row={row}
+                  repo={repo}
+                  options={page.issue_types ?? []}
+                  onChange={onIssueTypeChange}
+                />
+              </TableCell>
+            )}
             <TableCell>
               {row.assignees.length ? (
                 <AssigneeAvatars assignees={row.assignees} />
@@ -236,12 +258,14 @@ export function ProjectBoard({
   editable,
   onEdit,
   onStatus,
+  showIssueType,
 }: {
   repo?: Pick<Repository, "owner" | "name">;
   page: ItemPage;
   editable: boolean;
   onEdit: (row: Row) => void;
   onStatus: (row: Row, status: string) => void;
+  showIssueType?: boolean;
 }) {
   const dragged = useRef<Row | null>(null);
   const [over, setOver] = useState<string>();
@@ -294,7 +318,11 @@ export function ProjectBoard({
                     setOver(undefined);
                   }}
                 >
-                  <ItemTitle repo={repo} row={row} />
+                  <ItemTitle
+                    repo={repo}
+                    row={row}
+                    showIssueType={showIssueType}
+                  />
                   <footer>
                     <AssigneeAvatars assignees={row.assignees} />
                     <Badge variant="outline">
@@ -337,11 +365,13 @@ export function ProjectRoadmap({
   page,
   editable,
   onEdit,
+  showIssueType,
 }: {
   repo?: Pick<Repository, "owner" | "name">;
   page: ItemPage;
   editable: boolean;
   onEdit: (row: Row) => void;
+  showIssueType?: boolean;
 }) {
   const [offset, setOffset] = useState(0);
   const today = new Date();
@@ -453,7 +483,11 @@ export function ProjectRoadmap({
             return (
               <div className="project-roadmap-row" role="row" key={row.item.id}>
                 <div role="cell">
-                  <ItemTitle repo={repo} row={row} />
+                  <ItemTitle
+                    repo={repo}
+                    row={row}
+                    showIssueType={showIssueType}
+                  />
                 </div>
                 <div
                   className="project-roadmap-track"

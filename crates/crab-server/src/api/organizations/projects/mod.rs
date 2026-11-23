@@ -1,4 +1,4 @@
-use super::{actor, read_error};
+use super::{actor, issue_types, read_error};
 use crate::{
     api::write::ResponseError,
     app::{self, Error, Result},
@@ -190,6 +190,13 @@ async fn items(
         .map_err(read_error)?
         .output
         .ok_or(Error::NotFound)?;
+    let show_issue_type = page
+        .view
+        .project
+        .definition
+        .views
+        .iter()
+        .any(|view| view.show_issue_type);
     let mut grouped: BTreeMap<Uuid, Vec<Subject>> = BTreeMap::new();
     for entry in &page.items {
         let item = &entry.record;
@@ -199,8 +206,9 @@ async fn items(
     }
     let mut work = BTreeMap::new();
     let mut repositories = BTreeMap::new();
-    for (id, subjects) in grouped {
-        let Some(repo) = accessible(&server, &principal, id).await? else {
+    let mut types = None;
+    for (repository_id, subjects) in grouped {
+        let Some(repo) = accessible(&server, &principal, repository_id).await? else {
             continue;
         };
         let cell = app::repository_cell(&server, &repo)?;
@@ -212,6 +220,7 @@ async fn items(
                     source::WorkQuery {
                         subjects: subjects.clone(),
                         default_ref: repo.default_ref().await?,
+                        include_issue_type: show_issue_type && repo.organization == Some(id),
                     },
                 )
                 .await,
@@ -221,6 +230,12 @@ async fn items(
                 "Project work lookup returned an invalid result count",
             ));
         }
+        let loaded_types =
+            if types.is_none() && found.iter().flatten().any(|row| row.issue_type.is_some()) {
+                Some(issue_types::active(&server, Some(id)).await?.definitions)
+            } else {
+                None
+            };
         let selection = match crate::api::assignees::Selection::load(
             &server,
             &principal,
@@ -236,21 +251,30 @@ async fn items(
             Err(Error::NotFound) => continue,
             Err(error) => return Err(error),
         };
-        // Repository grants remain independent of organization membership. Refresh
-        // after source reads, then recheck project authority before returning rows.
-        if accessible(&server, &principal, id).await?.is_none() {
-            continue;
-        }
+        // Recheck the pinned source. A transferred repository must not publish
+        // an issue type resolved against its former organization.
+        let current = match app::membership(&server, &principal, &repo).await {
+            Ok(current) => current,
+            Err(Error::NotFound) => continue,
+            Err(error) => return Err(error),
+        };
+        types = types.or(loaded_types);
         for (subject, summary) in subjects.into_iter().zip(found) {
             if let Some(summary) = summary {
                 let assignees = selection.view(&summary.assignees);
+                let (issue_type, version) = issue_types::project_field(
+                    &repo,
+                    summary.issue_type,
+                    types.as_deref().unwrap_or_default(),
+                    current.principal.can_triage(repo.id),
+                );
                 work.insert(
-                    (id, subject.kind as u8, subject.number),
-                    (summary, assignees),
+                    (repository_id, subject.kind as u8, subject.number),
+                    (summary, assignees, issue_type.cloned(), version),
                 );
             }
         }
-        repositories.insert(id, repository(&repo));
+        repositories.insert(repository_id, repository(&repo));
     }
     let rows=page.items.into_iter().map(|entry|{
         let record = entry.record;
@@ -263,13 +287,15 @@ async fn items(
             "version": entry.version,
             "repository": if restricted { None } else { record.repository.and_then(|id| repositories.get(&id)) },
             "restricted": restricted,
-            "work": summary.map(|(details, _)| &details.work),
-            "blocked": summary.is_some_and(|(details, _)| details.blocked),
-            "assignees": summary.map(|(_, assignees)| assignees).cloned().unwrap_or_default(),
-            "parent": summary.and_then(|(details, _)| details.parent.as_ref()),
-            "progress": summary.and_then(|(details, _)| details.progress.as_ref()),
-            "links": summary.map(|(details, _)| details.links.as_slice()).unwrap_or_default(),
-            "more_links": summary.is_some_and(|(details, _)| details.more_links),
+            "work": summary.map(|(details, ..)| &details.work),
+            "blocked": summary.is_some_and(|(details, ..)| details.blocked),
+            "issue_type": summary.and_then(|(_, _, issue_type, _)| issue_type.as_ref()),
+            "issue_type_version": summary.and_then(|(_, _, _, version)| *version),
+            "assignees": summary.map(|(_, assignees, ..)| assignees).cloned().unwrap_or_default(),
+            "parent": summary.and_then(|(details, ..)| details.parent.as_ref()),
+            "progress": summary.and_then(|(details, ..)| details.progress.as_ref()),
+            "links": summary.map(|(details, ..)| details.links.as_slice()).unwrap_or_default(),
+            "more_links": summary.is_some_and(|(details, ..)| details.more_links),
         })
     }).collect::<Vec<_>>();
     let current = project(&server, id, actor, selected).await?;
@@ -278,7 +304,7 @@ async fn items(
         return Err(Error::PageChanged);
     }
     Ok(Json(
-        json!({"page":{"project":public_project(&current.project),"items":rows,"next":page.next,"counts":page.counts,"total":page.total,"revision":page.view.project.version},"can_manage":current.can_manage}),
+        json!({"page":{"project":public_project(&current.project),"items":rows,"next":page.next,"counts":page.counts,"total":page.total,"revision":page.view.project.version,"issue_types":types.unwrap_or_default()},"can_manage":current.can_manage}),
     ))
 }
 #[derive(Deserialize)]
@@ -363,6 +389,7 @@ async fn submit(
                                 source::WorkQuery {
                                     subjects,
                                     default_ref: repo.default_ref().await?,
+                                    include_issue_type: false,
                                 },
                             )
                             .await,

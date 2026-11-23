@@ -2756,6 +2756,23 @@ Reload the latest data after HTTP 409.
 Update all serving peers before using the new settings so every peer can
 read the new audit events and handle issue type requests.
 
+### Show issue types in Projects
+
+In **Settings** → **Views**, turn on **Show issue type** for a saved Project
+view. Table views gain a **Type** column. Board and roadmap views show the
+type beside the issue title. Organization Project views show this field for
+same-organization issues from repositories the viewer can read.
+
+In table view, select a type badge or **Set type** to edit the issue. Source
+repository triage access authorizes this action. Archived repositories and
+Projects show the type for reference. Changes appear on the issue and in
+other views of the same issue when they reload.
+
+Saved view definitions use `show_issue_type`, which defaults to false. Project
+item pages supply the enabled `issue_types` and an `issue_type` per available
+issue. The item has an `issue_type_version` when the source repository permits
+an edit. Submit changes through the source issue type route.
+
 ### Edit pull requests and review summaries
 
 Pull request authors can choose **Edit pull request** beside the title to update

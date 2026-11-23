@@ -459,6 +459,12 @@ function PlanningWorkspace({
                           page={page}
                           editable={editable}
                           onEdit={setEditing}
+                          showIssueType={selected.show_issue_type}
+                          onIssueTypeChange={
+                            project.archived
+                              ? undefined
+                              : () => (after ? filters({}) : resource.retry())
+                          }
                           onStatus={(row, status) =>
                             void changeStatus(row, status)
                           }
@@ -604,6 +610,7 @@ function PlanningWorkspace({
         <ProjectSettings
           target={{ organization }}
           project={project}
+          issueTypes
           onClose={() => setSettings(false)}
         />
       )}

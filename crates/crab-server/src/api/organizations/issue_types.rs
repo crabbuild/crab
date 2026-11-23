@@ -4,7 +4,10 @@ use crate::{
         organization::issue_types::{
             Active, Definition, Get, Outcome, Replace, ReplaceInput, Schema,
         },
-        repository::issues::issue_type::{self, Selection},
+        repository::{
+            issues::issue_type::{self, Selection},
+            projects::IssueTypeField,
+        },
     },
     repository::Repository,
 };
@@ -105,6 +108,21 @@ pub(in crate::api) fn visible<'a>(
     definitions
         .iter()
         .find(|definition| definition.id == selection.id)
+}
+
+pub(in crate::api) fn project_field<'a>(
+    repo: &Repository,
+    field: Option<IssueTypeField>,
+    definitions: &'a [Definition],
+    can_triage: bool,
+) -> (Option<&'a Definition>, Option<u64>) {
+    let Some(field) = field.filter(|_| repo.organization.is_some()) else {
+        return (None, None);
+    };
+    (
+        visible(repo, field.selection, definitions),
+        field.editable_version.filter(|_| can_triage),
+    )
 }
 
 #[derive(Deserialize)]

@@ -20,8 +20,8 @@ mod templates;
 pub(crate) use commands::{Change, Command, Outcome, Request};
 pub(crate) use history::{GetHistory, HistoryQuery};
 pub(crate) use reads::{
-    CandidateQuery, Candidates, GetProject, ItemQuery, Items, ListProjects, Memberships,
-    ProjectQuery, WorkQuery, WorkSummaries,
+    CandidateQuery, Candidates, GetProject, IssueTypeField, ItemQuery, Items, ListProjects,
+    Memberships, ProjectQuery, WorkQuery, WorkSummaries,
 };
 pub(crate) use templates::templates;
 
@@ -41,6 +41,8 @@ pub(crate) struct View {
     pub query: String,
     pub status: Option<String>,
     pub hide_closed: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub show_issue_type: bool,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]

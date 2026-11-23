@@ -15,7 +15,7 @@ export function IssueTypeControl({
   types,
   refresh,
 }: {
-  repo: Repository;
+  repo: Pick<Repository, "id" | "owner" | "name">;
   csrf: string;
   number: number;
   version: number;

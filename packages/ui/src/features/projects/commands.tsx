@@ -26,6 +26,7 @@ import {
 } from "./journal";
 interface Commands {
   account: string | null;
+  csrf: string;
   submit: (
     repo: ProjectRepository,
     command: Command,
@@ -263,6 +264,7 @@ export function ProjectCommandsProvider({
     <Context
       value={{
         account,
+        csrf,
         submit: (repo, command, draft) =>
           submit({ repo: { ...repo } }, command, draft),
         submitOrganization: (organization, command, draft) =>

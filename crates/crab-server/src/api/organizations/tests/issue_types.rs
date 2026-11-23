@@ -41,6 +41,231 @@ async fn fixture() -> (Harness, String, String, Uuid, String) {
     (h, alice, org, repo, key)
 }
 
+async fn project_with_issue(
+    h: &Harness,
+    alice: &str,
+    root: &str,
+    repository: Uuid,
+    organization_project: bool,
+    show_type: bool,
+) -> Uuid {
+    let id = Uuid::now_v7();
+    let submit = async |command: Value| {
+        let path = format!("{root}/commands");
+        let input = json!({"request_id":Uuid::now_v7(),"command":command});
+        let response = if organization_project {
+            h.write(Method::POST, &path, alice, input).await
+        } else {
+            repository_write(h, Method::POST, &path, alice, repository, input).await
+        };
+        let result: Value = response.error_for_status().unwrap().json().await.unwrap();
+        assert_eq!(result["outcome"], "applied", "{result}");
+    };
+    submit(json!({"kind":"create","id":id,"name":"Release planning","template":"table"})).await;
+    if organization_project {
+        submit(json!({"kind":"repository","project":id,"version":1,"repository":repository,"linked":true})).await;
+    }
+    if show_type {
+        let detail = h.json(&format!("{root}/{id}"), alice).await;
+        let mut definition = detail["project"]["definition"].clone();
+        definition["views"][0]["show_issue_type"] = json!(true);
+        submit(json!({"kind":"edit","project":id,"version":detail["project"]["version"],"definition":definition,"archived":false})).await;
+    }
+    let mut command = json!({"kind":"item","project":id,"version":0,"item":{
+        "id":Uuid::now_v7(),"subject":{"kind":"issue","number":1},"title":"","body":"",
+        "status":"Todo","priority":0,"start":null,"end":null,"values":{}
+    }});
+    if organization_project {
+        command["repository"] = json!(repository);
+    }
+    submit(command).await;
+    id
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn project_issue_type_fields_follow_source_permissions_and_assignment() {
+    use crate::cells::{
+        Address,
+        organization::{ChangeOutcome, DecideInvitation, Decision, Invite, InviteInput, Role},
+    };
+
+    let (h, alice, org, repo, key) = fixture().await;
+    let root = format!("/api/repos/{key}");
+    let repositories = format!("{root}/projects");
+    let workspace = format!("{org}/projects");
+    let local = project_with_issue(&h, &alice, &repositories, repo, false, true).await;
+    let shared = project_with_issue(&h, &alice, &workspace, repo, true, true).await;
+    let local_items = format!("{repositories}/{local}/items");
+    let shared_items = format!("{workspace}/{shared}/items");
+    let issue = format!("{root}/issues/1");
+    let schema = format!("{org}/issue-types");
+    let initial = h.json(&schema, &alice).await;
+    let mut types = initial["definitions"].as_array().unwrap().to_vec();
+    repository_write(
+        &h,
+        Method::PUT,
+        &format!("{issue}/type"),
+        &alice,
+        repo,
+        json!({"expected_version":0,"type_id":types[1]["id"]}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    for path in [&local_items, &shared_items] {
+        let page = h.json(path, &alice).await;
+        assert_eq!(page["page"]["items"][0]["issue_type"]["name"], "Bug");
+        assert_eq!(page["page"]["items"][0]["issue_type_version"], 1);
+        assert_eq!(page["page"]["issue_types"].as_array().unwrap().len(), 3);
+    }
+
+    let organization = org.rsplit('/').next().unwrap().parse().unwrap();
+    let owner = h.json(&org, &alice).await["actor"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let cells = h.server.cells().unwrap();
+    let bob = cells
+        .command::<RegisterAccounts>(
+            Address::Directory,
+            app::mutation_identity().unwrap(),
+            vec![IdentityKey {
+                issuer: h.provider.issuer.clone(),
+                subject: "bob-id".into(),
+            }],
+        )
+        .await
+        .unwrap()
+        .output[0];
+    let offer = cells
+        .command::<Invite>(
+            Address::Organization(organization),
+            app::mutation_identity().unwrap(),
+            InviteInput {
+                actor: owner,
+                recipient: bob,
+                version: 0,
+                role: Role::Member,
+            },
+        )
+        .await
+        .unwrap()
+        .output;
+    let ChangeOutcome::Applied(offer) = offer else {
+        panic!("Invitation was rejected")
+    };
+    cells
+        .command::<DecideInvitation>(
+            Address::Organization(organization),
+            app::mutation_identity().unwrap(),
+            Decision {
+                actor: bob,
+                version: offer.version,
+                accept: true,
+            },
+        )
+        .await
+        .unwrap();
+    *h.provider.mode.lock().await = "member".into();
+    let reader = h.login().await;
+    let restricted = h.json(&shared_items, &reader).await;
+    assert_eq!(restricted["page"]["items"][0]["restricted"], true);
+    assert_eq!(restricted["page"]["items"][0]["issue_type"], Value::Null);
+    assert_eq!(restricted["page"]["issue_types"], json!([]));
+    let members = format!("{root}/members");
+    for (access, version) in [("read", Value::Null), ("triage", json!(1))] {
+        let acl = h.json(&members, &alice).await;
+        repository_write(
+            &h, Method::PUT, &members, &alice, repo,
+            json!({"expected_revision":acl["revision"],"members":[{"subject":"bob-id","name":"Bob","access":access}],"groups":[]}),
+        ).await.error_for_status().unwrap();
+        let visible = h.json(&shared_items, &reader).await;
+        assert_eq!(visible["can_manage"], false);
+        assert_eq!(visible["page"]["items"][0]["issue_type"]["name"], "Bug");
+        assert_eq!(visible["page"]["items"][0]["issue_type_version"], version);
+    }
+    types[1]["name"] = json!("Incident");
+    h.write(
+        Method::PUT,
+        &schema,
+        &alice,
+        json!({"expected_version":0,"definitions":types}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    for path in [&local_items, &shared_items] {
+        let page = h.json(path, &alice).await;
+        assert_eq!(page["page"]["items"][0]["issue_type"]["name"], "Incident");
+        assert_eq!(page["page"]["items"][0]["issue_type_version"], 1);
+    }
+    repository_write(
+        &h,
+        Method::PUT,
+        &format!("{root}/settings/archive"),
+        &alice,
+        repo,
+        json!({"expected_version":0,"archived":true,"repository":key}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    for path in [&local_items, &shared_items] {
+        let page = h.json(path, &alice).await;
+        assert_eq!(page["page"]["items"][0]["issue_type"]["name"], "Incident");
+        assert_eq!(page["page"]["items"][0]["issue_type_version"], Value::Null);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires agent-browser and built embedded UI; uses real OIDC/native Cells"]
+async fn native_browser_edits_project_issue_type_field() {
+    use crate::test_support::http::browser::Browser;
+
+    let (h, alice, _, repo, key) = fixture().await;
+    let id = project_with_issue(
+        &h,
+        &alice,
+        &format!("/api/repos/{key}/projects"),
+        repo,
+        false,
+        false,
+    )
+    .await;
+    let browser = Browser::new("project-types");
+    let project = format!("{}/{key}/projects/{id}", h.origin);
+    let click = async |role: &str, name: &str| {
+        browser
+            .run(&["find", "role", role, "click", "--name", name, "--exact"])
+            .await;
+    };
+    browser.run(&["open", &project]).await;
+    browser.sign_in().await;
+    browser.run(&["wait", "table.project-table"]).await;
+    click("button", "Settings").await;
+    browser
+        .run(&["wait", "--text", "Save project settings"])
+        .await;
+    click("tab", "Views").await;
+    click("checkbox", "Show issue type in Table").await;
+    click("button", "Save project settings").await;
+    browser.run(&["wait", "--fn", "document.querySelector('table.project-table button[aria-label^=\"Change issue type for\"]') && !document.querySelector('[role=dialog]')"]).await;
+    click("button", "Change issue type for Classify this report").await;
+    click("combobox", "Issue type").await;
+    click("option", "Bug").await;
+    click("button", "Save issue type").await;
+    browser.run(&["wait", "--fn", "document.querySelector('table.project-table button[aria-label^=\"Change issue type for\"]')?.textContent.includes('Bug')"]).await;
+    click("link", "Classify this report").await;
+    browser
+        .run(&[
+            "wait",
+            "--fn",
+            "document.querySelector('.issue-meta')?.textContent.includes('Bug')",
+        ])
+        .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn issue_types_follow_organization_policy_and_live_repository_roles() {
     let (h, alice, org, repo, key) = fixture().await;

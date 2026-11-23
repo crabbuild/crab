@@ -129,7 +129,9 @@ function definition(value: unknown): boolean {
         ["table", "board", "roadmap"].includes(String(view.layout)) &&
         string(view.query) &&
         optionalString(view.status) &&
-        typeof view.hide_closed === "boolean",
+        typeof view.hide_closed === "boolean" &&
+        (view.show_issue_type === undefined ||
+          typeof view.show_issue_type === "boolean"),
     )
   );
 }

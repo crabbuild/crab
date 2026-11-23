@@ -1,4 +1,8 @@
-use super::super::collaboration::{SubjectState, dependencies};
+use super::super::{
+    collaboration::{SubjectState, dependencies},
+    issues::issue_type,
+    settings,
+};
 use super::*;
 
 pub(crate) struct WorkSummaries;
@@ -7,6 +11,14 @@ pub(crate) struct WorkSummaries;
 pub(crate) struct WorkQuery {
     pub subjects: Vec<Subject>,
     pub default_ref: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_issue_type: bool,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct IssueTypeField {
+    pub selection: Option<issue_type::Selection>,
+    pub editable_version: Option<u64>,
 }
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -14,6 +26,8 @@ pub(crate) struct WorkDetails {
     pub work: SubjectSummary,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub blocked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_type: Option<IssueTypeField>,
     pub assignees: Vec<super::super::assignments::Assignee>,
     pub progress: Option<hierarchy::Progress>,
     pub parent: Option<SubjectSummary>,
@@ -25,6 +39,7 @@ fn work_details(
     subject: Subject,
     assignees: Vec<super::super::assignments::Assignee>,
     default_ref: &str,
+    issue_type_writable: Option<bool>,
 ) -> Result<Option<WorkDetails>> {
     let Some(work) = subject.summary(context)? else {
         return Ok(None);
@@ -52,6 +67,16 @@ fn work_details(
     } else {
         (None, None)
     };
+    let issue_type = issue_type_writable
+        .filter(|_| subject.kind == SubjectKind::Issue)
+        .map(|writable| {
+            let assignment = issue_type::load(context, subject.number)?;
+            Ok::<_, Error>(IssueTypeField {
+                selection: assignment.selection,
+                editable_version: writable.then_some(assignment.version),
+            })
+        })
+        .transpose()?;
     let page = super::super::collaboration::links::ListLinks::execute(
         context,
         super::super::collaboration::links::Query {
@@ -65,6 +90,7 @@ fn work_details(
     Ok(Some(WorkDetails {
         work,
         blocked,
+        issue_type,
         assignees,
         progress,
         parent,
@@ -82,6 +108,10 @@ impl Read for WorkSummaries {
             return Err(Error::Invalid("work lookup is limited to 50 subjects"));
         }
         preparation::ensure_ready(context)?;
+        let issue_type_writable = input
+            .include_issue_type
+            .then(|| settings::archived(context).map(|archived| !archived))
+            .transpose()?;
         input
             .subjects
             .into_iter()
@@ -102,7 +132,13 @@ impl Read for WorkSummaries {
                     SqlValue::Blob(bytes) => super::super::assignments::decode(bytes)?,
                     _ => return Err(Error::Invalid("project source assignments are invalid")),
                 };
-                work_details(context, subject, assignees, &input.default_ref)
+                work_details(
+                    context,
+                    subject,
+                    assignees,
+                    &input.default_ref,
+                    issue_type_writable,
+                )
             })
             .collect()
     }
@@ -177,6 +213,8 @@ pub(crate) struct Row {
     pub work: Option<SubjectSummary>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub blocked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_type: Option<IssueTypeField>,
     pub assignees: Vec<super::super::assignments::Assignee>,
     pub progress: Option<hierarchy::Progress>,
     pub parent: Option<SubjectSummary>,
@@ -207,6 +245,13 @@ impl Read for Items {
         let Some(project) = load(context, input.project)? else {
             return Ok(None);
         };
+        let issue_type_writable = project
+            .definition
+            .views
+            .iter()
+            .any(|view| view.show_issue_type)
+            .then(|| settings::archived(context).map(|archived| !archived))
+            .transpose()?;
         if input
             .status
             .as_ref()
@@ -271,8 +316,14 @@ impl Read for Items {
             };
             let details = if let Some(subject) = entry.subject {
                 Some(
-                    work_details(context, subject, assignees, &input.default_ref)?
-                        .ok_or(Error::Invalid("project source is missing"))?,
+                    work_details(
+                        context,
+                        subject,
+                        assignees,
+                        &input.default_ref,
+                        issue_type_writable,
+                    )?
+                    .ok_or(Error::Invalid("project source is missing"))?,
                 )
             } else {
                 None
@@ -286,6 +337,7 @@ impl Read for Items {
                 item: entry,
                 work: details.as_ref().map(|details| details.work.clone()),
                 blocked: details.as_ref().is_some_and(|details| details.blocked),
+                issue_type: details.as_ref().and_then(|details| details.issue_type),
                 progress: details
                     .as_ref()
                     .and_then(|details| details.progress.clone()),

@@ -27,10 +27,12 @@ import { useProjectDraft } from "./drafts";
 export function ProjectSettings({
   target,
   project,
+  issueTypes,
   onClose,
 }: {
   target: import("./model").ProjectTarget;
   project: Project;
+  issueTypes: boolean;
   onClose: () => void;
 }) {
   const saved = useProjectDraft(
@@ -475,6 +477,30 @@ export function ProjectSettings({
                           />
                           <FieldLabel htmlFor={`${id}-closed-${view.id}`}>
                             Hide closed issues and PRs
+                          </FieldLabel>
+                        </Field>
+                      )}
+                      {issueTypes && (
+                        <Field orientation="horizontal">
+                          <Checkbox
+                            id={`${id}-issue-type-${view.id}`}
+                            checked={view.show_issue_type ?? false}
+                            onCheckedChange={(value) =>
+                              setDraft({
+                                ...draft,
+                                views: draft.views.map((current, n) =>
+                                  n === i
+                                    ? {
+                                        ...current,
+                                        show_issue_type: value === true,
+                                      }
+                                    : current,
+                                ),
+                              })
+                            }
+                          />
+                          <FieldLabel htmlFor={`${id}-issue-type-${view.id}`}>
+                            Show issue type in {view.name}
                           </FieldLabel>
                         </Field>
                       )}

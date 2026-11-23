@@ -23,7 +23,10 @@ fn key(number: u64) -> String {
     format!("{PREFIX}{number:016x}")
 }
 
-pub(super) fn load(context: &Transaction<'_>, number: u64) -> crate::cells::Result<Assignment> {
+pub(in crate::cells::repository) fn load(
+    context: &Transaction<'_>,
+    number: u64,
+) -> crate::cells::Result<Assignment> {
     Ok(context.document(&key(number))?.unwrap_or_default())
 }
 

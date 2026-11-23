@@ -456,6 +456,7 @@ function ProjectWorkspace({
                       editable={editable && can_manage}
                       onEdit={setEditing}
                       onStatus={changeStatus}
+                      showIssueType={selected.show_issue_type}
                     />
                   ) : selected.layout === "roadmap" ? (
                     <ProjectRoadmap
@@ -463,6 +464,7 @@ function ProjectWorkspace({
                       page={page}
                       editable={editable && can_manage}
                       onEdit={setEditing}
+                      showIssueType={selected.show_issue_type}
                     />
                   ) : (
                     <ProjectTable
@@ -471,6 +473,12 @@ function ProjectWorkspace({
                       editable={editable && can_manage}
                       onEdit={setEditing}
                       onStatus={changeStatus}
+                      showIssueType={selected.show_issue_type}
+                      onIssueTypeChange={
+                        repo.archived || project.archived
+                          ? undefined
+                          : () => (after ? filters({}) : resource.retry())
+                      }
                     />
                   )
                 ) : (
@@ -561,6 +569,7 @@ function ProjectWorkspace({
         <ProjectSettings
           target={{ repo }}
           project={project}
+          issueTypes={!!repo.organization_id}
           onClose={() => setSettings(false)}
         />
       )}

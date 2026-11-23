@@ -156,6 +156,11 @@ async fn items(
             .await,
     )?
     .ok_or(Error::NotFound)?;
+    let types = if page.items.iter().any(|row| row.issue_type.is_some()) {
+        super::organizations::issue_types::active(&server, repo.organization).await?
+    } else {
+        Default::default()
+    };
     let selected = crate::api::assignees::Selection::load(
         &server,
         &principal,
@@ -170,10 +175,19 @@ async fn items(
         .map(|row| {
             let mut value = serde_json::to_value(row)?;
             value["assignees"] = json!(selected.view(&row.assignees));
+            let (issue_type, version) = super::organizations::issue_types::project_field(
+                &repo,
+                row.issue_type,
+                &types.definitions,
+                selected.principal.can_triage(repo.id),
+            );
+            value["issue_type"] = json!(issue_type);
+            value["issue_type_version"] = json!(version);
             Ok(value)
         })
         .collect::<std::result::Result<Vec<_>, serde_json::Error>>()?;
     presented["items"] = json!(items);
+    presented["issue_types"] = json!(types.definitions);
     Ok(Json(
         json!({"page":presented,"can_manage":selected.principal.can_write(repo.id)}),
     ))
