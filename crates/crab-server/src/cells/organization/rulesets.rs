@@ -26,12 +26,84 @@ pub(crate) enum Repositories {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub(crate) enum PropertyCondition {
+    Custom(CustomCondition),
+    System(SystemCondition),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct PropertyCondition {
+pub(crate) struct CustomCondition {
     pub property: Uuid,
     pub value: PropertyValue,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub exclude: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SystemProperty {
+    Fork,
+    Name,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SystemCondition {
+    system: SystemProperty,
+    value: PropertyValue,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    exclude: bool,
+}
+
+fn name_pattern(value: &str) -> Option<Pattern> {
+    if value.contains('/') {
+        return None;
+    }
+    Pattern::parse(value, Target::Tag)
+}
+
+fn matches_name(pattern: &str, name: &str) -> Result<bool> {
+    name_pattern(pattern)
+        .map(|pattern| pattern.matches(name, false))
+        .ok_or(Error::Invalid("invalid saved repository pattern"))
+}
+
+impl PropertyCondition {
+    fn valid(&self) -> bool {
+        match self {
+            Self::Custom(term) => !term.property.is_nil(),
+            Self::System(term) => match (term.system, &term.value) {
+                (SystemProperty::Fork, PropertyValue::Boolean(_)) => true,
+                (SystemProperty::Name, PropertyValue::Text(pattern)) => {
+                    name_pattern(pattern).is_some()
+                }
+                _ => false,
+            },
+        }
+    }
+
+    fn matches(&self, repo: &Repository, values: &BTreeMap<Uuid, PropertyValue>) -> Result<bool> {
+        match self {
+            Self::Custom(term) => Ok(values
+                .get(&term.property)
+                .is_some_and(|value| value.matches(&term.value))
+                != term.exclude),
+            Self::System(term) => {
+                let matched = match (term.system, &term.value) {
+                    (SystemProperty::Fork, PropertyValue::Boolean(expected)) => {
+                        repo.fork == *expected
+                    }
+                    (SystemProperty::Name, PropertyValue::Text(pattern)) => {
+                        matches_name(pattern, &repo.name)?
+                    }
+                    _ => return Err(Error::Invalid("invalid saved system property")),
+                };
+                Ok(matched != term.exclude)
+            }
+        }
+    }
 }
 
 impl Repositories {
@@ -50,9 +122,7 @@ impl Repositories {
                         let mut unique = HashSet::new();
                         patterns.len() <= 20
                             && patterns.iter().all(|pattern| {
-                                !pattern.contains('/')
-                                    && unique.insert(pattern)
-                                    && Pattern::parse(pattern, Target::Tag).is_some()
+                                unique.insert(pattern) && name_pattern(pattern).is_some()
                             })
                     })
             }
@@ -60,27 +130,20 @@ impl Repositories {
                 !conditions.is_empty()
                     && conditions.len() <= 20
                     && conditions.iter().enumerate().all(|(index, condition)| {
-                        !condition.property.is_nil() && !conditions[..index].contains(condition)
+                        condition.valid() && !conditions[..index].contains(condition)
                     })
             }
         }
     }
 
-    fn matches(
-        &self,
-        id: Uuid,
-        name: &str,
-        values: &BTreeMap<Uuid, PropertyValue>,
-    ) -> Result<bool> {
+    fn matches(&self, repo: &Repository, values: &BTreeMap<Uuid, PropertyValue>) -> Result<bool> {
         match self {
             Self::All => Ok(true),
-            Self::Selected { ids } => Ok(ids.contains(&id)),
+            Self::Selected { ids } => Ok(ids.contains(&repo.id)),
             Self::Name { include, exclude } => {
                 let matches = |patterns: &[String]| -> Result<bool> {
                     for pattern in patterns {
-                        let pattern = Pattern::parse(pattern, Target::Tag)
-                            .ok_or(Error::Invalid("invalid saved repository pattern"))?;
-                        if pattern.matches(name, false) {
+                        if matches_name(pattern, &repo.name)? {
                             return Ok(true);
                         }
                     }
@@ -88,23 +151,30 @@ impl Repositories {
                 };
                 Ok(matches(include)? && !matches(exclude)?)
             }
-            Self::Properties { conditions } => Ok(conditions.iter().all(|condition| {
-                values
-                    .get(&condition.property)
-                    .is_some_and(|value| value.matches(&condition.value))
-                    != condition.exclude
-            })),
+            Self::Properties { conditions } => {
+                for condition in conditions {
+                    if !condition.matches(repo, values)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
         }
+    }
+
+    fn uses_custom_properties(&self) -> bool {
+        matches!(self, Self::Properties { conditions } if conditions.iter().any(|term| matches!(term, PropertyCondition::Custom(_))))
     }
 
     fn defined_by(&self, schema: &Schema) -> bool {
         let Self::Properties { conditions } = self else {
             return true;
         };
-        conditions.iter().all(|term| {
-            schema
+        conditions.iter().all(|term| match term {
+            PropertyCondition::System(_) => true,
+            PropertyCondition::Custom(term) => schema
                 .definition(term.property)
-                .is_some_and(|definition| definition.accepts_term(&term.value))
+                .is_some_and(|definition| definition.accepts_term(&term.value)),
         })
     }
 }
@@ -177,7 +247,7 @@ impl Mutation for Replace {
         if input
             .rulesets
             .iter()
-            .any(|entry| matches!(entry.repositories, Repositories::Properties { .. }))
+            .any(|entry| entry.repositories.uses_custom_properties())
         {
             let schema = properties::schema(context)?;
             if !input
@@ -261,6 +331,7 @@ pub(crate) struct Repository {
     pub id: Uuid,
     pub name: String,
     pub ownership_epoch: u32,
+    pub fork: bool,
 }
 
 pub(crate) struct Applicable;
@@ -277,7 +348,7 @@ impl Read for Applicable {
         let settings = load(context)?;
         let values = if settings.rulesets.iter().any(|entry| {
             entry.ruleset.enforcement == Enforcement::Active
-                && matches!(entry.repositories, Repositories::Properties { .. })
+                && entry.repositories.uses_custom_properties()
         }) {
             properties::effective(
                 context,
@@ -292,9 +363,7 @@ impl Read for Applicable {
         let mut rulesets = Vec::new();
         for entry in settings.rulesets {
             if entry.ruleset.enforcement == Enforcement::Active
-                && entry
-                    .repositories
-                    .matches(repository.id, &repository.name, &values)?
+                && entry.repositories.matches(&repository, &values)?
             {
                 rulesets.push(entry.ruleset);
             }

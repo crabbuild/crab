@@ -232,6 +232,50 @@ async fn private_fork_recovers_git_publication_and_uses_live_source_permissions(
         clone.path(),
     )
     .await;
+    let rule_id = Uuid::now_v7();
+    let rulesets = format!("{org}/rulesets");
+    let mut entry = json!({
+        "ruleset": {"id":rule_id,"name":"Fork branch policy","target":"branch","enforcement":"active",
+            "include":["policy/*"],"exclude":[],"restrict_creations":true,"restrict_deletions":false,
+            "require_pull_request":false,"required_approvals":0,"required_code_owner_reviews":false,
+            "required_checks":[],"required_integrations":[]},
+        "repositories":{"kind":"properties","conditions":[
+            {"system":"fork","value":true},{"system":"name","value":"*-fork"}
+        ]}
+    });
+    let save = async |version, entry| {
+        h.write(
+            Method::PUT,
+            &rulesets,
+            &alice,
+            json!({"expected_version":version,"rulesets":[entry]}),
+        )
+        .await
+    };
+    let mut invalid = entry.clone();
+    invalid["repositories"]["conditions"][0]["value"] = json!("true");
+    assert_eq!(save(0, invalid).await.status(), StatusCode::BAD_REQUEST);
+    save(0, entry.clone()).await.error_for_status().unwrap();
+    assert_eq!(
+        h.json(&format!("{fork}/rulesets"), &bob).await["inherited"]["rulesets"][0]["id"],
+        json!(rule_id)
+    );
+    assert_eq!(
+        h.json(&format!("{source}/rulesets"), &bob).await["inherited"]["rulesets"],
+        json!([])
+    );
+    let restricted = "HEAD:refs/heads/policy/candidate";
+    let blocked = git::git(local.path(), &["push", remote.as_str(), restricted]).await;
+    assert!(!blocked.status.success());
+    assert!(String::from_utf8_lossy(&blocked.stderr).contains("restricts ref creation"));
+    git::success(
+        local.path(),
+        &["push", upstream_remote.as_str(), restricted],
+    )
+    .await;
+    entry["repositories"]["conditions"][1]["value"] = json!("other-*");
+    save(1, entry).await.error_for_status().unwrap();
+    git::success(local.path(), &["push", remote.as_str(), restricted]).await;
     let compare = format!(
         "{fork}/changes?rev=refs/heads/fork-only&base=refs/heads/main&merge_base=true&upstream={id}"
     );

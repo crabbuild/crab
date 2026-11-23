@@ -214,6 +214,7 @@ pub(crate) async fn inherited_rulesets(server: &Server, repo: &Repository) -> Re
                     id: repo.id,
                     name: repo.config.name.clone(),
                     ownership_epoch: repo.ownership_epoch,
+                    fork: repo.forked_from.is_some(),
                 },
             )
             .await,

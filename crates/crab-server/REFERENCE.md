@@ -1210,11 +1210,18 @@ includes restoring defaults. Changes to a delegated value can change which
 organization rulesets apply.
 
 Select **Matching repository properties** in an organization ruleset and add
-the conditions that repositories must satisfy. Property changes and Git
-publication share the organization policy lease. Imports hold that lease
-while rechecking creation restrictions and publishing the catalog entry.
-A repository transfer starts
-a new set of explicit overrides under the destination's property definitions.
+the conditions that repositories must satisfy. Built-in **Repository type**
+matches source repositories or forks. **Repository name** matches a glob such
+as `release-*`. Combine these with custom properties in one filter. Ruleset
+checks use the cataloged repository type and name, including the reserved
+destination when an import or fork is being published. In the API, built-in
+conditions use `{"system":"fork","value":true}` or
+`{"system":"name","value":"release-*"}`. Any condition may set `exclude`.
+Upgrade serving peers together because native ruleset lookups now include the
+repository type. Property changes and Git publication share the organization
+policy lease. Imports hold that lease while rechecking creation restrictions and
+publishing the catalog entry. A repository transfer starts a new set of explicit
+overrides under the destination's property definitions.
 Organization audit events record changes to definitions and repository values.
 
 Use `GET /api/organizations/{id}/repository-properties` for the versioned

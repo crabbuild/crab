@@ -273,6 +273,14 @@ test("owners target repositories and repository admins see inherited rules as re
     .getByRole("combobox", { name: "Property", exact: true })
     .selectOption(schema.definitions[0].id);
   await page.getByLabel("Matching value").selectOption("true");
+  await page.getByRole("button", { name: "Add condition" }).click();
+  const system = page.getByRole("group", { name: "Condition 2" });
+  await system
+    .getByRole("combobox", { name: "Property", exact: true })
+    .selectOption("system:fork");
+  await system
+    .getByRole("combobox", { name: "Matching value", exact: true })
+    .selectOption("false");
   await expectNoAccessibilityViolations(page);
   await page.getByRole("button", { name: "Save ruleset" }).click();
   await expect(
@@ -280,8 +288,16 @@ test("owners target repositories and repository admins see inherited rules as re
   ).toBeVisible();
   expect(rulesets[0].repositories).toEqual({
     kind: "properties",
-    conditions: [{ property: schema.definitions[0].id, value: true }],
+    conditions: [
+      { property: schema.definitions[0].id, value: true },
+      { system: "fork", value: false },
+    ],
   });
+  await expect(
+    page.getByText("Repository type matches Source repository", {
+      exact: false,
+    }),
+  ).toBeVisible();
 
   await page.goto("/team/project/settings/rulesets");
   const inherited = page.getByRole("region", {

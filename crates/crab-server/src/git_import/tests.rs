@@ -376,7 +376,11 @@ async fn organization_import_requires_current_ownership_and_resumes_under_anothe
         &policy,
         &bob,
         json!({"expected_version":0,"rulesets":[
-            {"ruleset":rule,"repositories":{"kind":"properties","conditions":[{"property":property,"value":true}]}}
+            {"ruleset":rule,"repositories":{"kind":"properties","conditions":[
+                {"property":property,"value":true},
+                {"system":"fork","value":false},
+                {"system":"name","value":"import*"}
+            ]}}
         ]}),
     )
     .await

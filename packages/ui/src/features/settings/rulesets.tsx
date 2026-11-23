@@ -491,9 +491,13 @@ function RulesetForm({
         repositories.conditions.some(
           (condition) =>
             condition.value === null ||
-            !definitions?.some(
-              (property) => property.id === condition.property,
-            ),
+            ("system" in condition
+              ? condition.system === "fork"
+                ? typeof condition.value !== "boolean"
+                : typeof condition.value !== "string" || !condition.value.trim()
+              : !definitions?.some(
+                  (property) => property.id === condition.property,
+                )),
         )));
   const invalidBypass =
     !branch && rule.bypass_actors?.some(({ mode }) => mode === "pull_request");

@@ -1046,6 +1046,85 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
         .run(&["wait", "--text", "No repositories match this search."])
         .await;
 
+    browser
+        .run(&[
+            "open",
+            &format!("{}/-/organizations/{organization}?tab=rulesets", h.origin),
+        ])
+        .await;
+    browser.run(&["wait", "--text", "New ruleset"]).await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "New ruleset",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "label",
+            "Name",
+            "fill",
+            "Browser fork policy",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&[
+            "select",
+            "select:has(option[value='properties'])",
+            "properties",
+        ])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Add condition",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&[
+            "select",
+            "select:has(option[value='system:fork'])",
+            "system:fork",
+        ])
+        .await;
+    browser
+        .run(&[
+            "select",
+            "select:has(option[value='true']):has(option[value='false'])",
+            "true",
+        ])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Save ruleset",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", "--text", "Repository type matches Fork"])
+        .await;
+    assert_eq!(
+        h.json(&format!("{org}/rulesets"), &alice).await["rulesets"][0]["repositories"]["conditions"],
+        json!([{"system":"fork","value":true}])
+    );
+
     let team_settings = format!(
         "{}/-/organizations/{organization}?tab=teams&team={team}&view=settings",
         h.origin
