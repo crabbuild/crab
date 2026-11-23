@@ -191,7 +191,12 @@ async fn reference_menu_choices_are_scoped_native_destinations_without_account_e
         .json()
         .await
         .unwrap();
-    assert_eq!(menu["items"].as_array().unwrap().len(), 7);
+    assert!(menu["items"].as_array().unwrap().iter().any(|choice| {
+        choice["label"] == "Awaiting review from you or your team"
+            && choice["query"]
+                .as_str()
+                .is_some_and(|query| query.contains("review-requested:@me"))
+    }));
     assert_eq!(
         menu["items"][2]["query"],
         "is:open label:Bug review:approved"

@@ -50,6 +50,7 @@ enum Term {
     Assignee(String),
     Reviewer { kind: reviews::Kind, name: String },
     ReviewStatus(reviews::status::Status),
+    TeamReviewRequested(String),
     Count(counts::Filter),
     Text(String),
     Label(Vec<String>),
@@ -343,6 +344,9 @@ fn atom_expression(atom: &str) -> Result<Expression, &'static str> {
                     kind: reviews::Kind::parse(&qualifier.to_ascii_lowercase())?,
                     name: people::name(&unquote(value)?)?,
                 }
+            }
+            "team-review-requested" => {
+                Term::TeamReviewRequested(reviews::teams::name(&unquote(value)?)?)
             }
             "review" => Term::ReviewStatus(reviews::status::Status::parse(&unquote(value)?)?),
             "label" => Term::Label(label_names(value)?),

@@ -24,7 +24,7 @@ pub(super) fn requested_key(pull: u64, team: Uuid) -> String {
     format!("collaboration/v1/pulls/{pull:016x}/requested-teams/{team}")
 }
 
-pub(in crate::cells::repository::pulls) fn load_teams(
+pub(in crate::cells::repository) fn load_teams(
     context: &Transaction<'_>,
     pull: u64,
 ) -> Result<Vec<TeamRequest>> {

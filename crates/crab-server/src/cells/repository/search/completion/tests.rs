@@ -104,7 +104,7 @@ fn commenter_completion_uses_the_shared_people_path_and_keeps_utf16_ranges() {
         person_prefix(&input).unwrap(),
         Some(("commenter".into(), "@".into()))
     );
-    append_people(
+    append_qualified_values(
         &input,
         &mut result,
         "commenter",

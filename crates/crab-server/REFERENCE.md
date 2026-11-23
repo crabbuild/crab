@@ -2368,15 +2368,25 @@ Both list outputs include `assigned_to_me` for global positive self predicates;
 conditional/excluded predicates retain arbitrary-search navigation.
 
 Reviewer predicates accept public usernames or `@me`: `review-requested`,
-`reviewed-by`, `review-involves`, and `user-review-requested`. The last qualifier
-selects direct requests; team relationships are not implemented. A submitted
-review fulfills its pending direct request and remains a participant; cancellation
-without a review removes participation. Qualified issuer/subject bindings prevent
-cross-provider subject collisions. Exclusion, boolean groups, exact full counts
-and query-bound cursors use the same native predicate on mixed and PR-only lists.
-The PR workspace adds Review requests navigation from the native
-`review_requested_from_me` result flag. Negated/conditional self terms do not
-select that personal view.
+`reviewed-by`, `review-involves`, and `user-review-requested`.
+`review-requested:@me` includes outstanding requests for the teams you currently
+belong to. `user-review-requested:@me` shows direct requests. A submitted review
+fulfills its pending direct request and remains a participant. Cancellation
+without a review removes participation. Qualified issuer/subject bindings
+prevent cross-provider subject collisions.
+
+Use `team-review-requested:<repository-owner>/<team-name>` to find PRs awaiting
+review from a visible team in the repository's organization. Quote values
+containing spaces. Type `team-review-requested:` in the search box to choose
+a visible team with the qualified value filled in. A fulfilled or cancelled
+request drops out. Team visibility and roster changes invalidate affected
+continuations. Existing repositories require `cells rebuild-search` for
+discussion index format 14.
+
+Exclusion, boolean groups, exact full counts and query-bound cursors use the
+same native predicate on mixed and PR-only lists. The PR workspace selects
+Review requests navigation when the query includes a positive, global self
+predicate. Conditional and negated self terms keep search navigation.
 
 Named reviewer predicates use shared public-handle completion. The Reviews menu
 uses the status/personal destinations described below; the former unshipped
@@ -2686,8 +2696,9 @@ earlier review leave the request pending. The request sends inbox notifications
 to current members other than the requester and pull author. Activity and inbox
 lines omit team identity, so notifications can remain in users' history without
 exposing a team name after membership changes. The current limits are 100 team
-requests per PR and 256 members per team request. `review-requested:` search and
-list rollup counts still cover individual requests. Automatic reviewer
+requests per PR and 256 members per team request. The Reviews filter offers
+direct and team-aware personal queues. Team-specific search matches pending
+requests. List rollup counts cover individual requests. Automatic reviewer
 assignment remains open.
 
 ### Require code owner reviews
