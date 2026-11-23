@@ -19,7 +19,7 @@ pub(super) async fn inspect(
     });
     let range = &rows[start..];
     let range = &range[..range.partition_point(|row| row.path.as_bytes().starts_with(&prefix))];
-    let limit = if pattern.paths_only {
+    let limit = if pattern.kind == Kind::Path {
         window.results
     } else {
         window.paths
@@ -57,7 +57,7 @@ pub(super) async fn inspect(
                     invariant: "code index path disagreed with the pinned Git tree",
                 });
             }
-            if pattern.paths_only {
+            if pattern.kind == Kind::Path {
                 Ok(Inspection::Match(FileMatches {
                     path: display_path(entry.path.as_bytes()),
                     path_hex: encode_hex(entry.path.as_bytes()),
@@ -65,14 +65,15 @@ pub(super) async fn inspect(
                     more_lines: false,
                 }))
             } else {
-                file_matches(snapshot, &entry, &pattern.matcher, operation).await
+                file_matches(snapshot, &entry, pattern, operation).await
             }
         }))
         .await?;
-        if !pattern.paths_only {
+        if pattern.kind != Kind::Path {
             verified += batch.len();
         }
         for ((position, _), result) in batch.iter().zip(matches) {
+            page.skipped += usize::from(matches!(result, Inspection::Skipped));
             if let Inspection::Match(found) = result {
                 page.items.push(found);
                 if page.items.len() == window.results {
@@ -83,10 +84,14 @@ pub(super) async fn inspect(
         }
     }
     page.scanned = visited;
-    if !pattern.paths_only {
-        page.skipped = range[..visited]
+    if pattern.kind != Kind::Path {
+        page.skipped += range[..visited]
             .iter()
-            .filter(|row| row.filter.is_none())
+            .filter(|row| {
+                row.filter.is_none()
+                    && (pattern.kind != Kind::Symbol
+                        || Syntax::for_path(row.path.as_bytes()).is_some())
+            })
             .count();
     }
     let after = visited
@@ -103,10 +108,18 @@ pub(super) async fn inspect(
 }
 
 fn eligible(row: &Row, pattern: &Pattern) -> bool {
-    if pattern.paths_only {
+    if pattern.kind == Kind::Path {
         return pattern.matcher.is_match(&display_path(row.path.as_bytes()));
     }
-    row.filter.as_ref().is_some_and(|mask| {
+    if pattern.kind == Kind::Symbol && Syntax::for_path(row.path.as_bytes()).is_none() {
+        return false;
+    }
+    let filter = if pattern.kind == Kind::Symbol {
+        row.symbols.as_deref().or(row.filter.as_ref())
+    } else {
+        row.filter.as_ref()
+    };
+    filter.is_some_and(|mask| {
         pattern
             .mask
             .as_ref()

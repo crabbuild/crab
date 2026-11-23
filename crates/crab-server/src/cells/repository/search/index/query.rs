@@ -45,6 +45,8 @@ pub(crate) struct SearchInput {
     pub people: Vec<super::super::people::Binding>,
     pub assignees: Vec<super::super::assignees::Binding>,
     pub review_context: Option<super::super::reviews::status::Context>,
+    #[serde(default)]
+    pub review_teams: super::super::reviews::teams::Bindings,
 }
 impl Default for SearchInput {
     fn default() -> Self {
@@ -57,6 +59,7 @@ impl Default for SearchInput {
             people: Vec::new(),
             assignees: Vec::new(),
             review_context: None,
+            review_teams: Default::default(),
         }
     }
 }
@@ -170,12 +173,12 @@ struct Candidate {
     metrics: Metrics,
 }
 
-#[derive(Default)]
 struct Bindings<'a> {
     values: Vec<SqlValue>,
     people: &'a [super::super::people::Binding],
     assignees: &'a [super::super::assignees::Binding],
     review: Option<super::super::reviews::status::Bound>,
+    review_teams: &'a super::super::reviews::teams::Bindings,
 }
 impl<'a> Bindings<'a> {
     fn new(
@@ -185,7 +188,9 @@ impl<'a> Bindings<'a> {
         let mut values = Self {
             people: &input.people,
             assignees: &input.assignees,
-            ..Self::default()
+            review: None,
+            values: Vec::new(),
+            review_teams: &input.review_teams,
         };
         if let Some(prepared) = prepared {
             values.review = Some(super::super::reviews::status::Bound::new(
@@ -241,6 +246,10 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
     query
         .validate_assignees(&input.assignees)
         .map_err(crate::cells::Error::Invalid)?;
+    input
+        .review_teams
+        .validate(&query)
+        .map_err(crate::cells::Error::Invalid)?;
     let identity = context.sql(&SqlBatch {
         statements: vec![statement(
             "SELECT repository_uuid FROM repository_identity WHERE singleton = 1",
@@ -265,6 +274,7 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         &input.people,
         &input.assignees,
         &input.review_context,
+        &input.review_teams,
         review.as_ref().map(|prepared| &prepared.approvals),
     ))?)
     .to_hex()
@@ -531,10 +541,28 @@ fn scoped_expression(
             Term::ReviewStatus(super::super::reviews::status::Status::None) => super::super::reviews::status::UNREVIEWED.into(),
             Term::ReviewStatus(super::super::reviews::status::Status::ChangesRequested) => super::super::reviews::status::CHANGES_REQUESTED.into(),
             Term::ReviewStatus(status)=> bindings.review.as_ref().ok_or(crate::cells::Error::Invalid("Review source was not bound"))?.predicate(*status),
-            Term::Reviewer { kind, name } => bindings.person(name).map_or_else(|| "0".into(), |value| {
-                let predicate = kind.predicate();
-                format!("d.kind = 1 AND EXISTS (SELECT 1 FROM discussion_index_reviewers r WHERE r.pull = d.number AND r.identity = {value} AND ({predicate}))")
-            }),
+            Term::Reviewer { kind, name } => {
+                use super::super::reviews::Kind;
+                let direct = bindings.person(name).map_or_else(|| "0".into(), |value| {
+                    let predicate = kind.predicate();
+                    format!("d.kind = 1 AND EXISTS (SELECT 1 FROM discussion_index_reviewers r WHERE r.pull = d.number AND r.identity = {value} AND ({predicate}))")
+                });
+                if *kind == Kind::ReviewRequested && name == "@me" && !bindings.review_teams.mine.is_empty() {
+                    let teams = bindings.text(&serde_json::to_string(&bindings.review_teams.mine)?);
+                    let team = format!("EXISTS (SELECT 1 FROM discussion_index_team_requests t WHERE t.document=d.rowid AND t.team IN (SELECT value FROM json_each({teams})))");
+                    format!("(({direct}) OR (d.kind=1 AND {team}))")
+                } else {
+                    direct
+                }
+            }
+            Term::TeamReviewRequested(name) => {
+                if let Some(team) = bindings.review_teams.named(name) {
+                    let value = bindings.text(&team.to_string());
+                    format!("d.kind=1 AND EXISTS (SELECT 1 FROM discussion_index_team_requests t WHERE t.document=d.rowid AND t.team={value})")
+                } else {
+                    "0".into()
+                }
+            }
             Term::Milestone(title) => {
                 let value = bindings.text(title);
                 format!("EXISTS (SELECT 1 FROM discussion_index_milestones dm JOIN discussion_index_milestone_catalog m ON m.number = dm.milestone WHERE dm.document = d.rowid AND m.title_key = {value})")

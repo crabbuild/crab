@@ -26,3 +26,5 @@ client_id = "crab-browser"
 public_url = "https://git.example.com"
 client_secret_file = "/run/secrets/crab-oidc-client-secret"
 state_key_file = "/run/secrets/crab-state-key"
+# Require SCIM User provisioning for this issuer before sign-in.
+# scim_token_file = "/run/secrets/crab-scim-token"

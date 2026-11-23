@@ -1,6 +1,7 @@
 //! Optional search acceleration for one verified default-branch tree.
 
 mod format;
+pub(crate) mod symbols;
 pub(crate) use format::{Index, Mask, Row};
 
 use bytes::Bytes;
@@ -22,7 +23,7 @@ use uuid::Uuid;
 use super::Repository;
 use crate::server::Server;
 
-const PATH: &str = "v2/derived/code-search-v1";
+const PATH: &str = "v2/derived/code-search-v2";
 const MAX_FILE_BYTES: u64 = 256 * 1024;
 const BUILD_PAGE: usize = 96;
 const BUILD_CONCURRENCY: usize = 8;
@@ -217,10 +218,17 @@ async fn build(
         .and_then(|index| index.rows.as_ref())
         .into_iter()
         .flatten()
-        .map(|row| (row.oid, &row.filter))
+        // The parser depends on the extension even when a rename keeps the same blob.
+        .map(|row| {
+            (
+                (row.oid, symbols::Syntax::for_path(row.path.as_bytes())),
+                row,
+            )
+        })
         .collect();
     let tree = snapshot.root_tree_oid();
     let mut size = format::OVERHEAD;
+    let mut row_weight = 0;
     let mut after = None;
     let mut rows = Vec::new();
     loop {
@@ -242,13 +250,14 @@ async fn build(
                             invariant: "ungrouped code index received a grouped path",
                         });
                     };
-                    let data = match previous.get(&entry.oid) {
-                        Some(filter) => BuildData::Reused((*filter).clone()),
+                    let syntax = symbols::Syntax::for_path(entry.path.as_bytes());
+                    let data = match previous.get(&(entry.oid, syntax)) {
+                        Some(row) => BuildData::Reused(row.filter.clone(), row.symbols.clone()),
                         None => BuildData::Text(
                             text(snapshot, &entry.path, entry.oid, &operation).await?,
                         ),
                     };
-                    Ok((entry.path.clone(), entry.oid, data))
+                    Ok((entry.path.clone(), entry.oid, syntax, data))
                 }))
                 .await?;
                 batch.extend(found);
@@ -257,24 +266,41 @@ async fn build(
         }
         .await;
         let (batch, more) = operation.finish(page).await?;
+        let parse_cancel = cancel.clone();
         let page = tokio::task::spawn_blocking(move || {
             batch
                 .into_iter()
-                .map(|(path, oid, data)| Row {
-                    path,
-                    oid,
-                    filter: match data {
-                        BuildData::Reused(filter) => filter,
-                        BuildData::Text(text) => text.as_deref().map(Mask::from_text),
-                    },
+                .map(|(path, oid, syntax, data)| {
+                    let (filter, symbols) = match data {
+                        BuildData::Reused(filter, symbols) => (filter, symbols),
+                        BuildData::Text(text) => {
+                            let filter = text.as_deref().map(Mask::from_text);
+                            let symbols = syntax.zip(text.as_deref()).and_then(|(syntax, text)| {
+                                symbols::definitions(syntax, text, &parse_cancel).map(|defs| {
+                                    let mut filter = Mask::from_text("");
+                                    for definition in defs {
+                                        filter.insert(&text[definition.bytes]);
+                                    }
+                                    Box::new(filter)
+                                })
+                            });
+                            (filter, symbols)
+                        }
+                    };
+                    Row {
+                        path,
+                        oid,
+                        filter,
+                        symbols,
+                    }
                 })
                 .collect::<Vec<_>>()
         })
         .await?;
         size += page.iter().map(Row::encoded_size).sum::<usize>();
-        if size > MAX_INDEX_BYTES
-            || size + (rows.len() + page.len()) * size_of::<Row>() > CACHE_BYTES
-        {
+        row_weight += page.len() * size_of::<Row>()
+            + page.iter().filter(|row| row.symbols.is_some()).count() * size_of::<Mask>();
+        if size > MAX_INDEX_BYTES || size + row_weight > CACHE_BYTES {
             return Ok(Index::new(tree, None, format::OVERHEAD));
         }
         after = page
@@ -291,7 +317,7 @@ async fn build(
 }
 
 enum BuildData {
-    Reused(Option<Mask>),
+    Reused(Option<Mask>, Option<Box<Mask>>),
     Text(Option<String>),
 }
 

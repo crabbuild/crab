@@ -13,6 +13,7 @@ const choices = [
   ["Reviewed by you", "is:open reviewed-by:@me"],
   ["Not reviewed by you", "is:open -reviewed-by:@me"],
   ["Awaiting review from you", "is:open user-review-requested:@me"],
+  ["Awaiting review from you or your team", "is:open review-requested:@me"],
 ] as const;
 async function fixture(page: Page) {
   await mockPullRequest(page);
@@ -91,11 +92,16 @@ test("the reference review menu uses native destinations and preserves navigatio
     await expect(
       menu.getByRole("menuitemradio", { name: label, exact: true }),
     ).toBeVisible();
-  await expect(
-    menu.getByRole("menuitemradio", {
-      name: /Awaiting review from you or your team/,
-    }),
-  ).toBeDisabled();
+  await menu
+    .getByRole("menuitemradio", {
+      name: "Awaiting review from you or your team",
+      exact: true,
+    })
+    .click();
+  await expect
+    .poll(() => new URL(page.url()).searchParams.get("q"))
+    .toBe("is:open review-requested:@me");
+  await trigger.click();
   await menu
     .getByRole("menuitemradio", { name: "Approved review", exact: true })
     .click();

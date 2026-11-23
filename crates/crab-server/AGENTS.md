@@ -23,7 +23,10 @@ and migration limitations.
    stores versioned digests and expiry. Authentication verifies each transport
    request before binding the principal to that repository UUID.
    `auth/accounts.rs` owns durable suspension revisions, with mutations exposed
-   only through private `server/management/accounts.rs` and the `accounts` CLI.
+   through private `server/management/accounts.rs` and the `accounts` CLI.
+   `auth/scim/` owns the bearer-only user directory and its durable pending
+   change. Reconciliation applies managed state through the same account
+   revision authority while preserving independent operator holds.
 5. `crates/crab-server/src/git/receive/mod.rs` — `receive / publish_objects`: bounded native receive and publication orchestration.
 
 Trace one path: `crates/crab-server/src/main.rs` → `src/cli/mod.rs` → `serve` in
@@ -67,6 +70,11 @@ merge admission and publication under the per-PR merge lease. FIFO queue
 entries share this worker. The Cell assigns order per target branch, admits
 tests within the configured build window, and guards merge reservation for
 the first entry. `auto_merge/queue.rs` reconciles candidate checks and retries.
+An administrator's priority change advances the branch queue's order
+revision in the same Cell transaction as the move. Candidate sources, CI
+admission, and begin-merge compare that revision so a stale worker cannot
+publish or remove an entry for a superseded order. A pending publication
+prevents reordering until it settles.
 Classic branch protection and active branch rulesets can require queues.
 Classic transitions share the branch ref lease with publication. Ruleset
 settings and final branch publication share a repository or organization
@@ -125,7 +133,10 @@ and personal-view selection. `search/contributions/` owns per-contribution quali
 identities, text/FTS maintenance, canonical deletion triggers and bounded five-source rebuilding;
 `search/text/` owns field scopes, text predicates and relevance SQL;
 `search/reviews/` owns reviewer predicates, transactional
-review/request projections and bounded rebuild source cursors. Its `status/`
+review/request projections and bounded rebuild source cursors. Team predicates
+project pending PR requests under the same index generation and use current,
+viewer-scoped organization bindings from `api/discussion_search/review_teams.rs`.
+Its `status/`
 owner binds source epochs and effective branch rules for repository-wide review
 status predicates and grammar-preserving menu choices; tests stay beside it.
 `search/assignees/` owns stable-ID predicates, resolved binding validation,
@@ -311,8 +322,11 @@ and session migration paths are supported.
   Workspace search reuses the catalog's current grants and the same bounded
   Git scans. Its cursor also binds the actor and readable repository scope.
   `repository/code_index/` publishes the bounded, checksummed default-tree
-  artifact through the background lifecycle. It stores paths and filters,
-  and the HTTP owner verifies selected matches against the pinned Git tree.
+  artifact through the background lifecycle. It stores paths and separate text
+  and definition filters. Search verifies candidates against the pinned Git tree
+  and reparses definition locations using `code_index/symbols.rs`. Reuse filters
+  by blob and parsing language. Change the artifact version if parser upgrades
+  change which definitions the filters can rule out.
   Missing or stale derived data leaves the authorized Git scan available.
 - `api/contracts.rs` exports the public identity/access/organization/team wire
   types to `packages/ui/src/lib/contracts.ts` during tests. Update the actual

@@ -548,13 +548,14 @@ best ancestor and asks the author to resolve more complex histories in Git.
 
 ### Search repository code
 
-**Search code** matches literal UTF-8 text in one repository. Select a branch,
-tag, or full commit, optionally restrict the search to an exact directory,
-and select **Match case** when needed. Each excerpt links to its file and line
-at the commit searched.
+**Search code** can find file contents, file paths, or symbol definitions in
+one repository. Select a branch, tag, or full commit, optionally restrict the
+search to an exact directory, and select **Match case** when needed. Each
+excerpt links to its file and line at the commit searched.
 
 `GET /api/repos/{owner}/{name}/code-search` takes `q`, optional `rev`, an
-optional directory `path`, `case_sensitive` (default `false`), `limit`
+optional directory `path`, `kind=content|path|symbol` (default `content`),
+`case_sensitive` (default `false`), `limit`
 (1–40 matching files, default 20), and an opaque `cursor`. It returns
 `{commit, items, scanned, skipped, next}`. Each file carries `path`,
 `path_hex`, `more_lines`, and up to six excerpts with `line`, `before`,
@@ -563,39 +564,46 @@ to continue. A cursor binds the repository UUID, commit, and search filters.
 Subsequent pages use the pinned commit even if the selected branch advances.
 Every request checks current repository access before returning any matches.
 
-Each page inspects up to 128 blobs in canonical path order. Large blobs above
-256 KiB, binary and invalid UTF-8 data, and separately stored Crab or LFS
-content are counted as skipped. An empty page may have a continuation.
-The browser reports scanned and skipped counts and keeps earlier results
-visible when a continuation needs to be retried. This search uses the
-verified snapshot reader and bulk read budgets. It scans eligible blobs on
-demand.
+Each page scans up to 128 files in canonical path order. Indexed symbol search
+can consider all indexed paths and opens up to 128 candidates. Large blobs
+above 256 KiB, binary or invalid UTF-8 data, separately stored Crab or LFS
+content, and files beyond the parser budget are counted as skipped for modes
+that read content. Empty pages can have a continuation. The browser retains
+earlier results when a continuation needs to be retried.
+
+**Symbols** matches literal text within definition names captured by the
+Tree-sitter grammars for C, C++, Go, Java, JavaScript, Python, Rust, and
+TypeScript, including TSX. Pick a result to open the definition at the pinned
+line. Definitions follow the grammar's tag queries and exclude references
+and plain text mentions. Unsupported file extensions are outside this mode's
+scope. [GitHub symbol search](https://docs.github.com/en/search-github/github-code-search/understanding-github-code-search-syntax#symbol-qualifier)
 
 ### Search across repositories
 
 Open **Search code** from the global header, or **Search organization code**
-from an organization's repository list. Search file contents or paths on
+from an organization's repository list. Search file contents, paths, or definitions on
 default branches. Use an exact directory and **Match case** to narrow the
 scan. Results name the repository and link to the exact Git commit, file,
 and matching line.
 
 `GET /api/code-search` takes `q`, optional `organization` UUID and
-`directory`, `kind=content|path` (default `content`), `case_sensitive`,
+`directory`, `kind=content|path|symbol` (default `content`), `case_sensitive`,
 and `cursor`. It returns `groups`, `scanned` paths, `skipped` files,
 `verified` content candidates checked against Git, and `next`. Groups carry
 `id`, `owner`, `name`, `commit`, and matching `files`. Path matches use
 the Git tree and have no excerpts. Each page examines up to four repositories
 and returns up to 20 matching files. A Git scan considers up to 32 paths per
-repository. An indexed content search can consider all indexed paths and checks
-up to 32 content candidates per repository. Follow `next` with the same
+repository. An indexed content or symbol search can consider all indexed paths
+and checks up to 32 candidates per repository. Follow `next` with the same
 parameters, including after an empty page. A repository in progress keeps
 the same commit until its scan finishes.
 
 The server builds a default-branch index in the background and keeps one
 published artifact per repository in object storage. It contains paths and
-trigram filters. An index answers only for its exact Git tree. Crab checks
-returned paths and text against Git and reuses unchanged blob filters after
-an update. Short literals and Unicode case-folding cases that the filter
+separate trigram filters for file text and supported definition names. An
+index answers only for its exact Git tree. Crab verifies returned paths, text,
+and definition locations against Git. It reuses unchanged blobs' filters when
+their parsing language is unchanged. Short literals and Unicode case-folding cases that the filter
 cannot rule out remain candidates. The page reports `indexed_repositories`,
 `scanning_repositories`, and `limited_repositories`. Crab scans Git while a
 matching index is unavailable or exceeds the artifact or memory limit.
@@ -603,8 +611,8 @@ matching index is unavailable or exceeds the artifact or memory limit.
 Search considers current readable repositories and checks them again before
 returning excerpts or a cursor. A continuation binds the account, filters,
 and readable repository set. A grant or address change in that scope returns
-HTTP 409, and **Start over** opens a new search. Persistent symbol definitions
-and large-catalog performance qualification remain open.
+HTTP 409, and **Start over** opens a new search. Representative large-catalog
+performance qualification remains open.
 
 ### Create a repository in the browser
 
@@ -1360,12 +1368,13 @@ Open the organization’s **People** page and select **View repository access**
 for a current member. Organization owners can see the member's highest
 configured role from direct grants, active teams, and organization ownership.
 Fork rows identify the source of the grants. The view shows separately when
-sign-in is blocked for the account. Where a signed SSO claim could add access,
+sign-in and user Git credentials are blocked, and when the identity provider
+manages the account. Where a signed SSO claim could add access,
 the row shows the highest configured SSO role. Git credentials can have a
 lower scope than the account's role.
 
 `GET /api/organizations/{id}/members/{actor}/repository-access` returns
-`{account, items, next}`. Pass its opaque `next` as `after` to continue.
+`{account, managed, items, next}`. Pass its opaque `next` as `after` to continue.
 `limit` accepts 1–50 and defaults to 30. The continuation binds the requesting
 owner, inspected member, catalog revision, current teams and account
 suspension version. Reload from the first page after a change. The response
@@ -1465,6 +1474,49 @@ its marker. Sessions and derived Git tokens issued before a change in account
 revision stay invalid after reactivation. See [the operations runbook](deploy/operations.md#manage-membership-and-sessions).
 
 `GET /api/session` returns the current account and CSRF token to the same-origin frontend. Anonymous repository APIs return HTTP 401. No cloud credential reaches the browser.
+
+### Provision users with SCIM
+
+Crab can require SCIM provisioning for the configured OIDC issuer. Upgrade
+all serving replicas before enabling it. Mount the same operator-owned bearer
+token file on each replica and configure it under `[auth]`.
+
+```toml
+scim_token_file = "/run/secrets/crab-scim-token"
+```
+
+Use a dedicated, randomly generated token of 32–512 visible ASCII characters.
+Enter the HTTPS server URL ending in `/scim/v2` and the token in the identity
+provider. Map SCIM `externalId` to the exact, case-sensitive `sub` the provider
+signs for this OIDC application. `userName`, email, and display name are
+profile fields. Obtain the mapping from the provider before enabling the
+integration. Provision the operator or organization owner before their next
+sign-in. Enabling this setting blocks sign-in and use of session-bound Git
+tokens for unprovisioned identities. Restart the serving replicas to change
+the token. Protect the token as a server-wide account lifecycle credential.
+
+Crab supports User creation, retrieval, replacement, patch, deletion, and
+paged discovery with `userName eq` and `externalId eq` filters. The
+case-insensitive username is unique among current User resources.
+Changes can send the last returned ETag in `If-Match`. Use
+`PATCH active=false` to disable a user while keeping the resource visible to
+the provider. `DELETE` hides the User and retains its identity binding so a
+later create for the same subject can reuse its ID. The last profile remains
+in operator-owned storage. The directory holds up to 4,096 subjects and
+8 MiB, including deleted users.
+Deployment operators should qualify their IdP’s attribute mappings and
+operations before enrolling production users. Team and organization role
+assignment stay with Crab’s existing membership and signed OIDC group rules.
+
+A successful deactivation applies to the next browser or user Git
+authorization. Reactivation requires a fresh sign-in and a new Git token.
+Independent operator holds remain in effect after SCIM reactivation.
+Disabling the SCIM endpoint preserves previously recorded provider holds. A
+transient failure can happen after the change is recorded. The next User
+request reconciles any such change before answering. After an uncertain
+create, look up the exact `externalId` before retrying. After an uncertain
+update, read the User and use its current ETag. For the protocol contract see
+[SCIM Protocol (RFC 7644)](https://www.rfc-editor.org/rfc/rfc7644.html).
 
 ## Git HTTP reads
 
@@ -2316,15 +2368,25 @@ Both list outputs include `assigned_to_me` for global positive self predicates;
 conditional/excluded predicates retain arbitrary-search navigation.
 
 Reviewer predicates accept public usernames or `@me`: `review-requested`,
-`reviewed-by`, `review-involves`, and `user-review-requested`. The last qualifier
-selects direct requests; team relationships are not implemented. A submitted
-review fulfills its pending direct request and remains a participant; cancellation
-without a review removes participation. Qualified issuer/subject bindings prevent
-cross-provider subject collisions. Exclusion, boolean groups, exact full counts
-and query-bound cursors use the same native predicate on mixed and PR-only lists.
-The PR workspace adds Review requests navigation from the native
-`review_requested_from_me` result flag. Negated/conditional self terms do not
-select that personal view.
+`reviewed-by`, `review-involves`, and `user-review-requested`.
+`review-requested:@me` includes outstanding requests for the teams you currently
+belong to. `user-review-requested:@me` shows direct requests. A submitted review
+fulfills its pending direct request and remains a participant. Cancellation
+without a review removes participation. Qualified issuer/subject bindings
+prevent cross-provider subject collisions.
+
+Use `team-review-requested:<repository-owner>/<team-name>` to find PRs awaiting
+review from a visible team in the repository's organization. Quote values
+containing spaces. Type `team-review-requested:` in the search box to choose
+a visible team with the qualified value filled in. A fulfilled or cancelled
+request drops out. Team visibility and roster changes invalidate affected
+continuations. Existing repositories require `cells rebuild-search` for
+discussion index format 14.
+
+Exclusion, boolean groups, exact full counts and query-bound cursors use the
+same native predicate on mixed and PR-only lists. The PR workspace selects
+Review requests navigation when the query includes a positive, global self
+predicate. Conditional and negated self terms keep search navigation.
 
 Named reviewer predicates use shared public-handle completion. The Reviews menu
 uses the status/personal destinations described below; the former unshipped
@@ -2634,8 +2696,9 @@ earlier review leave the request pending. The request sends inbox notifications
 to current members other than the requester and pull author. Activity and inbox
 lines omit team identity, so notifications can remain in users' history without
 exposing a team name after membership changes. The current limits are 100 team
-requests per PR and 256 members per team request. `review-requested:` search and
-list rollup counts still cover individual requests. Automatic reviewer
+requests per PR and 256 members per team request. The Reviews filter offers
+direct and team-aware personal queues. Team-specific search matches pending
+requests. List rollup counts cover individual requests. Automatic reviewer
 assignment remains open.
 
 ### Automatically assign team reviews
@@ -3494,6 +3557,28 @@ minutes. For a candidate that includes earlier entries, Crab evaluates failures
 against the live base when the entry reaches the front. PR authors and writers
 can remove an entry before publication is
 pending. A PR in the queue can only merge through the queue.
+
+Open **Pull requests → Merge queue** or follow **View merge queue** from a
+queued PR to see the entries for one target branch in merge order. The queue
+shows the requested head, whether a candidate is scheduled, and whether
+publication is pending. Open **Candidate checks** for the current result and
+tested commit. Readers can inspect the queue. Writers and PR authors can
+remove an entry by its exact request before publication is pending.
+Repository admins can select **Move to front** for an urgent pull request.
+Crab keeps the entry and its recorded requester and rebuilds candidates for
+the reordered branch. Checks on earlier candidate commits cannot satisfy the
+new order. Once the front entry has begun publication, the queue accepts
+priority changes again after that publication finishes.
+
+`PUT /api/repos/{owner}/{name}/pulls/{number}/merge-queue/priority` accepts
+`queue_id` from the queue row and a new UUID as `request_id`. Retrying the
+same accepted request returns its acknowledgement without moving the entry
+a second time. The pull request conversation records the move.
+
+`GET /api/repos/{owner}/{name}/pulls/queue` takes the full target ref as
+`branch` (for example, `refs/heads/main`). Pass the returned `next` cursor
+as `before` to continue on the same branch. Completed and removed requests
+leave the queue.
 
 The settings `PUT` accepts optional `merge_queue` (boolean),
 `merge_queue_method` (`merge_commit`, `squash`, or `rebase`),

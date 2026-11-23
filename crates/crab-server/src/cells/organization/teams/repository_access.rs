@@ -2,7 +2,7 @@ use super::*;
 use crate::catalog::MAX_TEAM_GRANTS;
 use std::collections::BTreeMap;
 
-const MAX_TEAM_ACCESS_ROWS: usize = 4096;
+pub(crate) const MAX_TEAM_ACCESS_ROWS: usize = 4096;
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -58,6 +58,66 @@ impl Read for RepositoryTeamsForActor {
             teams,
             bypass_teams,
         })
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReviewTeamQuery {
+    pub actor: Uuid,
+    pub names: Vec<String>,
+    pub include_mine: bool,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReviewTeams {
+    pub named: Vec<Option<Uuid>>,
+    pub mine: Vec<Uuid>,
+}
+
+pub(crate) struct ResolveReviewTeams;
+impl Read for ResolveReviewTeams {
+    const CLASS: &'static str = super::super::CLASS;
+    const ID: u32 = 49;
+    type Input = ReviewTeamQuery;
+    type Output = ReviewTeams;
+
+    fn execute(context: &mut Transaction<'_>, input: ReviewTeamQuery) -> Result<ReviewTeams> {
+        if input.names.len() > 64
+            || input.names.iter().any(|name| {
+                name.is_empty() || name.len() > 400 || name.chars().any(char::is_control)
+            })
+        {
+            return Err(Error::Invalid("Invalid review team names"));
+        }
+        let mut named = Vec::with_capacity(input.names.len());
+        for name in input.names {
+            let rows = context.query(
+                "SELECT id FROM organization_teams WHERE name_key=? AND deleted_at_ms IS NULL",
+                &[SqlValue::Text(name)],
+            )?;
+            let id = match rows.rows.first().map(Vec::as_slice) {
+                Some([id]) => Some(uuid(id)?),
+                None => None,
+                _ => return Err(Error::Invalid("Invalid review team result")),
+            };
+            let visible = id
+                .map(|id| view(context, input.actor, id))
+                .transpose()?
+                .flatten();
+            named.push(visible.map(|team| team.team.id));
+        }
+        let mut mine = Vec::new();
+        if input.include_mine {
+            for row in active_team_rows(context, input.actor, false)? {
+                let [team, _, _] = row.as_slice() else {
+                    return Err(Error::Invalid("Invalid review team membership"));
+                };
+                mine.push(uuid(team)?);
+            }
+        }
+        Ok(ReviewTeams { named, mine })
     }
 }
 

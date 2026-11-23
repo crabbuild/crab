@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use axum::{
     Extension, Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     routing::get,
 };
 use serde::Deserialize;
@@ -32,10 +32,93 @@ const TTL: Duration = Duration::from_secs(300);
 type Address = (String, String, u64);
 
 pub(super) fn routes() -> Router<Arc<Server>> {
-    Router::new().route(
-        "/api/repos/{owner}/{name}/pulls/{number}/auto-merge",
-        get(detail).put(enable).delete(disable),
+    Router::new()
+        .route("/api/repos/{owner}/{name}/pulls/queue", get(list_queue))
+        .route(
+            "/api/repos/{owner}/{name}/pulls/{number}/merge-queue/priority",
+            axum::routing::put(prioritize),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/pulls/{number}/auto-merge",
+            get(detail).put(enable).delete(disable),
+        )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueueQuery {
+    branch: String,
+    before: Option<String>,
+}
+
+async fn list_queue(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name)): Path<(String, String)>,
+    Query(input): Query<QueueQuery>,
+) -> Result<Json<cell::list::Page>> {
+    let repo = app::repository(&server, &principal, &(owner, name))?;
+    let access = app::membership(&server, &principal, &repo).await?;
+    let routed = app::repository_cell(&server, &repo)?;
+    let page = app::query_output(
+        routed
+            .client
+            .query::<cell::list::List>(
+                &routed.target,
+                None,
+                cell::list::Query {
+                    branch: input.branch,
+                    before: input.before,
+                    actor: (&app::actor(&principal)?).into(),
+                    can_write: access.principal.can_write(repo.id),
+                    can_admin: access.principal.can_admin(repo.id),
+                },
+            )
+            .await,
+    )?;
+    app::membership(&server, &principal, &repo).await?;
+    Ok(Json(page))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PriorityInput {
+    request_id: Uuid,
+    queue_id: Uuid,
+}
+
+async fn prioritize(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name, number)): Path<Address>,
+    Json(input): Json<PriorityInput>,
+) -> Result<Json<Value>> {
+    let repo = app::repository(&server, &principal, &(owner, name))?;
+    let pull = storage::pull(&server, &repo, app::number(number)?)
+        .await?
+        .ok_or(Error::NotFound)?;
+    let policy = settings::queue_policy(&server, &repo, &pull.base_ref).await?;
+    if !app::membership(&server, &principal, &repo)
+        .await?
+        .principal
+        .can_admin(repo.id)
+    {
+        return Err(Error::Forbidden);
+    }
+    change(
+        &server,
+        &repo,
+        Change::Prioritize(cell::Priority {
+            pull: number,
+            id: input.queue_id,
+            request_id: input.request_id,
+            actor: (&app::actor(&principal)?).into(),
+            configured_queue_required: settings::configured_queue_required(&repo, &pull.base_ref),
+            ruleset_queue_required: policy.ruleset,
+        }),
     )
+    .await?;
+    Ok(Json(json!({ "request_id": input.request_id })))
 }
 
 #[derive(Deserialize)]
@@ -134,7 +217,8 @@ async fn view(
         "request": state.map(|state| json!({"request_id": state.job.id, "method": state.job.method,
             "head_oid": state.job.head_oid, "scheduled_by": state.job.actor.name, "stopped": state.stopped,
             "queue": state.job.queue.is_some(), "first": state.first,
-            "testing": state.ahead.is_some() && state.job.queue.and_then(|queue| queue.testing).is_some()})),
+            "testing": state.ahead.is_some() && state.job.queue.and_then(|queue| queue.testing)
+                .is_some_and(|attempt| attempt.order_revision == state.order_revision)})),
     })))
 }
 
@@ -325,7 +409,17 @@ where
 }
 
 async fn stop(server: &Server, repo: &Repository, pull: u64, id: Uuid, reason: Stop) -> Result<()> {
-    change(server, repo, Change::Disarm { pull, id, reason }).await
+    change(
+        server,
+        repo,
+        Change::Disarm {
+            pull,
+            id,
+            reason,
+            front_revision: None,
+        },
+    )
+    .await
 }
 
 async fn durable_principal(
@@ -343,13 +437,19 @@ async fn durable_principal(
     }
 }
 
-fn matches_attempt(job: &Job, pending: &PullMerge) -> bool {
+fn matches_attempt(state: &cell::State, pending: &PullMerge) -> bool {
+    let job = &state.job;
     let tested = pending
         .tested_candidate
         .then_some(pending.commit_oid.as_str());
     pending.request_id
         == job
-            .publication_id(pending.pull_version, &pending.base_oid, tested)
+            .publication_id(
+                pending.pull_version,
+                &pending.base_oid,
+                tested,
+                state.order_revision,
+            )
             .to_string()
         && pending.head_oid == job.head_oid
         && pending.method == job.method
@@ -414,7 +514,7 @@ pub(super) async fn authorize(
         .filter(|state| {
             state.stopped.is_none()
                 && (state.job.queue.is_none() || state.first)
-                && matches_attempt(&state.job, pending)
+                && matches_attempt(state, pending)
         })
         .ok_or(Error::AutoMergeDisabled)?;
     let (settings, queue_required) = tokio::try_join!(

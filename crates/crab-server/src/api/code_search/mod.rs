@@ -13,6 +13,7 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
+use code_index::symbols::Syntax;
 use crab_remote_git::{
     EntryKind, Error, GitPath, OperationContext, OperationKind, RemoteGitSnapshot, Revision,
     TreeListingItem, TreeListingRequest,
@@ -20,7 +21,7 @@ use crab_remote_git::{
 use gix_hash::ObjectId;
 use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
-use std::{sync::Arc, time::Duration};
+use std::{ops::Range, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -33,6 +34,15 @@ const MAX_MATCH_LINES: usize = 6;
 const MAX_CURSOR_PATH: usize = 8 * 1024;
 const CURSOR_HEADER: usize = 20 + 32;
 
+#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Kind {
+    #[default]
+    Content,
+    Path,
+    Symbol,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Parameters {
@@ -41,6 +51,8 @@ pub(super) struct Parameters {
     path: Option<String>,
     #[serde(default)]
     case_sensitive: bool,
+    #[serde(default)]
+    kind: Kind,
     cursor: Option<String>,
     limit: Option<usize>,
 }
@@ -86,10 +98,16 @@ pub(super) async fn search(
     if !(1..=40).contains(&limit) {
         return Err(ApiError::Input("limit must be between 1 and 40").into_response());
     }
-    let pattern = Pattern::new(terms, path, params.case_sensitive, false)
+    let pattern = Pattern::new(terms, path, params.case_sensitive, params.kind)
         .map_err(IntoResponse::into_response)?;
-    let context = serde_json::to_vec(&(terms, params.rev.as_deref(), path, params.case_sensitive))
-        .map_err(|error| ApiError::Json(error).into_response())?;
+    let context = serde_json::to_vec(&(
+        terms,
+        params.rev.as_deref(),
+        path,
+        params.case_sensitive,
+        params.kind,
+    ))
+    .map_err(|error| ApiError::Json(error).into_response())?;
     let fingerprint = blake3::hash(&context);
     let tokens = Tokens {
         key: &server.cursor_key,
@@ -113,7 +131,7 @@ pub(super) async fn search(
             paths: PAGE_ENTRIES,
             results: limit,
             duration: Duration::from_secs(20),
-            use_index: false,
+            use_index: params.kind == Kind::Symbol,
         },
         &cancellation,
     )
@@ -150,18 +168,13 @@ fn acquire(server: &Server) -> std::result::Result<read_admission::Admission, Re
 struct Pattern {
     matcher: Regex,
     directory: GitPath,
-    paths_only: bool,
+    kind: Kind,
     case_sensitive: bool,
     mask: Option<code_index::Mask>,
 }
 
 impl Pattern {
-    fn new(
-        terms: &str,
-        path: &str,
-        case_sensitive: bool,
-        paths_only: bool,
-    ) -> Result<Self, ApiError> {
+    fn new(terms: &str, path: &str, case_sensitive: bool, kind: Kind) -> Result<Self, ApiError> {
         if terms.is_empty() || terms.chars().count() > 128 || terms.chars().any(char::is_control) {
             return Err(ApiError::Input("Enter 1–128 characters to search for"));
         }
@@ -179,7 +192,7 @@ impl Pattern {
         Ok(Self {
             matcher,
             directory,
-            paths_only,
+            kind,
             case_sensitive,
             mask: code_index::Mask::query(terms, case_sensitive),
         })
@@ -228,7 +241,7 @@ async fn scan_repository(
     limits.max_fetched_bytes = limits.max_fetched_bytes.min(192 * 1024 * 1024);
     limits.max_inflated_bytes = limits.max_inflated_bytes.min(128 * 1024 * 1024);
     limits.max_response_bytes = 40 * 1024 * 1024;
-    let kind = if pattern.paths_only {
+    let kind = if pattern.kind == Kind::Path {
         OperationKind::Tree
     } else {
         OperationKind::Content
@@ -306,7 +319,7 @@ async fn inspect(
         let found = futures_util::future::try_join_all(batch.iter().map(|item| async move {
             match item {
                 TreeListingItem::Blob(entry) => {
-                    if pattern.paths_only {
+                    if pattern.kind == Kind::Path {
                         let path = display_path(entry.path.as_bytes());
                         if pattern.matcher.is_match(&path) {
                             Ok(Inspection::Match(FileMatches {
@@ -319,7 +332,7 @@ async fn inspect(
                             Ok(Inspection::NoMatch)
                         }
                     } else {
-                        file_matches(snapshot, entry, &pattern.matcher, operation).await
+                        file_matches(snapshot, entry, pattern, operation).await
                     }
                 }
                 TreeListingItem::CommonPrefix(_) => Err(Error::InternalInvariant {
@@ -328,8 +341,13 @@ async fn inspect(
             }
         }))
         .await?;
-        if !pattern.paths_only {
-            verified += found.len();
+        if pattern.kind != Kind::Path {
+            verified += batch
+                .iter()
+                .filter(|item| {
+                    pattern.kind != Kind::Symbol || Syntax::for_path(item.path()).is_some()
+                })
+                .count();
         }
         for found in found {
             examined += 1;
@@ -363,17 +381,39 @@ async fn inspect(
 async fn file_matches(
     snapshot: &RemoteGitSnapshot,
     entry: &crab_remote_git::TreeEntry,
-    matcher: &Regex,
+    pattern: &Pattern,
     operation: &OperationContext,
 ) -> crab_remote_git::Result<Inspection> {
+    let syntax = if pattern.kind == Kind::Symbol {
+        let Some(syntax) = Syntax::for_path(entry.path.as_bytes()) else {
+            return Ok(Inspection::NoMatch);
+        };
+        Some(syntax)
+    } else {
+        None
+    };
     let Some(text) = code_index::text(snapshot, &entry.path, entry.oid, operation).await? else {
         return Ok(Inspection::Skipped);
     };
-    let mut hits = text.lines().enumerate().filter_map(|(index, line)| {
-        let found = matcher.find(line)?;
-        Some(excerpt(index + 1, line, found))
-    });
-    let lines: Vec<_> = hits.by_ref().take(MAX_MATCH_LINES).collect();
+    let (lines, more_lines) = if let Some(syntax) = syntax {
+        let cancel = operation.cancellation().clone();
+        let matcher = pattern.matcher.clone();
+        let Some(matches) =
+            tokio::task::spawn_blocking(move || symbol_matches(syntax, &text, &matcher, &cancel))
+                .await
+                .map_err(|source| Error::DecodeTask { source })?
+        else {
+            return Ok(Inspection::Skipped);
+        };
+        matches
+    } else {
+        let mut hits = text.lines().enumerate().filter_map(|(index, line)| {
+            let found = pattern.matcher.find(line)?;
+            Some(excerpt(index + 1, line, found.range()))
+        });
+        let lines = hits.by_ref().take(MAX_MATCH_LINES).collect();
+        (lines, hits.next().is_some())
+    };
     if lines.is_empty() {
         return Ok(Inspection::NoMatch);
     }
@@ -381,18 +421,52 @@ async fn file_matches(
         path: display_path(entry.path.as_bytes()),
         path_hex: encode_hex(entry.path.as_bytes()),
         lines,
-        more_lines: hits.next().is_some(),
+        more_lines,
     }))
 }
 
-fn excerpt(number: usize, text: &str, found: regex::Match<'_>) -> Excerpt {
-    let before = &text[..found.start()];
+fn symbol_matches(
+    syntax: Syntax,
+    text: &str,
+    matcher: &Regex,
+    cancel: &CancellationToken,
+) -> Option<(Vec<Excerpt>, bool)> {
+    let definitions = code_index::symbols::definitions(syntax, text, cancel)?;
+    let mut lines: Vec<Excerpt> = Vec::new();
+    for symbol in definitions {
+        let Some(found) = matcher.find(&text[symbol.bytes.clone()]) else {
+            continue;
+        };
+        if lines.last().is_some_and(|last| last.line == symbol.line) {
+            continue;
+        }
+        if lines.len() == MAX_MATCH_LINES {
+            return Some((lines, true));
+        }
+        let start = text[..symbol.bytes.start]
+            .rfind('\n')
+            .map_or(0, |offset| offset + 1);
+        let end = text[symbol.bytes.end..]
+            .find('\n')
+            .map_or(text.len(), |offset| symbol.bytes.end + offset);
+        let column = symbol.bytes.start - start;
+        lines.push(excerpt(
+            symbol.line,
+            text[start..end].trim_end_matches('\r'),
+            column + found.start()..column + found.end(),
+        ));
+    }
+    Some((lines, false))
+}
+
+fn excerpt(number: usize, text: &str, found: Range<usize>) -> Excerpt {
+    let before = &text[..found.start];
     let from = before
         .char_indices()
         .rev()
         .nth(79)
         .map_or(0, |(index, _)| index);
-    let after = &text[found.end()..];
+    let after = &text[found.end..];
     let to = after
         .char_indices()
         .nth(120)
@@ -400,7 +474,7 @@ fn excerpt(number: usize, text: &str, found: regex::Match<'_>) -> Excerpt {
     Excerpt {
         line: number,
         before: format!("{}{}", if from > 0 { "…" } else { "" }, &before[from..]),
-        matched: found.as_str().into(),
+        matched: text[found].into(),
         after: format!(
             "{}{}",
             &after[..to],

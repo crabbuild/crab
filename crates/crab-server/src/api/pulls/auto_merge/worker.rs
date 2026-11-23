@@ -88,7 +88,7 @@ async fn reconcile(
         .await?
         .ok_or(Error::NotFound)?;
     let pending = match &pull.merge_pending {
-        Some(pending) if matches_attempt(job, pending) => Some(pending),
+        Some(pending) if matches_attempt(&state, pending) => Some(pending),
         Some(_) => return Ok(()),
         None => None,
     };
@@ -204,7 +204,7 @@ async fn reconcile(
     let candidate = NewPullMerge {
         author: actor,
         request_id: job
-            .publication_id(pull.version, &base_oid, None)
+            .publication_id(pull.version, &base_oid, None, 0)
             .to_string(),
         method: job.method,
         pull_version: pull.version,

@@ -103,14 +103,6 @@ export function ReviewFilter({
                     {choice.label}
                   </DropdownMenuRadioItem>
                 ))}
-                <DropdownMenuRadioItem value="team-review-unavailable" disabled>
-                  <span>
-                    Awaiting review from you or your team
-                    <small className="block text-xs text-muted-foreground">
-                      Team review requests are not yet supported.
-                    </small>
-                  </span>
-                </DropdownMenuRadioItem>
               </DropdownMenuRadioGroup>
               {menu.data.items.some((choice) => choice.query === null) && (
                 <p className="p-2 text-xs text-muted-foreground">

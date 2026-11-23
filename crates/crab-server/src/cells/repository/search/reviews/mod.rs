@@ -5,6 +5,7 @@ use super::{Expression, Query, Term};
 mod projection;
 mod rebuild;
 pub(crate) mod status;
+pub(crate) mod teams;
 pub(in crate::cells::repository) use projection::{requested, reviewed};
 pub(in crate::cells::repository::search) use rebuild::{clear, requests, reset, reviews};
 

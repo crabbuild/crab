@@ -120,7 +120,9 @@ export function repoHref(
   } else if (view === "issues") {
     suffix = `/issues${issue ? `/${encodeURIComponent(issue)}` : ""}`;
   } else if (view === "pulls") {
-    if (pull === "new") {
+    if (action === "queue") {
+      suffix = "/pulls/queue";
+    } else if (pull === "new") {
       const { base, head } = filters;
       delete filters.base;
       delete filters.head;
@@ -151,6 +153,7 @@ export function repoHref(
   } else {
     suffix = `/${view}`;
   }
+  if (view === "code-search" && kind) filters.kind = kind;
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(filters))
     if (value) query.set(key, value);
@@ -262,6 +265,8 @@ export function repositoryRoute(url: URL, refs?: Refs): RepositoryRoute | null {
         project: tail[0] && decodeURIComponent(tail[0]),
       };
     if (page === "pulls" && !tail.length) return { ...route, view: "pulls" };
+    if (page === "pulls" && tail.length === 1 && tail[0] === "queue")
+      return { ...route, view: "pulls", action: "queue" };
     if (page === "fork-compare" && tail.length <= 1)
       return {
         ...route,

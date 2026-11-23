@@ -48,6 +48,7 @@ pub(crate) enum Action {
     TeamReviewRequested,
     TeamReviewRequestCancelled,
     CodeOwnerReviewsRequested,
+    MergeQueuePrioritized,
     Updated,
     Closed,
     IssueClosed {
@@ -138,6 +139,7 @@ impl Action {
                     | Self::TeamReviewRequested
                     | Self::TeamReviewRequestCancelled
                     | Self::CodeOwnerReviewsRequested
+                    | Self::MergeQueuePrioritized
                     | Self::IssueLinked { .. }
                     | Self::IssueUnlinked { .. }
                     | Self::MilestoneAssigned { .. }

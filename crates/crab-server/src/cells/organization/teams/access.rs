@@ -15,6 +15,7 @@ pub(in crate::cells::organization) fn handles(operation: u32, mutation: bool) ->
                 | review_routing::GetSettings::ID
                 | GetPolicy::ID
                 | MentionMembers::ID
+                | ResolveReviewTeams::ID
         )
     }
 }
@@ -85,7 +86,7 @@ pub(in crate::cells::organization) fn authorize(
             Err(Error::AccessDenied)
         };
     }
-    if operation == List::ID {
+    if matches!(operation, List::ID | ResolveReviewTeams::ID) {
         return Ok(());
     }
     #[derive(Deserialize)]

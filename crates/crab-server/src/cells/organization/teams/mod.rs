@@ -22,7 +22,7 @@ pub(crate) use reads::{
     MentionMembers, MentionMembersInput, MentionRoster, Page, QueryCursor, Summary,
 };
 pub(crate) use repository_access::{
-    GetRepositoryTeamAccess, RepositoryTeamAccess, RepositoryTeams,
+    GetRepositoryTeamAccess, RepositoryTeamAccess, RepositoryTeams, ResolveReviewTeams,
 };
 
 pub(crate) mod review_routing;

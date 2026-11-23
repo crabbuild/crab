@@ -256,6 +256,29 @@ async fn rebuild_pages_review_history_and_sparse_requests_without_changing_versi
             request(&cell, number, &alice, &bob, true).await;
         }
     }
+    use review_requests::teams::{SetTeamReviewRequest, TeamOutcome, TeamSelection};
+    let team = Uuid::now_v7();
+    let pull = cell
+        .client
+        .query::<GetPull>(&cell.target, None, 1)
+        .await
+        .unwrap()
+        .output
+        .unwrap();
+    assert!(matches!(
+        write::<SetTeamReviewRequest>(
+            &cell,
+            TeamSelection {
+                pull: 1,
+                version: pull.version,
+                actor: alice.clone(),
+                team,
+                recipients: Some(Vec::new()),
+            }
+        )
+        .await,
+        TeamOutcome::Applied,
+    ));
     let before = cell
         .client
         .query::<GetPull>(&cell.target, None, 1)
@@ -322,5 +345,23 @@ async fn rebuild_pages_review_history_and_sparse_requests_without_changing_versi
             .output,
         before
     );
+    let rebuilt = cell
+        .client
+        .query::<ListDiscussions>(
+            &cell.target,
+            None,
+            SearchInput {
+                query: Some("is:open team-review-requested:team/engineering".into()),
+                review_teams: teams::Bindings {
+                    named: vec![("team/engineering".into(), Some(team))],
+                    mine: Vec::new(),
+                },
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .output;
+    assert_eq!(rebuilt.matching, 1);
     fixtures::close(&server).await;
 }

@@ -83,6 +83,11 @@ describe("GitHub repository addresses", () => {
     [{ view: "activity" }, "/team/repo.name/activity", { view: "activity" }],
     [{ view: "pulls" }, "/team/repo.name/pulls", { view: "pulls" }],
     [
+      { view: "pulls", action: "queue", branch: "refs/heads/release/next" },
+      "/team/repo.name/pulls/queue?branch=refs%2Fheads%2Frelease%2Fnext",
+      { view: "pulls", action: "queue" },
+    ],
+    [
       { view: "fork-compare", rev: "refs/heads/feature/x" },
       "/team/repo.name/fork-compare/feature%2Fx",
       { view: "fork-compare", head: "feature/x" },

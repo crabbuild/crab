@@ -111,7 +111,8 @@ async fn list(
     let repo = repository(&server, &principal, &key)?;
     let routed = crate::app::repository_cell(&server, &repo)?;
     let mut input = params.input("is:issue is:open")?;
-    super::discussion_search::resolve_people(&server, &principal, &repo, &mut input).await?;
+    let review_teams =
+        super::discussion_search::resolve_people(&server, &principal, &repo, &mut input).await?;
     let review_source = input
         .review_context
         .as_ref()
@@ -163,6 +164,9 @@ async fn list(
             }
         })
         .collect::<Result<Vec<_>>>()?;
+    if let Some(bound) = review_teams {
+        bound.verify(&server, &principal, &repo).await?;
+    }
     Ok(Json(
         json!({"repository_id":repo.id,"can_bulk_edit":assignees.principal.can_triage(repo.id),"items":items,"next":page.next,"counts":page.counts,"matching":page.matching,"navigation":page.navigation,"authored_by_me":page.authored_by_me,"assigned_to_me":page.assigned_to_me,"review_requested_from_me":page.review_requested_from_me}),
     ))

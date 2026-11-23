@@ -907,7 +907,61 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
     browser
         .run(&["wait", "--text", "Team review requested"])
         .await;
-    browser.run(&["reload"]).await;
+    browser
+        .run(&["open", &format!("{}/{owner}/library/pulls", h.origin)])
+        .await;
+    browser
+        .run(&["wait", "[aria-label='Filter by reviews']"])
+        .await;
+    browser
+        .run(&["click", "[aria-label='Filter by reviews']"])
+        .await;
+    browser
+        .run(&["wait", "--text", "Awaiting review from you or your team"])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "menuitemradio",
+            "click",
+            "--name",
+            "Awaiting review from you or your team",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&[
+            "wait",
+            "--fn",
+            "new URL(location.href).searchParams.get('q')?.includes('review-requested:@me')",
+        ])
+        .await;
+    browser.run(&["wait", "--text", "Review this change"]).await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "combobox",
+            "fill",
+            "team-review-requested:eng",
+        ])
+        .await;
+    browser.run(&["wait", "[role='option']"]).await;
+    browser.run(&["press", "ArrowDown"]).await;
+    browser.run(&["press", "Enter"]).await;
+    browser.run(&["press", "Enter"]).await;
+    browser
+        .run(&[
+            "wait",
+            "--fn",
+            "new URL(location.href).searchParams.get('q')?.includes('Engineering')",
+        ])
+        .await;
+    browser.run(&["wait", "--text", "Review this change"]).await;
+    browser
+        .run(&["open", &format!("{}/{owner}/library/pull/1", h.origin)])
+        .await;
     let cancel = "[aria-label='Cancel review request for team Engineering']";
     browser.run(&["wait", cancel]).await;
     let inbox = format!("/api/notifications?repository={repo_id}");
