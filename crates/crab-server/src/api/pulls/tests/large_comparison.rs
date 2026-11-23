@@ -237,6 +237,57 @@ async fn native_large_pull_opens_a_file_and_publishes_an_exact_review_anchor() {
         .run(&["wait", "[data-change-path='README.md'] diffs-container"])
         .await;
     browser.run(&["wait", "[data-thread-number='1']"]).await;
+    browser
+        .run(&["fill", "input[aria-label='Filter changed files']", "readme"])
+        .await;
+    browser
+        .run(&["wait", "--text", "1 of 516 files shown"])
+        .await;
+    browser
+        .run(&["wait", "--fn", "document.querySelectorAll('.diff-panel').length === 1 && document.querySelector('.diff-panel').dataset.changePath === 'README.md'"])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "checkbox",
+            "click",
+            "--name",
+            "Viewed README.md",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", "--text", "1 of 516 files viewed"])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "checkbox",
+            "click",
+            "--name",
+            "Hide viewed",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", "--text", "No changed files match these filters."])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Jump to diff",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", "--fn", "document.activeElement?.matches('[data-thread-number=\"1\"]') && document.querySelector('input[aria-label=\"Filter changed files\"]').value === 'readme'"])
+        .await;
     drop(browser);
     h.close().await;
 }

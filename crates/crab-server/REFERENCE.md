@@ -3313,6 +3313,12 @@ A new commit retains marks for identical diff entries and clears them for files
 whose compared content or mode changed. Each account can track 950 paths per
 PR. Progress writes stay separate from PR versions, checks and activity.
 
+Use **Filter changed files** to narrow the file tree and diffs by path on
+pull requests, branch comparisons, and commits. **Hide viewed** in a pull
+request uses the saved progress for the exact comparison. **Jump to diff**
+reveals a filtered file and focuses its review annotation. The filter
+controls retain their values so you can resume the same review scope.
+
 If either branch is deleted, the conversation and original OIDs remain visible while live comparison becomes unavailable. A completed merge retains its pre-merge comparison after source deletion.
 
 Reviews record `commented`, `approved`, or `changes_requested` against the exact current head. Pull authors cannot approve or request changes on their own pull. Advancing the head marks older reviews as not current.

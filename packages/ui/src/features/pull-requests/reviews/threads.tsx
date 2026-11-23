@@ -12,8 +12,8 @@ import {
   usePullComparison,
 } from "@/features/repository/diff";
 import {
-  changePanelId,
   type DiffReviewState,
+  type DiffTarget,
   type InlineDiffThread,
 } from "@/features/repository/diff/model";
 import { endpoint, useLocation, useRequest, type Repository } from "@/lib/api";
@@ -139,6 +139,7 @@ export function PullReviewThreads({
   );
   const preview = comparison.data;
   const viewed = useViewedFiles(repo, pull.number, csrf, preview?.changes);
+  const [diffTarget, setDiffTarget] = useState<DiffTarget>();
   const [selection, setSelection] = useState<ThreadSelection>();
   const [body, setBody] = useState("");
   const [suggestion, setSuggestion] = useState("");
@@ -169,8 +170,13 @@ export function PullReviewThreads({
     setSuggestion("");
     setSuggestionEnabled(false);
   }
+  function jumpToDiff(thread: InlineDiffThread) {
+    setDiffTarget({ pathHex: thread.path_hex, thread: thread.number });
+  }
   const review: DiffReviewState = {
-    threads: threads.items,
+    threads: currentItems,
+    target: diffTarget,
+    isViewed: viewed.isViewed,
     renderFileActions: viewed.renderFileActions,
     onLineSelected(pathHex, range) {
       if (!range || range.endSide || !preview || pull.merge_pending) {
@@ -196,20 +202,6 @@ export function PullReviewThreads({
           : "smooth",
         block: "center",
       });
-    },
-    onDiffSelected(thread) {
-      const panel = document.getElementById(changePanelId(thread.path_hex));
-      panel?.scrollIntoView({
-        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
-          ? "auto"
-          : "smooth",
-        block: "center",
-      });
-      panel
-        ?.querySelector<HTMLButtonElement>(
-          `[data-thread-number="${thread.number}"]`,
-        )
-        ?.focus({ preventScroll: true });
     },
     fileSummary(pathHex) {
       const all = [...threads.items, ...outdatedThreads.items].filter(
@@ -472,7 +464,7 @@ export function PullReviewThreads({
                   thread={thread}
                   csrf={csrf}
                   linked={thread.number === focusNumber}
-                  onJumpToDiff={review.onDiffSelected}
+                  onJumpToDiff={jumpToDiff}
                   refresh={refreshThreads}
                   suggestions={suggestions}
                 />
@@ -509,7 +501,7 @@ export function PullReviewThreads({
                     thread={thread}
                     csrf={csrf}
                     linked={thread.number === focusNumber}
-                    onJumpToDiff={review.onDiffSelected}
+                    onJumpToDiff={jumpToDiff}
                     refresh={refreshThreads}
                   />
                 ))}

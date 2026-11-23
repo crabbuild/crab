@@ -2,7 +2,7 @@ import { useMutation } from "@/components/discussion/mutations";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { endpoint, useRequest, type Change, type Repository } from "@/lib/api";
-import { useState } from "react";
+import { useCallback, useState } from "react";
 
 interface Progress {
   version: number;
@@ -21,16 +21,20 @@ export function useViewedFiles(
   const mutation = useMutation(csrf, repo);
   const [saved, setSaved] = useState<Progress>();
   const progress = request.data && (saved ?? request.data);
-  function hasViewed(id: string) {
-    return progress?.files[id.slice(0, 64)] === id.slice(64);
-  }
+  const isViewed = useCallback(
+    (file: Change) => {
+      const id = file.view_id;
+      return !!id && progress?.files[id.slice(0, 64)] === id.slice(64);
+    },
+    [progress],
+  );
   function renderFileActions(file: Change) {
     const id = file.view_id;
     if (!id || !progress) return null;
     return (
       <label className="inline-flex items-center gap-2 text-sm">
         <Checkbox
-          checked={hasViewed(id)}
+          checked={isViewed(file)}
           aria-label={`Viewed ${file.path}`}
           disabled={repo.archived || mutation.pending || !!mutation.error}
           onCheckedChange={async (viewed) => {
@@ -64,14 +68,13 @@ export function useViewedFiles(
       </div>
     ) : progress && tracked.length > 0 ? (
       <p className="muted" role="status">
-        {
-          tracked.filter(
-            (change) => change.view_id && hasViewed(change.view_id),
-          ).length
-        }{" "}
-        of {tracked.length} files viewed
+        {tracked.filter(isViewed).length} of {tracked.length} files viewed
       </p>
     ) : null;
 
-  return { status, renderFileActions };
+  return {
+    status,
+    renderFileActions,
+    isViewed: progress ? isViewed : undefined,
+  };
 }

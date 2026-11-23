@@ -296,6 +296,26 @@ test("viewed files survive reload and clear when the file changes", async ({
   await expect(viewed).not.toBeChecked();
   await viewed.check();
   await expect(page.getByText("1 of 1 files viewed")).toBeVisible();
+  const filter = page.getByRole("searchbox", { name: "Filter changed files" });
+  const hideViewed = page.getByRole("checkbox", { name: "Hide viewed" });
+  await filter.fill("README");
+  await hideViewed.check();
+  await expect(
+    page.getByText("No changed files match these filters."),
+  ).toBeVisible();
+  await expect(page.locator(".diff-panel")).toHaveCount(0);
+  await page.getByRole("button", { name: "Jump to diff", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Open review thread #1" }),
+  ).toBeFocused();
+  await expect(hideViewed).toBeChecked();
+  await expect(filter).toHaveValue("README");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await filter.fill("missing");
+  await expect(page.getByText("0 of 1 files shown")).toBeVisible();
+  await page.getByRole("button", { name: "Clear filters" }).click();
+  await expect(hideViewed).not.toBeChecked();
+  await expect(viewed).toBeChecked();
   await page.reload();
   await expect(viewed).toBeChecked();
   revision = "3".repeat(64);

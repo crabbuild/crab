@@ -28,11 +28,17 @@ export interface DiffReviewFileSummary {
   outdated: number;
 }
 
+export interface DiffTarget {
+  pathHex: string;
+  thread: number;
+}
+
 export interface DiffReviewState {
   threads: InlineDiffThread[];
+  target?: DiffTarget;
+  isViewed?: (file: Change) => boolean;
   onLineSelected: (pathHex: string, range: SelectedLineRange | null) => void;
   onThreadSelected: (thread: InlineDiffThread) => void;
-  onDiffSelected?: (thread: InlineDiffThread) => void;
   fileSummary?: (pathHex: string) => DiffReviewFileSummary | null;
   fileSummaryVersion?: string;
   renderAnnotation?: (thread: InlineDiffThread) => ReactNode;

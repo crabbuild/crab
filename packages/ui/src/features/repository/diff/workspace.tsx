@@ -1,8 +1,11 @@
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
 import { type Change, type Repository } from "@/lib/api";
 import { type CodeThemes } from "@/lib/code-theme";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { DiffView } from "./file";
-import type { DiffReviewState } from "./model";
+import type { DiffReviewState, DiffTarget } from "./model";
 import { changePanelId } from "./model";
 import { ChangeTree } from "./tree";
 
@@ -29,31 +32,58 @@ export function ChangeWorkspace({
 }) {
   const diffPane = useRef<HTMLDivElement>(null);
   const heading = `${idPrefix}changed-files-heading`;
-  const [selectedPath, setSelectedPath] = useState(changes[0]?.path);
+  const [selectedPath, setSelectedPath] = useState<string>();
+  const [filter, setFilter] = useState({ path: "", hideViewed: false });
+  const [dismissedTarget, setDismissedTarget] = useState<DiffTarget>();
+  const target =
+    review?.target === dismissedTarget ? undefined : review?.target;
+  const revealedPath = target?.pathHex;
+  const path = filter.path.trim().toLowerCase();
+  const isViewed = filter.hideViewed ? review?.isViewed : undefined;
+  const filtered = Boolean(path || isViewed);
+  const visible = useMemo(() => {
+    if (!filtered) return changes;
+    return changes.filter(
+      (file) =>
+        file.path_hex === revealedPath ||
+        (file.path.toLowerCase().includes(path) && !isViewed?.(file)),
+    );
+  }, [changes, filtered, isViewed, path, revealedPath]);
+  const activePath = visible.some((file) => file.path === selectedPath)
+    ? selectedPath
+    : visible[0]?.path;
+  const tracksScroll = review !== undefined;
 
-  useEffect(() => {
-    setSelectedPath(changes[0]?.path);
-  }, [changes]);
+  function updateFilter(path: string, hideViewed: boolean) {
+    setFilter({ path, hideViewed });
+    setDismissedTarget(review?.target);
+    setSelectedPath(undefined);
+    diffPane.current?.scrollTo({ top: 0 });
+  }
 
   useEffect(() => {
     const pane = diffPane.current;
-    const firstChange = changes[0];
-    if (!pane || !review || !firstChange || changes.length < 2) return;
+    if (!pane || !tracksScroll || visible.length < 2) return;
     let frame = 0;
     const updateSelection = () => {
       frame = 0;
       const paneTop = pane.getBoundingClientRect().top;
-      let active = firstChange;
-      for (const change of changes) {
+      // Panels are in file order. Find the last one at the top of the pane
+      // without measuring every mounted panel each time the reviewer scrolls.
+      let start = 0;
+      let end = visible.length;
+      while (start < end) {
+        const middle = Math.floor((start + end) / 2);
         const panel = document.getElementById(
-          idPrefix + changePanelId(change.path_hex),
+          idPrefix + changePanelId(visible[middle].path_hex),
         );
-        if (!panel) continue;
-        if (panel.getBoundingClientRect().top - paneTop <= 32) active = change;
+        if (panel && panel.getBoundingClientRect().top - paneTop <= 32) {
+          start = middle + 1;
+        } else {
+          end = middle;
+        }
       }
-      setSelectedPath((current) =>
-        current === active.path ? current : active.path,
-      );
+      setSelectedPath(visible[Math.max(0, start - 1)].path);
     };
     const onScroll = () => {
       if (frame) return;
@@ -65,7 +95,7 @@ export function ChangeWorkspace({
       pane.removeEventListener("scroll", onScroll);
       if (frame) cancelAnimationFrame(frame);
     };
-  }, [changes, idPrefix]);
+  }, [idPrefix, tracksScroll, visible]);
 
   function scrollToChange(change: Change) {
     const pane = diffPane.current;
@@ -86,7 +116,48 @@ export function ChangeWorkspace({
       <h3 id={heading}>
         {changes.length} changed {changes.length === 1 ? "file" : "files"}
       </h3>
-      {changes.length ? (
+      {changes.length > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2">
+          <Input
+            type="search"
+            aria-label="Filter changed files"
+            placeholder="Filter by path"
+            value={filter.path}
+            className="sm:max-w-72"
+            onChange={(event) =>
+              updateFilter(event.target.value, filter.hideViewed)
+            }
+          />
+          {review && (
+            <label className="inline-flex items-center gap-2 text-sm">
+              <Checkbox
+                aria-label="Hide viewed"
+                checked={filter.hideViewed}
+                disabled={!review.isViewed}
+                onCheckedChange={(checked) =>
+                  updateFilter(filter.path, checked === true)
+                }
+              />
+              Hide viewed
+            </label>
+          )}
+          {(filter.path || filter.hideViewed) && (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => updateFilter("", false)}
+            >
+              Clear filters
+            </Button>
+          )}
+          {filtered && (
+            <p className="text-sm text-muted-foreground" role="status">
+              {visible.length} of {changes.length} files shown
+            </p>
+          )}
+        </div>
+      )}
+      {visible.length ? (
         <section
           className={`change-workspace${sticky ? " change-workspace-sticky" : ""}`}
           aria-labelledby={heading}
@@ -94,8 +165,8 @@ export function ChangeWorkspace({
           <div className="change-tree-pane">
             <ChangeTree
               key={review?.fileSummaryVersion ?? "changed-files"}
-              changes={changes}
-              selected={selectedPath}
+              changes={visible}
+              selected={activePath}
               onSelect={scrollToChange}
               review={review}
             />
@@ -106,7 +177,7 @@ export function ChangeWorkspace({
             aria-label="Changed file diffs"
           >
             <div className="change-diff-list">
-              {changes.map((change, index) => (
+              {visible.map((change, index) => (
                 <DiffView
                   key={change.path_hex}
                   id={idPrefix + changePanelId(change.path_hex)}
@@ -118,13 +189,18 @@ export function ChangeWorkspace({
                   codeThemes={codeThemes}
                   eager={index === 0}
                   review={review}
+                  target={change.path_hex === revealedPath ? target : undefined}
                 />
               ))}
             </div>
           </div>
         </section>
       ) : (
-        <p className="muted">This comparison has no changed files.</p>
+        <p className="muted">
+          {changes.length
+            ? "No changed files match these filters."
+            : "This comparison has no changed files."}
+        </p>
       )}
     </>
   );

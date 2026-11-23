@@ -16,7 +16,7 @@ import {
 import type { DiffLineAnnotation, SelectedLineRange } from "@pierre/diffs";
 import { MultiFileDiff } from "@pierre/diffs/react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { DiffReviewState, InlineDiffThread } from "./model";
+import type { DiffReviewState, DiffTarget, InlineDiffThread } from "./model";
 
 function changeVariant(kind: string) {
   if (kind === "Added") return "success" as const;
@@ -34,6 +34,7 @@ export function DiffView({
   codeThemes,
   eager,
   review,
+  target,
 }: {
   id: string;
   repo: Pick<Repository, "owner" | "name">;
@@ -44,9 +45,30 @@ export function DiffView({
   change: Change;
   eager: boolean;
   review?: DiffReviewState;
+  target?: DiffTarget;
 }) {
   const panel = useRef<HTMLElement>(null);
   const [load, setLoad] = useState(eager);
+  useEffect(() => {
+    const node = panel.current;
+    if (!node || !target) return;
+    setLoad(true);
+    node.scrollIntoView({ block: "center" });
+    const focusAnnotation = () => {
+      const annotation = node.querySelector<HTMLButtonElement>(
+        `[data-thread-number="${target.thread}"]`,
+      );
+      annotation?.focus({ preventScroll: true });
+      return annotation !== null;
+    };
+    if (focusAnnotation()) return;
+    // A revealed file may still be waiting for its pinned diff and annotation.
+    const observer = new MutationObserver(() => {
+      if (focusAnnotation()) observer.disconnect();
+    });
+    observer.observe(node, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [target]);
   useEffect(() => {
     const node = panel.current;
     if (load || !node) return;
