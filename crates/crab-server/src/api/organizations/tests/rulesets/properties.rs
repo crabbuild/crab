@@ -293,15 +293,18 @@ async fn property_ruleset_tracks_defaults_overrides_and_current_organization_aut
     })).await.error_for_status().unwrap();
     *h.provider.mode.lock().await = "member".into();
     let bob = h.login().await;
+    let release_properties = format!("{release}/properties");
+    let locked = h.json(&release_properties, &bob).await;
     assert_eq!(
-        h.json(&format!("{release}/properties"), &bob).await["values"]["overrides"],
+        locked["values"]["overrides"],
         json!({(regulated.to_string()):false})
     );
+    assert_eq!(locked["editable"], json!([]));
     assert_eq!(
         repository_write(
             &h,
             Method::PUT,
-            &format!("{release}/properties"),
+            &release_properties,
             &bob,
             release_id,
             json!({"expected_version":1,"schema_version":1,"overrides":{}})
@@ -309,6 +312,65 @@ async fn property_ruleset_tracks_defaults_overrides_and_current_organization_aut
         .await
         .status(),
         StatusCode::NOT_FOUND
+    );
+
+    definitions[1]["values_editable_by"] = json!("repository");
+    h.write(
+        Method::PUT,
+        &schema,
+        &alice,
+        json!({"expected_version":1,"definitions":definitions}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert_eq!(
+        h.json(&release_properties, &bob).await["editable"],
+        json!([regions])
+    );
+    let edit = async |schema_version, expected_version, overrides| {
+        repository_write(&h, Method::PUT, &release_properties, &bob, release_id,
+            json!({"schema_version":schema_version,"expected_version":expected_version,"overrides":overrides}))
+            .await
+    };
+    for mixed in [
+        json!({(regions.to_string()):["eu"]}),
+        json!({(regulated.to_string()):true,(regions.to_string()):["eu"]}),
+    ] {
+        assert_eq!(edit(2, 1, mixed).await.status(), StatusCode::NOT_FOUND);
+    }
+    assert_eq!(
+        h.json(&release_properties, &bob).await["values"],
+        locked["values"]
+    );
+    let approved = json!({(regulated.to_string()):false,(regions.to_string()):["eu"]});
+    edit(2, 1, approved.clone())
+        .await
+        .error_for_status()
+        .unwrap();
+    let changed = h.json(&release_properties, &bob).await;
+    assert_eq!(changed["values"]["overrides"], approved);
+    assert_eq!(changed["values"]["version"], 2);
+
+    definitions[1]["values_editable_by"] = json!("organization");
+    h.write(
+        Method::PUT,
+        &schema,
+        &alice,
+        json!({"expected_version":2,"definitions":definitions}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let reset = json!({(regulated.to_string()):false});
+    assert_eq!(
+        edit(2, 2, reset.clone()).await.status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(edit(3, 2, reset).await.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        h.json(&release_properties, &bob).await["values"],
+        changed["values"]
     );
     h.close().await;
 }

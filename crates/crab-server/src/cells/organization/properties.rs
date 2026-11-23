@@ -15,6 +15,14 @@ pub(crate) enum Kind {
     MultiSelect,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum EditAuthority {
+    #[default]
+    Organization,
+    Repository,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(untagged)]
 pub(crate) enum PropertyValue {
@@ -41,6 +49,8 @@ pub(crate) struct Definition {
     pub kind: Kind,
     pub options: Vec<String>,
     pub default: Option<PropertyValue>,
+    #[serde(default)]
+    pub values_editable_by: EditAuthority,
 }
 
 fn valid_text(value: &str) -> bool {
@@ -153,12 +163,42 @@ pub(crate) struct Values {
 pub(crate) struct View {
     pub schema: Schema,
     pub values: Values,
+    pub editable: Vec<Uuid>,
 }
 
-fn view(context: &Transaction<'_>, repository: Repository) -> Result<View> {
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Editor {
+    pub actor: Uuid,
+    pub repository_admin: bool,
+}
+
+impl Editor {
+    fn organization_owner(self, context: &Transaction<'_>) -> Result<bool> {
+        actor(self.actor)?;
+        Ok(member(context, self.actor)?
+            .is_some_and(|member| member.active && member.role == Role::Owner))
+    }
+}
+
+fn view(context: &Transaction<'_>, repository: Repository, editor: Option<Editor>) -> Result<View> {
     let schema = schema(context)?;
     let values = values(context, &schema, &repository.key()?)?;
-    Ok(View { schema, values })
+    let mut editable = Vec::new();
+    if let Some(editor) = editor {
+        let owner = editor.organization_owner(context)?;
+        editable.extend(schema.definitions.iter().filter_map(|definition| {
+            (owner
+                || editor.repository_admin
+                    && definition.values_editable_by == EditAuthority::Repository)
+                .then_some(definition.id)
+        }));
+    }
+    Ok(View {
+        schema,
+        values,
+        editable,
+    })
 }
 
 fn values(context: &Transaction<'_>, schema: &Schema, key: &str) -> Result<Values> {
@@ -173,7 +213,8 @@ pub(super) fn effective(
     context: &Transaction<'_>,
     repository: Repository,
 ) -> Result<BTreeMap<Uuid, PropertyValue>> {
-    let View { schema, mut values } = view(context, repository)?;
+    let schema = schema(context)?;
+    let mut values = values(context, &schema, &repository.key()?)?;
     Ok(schema
         .definitions
         .into_iter()
@@ -192,6 +233,7 @@ pub(crate) enum Outcome<T> {
     Saved(T),
     Conflict,
     Invalid,
+    Denied,
     UsedByRuleset,
     IncompatibleDefinition,
 }
@@ -209,14 +251,22 @@ impl Read for GetSchema {
 }
 
 pub(crate) struct GetValues;
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReadValues {
+    pub repository: Repository,
+    pub editor: Option<Editor>,
+}
+
 impl Read for GetValues {
     const CLASS: &'static str = CLASS;
     const ID: u32 = 55;
-    type Input = Repository;
+    type Input = ReadValues;
     type Output = View;
 
-    fn execute(context: &mut Transaction<'_>, repository: Repository) -> Result<View> {
-        view(context, repository)
+    fn execute(context: &mut Transaction<'_>, input: ReadValues) -> Result<View> {
+        view(context, input.repository, input.editor)
     }
 }
 
@@ -309,11 +359,24 @@ impl Mutation for SetSchema {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SetValuesInput {
-    pub actor: Uuid,
+    pub editor: Editor,
     pub repository: Repository,
     pub expected_version: u64,
     pub schema_version: u64,
     pub overrides: BTreeMap<Uuid, PropertyValue>,
+}
+
+pub(super) fn authorize_save(context: &Transaction<'_>, input: &Value) -> Result<()> {
+    #[derive(Deserialize)]
+    struct Caller {
+        editor: Editor,
+    }
+    let Caller { editor } = serde_json::from_value(input.clone())?;
+    actor(editor.actor)?;
+    if editor.repository_admin || editor.organization_owner(context)? {
+        return Ok(());
+    }
+    Err(Error::AccessDenied)
 }
 
 pub(crate) struct SetValues;
@@ -327,7 +390,7 @@ impl Mutation for SetValues {
         context: &mut Transaction<'_>,
         input: SetValuesInput,
     ) -> Result<MutationResult<Self::Output>> {
-        let mut current = view(context, input.repository)?;
+        let mut current = view(context, input.repository, Some(input.editor))?;
         if current.schema.version != input.schema_version
             || current.values.version != input.expected_version
             || current.values.version >= MAX_VERSION - 1
@@ -342,11 +405,30 @@ impl Mutation for SetValues {
         }) {
             return Ok(MutationResult::Rejected(Outcome::Invalid));
         }
+        // A repository administrator submits a full snapshot. Compare omissions
+        // as well as supplied entries so locked overrides cannot be cleared.
+        if current
+            .values
+            .overrides
+            .keys()
+            .chain(input.overrides.keys())
+            .any(|id| {
+                current.values.overrides.get(id) != input.overrides.get(id)
+                    && !current.editable.contains(id)
+            })
+        {
+            return Ok(MutationResult::Rejected(Outcome::Denied));
+        }
         if current.values.overrides == input.overrides {
             return Ok(MutationResult::Success(Outcome::Saved(current)));
         }
         current.values.overrides = input.overrides;
-        save_values(context, input.actor, input.repository, &mut current.values)?;
+        save_values(
+            context,
+            input.editor.actor,
+            input.repository,
+            &mut current.values,
+        )?;
         Ok(MutationResult::Success(Outcome::Saved(current)))
     }
 }

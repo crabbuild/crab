@@ -106,6 +106,7 @@ test("owners target repositories and repository admins see inherited rules as re
           kind: "boolean",
           default: true,
           options: [],
+          values_editable_by: "repository",
         });
         schema = {
           version: schema.version + 1,
@@ -153,7 +154,22 @@ test("owners target repositories and repository admins see inherited rules as re
   );
   await page.route(
     (url) => url.pathname === "/api/repos/team/project/properties",
-    (route) => route.fulfill({ json: { schema, values } }),
+    (route) => {
+      const property = schema.definitions[0].id;
+      if (route.request().method() === "PUT") {
+        expect(route.request().headers()["x-crab-repository-id"]).toBe(repo.id);
+        expect(route.request().postDataJSON()).toEqual({
+          schema_version: schema.version,
+          expected_version: values.version,
+          overrides: { [property]: false },
+        });
+        values = {
+          version: values.version + 1,
+          overrides: { [property]: false },
+        };
+      }
+      return route.fulfill({ json: { schema, values, editable: [property] } });
+    },
   );
   await page.route(
     (url) => url.pathname === "/api/repos/team/project/rulesets",
@@ -219,6 +235,9 @@ test("owners target repositories and repository admins see inherited rules as re
   await page.getByLabel("Property name").fill("regulated");
   await page.getByLabel("Property type").selectOption("boolean");
   await page.getByLabel("Default value").selectOption("true");
+  await page
+    .getByRole("checkbox", { name: /Allow repository administrators/ })
+    .check();
   await page.getByRole("button", { name: "Save property" }).click();
   await expect(
     page.getByRole("button", { name: "Edit regulated" }),
@@ -287,5 +306,19 @@ test("owners target repositories and repository admins see inherited rules as re
   ).toBeVisible();
   await expect(
     page.locator("dl").getByText("true", { exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Edit properties", exact: true })
+    .click();
+  await page
+    .getByRole("combobox", { name: "regulated", exact: true })
+    .selectOption("false");
+  await expectNoAccessibilityViolations(page);
+  await page.getByRole("button", { name: "Save property values" }).click();
+  await expect(
+    page.getByText("Repository property values saved."),
+  ).toBeVisible();
+  await expect(
+    page.locator("dl").getByText("false", { exact: true }),
   ).toBeVisible();
 });

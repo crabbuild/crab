@@ -6,10 +6,10 @@ use crate::{
         MutationIdentity,
         application::Mutation,
         organization::properties::{
-            Definition, GetSchema, GetSelection, GetValues, MAX_BATCH, Outcome, PropertyValue,
-            Repository as Binding, Schema, Selection, SelectionReceipt, SelectionView, SetSchema,
-            SetSchemaInput, SetSelection, SetValues, SetValuesInput, UpdateSelection,
-            VersionedRepository, View,
+            Definition, Editor, GetSchema, GetSelection, GetValues, MAX_BATCH, Outcome,
+            PropertyValue, ReadValues, Repository as Binding, Schema, Selection, SelectionReceipt,
+            SelectionView, SetSchema, SetSchemaInput, SetSelection, SetValues, SetValuesInput,
+            UpdateSelection, VersionedRepository, View,
         },
     },
     repository::{
@@ -73,7 +73,12 @@ async fn update_schema(
         expected_version: input.expected_version,
         definitions: input.definitions,
     };
-    saved(save::<SetSchema>(server, id, command, None).await?)
+    saved(
+        policy_write(server, id, |server, address, _| async move {
+            submit::<SetSchema>(&server, address, app::mutation_identity()?, command).await
+        })
+        .await?,
+    )
 }
 
 fn binding(repo: &Repository) -> Result<(Uuid, Binding)> {
@@ -93,12 +98,34 @@ async fn read_values(
 ) -> Result<Json<View>> {
     let repo = app::repository(&server, &principal, &path)?;
     let (organization, binding) = binding(&repo)?;
+    let editor = match app::account(&principal) {
+        Ok(identity) => crate::repository::access::actor_id(&server, identity)
+            .await?
+            .map(|actor| Editor {
+                actor,
+                repository_admin: principal.can_admin(repo.id),
+            }),
+        Err(_) => None,
+    };
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
-    let result = cells
-        .query::<GetValues>(target(organization)?, None, binding)
+    let mut result = cells
+        .query::<GetValues>(
+            target(organization)?,
+            None,
+            ReadValues {
+                repository: binding,
+                editor,
+            },
+        )
         .await
         .map_err(read_error)?;
-    app::membership(&server, &principal, &repo).await?;
+    let current = app::membership(&server, &principal, &repo).await?;
+    // A stale render hint cannot keep delegated controls after loss of Admin.
+    // The write path always checks the live grant, independently of the hint.
+    if !current.principal.can_admin(repo.id) && editor.is_some_and(|editor| editor.repository_admin)
+    {
+        result.output.editable.clear();
+    }
     Ok(Json(result.output))
 }
 
@@ -119,14 +146,32 @@ async fn update_values(
     let repo = app::repository(&server, &principal, &path)?;
     let (organization, repository) = binding(&repo)?;
     let actor = actor(&server, &principal).await?;
-    let command = SetValuesInput {
-        actor,
-        repository,
-        expected_version: input.expected_version,
-        schema_version: input.schema_version,
-        overrides: input.overrides,
-    };
-    saved(save::<SetValues>(server, organization, command, Some((repo, principal))).await?)
+    saved(
+        policy_write(
+            server,
+            organization,
+            move |server, address, cancel| async move {
+                // A current catalog binding protects both Admin and ownership epoch
+                // under the same lease as transfers and inherited policy publication.
+                let current = app::membership(&server, &principal, &repo).await?;
+                if cancel.is_cancelled() {
+                    return Err(Error::MergeBusy);
+                }
+                let command = SetValuesInput {
+                    editor: Editor {
+                        actor,
+                        repository_admin: current.principal.can_admin(repo.id),
+                    },
+                    repository,
+                    expected_version: input.expected_version,
+                    schema_version: input.schema_version,
+                    overrides: input.overrides,
+                };
+                submit::<SetValues>(&server, address, app::mutation_identity()?, command).await
+            },
+        )
+        .await?,
+    )
 }
 
 #[derive(Deserialize)]
@@ -293,30 +338,6 @@ fn bulk_identity(actor: Uuid, request_id: Uuid, issued_at_ms: i64) -> Result<Mut
     })
 }
 
-async fn save<C: Mutation>(
-    server: Arc<Server>,
-    organization: Uuid,
-    command: C::Input,
-    repository: Option<(Arc<Repository>, Principal)>,
-) -> Result<C::Output>
-where
-    C::Input: Send + 'static,
-    C::Output: Send + 'static,
-{
-    policy_write(server, organization, |server, address, cancel| async move {
-        if let Some((repo, principal)) = repository {
-            // A transfer changes the ownership epoch. Verify it under the
-            // same lease as inherited policy and the property update.
-            app::membership(&server, &principal, &repo).await?;
-        }
-        if cancel.is_cancelled() {
-            return Err(Error::MergeBusy);
-        }
-        submit::<C>(&server, address, app::mutation_identity()?, command).await
-    })
-    .await
-}
-
 async fn submit<C: Mutation>(
     server: &Server,
     address: Address,
@@ -368,6 +389,7 @@ fn saved<T>(outcome: Outcome<T>) -> Result<Json<T>> {
     match outcome {
         Outcome::Saved(value) => Ok(Json(value)),
         Outcome::Conflict => Err(Error::Conflict),
+        Outcome::Denied => Err(Error::NotFound),
         Outcome::Invalid => Err(Error::Invalid(
             "Choose valid property names, types, and values",
         )),

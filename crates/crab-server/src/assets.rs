@@ -37,6 +37,8 @@ pub(crate) async fn serve(request: Request) -> Response {
             && components[0] != "auth"
             && components[0] != "git"
             && (components.len() == 2
+                || (components.len() == 3
+                    && matches!(components[2], "code-search" | "properties" | "rulesets"))
                 || matches!(
                     components[2],
                     "tree"
@@ -130,6 +132,10 @@ mod tests {
             ("/team/repo.name/compare/main...feature%2Fx", StatusCode::OK),
             ("/team/repo.name/releases/tag/v1.0.0", StatusCode::OK),
             ("/team/repo.name/settings/access", StatusCode::OK),
+            ("/team/repo.name/code-search", StatusCode::OK),
+            ("/team/repo.name/properties", StatusCode::OK),
+            ("/team/repo.name/rulesets", StatusCode::OK),
+            ("/team/repo.name/properties/unknown", StatusCode::NOT_FOUND),
             ("/team/repo.name/results", StatusCode::OK),
             (
                 "/team/repo.name/results?report=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",

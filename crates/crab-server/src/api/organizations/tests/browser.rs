@@ -919,6 +919,12 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
         .await;
     browser
         .run(&[
+            "click",
+            "#repository-property-definition input[type='checkbox']",
+        ])
+        .await;
+    browser
+        .run(&[
             "find",
             "role",
             "button",
@@ -1271,6 +1277,89 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
         .run(&["wait", "--text", "Review availability saved."])
         .await;
     assert_eq!(h.json(preference, &bob).await["busy"], false);
+    let repository_rulesets = format!("{}/{owner}/library/rulesets", h.origin);
+    let property_values = format!("/api/repos/{owner}/library/properties");
+    let members = format!("/api/repos/{owner}/library/members");
+    let replace_members = async |members_list| {
+        let revision = h.json(&members, &alice).await["revision"].clone();
+        super::repositories::repository_write(
+            &h,
+            Method::PUT,
+            &members,
+            &alice,
+            repo_id,
+            json!({"expected_revision":revision,"members":members_list,"groups":[]}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    };
+    assert_eq!(h.json(&property_values, &bob).await["editable"], json!([]));
+    replace_members(json!([{"subject":"bob-id","name":"Bob","access":"admin"}])).await;
+    assert_eq!(
+        h.json(&property_values, &bob).await["editable"],
+        json!([property])
+    );
+    bob_browser.run(&["open", &repository_rulesets]).await;
+    bob_browser
+        .run(&[
+            "find",
+            "role",
+            "link",
+            "click",
+            "--name",
+            "Repository properties",
+            "--exact",
+        ])
+        .await;
+    bob_browser.run(&["wait", "--text", "native-policy"]).await;
+    bob_browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Edit properties",
+            "--exact",
+        ])
+        .await;
+    bob_browser
+        .run(&["select", "form select:has(option[value='true'])", "true"])
+        .await;
+    bob_browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Save property values",
+            "--exact",
+        ])
+        .await;
+    bob_browser
+        .run(&["wait", "--text", "Repository property values saved."])
+        .await;
+    assert_eq!(
+        h.json(&property_values, &alice).await["values"]["overrides"][property],
+        true
+    );
+    replace_members(json!([])).await;
+    bob_browser.run(&["reload"]).await;
+    bob_browser.run(&["wait", "--text", "native-policy"]).await;
+    let after_revocation = bob_browser.run(&["snapshot"]).await;
+    assert!(!after_revocation.contains("Edit properties"));
+    let current = h.json(&property_values, &bob).await;
+    assert_eq!(
+        super::repositories::repository_write(
+            &h, Method::PUT, &property_values, &bob, repo_id,
+            json!({"schema_version":current["schema"]["version"],"expected_version":current["values"]["version"],"overrides":{(property):false}}),
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND,
+    );
     drop(bob_browser);
     browser.run(&["click", cancel]).await;
     browser.run(&["wait", "--text", "No reviews yet."]).await;

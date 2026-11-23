@@ -1201,7 +1201,12 @@ One save applies the entire selection. A stale selection prevents every write
 in the batch. Retry a lost response with the same submission to recover the
 original receipt. Repository readers can open
 **Repository properties** from the repository's **Rulesets** page.
-Organization owners manage definitions and overrides.
+Organization owners manage definitions and overrides. Enable **Allow repository
+administrators to set this property** on a definition to delegate its value
+to each repository's current administrators. On **Repository properties**,
+**Edit properties** shows the fields the signed-in account can edit. Delegation
+includes restoring defaults. Changes to a delegated value can change which
+organization rulesets apply.
 
 Select **Matching repository properties** in an organization ruleset and add
 the conditions that repositories must satisfy. Property changes and Git
@@ -1216,6 +1221,10 @@ definitions and `PUT` with `expected_version` and `definitions` to replace
 them. Use `GET /api/repos/{owner}/{name}/properties` for the definitions and
 versioned overrides. A repository `PUT` accepts `schema_version`,
 `expected_version`, and the complete `overrides` object keyed by property UUID.
+`editable` lists the property UUIDs the signed-in account may edit. Definitions
+use `values_editable_by` with `organization` as the default and `repository` to
+allow repository administrators. A repository administrator's save must retain
+the current overrides for organization-managed properties.
 Organization owners can use `GET /api/organizations/{id}/repository-properties/values?repositories={uuid},{uuid}`
 to capture the schema, repository IDs, ownership epochs, value versions, and
 effective values. A `PUT` to the same path takes a `request_id`, `issued_at_ms`,

@@ -600,7 +600,7 @@ export function RepositoryPage({
                 </div>
               }
             >
-              <RepositoryProperties key={repo.id} repo={repo} />
+              <RepositoryProperties key={repo.id} repo={repo} csrf={csrf} />
             </Suspense>
           </section>
         ) : view === "settings" ? (

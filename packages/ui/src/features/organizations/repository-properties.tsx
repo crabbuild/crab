@@ -21,6 +21,7 @@ import {
 interface PropertyView {
   schema: PropertySchema;
   values: { version: number; overrides: Record<string, PropertyValue> };
+  editable: string[];
 }
 
 const kinds = {
@@ -107,6 +108,8 @@ function Definitions({
             <strong>{definition.name}</strong>
             <p className="text-sm text-muted-foreground">
               {kinds[definition.kind]}
+              {definition.values_editable_by === "repository" &&
+                " · Repository administrators can edit values"}
               {definition.description && ` · ${definition.description}`}
             </p>
           </div>
@@ -133,6 +136,7 @@ function Definitions({
               kind: "text",
               options: [],
               default: null,
+              values_editable_by: "organization",
             })
           }
         >
@@ -237,6 +241,28 @@ function Definitions({
             unset="No default"
             onChange={(value) => setDraft({ ...draft, default: value })}
           />
+          <label className="flex items-start gap-2">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={draft.values_editable_by === "repository"}
+              onChange={(event) =>
+                setDraft({
+                  ...draft,
+                  values_editable_by: event.target.checked
+                    ? "repository"
+                    : "organization",
+                })
+              }
+            />
+            <span>
+              Allow repository administrators to set this property
+              <span className="block text-sm text-muted-foreground">
+                Changing this value can affect which organization rulesets
+                apply.
+              </span>
+            </span>
+          </label>
           <div className="flex flex-wrap gap-2">
             <Button type="submit" disabled={mutation.pending}>
               Save property
@@ -294,12 +320,139 @@ function Definitions({
   );
 }
 
-export function RepositoryProperties({ repo }: { repo: Repository }) {
-  const request = useRequest<PropertyView>(endpoint(repo, "properties"));
+export function RepositoryProperties({
+  repo,
+  csrf,
+}: {
+  repo: Repository;
+  csrf: string;
+}) {
+  const path = endpoint(repo, "properties");
+  const request = useRequest<PropertyView>(path, repo.id);
   return (
     <Result state={request} timingLabel="Repository property values">
-      {({ schema, values }) =>
-        schema.definitions.length ? (
+      {(view) => (
+        <RepositoryValues
+          view={view}
+          repo={repo}
+          path={path}
+          csrf={csrf}
+          reload={request.retry}
+        />
+      )}
+    </Result>
+  );
+}
+
+function RepositoryValues({
+  view,
+  repo,
+  path,
+  csrf,
+  reload,
+}: {
+  view: PropertyView;
+  repo: Repository;
+  path: string;
+  csrf: string;
+  reload: () => void;
+}) {
+  const [{ schema, values, editable }, setView] = useState(view);
+  const [draft, setDraft] = useState<Record<string, PropertyValue> | null>(
+    null,
+  );
+  const [saved, setSaved] = useState(false);
+  const mutation = useMutation(csrf, repo);
+  const writable = new Set(editable);
+  const changed =
+    draft &&
+    editable.some(
+      (id) =>
+        JSON.stringify(draft[id]) !== JSON.stringify(values.overrides[id]),
+    );
+
+  async function save() {
+    if (!draft || !changed) return;
+    const result = await mutation.run<PropertyView>(path, "PUT", {
+      schema_version: schema.version,
+      expected_version: values.version,
+      overrides: draft,
+    });
+    if (result) {
+      setView(result);
+      setDraft(null);
+      setSaved(true);
+    }
+  }
+
+  if (!schema.definitions.length) {
+    return <p>No repository properties have been defined.</p>;
+  }
+
+  return (
+    <div className="grid gap-3">
+      {saved && <p role="status">Repository property values saved.</p>}
+      {draft ? (
+        <form
+          className="grid gap-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void save();
+          }}
+        >
+          <fieldset
+            className="grid gap-3"
+            disabled={mutation.pending || mutation.conflict}
+          >
+            {schema.definitions
+              .filter(({ id }) => writable.has(id))
+              .map((definition) => (
+                <PropertyInput
+                  key={definition.id}
+                  label={definition.name}
+                  definition={definition}
+                  value={draft[definition.id] ?? null}
+                  unset={
+                    definition.default === null
+                      ? "Unset"
+                      : `Default · ${display(definition.default)}`
+                  }
+                  onChange={(value) =>
+                    setDraft((current) => {
+                      const next = { ...current };
+                      if (value === null) delete next[definition.id];
+                      else next[definition.id] = value;
+                      return next;
+                    })
+                  }
+                />
+              ))}
+          </fieldset>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="submit"
+              disabled={!changed || mutation.pending || mutation.conflict}
+            >
+              Save property values
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={mutation.pending}
+              onClick={() => setDraft(null)}
+            >
+              Cancel
+            </Button>
+            {mutation.error && (
+              <Button type="button" variant="outline" onClick={reload}>
+                Reload properties
+              </Button>
+            )}
+          </div>
+          <Failure message={mutation.error} />
+        </form>
+      ) : (
+        <>
           <dl className="grid gap-3">
             {schema.definitions.map((definition) => {
               const value = values.overrides[definition.id];
@@ -316,6 +469,12 @@ export function RepositoryProperties({ repo }: { repo: Repository }) {
                         ? "Unset"
                         : `Default · ${display(definition.default)}`}
                   </dd>
+                  {writable.has(definition.id) &&
+                    definition.values_editable_by === "repository" && (
+                      <dd className="text-sm text-muted-foreground">
+                        Editable by repository administrators
+                      </dd>
+                    )}
                   {definition.description && (
                     <dd className="text-sm text-muted-foreground">
                       {definition.description}
@@ -325,10 +484,22 @@ export function RepositoryProperties({ repo }: { repo: Repository }) {
               );
             })}
           </dl>
-        ) : (
-          <p>No repository properties have been defined.</p>
-        )
-      }
-    </Result>
+          {editable.length > 0 && (
+            <Button
+              type="button"
+              variant="outline"
+              className="justify-self-start"
+              onClick={() => {
+                mutation.reset();
+                setSaved(false);
+                setDraft(values.overrides);
+              }}
+            >
+              Edit properties
+            </Button>
+          )}
+        </>
+      )}
+    </div>
   );
 }

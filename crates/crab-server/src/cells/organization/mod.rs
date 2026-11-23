@@ -322,6 +322,9 @@ pub(in crate::cells) fn authorize(
     if teams::handles(operation, mutation) {
         return teams::authorize(context, operation, mutation, input);
     }
+    if mutation && operation == properties::SetValues::ID {
+        return properties::authorize_save(context, input);
+    }
     let owner = match (operation, mutation) {
         // The private repository reads use catalog-bound team IDs. The public
         // repository boundary authorizes their callers before it returns data.
@@ -359,7 +362,6 @@ pub(in crate::cells) fn authorize(
             | repositories::AuthorizeImportPublication::ID
             | rulesets::Replace::ID
             | properties::SetSchema::ID
-            | properties::SetValues::ID
             | properties::SetSelection::ID
             | automation::Change::ID,
             true,
