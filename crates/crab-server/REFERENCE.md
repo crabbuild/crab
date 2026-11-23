@@ -3870,8 +3870,9 @@ without counters, claims, request ledgers,
 control and immutable roots loses numbering, ownership and retry guarantees.
 
 Discussion deletion, moderation, edit history, broad activity feeds, and
-email delivery remain unimplemented. Native backup restore, cross-provider
-export, and complete product-root restore qualification remain pending.
+email delivery remain unimplemented. The isolated RustFS process qualification
+restores version-selected product roots, including release asset bodies.
+Cross-provider export and restore on a production deployment remain pending.
 
 ## Commit statuses and required checks
 
@@ -4289,7 +4290,7 @@ The server is complete only when a real account can perform the workflow and obs
 | Git hosting | Authenticated fetch and push, exact branch/tag lifecycle, protection, publication, and independent-client proof | In progress; additional crash phases and coexistence qualification remain |
 | Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; moderation, edit history, and email delivery qualification remain |
 | Repository management | CLI create/adopt/list, archive, settings, search, import, and audited administration | In progress; browser creation/import and audit history remain |
-| Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Native process restart and owner handoff tested; native metrics and shutdown wiring implemented. Backup restore, crash matrices, upgrades, and provider qualification remain |
+| Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Native process restart, owner handoff, and version-selected RustFS restore tested. Native metrics and shutdown wiring implemented. Deployment restore, crash matrices, upgrades, and provider qualification remain |
 | Quality gates | API, UI, accessibility, realistic repositories, security, package smoke, and measured performance | In progress |
 
 ### Track known operational gaps
@@ -4303,7 +4304,7 @@ The remaining production gaps include:
 - Production throughput and provider-level admission qualification
 - Membership audit history and immediate arbitrary provider revocation when no Logout Token is delivered
 - Repository creation and adoption exist in the CLI; browser import remains
-- Version-selected complete product-root restore qualification for Git, shared identity state, native Cellar metadata, immutable LTX graphs, and release assets across providers
+- Extend the version-selected RustFS product-root restore proof to production storage providers and authenticated deployments
 - Manual assistive-technology audits and broader workflow coverage
 - Successful EKS, GKE, and AKS live-workflow receipts; rollback, alert-tuning, and disaster-recovery qualification
 - First tagged server image/chart publication and registry-attestation verification

@@ -849,6 +849,16 @@ python3 crates/crab-server/tests/qualify_cellar_process.py \
   --artifacts "$CARGO_TARGET_DIR/cellar-process-proof"
 ```
 
+Add `--recovery` to exercise SIGKILL followed by a full-root restore to a new
+RustFS bucket. This mode enables versioning before the fixture's first write.
+With all writers stopped, it records the latest live version of each key and
+uses that version ID for object contents and tags. It compares SHA-256, sizes,
+headers and tags before starting a new server with an empty Cell cache. The
+receipt requires exact Git refs, a stock Git clone with `git fsck --strict`,
+application records including organization audit history, and a published
+release whose asset bytes download unchanged.
+Use `--large-file-bytes N` to qualify Git LFS recovery in the same run.
+
 `tests/qualify_project_process.py` exercises clean restart, SIGKILL, native handoff
 and full-root backup/restore against an existing ten-repository preview. Stop only its Crab process first; keep its
 object store and UI development server running, and supply the preview's AWS
