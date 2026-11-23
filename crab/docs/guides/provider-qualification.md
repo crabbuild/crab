@@ -1673,7 +1673,9 @@ measures LFS payload delivery and its native metadata reads.
 Assembly and release verification match the native origin and repository
 prefix of every CLI arm to the independently verified product fixture.
 The warm edge arm needs a completed, provider-confirmed hit for every
-viewer request in the registered read scope. A confirmed origin fill,
+viewer request in the registered read scope. Each warm payload object must
+appear in the paired cold edge arm, and at least one warm hit must serve
+an object with a provider-confirmed fill in that cold arm. A confirmed origin fill,
 revalidation, or incomplete response in that scope invalidates the warm
 sample. Adjacent reads count toward the transfer and origin budgets.
 

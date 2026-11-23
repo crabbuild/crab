@@ -102,6 +102,43 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "did not repeat its own warm edge fetch"):
             self.collect()
 
+    def test_warm_edge_rejects_objects_outside_its_cold_pair(self) -> None:
+        for edge, provider in fixture.CDN.PROVIDER_FOR_EDGE.items():
+            with self.subTest(edge=edge):
+                scope = f"{edge}/private/cli/git/direct"
+                self.registration.update(scope=scope, candidate=fixture.cli_candidate(scope, PLATFORM))
+                fixture.write_git_measurements(self.root, self.registration, PLATFORM)
+                path = self.root / "near/0001/warm_edge" / fixture.CDN.VIEWER_REQUEST_FILES[provider]
+                proof = json.loads(path.read_bytes())
+                next(iter(proof["records"].values()))["key_sha256"] = "f" * 64
+                fixture.json_file(path, proof)
+                with self.assertRaisesRegex(ValueError, "reads payload objects outside its cold edge pair"):
+                    self.collect()
+
+    def test_warm_edge_must_hit_an_object_filled_by_its_cold_pair(self) -> None:
+        cold_slot = "near/0001/cold_edge"
+        cold = self.root / cold_slot
+        client = json.loads((cold / "client.json").read_bytes())
+        request, other_key = "e" * 64, "f" * 64
+        responses = client["edge_responses"] | {request: fixture.range_response(self.registration["scope"], 8)}
+        self.amend_client(cold_slot, edge_responses=responses, all_edge_attempts=2, edge_attempts=2,
+                          observed_edge_gets=2, edge_hits=1, edge_bytes=16)
+
+        log_name = fixture.CDN.VIEWER_REQUEST_FILES["s3"]
+        cold_log = cold / log_name
+        cold_proof = json.loads(cold_log.read_bytes())
+        cold_proof["records"][request] = {
+            "status": 206, "cache": "hit", "response_bytes": 8, "key_sha256": other_key,
+        } | fixture.cloudfront_framing(8)
+        fixture.json_file(cold_log, cold_proof)
+
+        warm_log = cold.with_name("warm_edge") / log_name
+        warm_proof = json.loads(warm_log.read_bytes())
+        next(iter(warm_proof["records"].values()))["key_sha256"] = other_key
+        fixture.json_file(warm_log, warm_proof)
+        with self.assertRaisesRegex(ValueError, "did not serve a payload filled by its cold edge pair"):
+            self.collect()
+
     def test_capsule_repeat_must_reuse_a_range_verified_by_its_primer(self) -> None:
         self.registration["scope"] = "cloudfront/private/cli/capsule/direct"
         self.registration["candidate"] = fixture.cli_candidate(self.registration["scope"], PLATFORM)

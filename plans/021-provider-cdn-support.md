@@ -696,7 +696,9 @@ and edge payload through redacted observations.
   status, cache result, and viewer response bytes. Cold-fill and warm-hit
   proof comes from completed requests in the registered read scope.
   Every scoped viewer request in a warm-edge sample must be a
-  provider-confirmed hit.
+  provider-confirmed hit. Each warm payload object must appear in its paired
+  cold edge sample. At least one warm hit must serve an object filled in
+  that cold sample.
   Benchmarks charge adjacent reads to the byte and origin request budgets.
   CloudFront verifies signed reads from the approved S3 bucket using the viewer
   keys and timed window. Its cold arm requires a successful origin body response.

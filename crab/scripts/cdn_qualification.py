@@ -1954,8 +1954,13 @@ class ViewerRequestMetrics(NamedTuple):
     request_ids: set[str]
     origin_gets: int
     fill_bytes: int
-    successful_fill: bool
+    payload_keys: set[str]
+    filled_payload_keys: set[str]
     completed_cache: dict[str, str]
+
+    @property
+    def successful_fill(self) -> bool:
+        return bool(self.filled_payload_keys)
 
 
 def verify_cloudfront_framing(row: dict[str, Any], response: dict[str, Any]) -> None:
@@ -2011,7 +2016,7 @@ def verify_viewer_requests(
     origin_gets_by_key: dict[str, int] = defaultdict(int)
     viewer_fill_by_key: dict[str, int] = defaultdict(int)
     origin_fill_by_key: dict[str, int] = defaultdict(int)
-    successful_fill = False
+    filled_payload_keys = set()
     completed_cache = {}
     observed_transfer = dict.fromkeys(("edge_hits", "edge_misses", "edge_unknown", "edge_bytes", "incomplete_edge_bytes"), 0)
     for request_id, record in records.items():
@@ -2065,7 +2070,8 @@ def verify_viewer_requests(
             if served_payload:
                 # Cloud CDN can log byte_range_caching for a request whose
                 # missing ranges were filled by linked backend GETs.
-                successful_fill |= selected and supplied_from_origin
+                if selected and supplied_from_origin:
+                    filled_payload_keys.add(key)
                 if supplied_from_origin and cache == "hit":
                     cache = "miss"
                 elif children and cache == "hit":
@@ -2103,7 +2109,8 @@ def verify_viewer_requests(
             origin_gets_by_key[key] += 1
             if origin["status"] in (200, 206):
                 origin_fill_by_key[key] += origin["response_body_bytes"]
-                successful_fill |= key in selected_payload_keys and positive(origin["response_body_bytes"])
+                if key in selected_payload_keys and positive(origin["response_body_bytes"]):
+                    filled_payload_keys.add(key)
         # These providers join origin GETs by key and time. If a key touched
         # origin in this arm, its viewer hits alone cannot prove a warm read.
         completed_cache = {request_id: cache for request_id, cache in completed_cache.items()
@@ -2115,7 +2122,7 @@ def verify_viewer_requests(
     # describe a linked GET or a fill shared by several viewers.
     origin_gets = sum(max(origin_gets_by_key[key], int(viewer_fill_by_key[key] > 0)) for key in keys)
     fill_bytes = sum(max(viewer_fill_by_key[key], origin_fill_by_key[key]) for key in keys)
-    return ViewerRequestMetrics(logged_ids, origin_gets, fill_bytes, successful_fill, completed_cache)
+    return ViewerRequestMetrics(logged_ids, origin_gets, fill_bytes, selected_payload_keys, filled_payload_keys, completed_cache)
 
 
 def verify_product_viewer_requests(
@@ -3025,6 +3032,7 @@ def collect_git_performance(
             primer_cache = None
             primer_controls = set()
             service_primer = None
+            cold_payload_keys, cold_filled_keys = set(), set()
             for arm in ARMS:
                 slot = pair_path / arm
                 label = f"{location} {index} {arm}"
@@ -3135,7 +3143,7 @@ def collect_git_performance(
                 fixtures.add((payload, receipt, reader["origin_sha256"], reader["prefix_sha256"]))
                 windows[arm] = (client["started_at_unix_ms"], client["finished_at_unix_ms"])
                 viewer_log = None
-                traffic = ViewerRequestMetrics(set(), 0, 0, False, {})
+                traffic = ViewerRequestMetrics(set(), 0, 0, set(), set(), {})
                 cache_corrections = dict.fromkeys(("hit", "miss", "unknown"), 0)
                 if policies is not None:
                     verify_compiled_edge_limits(client, policies, label)
@@ -3150,10 +3158,16 @@ def collect_git_performance(
                     provider_request_ids.update(traffic.request_ids)
                     responses = {request_id: row for request_id, row in client["edge_responses"].items()
                                  if row["scope"] == scope}
-                    if arm == "warm_edge":
+                    if arm == "cold_edge":
+                        cold_payload_keys, cold_filled_keys = traffic.payload_keys, traffic.filled_payload_keys
+                    elif arm == "warm_edge":
                         require(responses and len(responses) == client["edge_attempts"]
                                 and all(traffic.completed_cache.get(request_id) == "hit" for request_id in responses),
                                 f"{label} needs provider-confirmed hits for every request in the registered scope")
+                        require(traffic.payload_keys <= cold_payload_keys,
+                                f"{label} reads payload objects outside its cold edge pair")
+                        require(not traffic.payload_keys.isdisjoint(cold_filled_keys),
+                                f"{label} did not serve a payload filled by its cold edge pair")
                     for request_id, row in responses.items():
                         if not row["complete"] or not row["bytes"]:
                             continue
