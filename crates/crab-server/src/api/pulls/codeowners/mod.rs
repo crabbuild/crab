@@ -24,7 +24,7 @@ use crate::{
         organization::teams::repository_access::{CodeOwnerTeamQuery, CodeOwnerTeams},
         repository::{
             MergeReviewers, RepositoryAuthor,
-            review_requests::automatic::{MAX_RECIPIENTS, Plan, TeamRecipients},
+            review_requests::automatic::{MAX_RECIPIENTS, Plan},
         },
     },
     repository::Repository,
@@ -226,14 +226,24 @@ pub(super) async fn requests(
             OwnerIdentity::Person(_) => {}
         }
     }
-    if let Some(organization) = membership.organization {
-        for team in teams {
-            let recipients =
-                crate::repository::access::team_review_recipients(server, organization, team)
-                    .await?;
-            subjects.extend(recipients.iter().cloned());
-            plan.teams.push(TeamRecipients { team, recipients });
+    for team in teams {
+        let plan_for_team = crate::repository::access::team_review_plan(
+            server,
+            &membership,
+            team,
+            Some(&eligibility),
+        )
+        .await?;
+        subjects.extend(plan_for_team.recipients.iter().cloned());
+        if let Some(routing) = &plan_for_team.routing {
+            subjects.extend(
+                routing
+                    .candidates
+                    .iter()
+                    .map(|reviewer| reviewer.subject.clone()),
+            );
         }
+        plan.teams.push(plan_for_team);
     }
     if subjects.len() > MAX_RECIPIENTS || serde_json::to_vec(&plan)?.len() > 1024 * 1024 {
         return Err(Error::Invalid(

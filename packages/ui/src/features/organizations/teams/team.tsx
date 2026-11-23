@@ -12,6 +12,7 @@ import { TeamFields } from "./form";
 import { TeamMembers } from "./members";
 import { IdentityGroupSettings } from "./identity-group";
 import { useTeamRead } from "./read";
+import { TeamReviewRouting } from "./review-routing";
 
 export function TeamDetail({
   organization,
@@ -201,6 +202,13 @@ export function TeamDetail({
                     />
                   </>
                 )}
+                <Separator />
+                <TeamReviewRouting
+                  organization={organization}
+                  actor={actor}
+                  team={team}
+                  commands={commands}
+                />
                 <Separator />
                 <section className="flex flex-col items-start gap-3">
                   <h3 className="font-semibold">Delete this team</h3>

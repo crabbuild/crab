@@ -82,6 +82,10 @@ pub(super) fn routes() -> Router<Arc<Server>> {
             "/api/organizations/{id}/teams/{team}/members/{person}",
             get(membership),
         )
+        .route(
+            "/api/organizations/{id}/teams/{team}/review-routing",
+            get(review_routing),
+        )
 }
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -270,6 +274,26 @@ async fn policy(
     app::account(&principal)?;
     Ok(Json(policy))
 }
+async fn review_routing(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((id, team)): Path<(Uuid, Uuid)>,
+) -> Result<Json<native::review_routing::Settings>> {
+    let actor = actor(&server, &principal).await?;
+    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    let settings = cells
+        .query::<native::review_routing::GetSettings>(
+            target(id)?,
+            None,
+            native::Key { actor, team },
+        )
+        .await
+        .map_err(read_error)?
+        .output;
+    app::account(&principal)?;
+    Ok(Json(settings))
+}
+
 enum People {
     Members,
     Candidates,
@@ -462,6 +486,7 @@ async fn save(
         native::Outcome::InvalidDescription => Error::Invalid(
             "Team description must contain at most 1000 characters, without NUL characters",
         ),
+        native::Outcome::InvalidRouting => Error::Invalid("Choose between 1 and 10 reviewers"),
         native::Outcome::NameTaken => Error::TeamNameConflict,
         native::Outcome::Missing => Error::NotFound,
         native::Outcome::NotMember => Error::Invalid(

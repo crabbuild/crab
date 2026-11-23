@@ -166,6 +166,10 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
   The repository file browser links ownership to the rule at the displayed
   commit. Verified email owner lookup remains open.
 
+- Team maintainers can distribute review requests by repository-scoped
+  rotation or fewest open requests. Organization-wide reviewer balancing and
+  availability remain open.
+
 ## Platform investments
 
 | Investment | First production milestone | Prerequisites |

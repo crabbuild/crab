@@ -13,6 +13,7 @@ pub(in crate::cells::organization) fn handles(operation: u32, mutation: bool) ->
                 | Members::ID
                 | GetMembership::ID
                 | Candidates::ID
+                | review_routing::GetSettings::ID
                 | GetPolicy::ID
                 | MentionMembers::ID
                 | ResolveReviewTeams::ID
@@ -75,7 +76,8 @@ pub(in crate::cells::organization) fn authorize(
             Command::Policy { .. } => owner,
             Command::Edit { team, .. }
             | Command::Delete { team, .. }
-            | Command::Member { team, .. } => {
+            | Command::Member { team, .. }
+            | Command::ReviewRouting { team, .. } => {
                 owner || view(context, who.actor, team)?.is_some_and(|view| view.can_manage)
             }
         };
@@ -94,7 +96,11 @@ pub(in crate::cells::organization) fn authorize(
     }
     let target: Target = serde_json::from_value(input.clone())?;
     let visible = view(context, who.actor, target.team)?.ok_or(Error::AccessDenied)?;
-    if matches!(operation, GetMembership::ID | Candidates::ID) && !visible.can_manage {
+    if matches!(
+        operation,
+        GetMembership::ID | Candidates::ID | review_routing::GetSettings::ID
+    ) && !visible.can_manage
+    {
         return Err(Error::AccessDenied);
     }
     Ok(())

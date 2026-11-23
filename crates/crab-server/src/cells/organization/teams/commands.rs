@@ -34,6 +34,12 @@ pub(crate) enum Command {
         version: u64,
         role: Option<Role>,
     },
+    ReviewRouting {
+        team: Uuid,
+        version: u64,
+        algorithm: review_routing::Algorithm,
+        reviewers: u8,
+    },
     Policy {
         version: u64,
         member_creation: bool,
@@ -47,6 +53,7 @@ pub(crate) enum Outcome {
     Conflict,
     InvalidName,
     InvalidDescription,
+    InvalidRouting,
     NameTaken,
     NotMember,
     Missing,
@@ -157,6 +164,21 @@ impl Mutation for Change {
                 version,
                 role,
             } => change_member(context, input.actor, *team, *member, *version, *role)?,
+            Command::ReviewRouting {
+                team,
+                version,
+                algorithm,
+                reviewers,
+            } => review_routing::set(
+                context,
+                input.actor,
+                *team,
+                review_routing::Settings {
+                    version: *version,
+                    algorithm: *algorithm,
+                    reviewers: *reviewers,
+                },
+            )?,
             Command::Policy {
                 version,
                 member_creation,
@@ -348,7 +370,8 @@ impl Mutation for Cancel {
             }
             Command::Edit { team, .. }
             | Command::Delete { team, .. }
-            | Command::Member { team, .. } => team,
+            | Command::Member { team, .. }
+            | Command::ReviewRouting { team, .. } => team,
         };
         // Cancellation and mutation consult the same ledger in this Cell's
         // transaction. Whichever commits first determines the permanent result;

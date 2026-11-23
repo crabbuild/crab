@@ -26,6 +26,8 @@ pub(crate) use repository_access::{
     GetRepositoryTeamAccess, RepositoryTeamAccess, RepositoryTeams, ResolveReviewTeams,
 };
 
+pub(crate) mod review_routing;
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(test, derive(ts_rs::TS))]

@@ -5,6 +5,7 @@ use crate::cells::repository::collaboration::{
 };
 
 pub(crate) mod automatic;
+pub(crate) mod routing;
 pub(crate) mod teams;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
