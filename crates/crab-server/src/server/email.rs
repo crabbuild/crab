@@ -30,6 +30,8 @@ pub(super) enum DeliveryError {
 
 type Result<T> = std::result::Result<T, DeliveryError>;
 
+mod transfers;
+
 const IDLE: Duration = Duration::from_secs(5);
 const TIMEOUT: Duration = Duration::from_secs(10);
 const RETRY_MS: u64 = 60_000;
@@ -40,6 +42,7 @@ pub(crate) struct Sender {
     key: String,
     from: String,
     text: String,
+    transfer_text: String,
 }
 
 #[derive(Serialize)]
@@ -82,6 +85,9 @@ impl Sender {
         let inbox = public
             .join("/-/notifications")
             .map_err(|error| crate::Error::Maintenance(Box::new(error)))?;
+        let transfers = public
+            .join("/-/notifications?tab=transfers")
+            .map_err(|error| crate::Error::Maintenance(Box::new(error)))?;
         Ok(Self {
             client,
             endpoint,
@@ -90,10 +96,18 @@ impl Sender {
             // Email can outlive repository access. Keep discussion content in
             // the authenticated inbox, where access is checked on each read.
             text: format!("You have new activity in Crab.\n\nOpen your notifications: {inbox}\n"),
+            transfer_text: format!(
+                "You have a repository transfer offer in Crab.\n\nOpen your notifications: {transfers}\n"
+            ),
         })
     }
 
     async fn send(&self, job: &Job, to: &str) -> Option<u64> {
+        let (subject, text) = if job.transfer.is_some() {
+            ("New repository transfer in Crab", &self.transfer_text)
+        } else {
+            ("New activity in Crab", &self.text)
+        };
         let response = self
             .client
             .post(self.endpoint.clone())
@@ -102,8 +116,8 @@ impl Sender {
             .json(&Message {
                 from: &self.from,
                 to: [to],
-                subject: "New activity in Crab",
-                text: &self.text,
+                subject,
+                text,
             })
             .send()
             .await;
@@ -137,15 +151,23 @@ pub(super) async fn run(server: Arc<Server>) -> crate::Result<()> {
         return Ok(());
     };
     let cells = server.cells().ok_or(crate::cells::Error::Unavailable)?;
+    tokio::join!(
+        run_delivery(&server, &cells, sender),
+        transfers::run(&server, &cells),
+    );
+    Ok(())
+}
+
+async fn run_delivery(server: &Server, cells: &CellClient, sender: &Sender) {
     let mut delay = IDLE;
     loop {
         tokio::select! {
-            _ = server.cancellation.cancelled() => return Ok(()),
+            _ = server.cancellation.cancelled() => return,
             _ = tokio::time::sleep(delay) => {}
         }
         let result = tokio::select! {
-            _ = server.cancellation.cancelled() => return Ok(()),
-            result = deliver_next(&server, &cells, sender) => result,
+            _ = server.cancellation.cancelled() => return,
+            result = deliver_next(server, cells, sender) => result,
         };
         delay = match result {
             Ok(true) => Duration::from_millis(200),
@@ -216,12 +238,6 @@ async fn can_deliver(server: &Server, cells: &CellClient, job: &Job) -> Result<b
     let Some(auth) = server.auth.as_ref() else {
         return Ok(false);
     };
-    let Some(repo) = server.repositories.by_id(job.repository) else {
-        return Ok(false);
-    };
-    let Some(grants) = current_grants(server, &repo).await? else {
-        return Ok(false);
-    };
     let identities = app::query_output(
         cells
             .query::<LookupIdentities>(Address::Directory, None, vec![job.id.actor])
@@ -234,6 +250,16 @@ async fn can_deliver(server: &Server, cells: &CellClient, job: &Job) -> Result<b
         .as_ref()
         .filter(|identity| identity.issuer == auth.issuer())
     else {
+        return Ok(false);
+    };
+    if let Some(source) = job.transfer {
+        return Ok(!auth.account_state(&identity.subject).await?.suspended
+            && transfers::still_pending(server, job.repository, source, identity).await?);
+    }
+    let Some(repo) = server.repositories.by_id(job.repository) else {
+        return Ok(false);
+    };
+    let Some(grants) = current_grants(server, &repo).await? else {
         return Ok(false);
     };
     let direct = grants

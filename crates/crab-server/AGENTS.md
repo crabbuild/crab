@@ -102,7 +102,9 @@ recipients and delivers to the Directory inbox before acknowledging the event.
 `cells/directory/notifications/email.rs` owns the verified address binding,
 versioned opt-in, and transactional email queue. `server/email.rs` rechecks
 current delivery authority and sends generic inbox links with durable
-provider idempotency keys.
+provider idempotency keys. `server/email/transfers.rs` discovers committed
+personal transfer offers from the catalog. Directory receipts fence replay,
+and the sender checks the exact pending offer again before delivery.
 `cells/repository/integrations.rs` owns GitHub Actions connections, delivery
 receipts, bounded accepted-delivery history, and workflow attempt ordering. It
 reads active providers and their exact-commit results from one snapshot for merge

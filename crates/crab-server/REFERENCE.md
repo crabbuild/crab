@@ -2953,6 +2953,15 @@ access, account suspension, mute, and opt-in before sending queued activity.
 Repository watches and discussion follows apply to both delivery channels.
 Delivery is limited to future inbox activity and can be turned off at any time.
 
+The same opt-in enables email for pending personal repository transfer offers.
+The email links to **Notifications → Repository transfers**. Recipient
+addresses come from the verified sign-in binding. Repository names and
+private offer links stay inside Crab. Delivery rechecks the exact offer,
+the recipient's account status, and the saved preference. Organization
+offers appear in the in-app transfer list. The transfer scanner recovers from
+the committed catalog, and the Directory uses the same idempotent provider
+delivery and 23-hour retry window as discussion email.
+
 `GET /api/notifications/email` returns `configured`, `address`, `enabled`,
 and `version` for the signed-in account. Send `enabled` and the captured
 `version` with `PUT`. A stale request for a different choice returns 409.

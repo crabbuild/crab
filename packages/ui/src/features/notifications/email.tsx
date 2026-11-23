@@ -35,7 +35,8 @@ export function EmailNotifications({ csrf }: { csrf: string }) {
         <DialogHeader>
           <DialogTitle>Email notifications</DialogTitle>
           <DialogDescription>
-            Receive an email when new activity reaches your Crab inbox.
+            Receive email about inbox activity and personal repository transfer
+            offers.
           </DialogDescription>
         </DialogHeader>
         {open && <EmailSettings csrf={csrf} />}

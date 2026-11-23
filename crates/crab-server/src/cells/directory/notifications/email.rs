@@ -189,11 +189,20 @@ impl JobId {
     }
 }
 
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TransferSource {
+    pub offer: Uuid,
+    pub created_at_ms: u64,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Job {
     pub id: JobId,
     pub repository: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer: Option<TransferSource>,
     pub preference_version: u64,
     pub expires: u64,
     due: u64,
@@ -217,35 +226,109 @@ fn delete_job(context: &Transaction<'_>, job: &Job) -> Result<()> {
 }
 
 pub(super) fn enqueue(context: &Transaction<'_>, actor: Uuid, notice: &Notice) -> Result<()> {
-    let preference = preference(context, actor)?;
-    if !preference.enabled {
+    queue(
+        context,
+        JobId {
+            actor,
+            notice: notice.id,
+        },
+        notice.repository,
+        notice.created_at_ms,
+        None,
+    )
+}
+
+fn queue(
+    context: &Transaction<'_>,
+    id: JobId,
+    repository: Uuid,
+    created_at_ms: u64,
+    transfer: Option<TransferSource>,
+) -> Result<()> {
+    let preference = preference(context, id.actor)?;
+    if !preference.enabled && transfer.is_none() {
         return Ok(());
     }
     let now = now(context)?;
-    let expires = notice.created_at_ms.saturating_add(HORIZON_MS);
-    if expires <= now || notice.created_at_ms > now.saturating_add(LEASE_MS) {
+    let expires = created_at_ms.saturating_add(HORIZON_MS);
+    if expires <= now || created_at_ms > now.saturating_add(LEASE_MS) {
         return Ok(());
     }
-    let id = JobId {
-        actor,
-        notice: notice.id,
-    };
     if context.document::<Job>(&id.key())?.is_some()
         || context.document::<bool>(&id.receipt(expires))?.is_some()
     {
         return Ok(());
     }
+    if !preference.enabled {
+        // Restarting the catalog scan must not turn a previously discarded
+        // transfer into new activity after the recipient opts in.
+        return context.put_document(&id.receipt(expires), &true);
+    }
     store_job(
         context,
         &Job {
             id,
-            repository: notice.repository,
+            repository,
+            transfer,
             preference_version: preference.version,
             expires,
             due: now,
             attempt: 0,
         },
     )
+}
+
+pub(crate) const TRANSFER_BATCH: usize = 32;
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TransferMail {
+    pub recipient: IdentityKey,
+    pub repository: Uuid,
+    pub source: TransferSource,
+}
+
+pub(crate) struct QueueTransferMail;
+
+impl Mutation for QueueTransferMail {
+    const CLASS: &'static str = CLASS;
+    const ID: u32 = 30;
+    type Input = Vec<TransferMail>;
+    type Output = ();
+
+    fn execute(context: &mut Transaction<'_>, input: Self::Input) -> Result<MutationResult<()>> {
+        if input.len() > TRANSFER_BATCH {
+            return Err(Error::Invalid("Too many transfer emails in one batch"));
+        }
+        for item in input {
+            if item.repository.is_nil() || item.source.offer.is_nil() {
+                return Err(Error::Invalid("Invalid transfer email source"));
+            }
+            let Some(actor) = active_account(context, item.recipient)? else {
+                continue;
+            };
+            // The proposal UUID comes from the client. Bind it to this source
+            // and lifetime without colliding with an ordinary inbox notice.
+            let mut hash = blake3::Hasher::new_derive_key("crab transfer email v1");
+            hash.update(item.repository.as_bytes());
+            hash.update(item.source.offer.as_bytes());
+            hash.update(&item.source.created_at_ms.to_be_bytes());
+            let mut bytes = [0; 16];
+            bytes.copy_from_slice(&hash.finalize().as_bytes()[..16]);
+            let id = JobId {
+                actor,
+                notice: Uuid::from_bytes(bytes),
+            };
+            queue(
+                context,
+                id,
+                item.repository,
+                item.source.created_at_ms,
+                Some(item.source),
+            )?;
+        }
+        Ok(MutationResult::Success(()))
+    }
 }
 
 pub(crate) struct MailPending;
