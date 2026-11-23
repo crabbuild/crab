@@ -555,7 +555,8 @@ excerpt links to its file and line at the commit searched.
 
 Add qualifiers to the search text to narrow a query. For example,
 `language:rust path:/src/**/*.rs symbol:parse` finds Rust definitions in
-`src` and its subdirectories. Use `repo:owner/name` to select an exact
+`src` and its subdirectories. Bare terms match file contents or paths by default.
+**Search in** can restrict them to one field. Use `repo:owner/name` to select an exact
 repository and `org:` with the organization namespace from the repository
 URL or its UUID. Both selectors use current repository access. A query
 containing only filters lists matching file paths.
@@ -564,11 +565,15 @@ containing only filters lists matching file paths.
 Use `*` or `?` within one path component and `**` across directories.
 For a root-anchored directory glob, use a leading slash, as in `path:/src/**`.
 Quotes keep wildcards literal and allow spaces, as in `path:"release notes"`.
-Repeated path filters must all match.
+Adjacent terms and qualifiers are joined by `AND`. Use uppercase `AND`,
+`OR`, and `NOT`. `NOT` binds first, then `AND`, then `OR`. Parentheses
+group expressions. For example, `(dial OR reconnect) NOT path:tests/` matches
+either term outside the tests directory. Separate terms can match different
+lines in the same file. Quote a phrase to require adjacent words in order.
+For mixed queries, `content:` and `symbol:` scope the term they prefix.
 `language:` uses the file extension and accepts C, C++, C#, CSS, Go, HTML,
 Java, JavaScript, JSON, Kotlin, Markdown, PHP, Python, Ruby, Rust, Shell,
-SQL, Swift, TOML, TypeScript, XML, and YAML. `symbol:` and `content:` select
-the search mode and supply the term. Quote text such as
+SQL, Swift, TOML, TypeScript, XML, and YAML. Quote text such as
 `"repo:owner/name"` to search for the qualifier itself.
 
 Wrap a pattern in slashes to search with a regular expression. For example,
@@ -584,7 +589,7 @@ program size and nesting, and supports patterns without look-around or
 backreferences.
 
 `GET /api/repos/{owner}/{name}/code-search` takes `q`, optional `rev`, an
-optional directory `path`, `kind=content|path|symbol` (default `content`),
+optional directory `path`, `kind=any|content|path|symbol` (default `any`),
 `case_sensitive` (default `false`), `limit`
 (1–40 matching files, default 20), and an opaque `cursor`. It returns
 `{commit, items, scanned, skipped, next}`. Each file carries `path`,
@@ -592,12 +597,14 @@ optional directory `path`, `kind=content|path|symbol` (default `content`),
 `matched`, and `after`. Supply the same search parameters with `next`
 to continue. A cursor binds the repository UUID, commit, and search filters.
 Subsequent pages use the pinned commit even if the selected branch advances.
-The search text accepts up to 512 characters, including up to 128 for the
-literal match.
+A query accepts up to 512 characters, 24 terms, 12 nested operators,
+and 128 characters per literal.
 Every request checks current repository access before returning any matches.
 
-Each page scans up to 128 files in canonical path order. Indexed symbol search
-can consider all indexed paths and opens up to 128 candidates. Large blobs
+A direct page scans up to 128 files in canonical path order. Repository
+search can use the index for the default revision and for symbol queries
+when its tree matches the selected commit. Indexed pages open up to 128
+candidates. Large blobs
 above 256 KiB, binary or invalid UTF-8 data, separately stored Crab or LFS
 content, and files beyond the parser budget are counted as skipped for modes
 that read content. Empty pages can have a continuation. The browser retains
@@ -620,7 +627,7 @@ current readable repository scope selected by its qualifiers. Results name
 the repository and link to the exact Git commit, file, and matching line.
 
 `GET /api/code-search` takes `q`, optional `organization` UUID and
-`directory`, `kind=content|path|symbol` (default `content`), `case_sensitive`,
+`directory`, `kind=any|content|path|symbol` (default `any`), `case_sensitive`,
 and `cursor`. It returns `groups`, `scanned` paths, `skipped` files,
 `verified` content candidates checked against Git, and `next`. Groups carry
 `id`, `owner`, `name`, `commit`, and matching `files`. Path matches use
@@ -631,10 +638,12 @@ and checks up to 32 candidates per repository. Follow `next` with the same
 parameters, including after an empty page. A repository in progress keeps
 the same commit until its scan finishes.
 
-An indexed query with a regular expression examines at most 4,096 path rows
-per repository per page. Follow its continuation even when a page contains
-no matches. Crab verifies text expressions against Git content without using
-literal trigram filters to rule out a match.
+An indexed Boolean or regex query examines at most 4,096 path rows per
+repository per page. Follow the continuation even after a page with no
+matches. The index can prove a literal absent through its trigram filter.
+A possible match stays eligible until the pinned Git file can be checked.
+Regex terms use Git verification directly. An unreadable file has unknown
+content, so a negated content term cannot treat it as an absence.
 
 The server builds a default-branch index in the background and keeps one
 published artifact per repository in object storage. It contains paths and

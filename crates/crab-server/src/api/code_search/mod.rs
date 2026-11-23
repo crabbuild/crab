@@ -19,12 +19,14 @@ use crab_remote_git::{
     TreeListingItem, TreeListingRequest,
 };
 use gix_hash::ObjectId;
-use regex::{Regex, RegexBuilder};
+use qualifiers::{Facts, QueryPlan, Truth};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{ops::Range, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+mod evaluate;
 mod indexed;
 mod qualifiers;
 pub(super) mod workspace;
@@ -40,6 +42,7 @@ const CURSOR_HEADER: usize = 20 + 32;
 #[serde(rename_all = "snake_case")]
 enum Kind {
     #[default]
+    Any,
     Content,
     Path,
     Symbol,
@@ -145,7 +148,12 @@ pub(super) async fn search(
             paths: PAGE_ENTRIES,
             results: limit,
             duration: Duration::from_secs(20),
-            use_index: pattern.kind == Kind::Symbol,
+            use_index: pattern.has_symbols
+                || params.rev.as_deref().is_none_or(|revision| {
+                    revision == "HEAD"
+                        || revision.strip_prefix("refs/heads/").unwrap_or(revision)
+                            == repo.config.default_branch
+                }),
         },
         &cancellation,
     )
@@ -180,60 +188,29 @@ fn acquire(server: &Server) -> std::result::Result<read_admission::Admission, Re
 }
 
 struct Pattern {
-    matcher: Regex,
+    query: Arc<QueryPlan>,
     directory: GitPath,
-    kind: Kind,
     case_sensitive: bool,
-    mask: Option<code_index::Mask>,
-    filters: qualifiers::Filters,
-    expression: bool,
+    uses_text: bool,
+    has_symbols: bool,
 }
 
 impl Pattern {
     fn new(terms: &str, path: &str, case_sensitive: bool, kind: Kind) -> Result<Self, ApiError> {
-        let (term, kind, filters) = qualifiers::Filters::parse(terms, kind)?;
+        let query = QueryPlan::parse(terms, kind, case_sensitive)?;
         if path.len() > 1024
             || path.chars().any(char::is_control)
             || path.split('/').any(|part| matches!(part, "." | ".."))
         {
             return Err(ApiError::Input("Enter a repository directory path"));
         }
-        let directory = GitPath::new(path.as_bytes().to_vec())?;
-        let expression = matches!(&term, qualifiers::Term::Expression(_));
-        let (matcher, mask) = match term {
-            qualifiers::Term::Literal(literal) => {
-                if literal.chars().count() > 128 {
-                    return Err(ApiError::Input(
-                        "Search text may contain up to 128 characters",
-                    ));
-                }
-                let matcher = RegexBuilder::new(&regex::escape(&literal))
-                    .case_insensitive(!case_sensitive)
-                    .build()
-                    .map_err(|_| ApiError::Input("The search term could not be compiled"))?;
-                (matcher, code_index::Mask::query(&literal, case_sensitive))
-            }
-            qualifiers::Term::Expression(pattern) => {
-                // Regex alternatives and optional atoms do not imply required trigrams.
-                (
-                    qualifiers::compile_expression(&pattern, case_sensitive)?,
-                    None,
-                )
-            }
-        };
         Ok(Self {
-            matcher,
-            directory,
-            kind,
+            uses_text: query.leaves.iter().any(qualifiers::Predicate::uses_text),
+            has_symbols: query.leaves.iter().any(qualifiers::Predicate::uses_symbols),
+            query: Arc::new(query),
+            directory: GitPath::new(path.as_bytes().to_vec())?,
             case_sensitive,
-            mask,
-            filters,
-            expression,
         })
-    }
-
-    fn uses_expression(&self) -> bool {
-        self.expression || self.filters.regex_paths
     }
 }
 
@@ -279,7 +256,7 @@ async fn scan_repository(
     limits.max_fetched_bytes = limits.max_fetched_bytes.min(192 * 1024 * 1024);
     limits.max_inflated_bytes = limits.max_inflated_bytes.min(128 * 1024 * 1024);
     limits.max_response_bytes = 40 * 1024 * 1024;
-    let kind = if pattern.kind == Kind::Path {
+    let kind = if !pattern.uses_text {
         OperationKind::Tree
     } else {
         OperationKind::Content
@@ -290,7 +267,8 @@ async fn scan_repository(
     let found = async {
         let snapshot = repository.snapshot(&revision, &operation).await?;
         let mut acceleration = Acceleration::Scanning;
-        if !pattern.filters.repository_matches(repo) {
+        let scope = pattern.repository_facts(repo);
+        if pattern.query.evaluate(&scope).0 == Truth::No {
             let commit = snapshot.commit_oid();
             return Ok(Scan {
                 commit,
@@ -304,7 +282,7 @@ async fn scan_repository(
             match code_index::load(server, repo, snapshot.root_tree_oid()).await {
                 Ok(Some(index)) => {
                     if let Some(rows) = &index.rows {
-                        return indexed::inspect(rows, &snapshot, pattern, &window, &operation).await;
+                        return indexed::inspect(rows, &snapshot, pattern, &scope, &window, &operation).await;
                     }
                     acceleration = Acceleration::Limited;
                 }
@@ -312,7 +290,7 @@ async fn scan_repository(
                 Err(error) => tracing::debug!(repository_id = %repo.id, ?error, "Code search index could not be read"),
             }
         }
-        let mut scan = inspect(&snapshot, pattern, &window, &operation).await?;
+        let mut scan = inspect(&snapshot, pattern, &scope, &window, &operation).await?;
         scan.acceleration = acceleration;
         Ok(scan)
     }
@@ -329,6 +307,7 @@ enum Inspection {
 async fn inspect(
     snapshot: &RemoteGitSnapshot,
     pattern: &Pattern,
+    scope: &Facts,
     window: &Window<'_>,
     operation: &OperationContext,
 ) -> crab_remote_git::Result<Scan> {
@@ -361,24 +340,9 @@ async fn inspect(
         let found = futures_util::future::try_join_all(batch.iter().map(|item| async move {
             match item {
                 TreeListingItem::Blob(entry) => {
-                    if !pattern.filters.file_matches(entry.path.as_bytes()) {
-                        return Ok(Inspection::NoMatch);
-                    }
-                    if pattern.kind == Kind::Path {
-                        let path = display_path(entry.path.as_bytes());
-                        if pattern.matcher.is_match(&path) {
-                            Ok(Inspection::Match(FileMatches {
-                                path,
-                                path_hex: encode_hex(entry.path.as_bytes()),
-                                lines: Vec::new(),
-                                more_lines: false,
-                            }))
-                        } else {
-                            Ok(Inspection::NoMatch)
-                        }
-                    } else {
-                        file_matches(snapshot, entry, pattern, operation).await
-                    }
+                    pattern
+                        .inspect_entry(snapshot, entry, scope, operation)
+                        .await
                 }
                 TreeListingItem::CommonPrefix(_) => Err(Error::InternalInvariant {
                     invariant: "ungrouped code search received a grouped path",
@@ -386,16 +350,8 @@ async fn inspect(
             }
         }))
         .await?;
-        if pattern.kind != Kind::Path {
-            verified += batch
-                .iter()
-                .filter(|item| {
-                    pattern.filters.file_matches(item.path())
-                        && (pattern.kind != Kind::Symbol || Syntax::for_path(item.path()).is_some())
-                })
-                .count();
-        }
-        for found in found {
+        verified += found.iter().filter(|(_, read)| *read).count();
+        for (found, _) in found {
             examined += 1;
             result.scanned += 1;
             match found {
@@ -422,64 +378,6 @@ async fn inspect(
             None
         },
     })
-}
-
-async fn file_matches(
-    snapshot: &RemoteGitSnapshot,
-    entry: &crab_remote_git::TreeEntry,
-    pattern: &Pattern,
-    operation: &OperationContext,
-) -> crab_remote_git::Result<Inspection> {
-    let syntax = if pattern.kind == Kind::Symbol {
-        let Some(syntax) = Syntax::for_path(entry.path.as_bytes()) else {
-            return Ok(Inspection::NoMatch);
-        };
-        Some(syntax)
-    } else {
-        None
-    };
-    let Some(text) = code_index::text(snapshot, &entry.path, entry.oid, operation).await? else {
-        return Ok(Inspection::Skipped);
-    };
-    let (lines, more_lines) = if let Some(syntax) = syntax {
-        let cancel = operation.cancellation().clone();
-        let matcher = pattern.matcher.clone();
-        let Some(matches) =
-            tokio::task::spawn_blocking(move || symbol_matches(syntax, &text, &matcher, &cancel))
-                .await
-                .map_err(|source| Error::DecodeTask { source })?
-        else {
-            return Ok(Inspection::Skipped);
-        };
-        matches
-    } else if pattern.expression {
-        let cancel = operation.cancellation().clone();
-        let matcher = pattern.matcher.clone();
-        let Some(matches) =
-            tokio::task::spawn_blocking(move || expression_matches(&text, &matcher, &cancel))
-                .await
-                .map_err(|source| Error::DecodeTask { source })?
-        else {
-            return Ok(Inspection::Skipped);
-        };
-        matches
-    } else {
-        let mut hits = text.lines().enumerate().filter_map(|(index, line)| {
-            let found = pattern.matcher.find(line)?;
-            Some(excerpt(index + 1, line, found.range()))
-        });
-        let lines = hits.by_ref().take(MAX_MATCH_LINES).collect();
-        (lines, hits.next().is_some())
-    };
-    if lines.is_empty() {
-        return Ok(Inspection::NoMatch);
-    }
-    Ok(Inspection::Match(FileMatches {
-        path: display_path(entry.path.as_bytes()),
-        path_hex: encode_hex(entry.path.as_bytes()),
-        lines,
-        more_lines,
-    }))
 }
 
 fn expression_matches(
@@ -528,12 +426,10 @@ fn expression_matches(
 }
 
 fn symbol_matches(
-    syntax: Syntax,
+    definitions: &[code_index::symbols::Definition],
     text: &str,
     matcher: &Regex,
-    cancel: &CancellationToken,
-) -> Option<(Vec<Excerpt>, bool)> {
-    let definitions = code_index::symbols::definitions(syntax, text, cancel)?;
+) -> (Vec<Excerpt>, bool) {
     let mut lines: Vec<Excerpt> = Vec::new();
     for symbol in definitions {
         let Some(found) = matcher.find(&text[symbol.bytes.clone()]) else {
@@ -543,7 +439,7 @@ fn symbol_matches(
             continue;
         }
         if lines.len() == MAX_MATCH_LINES {
-            return Some((lines, true));
+            return (lines, true);
         }
         let start = text[..symbol.bytes.start]
             .rfind('\n')
@@ -558,7 +454,7 @@ fn symbol_matches(
             column + found.start()..column + found.end(),
         ));
     }
-    Some((lines, false))
+    (lines, false)
 }
 
 fn excerpt(number: usize, text: &str, found: Range<usize>) -> Excerpt {
@@ -638,8 +534,8 @@ impl Tokens<'_> {
 
     fn signature(&self, payload: &[u8]) -> blake3::Hash {
         let mut hash = blake3::Hasher::new_keyed(self.key);
-        // The same raw text can resolve to a different query after qualifiers.
-        hash.update(b"crab-code-search-v3\0");
+        // Boolean expressions changed the meaning of whitespace and qualifiers.
+        hash.update(b"crab-code-search-v4\0");
         hash.update(self.repository.as_bytes());
         hash.update(payload);
         hash.finalize()

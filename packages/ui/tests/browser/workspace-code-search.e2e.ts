@@ -6,6 +6,7 @@ test("workspace search clears old results when access changes between pages", as
   const organization = "01905010-0000-7000-8000-000000000001";
   const repository = "01905010-0000-7000-8000-000000000002";
   const commit = "1".repeat(40);
+  const expression = "manifest AND NOT path:vendor/";
   let revoked = false;
   await page.route("**/api/session", (route) =>
     route.fulfill({
@@ -17,7 +18,7 @@ test("workspace search clears old results when access changes between pages", as
     (route) => {
       const filters = new URL(route.request().url()).searchParams;
       expect(filters.get("organization")).toBe(organization);
-      expect(filters.get("q")).toBe("manifest");
+      expect(filters.get("q")).toBe(expression);
       expect(filters.get("directory")).toBe("src");
       expect(filters.get("kind")).toBe("path");
       expect(filters.get("case_sensitive")).toBe("true");
@@ -64,7 +65,7 @@ test("workspace search clears old results when access changes between pages", as
   );
   await page.goto(`/-/code-search?organization=${organization}`);
   const form = page.getByRole("search", { name: "Search workspace code" });
-  await form.getByLabel("Search text").fill("manifest");
+  await form.getByLabel("Search text").fill(expression);
   await form.getByLabel("Search in").selectOption("path");
   await form.getByLabel("Directory (optional)").fill("src");
   await form.getByRole("checkbox", { name: "Match case" }).check();
