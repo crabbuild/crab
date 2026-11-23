@@ -1817,6 +1817,15 @@ mod tests {
 
     #[tokio::test]
     async fn sparse_range_stream_verifies_only_the_needed_xorb_bytes_from_cdn() {
+        reconstruct_over_cdn_ranges(Some(1024..8192)).await;
+    }
+
+    #[tokio::test]
+    async fn complete_hydration_uses_cdn_ranges_when_full_get_is_disabled() {
+        reconstruct_over_cdn_ranges(None).await;
+    }
+
+    async fn reconstruct_over_cdn_ranges(window: Option<std::ops::Range<u64>>) {
         use crab_storage::cdn::{
             CdnAccess, CdnCredential, CdnCredentials, CdnReadFamily, CdnRoute, CdnTransport,
         };
@@ -1870,37 +1879,45 @@ mod tests {
             .await
             .unwrap();
         let size = body.len();
-        let footer = size - FOOTER_SIZE..size;
-        let metadata = xorb_metadata_region(size, &body[footer.clone()]).unwrap();
-        let parsed = XorbParser::parse(body.clone()).unwrap();
-        let first = parsed.chunk_meta(0).unwrap();
-        let first_start = first.offset as usize;
-        let payload = first_start..first_start + first.compressed_len as usize;
+        let spans = if window.is_some() {
+            let footer = size - FOOTER_SIZE..size;
+            let metadata = xorb_metadata_region(size, &body[footer.clone()]).unwrap();
+            let parsed = XorbParser::parse(body.clone()).unwrap();
+            let first = parsed.chunk_meta(0).unwrap();
+            let first_start = first.offset as usize;
+            let payload = first_start..first_start + first.compressed_len as usize;
+            vec![
+                footer,
+                metadata.offset..metadata.offset + metadata.len,
+                payload,
+            ]
+        } else {
+            std::iter::once(0..size).collect()
+        };
         const RANGE_CAP: usize = 64;
-        let mut expected = [
-            footer,
-            metadata.offset..metadata.offset + metadata.len,
-            payload,
-        ]
-        .into_iter()
-        .flat_map(|range| {
-            (range.start..range.end)
-                .step_by(RANGE_CAP)
-                .map(move |start| (start, (start + RANGE_CAP).min(range.end) - 1))
-        })
-        .collect::<Vec<_>>();
+        let mut expected = spans
+            .into_iter()
+            .flat_map(|range| {
+                (range.start..range.end)
+                    .step_by(RANGE_CAP)
+                    .map(move |start| (start, (start + RANGE_CAP).min(range.end) - 1))
+            })
+            .collect::<Vec<_>>();
         expected.sort_unstable();
-        assert!(
-            expected
-                .iter()
-                .map(|(start, end)| end - start + 1)
-                .sum::<usize>()
-                < size
-        );
+        if window.is_some() {
+            assert!(
+                expected
+                    .iter()
+                    .map(|(start, end)| end - start + 1)
+                    .sum::<usize>()
+                    < size
+            );
+        }
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let transport = CdnTransport::loopback_fixture(listener.local_addr().unwrap()).unwrap();
         let path = xorb.location;
+        let full_limit = if window.is_some() { size } else { 0 };
         let route = CdnRoute::new(
             target,
             "runtime-test".into(),
@@ -1911,7 +1928,7 @@ mod tests {
         )
         .with_loopback_read_limits(
             CdnReadFamily::Xorb,
-            &format!("{size} {size} {RANGE_CAP} 10000"),
+            &format!("{full_limit} {size} {RANGE_CAP} 10000"),
         )
         .unwrap();
         let origin = crab_storage::Store::new(Arc::new(RejectFullXorbReads {
@@ -1954,13 +1971,24 @@ mod tests {
         });
         let hydrator = runtime_with_origin(&directory.path().join("cache"), 1024 * 1024, origin)
             .with_file_index_lookup(lookup.clone());
-        let result = hydrator
-            .reconstruct_range_stream(&pointer, 1024..8192)
-            .unwrap()
-            .try_collect::<Vec<_>>()
-            .await
-            .unwrap();
-        assert_eq!(result.concat(), original[1024..8192]);
+        if let Some(window) = window {
+            let expected = &original[window.start as usize..window.end as usize];
+            let result = hydrator
+                .reconstruct_range_stream(&pointer, window)
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            assert_eq!(result.concat(), expected);
+        } else {
+            let destination = directory.path().join("hydrated");
+            let size = hydrator
+                .reconstruct_to_path(&pointer, &destination)
+                .await
+                .unwrap();
+            assert_eq!(size, original.len() as u64);
+            assert_eq!(std::fs::read(destination).unwrap(), original);
+        }
         tokio::time::timeout(Duration::from_secs(2), edge)
             .await
             .unwrap()

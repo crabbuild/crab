@@ -376,7 +376,12 @@ impl CachingStore {
                     None => source.read_origin(self.origin.head(path)).await?.size,
                 };
                 Self::validate_xorb_size(path, size)?;
-                edge.get(size, None).await?
+                if edge.admits(size, None) {
+                    edge.get(size, None).await?
+                } else {
+                    self.xorb_range(path, xorb_hash, 0..size, source, Some(size))
+                        .await?
+                }
             }
             XorbSource::Origin(_) => Some(
                 source
@@ -530,7 +535,10 @@ impl CachingStore {
                 let size = object_len.ok_or_else(|| {
                     StorageError::Internal("CDN xorb range needs captured size".into())
                 })?;
-                if edge.admits(size, Some(range.end - range.start)) {
+                if edge
+                    .range_chunk_bytes(size)
+                    .is_some_and(|limit| range.end - range.start <= limit.get() as u64)
+                {
                     return Ok(edge.get(size, Some(range)).await?);
                 }
                 let batches = edge.range_batches(size, range)?;
