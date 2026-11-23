@@ -4088,6 +4088,42 @@ the recipient's historical decision. Browser cleanup is bounded and scoped to
 its own sessions. The normal suite ignores it because it needs an external browser.
 
 
+### Review and export organization audit history
+
+**Audit log** in the organization displays recorded organization, invitation,
+membership, team, project, ruleset, and repository access events for current
+organization owners. Records show the action, timestamp in UTC, actor and
+affected account, team, project, or repository where recorded. Names from
+account profiles reflect the current public profile. Historical repository
+names reflect the event's own organization at the time it was recorded.
+
+`GET /api/organizations/{id}/audit-log` accepts an exact `action` (for
+example `repository_access_changed`), actor and affected `account` UUIDs,
+`repository` name, inclusive `since_ms`, exclusive `until_ms`, and
+`limit` from 1 to 50. The actor filter parameter is `actor`. Continue with
+the returned `next` as `after` and the original filters, even after an
+empty page. The signed continuation binds the owner and organization and
+walks a fixed prefix of both event histories. Each source keeps its
+append order. The combined view compares timestamps at the heads of both
+sources.
+
+Use **Export JSON** or **Export CSV** to save the current search. The API
+accepts `export=json|csv` with the same filters. An export response contains
+up to 500 matching rows and scans up to 512 events. A response with
+`X-Crab-Audit-Next` has more history. Follow it as `after`, or use
+**Export next part** in the browser. `X-Crab-Audit-Count` counts rows in the
+response. The next part remains available after an empty response.
+Organization ownership is checked on each request. Downloads omit the raw
+provider identities, group names, and access digests in private storage.
+
+Native Organization events are visible from the existing durable history.
+Repository registration, access changes and transfers appear from the first
+write that records an organization scope. Older repository records without an
+event-time organization remain in the private catalog audit chain. Each side
+of a transfer receives its own name and event, with access to its own preceding
+history. Coordinate this catalog change across all serving replicas before
+accepting new writes. Keep a pre-upgrade backup for rollback.
+
 ### Native standalone teams
 
 `cells/organization/teams/` and `api/organizations/teams/` own direct teams,

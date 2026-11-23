@@ -723,3 +723,128 @@ async fn repository_prefixes_cannot_alias_or_enter_server_state() {
         assert!(matches!(result, Err(CatalogError::Invalid(_))), "{prefix}");
     }
 }
+
+#[tokio::test]
+async fn organization_audit_retains_each_side_of_a_transfer_and_survives_root_restore() {
+    let catalog = catalog();
+    let former = Uuid::now_v7();
+    let current = Uuid::now_v7();
+    let runtime = catalog
+        .create_repository(
+            "team".into(),
+            "project".into(),
+            "team/project".into(),
+            "main".into(),
+            String::new(),
+            vec![admin()],
+        )
+        .await
+        .unwrap();
+    let before = catalog.load().await.unwrap().0;
+    assert!(before.organization_audit_start(former).is_none());
+    let legacy = before.membership_audit_head.unwrap();
+    catalog.mark_cell_ready(runtime.id).await.unwrap();
+    let revision = catalog.load().await.unwrap().0.version;
+    catalog
+        .set_organization_access(
+            "team",
+            "project",
+            runtime.id,
+            revision,
+            OrganizationAccess {
+                id: former,
+                teams: vec![],
+            },
+            actor(),
+        )
+        .await
+        .unwrap();
+    let before = catalog.load().await.unwrap().0;
+    let former_history = before.organization_audit_start(former).unwrap();
+    let offer = Uuid::now_v7();
+    let now = 1_800_000_000_000;
+    let pending = catalog
+        .propose_transfer(
+            before.version,
+            runtime.id,
+            transfer::Proposal {
+                id: offer,
+                requester: actor(),
+                recipient: transfer::Recipient::Organization { id: current },
+                recipient_label: "Destination".into(),
+                name: "renamed-on-transfer".into(),
+                version: 0,
+            },
+            now,
+        )
+        .await
+        .unwrap();
+    catalog
+        .decide_transfer(
+            pending.version,
+            offer,
+            transfer::Decision::Accept {
+                actor: actor(),
+                display_name: "Alice".into(),
+            },
+            now + 2000,
+        )
+        .await
+        .unwrap();
+    let document = catalog.load().await.unwrap().0;
+    let shared = document.organization_audit_start(former).unwrap();
+    assert_eq!(document.organization_audit_start(current), Some(shared));
+    let restored = CatalogStore::new(StorageRoot::memory(catalog.root.store.clone(), "restored"));
+    for path in [
+        CATALOG_RELATIVE_PATH.to_string(),
+        legacy,
+        former_history.path(),
+        shared.path(),
+    ] {
+        let (bytes, _) = catalog
+            .root
+            .store
+            .get_with_etag_bounded(&catalog.root.path(&path), MAX_CATALOG_BYTES)
+            .await
+            .unwrap();
+        restored
+            .root
+            .store
+            .put_overwrite(&restored.root.path(&path), bytes)
+            .await
+            .unwrap();
+    }
+
+    let (snapshot, _) = restored.load_snapshot().await.unwrap();
+    let outgoing = restored
+        .organization_audit_entry(&snapshot, former, shared)
+        .await
+        .unwrap();
+    assert_eq!(
+        (outgoing.action, outgoing.name.as_str(), outgoing.previous),
+        (
+            audit::Action::TransferredOut,
+            "project",
+            Some(former_history)
+        )
+    );
+    let incoming = restored
+        .organization_audit_entry(&snapshot, current, shared)
+        .await
+        .unwrap();
+    assert_eq!(
+        (incoming.action, incoming.name.as_str(), incoming.previous),
+        (audit::Action::TransferredIn, "renamed-on-transfer", None)
+    );
+    let old = restored
+        .organization_audit_entry(&snapshot, former, former_history)
+        .await
+        .unwrap();
+    assert_eq!(old.previous, None);
+    assert!(
+        restored
+            .organization_audit_entry(&snapshot, current, former_history)
+            .await
+            .is_err()
+    );
+}
