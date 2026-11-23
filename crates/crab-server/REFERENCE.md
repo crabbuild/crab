@@ -1235,6 +1235,25 @@ a lost response. The receipt contains the number of repositories updated.
 Remove a rule's reference before deleting a definition. Retained definitions
 keep their type and allow existing select values to remain valid.
 
+### Filter organization repositories by property
+
+Open the organization's **Repositories** tab and choose **Filter by property**
+to add a qualifier to the search. Use `props.NAME:VALUE` to type one directly,
+such as `props.regulated:false` or `props.location:"US East"`. Prefix a qualifier
+with `-` to exclude repositories with that value. Combine qualifiers with name
+or description terms. Every qualifier must match. Property names and boolean
+values ignore case. Text and choice values match exactly. A multi-select
+qualifier matches one selected option. Defaults apply when no override exists.
+
+Use `GET /api/repos?organization={id}&q={query}` to run the search. The scope is
+one organization. `GET /api/organizations/{id}/repository-properties/filters`
+lists the definitions available through current repository access. The catalog
+checks readability before resolving properties and again before returning results.
+The server considers up to 512 candidate repositories per page in batches of
+128. Follow `next` even after an empty page. Continuations bind the account,
+query, property revision, and readable candidates. If they change, start at the
+first page.
+
 ### Grant ruleset bypass access
 
 Ruleset administrators can grant bypass access to repository administrators,

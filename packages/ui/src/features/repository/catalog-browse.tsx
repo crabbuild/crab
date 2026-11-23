@@ -1,4 +1,5 @@
 import { RepoIcon } from "@primer/octicons-react";
+import { useRef } from "react";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Badge } from "@/components/ui/badge";
@@ -6,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { navigate, useRequest, type Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
+import { RepositoryPropertyFilters } from "./catalog-property-filters";
 
 type Entry = Pick<
   Repository,
@@ -29,6 +31,7 @@ export function BrowseRepositories({
   if (after) params.set("after", after);
   if (organization) params.set("organization", organization);
   const page = useRequest<Page>(`/api/repos?${params}`);
+  const searchInput = useRef<HTMLInputElement>(null);
 
   function href(search: string, next?: string) {
     const destination = new URL(url);
@@ -57,11 +60,16 @@ export function BrowseRepositories({
       >
         <Input
           key={query}
+          ref={searchInput}
           type="search"
           className="max-w-md flex-1"
           name="q"
           aria-label="Search repositories"
-          placeholder="Search by name, owner, or description"
+          placeholder={
+            organization
+              ? "Search by name, description, or property"
+              : "Search by name, owner, or description"
+          }
           maxLength={200}
           defaultValue={query}
         />
@@ -74,6 +82,18 @@ export function BrowseRepositories({
           </Button>
         )}
       </form>
+      {organization && (
+        <RepositoryPropertyFilters
+          organization={organization}
+          apply={(filter) => {
+            const text = searchInput.current?.value.trim() ?? query;
+            const next = text ? `${text} ${filter}` : filter;
+            if (next.length > 200) return false;
+            navigate(href(next));
+            return true;
+          }}
+        />
+      )}
       <Result state={page} timingLabel="Repository search">
         {({ repositories, next }) => (
           <>
@@ -109,6 +129,10 @@ export function BrowseRepositories({
                   </li>
                 ))}
               </ul>
+            ) : next ? (
+              <p role="status" className="notice">
+                No matches on this page. More repositories are available.
+              </p>
             ) : query || after ? (
               <p role="status" className="notice">
                 No repositories match this search.

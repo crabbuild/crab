@@ -215,6 +215,7 @@ pub(super) async fn visible_matching(
                 record.owner == repository.config.owner
                     && record.name == repository.config.name
                     && record.organization_id() == repository.organization
+                    && record.ownership_epoch == repository.ownership_epoch
                     && record.forked_from == repository.forked_from
             }) else {
                 continue;

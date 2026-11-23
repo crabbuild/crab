@@ -9,7 +9,7 @@ use crate::{
             Definition, Editor, GetSchema, GetSelection, GetValues, MAX_BATCH, Outcome,
             PropertyValue, ReadValues, Repository as Binding, Schema, Selection, SelectionReceipt,
             SelectionView, SetSchema, SetSchemaInput, SetSelection, SetValues, SetValuesInput,
-            UpdateSelection, VersionedRepository, View,
+            UpdateSelection, VersionedRepository, View, search::Fields,
         },
     },
     repository::{
@@ -27,6 +27,10 @@ pub(super) fn organization_routes() -> Router<Arc<Server>> {
         .route(
             "/api/organizations/{id}/repository-properties/values",
             get(read_selection).put(update_selection),
+        )
+        .route(
+            "/api/organizations/{id}/repository-properties/filters",
+            get(filter_fields),
         )
         .layer(axum::extract::DefaultBodyLimit::max(128 * 1024))
 }
@@ -52,6 +56,36 @@ async fn read_schema(
         .await
         .map_err(read_error)?;
     Ok(Json(result.output))
+}
+
+async fn filter_fields(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path(organization): Path<Uuid>,
+) -> Result<Json<Schema>> {
+    let visible =
+        crate::api::catalog::visible(&server, &principal, None, Some(organization)).await?;
+    let Some(repository) = visible.first().map(|item| &item.repository) else {
+        return Ok(Json(Schema::default()));
+    };
+    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    let schema = cells
+        .query::<Fields>(target(organization)?, None, ())
+        .await
+        .map_err(read_error)?
+        .output;
+    // A definition is visible through repository access. Revalidate that
+    // access after the Organization Cell read before returning definitions.
+    let current = crate::api::catalog::visible_matching(&server, &principal, |repo| {
+        repo.id == repository.id
+            && repo.organization == Some(organization)
+            && repo.ownership_epoch == repository.ownership_epoch
+    })
+    .await?;
+    if current.is_empty() {
+        return Err(Error::PageChanged);
+    }
+    Ok(Json(schema))
 }
 
 #[derive(Deserialize)]

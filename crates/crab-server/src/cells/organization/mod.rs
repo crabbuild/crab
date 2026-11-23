@@ -337,6 +337,8 @@ pub(in crate::cells) fn authorize(
             | CodeOwnerTeams::ID
             | rulesets::Applicable::ID
             | properties::GetValues::ID
+            | properties::search::MatchRepositories::ID
+            | properties::search::Fields::ID
             | automation::Verify::ID,
             false,
         ) => return Ok(()),
@@ -446,6 +448,10 @@ pub(in crate::cells) fn dispatch_read(
         rulesets::Applicable::ID => invoke_read::<rulesets::Applicable>(context, input),
         properties::GetSchema::ID => invoke_read::<properties::GetSchema>(context, input),
         properties::GetValues::ID => invoke_read::<properties::GetValues>(context, input),
+        properties::search::MatchRepositories::ID => {
+            invoke_read::<properties::search::MatchRepositories>(context, input)
+        }
+        properties::search::Fields::ID => invoke_read::<properties::search::Fields>(context, input),
         properties::GetSelection::ID => invoke_read::<properties::GetSelection>(context, input),
         repositories::Owners::ID => invoke_read::<repositories::Owners>(context, input),
         teams::MentionMembers::ID => invoke_read::<teams::MentionMembers>(context, input),

@@ -1,6 +1,125 @@
 use super::*;
 
 #[tokio::test(flavor = "multi_thread")]
+async fn property_search_binds_continuations_to_values_and_visible_candidates() {
+    let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+    let h = Harness::new_with_store_and_prefix(false, false, store, "org-property-search").await;
+    h.initialize_directory().await;
+    let (organization, _, _) = crate::test_support::http::organizations::bootstrap(&h).await;
+    let alice = h.login().await;
+    let org = format!("/api/organizations/{organization}");
+    let schema = format!("{org}/repository-properties");
+    let fields = format!("{schema}/filters");
+    let (first, owner) = create(&h, &org, &alice, "library").await;
+    let (second, _) = create(&h, &org, &alice, "library-preview").await;
+    create(&h, &org, &alice, "library-private").await;
+    let region = Uuid::now_v7().to_string();
+    let service = Uuid::now_v7().to_string();
+    let regulated = Uuid::now_v7().to_string();
+    h.write(Method::PUT, &schema, &alice, json!({"expected_version":0,"definitions":[
+        {"id":region,"name":"location","description":"","kind":"text","options":[],"default":"US East"},
+        {"id":service,"name":"service","description":"","kind":"multi_select","options":["api","web"],"default":["api","web"]},
+        {"id":regulated,"name":"regulated","description":"","kind":"boolean","options":[],"default":false}
+    ]})).await.error_for_status().unwrap();
+
+    let first_path = format!("/api/repos/{owner}/library");
+    let second_path = format!("/api/repos/{owner}/library-preview");
+    let grant = async |repo: &str, id, members| {
+        let route = format!("{repo}/members");
+        let version = h.json(&route, &alice).await["revision"].clone();
+        repository_write(
+            &h,
+            Method::PUT,
+            &route,
+            &alice,
+            id,
+            json!({"expected_revision":version,"members":members,"groups":[]}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    };
+    for (path, id) in [(&first_path, first), (&second_path, second)] {
+        grant(
+            path,
+            id,
+            json!([{"subject":"bob-id","name":"Bob","access":"read"}]),
+        )
+        .await;
+    }
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    assert_eq!(
+        h.json(&fields, &bob).await["definitions"][0]["name"],
+        "location"
+    );
+    let search = |term: &str| {
+        let encoded: String = url::form_urlencoded::byte_serialize(term.as_bytes()).collect();
+        format!("/api/repos?organization={organization}&q={encoded}")
+    };
+    let status = async |path: &str, account: &str| {
+        h.http
+            .get(format!("{}{path}", h.origin))
+            .header("cookie", account)
+            .send()
+            .await
+            .unwrap()
+            .status()
+    };
+    let filter = search("library props.Location:\"US East\" props.REGULATED:FALSE");
+    let filtered = h.json(&format!("{filter}&limit=1"), &bob).await;
+    assert_eq!(filtered["repositories"][0]["id"], json!(first));
+    let cursor = filtered["next"].as_str().unwrap();
+    let next = format!("{filter}&limit=1&after={cursor}");
+    assert_eq!(
+        h.json(&next, &bob).await["repositories"][0]["id"],
+        json!(second)
+    );
+    assert_eq!(status(&next, &alice).await, StatusCode::BAD_REQUEST);
+    for term in [
+        "props.location:\"US East",
+        "props.regulated:maybe",
+        "props.unknown:x",
+    ] {
+        assert_eq!(status(&search(term), &bob).await, StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(
+        status("/api/repos?q=props.location:US", &bob).await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        h.json(&search("props.location:\"us east\""), &bob).await["repositories"],
+        json!([])
+    );
+
+    repository_write(&h, Method::PUT, &format!("{second_path}/properties"), &alice, second,
+        json!({"schema_version":1,"expected_version":0,"overrides":{(&region):"EU West",(&service):["api"]}}))
+        .await.error_for_status().unwrap();
+    assert_eq!(status(&next, &bob).await, StatusCode::CONFLICT);
+    let current = h
+        .json(&search("props.service:api -props.service:web"), &bob)
+        .await;
+    assert_eq!(current["repositories"].as_array().unwrap().len(), 1);
+    assert_eq!(current["repositories"][0]["id"], json!(second));
+
+    let scoped = search("props.regulated:false");
+    let page = h.json(&format!("{scoped}&limit=1"), &bob).await;
+    let cursor = page["next"].as_str().unwrap();
+    grant(&second_path, second, json!([])).await;
+    assert_eq!(
+        status(&format!("{scoped}&limit=1&after={cursor}"), &bob).await,
+        StatusCode::CONFLICT
+    );
+    grant(&first_path, first, json!([])).await;
+    assert_eq!(h.json(&fields, &bob).await["definitions"], json!([]));
+    assert_eq!(
+        h.json(&search("props.unknown:any"), &bob).await["repositories"],
+        json!([])
+    );
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn bulk_property_edits_validate_every_repository_and_recover_the_receipt() {
     let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
     let h = Harness::new_with_store_and_prefix(false, false, store, "org-property-batch").await;

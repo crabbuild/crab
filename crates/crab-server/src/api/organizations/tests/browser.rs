@@ -990,6 +990,62 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
     let property = saved["schema"]["definitions"][0]["id"].as_str().unwrap();
     assert_eq!(saved["values"]["overrides"][property], false);
 
+    let repository_list = format!(
+        "{}/-/organizations/{organization}?tab=repositories",
+        h.origin
+    );
+    browser.run(&["open", &repository_list]).await;
+    browser.run(&["wait", "--text", "Filter by property"]).await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Filter by property",
+            "--exact",
+        ])
+        .await;
+    let chooser = "form[aria-label='Repository property filter'] select";
+    browser.run(&["wait", chooser]).await;
+    browser.run(&["select", chooser, property]).await;
+    browser
+        .run(&[
+            "select",
+            "form[aria-label='Repository property filter'] select:has(option[value='false'])",
+            "false",
+        ])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Add filter",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", "--url", "**q=props.native-policy%3Afalse"])
+        .await;
+    browser
+        .run(&["wait", "[aria-label='Repository results'] a"])
+        .await;
+    browser
+        .run(&["fill", "input[name=q]", "props.native-policy:true"])
+        .await;
+    browser
+        .run(&[
+            "find", "role", "button", "click", "--name", "Search", "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", "--text", "No repositories match this search."])
+        .await;
+
     let team_settings = format!(
         "{}/-/organizations/{organization}?tab=teams&team={team}&view=settings",
         h.origin

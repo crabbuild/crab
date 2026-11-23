@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, HashSet};
 
 use super::*;
 
+pub(crate) mod search;
+
 const KEY: &str = "organization/v1/repository-properties";
 const MAX_PROPERTIES: usize = 50;
 pub(crate) const MAX_BATCH: usize = 50;
@@ -344,6 +346,7 @@ impl Mutation for SetSchema {
             }
         }
         context.put_document(KEY, &next)?;
+        search::advance_revision(context)?;
         advance(
             context,
             input.actor,
@@ -429,6 +432,7 @@ impl Mutation for SetValues {
             input.repository,
             &mut current.values,
         )?;
+        search::advance_revision(context)?;
         Ok(MutationResult::Success(Outcome::Saved(current)))
     }
 }
@@ -601,6 +605,9 @@ impl Mutation for SetSelection {
         let updated = pending.len();
         for (repository, mut values) in pending {
             save_values(context, input.actor, repository, &mut values)?;
+        }
+        if updated != 0 {
+            search::advance_revision(context)?;
         }
         Ok(MutationResult::Success(Outcome::Saved(SelectionReceipt {
             updated,
