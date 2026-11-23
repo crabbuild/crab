@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import type { Connection } from "@/features/settings/integrations";
 import type { BranchProtection } from "@/lib/contracts";
 import { expectNoAccessibilityViolations } from "./accessibility";
 import { mockPullRequest } from "./pulls/fixture";
@@ -9,22 +10,7 @@ test("a workflow can be connected, required by a branch, rotated, and disconnect
   const { lifecycle, pull } = await mockPullRequest(page);
   let rules: BranchProtection[] = [];
   let protectionVersion = 0;
-  let connection:
-    | {
-        id: string;
-        name: string;
-        github_repository: number;
-        workflow: number;
-        credential_version: string;
-        url: string;
-        dispatch?: {
-          id: string;
-          installation: number;
-          repository: string;
-          branch: string;
-        };
-      }
-    | undefined;
+  let connection: Connection | undefined;
   let loseSetupReply = true;
   let reported = false;
   let delivered = false;
@@ -97,7 +83,6 @@ test("a workflow can be connected, required by a branch, rotated, and disconnect
         return route.fulfill({
           json: {
             available: true,
-            dispatch_available: true,
             items: connection ? [connection] : [],
           },
         });
@@ -120,6 +105,8 @@ test("a workflow can be connected, required by a branch, rotated, and disconnect
             github_repository: change.github_repository,
             workflow: change.workflow,
             credential_version: change.id,
+            app_managed: false,
+            app_bound: false,
             url: `https://crab.example/webhooks/github-actions/${lifecycle.repositoryId}/${change.id}`,
           };
           if (loseSetupReply) {
@@ -134,7 +121,7 @@ test("a workflow can be connected, required by a branch, rotated, and disconnect
           expect(change.expected).toBe(connection?.credential_version);
           connection!.credential_version = change.credential;
           return route.fulfill({
-            json: { connection, secret: "fixture-new-secret" },
+            json: { connection, fetch_token: "fixture-rotated-checkout-token" },
           });
         case "dispatch":
           expect(change.id).toBe(connection?.id);
@@ -147,6 +134,8 @@ test("a workflow can be connected, required by a branch, rotated, and disconnect
             branch: "main",
           });
           connection!.dispatch = change.dispatch;
+          connection!.app_managed = true;
+          connection!.url = "https://crab.example/webhooks/github-actions/app";
           return route.fulfill({
             json: { connection, fetch_token: "fixture-checkout-token" },
           });
@@ -282,6 +271,10 @@ test("a workflow can be connected, required by a branch, rotated, and disconnect
   await expectNoAccessibilityViolations(page);
   await page.keyboard.press("Escape");
   await expect(deliveries).toBeFocused();
+  // The operator authorizes a binding. Enabling queue dispatch switches the
+  // connection to the operator's App.
+  connection!.app_bound = true;
+  await page.reload();
   await page.getByRole("button", { name: "Set up queue dispatch" }).click();
   const dispatch = page.getByRole("form", { name: "Automatic queue dispatch" });
   await dispatch
@@ -294,6 +287,12 @@ test("a workflow can be connected, required by a branch, rotated, and disconnect
     page.getByLabel("Queue checkout token", { exact: true }),
   ).toHaveValue("fixture-checkout-token");
   await page.getByRole("button", { name: "Hide credentials" }).click();
+  await expect(
+    page.getByText("Managed by the server GitHub App"),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Rotate secret for ci/test" }),
+  ).toHaveCount(0);
   await expect(
     page.getByText("Queue dispatch on example/mirror · main"),
   ).toBeVisible();
@@ -338,10 +337,18 @@ test("a workflow can be connected, required by a branch, rotated, and disconnect
   ).toHaveAttribute("href", actionsUrl);
 
   await page.goto("/team/project/settings/integrations");
-  await page.getByRole("button", { name: "Rotate secret for ci/test" }).click();
+  await page
+    .getByRole("button", { name: "Rotate queue checkout token for ci/test" })
+    .click();
   await page.getByRole("button", { name: "Confirm rotation" }).click();
-  await expect(page.getByLabel("Webhook secret", { exact: true })).toHaveValue(
-    "fixture-new-secret",
+  await expect(
+    page.getByLabel("Queue checkout token", { exact: true }),
+  ).toHaveValue("fixture-rotated-checkout-token");
+  await expect(page.getByLabel("Webhook URL", { exact: true })).toHaveValue(
+    connection!.url,
+  );
+  await expect(page.getByLabel("Webhook secret", { exact: true })).toHaveCount(
+    0,
   );
   await page.getByRole("button", { name: "Disconnect ci/test" }).click();
   await expect(

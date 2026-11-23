@@ -513,7 +513,10 @@ Prove one private repository from an author’s browser and stock Git through a 
   GitHub API fixture, and stock Git. A signed delivery recovered the run after
   the dispatch response was lost. The checkout credential exposed only the
   active candidate, and the target branch advanced to the exact fetched SHA.
-  Browser tests cover dispatch setup and the run link. A live GitHub App
+  One operator App webhook now routes signed reports by installation,
+  repository and workflow. Switching a connection to the App clears the
+  previous authority for required head checks. Browser tests cover dispatch
+  setup and the run link. A live GitHub App
   installation remains to be qualified.
 - This assessment traced the source and existing tests and exercised stock Git on divergent history. The synthetic direct tip diff reported a base-only deletion and the topic addition. The three-dot diff reported only the topic addition. On Crab merge `9f58cf5d85`, the same comparison on its parents returned 64 paths tip-to-tip and 46 from the merge base to the second parent. A separate redundant-parent fixture showed stock Git choosing the better common ancestor while a transcription of Crab’s helper chose its parent. Crab’s frontend and server suites were not run during this audit. Visual and accessibility findings are source-based, pending hands-on review.
 - Start with `npm run typecheck --prefix packages/ui`, `npm run test --prefix packages/ui`, the affected Playwright specs, and `npm run build --prefix packages/ui`. Build the UI before compiling `crab-server`. With a writable mounted workspace and this worktree’s own external `CARGO_TARGET_DIR`, run `cargo test -p crab-server --locked --lib api::pulls::tests` and the affected settings, Git receive and Cell suites. Run `npm run contracts:check --prefix packages/ui` for exported wire changes. The existing browser suite uses mocked transport per scenario. `packages/ui/README.md:51`, `crates/crab-server/AGENTS.md:215`, `.github/workflows/rust.yml:235`.

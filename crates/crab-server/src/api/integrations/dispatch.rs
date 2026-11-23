@@ -1,3 +1,4 @@
+use axum::{http::Method, routing::post};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use tokio_util::sync::CancellationToken;
 
@@ -119,7 +120,7 @@ pub(super) async fn authorize_report(
         Some(bound) if bound == run.id => (),
         Some(_) => return Err(Error::CommitNotFound),
         None => {
-            // The signature identifies GitHub and the connection, but only the
+            // The signature identifies the installation and workflow, but only the
             // dispatching App can recover a lost response by the run title.
             let actor = github.actor().await.map_err(|_| Error::AutoMergeChanged)?;
             if run

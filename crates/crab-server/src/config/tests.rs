@@ -352,3 +352,32 @@ fn outbound_receivers_require_one_explicit_https_binding_and_shared_auth() {
         assert!(config.validate().is_err());
     }
 }
+
+#[test]
+fn github_app_webhook_requires_an_unambiguous_workflow_owner() {
+    let mut config = local_config("s3://bucket/repositories");
+    config.auth = Some(toml::from_str(
+        "issuer='https://idp.example/'\nclient_id='crab'\npublic_url='https://crab.example/'\nstate_key_file='/run/secrets/state'",
+    ).unwrap());
+    let mut actions = GitHubActionsConfig {
+        app_id: 7,
+        private_key_file: "/run/secrets/app.pem".into(),
+        webhook_secret_file: "/run/secrets/app-webhook".into(),
+        bindings: vec![GitHubActionsBinding {
+            crab_repository: uuid::Uuid::now_v7(),
+            installation: 42,
+            github_repository: 123,
+            workflow: 456,
+            branch: "main".into(),
+        }],
+    };
+    let mut second = actions.bindings[0].clone();
+    second.crab_repository = uuid::Uuid::now_v7();
+    actions.bindings.push(second);
+    config.github_actions = Some(actions.clone());
+    assert!(config.validate().is_err());
+
+    actions.bindings[1].workflow = 789;
+    config.github_actions = Some(actions);
+    assert!(config.validate().is_ok());
+}
