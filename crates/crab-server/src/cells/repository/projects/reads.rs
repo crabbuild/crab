@@ -342,7 +342,7 @@ impl Read for Candidates {
     type Input = CandidateQuery;
     type Output = Vec<SubjectSummary>;
     fn execute(context: &mut Transaction<'_>, input: CandidateQuery) -> Result<Self::Output> {
-        preparation::ensure_ready(context)?;
+        // The shared picker reads only canonical discussion metadata and search.
         if !text_valid(&input.q, 256, false) {
             return Err(Error::Invalid("invalid work search"));
         }

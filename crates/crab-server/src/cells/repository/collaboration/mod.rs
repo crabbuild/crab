@@ -9,6 +9,7 @@ pub(crate) mod attachments;
 pub(crate) mod bulk;
 pub(crate) mod conversation;
 pub(crate) mod creation;
+pub(crate) mod dependencies;
 pub(crate) mod edit_history;
 pub(crate) mod lifecycle;
 pub(crate) mod links;

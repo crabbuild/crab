@@ -509,6 +509,16 @@ digest encoding and validation. Public HTTP cannot supply bindings.
 Update peers together; there is no old list-shape reader or source-scan fallback.
 Review-status predicates are described below.
 
+## Issue dependencies
+
+The Repository Cell records the issue pair, version tombstone, and both active
+direction indexes under `collaboration/v1/issue-dependencies/`. Validation and
+both indexes commit with one activity event indexed into both conversations.
+Each mutation walks a bounded set of existing edges before adding a blocker.
+List reads join current issue state and titles. Existing repositories need no
+dependency preparation. Update serving peers together before writing dependency
+events.
+
 ## Discussion edit history
 
 Edit history records the previous body with the native edit event. Inline

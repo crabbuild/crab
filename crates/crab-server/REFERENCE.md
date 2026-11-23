@@ -2438,6 +2438,7 @@ owner label does not acquire ownership.
 | Edit history | `GET /api/repos/{owner}/{name}/edit-history/{target}` and `DELETE ...?revision={number}` |
 | Activity | `GET /api/repos/{owner}/{name}/activity`, `GET /api/repos/{owner}/{name}/issues/{number}/activity`, `GET /api/repos/{owner}/{name}/pulls/{number}/activity` |
 | Linked work | Issue/pull `GET .../{number}/links`; `GET/PUT /api/repos/{owner}/{name}/pulls/{pull}/linked-issues/{issue}` |
+| Issue dependencies | `GET .../issues/{number}/dependencies/{blocked_by|blocking}`; `GET/PUT .../issues/{number}/dependencies/{direction}/{other}` |
 
 Every route prefix is `/api/repos/{owner}/{name}`. Browser mutations require the session cookie, canonical `Origin`, and CSRF token.
 
@@ -2684,6 +2685,24 @@ reload on HTTP 409. Minimization controls the default display. Authorized API
 reads, attachments, and discussion search retain the original content. Update
 serving peers together before hiding comments to enable the new activity events
 and batched presentation response. Existing comments need no migration.
+
+### Track issue dependencies
+
+Open **Issue dependencies** in the issue sidebar to see **Blocked by** and
+**Blocking** relationships within the repository. Each entry links to the issue
+and shows its current state. Repository readers can view relationships. Triage
+and higher roles can find issues by title or number, then add or remove a
+relationship from either issue.
+
+The two directions share one version. Use the pair's GET to obtain
+`{active,version}`, then PUT the desired `active` state with that version.
+Version zero describes a pair that has never changed. Repeating the last
+successful change recovers a lost response. Reload after an HTTP 409.
+List requests return `{items,next,can_manage}` with up to 30 rows. Use
+the exclusive `after` cursor to continue. Each direction supports up to 50
+direct dependencies, and Crab rejects self-links, cycles, and graphs that
+exceed the validation work limit. Dependencies track work state and leave
+issue completion to the normal close action.
 
 ### Edit pull requests and review summaries
 

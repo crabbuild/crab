@@ -27,6 +27,7 @@ import { Issue } from "./model";
 import { timestamp } from "@/components/discussion/time";
 import { Comments } from "./comments";
 import { PinIssue } from "./pins";
+import { IssueDependencies } from "./dependencies";
 
 function IssueBadge({ issue }: { issue: Issue }) {
   const { state, state_reason: reason } = issue;
@@ -193,6 +194,12 @@ export function IssueDetail({
             setMetadataEpoch((value) => value + 1);
           }}
         >
+          <IssueDependencies
+            repo={repo}
+            csrf={csrf}
+            issue={number}
+            onChanged={() => setMetadataEpoch((value) => value + 1)}
+          />
           <PinIssue
             repo={repo}
             csrf={csrf}

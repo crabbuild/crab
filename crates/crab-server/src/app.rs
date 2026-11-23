@@ -150,6 +150,8 @@ pub(crate) enum Error {
     MilestonePermission,
     #[error("Write access is required to manage linked work")]
     LinkPermission,
+    #[error("Triage access is required to manage issue dependencies")]
+    DependencyPermission,
     #[error("Write access is required to manage projects and sub-issues")]
     ProjectPermission,
     #[error("A milestone with this title already exists")]
@@ -543,6 +545,11 @@ impl IntoResponse for Error {
                 StatusCode::FORBIDDEN,
                 "forbidden",
                 "Write access is required to manage linked work",
+            ),
+            Self::DependencyPermission => (
+                StatusCode::FORBIDDEN,
+                "dependency_permission",
+                "Triage access is required to manage issue dependencies",
             ),
             Self::MilestoneConflict => (
                 StatusCode::CONFLICT,

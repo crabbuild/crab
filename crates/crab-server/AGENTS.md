@@ -242,6 +242,8 @@ shared discussion-index lifecycle. `api/conversation/` enriches these native
 windows with public authors, reactions and selected-head review freshness.
 `links/` owns versioned issue/PR relationships and both subject indexes; its
 single activity event is indexed into both timelines.
+`dependencies.rs` owns the versioned issue graph, its active direction indexes,
+and bounded cycle checking. It shares one dependency event between both issues.
 `collaboration/mentions.rs` records Markdown mentions with the source body.
 `collaboration/mention_settings.rs` owns versioned aliases. `server/mentions.rs`
 delivers the durable outbox to `cells/directory/notifications.rs`.

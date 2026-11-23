@@ -55,6 +55,12 @@ export type Action =
       title: string;
     }
   | {
+      kind: "dependency_changed";
+      number: number;
+      title: string;
+      active: boolean;
+    }
+  | {
       kind: "issue_closed";
       reason: "completed" | "not_planned";
       pull?: number;

@@ -114,6 +114,9 @@ pub(in crate::cells) fn dispatch_mutation(
         collaboration::edit_history::Redact::ID => {
             invoke_mutation::<collaboration::edit_history::Redact>(context, input)
         }
+        collaboration::dependencies::Set::ID => {
+            invoke_mutation::<collaboration::dependencies::Set>(context, input)
+        }
         collaboration::minimization::Set::ID => {
             invoke_mutation::<collaboration::minimization::Set>(context, input)
         }
@@ -401,6 +404,12 @@ pub(in crate::cells) fn dispatch_read(
         }
         collaboration::edit_history::Get::ID => {
             invoke_read::<collaboration::edit_history::Get>(context, input)
+        }
+        collaboration::dependencies::List::ID => {
+            invoke_read::<collaboration::dependencies::List>(context, input)
+        }
+        collaboration::dependencies::Get::ID => {
+            invoke_read::<collaboration::dependencies::Get>(context, input)
         }
         collaboration::locks::Get::ID => invoke_read::<collaboration::locks::Get>(context, input),
         <collaboration::activity::ListActivity as Read>::ID => {

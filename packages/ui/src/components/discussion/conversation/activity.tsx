@@ -27,6 +27,8 @@ function action(event: ActivityEvent): string {
       return "set parent issue";
     case "parent_removed":
       return "removed parent issue";
+    case "dependency_changed":
+      return event.action.active ? "added blocker" : "removed blocker";
     case "created":
       switch (event.target.kind) {
         case "issue":
@@ -145,6 +147,7 @@ export function ActivityItem({
   const linkedIssue =
     related?.kind === "issue_linked" ||
     related?.kind === "issue_unlinked" ||
+    related?.kind === "dependency_changed" ||
     related?.kind === "parent_assigned" ||
     related?.kind === "parent_removed";
   const relatedHref =

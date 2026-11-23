@@ -28,6 +28,11 @@ pub(crate) enum Action {
         number: u64,
         title: String,
     },
+    DependencyChanged {
+        number: u64,
+        title: String,
+        active: bool,
+    },
     Created,
     Drafted,
     ReadyForReview,
@@ -106,6 +111,7 @@ impl Action {
             Self::IssueLinked { number, .. }
             | Self::IssueUnlinked { number, .. }
             | Self::ParentAssigned { number, .. }
+            | Self::DependencyChanged { number, .. }
             | Self::ParentRemoved { number, .. } => Some(Subject {
                 kind: super::SubjectKind::Issue,
                 number: *number,
@@ -127,6 +133,7 @@ impl Action {
                     | Self::ProjectRemoved { .. }
                     | Self::ParentAssigned { .. }
                     | Self::ParentRemoved { .. }
+                    | Self::DependencyChanged { .. }
                     | Self::Created
                     | Self::Updated
                     | Self::Locked { .. }
@@ -187,6 +194,7 @@ impl Action {
         | Self::IssueLinked { number, title }
         | Self::IssueUnlinked { number, title }
         | Self::ParentAssigned { number, title }
+        | Self::DependencyChanged { number, title, .. }
         | Self::ParentRemoved { number, title } = self
         {
             validate_number(*number)?;
