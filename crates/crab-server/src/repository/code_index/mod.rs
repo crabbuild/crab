@@ -2,7 +2,7 @@
 
 mod format;
 pub(crate) mod symbols;
-pub(crate) use format::{Index, Mask, Row};
+pub(crate) use format::{Index, Mask, QueryMask, Row};
 
 use bytes::Bytes;
 use crab_remote_git::{
@@ -23,7 +23,7 @@ use uuid::Uuid;
 use super::Repository;
 use crate::server::Server;
 
-const PATH: &str = "v2/derived/code-search-v2";
+const PATH: &str = "v2/derived/code-search-v3";
 const MAX_FILE_BYTES: u64 = 256 * 1024;
 const BUILD_PAGE: usize = 96;
 const BUILD_CONCURRENCY: usize = 8;
@@ -277,11 +277,9 @@ async fn build(
                             let filter = text.as_deref().map(Mask::from_text);
                             let symbols = syntax.zip(text.as_deref()).and_then(|(syntax, text)| {
                                 symbols::definitions(syntax, text, &parse_cancel).map(|defs| {
-                                    let mut filter = Mask::from_text("");
-                                    for definition in defs {
-                                        filter.insert(&text[definition.bytes]);
-                                    }
-                                    Box::new(filter)
+                                    Mask::from_symbols(
+                                        defs.into_iter().map(|definition| &text[definition.bytes]),
+                                    )
                                 })
                             });
                             (filter, symbols)
@@ -298,8 +296,7 @@ async fn build(
         })
         .await?;
         size += page.iter().map(Row::encoded_size).sum::<usize>();
-        row_weight += page.len() * size_of::<Row>()
-            + page.iter().filter(|row| row.symbols.is_some()).count() * size_of::<Mask>();
+        row_weight += page.len() * size_of::<Row>();
         if size > MAX_INDEX_BYTES || size + row_weight > CACHE_BYTES {
             return Ok(Index::new(tree, None, format::OVERHEAD));
         }
@@ -317,7 +314,7 @@ async fn build(
 }
 
 enum BuildData {
-    Reused(Option<Mask>, Option<Box<Mask>>),
+    Reused(Option<Mask>, Option<Mask>),
     Text(Option<String>),
 }
 

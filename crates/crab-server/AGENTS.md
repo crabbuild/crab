@@ -341,7 +341,8 @@ and session migration paths are supported.
   `api/code_search/qualifiers.rs` owns the bounded Boolean grammar, term
   predicates, and regex compilation. `code_search/evaluate.rs` evaluates the
   same query at repository, path, index, and verified Git boundaries. Keep
-  unknown evidence under negation and apply trigram pruning only to literals.
+  unknown evidence under negation and apply trigram pruning only to byte runs
+  required by every match after parsing flags and Unicode case folding.
   The indexed reader bounds path rows for Boolean and regex queries.
   Workspace search reuses the catalog's current grants and the same bounded
   Git scans. Its cursor also binds the actor and readable repository scope.

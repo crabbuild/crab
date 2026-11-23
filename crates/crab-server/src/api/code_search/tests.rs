@@ -3,6 +3,8 @@ use crate::test_support::{git, http::Harness};
 use reqwest::Method;
 use serde_json::{Value, json};
 
+mod corpus;
+
 #[tokio::test]
 async fn code_search_pins_its_pages_and_requires_current_repository_access() {
     let h = Harness::new(false).await;
@@ -811,7 +813,7 @@ async fn persistent_code_index_prunes_a_sparse_search_and_refreshes_after_public
         before.elapsed()
     );
     assert_eq!(page["scanned"], 514);
-    assert_eq!(page["verified"], 2);
+    assert_eq!(page["verified"], 1);
     assert_eq!(page["groups"][0]["commit"], head);
     assert_eq!(page["groups"][0]["files"][0]["path"], "src/target.rs");
     assert_eq!(page["indexed_repositories"], 1);
@@ -830,7 +832,7 @@ async fn persistent_code_index_prunes_a_sparse_search_and_refreshes_after_public
         .await;
     eprintln!("regex examined 514 index rows in {:?}", before.elapsed());
     assert_eq!(regex["scanned"], 514);
-    assert_eq!(regex["verified"], 2);
+    assert_eq!(regex["verified"], 1);
     assert_eq!(regex["groups"][0]["files"][0]["path"], "src/target.rs");
     assert_eq!(regex["next"], Value::Null);
 
@@ -856,6 +858,7 @@ async fn persistent_code_index_prunes_a_sparse_search_and_refreshes_after_public
         "Kelvin"
     );
     assert_eq!(unicode["indexed_repositories"], 1);
+    assert_eq!(unicode["verified"], 1);
     let inline = h
         .json(
             "/api/code-search?q=%2F%28%3Fi%29kelvin%2F&case_sensitive=true",
@@ -866,6 +869,7 @@ async fn persistent_code_index_prunes_a_sparse_search_and_refreshes_after_public
         inline["groups"][0]["files"][0]["lines"][0]["matched"],
         "Kelvin"
     );
+    assert_eq!(inline["verified"], 1);
     let short = h.json("/api/code-search?q=42&directory=src", &alice).await;
     assert_eq!(short["verified"], 32);
     assert!(short["next"].is_string());

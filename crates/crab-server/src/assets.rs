@@ -16,7 +16,7 @@ pub(crate) async fn serve(request: Request) -> Response {
     // and recognize only browser pages so missing APIs/assets still return 404.
     let components: Vec<_> = path.trim_end_matches('/').split('/').collect();
     let account_route = match components.as_slice() {
-        ["-", "profile" | "notifications"]
+        ["-", "profile" | "notifications" | "code-search"]
         | ["-", "notifications", "watched" | "subscriptions"]
         | ["-", "settings", "saved-replies"] => true,
         ["-", "users" | "organizations" | "repository-transfers", id]
@@ -136,6 +136,12 @@ mod tests {
                 StatusCode::OK,
             ),
             ("/-/profile", StatusCode::OK),
+            ("/-/code-search", StatusCode::OK),
+            (
+                "/-/code-search?organization=01900000-0000-7000-8000-000000000001&q=match",
+                StatusCode::OK,
+            ),
+            ("/-/code-search/unknown", StatusCode::NOT_FOUND),
             ("/-/settings/saved-replies", StatusCode::OK),
             ("/-/notifications", StatusCode::OK),
             ("/-/notifications/watched", StatusCode::OK),

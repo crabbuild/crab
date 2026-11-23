@@ -32,13 +32,13 @@ impl Pattern {
                 continue;
             };
             let filter = if *kind == Kind::Symbol {
-                row.symbols.as_deref().or(row.filter.as_ref())
+                row.symbols.as_ref().or(row.filter.as_ref())
             } else {
                 row.filter.as_ref()
             };
             // The filter proves absence only. A positive filter must still
             // reach Git, including when the term appears under NOT.
-            if filter.is_some_and(|filter| !query.may_contain(filter)) {
+            if filter.is_some_and(|filter| !filter.may_contain(query)) {
                 *fact = Truth::No;
             }
         }

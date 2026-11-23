@@ -629,6 +629,8 @@ default branches. Use the same qualifiers, exact directory, and **Match case**
 controls as repository search. A continuation binds the full query and the
 current readable repository scope selected by its qualifiers. Results name
 the repository and link to the exact Git commit, file, and matching line.
+The workspace search URL preserves the query and filters across reloads and
+can be shared. The recipient searches with their own repository access.
 
 `GET /api/code-search` takes `q`, optional `organization` UUID and
 `directory`, `kind=any|content|path|symbol` (default `any`), `case_sensitive`,
@@ -644,28 +646,50 @@ the same commit until its scan finishes.
 
 An indexed Boolean or regex query examines at most 4,096 path rows per
 repository per page. Follow the continuation even after a page with no
-matches. The index can prove a literal absent through its trigram filter.
-For regular expressions, Crab also checks trigrams required by every possible
-ASCII match. Alternation, repetition, and inline case flags are accounted for.
-Expressions without required trigrams and non-ASCII candidates stay eligible
-for exact Git verification. An unreadable file has unknown content, so a
-negated content term cannot treat it as an absence.
+matches.
+For literals and regular expressions, Crab checks trigrams required by every
+possible match. It derives the required byte runs from the parsed expression,
+including alternation, repetition, inline flags, and Unicode case folding.
+Expressions without required trigrams stay eligible for exact Git verification.
+An unreadable file has unknown content, so a negated content term cannot treat
+it as an absence.
 
 The server builds a default-branch index in the background and keeps one
-published artifact per repository in object storage. It contains paths and
-separate trigram filters for file text and supported definition names. An
+current published artifact per repository in object storage. It contains paths
+and separate trigram filters for file text and supported definition names.
+Larger files get larger text filters to reduce false positives. An
 index answers only for its exact Git tree. Crab verifies returned paths, text,
 and definition locations against Git. It reuses unchanged blobs' filters when
-their parsing language is unchanged. Short literals and Unicode case-folding cases that the filter
-cannot rule out remain candidates. The page reports `indexed_repositories`,
+their parsing language is unchanged. Short literals and other terms that the
+filter cannot rule out remain candidates. The page reports `indexed_repositories`,
 `scanning_repositories`, and `limited_repositories`. Crab scans Git while a
 matching index is unavailable or exceeds the artifact or memory limit.
+The server rebuilds the new index format in its own storage slot, so replicas
+running the earlier format can continue using their existing derived index.
 
 Search considers current readable repositories and checks them again before
 returning excerpts or a cursor. A continuation binds the account, filters,
 and readable repository set. A grant or address change in that scope returns
-HTTP 409, and **Start over** opens a new search. Representative large-catalog
-performance qualification remains open.
+HTTP 409, and **Start over** opens a new search.
+
+The opt-in search corpus test uses pinned snapshots of Next.js, Neovim, and
+ripgrep. It publishes their trees with stock Git, exhausts result pages,
+opens a commit-pinned result in Chromium, and checks continuation invalidation
+after grant removal. With `agent-browser` and the built UI available, set
+`CRAB_SEARCH_CORPUS_DIR` to the directory containing the source repositories
+and `CARGO_TARGET_DIR` to the per-checkout build directory. Provide
+`CRAB_HTTP_CELL_TEST_BUCKET`, `CRAB_HTTP_CELL_TEST_ENDPOINT`,
+`CRAB_HTTP_CELL_TEST_PREFIX`, and fixture-only AWS credentials for an isolated
+RustFS bucket on loopback. Run the test with
+`cargo test -p crab-server --lib --locked workspace_search_indexes_and_checks_a_real_repository_corpus -- --ignored --nocapture`.
+The test reports indexing time, latency per page, and Git content
+verifications. The fixture pauses unrelated browse indexing while it measures
+search. A local RustFS run examined 38,135 path rows across three
+repositories. A selective literal went from 1,235 content verifications over
+38 pages to 110 over four pages. Its regex equivalent verified 110 files,
+the Boolean content-and-symbol query verified five, and the path-only query
+read zero file bodies. These measurements cover the pinned corpus on one
+server with the indexes already built.
 
 ### Create a repository in the browser
 
