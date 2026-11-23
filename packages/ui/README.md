@@ -92,7 +92,9 @@ the old endpoint after a preview request fails.
 
 `FilePreview.lfs_size` describes the stored Git LFS object. The file toolbar
 offers its download and the raw pointer at the displayed commit. The browser
-streams downloads using the signed-in repository session.
+streams downloads using the signed-in repository session. Selecting **Preview**
+loads a recognized format from the same commit. Parquet uses HTTP ranges.
+Whole-file previews enforce a size limit before requesting the payload.
 
 Build the UI once, then use this checkout's external Cargo directory to check or
 regenerate the contract:

@@ -113,14 +113,29 @@ export function FileView({
   const state = useRequest<FilePreviewContent>(
     endpoint(repo, "file-preview", { rev, path_hex: path }),
   );
-  const lfs = state.data?.classification === "LfsPointer";
+  const lfsCommit =
+    state.data?.classification === "LfsPointer" ? state.data.commit : null;
+  const lfs = lfsCommit !== null;
+  const payloadSize = lfs ? state.data?.lfs_size : state.data?.size;
+  const fileParams = { rev: lfsCommit ?? rev, path_hex: path };
+  const rawUrl = endpoint(repo, "blob", fileParams);
+  const contentUrl = lfs ? endpoint(repo, "lfs-content", fileParams) : rawUrl;
+  const copyLabel = lfs ? "Copy pointer" : "Copy file contents";
+  const copiedLabel = lfs ? "Pointer copied" : "File contents copied";
   const previewState = state.data?.preview.state;
   const text =
     state.data?.preview.state === "inline" ? state.data.preview.text : null;
   const [presentation, setView] = useState<"code" | "preview">(
     previewFirst ? "preview" : "code",
   );
-  const view = lfs ? "code" : blameView ? "blame" : presentation;
+  const [lfsPreviewCommit, setLfsPreviewCommit] = useState<string | null>(null);
+  const view = lfs
+    ? lfsPreviewCommit === lfsCommit
+      ? "preview"
+      : "code"
+    : blameView
+      ? "blame"
+      : presentation;
   const [blamePaneWidth, setBlamePaneWidth] = useState(
     DEFAULT_BLAME_PANE_WIDTH,
   );
@@ -280,12 +295,13 @@ export function FileView({
     }),
     [codeThemes, symbolLanguage, theme],
   );
-  const activePreview: PreviewDescriptor | null = lfs
-    ? null
-    : (preview ??
-      (state.data && state.data.preview.state !== "inline"
-        ? { kind: "generic", label: "File inspector" }
-        : null));
+  const activePreview: PreviewDescriptor | null =
+    payloadSize === undefined
+      ? null
+      : (preview ??
+        (!lfs && state.data && state.data.preview.state !== "inline"
+          ? { kind: "generic", label: "File inspector" }
+          : null));
   const symbols =
     view === "code" && symbolsOpen && symbolLanguage && text !== null ? (
       <CodeSymbolsPanel
@@ -320,6 +336,12 @@ export function FileView({
                       next !== "blame"
                     )
                       return;
+                    if (lfs) {
+                      setLfsPreviewCommit(
+                        next === "preview" ? lfsCommit : null,
+                      );
+                      return;
+                    }
                     setView(next === "blame" ? "code" : next);
                     if (blameView || next === "blame")
                       navigate(
@@ -338,7 +360,7 @@ export function FileView({
                     aria-pressed={view === "code"}
                     aria-checked={undefined}
                   >
-                    {text === null ? "Info" : "Code"}
+                    {lfs ? "Pointer" : text === null ? "Info" : "Code"}
                   </ToggleGroupItem>
                   {activePreview && (
                     <ToggleGroupItem
@@ -367,9 +389,14 @@ export function FileView({
                     ? "Git LFS"
                     : content.preview.state !== "inline"
                       ? unavailablePreview[content.preview.state].title
-                      : `${content.preview.text === "" ? 0 : content.preview.text.split("\n").length - Number(content.preview.text.endsWith("\n"))} lines`}{" "}
-                  <span aria-hidden="true">·</span>{" "}
-                  {formatSize(content.lfs_size ?? content.size)}
+                      : `${content.preview.text === "" ? 0 : content.preview.text.split("\n").length - Number(content.preview.text.endsWith("\n"))} lines`}
+                  {payloadSize !== undefined && (
+                    <>
+                      {" "}
+                      <span aria-hidden="true">·</span>{" "}
+                      {formatSize(payloadSize)}
+                    </>
+                  )}
                 </span>
               </div>
               <div className="file-actions">
@@ -393,20 +420,11 @@ export function FileView({
                     </Button>
                   )}
                 <Button asChild variant="outline" size="sm">
-                  <a
-                    href={endpoint(repo, "blob", {
-                      rev: lfs ? content.commit : rev,
-                      path_hex: path,
-                    })}
-                  >
-                    {lfs ? "Raw pointer" : "Raw"}
-                  </a>
+                  <a href={rawUrl}>{lfs ? "Raw pointer" : "Raw"}</a>
                 </Button>
                 {text !== null && (
                   <Button
-                    aria-label={
-                      copied ? "File contents copied" : "Copy file contents"
-                    }
+                    aria-label={copied ? copiedLabel : copyLabel}
                     size="icon-sm"
                     onClick={async () => {
                       try {
@@ -423,10 +441,7 @@ export function FileView({
                 )}
                 <Button asChild variant="outline" size="icon-sm">
                   <a
-                    href={endpoint(repo, lfs ? "lfs-content" : "blob", {
-                      rev: lfs ? content.commit : rev,
-                      path_hex: path,
-                    })}
+                    href={contentUrl}
                     download={name.split("/").pop()}
                     aria-label={
                       lfs ? "Download Git LFS file" : "Download raw file"
@@ -489,7 +504,9 @@ export function FileView({
             {view === "blame" && (blame.loading || blame.error) && (
               <Result state={blame}>{() => null}</Result>
             )}
-            {view === "preview" && activePreview ? (
+            {view === "preview" &&
+            activePreview &&
+            payloadSize !== undefined ? (
               <Suspense
                 fallback={
                   <div className="file-preview-notice" role="status">
@@ -498,15 +515,17 @@ export function FileView({
                 }
               >
                 <FilePreview
+                  key={contentUrl}
                   descriptor={activePreview}
                   repo={repo}
-                  rev={rev}
-                  revision={revision}
+                  rev={fileParams.rev}
+                  revision={lfsCommit ?? revision}
                   directory={parentHex(path)}
                   name={name}
-                  text={text}
-                  size={content.size}
-                  blobUrl={endpoint(repo, "blob", { rev, path_hex: path })}
+                  text={lfs ? null : text}
+                  size={payloadSize}
+                  blobUrl={contentUrl}
+                  stored={lfs}
                   theme={theme}
                   codeThemes={codeThemes}
                 />

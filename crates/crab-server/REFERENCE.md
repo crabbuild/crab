@@ -977,6 +977,12 @@ and streams through the Git LFS transfer budget and integrity checks. The
 response supports single byte ranges and `If-Range` with the object ETag.
 Native Crab pointers continue to use the raw Git download action.
 
+For recognized Git LFS formats, choose **Preview** to read the stored bytes
+at the displayed commit. **Pointer** returns to the Git representation.
+Parquet uses the range-backed SQL workbench. Whole-file previews are
+limited to 50 MiB, with a 1 MiB limit for Markdown and notebooks. Larger
+files remain available through the download action.
+
 ### Stream a repository archive
 
 `GET /api/repos/{owner}/{name}/archive?rev=revision_name` streams a ZIP pinned to the selected commit.
