@@ -120,7 +120,10 @@ and personal-view selection. `search/contributions/` owns per-contribution quali
 identities, text/FTS maintenance, canonical deletion triggers and bounded five-source rebuilding;
 `search/text/` owns field scopes, text predicates and relevance SQL;
 `search/reviews/` owns reviewer predicates, transactional
-review/request projections and bounded rebuild source cursors. Its `status/`
+review/request projections and bounded rebuild source cursors. Team predicates
+project pending PR requests under the same index generation and use current,
+viewer-scoped organization bindings from `api/discussion_search/review_teams.rs`.
+Its `status/`
 owner binds source epochs and effective branch rules for repository-wide review
 status predicates and grammar-preserving menu choices; tests stay beside it.
 `search/assignees/` owns stable-ID predicates, resolved binding validation,

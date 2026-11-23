@@ -41,7 +41,7 @@ is buffered before owner dispatch so Cellar can safely retry stale routes; it is
 not forwarded as a non-replayable upload stream. Successful HTTP output
 uses the SDK output gate, including its ownership and durability checks.
 
-Repository assignment format 2 and discussion index format 13 require the explicit
+Repository assignment format 2 and discussion index format 14 require the explicit
 preparation described below. Issue lifecycle metadata also requires explicit
 `cells prepare-issue-state` on existing repositories. Pull lifecycle metadata
 requires `cells prepare-pull-state`. Other canonical records
@@ -501,14 +501,24 @@ review key or exclusive KV bound. Both phases process at most eight source recor
 per transaction; unrelated pull metadata also advances the request cursor. Reads
 remain unavailable until all sources complete. Domain records, versions, request
 history, receipts and public submission mappings are unchanged. Older indexes
-require `cells rebuild-search`. Fresh repositories initialize format 13.
+require `cells rebuild-search`. Fresh repositories initialize format 14.
 
 Native list output adds `review_requested_from_me`. Author, reviewer and commenter
 names now share one ordered `people` binding collection, one Directory snapshot,
 digest encoding and validation. Public HTTP cannot supply bindings.
 Update peers together; there is no old list-shape reader or source-scan fallback.
-Team review requests and mention search relationships remain separate work.
 Review-status predicates are described below.
+
+## Team review search preparation
+
+Discussion index format 14 adds pending team request rows to each PR search
+document. Rebuild with `cells rebuild-search` on existing repositories before
+serving the new format. The existing bounded PR phase reads current request
+records and reconstructs membership-independent rows. Request creation,
+cancellation, and fulfillment refresh the projection within the same native
+transaction. The HTTP layer resolves visible teams and active membership
+before filtering. Those bindings participate in the cursor digest and are
+checked again before the response returns.
 
 ## Reviewer status preparation
 

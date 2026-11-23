@@ -15,6 +15,7 @@ mod assignees;
 mod authors;
 mod composer;
 mod people;
+pub(super) mod review_teams;
 mod reviews;
 mod team_mentions;
 pub(super) async fn resolve_people(
@@ -22,10 +23,11 @@ pub(super) async fn resolve_people(
     principal: &Principal,
     repo: &crate::repository::Repository,
     input: &mut crate::cells::repository::SearchInput,
-) -> Result<()> {
+) -> Result<Option<review_teams::Bound>> {
     people::resolve(server, principal, input).await?;
     assignees::resolve(server, principal, input).await?;
-    reviews::bind_source(server, principal, repo, input).await
+    reviews::bind_source(server, principal, repo, input).await?;
+    review_teams::bind(server, principal, repo, input).await
 }
 
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
@@ -113,7 +115,7 @@ async fn complete(
                 )
                 .await,
         )?;
-        crate::cells::repository::search::completion::append_people(
+        crate::cells::repository::search::completion::append_qualified_values(
             &input,
             &mut result,
             &qualifier,
@@ -123,6 +125,11 @@ async fn complete(
                 .map(|actor| (actor.handle, actor.name)),
         )
         .map_err(app::Error::Invalid)?;
+    }
+    if let Some(prefix) = crate::cells::repository::search::completion::team_prefix(&input)
+        .map_err(app::Error::Invalid)?
+    {
+        review_teams::complete(&server, &principal, &repo, &input, &mut result, &prefix).await?;
     }
     // Recheck the durable grant after the awaited read: the materialized
     // repository may still contain a member whose access has been revoked.
@@ -194,6 +201,7 @@ impl ListParameters {
             people: Vec::new(),
             assignees: Vec::new(),
             review_context: None,
+            review_teams: Default::default(),
         };
         input.validate().map_err(app::Error::Invalid)?;
         Ok(input)

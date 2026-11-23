@@ -133,7 +133,17 @@ pub(crate) fn person_prefix(
     }))
 }
 
-pub(crate) fn append_people(
+pub(crate) fn team_prefix(input: &CompletionInput) -> Result<Option<String>, &'static str> {
+    let (start, _, cursor) = replacement(input)?;
+    let prefix = input.query[start..cursor]
+        .trim_start_matches('-')
+        .to_lowercase();
+    Ok(prefix
+        .strip_prefix("team-review-requested:")
+        .map(value_prefix))
+}
+
+pub(crate) fn append_qualified_values(
     input: &CompletionInput,
     result: &mut Suggestions,
     qualifier: &str,
@@ -265,6 +275,7 @@ fn suggestions(
             ("assignee:*", "Work with any assignee"),
             ("review:", "Filter review status"),
             ("review-requested:", "Filter pending reviewers"),
+            ("team-review-requested:", "Filter by requested team"),
             ("reviewed-by:", "Filter submitted reviewers"),
             (
                 "review-involves:",

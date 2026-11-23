@@ -258,7 +258,8 @@ impl Query {
         fn review(expression: &Expression) -> bool {
             match expression {
                 Expression::Term {
-                    value: Term::Reviewer { .. } | Term::ReviewStatus(_),
+                    value:
+                        Term::Reviewer { .. } | Term::ReviewStatus(_) | Term::TeamReviewRequested(_),
                     ..
                 } => true,
                 Expression::Not(inner) => review(inner),
@@ -313,6 +314,11 @@ impl Query {
             (
                 "Awaiting review from you",
                 super::Kind::UserReviewRequested,
+                false,
+            ),
+            (
+                "Awaiting review from you or your team",
+                super::Kind::ReviewRequested,
                 false,
             ),
         ] {
