@@ -8,12 +8,16 @@ import { Input } from "@/components/ui/input";
 import { navigate, useRequest, type Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 import { RepositoryPropertyFilters } from "./catalog-property-filters";
+import { RepositoryStateFilters } from "./catalog-state-filters";
 
 type Entry = Pick<
   Repository,
   "id" | "owner" | "name" | "description" | "archived"
 >;
-type Page = { repositories: Entry[]; next: string | null };
+type Page = {
+  repositories: (Entry & { fork: boolean })[];
+  next: string | null;
+};
 
 export function BrowseRepositories({
   url,
@@ -40,6 +44,13 @@ export function BrowseRepositories({
     if (search) destination.searchParams.set("q", search);
     if (next) destination.searchParams.set("after", next);
     return destination.pathname + destination.search;
+  }
+
+  const draft = () => searchInput.current?.value.trim() ?? query;
+  function apply(search: string) {
+    if (search.length > 200) return false;
+    navigate(href(search));
+    return true;
   }
 
   return (
@@ -82,15 +93,18 @@ export function BrowseRepositories({
           </Button>
         )}
       </form>
+      <RepositoryStateFilters
+        key={query}
+        query={query}
+        draft={draft}
+        apply={apply}
+      />
       {organization && (
         <RepositoryPropertyFilters
           organization={organization}
           apply={(filter) => {
-            const text = searchInput.current?.value.trim() ?? query;
-            const next = text ? `${text} ${filter}` : filter;
-            if (next.length > 200) return false;
-            navigate(href(next));
-            return true;
+            const text = draft();
+            return apply(text ? `${text} ${filter}` : filter);
           }}
         />
       )}
@@ -120,6 +134,7 @@ export function BrowseRepositories({
                       {repo.archived && (
                         <Badge variant="outline">Archived</Badge>
                       )}
+                      {repo.fork && <Badge variant="outline">Fork</Badge>}
                     </div>
                     {repo.description && (
                       <p className="muted mt-1 break-words">

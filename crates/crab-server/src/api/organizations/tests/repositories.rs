@@ -160,6 +160,29 @@ async fn private_fork_recovers_git_publication_and_uses_live_source_permissions(
         json!({"id":id,"owner":owner,"name":"library"})
     );
     let fork_id = Uuid::parse_str(repo["id"].as_str().unwrap()).unwrap();
+    for (filter, names, fork_marker) in [
+        (
+            "fork:only%20archived:false",
+            vec!["library-fork"],
+            Some(true),
+        ),
+        ("fork:false", vec!["library"], Some(false)),
+        ("fork:true", vec!["library", "library-fork"], None),
+    ] {
+        let result = h
+            .json(&format!("{listed}&q=library%20{filter}"), &bob)
+            .await;
+        let rows = result["repositories"].as_array().unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|repo| repo["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            names
+        );
+        if let Some(marker) = fork_marker {
+            assert_eq!(rows[0]["fork"], marker);
+        }
+    }
     let fork_token = token("library-fork", &bob).await;
     let secret = fork_token["token"].as_str().unwrap();
     let mut remote = git_url("library-fork");
@@ -267,6 +290,10 @@ async fn private_fork_recovers_git_publication_and_uses_live_source_permissions(
     .error_for_status()
     .unwrap();
     assert_eq!(h.json(&listed, &bob).await["repositories"], json!([]));
+    assert_eq!(
+        h.json(&format!("{listed}&q=fork:only"), &bob).await["repositories"],
+        json!([])
+    );
     let compare_denied = h
         .http
         .get(format!("{}{compare}", h.origin))

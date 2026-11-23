@@ -4,6 +4,8 @@ use crate::cells::organization::properties::search::{MAX_TERMS, Term};
 pub(super) struct Query {
     pub text: String,
     pub terms: Vec<Term>,
+    pub archived: Option<bool>,
+    pub fork: Option<bool>,
 }
 
 const INVALID_TERM: &str = "Use props.NAME:VALUE and quote values containing spaces";
@@ -13,6 +15,8 @@ impl Query {
     pub(super) fn parse(mut source: &str, organization: Option<Uuid>) -> Result<Self> {
         let mut text = Vec::new();
         let mut terms = Vec::new();
+        let mut archived = None;
+        let mut fork = None;
         while !source.trim_start().is_empty() {
             source = source.trim_start();
             let boundary = source.find(char::is_whitespace).unwrap_or(source.len());
@@ -21,6 +25,31 @@ impl Query {
             let (exclude, qualified) = word
                 .strip_prefix('-')
                 .map_or((false, word), |term| (true, term));
+            if let Some((name, value)) = qualified.split_once(':') {
+                if name.eq_ignore_ascii_case("archived") {
+                    let value = if value.eq_ignore_ascii_case("true") {
+                        true
+                    } else if value.eq_ignore_ascii_case("false") {
+                        false
+                    } else {
+                        return Err(Error::Invalid("Use archived:true or archived:false"));
+                    };
+                    require_value(&mut archived, value != exclude)?;
+                    source = end;
+                    continue;
+                }
+                if name.eq_ignore_ascii_case("fork") {
+                    if value.eq_ignore_ascii_case("only") {
+                        require_value(&mut fork, !exclude)?;
+                    } else if value.eq_ignore_ascii_case("false") {
+                        require_value(&mut fork, exclude)?;
+                    } else if !value.eq_ignore_ascii_case("true") || exclude {
+                        return Err(Error::Invalid("Use fork:only, fork:false, or fork:true"));
+                    }
+                    source = end;
+                    continue;
+                }
+            }
             if !qualified
                 .get(..6)
                 .is_some_and(|prefix| prefix.eq_ignore_ascii_case("props."))
@@ -85,7 +114,13 @@ impl Query {
         Ok(Self {
             text: text.join(" ").to_lowercase(),
             terms,
+            archived,
+            fork,
         })
+    }
+
+    pub(super) fn filtered(&self) -> bool {
+        !self.terms.is_empty() || self.archived.is_some() || self.fork.is_some()
     }
 
     pub(super) fn cursor_key(
@@ -109,8 +144,26 @@ impl Query {
             hash_field(&mut digest, term.value.as_bytes());
             digest.update(&[u8::from(term.exclude)]);
         }
+        if self.archived.is_some() || self.fork.is_some() {
+            digest.update(b"crab-server.repository-state.v1");
+            digest.update(&[state(self.archived), state(self.fork)]);
+        }
         digest
     }
+}
+
+fn state(value: Option<bool>) -> u8 {
+    value.map_or(0, |value| u8::from(value) + 1)
+}
+
+fn require_value(filter: &mut Option<bool>, value: bool) -> Result<()> {
+    if filter.is_some_and(|previous| previous != value) {
+        return Err(Error::Invalid(
+            "Choose one value for each repository state filter",
+        ));
+    }
+    *filter = Some(value);
+    Ok(())
 }
 
 fn hash_field(digest: &mut blake3::Hasher, value: &[u8]) {

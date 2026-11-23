@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 mod properties;
 mod query;
+mod scan;
 
 use query::{Cursor, Query};
 
@@ -36,13 +37,16 @@ struct Entry<'a> {
     name: &'a str,
     description: &'a str,
     archived: bool,
+    fork: bool,
 }
 
 #[derive(Default)]
 struct Window<'a> {
     entries: Vec<&'a Arc<Repository>>,
     boundary: Option<&'a Arc<Repository>>,
-    property_state: Option<(blake3::Hash, u64)>,
+    property_revision: Option<u64>,
+    archive_versions: HashMap<Uuid, u64>,
+    invalid_property: bool,
 }
 
 pub(super) async fn list(
@@ -58,7 +62,8 @@ pub(super) async fn list(
         ));
     }
     let query = Query::parse(&search.query, search.organization)?;
-    let filtered = !query.terms.is_empty();
+    let filtered = query.filtered();
+    let property_filter = !query.terms.is_empty();
     let key = query.cursor_key(server, actor, search.organization);
     let after = search
         .after
@@ -74,14 +79,20 @@ pub(super) async fn list(
         {
             return false;
         }
-        if let Some(priority) = rank(repo, &query.text, &words) {
+        if query
+            .fork
+            .is_none_or(|fork| repo.forked_from.is_some() == fork)
+            && let Some(priority) = rank(repo, &query.text, &words)
+        {
             ranks.insert(repo.id, priority);
             return true;
         }
-        filtered
+        property_filter
     })
     .await?;
-    let can_filter = filtered && !scoped.is_empty();
+    let property_organization = search
+        .organization
+        .filter(|_| property_filter && !scoped.is_empty());
     let mut ranked: Vec<_> = scoped
         .into_iter()
         .filter_map(|row| {
@@ -101,41 +112,16 @@ pub(super) async fn list(
             .map(|index| index + 1)
             .ok_or(Error::PageChanged)
     })?;
-    let window = if let Some(organization) = search.organization.filter(|_| can_filter) {
-        properties::scan(
-            server,
-            organization,
-            &query.terms,
-            &visible,
-            start,
-            limit,
-            after.as_ref().and_then(|cursor| cursor.state),
-        )
-        .await?
-    } else {
-        Window {
-            entries: visible[start..(start + limit + 1).min(visible.len())]
-                .iter()
-                .collect(),
-            ..Window::default()
-        }
-    };
+    let window = scan::window(
+        server,
+        &query,
+        property_organization,
+        &visible,
+        start,
+        limit,
+    )
+    .await?;
     let page = &window.entries[..limit.min(window.entries.len())];
-    let archive_repositories: Vec<_> = page.iter().copied().cloned().collect();
-    let archives: Vec<_> = stream::iter(archive_repositories)
-        .map(|repo: Arc<Repository>| async move {
-            settings::load_lifecycle(server, &repo)
-                .await
-                .map(|state| state.archived)
-        })
-        .buffered(8)
-        .try_collect()
-        .await?;
-    if let (Some(organization), Some((_, revision))) = (search.organization, window.property_state)
-        && properties::revision(server, organization).await? != revision
-    {
-        return Err(Error::PageChanged);
-    }
     let checked: Vec<_> = window
         .entries
         .iter()
@@ -143,6 +129,57 @@ pub(super) async fn list(
         .chain(window.boundary)
         .chain(start.checked_sub(1).and_then(|index| visible.get(index)))
         .collect();
+    let archive_targets = if query.archived.is_some() {
+        &checked
+    } else {
+        page
+    };
+    let archive_repositories: Vec<_> = archive_targets.iter().copied().cloned().collect();
+    let archives = scan::lifecycles(server, archive_repositories).await?;
+    if archive_targets
+        .iter()
+        .zip(&archives)
+        .any(|(repo, lifecycle)| {
+            window
+                .archive_versions
+                .get(&repo.id)
+                .is_some_and(|expected| *expected != lifecycle.version)
+        })
+    {
+        return Err(Error::PageChanged);
+    }
+    if let (Some(organization), Some(revision)) = (property_organization, window.property_revision)
+        && properties::revision(server, organization).await? != revision
+    {
+        return Err(Error::PageChanged);
+    }
+    let scope = filtered.then(|| scan::scope(server, &visible, window.property_revision));
+    let cursor_state = |id| -> Result<Option<blake3::Hash>> {
+        let Some(mut scope) = scope.clone() else {
+            return Ok(None);
+        };
+        if query.archived.is_some() {
+            let version = archive_targets
+                .iter()
+                .zip(&archives)
+                .find_map(|(repo, record)| (repo.id == id).then_some(record.version))
+                .ok_or(Error::CellContract(
+                    "Repository search archive boundary is missing",
+                ))?;
+            scope.update(&version.to_le_bytes());
+        }
+        Ok(Some(scope.finalize()))
+    };
+    if let Some(cursor) = &after
+        && cursor.state != cursor_state(cursor.id)?
+    {
+        return Err(Error::PageChanged);
+    }
+    if window.invalid_property {
+        return Err(Error::Invalid(
+            "Choose an existing repository property and a valid value",
+        ));
+    }
     let ids: HashSet<_> = checked.iter().map(|repo| repo.id).collect();
     // An organization grant or direct membership may change while we read the
     // page's archive state. Recheck even the lookahead used to issue a cursor.
@@ -157,6 +194,7 @@ pub(super) async fn list(
                     && fresh.config.description == repo.config.description
                     && fresh.organization == repo.organization
                     && fresh.ownership_epoch == repo.ownership_epoch
+                    && fresh.forked_from == repo.forked_from
             })
         })
     {
@@ -167,22 +205,24 @@ pub(super) async fn list(
         .copied()
         .filter(|_| window.entries.len() > limit)
         .or(window.boundary)
-        .map(|repo| {
-            Cursor {
+        .map(|repo| -> Result<String> {
+            Ok(Cursor {
                 id: repo.id,
-                state: window.property_state.map(|(state, _)| state),
+                state: cursor_state(repo.id)?,
             }
-            .encode(&key)
-        });
+            .encode(&key))
+        })
+        .transpose()?;
     let repositories: Vec<_> = page
         .iter()
         .zip(archives)
-        .map(|(repo, archived)| Entry {
+        .map(|(repo, lifecycle)| Entry {
             id: repo.id,
             owner: &repo.config.owner,
             name: &repo.config.name,
             description: &repo.config.description,
-            archived,
+            archived: lifecycle.archived,
+            fork: repo.forked_from.is_some(),
         })
         .collect();
     Ok(Json(

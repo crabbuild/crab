@@ -1254,6 +1254,20 @@ The server considers up to 512 candidate repositories per page in batches of
 query, property revision, and readable candidates. If they change, start at the
 first page.
 
+### Filter repositories by archive and fork state
+
+Use **Archive status** and **Fork status** on the home or organization catalog.
+The controls add `archived:true`, `archived:false`, `fork:only`, or `fork:false`
+to the search, and combine with text and custom-property qualifiers. `fork:true`
+includes source repositories and forks, as does the unfiltered Crab catalog.
+Fork rows carry a **Fork** badge.
+
+The server reads archive state from the Repository Cell after checking repository
+access. It examines up to 128 candidates per archive-filtered response. Follow
+`next` even after an empty page. A cursor binds the archive revision of its
+boundary repository and the readable candidates. If either changes, restart at
+page one. Later pages read live archive state for their candidates.
+
 ### Grant ruleset bypass access
 
 Ruleset administrators can grant bypass access to repository administrators,

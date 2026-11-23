@@ -82,6 +82,18 @@ test("repository search pages on the server and restores a stale continuation", 
             : { repositories: [], next: "property-token" },
         });
       }
+      if (
+        q === 'project props.region:"US East" archived:true' ||
+        q === 'project props.region:"US East" archived:true fork:only'
+      ) {
+        expect(after).toBeNull();
+        return route.fulfill({
+          json: {
+            repositories: [{ ...repo("archive-fork", true), fork: true }],
+            next: null,
+          },
+        });
+      }
       return route.fulfill({
         json: { repositories: [repo("org-project")], next: null },
       });
@@ -127,7 +139,11 @@ test("repository search pages on the server and restores a stale continuation", 
   await expect(
     page.getByRole("link", { name: "team / project-notes" }),
   ).toBeVisible();
-  await expect(page.getByText("Archived", { exact: true })).toBeVisible();
+  await expect(
+    page
+      .getByRole("list", { name: "Repository results" })
+      .getByText("Archived", { exact: true }),
+  ).toBeVisible();
   stale = true;
   await page.reload();
   await expect(page.getByRole("alert")).toContainText(
@@ -178,4 +194,21 @@ test("repository search pages on the server and restores a stale continuation", 
     page.getByRole("link", { name: "org-matching-project" }),
   ).toBeVisible();
   expect(requests.at(-1)?.get("after")).toBe("property-token");
+  await page
+    .getByRole("combobox", { name: "Archive status" })
+    .selectOption("true");
+  await expect(search).toHaveValue(
+    'project props.region:"US East" archived:true',
+  );
+  await page
+    .getByRole("combobox", { name: "Fork status" })
+    .selectOption("only");
+  await expect(search).toHaveValue(
+    'project props.region:"US East" archived:true fork:only',
+  );
+  await expect(
+    page.getByRole("link", { name: "archive-fork", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("Fork", { exact: true })).toBeVisible();
+  await expectNoAccessibilityViolations(page);
 });

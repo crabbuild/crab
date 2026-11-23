@@ -66,7 +66,7 @@ async fn property_search_binds_continuations_to_values_and_visible_candidates() 
             .unwrap()
             .status()
     };
-    let filter = search("library props.Location:\"US East\" props.REGULATED:FALSE");
+    let filter = search("library props.Location:\"US East\" props.REGULATED:FALSE archived:false");
     let filtered = h.json(&format!("{filter}&limit=1"), &bob).await;
     assert_eq!(filtered["repositories"][0]["id"], json!(first));
     let cursor = filtered["next"].as_str().unwrap();
