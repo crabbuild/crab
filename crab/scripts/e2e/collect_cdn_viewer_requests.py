@@ -34,7 +34,8 @@ from collect_front_door_deployment_policy import FRONT_DOOR, FRONT_DOOR_HOST, SU
 from collect_cloudfront_access_logs import download_logs  # noqa: E402
 from run_cdn_git_workload import read_target_fingerprints  # noqa: E402
 from run_cdn_transport_checks import (  # noqa: E402
-    approved_fixture, deployment_target, fixture_base, fixture_object_key, https_response, origin_bucket,
+    GCS_VIEWER_AGENT_PREFIX, approved_fixture, deployment_target, fixture_base, fixture_object_key, https_response,
+    origin_bucket,
 )
 
 
@@ -43,7 +44,7 @@ LOG_FIELDS = {b"x-edge-request-id", b"x-host-header", b"cs-method", b"cs-uri-ste
               b"sc-content-len", b"sc-range-start", b"sc-range-end"}
 CF_CACHE_STATUS = {b"Hit": "hit", b"Miss": "miss"}
 AZURE_CACHE_STATUS = {"HIT": "hit", "REMOTE_HIT": "hit", "MISS": "miss"}
-GCS_VIEWER_AGENT = re.compile(r"crab-cdn-qualification/[0-9a-f]{32}")
+GCS_VIEWER_AGENT = re.compile(GCS_VIEWER_AGENT_PREFIX + r"[0-9a-f]{32}")
 GCS_ORIGIN_AGENT = "Cloud-CDN-Google"
 MAX_LINE = 64 * 1024
 JSON_LOG_LIMIT = 32 * 1024 * 1024
@@ -209,7 +210,7 @@ def front_door_logs(exports: Iterable[object], client: dict, fixture: dict, *, e
                 pop = props.get("pop")
                 require(isinstance(pop, str) and re.fullmatch(r"[A-Za-z0-9-]{1,32}", pop),
                         "Front Door cache reuse requires a recorded viewer point of presence")
-                record["pop_sha256"] = hashlib.sha256(pop.encode()).hexdigest()
+                record["cache_location_sha256"] = hashlib.sha256(pop.encode()).hexdigest()
                 # REMOTE_HIT can describe delivery from a parent cache.
                 record["cache"] = {"HIT": "hit", "MISS": "miss"}.get(cache, "unknown")
             require(fingerprint not in records or records[fingerprint] == record,
@@ -425,7 +426,7 @@ def gcp_logging_pages(fixture: dict, client: dict) -> Iterator[list]:
     raise ValueError("Cloud Logging query exceeds the page limit")
 
 
-def cloud_cdn_logs(exports: Iterable[object], client: dict, fixture: dict) -> dict:
+def cloud_cdn_logs(exports: Iterable[object], client: dict, fixture: dict, *, edge_location: bool = False) -> dict:
     expected = client["edge_responses"]
     deployment = deployment_target(fixture, "cloud-cdn")
     project, rule = deployment["project"], deployment["forwarding_rule"]
@@ -464,9 +465,19 @@ def cloud_cdn_logs(exports: Iterable[object], client: dict, fixture: dict) -> di
                     and re.fullmatch(r"[0-9]{1,19}", fill) and isinstance(insert_id, str) and bool(insert_id),
                     "Cloud CDN log has invalid status, byte counts or log entry ID")
             key = url.path.removeprefix(base_path)
+            details = payload.get("statusDetails")
             record = {"status": status, "response_bytes": int(size), "cache_fill_bytes": int(fill),
                       "key_sha256": hashlib.sha256(key.encode()).hexdigest(),
-                      "cache": cloud_cdn_cache_status(request, payload.get("statusDetails")), "origin_requests": {}}
+                      "cache": cloud_cdn_cache_status(request, details), "origin_requests": {}}
+            if edge_location:
+                cache_id = payload.get("cacheId")
+                require(isinstance(cache_id, str) and re.fullmatch(r"[A-Z]{3}-[A-Za-z0-9._-]{1,124}", cache_id),
+                        "Cloud CDN cache reuse requires a recorded cache instance")
+                record["cache_location_sha256"] = hashlib.sha256(cache_id.encode()).hexdigest()
+                # The cache-reuse workload is one small full GET. Composite
+                # range cache responses can include a backend transfer.
+                if (record["cache"], details) not in (("hit", "response_from_cache"), ("miss", "response_sent_by_backend")):
+                    record["cache"] = "unknown"
             require(fingerprint not in records or (records[fingerprint] == record and inserts[fingerprint] == insert_id),
                     "Cloud CDN exports disagree about one viewer request")
             records[fingerprint], inserts[fingerprint] = record, insert_id
@@ -491,6 +502,9 @@ def cloud_cdn_logs(exports: Iterable[object], client: dict, fixture: dict) -> di
         require(fingerprint not in requests or requests[fingerprint] == record,
                 "Cloud CDN exports disagree about one origin request")
         requests[fingerprint] = record
+    if edge_location:
+        for record in records.values():
+            record["origin_request_count"] = len(record.pop("origin_requests"))
     return records
 
 

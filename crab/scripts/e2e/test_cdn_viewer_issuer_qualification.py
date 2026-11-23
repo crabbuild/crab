@@ -17,7 +17,7 @@ import cdn_deployment_policy_cli as DEPLOYMENT
 import cdn_viewer_issuer as ISSUER
 import collect_cdn_cache_reuse as REUSE
 import run_cdn_transport_checks as TRANSPORT
-from cdn_qualification import verify_front_door_cache_reuse
+from cdn_qualification import verify_cache_reuse_viewer_logs
 from test_cdn_transport_qualification import BODY, fixture, response, scoped_credential
 
 
@@ -28,6 +28,7 @@ AUDIENCE = "urn:crab:qualification"
 OIDC_TOKEN = "oidc.jwt.fixture"
 RUNTIME_TOKEN = "runtime-credential-fixture"
 ENVIRONMENT = {"ACTIONS_ID_TOKEN_REQUEST_URL": RUNTIME, "ACTIONS_ID_TOKEN_REQUEST_TOKEN": RUNTIME_TOKEN}
+GCP_VIEWER_TAGS = {"primary": "1" * 32, "second": "2" * 32}
 
 
 def encoded(value):
@@ -41,6 +42,8 @@ def settings(edge, *, protected=False):
     if edge == "front-door":
         config["deployment"] = {"subscription": "12345678-1234-1234-1234-123456789012",
                                 "resource_group": "test", "profile": "test-cdn"}
+    elif edge == "cloud-cdn":
+        config["deployment"] = {"project": "fixture-project", "forwarding_rule": "fixture-rule"}
     if protected:
         config["view_suffix"] = f"/acl-views/v2/{'a' * 64}/1-{'b' * 64}"
         config["scope"] = f"{edge}/private/cli/xorb/direct"
@@ -63,6 +66,24 @@ def azure_viewer_archive(config, warm_cache="HIT"):
         common | {"properties": viewer | {"trackingReference": "second-viewer-ref", "cacheStatus": "HIT",
                                            "isReceivedFromClient": False, "pop": "SEA"}},
     ]}]
+
+
+def cloud_cdn_viewer_pages(config):
+    if not config["scope"].startswith("cloud-cdn/"):
+        return []
+    project, rule = (config["deployment"][field] for field in ("project", "forwarding_rule"))
+    key = config["fixture_prefix"] + config["view_suffix"] + "/" + config["object_path"]
+    resource = {"type": "http_load_balancer", "labels": {"project_id": project, "forwarding_rule_name": rule}}
+    viewer = {"requestMethod": "GET", "requestUrl": f"{config['base_url']}/{key}", "responseSize": str(len(BODY)),
+              "status": 200, "cacheLookup": True}
+    return [[
+        {"logName": f"projects/{project}/logs/requests", "insertId": role, "resource": resource,
+         "httpRequest": viewer | {"userAgent": TRANSPORT.GCS_VIEWER_AGENT_PREFIX + tag, "cacheHit": role == "second",
+                                 "cacheFillBytes": str(len(BODY)) if role == "primary" else "0"},
+         "jsonPayload": {"cacheId": "SFO-fbae48ad",
+                         "statusDetails": "response_sent_by_backend" if role == "primary" else "response_from_cache"}}
+        for role, tag in GCP_VIEWER_TAGS.items()
+    ]]
 
 
 def issue_reply(edge, config, *, expires_in=180):
@@ -192,11 +213,14 @@ class CdnViewerIssuerQualificationTests(TestCase):
                 with (patch.object(sys, "argv", args), patch.object(REUSE, "attest_fixture") as attest,
                       patch.object(REUSE.time, "sleep"),
                       patch.object(REUSE, "azure_monitor_tokens", return_value=("arm", "storage")),
-                      patch.object(REUSE, "azure_log_archives", side_effect=[[], azure_viewer_archive(config)]) as logs,
+                      patch.object(REUSE, "azure_log_archives", side_effect=[[], azure_viewer_archive(config)]) as azure_logs,
+                      patch.object(REUSE, "gcp_logging_pages", side_effect=[[], cloud_cdn_viewer_pages(config)]) as gcp_logs,
+                      patch.object(TRANSPORT.secrets, "token_hex", side_effect=GCP_VIEWER_TAGS.values()),
                       patch.object(REUSE.time, "time_ns", side_effect=[NOW * 10**9 + i * 10**6 for i in range(6)])):
                     self.assertEqual(REUSE.main(), 0)
                 self.assertEqual(attest.call_count, 2)
-                self.assertEqual(logs.call_count, 2 if edge == "front-door" else 0)
+                self.assertEqual(azure_logs.call_count, 2 if edge == "front-door" else 0)
+                self.assertEqual(gcp_logs.call_count, 2 if edge == "cloud-cdn" else 0)
                 calls = self.connection.request.call_args_list
                 for role, grant, read in zip(roles, calls[::2], calls[1::2], strict=True):
                     self.assertEqual(grant.args, ("POST", "/v1/credentials"))
@@ -205,6 +229,8 @@ class CdnViewerIssuerQualificationTests(TestCase):
                     self.assertNotIn(tokens[role], str(read.kwargs["headers"]))
                     if edge == "cloudfront":
                         self.assertEqual(read.kwargs["headers"].get("Pragma"), "server-timing")
+                    elif edge == "cloud-cdn":
+                        self.assertEqual(read.kwargs["headers"].get("User-Agent"), TRANSPORT.GCS_VIEWER_AGENT_PREFIX + GCP_VIEWER_TAGS[role])
                 self.assertEqual(calls[1].args, calls[3].args)
                 trace = output.read_text()
                 for secret in (*tokens.values(), "primary@example.com", "native-credential-fixture", "fixture-signature"):
@@ -216,9 +242,15 @@ class CdnViewerIssuerQualificationTests(TestCase):
                     self.assertEqual([row["cloudfront_hit_layer"] for row in reads], [None, "EDGE"])
                     self.assertNotIn("PHX50-C2", trace)
                 elif edge == "front-door":
-                    retained = json.loads(trace)["front_door_viewer_logs"]
-                    self.assertEqual({row["pop_sha256"] for row in retained.values()}, {hashlib.sha256(b"SJC").hexdigest()})
+                    retained = json.loads(trace)["viewer_logs"]
+                    self.assertEqual({row["cache_location_sha256"] for row in retained.values()}, {hashlib.sha256(b"SJC").hexdigest()})
                     for raw_field in ("primary-viewer-ref", "second-viewer-ref", "SJC"):
+                        self.assertNotIn(raw_field, trace)
+                elif edge == "cloud-cdn":
+                    retained = json.loads(trace)["viewer_logs"]
+                    self.assertEqual({row["cache_location_sha256"] for row in retained.values()},
+                                     {hashlib.sha256(b"SFO-fbae48ad").hexdigest()})
+                    for raw_field in (*GCP_VIEWER_TAGS.values(), "SFO-fbae48ad"):
                         self.assertNotIn(raw_field, trace)
 
     def test_cloudfront_cache_reuse_requires_one_point_of_presence(self):
@@ -232,15 +264,36 @@ class CdnViewerIssuerQualificationTests(TestCase):
     def test_front_door_cache_reuse_rejects_a_remote_hit(self):
         config = settings("front-door")
         key = config["fixture_prefix"] + "/" + config["object_path"]
-        requests = [{"front_door_request_sha256": hashlib.sha256(f"{role}-viewer-ref".encode()).hexdigest(),
+        requests = [{"request_sha256": hashlib.sha256(f"{role}-viewer-ref".encode()).hexdigest(),
                      "status": 200, "cache": cache, "key_sha256": hashlib.sha256(key.encode()).hexdigest(),
                      "bytes": len(BODY), "started_at_unix_ms": 1000, "finished_at_unix_ms": 1050}
                     for role, cache in (("primary", "miss"), ("second", "hit"))]
         with (patch.object(REUSE, "azure_monitor_tokens", return_value=("arm", "storage")),
               patch.object(REUSE, "azure_log_archives", return_value=azure_viewer_archive(config, "REMOTE_HIT"))):
-            logs = REUSE.azure_reuse_viewer_logs(config, requests)
+            logs = REUSE.cache_reuse_viewer_logs("front-door", config, requests)
         with self.assertRaisesRegex(ValueError, "disagrees with the verified miss or edge hit"):
-            verify_front_door_cache_reuse(logs, requests)
+            verify_cache_reuse_viewer_logs("front-door", logs, requests)
+
+    def test_cloud_cdn_cache_reuse_checks_the_logged_cache_instance_and_hit_kind(self):
+        config = settings("cloud-cdn")
+        key = config["fixture_prefix"] + "/" + config["object_path"]
+        requests = [{"request_sha256": hashlib.sha256((TRANSPORT.GCS_VIEWER_AGENT_PREFIX + tag).encode()).hexdigest(),
+                     "status": 200, "cache": "miss" if role == "primary" else "hit",
+                     "key_sha256": hashlib.sha256(key.encode()).hexdigest(), "bytes": len(BODY),
+                     "started_at_unix_ms": 1000, "finished_at_unix_ms": 1050}
+                    for role, tag in GCP_VIEWER_TAGS.items()]
+        for changes, error in (
+            ({"cacheId": "SFO-1234abcd"}, "same cache location"),
+            ({"cacheId": "unknown"}, "requires a recorded cache instance"),
+            ({"statusDetails": "byte_range_caching"}, "disagrees with the verified miss or edge hit"),
+            ({"statusDetails": "response_from_cache_validated"}, "disagrees with the verified miss or edge hit"),
+        ):
+            with self.subTest(changes=changes):
+                pages = cloud_cdn_viewer_pages(config)
+                pages[0][1]["jsonPayload"].update(changes)
+                with (patch.object(REUSE, "gcp_logging_pages", return_value=pages), self.assertRaisesRegex(ValueError, error)):
+                    logs = REUSE.cache_reuse_viewer_logs("cloud-cdn", config, requests)
+                    verify_cache_reuse_viewer_logs("cloud-cdn", logs, requests)
 
     def test_cache_reuse_cannot_relabel_one_policy_identity_as_two_principals(self):
         with TemporaryDirectory() as directory:
@@ -317,13 +370,16 @@ class CdnViewerIssuerQualificationTests(TestCase):
                     with (patch.object(sys, "argv", selected), patch.dict(ISSUER.os.environ, {"RUNNER_NAME": "worker"}),
                           patch.object(REUSE, "attest_fixture") as attest,
                           patch.object(REUSE, "azure_monitor_tokens", return_value=("arm", "storage")),
-                          patch.object(REUSE, "azure_log_archives", return_value=azure_viewer_archive(config)) as logs,
+                          patch.object(REUSE, "azure_log_archives", return_value=azure_viewer_archive(config)) as azure_logs,
+                          patch.object(REUSE, "gcp_logging_pages", return_value=cloud_cdn_viewer_pages(config)) as gcp_logs,
+                          patch.object(TRANSPORT.secrets, "token_hex", return_value=GCP_VIEWER_TAGS[role]),
                           patch.object(REUSE.time, "time_ns", side_effect=[
                               NOW * 10**9 + (offset + (0 if role == "primary" else 10)) * 10**6 for offset in range(3)
                           ])):
                         self.assertEqual(REUSE.main(), 0)
                     self.assertEqual(attest.call_count, 2)
-                    self.assertEqual(logs.call_count, int(edge == "front-door" and role == "second"))
+                    self.assertEqual(azure_logs.call_count, int(edge == "front-door" and role == "second"))
+                    self.assertEqual(gcp_logs.call_count, int(edge == "cloud-cdn" and role == "second"))
                 trace = json.loads(output.read_text())
                 self.assertEqual([row["cache"] for row in trace["requests"]], ["miss", "hit"])
                 for path in (primary, output):

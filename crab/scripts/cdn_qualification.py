@@ -1161,8 +1161,8 @@ def verify_scoped_view(value: Any, report: dict[str, Any], approved: str) -> Non
 def verify_cache_reuse(value: Any, report: dict[str, Any], approved: str) -> tuple[str, int]:
     edge = scope_parts(report["scope"])[0]
     trace_fields = CDN_PROVENANCE_FIELDS | {"schema", "check", "authority", "grants", "requests"}
-    if edge == "front-door":
-        trace_fields.add("front_door_viewer_logs")
+    if edge in ("cloud-cdn", "front-door"):
+        trace_fields.add("viewer_logs")
     trace = fields(value, trace_fields, CACHE_REUSE_CHECK)
     require(trace["schema"] == "crab.cdn-authenticated-cache-reuse/v1" and trace["check"] == CACHE_REUSE_CHECK
             and all(trace[key] == report[key] for key in CDN_PROVENANCE_FIELDS),
@@ -1191,28 +1191,34 @@ def verify_cache_reuse(value: Any, report: dict[str, Any], approved: str) -> tup
     if edge == "cloudfront":
         require(requests[0]["cloudfront_pop_sha256"] == requests[1]["cloudfront_pop_sha256"],
                 "CloudFront cache reuse requires both reads at the same point of presence")
-    elif edge == "front-door":
-        verify_front_door_cache_reuse(trace["front_door_viewer_logs"], requests)
+    elif edge in ("cloud-cdn", "front-door"):
+        verify_cache_reuse_viewer_logs(edge, trace["viewer_logs"], requests)
     require(grants["primary"]["expires_at_unix"] != grants["second"]["expires_at_unix"],
             "cache reuse needs distinct signed viewer grants with different expirations")
     return obj["key_sha256"], obj["bytes"]
 
 
-def verify_front_door_cache_reuse(viewer_logs: Any, requests: list) -> None:
-    request_ids = {row["front_door_request_sha256"] for row in requests}
-    require(len(request_ids) == 2, "Front Door cache reuse requires two distinct viewer requests")
-    records = fields(viewer_logs, request_ids, "Front Door cache-reuse viewer logs")
+def verify_cache_reuse_viewer_logs(edge: str, viewer_logs: Any, requests: list) -> None:
+    request_ids = {row["request_sha256"] for row in requests}
+    require(len(request_ids) == 2, "cache reuse requires two distinct viewer requests")
+    records = fields(viewer_logs, request_ids, "cache-reuse viewer logs")
+    record_fields = {"status", "cache", "key_sha256", "response_bytes", "cache_location_sha256"}
+    if edge == "cloud-cdn":
+        record_fields |= {"cache_fill_bytes", "origin_request_count"}
     locations = set()
     for row in requests:
-        record = fields(records[row["front_door_request_sha256"]],
-                        {"status", "cache", "key_sha256", "response_bytes", "pop_sha256"},
-                        "Front Door cache-reuse viewer record")
+        record = fields(records[row["request_sha256"]], record_fields, "cache-reuse viewer record")
         require(type(record["status"]) is int and all(record[key] == row[key] for key in ("status", "cache", "key_sha256"))
                 and type(record["response_bytes"]) is int and record["response_bytes"] >= row["bytes"],
-                "Front Door viewer log disagrees with the verified miss or edge hit")
-        require(matches(SHA256, record["pop_sha256"]), "invalid Front Door viewer point of presence")
-        locations.add(record["pop_sha256"])
-    require(len(locations) == 1, "Front Door cache reuse requires both reads at the same point of presence")
+                f"{edge} viewer log disagrees with the verified miss or edge hit")
+        require(matches(SHA256, record["cache_location_sha256"]), f"invalid {edge} cache location")
+        locations.add(record["cache_location_sha256"])
+        if edge == "cloud-cdn":
+            fill, origins = record["cache_fill_bytes"], record["origin_request_count"]
+            require(type(fill) is int and type(origins) is int and origins >= 0
+                    and (fill > 0 if row["cache"] == "miss" else fill == origins == 0),
+                    "Cloud CDN cache reuse requires a cold fill and a warm hit without origin traffic")
+    require(len(locations) == 1, f"{edge} cache reuse requires both reads at the same cache location")
 
 
 def verify_cache_reuse_read(
@@ -1226,8 +1232,8 @@ def verify_cache_reuse_read(
     read_fields = TRACE_REQUEST_FIELDS | {"principal", "body_sha256", "started_at_unix_ms", "finished_at_unix_ms"}
     if edge == "cloudfront":
         read_fields |= {"cloudfront_pop_sha256", "cloudfront_hit_layer"}
-    elif edge == "front-door":
-        read_fields.add("front_door_request_sha256")
+    elif edge in ("cloud-cdn", "front-door"):
+        read_fields.add("request_sha256")
     fields(row, read_fields, "authenticated cache reuse read")
     cache = "miss" if role == "primary" else "hit"
     require(row["principal"] == role and row["source"] == "edge" and type(row["status"]) is int
@@ -1238,8 +1244,8 @@ def verify_cache_reuse_read(
         require(matches(SHA256, row["cloudfront_pop_sha256"])
                 and row["cloudfront_hit_layer"] == (None if role == "primary" else "EDGE"),
                 "CloudFront cache reuse requires a recorded point of presence and a hit at the edge layer")
-    elif edge == "front-door":
-        require(matches(SHA256, row["front_door_request_sha256"]), "invalid Front Door viewer request fingerprint")
+    elif edge in ("cloud-cdn", "front-door"):
+        require(matches(SHA256, row["request_sha256"]), f"invalid {edge} viewer request fingerprint")
     start, finish, expires = row["started_at_unix_ms"], row["finished_at_unix_ms"], grant["expires_at_unix"] * 1000
     require(type(row["elapsed_ms"]) is int and row["elapsed_ms"] >= 0 and type(row["bytes"]) is int
             and positive(start) and positive(finish)

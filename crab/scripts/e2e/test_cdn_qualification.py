@@ -928,14 +928,16 @@ class CdnQualificationTests(unittest.TestCase):
                 for row in evidence["requests"]:
                     row.update(cloudfront_pop_sha256="f" * 64,
                                cloudfront_hit_layer="EDGE" if row["cache"] == "hit" else None)
-            elif self.report["scope"].startswith("front-door/"):
+            elif self.report["scope"].startswith(("cloud-cdn/", "front-door/")):
                 logs = {}
                 for row in evidence["requests"]:
                     request = hashlib.sha256(row["principal"].encode()).hexdigest()
-                    row["front_door_request_sha256"] = request
+                    row["request_sha256"] = request
                     logs[request] = {"status": row["status"], "cache": row["cache"], "key_sha256": row["key_sha256"],
-                                     "response_bytes": row["bytes"], "pop_sha256": "f" * 64}
-                evidence["front_door_viewer_logs"] = logs
+                                     "response_bytes": row["bytes"], "cache_location_sha256": "f" * 64}
+                    if self.report["scope"].startswith("cloud-cdn/"):
+                        logs[request].update(cache_fill_bytes=row["bytes"] if row["cache"] == "miss" else 0, origin_request_count=0)
+                evidence["viewer_logs"] = logs
         path = self.directory / "traces" / f"{check}.json"
         self.report["checks"][check] = {"passed": True, "trace_sha256": json_file(path, evidence)}
 
@@ -2146,17 +2148,34 @@ class CdnQualificationTests(unittest.TestCase):
     def test_front_door_cache_reuse_requires_matched_viewer_logs(self) -> None:
         self.configure("azure", "private", "direct")
         trace = json.loads((self.directory / "traces" / f"{CDN.CACHE_REUSE_CHECK}.json").read_bytes())
-        self.cache_reuse_trace({key: value for key, value in trace.items() if key != "front_door_viewer_logs"})
+        self.cache_reuse_trace({key: value for key, value in trace.items() if key != "viewer_logs"})
         self.rejected("invalid fields in authorized_cache_reuse")
-        logs = trace["front_door_viewer_logs"]
-        second = trace["requests"][1]["front_door_request_sha256"]
+        logs = trace["viewer_logs"]
+        second = trace["requests"][1]["request_sha256"]
         for changes, error in (
-            ({"pop_sha256": "e" * 64}, "both reads at the same point of presence"),
+            ({"cache_location_sha256": "e" * 64}, "both reads at the same cache location"),
             ({"cache": "unknown"}, "disagrees with the verified miss or edge hit"),
             ({"key_sha256": "a" * 64}, "disagrees with the verified miss or edge hit"),
         ):
             with self.subTest(changes=changes):
-                self.cache_reuse_trace(trace | {"front_door_viewer_logs": logs | {second: logs[second] | changes}})
+                self.cache_reuse_trace(trace | {"viewer_logs": logs | {second: logs[second] | changes}})
+                self.rejected(error)
+
+    def test_cloud_cdn_cache_reuse_requires_matched_viewer_logs(self) -> None:
+        self.configure("gcs", "private", "direct")
+        trace = json.loads((self.directory / "traces" / f"{CDN.CACHE_REUSE_CHECK}.json").read_bytes())
+        self.cache_reuse_trace({key: value for key, value in trace.items() if key != "viewer_logs"})
+        self.rejected("invalid fields in authorized_cache_reuse")
+        first, second = (row["request_sha256"] for row in trace["requests"])
+        logs = trace["viewer_logs"]
+        for request, changes, error in (
+            (first, {"cache_fill_bytes": 0}, "requires a cold fill"),
+            (second, {"cache_location_sha256": "e" * 64}, "same cache location"),
+            (second, {"cache_fill_bytes": 1}, "warm hit without origin traffic"),
+            (second, {"origin_request_count": 1}, "warm hit without origin traffic"),
+        ):
+            with self.subTest(changes=changes):
+                self.cache_reuse_trace(trace | {"viewer_logs": logs | {request: logs[request] | changes}})
                 self.rejected(error)
 
     def test_cache_reuse_checks_the_read_and_its_signed_grant(self) -> None:

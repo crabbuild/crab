@@ -22,7 +22,7 @@ from cdn_qualification import (
 from cdn_viewer_issuer import BEARER, JWT, github_id_token, issue_viewer, issuer_settings
 from collect_azure_access_logs import azure_log_archives
 from collect_cdn_viewer_requests import (
-    JSON_LOG_LIMIT, azure_monitor_tokens, front_door_logs, front_door_resources,
+    JSON_LOG_LIMIT, azure_monitor_tokens, cloud_cdn_logs, front_door_logs, front_door_resources, gcp_logging_pages,
 )
 from run_cdn_transport_checks import approved_fixture, fixture_base, fixture_object_key, request_sample, viewer_expiry
 
@@ -121,29 +121,34 @@ def hosted_measure(
     return full_trace(fixture, provenance, authority, {"primary": primary["grant"]} | grants, [primary["request"], *requests])
 
 
-def azure_reuse_viewer_logs(fixture: dict, requests: list) -> dict:
-    expected = {row["front_door_request_sha256"]: row for row in requests}
-    require(len(expected) == 2, "Front Door cache reuse requires two distinct viewer requests")
+def cache_reuse_viewer_logs(edge: str, fixture: dict, requests: list) -> dict:
+    expected = {row["request_sha256"]: row for row in requests}
+    require(len(expected) == 2, "cache reuse requires two distinct viewer requests")
     client = {"edge_responses": expected, "started_at_unix_ms": requests[0]["started_at_unix_ms"],
               "finished_at_unix_ms": requests[1]["finished_at_unix_ms"]}
-    profile, _, _ = front_door_resources(fixture)
-    arm, storage = azure_monitor_tokens(profile)
+    if edge == "front-door":
+        profile, _, _ = front_door_resources(fixture)
+        arm, storage = azure_monitor_tokens(profile)
     deadline = time.monotonic() + 10 * 60
     while True:
-        archives = azure_log_archives(profile, "FrontDoorAccessLog", client, arm, storage, JSON_LOG_LIMIT)
-        records = front_door_logs(archives, client, fixture, edge_location=True)
+        if edge == "front-door":
+            archives = azure_log_archives(profile, "FrontDoorAccessLog", client, arm, storage, JSON_LOG_LIMIT)
+            records = front_door_logs(archives, client, fixture, edge_location=True)
+        else:
+            records = cloud_cdn_logs(gcp_logging_pages(fixture, client), client, fixture, edge_location=True)
         if records.keys() == expected.keys():
             return records
         remaining = deadline - time.monotonic()
-        require(remaining > 0, "Azure Monitor did not deliver both cache-reuse viewer records")
+        require(remaining > 0, f"{edge} did not deliver both cache-reuse viewer records")
         time.sleep(min(30, remaining))
 
 
 def full_trace(fixture: dict, provenance: dict, authority: dict, grants: dict, requests: list) -> dict:
     trace = provenance | {"schema": "crab.cdn-authenticated-cache-reuse/v1", "check": CACHE_REUSE_CHECK,
                           "authority": authority, "grants": grants, "requests": requests}
-    if scope_parts(fixture["scope"])[0] == "front-door":
-        trace["front_door_viewer_logs"] = azure_reuse_viewer_logs(fixture, requests)
+    edge = scope_parts(fixture["scope"])[0]
+    if edge in ("cloud-cdn", "front-door"):
+        trace["viewer_logs"] = cache_reuse_viewer_logs(edge, fixture, requests)
     verify_cache_reuse(trace, provenance, deployment_component_digest(authority))
     return trace
 

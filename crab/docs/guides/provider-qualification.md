@@ -332,6 +332,13 @@ fingerprint of `X-Azure-Ref`, and verifies a miss and a local hit at the
 same point of presence. It uses the viewer records emitted by the edge.
 [Front Door access logs](https://learn.microsoft.com/en-us/azure/frontdoor/monitor-front-door#access-log)
 
+For Cloud CDN, the active Google Cloud CLI identity needs read access to
+the approved forwarding rule's request logs. The collector tags each read
+with a distinct User-Agent and polls Cloud Logging after both reads. It
+requires a cold fill and a warm response served entirely from the same
+`cacheId`. The approved cache policy keeps the User-Agent out of the cache
+key. [Cloud CDN request logs](https://docs.cloud.google.com/cdn/docs/logging)
+
 To collect the same trace in GitHub Actions, dispatch **Provider contract
 qualification** with `cdn_transport` and `cdn_cache_reuse` for the selected
 private provider. Attach the `cdn-cache-reuse` label to one protected Linux

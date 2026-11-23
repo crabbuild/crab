@@ -9,6 +9,7 @@ import hashlib
 import http.client
 import json
 import re
+import secrets
 import sys
 import time
 from collections.abc import Iterator
@@ -71,6 +72,7 @@ CACHE_CODES = {
     "cloud-cdn": ("X-Crab-CDN-Cache", {"hit": "hit", "miss": "miss"}),
     "front-door": ("X-Cache", {"TCP_HIT": "hit", "TCP_REMOTE_HIT": "hit", "TCP_MISS": "miss"}),
 }
+GCS_VIEWER_AGENT_PREFIX = "crab-cdn-qualification/"
 
 
 def approved_fixture(path: Path, configuration_sha256: str, *, operator_binding: bool = False) -> dict[str, Any]:
@@ -359,8 +361,11 @@ def request_sample(
     denied_statuses: tuple[int, ...] = (401, 403), origin_authorization: str | None = None,
 ) -> tuple[dict[str, Any], bytes]:
     headers = viewer | {"Accept-Encoding": "identity"}
-    if edge == "cloudfront" and check == CACHE_REUSE_CHECK:
-        headers["Pragma"] = "server-timing"
+    if check == CACHE_REUSE_CHECK:
+        if edge == "cloudfront":
+            headers["Pragma"] = "server-timing"
+        elif edge == "cloud-cdn":
+            headers["User-Agent"] = GCS_VIEWER_AGENT_PREFIX + secrets.token_hex(16)
     if edge is None:
         require(not viewer, "native origin probes cannot use viewer credentials")
         if not base.query and base.netloc.endswith(".blob.core.windows.net"):
@@ -411,11 +416,13 @@ def request_sample(
         if check == CACHE_REUSE_CHECK:
             if edge == "cloudfront":
                 observation.update(cloudfront_cache_timing(response))
+            elif edge == "cloud-cdn":
+                observation["request_sha256"] = hashlib.sha256(headers["User-Agent"].encode()).hexdigest()
             elif edge == "front-door":
                 references = response.headers.get_all("X-Azure-Ref", [])
                 require(len(references) == 1 and re.fullmatch(r"[\x21-\x7e]{1,256}", references[0]),
                         "Front Door cache reuse requires one viewer tracking reference")
-                observation["front_door_request_sha256"] = hashlib.sha256(references[0].encode()).hexdigest()
+                observation["request_sha256"] = hashlib.sha256(references[0].encode()).hexdigest()
         return observation, body
 
 
