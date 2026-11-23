@@ -2202,7 +2202,7 @@ owner label does not acquire ownership.
 | Pull comments | `GET/POST /api/repos/{owner}/{name}/pulls/{number}/comments`, `GET/PATCH /api/repos/{owner}/{name}/pulls/{number}/comments/{comment}` |
 | Reviews | `GET/POST /api/repos/{owner}/{name}/pulls/{number}/reviews`, `GET/PATCH /api/repos/{owner}/{name}/pulls/{number}/reviews/{review}` |
 | Pending review | `GET/PUT /api/repos/{owner}/{name}/pulls/{number}/pending-review`, `POST .../pending-review/submit` |
-| Inline review threads | `GET/POST /api/repos/{owner}/{name}/pulls/{number}/threads`, `GET/PATCH /api/repos/{owner}/{name}/pulls/{number}/threads/{thread}` |
+| Inline review threads | `GET/POST /api/repos/{owner}/{name}/pulls/{number}/threads`, `GET/PATCH /api/repos/{owner}/{name}/pulls/{number}/threads/{thread}`, `GET /api/repos/{owner}/{name}/pulls/{number}/threads/navigation` |
 | Thread replies | `GET/POST /api/repos/{owner}/{name}/pulls/{number}/threads/{thread}/replies`, `GET/PATCH /api/repos/{owner}/{name}/pulls/{number}/threads/{thread}/replies/{reply}` |
 | Apply review suggestions | `POST /api/repos/{owner}/{name}/pulls/{number}/suggestions` |
 | Apply upstream review suggestions to a fork | `POST /api/repos/{fork-owner}/{fork-name}/upstream-pulls/{number}/suggestions` |
@@ -3350,6 +3350,23 @@ files use their normal presentation. If a review comment is outside the shown
 hunks, **Jump to diff** opens the original hunk without changing the preference.
 The browser remembers the choice per pull request. Branch comparisons and
 commit pages share a separate preference.
+
+Use **Previous unresolved** and **Next unresolved** on **Files changed** to
+step through all unresolved conversations in newest-first order. The controls
+reach conversations beyond the loaded pages. Current comments open at their
+diff anchor without clearing file filters. Outdated comments open in the
+outdated conversations list. The review header counts all conversations for
+the current comparison, and file badges indicate when their counts cover only
+loaded conversations.
+
+`GET .../threads/navigation` accepts an optional `around` thread number and
+returns `base_oid`, `head_oid`, and a `summary`. The summary contains
+`open` and `resolved` counts for the current comparison, `outdated` and
+`outdated_unresolved` counts for earlier comparisons, and nullable
+`previous` and `next` unresolved thread numbers. Without `around`, `next`
+is the newest unresolved conversation. A resolved anchor can still be used
+as the starting position. The endpoint requires current repository read
+access.
 
 If either branch is deleted, the conversation and original OIDs remain visible while live comparison becomes unavailable. A completed merge retains its pre-merge comparison after source deletion.
 

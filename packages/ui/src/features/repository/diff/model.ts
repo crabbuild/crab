@@ -41,6 +41,7 @@ export interface DiffReviewState {
   onLineSelected: (file: Change, range: SelectedLineRange | null) => void;
   onThreadSelected: (thread: InlineDiffThread) => void;
   fileSummary?: (pathHex: string) => DiffReviewFileSummary | null;
+  fileSummaryPartial?: boolean;
   fileSummaryVersion?: string;
   renderAnnotation?: (thread: InlineDiffThread) => ReactNode;
   renderFileActions?: (file: Change) => ReactNode;

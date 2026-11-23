@@ -302,6 +302,134 @@ async fn native_large_pull_opens_a_file_and_publishes_an_exact_review_anchor() {
     browser
         .run(&["wait", "--fn", "document.activeElement?.matches('[data-thread-number=\"1\"]') && document.querySelector('input[aria-label=\"Filter changed files\"]').value === 'readme'"])
         .await;
+
+    let deleted = rows
+        .iter()
+        .find(|row| row["path"] == "deleted.txt")
+        .unwrap();
+    for number in 2..=34 {
+        let (path, side) = if number == 2 {
+            (&deleted["path_hex"], "old")
+        } else {
+            (&readme["path_hex"], "new")
+        };
+        let created: Value = h
+            .write(
+                Method::POST,
+                &review_path,
+                &bob,
+                json!({
+                    "request_id":Uuid::now_v7(), "body":format!("Review point {number}"),
+                    "base_oid":ancestor, "head_oid":head, "path_hex":path,
+                    "side":side, "start_line":1, "end_line":1,
+                }),
+            )
+            .await
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(created["number"], number);
+        if number > 2 {
+            h.write(
+                Method::PATCH,
+                &format!("{review_path}/{number}"),
+                &alice,
+                json!({"version":created["version"], "resolved":true}),
+            )
+            .await
+            .error_for_status()
+            .unwrap();
+        }
+    }
+    let page = h.json(&format!("{review_path}?outdated=false"), &bob).await;
+    let page_items = page["items"].as_array().unwrap();
+    assert_eq!(page_items.len(), 30);
+    assert!(page_items.iter().all(|thread| thread["resolved"] == true));
+    let navigation = format!("{review_path}/navigation");
+    let summary = h.json(&navigation, &bob).await;
+    assert_eq!(summary["base_oid"], ancestor);
+    assert_eq!(summary["head_oid"], head);
+    assert_eq!(
+        summary["summary"],
+        json!({"open":2,"resolved":32,"outdated":0,"outdated_unresolved":0,"previous":null,"next":2})
+    );
+    let resolved_anchor = h.json(&format!("{navigation}?around=3"), &bob).await;
+    assert_eq!(resolved_anchor["summary"]["previous"], Value::Null);
+    assert_eq!(resolved_anchor["summary"]["next"], 2);
+
+    browser.run(&["reload"]).await;
+    browser
+        .run(&["wait", "--text", "2 open · 32 resolved · 0 outdated"])
+        .await;
+    browser.run(&["set", "viewport", "390", "844"]).await;
+    browser
+        .run(&[
+            "wait", "--fn",
+            "(() => { const nav = document.querySelector('nav[aria-label=\"Review conversation navigation\"]'); return nav && nav.scrollWidth <= nav.clientWidth && nav.querySelectorAll('button').length === 2; })()",
+        ])
+        .await;
+    browser.run(&["set", "viewport", "1280", "900"]).await;
+    browser
+        .run(&["fill", "input[aria-label='Filter changed files']", "readme"])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "checkbox",
+            "click",
+            "--name",
+            "Hide viewed",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", "--text", "No changed files match these filters."])
+        .await;
+    for (button, number) in [
+        ("Next unresolved", 2),
+        ("Next unresolved", 1),
+        ("Previous unresolved", 2),
+    ] {
+        browser
+            .run(&[
+                "find", "role", "button", "click", "--name", button, "--exact",
+            ])
+            .await;
+        browser
+            .run(&[
+                "wait",
+                "--fn",
+                &format!("document.activeElement?.matches('[data-thread-number=\"{number}\"]')"),
+            ])
+            .await;
+    }
+    browser
+        .run(&["wait", "--url", "**/pull/1/files#review-diff-2"])
+        .await;
+
+    git(path, &["switch", "feature"]).await;
+    std::fs::write(path.join("README.md"), "base  text\nnewer review line\n").unwrap();
+    git(path, &["commit", "-am", "Advance the comparison"]).await;
+    assert!(with_http_token(path, token, &["push", &remote, "feature"]).await);
+    let advanced = h.json(&format!("{navigation}?around=2"), &bob).await;
+    assert_ne!(advanced["head_oid"], head);
+    assert_eq!(
+        advanced["summary"],
+        json!({"open":0,"resolved":0,"outdated":34,"outdated_unresolved":2,"previous":null,"next":1})
+    );
+    browser.run(&["reload"]).await;
+    browser
+        .run(&["wait", "--text", "0 open · 0 resolved · 34 outdated"])
+        .await;
+    browser
+        .run(&[
+            "wait", "--fn",
+            "document.activeElement?.id === 'review-thread-2' && document.getElementById('review-thread-2')?.closest('details[open]') !== null",
+        ])
+        .await;
     drop(browser);
     h.close().await;
 }

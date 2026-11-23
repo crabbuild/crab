@@ -54,6 +54,8 @@ export function ChangeTree({
   );
   const fileSummariesRef = useRef(fileSummaries);
   fileSummariesRef.current = fileSummaries;
+  const partial = useRef(review?.fileSummaryPartial);
+  partial.current = review?.fileSummaryPartial;
   const syncingSelection = useRef(false);
   const renderRowDecoration = useRef(
     ({ item }: FileTreeRowDecorationContext) => {
@@ -61,7 +63,8 @@ export function ChangeTree({
       const change = pathsRef.current.get(item.path);
       const stats = fileSummariesRef.current.get(change?.path_hex ?? "");
       if (!stats || stats.total === 0) return null;
-      const label = `${stats.total} ${stats.total === 1 ? "thread" : "threads"}`;
+      const count = `${stats.total} ${stats.total === 1 ? "thread" : "threads"}`;
+      const label = partial.current ? `${count} loaded` : count;
       return {
         text: label,
         title: `${label}; ${stats.open} open, ${stats.resolved} resolved${stats.outdated ? `, ${stats.outdated} outdated` : ""}`,

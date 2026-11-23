@@ -12,12 +12,14 @@ import {
   usePullComparison,
 } from "@/features/repository/diff";
 import {
+  type DiffReviewFileSummary,
   type DiffReviewState,
   type DiffTarget,
   type InlineDiffThread,
 } from "@/features/repository/diff/model";
 import {
   endpoint,
+  navigate,
   useLocation,
   useRequest,
   type Change,
@@ -39,19 +41,24 @@ function isOutdatedThread(thread: InlineDiffThread) {
   return thread.outdated || thread.vanished;
 }
 
-function isOpenThread(thread: InlineDiffThread) {
-  return !thread.resolved && !isOutdatedThread(thread);
-}
-
-function isResolvedThread(thread: InlineDiffThread) {
-  return thread.resolved && !isOutdatedThread(thread);
-}
-
 type ThreadSelection = {
   file: Change;
   range: SelectedLineRange;
   base: string;
   head: string;
+};
+
+type ReviewNavigation = {
+  base_oid: string;
+  head_oid: string;
+  summary: {
+    open: number;
+    resolved: number;
+    outdated: number;
+    outdated_unresolved: number;
+    previous: number | null;
+    next: number | null;
+  };
 };
 
 export function PullReviewThreads({
@@ -90,17 +97,18 @@ export function PullReviewThreads({
   const threads = usePagedRequest<PullReviewThread>(path);
   const outdatedThreads = usePagedRequest<PullReviewThread>(outdatedPath);
   const location = useLocation();
-  const focus = /#(review-thread-([1-9]\d*))$/.exec(location);
-  const focusNumber = Number(focus?.[2]);
-  const currentMatch = threads.items.some(
+  const focus = /#review-(thread|diff)-([1-9]\d*)$/.exec(location);
+  const number = Number(focus?.[2]);
+  const focusNumber = Number.isSafeInteger(number) ? number : undefined;
+  const currentMatch = threads.items.find(
     (thread) => thread.number === focusNumber,
   );
-  const outdatedMatch = outdatedThreads.items.some(
+  const outdatedMatch = outdatedThreads.items.find(
     (thread) => thread.number === focusNumber,
   );
   // A permalink can target a thread beyond both initial pages.
   const linkedThread = useRequest<PullReviewThread>(
-    Number.isSafeInteger(focusNumber) &&
+    focusNumber !== undefined &&
       !currentMatch &&
       !outdatedMatch &&
       !threads.loading &&
@@ -119,14 +127,23 @@ export function PullReviewThreads({
     linkedThread.data && linkedOutdated
       ? [linkedThread.data, ...outdatedThreads.items]
       : outdatedThreads.items;
-  useContributionFocus(
-    focus?.[1],
-    currentMatch || outdatedMatch || linkedThread.data !== undefined,
+  const selected = currentMatch ?? outdatedMatch ?? linkedThread.data;
+  const [manualJump, setManualJump] = useState<{
+    location: string;
+    target: DiffTarget;
+  }>();
+  const jumpTarget =
+    manualJump?.location === location ? manualJump.target : undefined;
+  const navigation = useRequest<ReviewNavigation>(
+    endpoint(repo, `pulls/${pull.number}/threads/navigation`, {
+      around: (jumpTarget?.thread ?? focusNumber)?.toString(),
+    }),
   );
   function refreshThreads() {
     threads.retry();
     outdatedThreads.retry();
     linkedThread.retry();
+    navigation.retry();
     refresh();
   }
   const suggestions = useSuggestionBatch(
@@ -144,32 +161,72 @@ export function PullReviewThreads({
     pull.head_repository ? repo.id : undefined,
   );
   const preview = comparison.data;
+  const comparisonChanged =
+    navigation.data &&
+    preview &&
+    (navigation.data.base_oid !== preview.base ||
+      navigation.data.head_oid !== preview.commit);
+  const summary = comparisonChanged ? undefined : navigation.data?.summary;
+  const directTarget = useMemo(
+    () =>
+      focus?.[1] === "diff" &&
+      selected &&
+      !isOutdatedThread(selected) &&
+      selected.base_oid === preview?.base &&
+      selected.head_oid === preview?.commit
+        ? { pathHex: selected.path_hex, thread: selected.number }
+        : undefined,
+    [focus?.[1], preview?.base, preview?.commit, selected],
+  );
+  const focusConversation =
+    focus?.[1] === "thread" ||
+    (selected &&
+      (isOutdatedThread(selected) || (!preview && !comparison.loading)));
+  useContributionFocus(
+    focusNumber && focusConversation
+      ? `review-thread-${focusNumber}`
+      : undefined,
+    selected !== undefined,
+  );
   const viewed = useViewedFiles(repo, pull.number, csrf, preview?.changes);
-  const [diffTarget, setDiffTarget] = useState<DiffTarget>();
   const [selection, setSelection] = useState<ThreadSelection>();
   const [body, setBody] = useState("");
   const [suggestion, setSuggestion] = useState("");
   const [suggestionEnabled, setSuggestionEnabled] = useState(false);
   const mutation = useMutation(csrf, repo);
   const submission = useSubmission();
-  const reviewMetrics = useMemo(() => {
-    const all = [...threads.items, ...outdatedThreads.items];
-    return {
-      open: all.filter(isOpenThread).length,
-      resolved: all.filter(isResolvedThread).length,
-      outdated: all.filter(isOutdatedThread).length,
-    };
+  const fileSummaries = useMemo(() => {
+    const summaries = new Map<string, DiffReviewFileSummary>();
+    for (const thread of [...threads.items, ...outdatedThreads.items]) {
+      const file = summaries.get(thread.path_hex) ?? {
+        total: 0,
+        open: 0,
+        resolved: 0,
+        outdated: 0,
+      };
+      file.total += 1;
+      if (isOutdatedThread(thread)) file.outdated += 1;
+      else if (thread.resolved) file.resolved += 1;
+      else file.open += 1;
+      summaries.set(thread.path_hex, file);
+    }
+    return summaries;
   }, [outdatedThreads.items, threads.items]);
+  const incompleteFiles =
+    unresolvedOnly ||
+    threads.loading ||
+    outdatedThreads.loading ||
+    Boolean(threads.error || outdatedThreads.error) ||
+    threads.next !== null ||
+    outdatedThreads.next !== null;
   const fileSummaryVersion = useMemo(
-    () =>
-      [...threads.items, ...outdatedThreads.items]
-        .map(
-          (thread) =>
-            `${thread.number}:${thread.resolved ? "r" : "o"}:${isOutdatedThread(thread) ? "x" : "c"}`,
-        )
-        .join("|"),
-    [outdatedThreads.items, threads.items],
+    () => JSON.stringify([incompleteFiles, [...fileSummaries]]),
+    [fileSummaries, incompleteFiles],
   );
+  function navigateToThread(target: number) {
+    setManualJump(undefined);
+    navigate(`${location.split("#")[0]}#review-diff-${target}`);
+  }
   function clearSelection() {
     setSelection(undefined);
     setBody("");
@@ -177,12 +234,15 @@ export function PullReviewThreads({
     setSuggestionEnabled(false);
   }
   function jumpToDiff(thread: InlineDiffThread) {
-    setDiffTarget({ pathHex: thread.path_hex, thread: thread.number });
+    setManualJump({
+      location,
+      target: { pathHex: thread.path_hex, thread: thread.number },
+    });
   }
   const review: DiffReviewState = {
     preferenceScope: `${repo.id}-${pull.number}`,
     threads: currentItems,
-    target: diffTarget,
+    target: jumpTarget ?? directTarget,
     isViewed: viewed.isViewed,
     renderFileActions: viewed.renderFileActions,
     onLineSelected(file, range) {
@@ -210,18 +270,8 @@ export function PullReviewThreads({
         block: "center",
       });
     },
-    fileSummary(pathHex) {
-      const all = [...threads.items, ...outdatedThreads.items].filter(
-        (thread) => thread.path_hex === pathHex,
-      );
-      if (!all.length) return null;
-      return {
-        total: all.length,
-        open: all.filter(isOpenThread).length,
-        resolved: all.filter(isResolvedThread).length,
-        outdated: all.filter(isOutdatedThread).length,
-      };
-    },
+    fileSummary: (pathHex) => fileSummaries.get(pathHex) ?? null,
+    fileSummaryPartial: incompleteFiles,
     fileSummaryVersion,
     renderAnnotation(thread) {
       const preview = thread.body.replace(/\s+/g, " ").trim();
@@ -308,31 +358,54 @@ export function PullReviewThreads({
       )}
       <header className="inline-review-header">
         <div>
-          <span className="inline-review-kicker">Review workspace</span>
           <h2>Inline review</h2>
           <p className="muted">
             Select a line or range in the diff to leave feedback. Your review
             stays attached to the exact version you inspected.
           </p>
         </div>
-        <div
-          className="inline-review-metrics"
-          aria-label={`${reviewMetrics.open} open, ${reviewMetrics.resolved} resolved, ${reviewMetrics.outdated} outdated`}
-        >
-          <span className="inline-review-metric open">
-            <strong>{reviewMetrics.open}</strong>
-            <span>open</span>
-          </span>
-          <span className="inline-review-metric resolved">
-            <strong>{reviewMetrics.resolved}</strong>
-            <span>resolved</span>
-          </span>
-          <span className="inline-review-metric outdated">
-            <strong>{reviewMetrics.outdated}</strong>
-            <span>outdated</span>
-          </span>
-        </div>
       </header>
+      <nav
+        className="mb-4 flex flex-wrap items-center justify-between gap-2"
+        aria-label="Review conversation navigation"
+      >
+        <div role="status" className="text-sm text-muted-foreground">
+          {summary
+            ? `${summary.open} open · ${summary.resolved} resolved · ${summary.outdated} outdated`
+            : navigation.error
+              ? "Conversation counts unavailable."
+              : comparisonChanged
+                ? "The comparison changed. Refresh to continue."
+                : "Loading conversation counts…"}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {(navigation.error || comparisonChanged) && (
+            <Button variant="outline" size="sm" onClick={refreshThreads}>
+              Refresh conversations
+            </Button>
+          )}
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={summary?.previous == null}
+            onClick={() =>
+              summary?.previous != null && navigateToThread(summary.previous)
+            }
+          >
+            Previous unresolved
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={summary?.next == null}
+            onClick={() =>
+              summary?.next != null && navigateToThread(summary.next)
+            }
+          >
+            Next unresolved
+          </Button>
+        </div>
+      </nav>
       {viewed.status}
       <ChangeComparison
         state={comparison}
@@ -438,10 +511,9 @@ export function PullReviewThreads({
               <div>
                 <h3 id="inline-review-heading">Inline review threads</h3>
                 <p className="muted">
-                  {reviewMetrics.open
-                    ? `${reviewMetrics.open} open ${reviewMetrics.open === 1 ? "conversation" : "conversations"} on this revision.`
-                    : "No open conversations on this revision."}{" "}
-                  Outdated threads remain visible for context.
+                  {incompleteFiles
+                    ? "File indicators count conversations loaded below."
+                    : "Outdated threads remain visible for context."}
                 </p>
               </div>
               <div className="discussion-actions">
@@ -483,7 +555,7 @@ export function PullReviewThreads({
               <p className="muted">
                 {unresolvedOnly
                   ? "No unresolved threads on this revision."
-                  : "No inline review threads yet."}
+                  : "No inline review threads on this revision."}
               </p>
             )}
             {threads.next !== null && (
@@ -496,9 +568,18 @@ export function PullReviewThreads({
       </Result>
       <details
         className="inline-review-outdated"
-        open={unresolvedOnly || outdatedMatch || linkedOutdated || undefined}
+        open={
+          unresolvedOnly ||
+          Boolean(outdatedMatch) ||
+          linkedOutdated ||
+          undefined
+        }
       >
-        <summary>Outdated conversations ({outdatedItems.length})</summary>
+        <summary>
+          Outdated conversations
+          {summary &&
+            ` (${unresolvedOnly ? summary.outdated_unresolved : summary.outdated})`}
+        </summary>
         <Result state={outdatedThreads} timingLabel="Outdated review threads">
           {() =>
             outdatedItems.length ? (

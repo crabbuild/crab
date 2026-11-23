@@ -782,8 +782,7 @@ main {
   gap: --spacing(0.5);
   min-width: 0;
 }
-.change-tree-kicker,
-.inline-review-kicker {
+.change-tree-kicker {
   color: var(--muted-foreground);
   font-size: var(--text-xs);
   font-weight: 700;
@@ -873,37 +872,6 @@ main {
 .inline-review-header p {
   max-width: 680px;
   margin: --spacing(1.5) 0 0;
-}
-.inline-review-metrics {
-  display: flex;
-  flex: 0 0 auto;
-  gap: --spacing(2);
-}
-.inline-review-metric {
-  display: grid;
-  min-width: 74px;
-  padding: --spacing(2) --spacing(2.5);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--muted);
-}
-.inline-review-metric strong {
-  font-size: var(--text-lg);
-  line-height: 1.1;
-}
-.inline-review-metric span:last-child {
-  color: var(--muted-foreground);
-  font-size: var(--text-xs);
-  font-weight: 600;
-}
-.inline-review-metric.open strong {
-  color: var(--info);
-}
-.inline-review-metric.resolved strong {
-  color: var(--done);
-}
-.inline-review-metric.outdated strong {
-  color: var(--warning);
 }
 .inline-review-annotation {
   display: block;
@@ -1478,13 +1446,6 @@ main {
     align-items: flex-start;
     flex-direction: column;
     gap: --spacing(3);
-  }
-  .inline-review-metrics {
-    width: 100%;
-  }
-  .inline-review-metric {
-    flex: 1;
-    min-width: 0;
   }
   .review-thread-summary {
     padding-left: --spacing(6);

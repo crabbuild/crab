@@ -220,6 +220,9 @@ pub(crate) enum UpdatePullReviewReplyOutcome {
     Conflict,
 }
 
+mod navigation;
+pub(crate) use navigation::{GetReviewNavigation, ReviewNavigationInput};
+
 mod operations;
 pub(crate) use operations::{
     CountUnresolvedConversations, CreatePullReviewReply, CreatePullReviewThread,

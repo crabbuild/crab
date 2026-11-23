@@ -91,7 +91,7 @@ fn validate_path(path: &[u8]) -> crate::cells::Result<()> {
     Ok(())
 }
 
-fn validate_oid(value: &str) -> crate::cells::Result<()> {
+pub(super) fn validate_oid(value: &str) -> crate::cells::Result<()> {
     if value.len() != 40
         || !value
             .bytes()

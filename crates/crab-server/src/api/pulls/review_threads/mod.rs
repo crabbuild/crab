@@ -24,7 +24,8 @@ use crate::{
     auth::{Identity, Principal},
     cells::repository::collaboration::Target,
     cells::repository::{
-        CreatePullReviewThreadInput, PullReviewThreadListInput, PullReviewThreadSide,
+        CreatePullReviewThreadInput, GetReviewNavigation, PullReviewThreadListInput,
+        PullReviewThreadSide, ReviewNavigationInput,
     },
     repository::Repository,
     server::Server,
@@ -42,6 +43,10 @@ pub(super) fn routes() -> Router<Arc<Server>> {
         .route(
             "/api/repos/{owner}/{name}/pulls/{number}/threads/{thread}",
             get(detail).patch(edit),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/pulls/{number}/threads/navigation",
+            get(navigation),
         )
         .merge(replies::routes())
         .merge(pending::routes())
@@ -63,6 +68,12 @@ struct ListParameters {
     path_hex: Option<String>,
     resolved: Option<bool>,
     outdated: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NavigationParameters {
+    around: Option<u64>,
 }
 
 impl ListParameters {
@@ -387,6 +398,41 @@ async fn list(
         })
         .collect::<Vec<_>>();
     Ok(Json(json!({"items": items, "next": page.1})))
+}
+
+async fn navigation(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name, id)): Path<(String, String, u64)>,
+    Query(params): Query<NavigationParameters>,
+) -> Result<Json<Value>> {
+    let around = params.around.map(app::number).transpose()?;
+    let repo = app::repository(&server, &principal, &(owner, name))?;
+    let pull = load_pull(&server, &repo, app::number(id)?).await?;
+    let comparison = comparison(&server, &repo, &pull).await?;
+    let routed = app::repository_cell(&server, &repo)?;
+    let summary = app::query_output(
+        routed
+            .client
+            .query::<GetReviewNavigation>(
+                &routed.target,
+                None,
+                ReviewNavigationInput {
+                    pull: pull.number,
+                    base_oid: comparison.base_oid.clone(),
+                    head_oid: comparison.head_oid.clone(),
+                    around,
+                },
+            )
+            .await,
+    )?
+    .ok_or(Error::NotFound)?;
+    app::membership(&server, &principal, &repo).await?;
+    Ok(Json(json!({
+        "base_oid": comparison.base_oid,
+        "head_oid": comparison.head_oid,
+        "summary": summary,
+    })))
 }
 
 async fn detail(

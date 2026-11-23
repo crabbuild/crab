@@ -40,12 +40,13 @@ pub(crate) use pulls::review_threads::{
     CountUnresolvedConversations, CreatePullReviewReply, CreatePullReviewReplyInput,
     CreatePullReviewReplyOutcome, CreatePullReviewThread, CreatePullReviewThreadInput,
     CreatePullReviewThreadOutcome, GetPullReviewReply, GetPullReviewReplySubmission,
-    GetPullReviewThread, GetPullReviewThreadSubmission, ListPullReviewReplies,
+    GetPullReviewThread, GetPullReviewThreadSubmission, GetReviewNavigation, ListPullReviewReplies,
     ListPullReviewThreads, PullReviewReplyKey, PullReviewReplyListInput, PullReviewReplyRecord,
     PullReviewReplySubmissionKey, PullReviewThreadKey, PullReviewThreadListInput,
     PullReviewThreadRecord, PullReviewThreadSide, PullReviewThreadSubmissionKey,
-    UpdatePullReviewReply, UpdatePullReviewReplyInput, UpdatePullReviewReplyOutcome,
-    UpdatePullReviewThread, UpdatePullReviewThreadInput, UpdatePullReviewThreadOutcome,
+    ReviewNavigationInput, UpdatePullReviewReply, UpdatePullReviewReplyInput,
+    UpdatePullReviewReplyOutcome, UpdatePullReviewThread, UpdatePullReviewThreadInput,
+    UpdatePullReviewThreadOutcome,
 };
 pub(crate) use pulls::viewed;
 pub(crate) use pulls::{

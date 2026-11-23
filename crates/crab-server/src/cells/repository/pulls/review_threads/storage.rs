@@ -380,7 +380,10 @@ fn optional_author(
     }
 }
 
-fn result_optional_u64(row: &[SqlValue], column: usize) -> crate::cells::Result<Option<u64>> {
+pub(super) fn result_optional_u64(
+    row: &[SqlValue],
+    column: usize,
+) -> crate::cells::Result<Option<u64>> {
     match row.get(column) {
         Some(SqlValue::Null) => Ok(None),
         Some(SqlValue::Integer(value)) => u64::try_from(*value)

@@ -468,6 +468,7 @@ pub(in crate::cells) fn dispatch_read(
             invoke_read::<CountUnresolvedConversations>(context, input)
         }
         <GetPullReviewThread as Read>::ID => invoke_read::<GetPullReviewThread>(context, input),
+        <GetReviewNavigation as Read>::ID => invoke_read::<GetReviewNavigation>(context, input),
         <ListPullReviewThreads as Read>::ID => invoke_read::<ListPullReviewThreads>(context, input),
         <GetPullReviewThreadSubmission as Read>::ID => {
             invoke_read::<GetPullReviewThreadSubmission>(context, input)
