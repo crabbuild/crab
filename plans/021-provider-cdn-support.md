@@ -543,6 +543,13 @@ show verified capsule bytes from the selected native target. Block promotion
 when required evidence depends on a generic trace or an externally supplied
 pass flag.
 
+A small capsule leaf can supply its footer and admission counts in one
+verified range. The verifier authenticates the footer and selected count
+pages from the same response. On corruption, it retries the entire range
+from the native target within the original deadline. Unrequested OID pages
+remain lazy. Capsule promotion still needs a qualifying warm-local workload
+and live provider measurements.
+
 Start with the dedicated S3 repository and CloudFront distribution. Configure
 `provider-qualification-s3` for the native contract job and
 `provider-cdn-qualification-s3` for the read-only CDN inspector. Restrict both
@@ -655,7 +662,7 @@ and edge payload through redacted observations.
   egress, CDN requests and any gateway charges per successful action. Include
   the gateway's fixed deployment cost at the expected traffic volume. Use
   provider hit evidence and the same commit, repo and workload in every comparison.
-  The direct CLI Git, capsule and LFS workloads include native-origin and
+  The direct CLI Git, capsule and LFS workloads require native-origin and
   warm-local controls for the same publication receipt. Each pair retains
   the writer's exact receipt. Verification checks the candidate, commit,
   payload, and ref visibility before the first measurement. The origin arm

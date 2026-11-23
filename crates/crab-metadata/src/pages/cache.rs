@@ -16,6 +16,7 @@ pub(crate) const READ_AHEAD_BYTES: u64 = 64 * 1024;
 pub(crate) struct PageCache {
     state: Mutex<State>,
     read_ahead: Option<std::ops::Range<u64>>,
+    prefetched: Option<(u64, bytes::Bytes)>,
     block_reads: [futures_util::lock::Mutex<()>; 4],
 }
 
@@ -166,6 +167,7 @@ impl PageCache {
         Ok(Self {
             state: Mutex::new(state),
             read_ahead: self.read_ahead.clone(),
+            prefetched: self.prefetched.clone(),
             ..Self::default()
         })
     }
@@ -184,9 +186,11 @@ impl PageCache {
         let end = offset
             .checked_add(body.len() as u64)
             .ok_or_else(|| corruption("prefetched metadata range overflows"))?;
-        let cache = Self::for_region(offset..end);
-        cache.cache_block(offset, body)?;
-        Ok(cache)
+        Ok(Self {
+            read_ahead: Some(offset..end),
+            prefetched: Some((offset, body)),
+            ..Self::default()
+        })
     }
 
     fn blocks(&self, range: std::ops::Range<u64>) -> Vec<std::ops::Range<u64>> {
@@ -443,6 +447,16 @@ impl PageCache {
             .checked_sub(range.start)
             .filter(|length| *length <= maximum)
             .ok_or_else(|| corruption("metadata range exceeds its byte limit"))?;
+        if let Some((offset, body)) = &self.prefetched {
+            // An immutable prefetch is the entire verification source. A bad
+            // reference cannot mix an origin page into an edge attempt.
+            let start = range
+                .start
+                .checked_sub(*offset)
+                .filter(|start| *start <= body.len() as u64 && length <= body.len() as u64 - *start)
+                .ok_or_else(|| corruption("metadata range is outside the prefetched region"))?;
+            return Ok(body.slice(start as usize..(start + length) as usize));
+        }
         let blocks = self.blocks(range.clone());
         let expanded = blocks
             .first()

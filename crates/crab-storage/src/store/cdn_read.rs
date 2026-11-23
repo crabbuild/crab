@@ -282,28 +282,35 @@ impl Store {
             };
 
             let tail = async {
-                match attempt.get(size, range.clone()).await? {
-                    Some(bytes) => match verify(bytes).await {
-                        Ok(value) => Ok(value),
-                        Err(_) => {
-                            tracing::warn!(
-                                "CDN immutable bytes failed verification; reading from origin"
-                            );
-                            origin.await
+                let Some(bytes) = attempt.get(size, range.clone()).await? else {
+                    return origin.await;
+                };
+                let nonempty = !bytes.is_empty();
+                match verify(bytes).await {
+                    Ok(value) => {
+                        // Other families report at their owning payload
+                        // boundary. An index range cannot witness a Git pack.
+                        if nonempty
+                            && attempt.family == CdnReadFamily::Capsule
+                            && let Some(observation) = attempt.payload_observation()
+                        {
+                            observation.record_verified();
                         }
-                    },
-                    None => origin.await,
+                        Ok(value)
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            "CDN immutable bytes failed verification; reading from origin"
+                        );
+                        origin.await
+                    }
                 }
             };
             attempt.within_deadline(tail).await
         })
     }
 
-    /// Report a nonempty native immutable read after authenticating its bytes.
-    ///
-    /// The active route must exclude this family. Reads that restarted at
-    /// origin after an eligible edge attempt cannot supply this evidence.
-    pub fn observe_verified_origin_only_read(&self, path: &Path) {
+    fn observe_verified_origin_only_read(&self, path: &Path) {
         if let Some((route, family)) = self.cdn_path_route(path)
             && route.limits_for(family).is_none()
             && let Some(policy) = route.policy()

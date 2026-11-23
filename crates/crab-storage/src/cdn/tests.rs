@@ -568,6 +568,84 @@ impl Subscriber for Capture {
     }
 }
 
+#[tokio::test]
+async fn verified_capsule_scope_is_reported_only_for_accepted_edge_bytes() {
+    let capture = Capture::default();
+    let dispatcher = tracing::Dispatch::new(capture.clone());
+    let _guard = tracing::dispatcher::set_default(&dispatcher);
+    let path = StoreLayout::with_global_prefix((), "org/repo".into(), crate::GLOBAL_PREFIX.into())
+        .capsule_path(&"a".repeat(64));
+    let origin = Arc::new(InMemory::new());
+    origin
+        .put(&path, Bytes::from_static(b"good").into())
+        .await
+        .unwrap();
+    let target = [8; 32];
+    for (response, expected) in [
+        (
+            "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ngood",
+            1,
+        ),
+        (
+            "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbad!",
+            0,
+        ),
+    ] {
+        capture.events.lock().unwrap().clear();
+        let (transport, request) = endpoint(response).await;
+        let route = CdnRoute::new(
+            target,
+            "org/repo".into(),
+            None,
+            CdnAccess::Public,
+            transport,
+            Duration::from_secs(5),
+        )
+        .for_consumer(CdnConsumer::Cli, CdnProfile::Direct);
+        let store = Store::new(origin.clone())
+            .with_target_identity(target)
+            .with_bucket_identity(BucketIdentity::new(
+                StorageProviderKind::S3,
+                "origin",
+                "origin",
+            ))
+            .with_cdn_route(route)
+            .unwrap();
+        let verify_path = &path;
+        store
+            .read_verified(verify_path, 4, None, |bytes: Bytes| async move {
+                if bytes.as_ref() == b"good" {
+                    Ok(())
+                } else {
+                    Err(StorageError::CorruptObject {
+                        path: verify_path.to_string(),
+                        reason: "wrong capsule bytes".to_owned(),
+                    })
+                }
+            })
+            .await
+            .unwrap();
+        request.await.unwrap();
+        let events = capture.events.lock().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| {
+                    event
+                        .0
+                        .get("family")
+                        .is_some_and(|family| family == "\"capsule\"")
+                        && event
+                            .0
+                            .get("source")
+                            .is_some_and(|source| source == "\"edge\"")
+                })
+                .count(),
+            expected
+        );
+    }
+}
+
 #[test]
 fn service_read_target_reports_fingerprints_of_the_selected_layout() {
     let capture = Capture::default();

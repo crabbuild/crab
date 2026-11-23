@@ -468,48 +468,67 @@ pub(super) async fn load_run_git_control(
     let path = router.capsule_path(pointer.hash());
     // A publication leaf can share one control read with its small admission
     // pages. Compacted histories retain selected-member paging.
-    let prefetch = pointer.level() == 0 && pointer.control_size() <= crate::pages::READ_AHEAD_BYTES;
-    let start = if prefetch {
-        pointer.control_offset()
+    let control = if pointer.level() == 0
+        && pointer.control_size() <= crate::pages::READ_AHEAD_BYTES
+    {
+        let start = pointer.control_offset();
+        let path = &path;
+        router
+            .store()
+            .read_verified(
+                path,
+                pointer.size(),
+                Some(start..pointer.size()),
+                |body| async move {
+                    if body.len() as u64 != pointer.control_size() {
+                        return Err(corrupt(path, "capsule control read is truncated"));
+                    }
+                    let trailer_start = body
+                        .len()
+                        .saturating_sub(CapsuleRunControl::trailer_bytes() as usize);
+                    let range = CapsuleRunControl::footer_range(&body[trailer_start..], pointer)?;
+                    let offset = (range.start - start) as usize;
+                    let control = CapsuleRunControl::decode_footer(body.slice(offset..), pointer)?;
+                    verify_run_admission(router, path, &control, Some(body.slice(..offset)))
+                        .await?;
+                    Ok(control)
+                },
+            )
+            .await?
     } else {
-        pointer
+        let start = pointer
             .size()
             .checked_sub(CapsuleRunControl::trailer_bytes())
-            .ok_or_else(|| corrupt(&path, "capsule run is shorter than its trailer"))?
-    };
-    let body = router
-        .store()
-        .range_get(&path, start..pointer.size())
-        .await?;
-    if body.len() as u64 != pointer.size() - start {
-        return Err(corrupt(&path, "capsule control read is truncated"));
-    }
-    let trailer_start = body
-        .len()
-        .saturating_sub(CapsuleRunControl::trailer_bytes() as usize);
-    let range = CapsuleRunControl::footer_range(&body[trailer_start..], pointer)?;
-    let (control, admission) = if prefetch {
-        let offset = usize::try_from(range.start - start)
-            .map_err(|_| corrupt(&path, "capsule footer offset cannot be represented"))?;
-        let admission_start = usize::try_from(pointer.control_offset() - start)
-            .map_err(|_| corrupt(&path, "capsule admission offset cannot be represented"))?;
-        (
-            CapsuleRunControl::decode_footer(body.slice(offset..), pointer)?,
-            Some(body.slice(admission_start..offset)),
-        )
-    } else {
+            .ok_or_else(|| corrupt(&path, "capsule run is shorter than its trailer"))?;
+        let trailer = router
+            .store()
+            .range_get(&path, start..pointer.size())
+            .await?;
+        let range = CapsuleRunControl::footer_range(&trailer, pointer)?;
         let control = router
             .store()
             .read_verified(&path, pointer.size(), Some(range), |footer| async {
                 CapsuleRunControl::decode_footer(footer, pointer)
             })
             .await?;
-        (control, None)
+        verify_run_admission(router, &path, &control, None).await?;
+        control
     };
+    // A rejected edge response must not consume the caller's visibility headroom.
+    let capsules = control.materialize_capsules_with_paged_visibility(router, read_ahead)?;
+    Ok((control, capsules))
+}
+
+async fn verify_run_admission(
+    router: &StoreLayout<Store>,
+    path: &object_store::path::Path,
+    control: &CapsuleRunControl,
+    prefetched: Option<bytes::Bytes>,
+) -> Result<()> {
     if let Some(mut reader) =
         control.admission_reader(router, super::run::MAX_RUN_FOOTER_BYTES as u64)?
     {
-        if let Some(body) = admission {
+        if let Some(body) = prefetched {
             reader.prefetch(body)?;
         }
         let counts = reader.counts(router.store()).await?;
@@ -520,18 +539,12 @@ pub(super) async fn load_run_git_control(
                 .any(|(count, member)| *count != member.object_count())
         {
             return Err(corrupt(
-                &path,
+                path,
                 "capsule member counts do not match its authenticated pack directory",
             ));
         }
     }
-    let capsules = control.materialize_capsules_with_paged_visibility(router, read_ahead)?;
-    if prefetch {
-        // Leaf control bytes came from one coalesced native read. Report
-        // only after verification because this branch bypasses read_verified.
-        router.store().observe_verified_origin_only_read(&path);
-    }
-    Ok((control, capsules))
+    Ok(())
 }
 
 async fn load_detached_control_sections(
