@@ -260,11 +260,13 @@ impl LfsObjectStore {
             .as_ref()
             .is_none_or(|range| *range == (0..expected_size))
             && let Some(attempt) = self.store.cdn_attempt(&path)
-            && let Some(chunk_bytes) = attempt.range_chunk_bytes(expected_size)
         {
-            return self
-                .stream_from_edge(attempt, *oid, expected_size, range, session, chunk_bytes)
-                .await;
+            let chunk_bytes = attempt.range_chunk_bytes(expected_size);
+            if chunk_bytes.is_some() || attempt.admits_buffered_full_get(expected_size) {
+                return self
+                    .stream_from_edge(attempt, *oid, expected_size, range, session, chunk_bytes)
+                    .await;
+            }
         }
         let (_, range, stream) = self
             .stream_with_session(oid, expected_size, range, session)
@@ -324,11 +326,12 @@ impl LfsObjectStore {
         size: u64,
         range: Option<Range<u64>>,
         session: Option<&LfsReadSession>,
-        chunk_bytes: NonZeroUsize,
+        chunk_bytes: Option<NonZeroUsize>,
     ) -> Result<(Range<u64>, LfsByteStream)> {
-        let chunk_bytes = chunk_bytes.get() as u64;
-        let first_end = size.min(chunk_bytes);
-        let Some(first) = attempt.get(size, Some(0..first_end)).await? else {
+        let step = chunk_bytes.map_or(size, |chunk| chunk.get() as u64);
+        let first_end = size.min(step);
+        let first_range = chunk_bytes.map(|_| 0..first_end);
+        let Some(first) = attempt.get(size, first_range).await? else {
             // Restart only the selected native source. Keep the original
             // deadline while opening and consuming the replacement stream.
             let (_, range, stream) = attempt
@@ -352,7 +355,7 @@ impl LfsObjectStore {
                 if offset == size {
                     return Ok(None);
                 }
-                let end = size.min(offset.saturating_add(chunk_bytes));
+                let end = size.min(offset.saturating_add(step));
                 let chunk = edge.get_after_delivery(size, offset..end).await?;
                 Ok(Some((chunk, end)))
             }
@@ -840,11 +843,9 @@ impl LfsObjectStore {
             return Err(StorageError::Cancelled.into());
         }
         let path = self.object_path(oid);
-        if let Some(edge) = self
-            .store
-            .cdn_attempt(&path)
-            .filter(|edge| edge.admits_range_batches(expected_size))
-        {
+        if let Some(edge) = self.store.cdn_attempt(&path).filter(|edge| {
+            edge.admits_range_batches(expected_size) || edge.admits_buffered_full_get(expected_size)
+        }) {
             let accepted_edge: bool = edge
                 .with_file_deadline(cancel, async |cancel| {
                     if let Some(parent) = destination.parent() {

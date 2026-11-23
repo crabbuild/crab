@@ -171,7 +171,7 @@ async fn fixture(fault: Fault) -> (LfsObjectStore, Arc<DeliveryStore>, [u8; 32])
 
 async fn edge_fixture(
     origin: Arc<DeliveryStore>,
-    responses: Vec<(Range<u64>, String, Bytes)>,
+    responses: Vec<(Option<Range<u64>>, String, Bytes)>,
     limits: Option<&str>,
 ) -> (LfsObjectStore, tokio::task::JoinHandle<()>) {
     use crab_storage::cdn::{CdnAccess, CdnReadFamily, CdnRoute, CdnTransport};
@@ -206,11 +206,16 @@ async fn edge_fixture(
             while !request.ends_with("\r\n\r\n") {
                 assert_ne!(stream.read_line(&mut request).await.unwrap(), 0);
             }
-            assert!(request.to_ascii_lowercase().contains(&format!(
-                "\r\nrange: bytes={}-{}\r\n",
-                range.start,
-                range.end - 1
-            )));
+            let request = request.to_ascii_lowercase();
+            let headers_sent: Vec<_> = request
+                .lines()
+                .filter_map(|line| line.strip_prefix("range: "))
+                .collect();
+            let expected: Vec<_> = range
+                .into_iter()
+                .map(|range| format!("bytes={}-{}", range.start, range.end - 1))
+                .collect();
+            assert_eq!(headers_sent, expected);
             stream.write_all(headers.as_bytes()).await.unwrap();
             stream.write_all(&body).await.unwrap();
         }
@@ -218,12 +223,12 @@ async fn edge_fixture(
     (LfsObjectStore::new(store, "stream"), server)
 }
 
-fn edge_partial(range: Range<u64>, size: u64, bytes: Bytes) -> (Range<u64>, String, Bytes) {
+fn edge_partial(range: Range<u64>, size: u64, bytes: Bytes) -> (Option<Range<u64>>, String, Bytes) {
     let end = range.end - 1;
     let start = range.start;
     let len = range.end - start;
     (
-        range,
+        Some(range),
         format!(
             "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{size}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n"
         ),
@@ -261,7 +266,7 @@ async fn cdn_stream_denial_stops_before_native_or_primary_io() {
     let (_, origin, oid) = fixture(Fault::None).await;
     let (primary, primary_origin, _) = fixture(Fault::None).await;
     let forbidden = (
-        0..8,
+        Some(0..8),
         "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n".into(),
         Bytes::new(),
     );
@@ -284,7 +289,7 @@ async fn cdn_stream_denial_stops_before_native_or_primary_io() {
 async fn cdn_stream_origin_restart_keeps_the_native_partial_reader() {
     let (_, origin, oid) = fixture(Fault::None).await;
     let unavailable = (
-        0..8,
+        Some(0..8),
         "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n".into(),
         Bytes::new(),
     );
@@ -343,6 +348,36 @@ async fn cdn_stream_splits_all_requests_at_the_qualified_range_size() {
         stream.try_collect::<Vec<_>>().await.unwrap().concat(),
         b"verified"
     );
+    assert_eq!(origin.reads.load(Ordering::Relaxed), 0);
+    edge.await.unwrap();
+}
+
+#[tokio::test]
+async fn cdn_full_only_policy_serves_streams_and_files_with_whole_gets() {
+    let (_, origin, oid) = fixture(Fault::None).await;
+    let response = (
+        None,
+        "HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\n".into(),
+        Bytes::from_static(b"verified"),
+    );
+    let (lfs, edge) = edge_fixture(
+        origin.clone(),
+        vec![response.clone(), response],
+        Some("8 0 0 10000"),
+    )
+    .await;
+    let (range, stream) = lfs.stream_content(&oid, 8, None, None).await.unwrap();
+    assert_eq!(range, 0..8);
+    assert_eq!(
+        stream.try_collect::<Vec<_>>().await.unwrap().concat(),
+        b"verified"
+    );
+    assert_eq!(origin.reads.load(Ordering::Relaxed), 0);
+
+    let directory = tempfile::tempdir().unwrap();
+    let destination = directory.path().join("object");
+    lfs.download_to_file(&oid, 8, &destination).await.unwrap();
+    assert_eq!(std::fs::read(destination).unwrap(), b"verified");
     assert_eq!(origin.reads.load(Ordering::Relaxed), 0);
     edge.await.unwrap();
 }

@@ -499,7 +499,7 @@ pub struct CdnReadAttempt {
 }
 
 impl CdnReadAttempt {
-    const RANGE_BATCH_BYTES: u64 = 8 * 1024 * 1024;
+    const RESPONSE_BUFFER_BYTES: u64 = 8 * 1024 * 1024;
 
     /// Check a whole object or request range before selecting an edge attempt.
     #[must_use]
@@ -517,7 +517,7 @@ impl CdnReadAttempt {
     pub fn range_chunk_bytes(&self, object_bytes: u64) -> Option<NonZeroUsize> {
         let size = object_bytes
             .min(self.limits.range_bytes)
-            .min(Self::RANGE_BATCH_BYTES);
+            .min(Self::RESPONSE_BUFFER_BYTES);
         let chunk = NonZeroUsize::new(size as usize)?;
         self.admits(object_bytes, Some(size)).then_some(chunk)
     }
@@ -530,6 +530,12 @@ impl CdnReadAttempt {
         } else {
             self.range_chunk_bytes(object_bytes).is_some()
         }
+    }
+
+    /// Check whether the qualified whole GET fits in one response buffer.
+    #[must_use]
+    pub fn admits_buffered_full_get(&self, object_bytes: u64) -> bool {
+        object_bytes <= Self::RESPONSE_BUFFER_BYTES && self.admits(object_bytes, None)
     }
 
     /// Capture the edge source for a caller-owned payload verification.
@@ -904,6 +910,7 @@ impl CdnReadAttempt {
     }
 
     /// Write one immutable range to a caller-private staging destination.
+    /// A bounded whole GET may serve the complete object when ranges are unavailable.
     /// The caller must verify the final digest before publishing the file.
     /// A recoverable edge failure returns false and clears any written bytes.
     /// Cancellation drains writes. Await completion before reusing the path.
@@ -915,7 +922,18 @@ impl CdnReadAttempt {
         cancel: &CancellationToken,
         mut update_digest: impl FnMut(&[u8]),
     ) -> Result<bool> {
-        let batches = self.range_batches(size, range)?;
+        let whole = range == (0..size)
+            && self.range_chunk_bytes(size).is_none()
+            && self.admits_buffered_full_get(size);
+        let batches = if whole {
+            Either::Left(stream::once(async {
+                self.get(size, None)
+                    .await
+                    .map(|body| body.map(|bytes| vec![bytes]))
+            }))
+        } else {
+            Either::Right(self.range_batches(size, range)?)
+        };
         tokio::pin!(batches);
         let mut file = None::<tokio::fs::File>;
         let result = async {
