@@ -3086,6 +3086,7 @@ test("code search preserves scope and links each match to the searched commit", 
     (route) => {
       const request = new URL(route.request().url());
       expect(request.searchParams.get("q")).toBe("render");
+      expect(request.searchParams.get("kind")).toBe("symbol");
       expect(request.searchParams.get("path")).toBe("src");
       expect(request.searchParams.get("rev")).toBe("refs/heads/main");
       expect(request.searchParams.get("case_sensitive")).toBe("true");
@@ -3113,9 +3114,9 @@ test("code search preserves scope and links each match to the searched commit", 
               lines: [
                 {
                   line: cursor ? 7 : 2,
-                  before: "export const ",
+                  before: "export function ",
                   matched: "render",
-                  after: " = 1",
+                  after: "() {}",
                 },
               ],
             },
@@ -3131,10 +3132,11 @@ test("code search preserves scope and links each match to the searched commit", 
     .click();
   const form = page.getByRole("search", { name: "Search repository code" });
   await form.getByLabel("Search text").fill("render");
+  await form.getByLabel("Search in").selectOption("symbol");
   await form.getByLabel("Directory (optional)").fill("src");
   await form.getByRole("checkbox", { name: "Match case" }).check();
   await form.getByRole("button", { name: "Search", exact: true }).click();
-  await expect(page).toHaveURL(/code-search\?.*q=render/);
+  await expect(page).toHaveURL(/code-search\?.*kind=symbol/);
   const results = page.getByRole("region", { name: "Code search results" });
   await expect(
     results.getByText("1 matching file", { exact: false }),

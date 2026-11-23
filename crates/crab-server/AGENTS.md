@@ -314,8 +314,11 @@ and session migration paths are supported.
   Workspace search reuses the catalog's current grants and the same bounded
   Git scans. Its cursor also binds the actor and readable repository scope.
   `repository/code_index/` publishes the bounded, checksummed default-tree
-  artifact through the background lifecycle. It stores paths and filters,
-  and the HTTP owner verifies selected matches against the pinned Git tree.
+  artifact through the background lifecycle. It stores paths and separate text
+  and definition filters. Search verifies candidates against the pinned Git tree
+  and reparses definition locations using `code_index/symbols.rs`. Reuse filters
+  by blob and parsing language. Change the artifact version if parser upgrades
+  change which definitions the filters can rule out.
   Missing or stale derived data leaves the authorized Git scan available.
 - `api/contracts.rs` exports the public identity/access/organization/team wire
   types to `packages/ui/src/lib/contracts.ts` during tests. Update the actual

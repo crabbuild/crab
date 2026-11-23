@@ -548,13 +548,14 @@ best ancestor and asks the author to resolve more complex histories in Git.
 
 ### Search repository code
 
-**Search code** matches literal UTF-8 text in one repository. Select a branch,
-tag, or full commit, optionally restrict the search to an exact directory,
-and select **Match case** when needed. Each excerpt links to its file and line
-at the commit searched.
+**Search code** can find file contents, file paths, or symbol definitions in
+one repository. Select a branch, tag, or full commit, optionally restrict the
+search to an exact directory, and select **Match case** when needed. Each
+excerpt links to its file and line at the commit searched.
 
 `GET /api/repos/{owner}/{name}/code-search` takes `q`, optional `rev`, an
-optional directory `path`, `case_sensitive` (default `false`), `limit`
+optional directory `path`, `kind=content|path|symbol` (default `content`),
+`case_sensitive` (default `false`), `limit`
 (1–40 matching files, default 20), and an opaque `cursor`. It returns
 `{commit, items, scanned, skipped, next}`. Each file carries `path`,
 `path_hex`, `more_lines`, and up to six excerpts with `line`, `before`,
@@ -563,39 +564,46 @@ to continue. A cursor binds the repository UUID, commit, and search filters.
 Subsequent pages use the pinned commit even if the selected branch advances.
 Every request checks current repository access before returning any matches.
 
-Each page inspects up to 128 blobs in canonical path order. Large blobs above
-256 KiB, binary and invalid UTF-8 data, and separately stored Crab or LFS
-content are counted as skipped. An empty page may have a continuation.
-The browser reports scanned and skipped counts and keeps earlier results
-visible when a continuation needs to be retried. This search uses the
-verified snapshot reader and bulk read budgets. It scans eligible blobs on
-demand.
+Each page scans up to 128 files in canonical path order. Indexed symbol search
+can consider all indexed paths and opens up to 128 candidates. Large blobs
+above 256 KiB, binary or invalid UTF-8 data, separately stored Crab or LFS
+content, and files beyond the parser budget are counted as skipped for modes
+that read content. Empty pages can have a continuation. The browser retains
+earlier results when a continuation needs to be retried.
+
+**Symbols** matches literal text within definition names captured by the
+Tree-sitter grammars for C, C++, Go, Java, JavaScript, Python, Rust, and
+TypeScript, including TSX. Pick a result to open the definition at the pinned
+line. Definitions follow the grammar's tag queries and exclude references
+and plain text mentions. Unsupported file extensions are outside this mode's
+scope. [GitHub symbol search](https://docs.github.com/en/search-github/github-code-search/understanding-github-code-search-syntax#symbol-qualifier)
 
 ### Search across repositories
 
 Open **Search code** from the global header, or **Search organization code**
-from an organization's repository list. Search file contents or paths on
+from an organization's repository list. Search file contents, paths, or definitions on
 default branches. Use an exact directory and **Match case** to narrow the
 scan. Results name the repository and link to the exact Git commit, file,
 and matching line.
 
 `GET /api/code-search` takes `q`, optional `organization` UUID and
-`directory`, `kind=content|path` (default `content`), `case_sensitive`,
+`directory`, `kind=content|path|symbol` (default `content`), `case_sensitive`,
 and `cursor`. It returns `groups`, `scanned` paths, `skipped` files,
 `verified` content candidates checked against Git, and `next`. Groups carry
 `id`, `owner`, `name`, `commit`, and matching `files`. Path matches use
 the Git tree and have no excerpts. Each page examines up to four repositories
 and returns up to 20 matching files. A Git scan considers up to 32 paths per
-repository. An indexed content search can consider all indexed paths and checks
-up to 32 content candidates per repository. Follow `next` with the same
+repository. An indexed content or symbol search can consider all indexed paths
+and checks up to 32 candidates per repository. Follow `next` with the same
 parameters, including after an empty page. A repository in progress keeps
 the same commit until its scan finishes.
 
 The server builds a default-branch index in the background and keeps one
 published artifact per repository in object storage. It contains paths and
-trigram filters. An index answers only for its exact Git tree. Crab checks
-returned paths and text against Git and reuses unchanged blob filters after
-an update. Short literals and Unicode case-folding cases that the filter
+separate trigram filters for file text and supported definition names. An
+index answers only for its exact Git tree. Crab verifies returned paths, text,
+and definition locations against Git. It reuses unchanged blobs' filters when
+their parsing language is unchanged. Short literals and Unicode case-folding cases that the filter
 cannot rule out remain candidates. The page reports `indexed_repositories`,
 `scanning_repositories`, and `limited_repositories`. Crab scans Git while a
 matching index is unavailable or exceeds the artifact or memory limit.
@@ -603,8 +611,8 @@ matching index is unavailable or exceeds the artifact or memory limit.
 Search considers current readable repositories and checks them again before
 returning excerpts or a cursor. A continuation binds the account, filters,
 and readable repository set. A grant or address change in that scope returns
-HTTP 409, and **Start over** opens a new search. Persistent symbol definitions
-and large-catalog performance qualification remain open.
+HTTP 409, and **Start over** opens a new search. Representative large-catalog
+performance qualification remains open.
 
 ### Create a repository in the browser
 

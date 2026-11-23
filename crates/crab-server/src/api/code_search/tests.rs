@@ -178,11 +178,11 @@ async fn workspace_search_pins_current_repository_and_invalidates_pages_after_re
         "team",
         "private",
         (0..24)
-            .map(|index| (format!("src/file-{index:02}.rs"), "let Café = 1;\n".into()))
+            .map(|index| (format!("src/file-{index:02}.rs"), "fn Café() {}\n".into()))
             .chain((0..12).map(|index| {
                 (
                     format!("src/neutral-{index:02}.rs"),
-                    "ordinary text\n".into(),
+                    "fn neutral() { Café(); }\n".into(),
                 )
             }))
             .chain([("config/manifest.toml".into(), "limited path match\n".into())]),
@@ -194,7 +194,7 @@ async fn workspace_search_pins_current_repository_and_invalidates_pages_after_re
         "team",
         "library",
         [
-            ("src/library.rs".into(), "let Café = 2;\n".into()),
+            ("src/library.rs".into(), "fn Café() {}\n".into()),
             ("config/manifest.yml".into(), String::new()),
         ],
     )
@@ -207,7 +207,7 @@ async fn workspace_search_pins_current_repository_and_invalidates_pages_after_re
         [
             (
                 "src/restricted.rs".into(),
-                "let Café = \"PRIVATE_ONLY\";\n".into(),
+                "fn Café() { /* PRIVATE_ONLY */ }\n".into(),
             ),
             ("config/manifest.txt".into(), String::new()),
         ],
@@ -253,7 +253,7 @@ async fn workspace_search_pins_current_repository_and_invalidates_pages_after_re
     assert_eq!(exhausted["groups"], json!([]));
     assert_eq!(exhausted["next"], Value::Null);
 
-    let query = "/api/code-search?q=CAF%C3%89&directory=src";
+    let query = "/api/code-search?q=CAF%C3%89&directory=src&kind=symbol";
     let first = h.json(query, &reader).await;
     assert_eq!(first["groups"][0]["commit"], head);
     assert_eq!(first["groups"][0]["files"].as_array().unwrap().len(), 20);
@@ -274,6 +274,14 @@ async fn workspace_search_pins_current_repository_and_invalidates_pages_after_re
     );
     assert_eq!(
         status(&format!("{cursor_request}&case_sensitive=true"), &reader).await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        status(
+            &cursor_request.replace("kind=symbol", "kind=content"),
+            &reader
+        )
+        .await,
         StatusCode::BAD_REQUEST
     );
     let protections = "/api/repos/team/private/settings/branch-protections";
@@ -370,7 +378,7 @@ async fn workspace_search_organization_scope_follows_the_current_catalog() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires agent-browser and the built embedded UI with native Git"]
-async fn native_browser_finds_code_across_repositories_and_opens_the_exact_line() {
+async fn native_browser_finds_symbols_across_repositories_and_opens_the_definition() {
     let h = Harness::new(false).await;
     h.add_repository("library").await;
     let alice = h.login().await;
@@ -383,7 +391,7 @@ async fn native_browser_finds_code_across_repositories_and_opens_the_exact_line(
             name,
             [(
                 format!("{name}.rs"),
-                "header\nlet workspace_needle = true;\n".into(),
+                "// workspace_needle\nfn workspace_needle() {}\n".into(),
             )],
         )
         .await;
@@ -421,6 +429,9 @@ async fn native_browser_finds_code_across_repositories_and_opens_the_exact_line(
         .await;
     browser.run(&["wait", "#workspace-search-text"]).await;
     browser
+        .run(&["select", "#workspace-search-kind", "symbol"])
+        .await;
+    browser
         .run(&["fill", "#workspace-search-text", "workspace_needle"])
         .await;
     browser
@@ -455,7 +466,7 @@ async fn persistent_code_index_prunes_a_sparse_search_and_refreshes_after_public
             .map(|i| {
                 (
                     format!("src/part-{i:03}.rs"),
-                    "let ordinary = 2026;\n".into(),
+                    "fn ordinary() { stable_unique_search_symbol(); }\n".into(),
                 )
             })
             .chain([
@@ -465,7 +476,8 @@ async fn persistent_code_index_prunes_a_sparse_search_and_refreshes_after_public
                 ),
                 (
                     "src/target.rs".into(),
-                    "let stable_unique_search_target = 42;\n".into(),
+                    "fn stable_unique_search_symbol() { let stable_unique_search_target = 42; }\n"
+                        .into(),
                 ),
             ]),
     )
@@ -494,6 +506,22 @@ async fn persistent_code_index_prunes_a_sparse_search_and_refreshes_after_public
     assert_eq!(page["groups"][0]["files"][0]["path"], "src/target.rs");
     assert_eq!(page["indexed_repositories"], 1);
     assert_eq!(page["next"], Value::Null);
+
+    let symbols = h
+        .json(
+            "/api/code-search?q=stable_unique_search_symbol&kind=symbol",
+            &alice,
+        )
+        .await;
+    assert_eq!(symbols["verified"], 1);
+    assert_eq!(symbols["groups"][0]["files"][0]["path"], "src/target.rs");
+    assert_eq!(
+        symbols["groups"][0]["files"][0]["lines"][0]["before"],
+        "fn "
+    );
+    let by_revision = h.json(&format!("/api/repos/team/private/code-search?q=stable_unique_search_symbol&kind=symbol&rev={head}"), &alice).await;
+    assert_eq!(by_revision["commit"], head);
+    assert_eq!(by_revision["items"].as_array().unwrap().len(), 1);
 
     let unicode = h.json("/api/code-search?q=kelvin", &alice).await;
     assert_eq!(
