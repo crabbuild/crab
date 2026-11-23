@@ -691,7 +691,7 @@ jobs:
       group: provider-cdn-qualification
       labels: linux
     environment: provider-cdn-release-qualification
-    timeout-minutes: 30
+    timeout-minutes: 390
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -755,18 +755,19 @@ jobs:
         run: |
           : "${MEASURED_INPUTS_ROOT:?Set CRAB_CDN_MEASURED_INPUTS_ROOT in the release qualification environment.}"
           : "${BENCHMARKS_SHA256:?Set CRAB_CDN_BENCHMARKS_SHA256 in the release qualification environment.}"
-          measured="$MEASURED_INPUTS_ROOT/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT"
-          if [[ ! -d "$measured" ]]; then
-            echo '::error::The runner has no CDN measurements for this workflow attempt.'
+          if [[ ! -d "$MEASURED_INPUTS_ROOT" ]]; then
+            echo '::error::The runner cannot access the CDN measurement root.'
             exit 1
           fi
+          measured="$MEASURED_INPUTS_ROOT/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT"
           args=(--inputs "$measured" --native-reports "$SCRATCH/native" --output "$SCRATCH/artifact")
           if [[ -d "$SCRATCH/transport" ]]; then
             args+=(--transport-traces "$SCRATCH/transport")
           fi
           python3 -B crab/scripts/e2e/assemble_cdn_qualification.py "${args[@]}" \
             --benchmarks-sha256 "$BENCHMARKS_SHA256" --source-sha "$GITHUB_SHA" \
-            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --wait-for-inputs-seconds 21600
 
       - name: Upload verified CDN release evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

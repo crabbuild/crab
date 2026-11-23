@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -253,6 +255,22 @@ def assemble_bundle(
     return len(registrations)
 
 
+def wait_for_inputs(path: Path, timeout: int) -> None:
+    require(timeout >= 0, "measurement wait must be nonnegative")
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError:
+            remaining = deadline - time.monotonic()
+            require(remaining > 0, "timed out waiting for finalized CDN measurements for this attempt")
+            time.sleep(min(30, remaining))
+            continue
+        # Workers publish the complete directory with a same-filesystem rename.
+        require(stat.S_ISDIR(mode), "finalized CDN measurements must be a directory")
+        return
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--inputs", type=Path, required=True)
@@ -263,8 +281,10 @@ def main() -> int:
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--run-attempt", required=True)
+    parser.add_argument("--wait-for-inputs-seconds", type=int, default=0, help="wait for the finalized measurement directory")
     args = parser.parse_args()
     try:
+        wait_for_inputs(args.inputs, args.wait_for_inputs_seconds)
         count = assemble_bundle(
             args.inputs, args.output, args.benchmarks_sha256, release_scopes(POLICY),
             args.source_sha, args.run_id, args.run_attempt,

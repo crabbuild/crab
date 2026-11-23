@@ -785,8 +785,10 @@ and edge payload through redacted observations.
   canary traces for the exact scope and fixture digest. Conflicting measured
   traces or failed observations stop publication. A manual provider qualification
   run can publish the verified bundle using same-attempt native reports and
-  the measured inputs on a dedicated runner. The live product, deployment,
-  and regional jobs or external workers still need configured fixtures.
+  the measured inputs on a dedicated runner. The runner waits for the
+  finalized directory published for that exact attempt before verifying it.
+  The live product, deployment, and regional jobs or external workers
+  still need configured fixtures.
   Record provider/profile, configuration, region, client
   and product action, expected/observed bytes, redacted traces, metrics and
   cleanup. Use test-owned prefixes and distributions in dedicated CI. Level 3

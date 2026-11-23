@@ -1937,13 +1937,15 @@ Configure these variables in that environment. [GitHub runner group access](http
 Dispatch **Provider contract qualification** at the release candidate with
 `publish_cdn_evidence` enabled and select the providers in the approved
 registration. The product, deployment, and regional workers must deposit the
-measured row directories and `benchmarks.json` under
-`<measurement-root>/<run-id>/<run-attempt>/` before the assembly job starts.
-Use that dispatch's commit, run ID, and attempt in every record. Finalize the
-files before making the run directory available to the assembly job. Those
-workers need their own cloud fixtures and credentials. Enable `cdn_transport`
-on the same dispatch to include transport and deployment traces from the
-configured fixture.
+measured row directories and `benchmarks.json` together. Stage them next to
+`<measurement-root>/<run-id>/<run-attempt>/` and rename the completed
+directory to that path on the same filesystem. Use that dispatch's commit,
+run ID, and attempt in every record. The assembly job waits up to six hours
+for the finalized directory and then verifies its contents. Start the
+measurement workers separately from the assembly runner so they can finish
+while it waits. Those workers need their own cloud fixtures and credentials.
+Enable `cdn_transport` on the same dispatch to include transport and deployment
+traces from the configured fixture.
 
 The assembly job downloads the native reports and any successful CDN canary
 artifacts from the exact attempt. It verifies the measurements and

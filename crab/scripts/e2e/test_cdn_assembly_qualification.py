@@ -7,6 +7,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import assemble_cdn_qualification as ASSEMBLE
 import test_cdn_qualification as fixture
@@ -85,6 +86,27 @@ class CdnAssemblyQualificationTests(unittest.TestCase):
             observations["check_results"].pop(name)
         fixture.json_file(self.observations, observations)
         return root
+
+    def test_assembly_waits_for_atomic_publication_of_its_attempt(self) -> None:
+        digest = self.inputs("gcs")
+        staging = self.root / "staged"
+        staging.mkdir()
+        for path in list(self.root.iterdir()):
+            if path != staging:
+                path.rename(staging / path.name)
+        attempt = self.root / "123" / "2"
+        (attempt.parent / "1").mkdir(parents=True)
+        with self.assertRaisesRegex(ValueError, "timed out waiting for finalized CDN measurements"):
+            ASSEMBLE.wait_for_inputs(attempt, 0)
+        arguments = [
+            str(Path(ASSEMBLE.__file__)), "--inputs", str(attempt), "--output", str(self.output),
+            "--benchmarks-sha256", digest, "--source-sha", fixture.COMMIT, "--run-id", "123", "--run-attempt", "2",
+            "--wait-for-inputs-seconds", "60",
+        ]
+        with patch.object(sys, "argv", arguments), patch.object(ASSEMBLE.time, "sleep", side_effect=lambda _: staging.rename(attempt)) as wait:
+            self.assertEqual(ASSEMBLE.main(), 0)
+        wait.assert_called_once_with(30)
+        self.assertTrue((self.output / self.row / "cdn-report.json").is_file())
 
     def test_exposes_the_exact_release_artifact_after_verification(self) -> None:
         digest = self.inputs("gcs")
