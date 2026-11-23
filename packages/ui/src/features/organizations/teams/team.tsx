@@ -10,6 +10,7 @@ import { teamHref, type Draft } from "./model";
 import type { Commands } from "./commands";
 import { TeamFields } from "./form";
 import { TeamMembers } from "./members";
+import { IdentityGroupSettings } from "./identity-group";
 import { useTeamRead } from "./read";
 
 export function TeamDetail({
@@ -17,12 +18,16 @@ export function TeamDetail({
   actor,
   team,
   url,
+  csrf,
+  owner,
   commands,
 }: {
   organization: string;
   actor: string;
   team: string;
   url: URL;
+  csrf: string;
+  owner: boolean;
   commands: Commands;
 }) {
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -186,6 +191,16 @@ export function TeamDetail({
                     Save team changes
                   </Button>
                 </form>
+                {owner && (
+                  <>
+                    <Separator />
+                    <IdentityGroupSettings
+                      path={`/api/organizations/${organization}/teams/${team}/identity-group`}
+                      csrf={csrf}
+                      onChanged={state.retry}
+                    />
+                  </>
+                )}
                 <Separator />
                 <section className="flex flex-col items-start gap-3">
                   <h3 className="font-semibold">Delete this team</h3>

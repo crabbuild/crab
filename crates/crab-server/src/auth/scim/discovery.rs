@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::{Router, extract::Path, http::StatusCode, response::Response, routing::get};
 use serde_json::{Value, json};
 
-use super::{Error, ROOT, Result, USER, list_response, response};
+use super::{Error, ROOT, Result, USER, groups::GROUP, list_response, response};
 use crate::server::Server;
 
 const CONFIG: &str = "urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig";
@@ -15,15 +15,19 @@ pub(super) fn routes() -> Router<Arc<Server>> {
         .route("/ServiceProviderConfig", get(config))
         .route(
             "/ResourceTypes",
-            get(|| async { list_response(vec![user_type()], 1, 1) }),
+            get(|| async { list_response(vec![user_type(), group_type()], 2, 1) }),
         )
         .route(
             "/ResourceTypes/User",
             get(|| async { response(StatusCode::OK, user_type()) }),
         )
         .route(
+            "/ResourceTypes/Group",
+            get(|| async { response(StatusCode::OK, group_type()) }),
+        )
+        .route(
             "/Schemas",
-            get(|| async { list_response(vec![user_schema()], 1, 1) }),
+            get(|| async { list_response(vec![user_schema(), group_schema()], 2, 1) }),
         )
         .route("/Schemas/{id}", get(schema))
 }
@@ -65,10 +69,12 @@ fn user_type() -> Value {
 }
 
 async fn schema(Path(id): Path<String>) -> Result<Response> {
-    if id != USER {
-        return Err(Error::not_found());
-    }
-    Ok(response(StatusCode::OK, user_schema()))
+    let schema = match id.as_str() {
+        USER => user_schema(),
+        GROUP => group_schema(),
+        _ => return Err(Error::not_found()),
+    };
+    Ok(response(StatusCode::OK, schema))
 }
 
 fn attribute(name: &str, kind: &str) -> Value {
@@ -113,5 +119,34 @@ fn user_schema() -> Value {
         "name": "User",
         "attributes": [username, attribute("displayName", "string"), attribute("active", "boolean"), name, emails],
         "meta": {"resourceType": "Schema", "location": format!("{ROOT}/Schemas/{USER}")},
+    })
+}
+
+fn group_type() -> Value {
+    json!({
+        "schemas":[RESOURCE_TYPE],"id":"Group","name":"Group",
+        "description":"A directory group of provisioned users",
+        "endpoint":"/Groups","schema":GROUP,"schemaExtensions":[],
+        "meta":{"resourceType":"ResourceType","location":format!("{ROOT}/ResourceTypes/Group")},
+    })
+}
+
+fn group_schema() -> Value {
+    let mut name = attribute("displayName", "string");
+    name["required"] = json!(true);
+    name["uniqueness"] = json!("server");
+    let mut members = attribute("members", "complex");
+    members["multiValued"] = json!(true);
+    let mut reference = attribute("$ref", "reference");
+    reference["referenceTypes"] = json!(["User"]);
+    members["subAttributes"] = json!([
+        attribute("value", "string"),
+        attribute("type", "string"),
+        reference,
+    ]);
+    json!({
+        "schemas":[SCHEMA],"id":GROUP,"name":"Group",
+        "attributes":[name,members],
+        "meta":{"resourceType":"Schema","location":format!("{ROOT}/Schemas/{GROUP}")},
     })
 }

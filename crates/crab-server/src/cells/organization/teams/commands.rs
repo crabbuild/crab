@@ -265,6 +265,9 @@ fn change_member(
     let Some(old_team) = team(context, id)? else {
         return Ok(Outcome::Missing);
     };
+    if sync::binding(context, id)?.is_some() {
+        return Ok(Outcome::Conflict);
+    }
     let old = membership(context, id, person)?;
     if old.version != version {
         return Ok(Outcome::Conflict);

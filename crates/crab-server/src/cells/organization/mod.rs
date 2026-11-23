@@ -209,12 +209,15 @@ pub(crate) struct Event {
     pub created_at_ms: u64,
 }
 const EVENTS: &str = "organization/v1/events/";
-fn advance(context: &Transaction<'_>, actor: Uuid, action: Action) -> Result<()> {
+fn advance_revision(context: &Transaction<'_>) -> Result<u64> {
     let result = context.query("UPDATE organization_identity SET app_revision = app_revision + 1 WHERE singleton = 1 AND app_revision < 9007199254740991 RETURNING app_revision", &[])?;
     let Some([value]) = result.rows.first().map(Vec::as_slice) else {
         return Err(Error::Invalid("organization revision limit reached"));
     };
-    let revision = uint(value)?;
+    uint(value)
+}
+fn advance(context: &Transaction<'_>, actor: Uuid, action: Action) -> Result<()> {
+    let revision = advance_revision(context)?;
     let created_at_ms = u64::try_from(context.now_ms())
         .map_err(|_| Error::Invalid("organization clock is negative"))?;
     context.put_document(
@@ -292,6 +295,11 @@ pub(in crate::cells) fn authorize(
     }
     if projects::handles(operation, mutation) {
         return projects::authorize(context, operation, mutation, input);
+    }
+    if mutation && operation == teams::sync::SyncGroup::ID {
+        // Only the durable SCIM reconciler submits this native operation.
+        // Owner link edits check active ownership inside the same transaction.
+        return Ok(());
     }
     if teams::handles(operation, mutation) {
         return teams::authorize(context, operation, mutation, input);
@@ -386,6 +394,7 @@ pub(in crate::cells) fn dispatch_read(
         teams::List::ID => invoke_read::<teams::List>(context, input),
         teams::ResolveReviewTeams::ID => invoke_read::<teams::ResolveReviewTeams>(context, input),
         teams::Get::ID => invoke_read::<teams::Get>(context, input),
+        teams::sync::GetSync::ID => invoke_read::<teams::sync::GetSync>(context, input),
         teams::Members::ID => invoke_read::<teams::Members>(context, input),
         teams::GetMembership::ID => invoke_read::<teams::GetMembership>(context, input),
         teams::Candidates::ID => invoke_read::<teams::Candidates>(context, input),
@@ -430,6 +439,7 @@ pub(in crate::cells) fn dispatch_mutation(
         teams::tests::FailedStep::ID => invoke_mutation::<teams::tests::FailedStep>(context, input),
         teams::Prepare::ID => invoke_mutation::<teams::Prepare>(context, input),
         teams::Change::ID => invoke_mutation::<teams::Change>(context, input),
+        teams::sync::SyncGroup::ID => invoke_mutation::<teams::sync::SyncGroup>(context, input),
         teams::Cancel::ID => invoke_mutation::<teams::Cancel>(context, input),
         Bootstrap::ID => invoke_mutation::<Bootstrap>(context, input),
         repositories::AuthorizeCreation::ID => {

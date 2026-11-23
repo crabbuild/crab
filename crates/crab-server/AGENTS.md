@@ -27,6 +27,10 @@ and migration limitations.
    `auth/scim/` owns the bearer-only user directory and its durable pending
    change. Reconciliation applies managed state through the same account
    revision authority while preserving independent operator holds.
+   `auth/scim/groups/` owns the durable group roster and link intent.
+   `cells/organization/teams/sync.rs` versions and projects membership into the
+   ordinary roster, checking the current owner on link changes and fencing
+   delayed refreshes by link generation and group revision.
 5. `crates/crab-server/src/git/receive/mod.rs` — `receive / publish_objects`: bounded native receive and publication orchestration.
 
 Trace one path: `crates/crab-server/src/main.rs` → `src/cli/mod.rs` → `serve` in

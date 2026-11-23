@@ -1505,8 +1505,7 @@ later create for the same subject can reuse its ID. The last profile remains
 in operator-owned storage. The directory holds up to 4,096 subjects and
 8 MiB, including deleted users.
 Deployment operators should qualify their IdP’s attribute mappings and
-operations before enrolling production users. Team and organization role
-assignment stay with Crab’s existing membership and signed OIDC group rules.
+operations before enrolling production users.
 
 A successful deactivation applies to the next browser or user Git
 authorization. Reactivation requires a fresh sign-in and a new Git token.
@@ -1517,6 +1516,36 @@ request reconciles any such change before answering. After an uncertain
 create, look up the exact `externalId` before retrying. After an uncertain
 update, read the User and use its current ETag. For the protocol contract see
 [SCIM Protocol (RFC 7644)](https://www.rfc-editor.org/rfc/rfc7644.html).
+
+### Sync an organization team from SCIM
+
+Provision a group through the existing SCIM bearer credential. The
+`/scim/v2/Groups` endpoint supports create, read, replace, patch, and delete.
+List groups with `startIndex` and `count`, and filter by `displayName eq` or
+`externalId eq`. Membership payloads use provisioned SCIM User IDs. Group
+patch accepts roster replacement, additions, and removal by
+`members[value eq "USER_ID"]`. The directory supports up to 4,096 groups
+within 8 MiB, 1,000 users per group, and 32 teams linked to a group. Direct
+user members are supported. [SCIM Group schema](https://www.rfc-editor.org/rfc/rfc7643.html#section-4.2)
+
+In **Organization → Teams → Settings → Identity provider group**, an
+organization owner can enter the SCIM Group ID and link it. Linking replaces
+the team's direct roster with the group's users who already belong to the
+organization. Synced users receive the team Member role and the team's
+existing repository grants. Manual roster edits are disabled while a group
+owns the team. Use **Clear roster and unlink** to remove the synced grants
+and resume manual management.
+
+A successful group update or deletion commits the roster changes on each
+linked team before returning. The next repository access check uses the new
+roster, including for previously issued user Git tokens. If an update is
+interrupted, the next group request resumes the saved projection. Deleting a
+group empties its synced rosters and retains the link until the organization
+owner unlinks it. An organization invitation is still required for a new
+member. After accepting an invitation, resync the group to grant team access.
+Unlink managed teams before moving the deployment to a different OIDC issuer.
+Live provider qualification and automatic organization invitations remain
+open. [GitHub team sync](https://docs.github.com/en/enterprise-cloud@latest/admin/managing-iam/provisioning-user-accounts-with-scim/managing-team-memberships-with-identity-provider-groups)
 
 ## Git HTTP reads
 

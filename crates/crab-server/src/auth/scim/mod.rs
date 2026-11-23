@@ -18,6 +18,7 @@ use uuid::Uuid;
 use crate::{auth::Authentication, server::Server};
 
 mod discovery;
+pub(crate) mod groups;
 mod profile;
 mod store;
 use profile::{Patch, Profile, UserInput, valid_subject};
@@ -43,9 +44,10 @@ pub(crate) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
             "/Users/{id}",
             get(get_user).put(replace).patch(patch).delete(delete),
         )
+        .layer(DefaultBodyLimit::max(32 * 1024))
+        .merge(groups::routes())
         .merge(discovery::routes())
         .fallback(|| async { Error::not_found() })
-        .layer(DefaultBodyLimit::max(32 * 1024))
         .layer(middleware::from_fn_with_state(server, authenticate));
     Router::new().nest(ROOT, scim)
 }

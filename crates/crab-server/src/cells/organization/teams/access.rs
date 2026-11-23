@@ -9,6 +9,7 @@ pub(in crate::cells::organization) fn handles(operation: u32, mutation: bool) ->
             GetPreparation::ID
                 | List::ID
                 | Get::ID
+                | sync::GetSync::ID
                 | Members::ID
                 | GetMembership::ID
                 | Candidates::ID
