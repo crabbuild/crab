@@ -555,23 +555,41 @@ excerpt links to its file and line at the commit searched.
 
 Add qualifiers to the search text to narrow a query. For example,
 `language:rust path:/src/**/*.rs symbol:parse` finds Rust definitions in
-`src` and its subdirectories. Use `repo:owner/name` to select an exact
+`src` and its subdirectories. Bare terms match file contents or paths by default.
+**Search in** can restrict them to one field. Use `repo:owner/name` to select an exact
 repository and `org:` with the organization namespace from the repository
 URL or its UUID. Both selectors use current repository access. A query
 containing only filters lists matching file paths.
 
 `path:` matches a case-insensitive substring of the repository-relative path.
-Start it with `/` to anchor it at the root. Use `*` or `?` within one path
-component and `**` across directories. Quotes keep wildcards literal and
-allow spaces, as in `path:"release notes"`. Repeated path filters must all match.
+Use `*` or `?` within one path component and `**` across directories.
+For a root-anchored directory glob, use a leading slash, as in `path:/src/**`.
+Quotes keep wildcards literal and allow spaces, as in `path:"release notes"`.
+Adjacent terms and qualifiers are joined by `AND`. Use uppercase `AND`,
+`OR`, and `NOT`. `NOT` binds first, then `AND`, then `OR`. Parentheses
+group expressions. For example, `(dial OR reconnect) NOT path:tests/` matches
+either term outside the tests directory. Separate terms can match different
+lines in the same file. Quote a phrase to require adjacent words in order.
+For mixed queries, `content:` and `symbol:` scope the term they prefix.
 `language:` uses the file extension and accepts C, C++, C#, CSS, Go, HTML,
 Java, JavaScript, JSON, Kotlin, Markdown, PHP, Python, Ruby, Rust, Shell,
-SQL, Swift, TOML, TypeScript, XML, and YAML. `symbol:` and `content:` select
-the search mode and supply the literal term. Quote text such as
+SQL, Swift, TOML, TypeScript, XML, and YAML. Quote text such as
 `"repo:owner/name"` to search for the qualifier itself.
 
+Wrap a pattern in slashes to search with a regular expression. For example,
+`content:/phase [0-9]+\nstatus OK/` matches text across lines,
+`symbol:/^parse_(file|tree)$/` matches definition names, and
+`path:/^src\/.*\.rs$/` matches paths. **Search in** also applies to a bare
+`/pattern/`. Escape a slash inside the pattern with `\/`. Quotes make an
+expression literal. Content expressions see the full UTF-8 file, with
+match fragments linked to their own lines. Larger highlights are shortened.
+Match case sets the default for content and symbol terms, and an inline
+flag such as `(?-i)` can override the default. The Rust regex engine limits
+program size and nesting, and supports patterns without look-around or
+backreferences.
+
 `GET /api/repos/{owner}/{name}/code-search` takes `q`, optional `rev`, an
-optional directory `path`, `kind=content|path|symbol` (default `content`),
+optional directory `path`, `kind=any|content|path|symbol` (default `any`),
 `case_sensitive` (default `false`), `limit`
 (1–40 matching files, default 20), and an opaque `cursor`. It returns
 `{commit, items, scanned, skipped, next}`. Each file carries `path`,
@@ -579,12 +597,14 @@ optional directory `path`, `kind=content|path|symbol` (default `content`),
 `matched`, and `after`. Supply the same search parameters with `next`
 to continue. A cursor binds the repository UUID, commit, and search filters.
 Subsequent pages use the pinned commit even if the selected branch advances.
-The search text accepts up to 512 characters, including up to 128 for the
-literal match.
+A query accepts up to 512 characters, 24 terms, 12 nested operators,
+and 128 characters per literal.
 Every request checks current repository access before returning any matches.
 
-Each page scans up to 128 files in canonical path order. Indexed symbol search
-can consider all indexed paths and opens up to 128 candidates. Large blobs
+A direct page scans up to 128 files in canonical path order. Repository
+search can use the index for the default revision and for symbol queries
+when its tree matches the selected commit. Indexed pages open up to 128
+candidates. Large blobs
 above 256 KiB, binary or invalid UTF-8 data, separately stored Crab or LFS
 content, and files beyond the parser budget are counted as skipped for modes
 that read content. Empty pages can have a continuation. The browser retains
@@ -607,7 +627,7 @@ current readable repository scope selected by its qualifiers. Results name
 the repository and link to the exact Git commit, file, and matching line.
 
 `GET /api/code-search` takes `q`, optional `organization` UUID and
-`directory`, `kind=content|path|symbol` (default `content`), `case_sensitive`,
+`directory`, `kind=any|content|path|symbol` (default `any`), `case_sensitive`,
 and `cursor`. It returns `groups`, `scanned` paths, `skipped` files,
 `verified` content candidates checked against Git, and `next`. Groups carry
 `id`, `owner`, `name`, `commit`, and matching `files`. Path matches use
@@ -617,6 +637,13 @@ repository. An indexed content or symbol search can consider all indexed paths
 and checks up to 32 candidates per repository. Follow `next` with the same
 parameters, including after an empty page. A repository in progress keeps
 the same commit until its scan finishes.
+
+An indexed Boolean or regex query examines at most 4,096 path rows per
+repository per page. Follow the continuation even after a page with no
+matches. The index can prove a literal absent through its trigram filter.
+A possible match stays eligible until the pinned Git file can be checked.
+Regex terms use Git verification directly. An unreadable file has unknown
+content, so a negated content term cannot treat it as an absence.
 
 The server builds a default-branch index in the background and keeps one
 published artifact per repository in object storage. It contains paths and
@@ -725,8 +752,10 @@ and the current URL.
 In **Settings → General**, a repository administrator can create an offer for a
 personal account by profile handle or for an organization by link or ID. Share
 the private offer link with the recipient. The named account or a current owner
-of the destination organization must sign in and accept within 24 hours. A
-current source administrator can cancel a pending offer. The recipient can
+of the destination organization sees eligible offers in **Notifications →
+Repository transfers** and must sign in and accept within 24 hours. The bell
+also signals a pending offer. A current source administrator can cancel a
+pending offer. The recipient can
 also decline it. Crab rechecks the requester's authority and destination access
 at acceptance. Archived repositories and repositories in a private fork network
 are ineligible for transfer.
@@ -744,7 +773,11 @@ and offer to a repository administrator. A `POST` to that route submits `version
 `request_id`, destination `name`, and `recipient` (`{kind:"account",handle}` or
 `{kind:"organization",id}`). `GET /api/repository-transfers/{id}` reads the
 private offer. `PUT` on that path takes `decision` (`accept`, `decline`, or
-`cancel`). The browser endpoints use the session and the usual CSRF protection.
+`cancel`). `GET /api/repository-transfers/incoming` returns up to 20
+recipient-authorized pending offers and a `next` cursor to pass as `before`.
+Resolved, expired, and superseded offers leave the incoming list. The bell
+reports `pending_transfers: true` when there is a pending offer and no unread
+discussion notification is taking priority. The browser endpoints use the session and the usual CSRF protection.
 Retry a lost response with the same request ID or decision. A changed source
 address, a competing catalog update, or a claimed destination blocks acceptance.
 
@@ -1095,12 +1128,28 @@ Release routes use durable request reservations and versioned records:
 | Method and route | Purpose |
 | --- | --- |
 | `GET/POST /api/repos/{owner}/{name}/releases` | List or create releases |
+| `GET /api/repos/{owner}/{name}/releases/generate-notes` | Preview generated Markdown for an exact target commit |
 | `GET/PATCH/DELETE /api/repos/{owner}/{name}/releases/{number}` | Read, edit, or tombstone one release |
 | `GET /api/repos/{owner}/{name}/releases/tag/{tag}` | Read by unique tag, including slash-containing tags; same draft visibility as numbered reads |
 | `POST /api/repos/{owner}/{name}/releases/{number}/assets` | Upload a release asset |
 | `GET/DELETE /api/repos/{owner}/{name}/releases/{number}/assets/{asset_id}` | Download or remove an asset |
 
 Creation includes a stable universally unique identifier (UUID) in `request_id`, short `tag_name`, full target commit OID, title, Markdown body, prerelease flag, and draft state. The target must be a visible commit.
+
+Repository writers can pick a previous tag and generate a preview in the new
+release form or an existing draft. The preview includes merged pull requests
+in the Git range, contributors, and a link to the commit history for that
+range. Inserting the preview appends editable Markdown to the release body.
+
+The preview route accepts a full `target_oid` and an optional `previous_tag`.
+Omitting `previous_tag` selects the highest-numbered published release whose
+tag still points to its recorded commit and whose commit is a strict ancestor
+of the target. An empty string includes all history. An explicit tag must
+resolve to the target commit or an ancestor. The response returns the pinned
+`target_oid`, the selected `previous_tag` and `previous_oid` (both null for
+all history), and the Markdown `body`. Generation supports up to 4,096
+merged pull requests in the repository and returns an error if the scan or
+64 KiB body limit is exceeded.
 
 An existing lightweight or annotated tag is accepted only when it peels to the exact target. A new published release creates a lightweight tag through canonical ref publication. Drafts reserve their release tag but do not publish a new Git tag until a version-bound edit publishes the draft. Republishing a withdrawn release verifies the existing Git tag again before notifying watchers.
 
@@ -2903,6 +2952,15 @@ behind the current repository access checks. The sender checks repository
 access, account suspension, mute, and opt-in before sending queued activity.
 Repository watches and discussion follows apply to both delivery channels.
 Delivery is limited to future inbox activity and can be turned off at any time.
+
+The same opt-in enables email for pending personal repository transfer offers.
+The email links to **Notifications → Repository transfers**. Recipient
+addresses come from the verified sign-in binding. Repository names and
+private offer links stay inside Crab. Delivery rechecks the exact offer,
+the recipient's account status, and the saved preference. Organization
+offers appear in the in-app transfer list. The transfer scanner recovers from
+the committed catalog, and the Directory uses the same idempotent provider
+delivery and 23-hour retry window as discussion email.
 
 `GET /api/notifications/email` returns `configured`, `address`, `enabled`,
 and `version` for the signed-in account. Send `enabled` and the captured

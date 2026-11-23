@@ -102,7 +102,9 @@ recipients and delivers to the Directory inbox before acknowledging the event.
 `cells/directory/notifications/email.rs` owns the verified address binding,
 versioned opt-in, and transactional email queue. `server/email.rs` rechecks
 current delivery authority and sends generic inbox links with durable
-provider idempotency keys.
+provider idempotency keys. `server/email/transfers.rs` discovers committed
+personal transfer offers from the catalog. Directory receipts fence replay,
+and the sender checks the exact pending offer again before delivery.
 `cells/repository/integrations.rs` owns GitHub Actions connections, delivery
 receipts, bounded accepted-delivery history, and workflow attempt ordering. It
 reads active providers and their exact-commit results from one snapshot for merge
@@ -198,6 +200,8 @@ the durable catalog reservation and shared Git and Cell initializer.
 `cells/organization/repositories.rs` records owner-authorized submissions.
 The catalog's explicit organization UUID owns the repository relationship.
 `api/repository_transfer/` checks the current source and destination authorities.
+Its incoming view reads pending offers from the current catalog and applies
+recipient and organization-owner checks independently of source access.
 `catalog/transfer.rs` commits consent, the complete address and grant change,
 and the membership audit together. `catalog/rename.rs` owns historical addresses.
 `repository/access.rs` resolves current owner grants, and `app::membership`
@@ -229,7 +233,9 @@ reads current follows by paging the canonical discussion keys.
 `api/notifications/discussions/timed.rs` merges authorized Repository pages.
 `collaboration/watches/publications.rs`
 owns release watch activation and the publication outbox. Release completion
-queues the notice in its publication transaction. Activity writes enroll participants under
+queues the notice in its publication transaction. `api/releases/notes.rs`
+composes canonical completed pull merges with a pinned Git ancestry range
+for the editable release preview. Activity writes enroll participants under
 their qualified identity before scheduling delivery. Watch outbox events carry
 the activity number and advance by bounded pages after Directory delivery.
 The mention outbox pins enrollment sources to committed activity and gates
@@ -327,8 +333,11 @@ and session migration paths are supported.
   returning results and continuations.
 - `api/code_search/` searches authorized Git snapshots under bulk read
   admission. Repository searches bind the UUID, commit, and query filters.
-  `api/code_search/qualifiers.rs` parses scope filters and applies the same path
-  and language predicates before indexed or direct Git blob reads.
+  `api/code_search/qualifiers.rs` owns the bounded Boolean grammar, term
+  predicates, and regex compilation. `code_search/evaluate.rs` evaluates the
+  same query at repository, path, index, and verified Git boundaries. Keep
+  unknown evidence under negation and apply trigram pruning only to literals.
+  The indexed reader bounds path rows for Boolean and regex queries.
   Workspace search reuses the catalog's current grants and the same bounded
   Git scans. Its cursor also binds the actor and readable repository scope.
   `repository/code_index/` publishes the bounded, checksummed default-tree

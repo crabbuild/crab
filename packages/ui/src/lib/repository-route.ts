@@ -5,6 +5,7 @@ export interface RepositoryRoute {
   name: string;
   view: string;
   rev?: string;
+  since?: string;
   path: string;
   kind: string;
   issue?: string;
@@ -240,6 +241,11 @@ export function repositoryRoute(url: URL, refs?: Refs): RepositoryRoute | null {
         : "Tree";
       if (url.searchParams.has("kind"))
         route.kind = url.searchParams.get("kind") ?? route.kind;
+      const since = url.searchParams.get("since");
+      if (page === "commits" && since !== null) {
+        if (route.path || !commitOid(since)) return null;
+        route.since = since;
+      }
       if (
         ((page === "blob" || page === "blame") && !route.path) ||
         (page === "commit" && route.path)

@@ -449,6 +449,9 @@ pub(in crate::cells) fn dispatch_read(
         }
 
         <ListPulls as Read>::ID => invoke_read::<ListPulls>(context, input),
+        <ListMergedPullsForRelease as Read>::ID => {
+            invoke_read::<ListMergedPullsForRelease>(context, input)
+        }
         <GetPullComment as Read>::ID => invoke_read::<GetPullComment>(context, input),
         <ListPullComments as Read>::ID => invoke_read::<ListPullComments>(context, input),
         <GetPullReview as Read>::ID => invoke_read::<GetPullReview>(context, input),

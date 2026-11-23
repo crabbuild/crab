@@ -132,6 +132,7 @@ export function RepositoryPage({
 }) {
   const route = repositoryRoute(url);
   const view = route?.view ?? "code";
+  const historyBase = route?.since;
   const canWrite = repo.access === "write" && !repo.archived;
   const forkSource = repo.forked_from;
   const refs = useRequest<Refs>(
@@ -803,9 +804,10 @@ export function RepositoryPage({
                         />
                         <History
                           revision={navigationRevision ?? rev}
-                          key={`${rev}:${path}`}
+                          key={`${rev}:${path}:${historyBase ?? ""}`}
                           repo={repo}
                           rev={rev}
+                          base={historyBase}
                           path={path}
                           kind={kind}
                         />

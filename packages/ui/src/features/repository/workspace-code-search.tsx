@@ -38,12 +38,13 @@ export default function WorkspaceCodeSearch({ url }: { url: URL }) {
   const q = url.searchParams.get("q")?.trim() ?? "";
   const directory = url.searchParams.get("directory") ?? "";
   const mode = url.searchParams.get("kind");
-  const kind = mode === "path" || mode === "symbol" ? mode : "content";
+  const kind =
+    mode === "content" || mode === "path" || mode === "symbol" ? mode : "any";
   const caseSensitive = url.searchParams.get("case_sensitive") === "true";
   const scope = params.toString();
   if (q) params.set("q", q);
   if (directory) params.set("directory", directory);
-  if (kind !== "content") params.set("kind", kind);
+  if (kind !== "any") params.set("kind", kind);
   if (caseSensitive) params.set("case_sensitive", "true");
   const [attempt, setAttempt] = useState(0);
   const search = params.toString();
@@ -83,7 +84,8 @@ export default function WorkspaceCodeSearch({ url }: { url: URL }) {
             .replace(/\/+$/, "");
           if (path) selected.set("directory", path);
           const kind = values.get("kind");
-          if (kind === "path" || kind === "symbol") selected.set("kind", kind);
+          if (kind === "content" || kind === "path" || kind === "symbol")
+            selected.set("kind", kind);
           if (values.has("case_sensitive"))
             selected.set("case_sensitive", "true");
           const href = `/-/code-search?${selected}`;
@@ -104,8 +106,9 @@ export default function WorkspaceCodeSearch({ url }: { url: URL }) {
               defaultValue={q}
             />
             <FieldDescription id="workspace-search-qualifiers">
-              Try <code>repo:owner/name</code>, <code>language:rust</code>, or{" "}
-              <code>path:src/</code> to narrow results.
+              Combine terms with <code>AND</code>, <code>OR</code>, or{" "}
+              <code>NOT</code>. Use <code>/pattern/</code> for regex or quotes
+              for an exact phrase.
             </FieldDescription>
           </Field>
           <Button className="mt-6" type="submit">
@@ -126,6 +129,9 @@ export default function WorkspaceCodeSearch({ url }: { url: URL }) {
               name="kind"
               defaultValue={kind}
             >
+              <NativeSelectOption value="any">
+                Contents and paths
+              </NativeSelectOption>
               <NativeSelectOption value="content">
                 File contents
               </NativeSelectOption>

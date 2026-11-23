@@ -43,7 +43,8 @@ export default function RepositoryCodeSearch({
   const q = url.searchParams.get("q")?.trim() ?? "";
   const directory = url.searchParams.get("directory") ?? "";
   const mode = url.searchParams.get("kind");
-  const kind = mode === "symbol" || mode === "path" ? mode : "content";
+  const kind =
+    mode === "content" || mode === "symbol" || mode === "path" ? mode : "any";
   const caseSensitive = url.searchParams.get("case") === "true";
   const at =
     url.searchParams.get("at") || refs.head?.name || refs.refs[0]?.name;
@@ -75,7 +76,7 @@ export default function RepositoryCodeSearch({
                 q: terms,
                 directory: path,
                 at: selected,
-                kind: mode === "content" ? undefined : mode,
+                kind: mode === "any" ? undefined : mode,
                 case: matchCase ? "true" : undefined,
               });
               if (href === `${url.pathname}${url.search}`)
@@ -91,7 +92,7 @@ export default function RepositoryCodeSearch({
                 q,
                 path: directory || undefined,
                 rev: revision,
-                kind: kind === "content" ? undefined : kind,
+                kind: kind === "any" ? undefined : kind,
                 case_sensitive: caseSensitive ? "true" : undefined,
               })}
             />
@@ -120,7 +121,7 @@ function SearchForm({
   directory: string;
   revision: string;
   caseSensitive: boolean;
-  kind: "content" | "path" | "symbol";
+  kind: "any" | "content" | "path" | "symbol";
   onSearch: (
     q: string,
     path: string,
@@ -146,7 +147,7 @@ function SearchForm({
             path.trim().replace(/\/+$/, ""),
             selected,
             matchCase,
-            String(new FormData(event.currentTarget).get("kind") ?? "content"),
+            String(new FormData(event.currentTarget).get("kind") ?? "any"),
           );
       }}
     >
@@ -163,8 +164,9 @@ function SearchForm({
             onChange={(event) => setTerms(event.target.value)}
           />
           <FieldDescription id="code-search-qualifiers">
-            Narrow with <code>path:</code> or <code>language:</code>. Use{" "}
-            <code>symbol:</code> to find definitions.
+            Combine terms with <code>AND</code>, <code>OR</code>, or{" "}
+            <code>NOT</code>. Use <code>/pattern/</code> for regex or quotes for
+            an exact phrase.
           </FieldDescription>
         </Field>
         <Button className="mt-6" type="submit" disabled={!terms.trim()}>
@@ -175,6 +177,9 @@ function SearchForm({
         <Field className="w-auto">
           <FieldLabel htmlFor="code-search-kind">Search in</FieldLabel>
           <NativeSelect id="code-search-kind" name="kind" defaultValue={kind}>
+            <NativeSelectOption value="any">
+              Contents and paths
+            </NativeSelectOption>
             <NativeSelectOption value="content">
               File contents
             </NativeSelectOption>

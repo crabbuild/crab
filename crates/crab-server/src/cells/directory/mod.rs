@@ -291,6 +291,9 @@ pub(in crate::cells) fn dispatch_mutation(
         notifications::email::FinishMail::ID => {
             invoke_mutation::<notifications::email::FinishMail>(context, input)
         }
+        notifications::email::QueueTransferMail::ID => {
+            invoke_mutation::<notifications::email::QueueTransferMail>(context, input)
+        }
         notifications::SetState::ID => invoke_mutation::<notifications::SetState>(context, input),
         notifications::SweepFiling::ID => {
             invoke_mutation::<notifications::SweepFiling>(context, input)

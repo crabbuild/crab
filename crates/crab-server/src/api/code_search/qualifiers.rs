@@ -1,159 +1,387 @@
-use super::{ApiError, Kind, Repository, Syntax, display_path};
+use super::{ApiError, Kind, Repository, Syntax};
 use regex::{Regex, RegexBuilder};
 use uuid::Uuid;
 
-pub(super) const MAX_QUERY_CHARS: usize = 512;
+const MAX_QUERY_CHARS: usize = 512;
 
-#[derive(Default)]
-pub(super) struct Filters {
-    repository: Option<(String, String)>,
-    organization: Option<String>,
-    language: Option<Language>,
-    paths: Vec<Regex>,
+enum Term {
+    Literal(String),
+    Expression(String),
 }
 
-impl Filters {
-    pub(super) fn parse(query: &str, mut kind: Kind) -> Result<(String, Kind, Self), ApiError> {
+impl Term {
+    fn parse(value: &str) -> Result<Self, ApiError> {
+        if let Some(pattern) = regex_inner(value) {
+            if pattern.is_empty() {
+                return Err(ApiError::Input(
+                    "Enter a pattern between the regex delimiters",
+                ));
+            }
+            return Ok(Self::Expression(pattern.to_owned()));
+        }
+        Ok(Self::Literal(match quoted_inner(value) {
+            Some(inner) => unescape(inner),
+            None if value.starts_with('"') => {
+                return Err(ApiError::Input("Close the quoted code search qualifier"));
+            }
+            None => unescape(value),
+        }))
+    }
+
+    fn scoped_value(self) -> Result<String, ApiError> {
+        match self {
+            Self::Literal(value) if !value.is_empty() => Ok(value),
+            Self::Literal(_) => Err(ApiError::Input(
+                "Enter a value for each code search qualifier",
+            )),
+            Self::Expression(_) => Err(ApiError::Input(
+                "Use an exact repository, organization, or language name",
+            )),
+        }
+    }
+}
+
+pub(super) fn compile_expression(pattern: &str, case_sensitive: bool) -> Result<Regex, ApiError> {
+    RegexBuilder::new(pattern)
+        .case_insensitive(!case_sensitive)
+        .size_limit(256 * 1024)
+        .dfa_size_limit(1024 * 1024)
+        .nest_limit(32)
+        .build()
+        .map_err(|_| {
+            ApiError::Input("Use a valid regular expression with a supported size and syntax")
+        })
+}
+
+const MAX_TERMS: usize = 24;
+const MAX_DEPTH: usize = 12;
+
+pub(super) type Facts = [Truth; MAX_TERMS];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Truth {
+    No,
+    Unknown,
+    Yes,
+}
+
+impl Truth {
+    pub(super) const fn from_bool(value: bool) -> Self {
+        if value { Self::Yes } else { Self::No }
+    }
+
+    const fn invert(self) -> Self {
+        match self {
+            Self::Yes => Self::No,
+            Self::No => Self::Yes,
+            Self::Unknown => Self::Unknown,
+        }
+    }
+}
+
+enum Node {
+    Term(usize),
+    All(Vec<Self>),
+    Any(Vec<Self>),
+    Not(Box<Self>),
+}
+
+impl Node {
+    fn evaluate(&self, facts: &[Truth], negate: bool) -> (Truth, u32) {
+        match self {
+            Self::Term(index) => {
+                let value = facts[*index];
+                if negate {
+                    (value.invert(), 0)
+                } else {
+                    (value, u32::from(value == Truth::Yes) << *index)
+                }
+            }
+            Self::Not(inner) => inner.evaluate(facts, !negate),
+            Self::All(children) | Self::Any(children) => {
+                let all = matches!(self, Self::All(_)) != negate;
+                let mut value = Truth::from_bool(all);
+                let mut evidence = 0;
+                for child in children {
+                    let (value_at_child, child_evidence) = child.evaluate(facts, negate);
+                    match value_at_child {
+                        Truth::No if all => return (Truth::No, 0),
+                        Truth::Yes if !all => value = Truth::Yes,
+                        Truth::Unknown if all || value == Truth::No => value = Truth::Unknown,
+                        _ => (),
+                    }
+                    if value_at_child == Truth::Yes {
+                        evidence |= child_evidence;
+                    }
+                }
+                (value, evidence)
+            }
+        }
+    }
+}
+
+pub(super) struct QueryPlan {
+    root: Node,
+    pub(super) leaves: Vec<Predicate>,
+    pub(super) bounded: bool,
+}
+
+pub(super) enum Predicate {
+    Repository(String, String),
+    Organization(String),
+    Language(Language),
+    Path(Regex),
+    Text {
+        kind: Kind,
+        matcher: Regex,
+        mask: Option<Box<super::code_index::Mask>>,
+    },
+}
+
+impl QueryPlan {
+    pub(super) fn parse(query: &str, kind: Kind, case_sensitive: bool) -> Result<Self, ApiError> {
         if query.chars().count() > MAX_QUERY_CHARS || query.chars().any(char::is_control) {
             return Err(ApiError::Input(
                 "Code search queries may contain up to 512 characters",
             ));
         }
-        let mut rest = query;
-        let mut literal = String::new();
-        let mut scoped_text = None;
-        let mut filters = Self::default();
-        let mut qualifier_between_terms = false;
-        loop {
-            let word = rest.trim_start();
-            if word.is_empty() {
-                break;
-            }
-            let spaces = &rest[..rest.len() - word.len()];
-            let (token, after) = word.split_at(word_end(word));
-            rest = after;
-            let qualifier = token.split_once(':').and_then(|(key, raw)| {
-                let field = match key {
-                    "repo" => Field::Repository,
-                    "org" => Field::Organization,
-                    "language" => Field::Language,
-                    "path" => Field::Path,
-                    "content" => Field::Text(Kind::Content),
-                    "symbol" => Field::Text(Kind::Symbol),
-                    _ => return None,
-                };
-                Some((field, raw))
-            });
-            let Some((field, raw)) = qualifier else {
-                if !literal.is_empty() {
-                    literal.push_str(if qualifier_between_terms { " " } else { spaces });
-                }
-                literal.push_str(token);
-                qualifier_between_terms = false;
-                continue;
-            };
-            qualifier_between_terms = true;
-            let quoted = raw.starts_with('"');
-            let value = if quoted {
-                let inner = quoted_inner(raw)
-                    .ok_or(ApiError::Input("Close the quoted code search qualifier"))?;
-                unescape(inner)
-            } else {
-                raw.to_owned()
-            };
-            if value.is_empty() {
-                return Err(ApiError::Input(
-                    "Enter a value for each code search qualifier",
-                ));
-            }
-            match field {
-                Field::Repository => {
-                    let (owner, name) = value
-                        .split_once('/')
-                        .filter(|(owner, name)| path_segment(owner) && path_segment(name))
-                        .ok_or(ApiError::Input("Use repo:owner/name to filter code search"))?;
-                    single(&mut filters.repository, (owner.to_owned(), name.to_owned()))?;
-                }
-                Field::Organization => {
-                    if !path_segment(&value) {
-                        return Err(ApiError::Input(
-                            "Use the organization namespace or ID with org:",
-                        ));
-                    }
-                    single(&mut filters.organization, value)?;
-                }
-                Field::Language => single(&mut filters.language, Language::parse(&value)?)?,
-                Field::Path => filters.paths.push(path_matcher(&value, quoted)?),
-                Field::Text(scope) => {
-                    kind = scope;
-                    single(&mut scoped_text, value)?;
-                }
-            }
+        let mut tokens = Vec::new();
+        let mut rest = query.trim_start();
+        while !rest.is_empty() {
+            let (token, tail) = rest.split_at(word_end(rest));
+            tokens.push(token);
+            rest = tail.trim_start();
         }
-        let literal = if let Some(scoped_text) = scoped_text {
-            if !literal.is_empty() {
-                return Err(ApiError::Input(
-                    "Use one search term with content: or symbol:",
-                ));
-            }
-            scoped_text
-        } else if let Some(inner) = quoted_inner(&literal) {
-            unescape(inner)
-        } else {
-            literal
+        let mut parser = Parser {
+            tokens: tokens.into_iter().peekable(),
+            kind,
+            case_sensitive,
+            leaves: Vec::new(),
+            bounded: false,
         };
-        if literal.is_empty() {
-            if filters.repository.is_none()
-                && filters.organization.is_none()
-                && filters.language.is_none()
-                && filters.paths.is_empty()
-            {
-                return Err(ApiError::Input(
-                    "Enter search text or a code search qualifier",
-                ));
-            }
-            kind = Kind::Path;
+        let root = parser.or(0)?;
+        if parser.tokens.next().is_some() {
+            return Err(invalid_query());
         }
-        Ok((literal, kind, filters))
-    }
-
-    pub(super) fn repository_matches(&self, repo: &Repository) -> bool {
-        self.repository.as_ref().is_none_or(|(owner, name)| {
-            repo.config.owner.eq_ignore_ascii_case(owner)
-                && repo.config.name.eq_ignore_ascii_case(name)
-        }) && self.organization.as_ref().is_none_or(|org| {
-            repo.organization.is_some_and(|id| {
-                repo.config.owner.eq_ignore_ascii_case(org)
-                    || Uuid::parse_str(org).is_ok_and(|expected| expected == id)
-            })
+        Ok(Self {
+            root,
+            leaves: parser.leaves,
+            bounded: parser.bounded,
         })
     }
 
-    pub(super) fn file_matches(&self, path: &[u8]) -> bool {
-        self.language.is_none_or(|language| language.matches(path))
-            && (self.paths.is_empty() || {
-                let path = display_path(path);
-                self.paths.iter().all(|matcher| matcher.is_match(&path))
-            })
+    pub(super) fn evaluate(&self, facts: &[Truth]) -> (Truth, u32) {
+        self.root.evaluate(facts, false)
+    }
+
+    pub(super) fn facts(&self, mut evaluate: impl FnMut(&Predicate) -> Truth) -> Facts {
+        let mut facts = [Truth::Unknown; MAX_TERMS];
+        for (term, fact) in self.leaves.iter().zip(&mut facts) {
+            *fact = evaluate(term);
+        }
+        facts
     }
 }
 
-enum Field {
-    Repository,
-    Organization,
-    Language,
-    Path,
-    Text(Kind),
+impl Predicate {
+    fn parse(value: &str, kind: Kind, case_sensitive: bool) -> Result<(Self, bool), ApiError> {
+        let (scope, raw) = value.split_once(':').unwrap_or(("", value));
+        let raw = match scope {
+            "repo" | "org" | "language" | "path" | "content" | "symbol" => raw,
+            _ => value,
+        };
+        let term = Term::parse(raw)?;
+        if matches!(&term, Term::Literal(value) if value.is_empty()) {
+            return Err(ApiError::Input(
+                "Enter search text or a code search qualifier value",
+            ));
+        }
+        let expression = matches!(&term, Term::Expression(_));
+        let predicate = match scope {
+            "repo" => {
+                let value = term.scoped_value()?;
+                let (owner, name) = value
+                    .split_once('/')
+                    .filter(|(owner, name)| path_segment(owner) && path_segment(name))
+                    .ok_or(ApiError::Input("Use repo:owner/name to filter code search"))?;
+                Self::Repository(owner.to_owned(), name.to_owned())
+            }
+            "org" => {
+                let value = term.scoped_value()?;
+                if !path_segment(&value) {
+                    return Err(ApiError::Input(
+                        "Use the organization namespace or ID with org:",
+                    ));
+                }
+                Self::Organization(value)
+            }
+            "language" => Self::Language(Language::parse(&term.scoped_value()?)?),
+            "path" => Self::Path(match term {
+                Term::Literal(value) => path_matcher(&value, raw.starts_with('"'))?,
+                Term::Expression(pattern) => compile_expression(&pattern, case_sensitive)?,
+            }),
+            _ => {
+                let kind = match scope {
+                    "content" => Kind::Content,
+                    "symbol" => Kind::Symbol,
+                    _ => kind,
+                };
+                let (matcher, mask) = match term {
+                    Term::Literal(literal) => {
+                        if literal.chars().count() > 128 {
+                            return Err(ApiError::Input(
+                                "Search terms may contain up to 128 characters",
+                            ));
+                        }
+                        (
+                            RegexBuilder::new(&regex::escape(&literal))
+                                .case_insensitive(!case_sensitive)
+                                .build()
+                                .map_err(|_| {
+                                    ApiError::Input("The search term could not be compiled")
+                                })?,
+                            super::code_index::Mask::query(&literal, case_sensitive).map(Box::new),
+                        )
+                    }
+                    Term::Expression(pattern) => {
+                        (compile_expression(&pattern, case_sensitive)?, None)
+                    }
+                };
+                Self::Text {
+                    kind,
+                    matcher,
+                    mask,
+                }
+            }
+        };
+        Ok((predicate, expression))
+    }
+
+    pub(super) fn repository_fact(&self, repo: &Repository) -> Truth {
+        match self {
+            Self::Repository(owner, name) => Truth::from_bool(
+                repo.config.owner.eq_ignore_ascii_case(owner)
+                    && repo.config.name.eq_ignore_ascii_case(name),
+            ),
+            Self::Organization(org) => Truth::from_bool(repo.organization.is_some_and(|id| {
+                repo.config.owner.eq_ignore_ascii_case(org)
+                    || Uuid::parse_str(org).is_ok_and(|expected| expected == id)
+            })),
+            _ => Truth::Unknown,
+        }
+    }
+
+    pub(super) fn file_fact(&self, path: &[u8], display: &str, repo: Truth) -> Truth {
+        match self {
+            Self::Language(language) => Truth::from_bool(language.matches(path)),
+            Self::Path(matcher)
+            | Self::Text {
+                kind: Kind::Path,
+                matcher,
+                ..
+            } => Truth::from_bool(matcher.is_match(display)),
+            Self::Text {
+                kind: Kind::Any,
+                matcher,
+                ..
+            } if matcher.is_match(display) => Truth::Yes,
+            Self::Text {
+                kind: Kind::Symbol, ..
+            } if Syntax::for_path(path).is_none() => Truth::No,
+            _ => repo,
+        }
+    }
+
+    pub(super) fn uses_text(&self) -> bool {
+        matches!(self, Self::Text { kind, .. } if *kind != Kind::Path)
+    }
+
+    pub(super) fn uses_symbols(&self) -> bool {
+        matches!(
+            self,
+            Self::Text {
+                kind: Kind::Symbol,
+                ..
+            }
+        )
+    }
 }
 
-fn single<T>(slot: &mut Option<T>, value: T) -> Result<(), ApiError> {
-    if slot.is_some() {
-        return Err(ApiError::Input(
-            "Use one value per code search qualifier, except path:",
-        ));
+struct Parser<'a> {
+    tokens: std::iter::Peekable<std::vec::IntoIter<&'a str>>,
+    kind: Kind,
+    case_sensitive: bool,
+    leaves: Vec<Predicate>,
+    bounded: bool,
+}
+
+fn invalid_query() -> ApiError {
+    ApiError::Input("Enter a term after AND, OR, or NOT and close each parenthesized group")
+}
+
+impl Parser<'_> {
+    fn or(&mut self, depth: usize) -> Result<Node, ApiError> {
+        let mut first = self.and(depth)?;
+        if self.tokens.next_if_eq(&"OR").is_some() {
+            self.bounded = true;
+            let mut children = vec![first, self.and(depth)?];
+            while self.tokens.next_if_eq(&"OR").is_some() {
+                children.push(self.and(depth)?);
+            }
+            first = Node::Any(children);
+        }
+        Ok(first)
     }
-    *slot = Some(value);
-    Ok(())
+
+    fn and(&mut self, depth: usize) -> Result<Node, ApiError> {
+        let mut first = self.unary(depth)?;
+        if self
+            .tokens
+            .peek()
+            .is_some_and(|token| !matches!(*token, "OR" | ")"))
+        {
+            self.bounded = true;
+            let mut children = vec![first];
+            while self
+                .tokens
+                .peek()
+                .is_some_and(|token| !matches!(*token, "OR" | ")"))
+            {
+                self.tokens.next_if_eq(&"AND");
+                children.push(self.unary(depth)?);
+            }
+            first = Node::All(children);
+        }
+        Ok(first)
+    }
+
+    fn unary(&mut self, depth: usize) -> Result<Node, ApiError> {
+        if depth > MAX_DEPTH || self.leaves.len() == MAX_TERMS {
+            return Err(ApiError::Input(
+                "Limit code search to 24 terms and 12 nested operators",
+            ));
+        }
+        match self.tokens.next() {
+            Some("NOT") => {
+                self.bounded = true;
+                Ok(Node::Not(Box::new(self.unary(depth + 1)?)))
+            }
+            Some("(") => {
+                let node = self.or(depth + 1)?;
+                self.tokens.next_if_eq(&")").ok_or_else(invalid_query)?;
+                Ok(node)
+            }
+            Some(token) if !matches!(token, "AND" | "OR" | ")") => {
+                let (predicate, expression) =
+                    Predicate::parse(token, self.kind, self.case_sensitive)?;
+                let term = self.leaves.len();
+                self.leaves.push(predicate);
+                self.bounded |= expression;
+                Ok(Node::Term(term))
+            }
+            _ => Err(invalid_query()),
+        }
+    }
 }
 
 fn path_segment(value: &str) -> bool {
@@ -163,7 +391,21 @@ fn path_segment(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }
 
+fn token_boundary(character: char) -> bool {
+    character.is_whitespace() || matches!(character, '(' | ')')
+}
+
 fn word_end(value: &str) -> usize {
+    if value.starts_with(['(', ')']) {
+        return 1;
+    }
+    let prefix = ["path:", "content:", "symbol:"]
+        .iter()
+        .find(|prefix| value.starts_with(**prefix))
+        .map_or(0, |prefix| prefix.len());
+    if let Some(end) = regex_end(&value[prefix..]) {
+        return prefix + end;
+    }
     let mut quoted = false;
     let mut characters = value.char_indices().peekable();
     while let Some((index, character)) = characters.next() {
@@ -172,11 +414,36 @@ fn word_end(value: &str) -> usize {
                 characters.next();
             }
             '"' => quoted = !quoted,
-            character if !quoted && character.is_whitespace() => return index,
+            character if !quoted && token_boundary(character) => return index,
             _ => {}
         }
     }
     value.len()
+}
+
+fn regex_end(value: &str) -> Option<usize> {
+    let mut characters = value.strip_prefix('/')?.char_indices();
+    while let Some((index, character)) = characters.next() {
+        match character {
+            '\\' => {
+                characters.next();
+            }
+            '/' => {
+                let end = index + 2;
+                return value[end..]
+                    .chars()
+                    .next()
+                    .is_none_or(token_boundary)
+                    .then_some(end);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn regex_inner(value: &str) -> Option<&str> {
+    (regex_end(value)? == value.len()).then(|| &value[1..value.len() - 1])
 }
 
 fn quoted_inner(value: &str) -> Option<&str> {
@@ -240,12 +507,13 @@ fn path_matcher(value: &str, quoted: bool) -> Result<Regex, ApiError> {
     }
     RegexBuilder::new(&pattern)
         .case_insensitive(true)
+        .dot_matches_new_line(true)
         .build()
         .map_err(|_| ApiError::Input("Invalid path: filter"))
 }
 
 #[derive(Clone, Copy)]
-enum Language {
+pub(super) enum Language {
     Parsed(Syntax),
     Extensions(&'static [&'static [u8]]),
 }

@@ -89,6 +89,7 @@ struct ReleaseAsset {
     created_at: u64,
 }
 
+mod notes;
 mod storage;
 
 #[derive(Deserialize)]
@@ -161,6 +162,10 @@ pub(crate) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .route("/api/repos/{owner}/{name}/releases", get(list).post(create))
         .route(
+            "/api/repos/{owner}/{name}/releases/generate-notes",
+            get(notes::generate),
+        )
+        .route(
             "/api/repos/{owner}/{name}/releases/tag/{*tag}",
             get(detail_by_tag),
         )
@@ -193,6 +198,15 @@ fn tag_name(value: &str) -> Result<(String, String)> {
     crab_git::validate_push_refname(&reference)
         .map_err(|_| Error::Invalid("Enter a valid tag name"))?;
     Ok((value.to_owned(), reference))
+}
+
+fn target_oid(value: &str) -> Result<ObjectId> {
+    ObjectId::from_hex(value.as_bytes())
+        .ok()
+        .filter(|oid| oid.kind() == gix_hash::Kind::Sha1 && !oid.is_null())
+        .ok_or(Error::Invalid(
+            "Release target must be a full SHA-1 commit ID",
+        ))
 }
 
 fn asset_name(value: &str) -> Result<String> {
@@ -360,12 +374,7 @@ async fn create(
     let (tag_name, reference) = tag_name(&input.tag_name)?;
     let title = app::title(&input.title)?;
     app::body(&input.body, false)?;
-    let target = ObjectId::from_hex(input.target_oid.as_bytes())
-        .ok()
-        .filter(|oid| oid.kind() == gix_hash::Kind::Sha1 && !oid.is_null())
-        .ok_or(Error::Invalid(
-            "Release target must be a full SHA-1 commit ID",
-        ))?;
+    let target = target_oid(&input.target_oid)?;
     let target_oid = statuses::require_commit(&server, repo, target).await?;
     current_tag(&server, repo, &reference, target).await?;
     let actor = app::actor(&principal)?;

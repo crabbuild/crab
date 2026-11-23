@@ -78,6 +78,10 @@ pub(crate) enum Decision {
 }
 
 impl Offer {
+    pub(crate) fn created_at_ms(&self) -> i64 {
+        self.expires_at_ms.saturating_sub(LIFETIME_MS)
+    }
+
     pub(crate) fn available(&self, record: &CatalogRecord, now_ms: i64) -> bool {
         self.state == State::Pending
             && self.expires_at_ms > now_ms

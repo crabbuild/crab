@@ -115,6 +115,12 @@ pub(crate) fn definitions(
     source: &str,
     cancel: &CancellationToken,
 ) -> Option<Vec<Definition>> {
+    if cancel.is_cancelled() {
+        return None;
+    }
+    // Compiling the bundled grammar on first use is shared setup. Waiting for
+    // it must not consume a file's parsing budget on a cold process.
+    let grammar = syntax.grammar()?;
     // Parsing untrusted source is bounded separately from object reads.
     let deadline = Instant::now() + Duration::from_millis(150);
     let stopped = || cancel.is_cancelled() || Instant::now() >= deadline;
@@ -129,7 +135,6 @@ pub(crate) fn definitions(
         return None;
     }
 
-    let grammar = syntax.grammar()?;
     let mut parser = Parser::new();
     parser.set_language(&grammar.language).ok()?;
     let bytes = source.as_bytes();
