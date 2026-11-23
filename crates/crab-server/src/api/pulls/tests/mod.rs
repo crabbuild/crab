@@ -9,6 +9,12 @@ use axum::http::StatusCode;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
+mod auto_merge;
+mod branch_update;
+mod candidate;
+mod retarget;
+mod strict_head;
+
 async fn json_request(
     client: &reqwest::Client,
     method: reqwest::Method,
@@ -25,6 +31,158 @@ async fn json_request(
     let status = response.status();
     let value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
     (status, value)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pull_preview_matches_git_and_creation_keeps_the_inspected_tips() {
+    let server = fixtures::fixture().await;
+    server
+        .cells()
+        .unwrap()
+        .initialize(crate::cells::Address::Directory)
+        .await
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let stop = CancellationToken::new();
+    let stopped = stop.clone();
+    let app = router(Arc::clone(&server));
+    let http = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(stopped.cancelled_owned())
+            .await
+            .unwrap();
+    });
+    let source = tempfile::tempdir().unwrap();
+    let path = source.path();
+    let git_url = format!("http://127.0.0.1:{port}/git/team/repo.git");
+    git::success(
+        path,
+        &["init", "--initial-branch=main", "--object-format=sha1", "."],
+    )
+    .await;
+    for _ in 0..5 {
+        git::success(path, &["commit", "--allow-empty", "-m", "Shared history"]).await;
+    }
+    git::success(path, &["commit", "--allow-empty", "-m", "common"]).await;
+    let common = git::success(path, &["rev-parse", "HEAD"]).await;
+    git::success(path, &["branch", "topic"]).await;
+    for (branch, file) in [("main", "base-only.txt"), ("topic", "topic-only.txt")] {
+        git::success(path, &["checkout", branch]).await;
+        std::fs::write(path.join(file), "content\n").unwrap();
+        git::success(path, &["add", file]).await;
+        git::success(path, &["commit", "-m", file]).await;
+        git::success(path, &["push", &git_url, branch]).await;
+    }
+    {
+        use crab_remote_git::{OperationKind, OperationLimits, RepositoryOptions, Revision};
+        let repo = server.repositories.values()[0]
+            .open_current(&server, RepositoryOptions::default(), &server.cancellation)
+            .await
+            .unwrap();
+        let limits = OperationLimits {
+            max_history_commits: 3,
+            ..OperationLimits::default()
+        };
+        let operation = repo
+            .operation_with_limits(OperationKind::Compare, &server.cancellation, limits)
+            .await
+            .unwrap();
+        let base = repo
+            .snapshot(&Revision::parse("refs/heads/main").unwrap(), &operation)
+            .await
+            .unwrap();
+        let head = repo
+            .snapshot(&Revision::parse("refs/heads/topic").unwrap(), &operation)
+            .await
+            .unwrap();
+        let bases = head.merge_bases(&base, &operation).await;
+        let bases = operation.finish(bases).await.unwrap();
+        assert_eq!(
+            bases,
+            vec![gix_hash::ObjectId::from_hex(common.as_bytes()).unwrap()]
+        );
+    }
+    let root = format!("http://127.0.0.1:{port}/api/repos/team/repo");
+    let client = reqwest::Client::builder()
+        .default_headers(reqwest::header::HeaderMap::from_iter([(
+            reqwest::header::HeaderName::from_static("x-crab-repository-id"),
+            server.repositories.values()[0]
+                .id
+                .to_string()
+                .parse()
+                .unwrap(),
+        )]))
+        .build()
+        .unwrap();
+    let preview_url =
+        format!("{root}/changes?rev=refs/heads/topic&base=refs/heads/main&merge_base=true");
+    let preview: Value = client
+        .get(&preview_url)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let paths = preview["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| file["path"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paths.join("\n"),
+        git::success(path, &["diff", "--name-only", "main...topic"]).await
+    );
+    assert_eq!(preview["base"], common);
+    assert_eq!(
+        preview["base_tip"],
+        git::success(path, &["rev-parse", "main"]).await
+    );
+
+    let pulls = format!("{root}/pulls");
+    let mut input = json!({
+        "request_id": uuid::Uuid::now_v7(), "title":"Exact comparison", "body":"",
+        "base_ref":"refs/heads/main", "head_ref":"refs/heads/topic",
+        "expected": {"base_oid":preview["base_tip"], "head_oid":preview["commit"]},
+    });
+    git::success(path, &["commit", "--allow-empty", "-m", "topic moves"]).await;
+    let updated = git::success(path, &["rev-parse", "HEAD"]).await;
+    git::success(path, &["push", &git_url, "topic"]).await;
+    let (status, body) = json_request(&client, reqwest::Method::POST, &pulls, input.clone()).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"]["code"], "comparison_changed");
+    assert_eq!(
+        json_request(&client, reqwest::Method::POST, &pulls, input.clone())
+            .await
+            .1,
+        body
+    );
+
+    input["request_id"] = json!(uuid::Uuid::now_v7());
+    input["expected"]["head_oid"] = json!(updated);
+    let (status, pull) = json_request(&client, reqwest::Method::POST, &pulls, input.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{pull}");
+    assert_eq!(pull["number"], 1);
+    assert_eq!(pull["original_head_oid"], updated);
+    git::success(
+        path,
+        &["commit", "--allow-empty", "-m", "topic moves again"],
+    )
+    .await;
+    git::success(path, &["push", &git_url, "topic"]).await;
+    let (status, replay) = json_request(&client, reqwest::Method::POST, &pulls, input).await;
+    assert_eq!(status, StatusCode::CREATED, "{replay}");
+    assert_eq!(replay["number"], 1);
+    assert_eq!(replay["original_head_oid"], updated);
+
+    stop.cancel();
+    http.await.unwrap();
+    server.cancellation.cancel();
+    server.shutdown_runtimes().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -423,7 +581,12 @@ async fn pull_request_merge_methods_use_canonical_ref_publication() {
     repository.config.protected_branches = vec![crate::BranchProtection {
         branch: "main".into(),
         required_approvals: 0,
+        required_code_owner_reviews: false,
+        require_conversation_resolution: false,
+        require_up_to_date: false,
+        require_merge_queue: false,
         required_checks: vec![],
+        required_integrations: vec![],
     }];
     let stop = CancellationToken::new();
     let stopped = stop.clone();
@@ -864,3 +1027,4 @@ async fn pull_request_merge_methods_use_canonical_ref_publication() {
 }
 
 mod http;
+mod merge_methods;

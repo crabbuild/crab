@@ -78,25 +78,25 @@ async fn committed_mentions_deliver_once_and_inbox_hides_revoked_repository() {
     assert_eq!(notice["title"], "Review the contribution");
     assert_eq!(
         notice["repository"],
-        json!({"owner":"team","name":"private"})
+        json!({"id":repo.id,"owner":"team","name":"private"})
     );
     assert_eq!(
         notice["href"],
         format!("/team/private/issues/{number}?repository_id={}", repo.id)
     );
-    let path = format!("{INBOX}/{}/read", notice["id"].as_str().unwrap());
+    let path = format!("{INBOX}/{}/state", notice["id"].as_str().unwrap());
     h.write(
         Method::PUT,
         &path,
         &bob,
-        json!({"created_at_ms":notice["created_at_ms"]}),
+        json!({"repository_id":repo.id,"expected":notice["updated"],"action":{"read":true}}),
     )
     .await
     .error_for_status()
     .unwrap();
 
     // Another envelope replays the permanent issue creation. Changing prose
-    // and adding a picker link to the same actor must preserve the read notice.
+    // and adding a picker link update the same conversation with its original reason.
     assert_eq!(issue(&h, &alice, input).await["number"], number);
     h.write(
         Method::PATCH,
@@ -108,12 +108,14 @@ async fn committed_mentions_deliver_once_and_inbox_hides_revoked_repository() {
     .error_for_status()
     .unwrap();
     super::drain_repository(&h.server, repo).await.unwrap();
-    let inbox = h.json(INBOX, &bob).await;
+    let mentions = format!("{INBOX}?reason=mention");
+    let inbox = h.json(&mentions, &bob).await;
     let [current] = inbox["items"].as_array().unwrap().as_slice() else {
-        panic!("replay and equivalent mention spellings must not add a notice")
+        panic!("replay and equivalent mention spellings must not add a mention")
     };
     assert_eq!(current["id"], notice["id"]);
-    assert_eq!(current["read"], true);
+    assert_eq!(current["read"], false);
+    assert_ne!(current["updated"], notice["updated"]);
     assert_eq!(h.json(INBOX, &alice).await["items"], json!([]));
 
     let mut members = repo.config.members.clone();
@@ -245,20 +247,36 @@ async fn team_notifications(group_only: bool) {
         let item = items.iter().find(|item| item["title"] == title).unwrap();
         assert_eq!(item["reason"], reason);
     }
+    let preference = format!("{ISSUES}/1/subscription");
+    let expected = if group_only {
+        json!({"mode":"inherit","version":0})
+    } else {
+        json!({"mode":"follow","version":1})
+    };
+    assert_eq!(h.json(&preference, &bob).await, expected);
     assert_eq!(h.json(INBOX, &alice).await["items"], json!([]));
     if group_only {
         assert_eq!(h.json(UNREAD, &bob).await, json!({"unread":true}));
         let item = &items[0];
         h.write(
             Method::PUT,
-            &format!("{INBOX}/{}/read", item["id"].as_str().unwrap()),
+            &format!("{INBOX}/{}/state", item["id"].as_str().unwrap()),
             &bob,
-            json!({"created_at_ms":item["created_at_ms"]}),
+            json!({"repository_id":repo.id,"expected":item["updated"],"action":{"read":true}}),
         )
         .await
         .error_for_status()
         .unwrap();
         assert_eq!(h.json(INBOX, &bob).await["items"][0]["read"], true);
+        issue(
+            &h, &alice,
+            json!({"request_id":Uuid::now_v7(),"title":"Signed access","body":"@bob can you confirm?"}),
+        ).await;
+        super::drain_repository(&h.server, repo).await.unwrap();
+        assert_eq!(
+            h.json(&format!("{ISSUES}/4/subscription"), &bob).await,
+            json!({"mode":"follow","version":1})
+        );
         h.provider.claims.lock().await.remove("groups");
         let without_claim = h.login().await;
         assert_eq!(

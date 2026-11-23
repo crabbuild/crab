@@ -22,8 +22,8 @@ use crate::{
 
 pub(crate) fn routes() -> Router<Arc<Server>> {
     Router::new()
-        .merge(team_access::routes())
         .route("/api/repos/{owner}/{name}/members", get(list).put(replace))
+        .merge(team_access::routes())
         .layer(axum::extract::DefaultBodyLimit::max(256 * 1024))
 }
 
@@ -51,6 +51,22 @@ fn error(status: StatusCode, code: &'static str, message: &'static str) -> Respo
 
 fn boxed_error(status: StatusCode, code: &'static str, message: &'static str) -> Box<Response> {
     Box::new(error(status, code, message))
+}
+
+fn membership_error(failure: app::Error) -> Box<Response> {
+    if matches!(failure, app::Error::NotFound) {
+        boxed_error(
+            StatusCode::NOT_FOUND,
+            "repository_not_found",
+            "Repository not found.",
+        )
+    } else {
+        boxed_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "membership_unavailable",
+            "Membership is temporarily unavailable.",
+        )
+    }
 }
 
 async fn authorized(
@@ -103,32 +119,17 @@ async fn authorized(
                 "Repository not found.",
             )
         })?;
-    let config = record
-        .runtime_config(catalog.root(), &active.config.default_branch)
-        .map_err(|_| {
-            boxed_error(
-                StatusCode::NOT_FOUND,
-                "repository_not_found",
-                "Repository not found.",
-            )
-        })?;
-    if active.id != record.id {
-        return Err(boxed_error(
-            StatusCode::NOT_FOUND,
-            "repository_not_found",
-            "Repository not found.",
-        ));
-    }
-    let current = app::resolve_repository_membership(
+    let current = app::membership_snapshot(
         server,
         principal,
-        record.id,
-        &config,
-        record.organization.as_ref(),
+        &active,
+        document
+            .membership_snapshot(record)
+            .map_err(|error| membership_error(app::Error::Membership(Box::new(error))))?,
     )
     .await
-    .map_err(|error| Box::new(error.into_response()))?;
-    if !current.can_admin(record.id) {
+    .map_err(membership_error)?;
+    if !current.principal.can_admin(record.id) {
         return Err(boxed_error(
             StatusCode::NOT_FOUND,
             "repository_not_found",
@@ -147,23 +148,27 @@ async fn list(
         Ok(value) => value,
         Err(response) => return *response,
     };
-    let record = document.repositories.into_iter().find(|record| {
+    let record = document.repositories.iter().find(|record| {
         record.owner.eq_ignore_ascii_case(&owner) && record.name.eq_ignore_ascii_case(&name)
     });
-    match record {
-        Some(record) => Json(MembershipState {
+    match record
+        .map(|record| document.membership_snapshot(record))
+        .transpose()
+    {
+        Ok(Some(snapshot)) => Json(MembershipState {
             revision: document.version,
-            members: record.members,
-            groups: record.groups,
+            members: snapshot.members,
+            groups: snapshot.groups,
             can_admin: true,
             groups_supported: groups_supported(&server),
         })
         .into_response(),
-        None => error(
+        Ok(None) => error(
             StatusCode::NOT_FOUND,
             "repository_not_found",
             "Repository not found.",
         ),
+        Err(error) => *membership_error(app::Error::Membership(Box::new(error))),
     }
 }
 
@@ -177,6 +182,17 @@ async fn replace(
         Ok(value) => value,
         Err(response) => return *response,
     };
+    if document.repositories.iter().any(|record| {
+        record.owner.eq_ignore_ascii_case(&owner)
+            && record.name.eq_ignore_ascii_case(&name)
+            && record.forked_from.is_some()
+    }) {
+        return error(
+            StatusCode::FORBIDDEN,
+            "fork_access_inherited",
+            "Manage fork access on the source repository.",
+        );
+    }
     let input = match input {
         Ok(Json(input)) => input,
         Err(_) => {
@@ -227,35 +243,31 @@ async fn replace(
         .await
     {
         Ok(record) => {
-            let config = match record.runtime_config(catalog.root(), "main") {
-                Ok(config) => config,
-                Err(_) => {
-                    return error(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "membership_unavailable",
-                        "Membership is temporarily unavailable.",
-                    );
-                }
+            let Some(active) = server
+                .repositories
+                .get(&(record.owner.clone(), record.name.clone()))
+            else {
+                return *membership_error(app::Error::NotFound);
             };
-            let can_admin = match app::resolve_repository_membership(
+            let revision = if old.as_ref() == Some(&(record.members.clone(), record.groups.clone()))
+            {
+                document.version
+            } else {
+                document.version + 1
+            };
+            let can_admin = match app::membership_snapshot(
                 &server,
                 &principal,
-                record.id,
-                &config,
-                record.organization.as_ref(),
+                &active,
+                record.access_snapshot(revision, &record),
             )
             .await
             {
-                Ok(current) => current.can_admin(record.id),
-                Err(error) => return error.into_response(),
+                Ok(current) => current.principal.can_admin(record.id),
+                Err(error) => return *membership_error(error),
             };
             Json(MembershipState {
-                revision: if old.as_ref() == Some(&(record.members.clone(), record.groups.clone()))
-                {
-                    document.version
-                } else {
-                    document.version + 1
-                },
+                revision,
                 members: record.members,
                 groups: record.groups,
                 can_admin,

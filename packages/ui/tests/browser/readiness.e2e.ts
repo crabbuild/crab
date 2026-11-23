@@ -7,7 +7,11 @@ import {
   selectDarkTheme,
 } from "./accessibility";
 
-async function setup(page: Page, initialDraft: boolean) {
+async function setup(
+  page: Page,
+  initialDraft: boolean,
+  withCodeOwners = false,
+) {
   let draft = initialDraft;
   let version = 1;
   let title = "Draft proposal";
@@ -18,6 +22,7 @@ async function setup(page: Page, initialDraft: boolean) {
   let pending = false;
   let published = false;
   let merged = false;
+  let codeOwnersRequested = false;
   const unexpected: string[] = [];
   const writes: Array<{ version: number; draft: boolean }> = [];
   const base = "a".repeat(40),
@@ -72,6 +77,7 @@ async function setup(page: Page, initialDraft: boolean) {
         }
       : null,
     reactions: emptyReactions(),
+    merge_methods: ["merge_commit", "squash", "rebase", "fast_forward"],
     merge_requirements: {
       protected: false,
       required_approvals: 0,
@@ -136,7 +142,9 @@ async function setup(page: Page, initialDraft: boolean) {
         },
       });
     if (path.endsWith("/changes"))
-      return route.fulfill({ json: { base, commit: head, changes: [] } });
+      return route.fulfill({
+        json: { base, base_tip: base, commit: head, changes: [] },
+      });
     if (path.endsWith("/merge")) {
       expect(request.method()).toBe("POST");
       expect(archived && pending).toBe(true);
@@ -185,6 +193,17 @@ async function setup(page: Page, initialDraft: boolean) {
         action: { kind: draft ? "drafted" : "ready_for_review" },
         created_at: 1700000000000,
       });
+      if (withCodeOwners && !draft && !codeOwnersRequested) {
+        codeOwnersRequested = true;
+        events.unshift({
+          number: 100 + version,
+          target: { kind: "pull", number: 1 },
+          title,
+          actor: { name: "Alice", profile: null },
+          action: { kind: "code_owner_reviews_requested" },
+          created_at: 1700000000000,
+        });
+      }
       return route.fulfill({ json: pull() });
     }
     if (path.endsWith("/pulls")) {
@@ -193,8 +212,10 @@ async function setup(page: Page, initialDraft: boolean) {
           title: string;
           body: string;
           draft: boolean;
+          expected: { base_oid: string; head_oid: string };
         };
         expect(input.draft).toBe(true);
+        expect(input.expected).toEqual({ base_oid: base, head_oid: head });
         draft = input.draft;
         title = input.title;
         body = input.body;
@@ -233,7 +254,38 @@ async function setup(page: Page, initialDraft: boolean) {
     if (path.endsWith("/activity"))
       return route.fulfill({ json: { items: events, next: null } });
     if (path.endsWith("/reviewers"))
-      return route.fulfill({ json: emptyReviewers() });
+      return route.fulfill({
+        json: codeOwnersRequested
+          ? {
+              ...emptyReviewers(),
+              version,
+              items: [
+                {
+                  id: "b".repeat(64),
+                  reviewer: { name: "Bob", profile: null },
+                  candidate_id: "01900000-0000-7000-8000-000000000002",
+                  request: {
+                    id: "b".repeat(64),
+                    requested_by: { name: "Alice", profile: null },
+                    state: { kind: "requested" },
+                    code_owner: true,
+                  },
+                  review: null,
+                  decision: null,
+                },
+              ],
+              teams: [
+                {
+                  id: "01900000-0000-7000-8000-000000000003",
+                  name: "Release Engineering",
+                  state: { kind: "requested" },
+                  can_request: true,
+                  code_owner: true,
+                },
+              ],
+            }
+          : emptyReviewers(),
+      });
     if (path.endsWith("/links"))
       return route.fulfill({
         json: { items: [], next: null, can_manage: false },
@@ -270,6 +322,43 @@ async function setup(page: Page, initialDraft: boolean) {
     writes,
   };
 }
+
+test("marking ready shows the saved automatic code owner requests and activity", async ({
+  page,
+}) => {
+  const state = await setup(page, true, true);
+  await page.goto("/team/project/pull/1");
+  const reviewers = page.getByRole("region", {
+    name: "Reviewers",
+    exact: true,
+  });
+  await expect(reviewers.getByText("No reviews yet.")).toBeVisible();
+  await page
+    .getByRole("button", { name: "Mark ready for review", exact: true })
+    .click();
+  await expect(
+    reviewers.getByText("Code owner review requested", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    reviewers.getByText("Team code owner review requested", { exact: true }),
+  ).toBeVisible();
+  const history = page.getByRole("region", {
+    name: "Conversation history",
+    exact: true,
+  });
+  await expect(
+    history.getByText("requested code owner reviews on", { exact: false }),
+  ).toHaveCount(1);
+  await page.reload();
+  await expect(
+    reviewers.getByText("Release Engineering", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    history.getByText("requested code owner reviews on", { exact: false }),
+  ).toHaveCount(1);
+  expect(state.writes).toEqual([{ version: 1, draft: false }]);
+  expect(state.unexpected).toEqual([]);
+});
 
 test("draft creation, reload, readiness and conversion expose truthful merge controls", async ({
   page,

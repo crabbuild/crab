@@ -36,7 +36,12 @@ enum GitTokenAccess {
 }
 
 impl Authentication {
-    pub(crate) async fn git_principal(&self, headers: &HeaderMap) -> Principal {
+    pub(crate) async fn git_principal(
+        &self,
+        server: &Server,
+        headers: &HeaderMap,
+        git_transport: bool,
+    ) -> Principal {
         let Some(header) = headers
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
@@ -59,6 +64,14 @@ impl Authentication {
         else {
             return Principal::anonymous();
         };
+        if super::deploy_tokens::recognizes(token) {
+            if git_transport {
+                return super::deploy_tokens::verify(server, token)
+                    .await
+                    .unwrap_or_else(Principal::anonymous);
+            }
+            return Principal::anonymous();
+        }
         self.load_git_token(key(token))
             .await
             .map(Principal::git)
@@ -84,13 +97,9 @@ impl Authentication {
                 .await;
             return None;
         }
-        let Some(session) = self.load_session(record.session_key).await else {
-            let _ = state
-                .store
-                .delete(&state.path("git-tokens", &token_key))
-                .await;
-            return None;
-        };
+        let session = self
+            .load_session_scoped(record.session_key, Some(token_key))
+            .await?;
         let token = Arc::new(GitToken {
             repository_id: record.repository_id,
             session,
@@ -229,24 +238,24 @@ impl Authentication {
             }
         }
         let token_keys = token_keys.ok_or(AuthError::Busy)?;
-        for token_key in token_keys {
-            match state
-                .store
-                .delete(&state.path("git-tokens", &token_key))
-                .await
-            {
-                Ok(()) | Err(StorageError::NotFound { .. }) => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
-        self.git_tokens.lock().await.retain(|_, token| {
-            if token.session.session_key == session.session_key {
+        self.git_tokens.lock().await.retain(|key, token| {
+            if token_keys.contains(key) {
                 token.revoked.store(true, Ordering::Release);
                 false
             } else {
                 true
             }
         });
+        for token_key in token_keys {
+            if state
+                .delete_if_present(&state.path("git-tokens", &token_key))
+                .await
+                .is_err()
+            {
+                // The detachment already denies use. Auth-state expiration collects abandoned records.
+                tracing::warn!("could not clean up a revoked Git token object");
+            }
+        }
         Ok(())
     }
 }

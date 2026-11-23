@@ -138,7 +138,8 @@ async fn state_and_content_changes_are_ordered_and_rejected_or_noop_edits_emit_n
             (
                 3,
                 Action::IssueClosed {
-                    reason: crate::cells::repository::issues::lifecycle::Reason::Completed
+                    reason: crate::cells::repository::issues::lifecycle::Reason::Completed,
+                    pull: None,
                 }
             ),
             (2, Action::Updated),
@@ -344,6 +345,7 @@ async fn review_threads_replies_and_merge_completion_record_their_actual_targets
     write::<CreatePull>(
         &cell,
         CreatePullInput {
+            code_owner_requests: Default::default(),
             metadata: Default::default(),
             draft: false,
             submission_id: *Uuid::now_v7().as_bytes(),
@@ -352,6 +354,7 @@ async fn review_threads_replies_and_merge_completion_record_their_actual_targets
             body: String::new(),
             base_ref: "refs/heads/main".into(),
             head_ref: "refs/heads/feature".into(),
+            head_repository: None,
             base_oid: "a".repeat(40),
             head_oid: "b".repeat(40),
         },
@@ -370,6 +373,8 @@ async fn review_threads_replies_and_merge_completion_record_their_actual_targets
     write::<CreatePullReview>(
         &cell,
         CreatePullReviewInput {
+            base_revision: None,
+            review_teams: Vec::new(),
             pull: 1,
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor("Bob"),
@@ -439,6 +444,9 @@ async fn review_threads_replies_and_merge_completion_record_their_actual_targets
         commit_oid: pull.head_oid,
         message: String::new(),
         created_at_ms: u64::try_from(crate::cells::unix_now_ms().unwrap()).unwrap(),
+        publication_plan: None,
+        bypass_rulesets: Vec::new(),
+        tested_candidate: false,
     };
     write::<ReservePullMerge>(
         &cell,

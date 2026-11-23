@@ -4,25 +4,30 @@ use std::{
     time::Duration,
 };
 
+use futures_util::{StreamExt, TryStreamExt, stream};
 use uuid::Uuid;
 
 use super::Server;
 use crate::{
+    RepositoryGroup,
     app::{self, Error, Result},
     catalog::MembershipSnapshot,
     cells::{
         self, Address, CellClient,
         directory::{
-            AccountsExist, IdentityKey, LookupAccounts,
+            IdentityKey, LookupAccounts, LookupIdentities, RegisterAccounts,
             notifications::{
-                Access, Deliver, Delivery, HandlesAt, MAX_RECIPIENTS, Notice, Reason, Recipient,
-                ResolveHandlesAt,
+                Access, Deliver, Delivery, HandlesAt, MAX_RECIPIENTS, Notice, NoticeTarget, Reason,
+                Recipient, ReleaseKind, ResolveHandlesAt,
             },
         },
         organization::teams::{MentionMembers, MentionMembersInput, MentionRoster, Page},
         repository::collaboration::{
             mention_settings::{self, Settings},
-            mentions::{Acknowledge, Event, EventKey, Mention, Pending},
+            mentions::{
+                Acknowledge, Enroll, Enrollment, Event, EventKey, FollowSource, Mention, Pending,
+            },
+            watches,
         },
     },
     repository::Repository,
@@ -31,7 +36,10 @@ use crate::{
 const SWEEP_INTERVAL: Duration = Duration::from_secs(2);
 const SWEEP_BATCH: usize = 16;
 
-async fn current_grants(server: &Server, repo: &Repository) -> Result<Option<MembershipSnapshot>> {
+pub(super) async fn current_grants(
+    server: &Server,
+    repo: &Repository,
+) -> Result<Option<MembershipSnapshot>> {
     let Some(catalog) = server.catalog() else {
         return Ok(None);
     };
@@ -105,9 +113,11 @@ async fn raw_handles(client: &CellClient, event: &Event) -> Result<BTreeMap<Stri
 type TeamKey = (Uuid, Uuid);
 
 struct DeliveryScope {
+    issuer: String,
+    subjects: BTreeSet<String>,
     direct: BTreeSet<Uuid>,
     revision: u64,
-    group_access: bool,
+    groups: Vec<RepositoryGroup>,
 }
 
 async fn team_members(
@@ -206,110 +216,146 @@ fn expand(
     expanded
 }
 
-async fn deliver(
+impl DeliveryScope {
+    fn access(&self, actor: &IdentityKey) -> Option<Access> {
+        if actor.issuer != self.issuer {
+            None
+        } else if self.subjects.contains(&actor.subject) {
+            Some(Access::Direct)
+        } else {
+            (!self.groups.is_empty()).then_some(Access::Group)
+        }
+    }
+
+    async fn current(&self, server: &Server, repo: &Repository) -> Result<bool> {
+        let Some(fresh) = current_grants(server, repo).await? else {
+            return Ok(false);
+        };
+        if fresh.revision != self.revision {
+            // A roster change can move an account between inbox retention
+            // classes. Resolve the delivery again against the new grant.
+            return Err(Error::PageChanged);
+        }
+        Ok(true)
+    }
+}
+
+async fn publish(
+    server: &Server,
+    client: &CellClient,
+    notice: &Notice,
+    recipients: Vec<Recipient>,
+) -> Result<()> {
+    if recipients.is_empty() {
+        return Ok(());
+    }
+    // Directory deduplicates the event per account before acknowledging it.
+    app::command_output(
+        client
+            .command::<Deliver>(
+                Address::Directory,
+                app::mutation_identity()?,
+                Delivery {
+                    notice: notice.clone(),
+                    recipients,
+                    email: server.email.is_some(),
+                },
+            )
+            .await,
+    )?;
+    Ok(())
+}
+
+async fn watched_recipients(
+    client: &CellClient,
+    candidates: Vec<(IdentityKey, Access)>,
+    reason: Reason,
+) -> Result<Vec<Recipient>> {
+    let identities: Vec<_> = candidates
+        .iter()
+        .map(|(identity, _)| identity.clone())
+        .collect();
+    let ids = account_ids(client, &identities).await?;
+    let missing: Vec<_> = identities
+        .into_iter()
+        .zip(&ids)
+        .filter_map(|(identity, id)| id.is_none().then_some(identity))
+        .collect();
+    let count = missing.len();
+    // A qualified author can start watching before ever opening the inbox.
+    let fresh = if missing.is_empty() {
+        Vec::new()
+    } else {
+        app::command_output(
+            client
+                .command::<RegisterAccounts>(Address::Directory, app::mutation_identity()?, missing)
+                .await,
+        )?
+    };
+    if fresh.len() != count {
+        return Err(Error::CellContract(
+            "Notification account registration returned an invalid count",
+        ));
+    }
+    let mut fresh = fresh.into_iter();
+    candidates
+        .into_iter()
+        .zip(ids)
+        .map(|((_, access), id)| {
+            let actor = id
+                .or_else(|| fresh.next())
+                .ok_or(Error::CellContract("Watch account is missing"))?;
+            Ok(Recipient {
+                actor,
+                reason,
+                access,
+            })
+        })
+        .collect()
+}
+
+enum Progress {
+    Ready(Option<watches::Key>),
+    WaitingForFollow,
+}
+
+async fn enroll(
     server: &Server,
     repo: &Repository,
     client: &CellClient,
     scope: &DeliveryScope,
-    settings: &Settings,
-    event: &Event,
+    source: FollowSource,
+    candidates: Vec<(Recipient, IdentityKey)>,
 ) -> Result<()> {
-    let sender_key = IdentityKey {
-        issuer: event.actor.issuer.clone(),
-        subject: event.actor.subject.clone(),
-    };
-    let (handles, sender) = tokio::try_join!(
-        raw_handles(client, event),
-        account_ids(client, std::slice::from_ref(&sender_key)),
-    )?;
-    let sender = sender.into_iter().next().flatten();
-    let candidates: Vec<_> = scope.direct.iter().copied().collect();
-    let teams = team_members(
-        client,
-        event,
-        settings,
-        sender,
-        (!scope.group_access).then_some(candidates.as_slice()),
-    )
-    .await?;
-    let previous = expand(&event.previous, &handles, &teams);
-    let mut recipients = expand(&event.current, &handles, &teams);
-    recipients.retain(|actor, _| {
-        Some(*actor) != sender
-            && !previous.contains_key(actor)
-            && (scope.group_access || scope.direct.contains(actor))
-    });
-    if recipients.is_empty() {
-        return Ok(());
-    }
-    let Some(fresh) = current_grants(server, repo).await? else {
+    let Some(auth) = server.auth.as_ref() else {
         return Ok(());
     };
-    if fresh.revision != scope.revision {
-        // Expansion depends on whether there are group grants. Recompute after
-        // a roster edit so a candidate isn't assigned to the wrong collection.
-        return Err(Error::PageChanged);
-    }
-    let notice = Notice {
-        id: event.id,
-        repository: repo.id,
-        target: event.target,
-        created_at_ms: event.created_at_ms,
-        sender: event.actor.name.clone(),
-    };
-    // Every recipient/event key is idempotent in Directory. A failed batch or
-    // lost acknowledgement leaves this source event queued for another pass.
-    let recipients: Vec<_> = recipients.into_iter().collect();
-    for batch in recipients.chunks(MAX_RECIPIENTS) {
-        let candidates: Vec<_> = batch
-            .iter()
-            .filter_map(|(actor, _)| (!scope.direct.contains(actor)).then_some(*actor))
-            .collect();
-        let expected = candidates.len();
-        let existing = if candidates.is_empty() {
-            Vec::new()
-        } else {
-            app::query_output(
-                client
-                    .query::<AccountsExist>(Address::Directory, None, candidates)
-                    .await,
-            )?
-        };
-        if existing.len() != expected {
-            return Err(Error::CellContract(
-                "Notification recipient lookup returned an invalid count",
-            ));
-        }
-        let mut existing = existing.into_iter();
-        let recipients: Vec<_> = batch
-            .iter()
-            .filter_map(|&(actor, reason)| {
-                let access = if scope.direct.contains(&actor) {
-                    Access::Direct
-                } else if existing.next() == Some(true) {
-                    Access::Group
-                } else {
-                    return None;
-                };
-                Some(Recipient {
-                    actor,
-                    reason,
-                    access,
-                })
-            })
-            .collect();
-        if recipients.is_empty() {
-            continue;
-        }
+    // Group notices can be queued for offline readers. A durable follow
+    // requires current signed access evidence for those same accounts.
+    let enrolled: Vec<Option<IdentityKey>> = stream::iter(candidates)
+        .map(|(candidate, identity)| async move {
+            if candidate.access == Access::Direct
+                || auth
+                    .mention_group(&identity.subject, &scope.groups)
+                    .await?
+                    .is_some()
+            {
+                Ok::<_, Error>(Some(identity))
+            } else {
+                Ok(None)
+            }
+        })
+        .buffer_unordered(6)
+        .try_collect()
+        .await?;
+    let recipients: Vec<_> = enrolled.into_iter().flatten().collect();
+    if !recipients.is_empty() && scope.current(server, repo).await? {
         app::command_output(
             client
-                .command::<Deliver>(
-                    Address::Directory,
+                .command::<Enroll>(
+                    Address::Repository(repo.id),
                     app::mutation_identity()?,
-                    Delivery {
-                        notice: notice.clone(),
-                        recipients,
-                    },
+                    Enrollment { source, recipients },
                 )
                 .await,
         )?;
@@ -317,59 +363,312 @@ async fn deliver(
     Ok(())
 }
 
+async fn deliver(
+    server: &Server,
+    repo: &Repository,
+    client: &CellClient,
+    scope: &DeliveryScope,
+    settings: &Settings,
+    event: &Event,
+) -> Result<Progress> {
+    let notice = Notice {
+        id: event.id,
+        repository: repo.id,
+        target: event.target.into(),
+        created_at_ms: event.created_at_ms,
+        sender: event.actor.name.clone(),
+    };
+    if let Some(watch) = event.watch {
+        let Some(page) = app::query_output(
+            client
+                .query::<watches::ListWatchers>(
+                    Address::Repository(repo.id),
+                    None,
+                    watches::Query {
+                        subject: event.target.subject(),
+                        activity: event.version,
+                        before: watch.before,
+                    },
+                )
+                .await,
+        )?
+        else {
+            return Ok(Progress::WaitingForFollow);
+        };
+        let candidates: Vec<_> = page
+            .recipients
+            .into_iter()
+            .filter_map(|actor| scope.access(&actor).map(|access| (actor, access)))
+            .collect();
+        if !candidates.is_empty() && scope.current(server, repo).await? {
+            publish(
+                server,
+                client,
+                &notice,
+                watched_recipients(client, candidates, Reason::Subscribed).await?,
+            )
+            .await?;
+        }
+        return Ok(Progress::Ready(page.next));
+    }
+    let sender_key = IdentityKey {
+        issuer: event.actor.issuer.clone(),
+        subject: event.actor.subject.clone(),
+    };
+    let recipients: BTreeMap<_, _> = if !event.assignees.is_empty() {
+        let sender = account_ids(client, std::slice::from_ref(&sender_key))
+            .await?
+            .into_iter()
+            .next()
+            .flatten();
+        event
+            .assignees
+            .iter()
+            .copied()
+            .filter(|id| Some(*id) != sender)
+            .map(|id| (id, Reason::Assigned))
+            .collect()
+    } else if event.reviewers.is_empty() {
+        let (handles, sender) = tokio::try_join!(
+            raw_handles(client, event),
+            account_ids(client, std::slice::from_ref(&sender_key)),
+        )?;
+        let sender = sender.into_iter().next().flatten();
+        let candidates: Vec<_> = scope.direct.iter().copied().collect();
+        let teams = team_members(
+            client,
+            event,
+            settings,
+            sender,
+            scope.groups.is_empty().then_some(candidates.as_slice()),
+        )
+        .await?;
+        let previous = expand(&event.previous, &handles, &teams);
+        let mut recipients = expand(&event.current, &handles, &teams);
+        recipients.retain(|actor, _| Some(*actor) != sender && !previous.contains_key(actor));
+        recipients
+    } else {
+        account_ids(client, &event.reviewers)
+            .await?
+            .into_iter()
+            .flatten()
+            .map(|id| (id, Reason::ReviewRequested))
+            .collect()
+    };
+    if recipients.is_empty() || !scope.current(server, repo).await? {
+        return Ok(Progress::Ready(None));
+    }
+    let recipients: Vec<_> = recipients.into_iter().collect();
+    for batch in recipients.chunks(MAX_RECIPIENTS) {
+        let identities = app::query_output(
+            client
+                .query::<LookupIdentities>(
+                    Address::Directory,
+                    None,
+                    batch.iter().map(|(actor, _)| *actor).collect(),
+                )
+                .await,
+        )?;
+        if identities.len() != batch.len() {
+            return Err(Error::CellContract(
+                "Notification recipient lookup returned an invalid count",
+            ));
+        }
+        let mut candidates = Vec::new();
+        let mut qualified = Vec::new();
+        for (&(actor, reason), identity) in batch.iter().zip(identities) {
+            if let Some(identity) = identity
+                && let Some(access) = scope.access(&identity)
+            {
+                candidates.push(Recipient {
+                    actor,
+                    reason,
+                    access,
+                });
+                qualified.push(identity);
+            }
+        }
+        if candidates.is_empty() {
+            continue;
+        }
+        let unmuted = app::query_output(
+            client
+                .query::<watches::Unmuted>(Address::Repository(repo.id), None, qualified.clone())
+                .await,
+        )?;
+        if unmuted.len() != candidates.len() {
+            return Err(Error::CellContract(
+                "Notification preference lookup returned an invalid count",
+            ));
+        }
+        let recipients: Vec<_> = candidates
+            .into_iter()
+            .zip(qualified)
+            .zip(unmuted)
+            .filter_map(|(candidate, enabled)| enabled.then_some(candidate))
+            .collect();
+        publish(
+            server,
+            client,
+            &notice,
+            recipients.iter().map(|(recipient, _)| *recipient).collect(),
+        )
+        .await?;
+        if let Some(source) = event.follow {
+            enroll(server, repo, client, scope, source, recipients).await?;
+        }
+    }
+    Ok(Progress::Ready(None))
+}
+
+async fn deliver_release(
+    server: &Server,
+    repo: &Repository,
+    client: &CellClient,
+    scope: Option<&DeliveryScope>,
+    event: watches::ReleaseEvent,
+) -> Result<()> {
+    let cursor = event.cursor();
+    let mut next = None;
+    if let Some(scope) = scope {
+        let Some(page) = app::query_output(
+            client
+                .query::<watches::ReleaseWatchers>(Address::Repository(repo.id), None, cursor)
+                .await,
+        )?
+        else {
+            return Ok(());
+        };
+        let candidates: Vec<_> = page
+            .recipients
+            .into_iter()
+            .filter_map(|actor| scope.access(&actor).map(|access| (actor, access)))
+            .collect();
+        if !candidates.is_empty() && scope.current(server, repo).await? {
+            let notice = Notice {
+                id: event.id,
+                repository: repo.id,
+                target: NoticeTarget::Release {
+                    kind: ReleaseKind::Release,
+                    number: event.number,
+                },
+                created_at_ms: event.published_at_ms,
+                sender: event.publisher.name,
+            };
+            publish(
+                server,
+                client,
+                &notice,
+                watched_recipients(client, candidates, Reason::Release).await?,
+            )
+            .await?;
+        }
+        next = page.next;
+    }
+    app::command_output(
+        client
+            .command::<watches::AcknowledgeRelease>(
+                Address::Repository(repo.id),
+                app::mutation_identity()?,
+                watches::AcknowledgeReleaseInput { cursor, next },
+            )
+            .await,
+    )
+}
+
 pub(crate) async fn drain_repository(server: &Server, repo: &Repository) -> Result<()> {
     let cell = app::repository_cell(server, repo)?;
     let events = app::query_output(cell.client.query::<Pending>(&cell.target, None, ()).await)?;
-    if events.is_empty() {
+    if events.discussions.is_empty() && events.releases.is_empty() {
         return Ok(());
     }
     let grants = current_grants(server, repo).await?;
     let roster = match (server.auth.as_ref(), grants.as_ref()) {
         (Some(auth), Some(snapshot)) => {
-            let identities: Vec<_> = snapshot
-                .members
-                .iter()
+            let mut members = snapshot.members.clone();
+            if let Some(access) = &snapshot.organization {
+                members.extend(
+                    crate::repository::access::organization_members(
+                        server,
+                        access.id,
+                        &access.teams,
+                        None,
+                    )
+                    .await?,
+                );
+            }
+            let identities: Vec<_> = members
+                .into_iter()
                 .map(|member| IdentityKey {
                     issuer: auth.issuer().to_owned(),
-                    subject: member.subject.clone(),
+                    subject: member.subject,
                 })
                 .collect();
             let ids = account_ids(&cell.client, &identities).await?;
             // Group candidates are only visible when the inbox principal has a
             // current verified repository grant. No background session is used.
             Some(DeliveryScope {
+                issuer: auth.issuer().to_owned(),
+                subjects: identities.into_iter().map(|actor| actor.subject).collect(),
                 direct: ids.into_iter().flatten().collect(),
                 revision: snapshot.revision,
-                group_access: auth.is_oidc() && !snapshot.groups.is_empty(),
+                groups: if auth.is_oidc() {
+                    snapshot.groups.clone()
+                } else {
+                    Vec::new()
+                },
             })
         }
         _ => None,
     };
-    let settings = app::query_output(
-        cell.client
-            .query::<mention_settings::Get>(&cell.target, None, ())
-            .await,
-    )?;
-    for event in events {
-        if let Some(scope) = &roster
-            && (!scope.direct.is_empty() || scope.group_access)
-        {
-            deliver(server, repo, &cell.client, scope, &settings, &event).await?;
+    // A retry in one outbox must not prevent the other from advancing.
+    let releases = async {
+        for event in events.releases {
+            deliver_release(server, repo, &cell.client, roster.as_ref(), event).await?;
         }
-        app::command_output(
+        Ok::<(), Error>(())
+    };
+    let discussions = async {
+        if events.discussions.is_empty() {
+            return Ok(());
+        }
+        let settings = app::query_output(
             cell.client
-                .command::<Acknowledge>(
-                    &cell.target,
-                    app::mutation_identity()?,
-                    EventKey {
-                        id: event.id,
-                        created_at_ms: event.created_at_ms,
-                    },
-                )
+                .query::<mention_settings::Get>(&cell.target, None, ())
                 .await,
         )?;
-    }
-    Ok(())
+        for event in events.discussions {
+            let progress = if let Some(scope) = &roster
+                && (!scope.subjects.is_empty() || !scope.groups.is_empty())
+            {
+                deliver(server, repo, &cell.client, scope, &settings, &event).await?
+            } else {
+                Progress::Ready(None)
+            };
+            let Progress::Ready(next) = progress else {
+                continue;
+            };
+            app::command_output(
+                cell.client
+                    .command::<Acknowledge>(
+                        &cell.target,
+                        app::mutation_identity()?,
+                        EventKey {
+                            id: event.id,
+                            created_at_ms: event.created_at_ms,
+                            watch: event.watch,
+                            next,
+                            follow: event.follow,
+                        },
+                    )
+                    .await,
+            )?;
+        }
+        Ok(())
+    };
+    let (releases, discussions) = tokio::join!(releases, discussions);
+    releases?;
+    discussions
 }
 
 pub(super) async fn sweep(server: Arc<Server>) {
@@ -390,7 +689,7 @@ pub(super) async fn sweep(server: Arc<Server>) {
                 () = server.cancellation.cancelled() => return,
                 result = drain_repository(&server, repo) => {
                     if let Err(error) = result {
-                        tracing::warn!(repository_id = %repo.id, %error, "mention notification delivery will be retried");
+                        tracing::warn!(repository_id = %repo.id, %error, "notification delivery will be retried");
                     }
                 }
             }

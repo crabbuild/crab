@@ -44,18 +44,21 @@ crab-remote-git = { workspace = true }
 crab-storage = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["pkcs8"] }
 rand = "0.9"
+regex = "1.12.3"
+pulldown-cmark = { version = "0.13.6", default-features = false }
 openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest", "rustls-tls"] }
 object_store = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-tls", "socks", "stream"] }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
-pulldown-cmark = { version = "0.13", default-features = false }
 rustls = "0.23"
 rustls-pemfile = "2"
 url = { version = "2", features = ["serde"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 sha2 = "0.10"
+hmac = "0.12.1"
 sysinfo = "0.38.4"
 thiserror = { workspace = true }
 tikv-jemallocator = { version = "0.6", features = ["stats"] }
@@ -72,6 +75,7 @@ zip = { version = "6.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 crab-storage = { workspace = true, features = ["test-support"] }
+crab-xet = { workspace = true }
 ts-rs = { version = "=12.0.1", features = ["uuid-impl"] }
 async-trait = { workspace = true }
 http-body-util = "0.1"

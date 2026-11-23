@@ -68,6 +68,7 @@ pub(crate) enum Failure {
     Labels,
     Assignees,
     Milestone,
+    ComparisonChanged,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -118,6 +119,7 @@ impl Input {
         id: [u8; 16],
         digest: blake3::Hash,
         comparison: Option<Comparison>,
+        rejection: Option<Failure>,
     ) -> Result<Resolution> {
         let key = rejection_key(kind, id);
         let digest = digest.to_hex().to_string();
@@ -128,7 +130,11 @@ impl Input {
                 Resolution::Conflict
             });
         }
-        if let Some(reason) = self.prepare(context)? {
+        let reason = match rejection {
+            Some(reason) => Some(reason),
+            None => self.prepare(context)?,
+        };
+        if let Some(reason) = reason {
             context.put_document(
                 &key,
                 &Rejected {

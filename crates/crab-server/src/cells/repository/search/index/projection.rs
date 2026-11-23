@@ -1,6 +1,6 @@
 use super::*;
 use crate::cells::repository::assignments;
-use crate::cells::repository::collaboration::{Target, reactions};
+use crate::cells::repository::collaboration::{Target, links, reactions};
 use crate::cells::repository::{decode_label_ids, result_blob, result_text, result_u64_from_row};
 
 pub(super) fn remove(context: &Transaction<'_>, id: u64) -> crate::cells::Result<()> {
@@ -49,7 +49,8 @@ pub(super) fn refresh(context: &Transaction<'_>, subject: Subject) -> crate::cel
         return remove(context, id);
     };
     let title = result_text(row, 0)?.to_lowercase();
-    let body = result_text(row, 1)?.to_lowercase();
+    let source_body = result_text(row, 1)?;
+    let body = source_body.to_lowercase();
     let state = result_u64_from_row(row, 2)?;
     let labels = decode_label_ids(result_blob(row, 3)?)?;
     let assignees = assignments::decode(result_blob(row, 4)?)?;
@@ -90,6 +91,19 @@ pub(super) fn refresh(context: &Transaction<'_>, subject: Subject) -> crate::cel
     if subject.kind == SubjectKind::Pull {
         let (base, head, merged) =
             crate::cells::repository::pulls::review_source(context, subject.number)?;
+        // NULL identifies a link captured by a completed publication. Active
+        // references follow the default branch supplied by the read handler.
+        let binding = if state == 2 {
+            SqlValue::Null
+        } else {
+            SqlValue::Text(base.clone())
+        };
+        for issue in links::projected_keywords(context, subject.number, &source_body, state == 2)? {
+            statements.push(statement(
+                "INSERT INTO discussion_index_closing_issues(document, issue, base_ref) VALUES (?, ?, ?)",
+                vec![integer(id)?, integer(issue)?, binding.clone()],
+            ));
+        }
         statements.push(statement(
             "INSERT INTO discussion_index_pull_sources(document,base_ref,head_ref,merged_head_oid) VALUES (?,?,?,?)",
             vec![integer(id)?, SqlValue::Text(base), SqlValue::Blob(head.into_bytes()), merged.map_or(SqlValue::Null,SqlValue::Text)],

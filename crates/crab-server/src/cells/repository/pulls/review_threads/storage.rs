@@ -3,17 +3,22 @@ use super::*;
 pub(super) fn pull_state(
     context: &Transaction<'_>,
     pull: u64,
-) -> crate::cells::Result<Option<u64>> {
+) -> crate::cells::Result<Option<(u64, bool)>> {
     let result = context.sql(&SqlBatch {
         statements: vec![statement(
-            "SELECT state FROM repository_pulls WHERE number = ?",
+            "SELECT state, pending_merge IS NOT NULL FROM repository_pulls WHERE number = ?",
             vec![integer(pull)?],
         )],
     })?;
     result[0]
         .rows
         .first()
-        .map(|row| result_u64_from_row(row, 0))
+        .map(|row| {
+            Ok((
+                result_u64_from_row(row, 0)?,
+                result_u64_from_row(row, 1)? != 0,
+            ))
+        })
         .transpose()
 }
 

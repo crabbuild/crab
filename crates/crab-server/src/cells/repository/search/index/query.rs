@@ -265,7 +265,7 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         &input.people,
         &input.assignees,
         &input.review_context,
-        review.as_ref().map(|prepared| &prepared.rules),
+        review.as_ref().map(|prepared| &prepared.approvals),
     ))?)
     .to_hex()
     .to_string();

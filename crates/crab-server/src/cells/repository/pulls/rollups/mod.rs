@@ -152,9 +152,11 @@ fn checks(context: &mut Transaction<'_>, oid: &str) -> crate::cells::Result<Chec
     }
     let mut names = BTreeSet::new();
     for run in runs.runs {
-        // The latest run number wins per case-insensitive name, matching
-        // api/checks::latest. An old run update cannot replace a newer rerun.
-        if !names.insert(run.name.to_lowercase()) {
+        // Each provider owns its check names. An older run updated after a
+        // rerun must not replace the rerun in this summary.
+        let provider =
+            super::super::integrations::github_connection(&run.author.issuer, &run.author.subject);
+        if !names.insert((provider, run.name.to_lowercase())) {
             continue;
         }
         match (run.status, run.conclusion) {

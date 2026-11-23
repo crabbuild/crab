@@ -86,9 +86,11 @@ fn shared_auth(store: Store) -> Authentication {
         state: AuthState {
             store,
             prefix: "root/.crab/http-server/v1/auth".into(),
+            account_prefix: "root/.crab/http-server/v1/accounts".into(),
             pending_checks: Arc::default(),
         },
         cursor_key: [7; 32],
+        webhook_key: None,
         admission: Semaphore::new(1),
         logout_admission: Semaphore::new(1),
     }
@@ -110,7 +112,7 @@ fn active_session(session_key: Key) -> Arc<Session> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn cached_session_validation_reads_both_durable_records_concurrently() {
+async fn cached_session_validation_reads_all_durable_authorities_concurrently() {
     struct Gate {
         entered: Semaphore,
         release: Semaphore,
@@ -146,12 +148,12 @@ async fn cached_session_validation_reads_both_durable_records_concurrently() {
     auth.state.store = auth.state.store.clone().with_read_admission(gate.clone());
     let auth = Arc::new(auth);
     let pending = tokio::spawn(async move { auth.load_session(session.session_key).await });
-    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire_many(2))
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.acquire_many(3))
         .await
         .unwrap()
         .unwrap()
         .forget();
-    gate.release.add_permits(2);
+    gate.release.add_permits(3);
     assert!(
         tokio::time::timeout(Duration::from_secs(5), pending)
             .await
@@ -285,6 +287,132 @@ async fn shared_state_crosses_replica_boundaries_and_consumes_flows_once() {
 }
 
 #[tokio::test]
+async fn detached_git_token_stays_revoked_across_replicas_when_cleanup_is_interrupted() {
+    let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+    let issuer = shared_auth(store.clone());
+    let replica = shared_auth(store.clone());
+    let session = active_session(key("browser-session"));
+    let session_key = session.session_key;
+    let token_key = key("git-token");
+    issuer.store_session(session.clone()).await.unwrap();
+    issuer
+        .store_git_token(
+            token_key,
+            Arc::new(GitToken {
+                repository_id: uuid::Uuid::from_u128(1),
+                session,
+                owner: "team".into(),
+                repository: "private".into(),
+                access: RepositoryAccess::Read,
+                revoked: AtomicBool::new(false),
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(replica.load_git_token(token_key).await.is_some());
+
+    // Capture the durable state after detachment and before token object cleanup.
+    let path = issuer.state.path("sessions", &session_key);
+    let (body, etag) = store.get_with_etag_bounded(&path, 64 * 1024).await.unwrap();
+    let mut session: StoredSession = serde_json::from_slice(&body).unwrap();
+    assert_eq!(session.git_tokens, vec![token_key]);
+    session.git_tokens.clear();
+    store
+        .update(
+            &path,
+            Bytes::from(serde_json::to_vec(&session).unwrap()),
+            etag,
+        )
+        .await
+        .unwrap();
+
+    let restarted = shared_auth(store);
+    let session = restarted.load_session(session_key).await.unwrap();
+    restarted.remove_git_tokens(&session).await.unwrap();
+    assert!(session.active());
+    assert!(replica.load_git_token(token_key).await.is_none());
+    assert!(restarted.load_git_token(token_key).await.is_none());
+}
+
+#[tokio::test]
+async fn reactivation_requires_new_sessions_on_every_replica() {
+    let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+    let operator = shared_auth(store.clone());
+    let replica = shared_auth(store.clone());
+    let session_key = key("before-suspension");
+    operator
+        .store_session(active_session(session_key))
+        .await
+        .unwrap();
+    assert!(replica.load_session(session_key).await.is_some());
+
+    let suspended = operator
+        .set_account_suspended("alice", 0, true)
+        .await
+        .unwrap();
+    assert!(replica.load_session(session_key).await.is_none());
+    assert!(matches!(
+        replica
+            .store_session(active_session(key("during-suspension")))
+            .await,
+        Err(AuthError::Suspended)
+    ));
+    assert!(matches!(
+        replica.set_account_suspended("alice", 0, false).await,
+        Err(AuthError::AccountChanged)
+    ));
+
+    replica
+        .set_account_suspended("alice", suspended.revision, false)
+        .await
+        .unwrap();
+    let restarted = shared_auth(store);
+    assert!(restarted.load_session(session_key).await.is_none());
+    let fresh_key = key("after-reactivation");
+    operator
+        .store_session(active_session(fresh_key))
+        .await
+        .unwrap();
+    assert!(restarted.load_session(fresh_key).await.is_some());
+}
+
+#[tokio::test]
+async fn suspended_accounts_lose_mention_group_evidence() {
+    let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+    let operator = shared_auth(store.clone());
+    let replica = shared_auth(store);
+    let mut session = active_session(key("mention-group"));
+    Arc::get_mut(&mut session)
+        .unwrap()
+        .groups
+        .push("engineering".into());
+    operator.store_session(session).await.unwrap();
+    let grants = [crate::RepositoryGroup {
+        group: "engineering".into(),
+        access: RepositoryAccess::Read,
+    }];
+    assert!(
+        replica
+            .mention_group("alice", &grants)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    operator
+        .set_account_suspended("alice", 0, true)
+        .await
+        .unwrap();
+    assert!(
+        replica
+            .mention_group("alice", &grants)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn identity_revocation_crosses_replicas_and_deletes_derived_tokens() {
     let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
     let first = shared_auth(store.clone());
@@ -398,6 +526,7 @@ async fn failed_session_creation_removes_its_marker_and_stale_markers_are_collec
     let record = StoredSession {
         groups: Vec::new(),
         identity: session.identity.clone(),
+        account_revision: 0,
         csrf: session.csrf.clone(),
         expires_at: session.expires_at,
         git_tokens: vec![],

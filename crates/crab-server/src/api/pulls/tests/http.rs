@@ -74,6 +74,20 @@ async fn report_check(
     (status, body)
 }
 
+async fn set_bob_access(h: &Harness, alice: &str, access: &str) {
+    let url = "/api/repos/team/private/members";
+    let mut current = h.json(url, alice).await;
+    current["members"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|member| member["subject"] == "bob-id")
+        .unwrap()["access"] = json!(access);
+    h.write(reqwest::Method::PUT, url, alice,
+        json!({"expected_revision":current["revision"],"members":current["members"],"groups":current["groups"]}))
+        .await.error_for_status().unwrap();
+}
+
 #[tokio::test]
 async fn pull_routes_require_membership_and_csrf_before_repository_access() {
     let h = Harness::new(false).await;
@@ -129,6 +143,458 @@ async fn pull_routes_require_membership_and_csrf_before_repository_access() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
+    h.close().await;
+}
+
+#[tokio::test]
+async fn viewed_files_are_private_and_track_the_diff_identity() {
+    use crate::test_support::git;
+    let h = Harness::new(false).await;
+    h.initialize_directory().await;
+    let alice = h.login().await;
+    let token: Value = h
+        .write(
+            reqwest::Method::POST,
+            "/api/git-token",
+            &alice,
+            json!({"owner":"team","repository":"private","access":"write"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mut remote = Url::parse(&format!("{}/git/team/private.git", h.origin)).unwrap();
+    remote.set_username("crab").unwrap();
+    remote.set_password(token["token"].as_str()).unwrap();
+    let source = tempfile::tempdir().unwrap();
+    git::push_review_branches(source.path(), remote.as_str()).await;
+    h.write(
+        reqwest::Method::POST,
+        ROOT,
+        &alice,
+        json!({
+            "request_id":uuid::Uuid::now_v7(), "title":"Track review progress", "body":"",
+            "base_ref":"refs/heads/main", "head_ref":"refs/heads/feature",
+        }),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    let preview = "/api/repos/team/private/changes?base=refs/heads/main&rev=refs/heads/feature&merge_base=true";
+    let reviewed = format!("{ROOT}/1/viewed");
+    let first = h.json(preview, &bob).await;
+    let first = first["changes"][0]["view_id"].as_str().unwrap();
+    let (path, revision) = first.split_at(64);
+    let mark = |file: &str, version: u64| json!({"file":file,"version":version,"viewed":true});
+    let marked: Value = h
+        .write(reqwest::Method::PUT, &reviewed, &bob, mark(first, 0))
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(marked["version"], 1);
+    assert_eq!(h.json(&reviewed, &bob).await["files"][path], revision);
+    assert_eq!(h.json(&reviewed, &alice).await["files"], json!({}));
+
+    git::success(
+        source.path(),
+        &["commit", "--allow-empty", "-m", "Unchanged reviewed file"],
+    )
+    .await;
+    git::success(source.path(), &["push", remote.as_str(), "feature"]).await;
+    assert_eq!(h.json(preview, &bob).await["changes"][0]["view_id"], first);
+    std::fs::write(source.path().join("README.md"), "base\nchanged again\n").unwrap();
+    git::success(
+        source.path(),
+        &["commit", "-am", "Change the reviewed file"],
+    )
+    .await;
+    git::success(source.path(), &["push", remote.as_str(), "feature"]).await;
+    let second = h.json(preview, &bob).await;
+    let second = second["changes"][0]["view_id"].as_str().unwrap();
+    let (second_path, second_revision) = second.split_at(64);
+    assert_eq!(second_path, path);
+    assert_ne!(second_revision, revision);
+    let conflict = h
+        .write(reqwest::Method::PUT, &reviewed, &bob, mark(second, 0))
+        .await;
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    let updated: Value = h
+        .write(reqwest::Method::PUT, &reviewed, &bob, mark(second, 1))
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(updated["files"], json!({(path):second_revision}));
+    h.close().await;
+}
+
+#[tokio::test]
+async fn pending_review_keeps_comments_private_and_recovers_a_published_batch() {
+    use crate::test_support::git;
+    use reqwest::Method;
+    use uuid::Uuid;
+
+    let h = Harness::new(false).await;
+    h.initialize_directory().await;
+    let alice = h.login().await;
+    h.write(
+        Method::POST,
+        "/api/profile",
+        &alice,
+        json!({"request_id":Uuid::now_v7(),"handle":"alice","name":"Alice"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let token: Value = h
+        .write(
+            Method::POST,
+            "/api/git-token",
+            &alice,
+            json!({"owner":"team","repository":"private","access":"write"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mut remote = Url::parse(&format!("{}/git/team/private.git", h.origin)).unwrap();
+    remote.set_username("crab").unwrap();
+    remote.set_password(token["token"].as_str()).unwrap();
+    let git_source = tempfile::tempdir().unwrap();
+    git::push_review_branches(git_source.path(), remote.as_str()).await;
+    h.write(
+        Method::POST,
+        ROOT,
+        &alice,
+        json!({
+            "request_id":Uuid::now_v7(), "title":"Review together", "body":"",
+            "base_ref":"refs/heads/main", "head_ref":"refs/heads/feature",
+        }),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    let subscription = format!("{ROOT}/1/subscription");
+    let draft = format!("{ROOT}/1/pending-review");
+    let submit = format!("{draft}/submit");
+    let reviews = format!("{ROOT}/1/reviews");
+    let threads = format!("{ROOT}/1/threads");
+    let comparison_path = "/api/repos/team/private/changes?base=refs/heads/main&rev=refs/heads/feature&merge_base=true";
+    let comparison = h.json(comparison_path, &bob).await;
+    let comment = |expected, request_id, body, suggested_text| {
+        json!({
+            "expected":expected, "request_id":request_id,
+            "edit":{"action":"save","comment":{
+                "request_id":request_id,"body":body,"suggested_text":suggested_text,
+                "path_hex":comparison["changes"][0]["path_hex"],
+                "base_oid":comparison["base"],"head_oid":comparison["commit"],
+                "side":"new","start_line":2,"end_line":2,
+            }},
+        })
+    };
+    let first = Uuid::now_v7();
+    let second = Uuid::now_v7();
+    let first_edit = comment(
+        None,
+        first,
+        "@alice Consider explaining this.",
+        None::<&str>,
+    );
+    for input in [
+        first_edit.clone(),
+        first_edit.clone(),
+        comment(
+            Some(first),
+            second,
+            "Suggested help text.",
+            Some("updated feature"),
+        ),
+    ] {
+        h.write(Method::PUT, &draft, &bob, input)
+            .await
+            .error_for_status()
+            .unwrap();
+    }
+    assert_eq!(
+        h.json(&draft, &bob).await["comments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        h.json(&draft, &alice).await,
+        json!({"version":null,"comments":[]})
+    );
+    assert_eq!(h.json(&reviews, &alice).await["items"], json!([]));
+    assert_eq!(h.json(&threads, &alice).await["items"], json!([]));
+    assert_eq!(
+        h.json(&subscription, &bob).await,
+        json!({"mode":"inherit","version":0})
+    );
+    h.deliver_notifications("team", "private").await;
+    assert_eq!(
+        h.json("/api/notifications", &alice).await["items"],
+        json!([])
+    );
+    assert_eq!(
+        h.write(Method::PUT, &draft, &bob, first_edit)
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+
+    let request = json!({
+        "request_id":Uuid::now_v7(),"expected":second,"body":"Summary for @alice","state":"commented",
+    });
+    let submitted: Value = h
+        .write(Method::POST, &submit, &bob, request.clone())
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(submitted, json!({"review":1,"threads":[1,2]}));
+    h.deliver_notifications("team", "private").await;
+    let inbox = h.json("/api/notifications", &alice).await;
+    let [row] = inbox["items"].as_array().unwrap().as_slice() else {
+        panic!("one published pull request should occupy one inbox row");
+    };
+    assert_eq!(row["reason"], "mention");
+    assert!(row["href"].as_str().unwrap().contains("/pull/1"));
+    assert_eq!(
+        h.json(&subscription, &bob).await,
+        json!({"mode":"follow","version":1})
+    );
+    assert_eq!(h.json(&draft, &bob).await["comments"], json!([]));
+    assert_eq!(
+        h.json(&reviews, &alice).await["items"][0]["commit_oid"],
+        comparison["commit"]
+    );
+    let visible = h.json(&threads, &alice).await;
+    assert_eq!(visible["items"].as_array().unwrap().len(), 2);
+    assert!(
+        visible["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|thread| thread["suggested_text"] == "updated feature")
+    );
+
+    let stale = Uuid::now_v7();
+    h.write(
+        Method::PUT,
+        &draft,
+        &bob,
+        comment(
+            Some(request["request_id"].as_str().unwrap().parse().unwrap()),
+            stale,
+            "New private comment",
+            None,
+        ),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    git::success(
+        git_source.path(),
+        &["commit", "--allow-empty", "-m", "Move source"],
+    )
+    .await;
+    git::success(git_source.path(), &["push", remote.as_str(), "feature"]).await;
+    let conflict = h
+        .write(
+            Method::POST,
+            &submit,
+            &bob,
+            json!({"request_id":Uuid::now_v7(),"expected":stale,"body":"","state":"commented"}),
+        )
+        .await;
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    let replayed: Value = h
+        .write(Method::POST, &submit, &bob, request.clone())
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(replayed, submitted);
+    h.deliver_notifications("team", "private").await;
+    assert_eq!(h.json("/api/notifications", &alice).await, inbox);
+    assert_eq!(h.json(&draft, &bob).await["version"], json!(stale));
+    let discarded = Uuid::now_v7();
+    h.write(
+        Method::PUT,
+        &draft,
+        &bob,
+        json!({"request_id":discarded,"expected":stale,"edit":{"action":"discard"}}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert_eq!(
+        h.json(&draft, &bob).await,
+        json!({"version":discarded,"comments":[]})
+    );
+    assert_eq!(
+        h.json(&reviews, &alice).await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    h.close().await;
+}
+
+#[tokio::test]
+async fn suggestion_batches_publish_one_git_commit_or_leave_the_head_unchanged() {
+    use crate::test_support::git;
+    use reqwest::Method;
+
+    let h = Harness::new(false).await;
+    h.initialize_directory().await;
+    let alice = h.login().await;
+    let token: Value = h
+        .write(
+            Method::POST,
+            "/api/git-token",
+            &alice,
+            json!({"owner":"team","repository":"private","access":"write"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mut remote = Url::parse(&format!("{}/git/team/private.git", h.origin)).unwrap();
+    remote.set_username("crab").unwrap();
+    remote.set_password(token["token"].as_str()).unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let path = source.path();
+    git::push_review_branches(path, remote.as_str()).await;
+    std::fs::write(path.join("second.txt"), "alpha\r\nbeta\n").unwrap();
+    git::success(path, &["add", "second.txt"]).await;
+    git::success(path, &["commit", "-m", "Add a second file"]).await;
+    let head = git::success(path, &["rev-parse", "HEAD"]).await;
+    git::success(path, &["push", remote.as_str(), "feature"]).await;
+    h.write(
+        Method::POST,
+        ROOT,
+        &alice,
+        json!({
+            "request_id":uuid::Uuid::now_v7(), "title":"Update two files", "body":"",
+            "base_ref":"refs/heads/main", "head_ref":"refs/heads/feature",
+        }),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let diff = h.json("/api/repos/team/private/changes?base=refs/heads/main&rev=refs/heads/feature&merge_base=true", &alice).await;
+    for (file, line, replacement) in [
+        ("README.md", 2, "new feature"),
+        ("second.txt", 2, "new beta"),
+        ("README.md", 2, "overlapping edit"),
+    ] {
+        let change = diff["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|change| change["path"] == file)
+            .unwrap();
+        h.write(
+            Method::POST,
+            &format!("{ROOT}/1/threads"),
+            &alice,
+            json!({
+                "request_id":uuid::Uuid::now_v7(),
+                "base_oid":diff["base"],"head_oid":head,"path_hex":change["path_hex"],
+                "side":"new","start_line":line,"end_line":line,
+                "body":"Suggested revision","suggested_text":replacement
+            }),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    }
+    let endpoint = format!("{ROOT}/1/suggestions");
+    let denied = h
+        .write(
+            Method::POST,
+            &endpoint,
+            &alice,
+            json!({"expected_head":head,"threads":[
+                {"number":1,"version":1},{"number":2,"version":1},{"number":3,"version":1}
+            ]}),
+        )
+        .await;
+    assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+    let unchanged = git::success(path, &["ls-remote", remote.as_str(), "refs/heads/feature"]).await;
+    assert_eq!(unchanged, format!("{head}\trefs/heads/feature"));
+    let input =
+        json!({"expected_head":head,"threads":[{"number":1,"version":1},{"number":2,"version":1}]});
+    let mut stale = input.clone();
+    stale["threads"][1]["version"] = json!(2);
+    assert_eq!(
+        h.write(Method::POST, &endpoint, &alice, stale)
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    assert_eq!(
+        h.write(Method::POST, &endpoint, &bob, input.clone())
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let applied: Value = h
+        .write(Method::POST, &endpoint, &alice, input.clone())
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    git::success(path, &["fetch", remote.as_str(), "feature"]).await;
+    assert_eq!(
+        git::success(path, &["rev-parse", "FETCH_HEAD"]).await,
+        applied["commit"]
+    );
+    assert_eq!(
+        git::success(path, &["rev-parse", "FETCH_HEAD^"]).await,
+        head
+    );
+    assert_eq!(
+        git::success(path, &["show", "FETCH_HEAD:README.md"]).await,
+        "base\nnew feature"
+    );
+    assert_eq!(
+        git::success(path, &["show", "FETCH_HEAD:second.txt"]).await,
+        "alpha\r\nnew beta"
+    );
+    assert_eq!(
+        h.write(Method::POST, &endpoint, &alice, input)
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
     h.close().await;
 }
 
@@ -382,7 +848,11 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     }
     let ready = h.json(&format!("{ROOT}/1"), &alice).await;
     assert_eq!(ready["version"], 2);
-    assert_eq!(ready["merge_requirements"]["approvals"], 1);
+    assert_eq!(ready["merge_requirements"]["approvals"], 0);
+    assert_eq!(
+        h.json(&format!("{ROOT}/1"), &bob).await["review_counts_for_merge"],
+        false
+    );
     assert_eq!(
         ready["merge_requirements"]["checks"][0]["state"],
         Value::Null
@@ -407,6 +877,25 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     .await;
     assert_eq!(blocked.0, StatusCode::CONFLICT);
     assert_eq!(blocked.1["error"]["code"], "merge_blocked");
+    assert_eq!(
+        mutate(
+            &h,
+            &bob,
+            bob_csrf,
+            reqwest::Method::POST,
+            &format!("{ROOT}/1/merge"),
+            json!({
+                "request_id":"00000000-0000-4000-8000-000000000015",
+                "version":1,
+                "method":"fast_forward",
+                "base_oid":created.1["base_oid"],
+                "head_oid":created.1["head_oid"]
+            }),
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
     let pending = report_status(
         &h,
         &git_token,
@@ -454,6 +943,11 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     .await;
     assert_eq!(success.0, StatusCode::CREATED);
     assert_eq!(success.1["state"], "success");
+    set_bob_access(&h, &alice, "write").await;
+    assert_eq!(
+        h.json(&format!("{ROOT}/1"), &bob).await["review_counts_for_merge"],
+        true
+    );
     let replay = report_status(
         &h,
         &git_token,
@@ -564,6 +1058,14 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     .await;
     assert_eq!(running.0, StatusCode::OK, "{}", running.1);
     assert_eq!(running.1["version"], 2);
+    let blocked_status = report_status(
+        &h,
+        &git_token,
+        &first_head,
+        json!({"request_id":uuid::Uuid::now_v7(), "context":"ci/test", "state":"failure"}),
+    )
+    .await;
+    assert_eq!(blocked_status.0, StatusCode::CREATED);
     let completed = report_check(
         &h,
         &git_token,
@@ -665,6 +1167,20 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     )
     .await;
     assert_eq!(invalid_annotation.0, StatusCode::BAD_REQUEST);
+    let blocked = h.json(&format!("{ROOT}/1"), &alice).await;
+    assert_eq!(
+        blocked["merge_requirements"]["checks"][0]["state"],
+        "failure"
+    );
+    assert_eq!(blocked["can_merge"], false);
+    let pass_status = report_status(
+        &h,
+        &git_token,
+        &first_head,
+        json!({"request_id":uuid::Uuid::now_v7(), "context":"ci/test", "state":"success"}),
+    )
+    .await;
+    assert_eq!(pass_status.0, StatusCode::CREATED);
     let ready = h.json(&format!("{ROOT}/1"), &alice).await;
     assert_eq!(ready["merge_requirements"]["checks"][0]["state"], "success");
     assert_eq!(ready["merge_requirements"]["checks_satisfied"], true);
@@ -682,25 +1198,6 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     assert_eq!(edited.0, StatusCode::OK);
     assert_eq!(edited.1["state"], "approved");
     assert_eq!(edited.1["version"], 2);
-    assert_eq!(
-        mutate(
-            &h,
-            &bob,
-            bob_csrf,
-            reqwest::Method::POST,
-            &format!("{ROOT}/1/merge"),
-            json!({
-                "request_id":"00000000-0000-4000-8000-000000000015",
-                "version":1,
-                "method":"fast_forward",
-                "base_oid":created.1["base_oid"],
-                "head_oid":created.1["head_oid"]
-            }),
-        )
-        .await
-        .0,
-        StatusCode::FORBIDDEN
-    );
     assert_eq!(
         mutate(
             &h,
@@ -934,6 +1431,10 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
             "assignees":[{"id":bob_id,"name":"Bob","profile":null}]
         })
     );
+    set_bob_access(&h, &alice, "read").await;
+    let downgraded = h.json(&format!("{ROOT}/1"), &alice).await;
+    assert_eq!(downgraded["merge_requirements"]["approvals"], 0);
+    assert_eq!(downgraded["can_merge"], false);
     assert_eq!(
         mutate(
             &h,

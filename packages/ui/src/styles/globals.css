@@ -542,11 +542,6 @@ main {
   margin: 0 auto;
   padding: --spacing(12) var(--page-gutter);
 }
-.catalog-heading-title {
-  display: flex;
-  align-items: center;
-  gap: --spacing(3);
-}
 .catalog > .section-heading {
   flex-wrap: wrap;
 }
@@ -7114,6 +7109,10 @@ main {
 .linked-work label {
   display: grid;
   gap: --spacing(1.5);
+}
+.linked-work .linked-work-close {
+  display: flex;
+  align-items: start;
 }
 
 .pull-state.draft {

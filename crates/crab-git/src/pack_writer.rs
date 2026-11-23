@@ -19,6 +19,8 @@ pub enum Error {
     ObjectCount,
     #[error("object contains more bytes than its declared size")]
     ObjectSize,
+    #[error("base pack header, length or checksum is invalid")]
+    BasePack,
 }
 
 struct Output<W> {
@@ -65,6 +67,45 @@ where
     I: ExactSizeIterator<Item = io::Result<(Kind, u64, R)>>,
     C: Fn() -> bool,
 {
+    write(writer, None, objects, maximum, cancelled)
+}
+
+/// Append full objects to the entries of a self-contained SHA-1 Git pack.
+///
+/// The base reader starts at its header and has the given complete length.
+/// Base entries keep their positions so offset deltas remain valid. The base
+/// envelope and checksum are verified while copying. The caller supplies a
+/// structurally verified base pack and discards output on error.
+pub fn append_objects<W, R, I, C>(
+    writer: W,
+    base: &mut impl Read,
+    base_size: u64,
+    objects: I,
+    maximum: u64,
+    cancelled: C,
+) -> Result<(), Error>
+where
+    W: Write,
+    R: Read,
+    I: ExactSizeIterator<Item = io::Result<(Kind, u64, R)>>,
+    C: Fn() -> bool,
+{
+    write(writer, Some((base, base_size)), objects, maximum, cancelled)
+}
+
+fn write<W, R, I, C>(
+    writer: W,
+    base: Option<(&mut dyn Read, u64)>,
+    objects: I,
+    maximum: u64,
+    cancelled: C,
+) -> Result<(), Error>
+where
+    W: Write,
+    R: Read,
+    I: ExactSizeIterator<Item = io::Result<(Kind, u64, R)>>,
+    C: Fn() -> bool,
+{
     let count = u32::try_from(objects.len()).map_err(|_| Error::ObjectCount)?;
     let mut output = Output {
         writer,
@@ -75,9 +116,13 @@ where
     };
     let result = (|| {
         check(&cancelled)?;
-        output.write_all(b"PACK\0\0\0\x02")?;
-        output.write_all(&count.to_be_bytes())?;
         let mut buffer = [0; 64 * 1024];
+        if let Some((base, size)) = base {
+            copy_base(&mut output, base, size, count, &mut buffer, &cancelled)?;
+        } else {
+            output.write_all(b"PACK\0\0\0\x02")?;
+            output.write_all(&count.to_be_bytes())?;
+        }
         for object in objects {
             check(&cancelled)?;
             let (kind, size, mut reader) = object?;
@@ -119,6 +164,44 @@ where
     } else {
         result
     }
+}
+
+fn copy_base(
+    output: &mut impl Write,
+    base: &mut dyn Read,
+    size: u64,
+    additional: u32,
+    buffer: &mut [u8],
+    cancelled: &impl Fn() -> bool,
+) -> Result<(), Error> {
+    let payload_size = size.checked_sub(12 + 20).ok_or(Error::BasePack)?;
+    let mut header = [0; 12];
+    base.read_exact(&mut header)?;
+    if &header[..4] != b"PACK" || !matches!(header[4..8], [0, 0, 0, 2 | 3]) {
+        return Err(Error::BasePack);
+    }
+    let old_count = u32::from_be_bytes([header[8], header[9], header[10], header[11]]);
+    let count = old_count
+        .checked_add(additional)
+        .ok_or(Error::ObjectCount)?;
+    let mut hash = gix_hash::hasher(gix_hash::Kind::Sha1);
+    hash.update(&header);
+    output.write_all(&header[..8])?;
+    output.write_all(&count.to_be_bytes())?;
+    for offset in (0..payload_size).step_by(buffer.len()) {
+        check(cancelled)?;
+        let remaining = (payload_size - offset).min(buffer.len() as u64) as usize;
+        let bytes = &mut buffer[..remaining];
+        base.read_exact(bytes)?;
+        hash.update(bytes);
+        output.write_all(bytes)?;
+    }
+    let mut checksum = [0; 20];
+    base.read_exact(&mut checksum)?;
+    if hash.try_finalize()?.as_bytes() != checksum || base.read(&mut buffer[..1])? != 0 {
+        return Err(Error::BasePack);
+    }
+    Ok(())
 }
 
 fn check(cancelled: &impl Fn() -> bool) -> Result<(), Error> {
@@ -186,6 +269,46 @@ mod tests {
                 "{rows}"
             );
         }
+    }
+
+    #[test]
+    fn appending_authenticates_the_base_and_preserves_pack_entries() {
+        let original = (Kind::Blob, 4, b"base".as_slice());
+        let extra = (Kind::Blob, 3, b"new".as_slice());
+        let mut base = Vec::new();
+        write_pack(&mut base, [Ok(original)].into_iter(), 1024, || false).unwrap();
+        let mut expected = Vec::new();
+        write_pack(
+            &mut expected,
+            [Ok(original), Ok(extra)].into_iter(),
+            1024,
+            || false,
+        )
+        .unwrap();
+        let mut extended = Vec::new();
+        append_objects(
+            &mut extended,
+            &mut base.as_slice(),
+            base.len() as u64,
+            [Ok(extra)].into_iter(),
+            1024,
+            || false,
+        )
+        .unwrap();
+        assert_eq!(extended, expected);
+        let last = base.len() - 1;
+        base[last] ^= 1;
+        assert!(matches!(
+            append_objects(
+                Vec::new(),
+                &mut base.as_slice(),
+                base.len() as u64,
+                [Ok(extra)].into_iter(),
+                1024,
+                || false
+            ),
+            Err(Error::BasePack)
+        ));
     }
 
     #[test]

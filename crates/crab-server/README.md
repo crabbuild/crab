@@ -194,7 +194,7 @@ matching requests; stale changes require explicit reload. Fulfillment does not
 imply approval or current-head validity. The sidebar includes uninvited reviewers,
 keeps approval decisions separate from later comments, and distinguishes an
 outdated review from a missing head. Existing discussion indexes require
-`cells rebuild-search` for current format 11 before serving. Branch protection rules stay separate.
+`cells rebuild-search` for current format 13 before serving. Branch protection rules stay separate.
 The “Review changes” dialog keeps submission stable while the diff loads and
 pins a review to the inspected commit. A changed head requires comparison
 reload and explicit draft rebasing; retries use the native submission ledger.
@@ -659,7 +659,7 @@ The internal owners are:
 | `repository/` | Pinned Git snapshots, maintenance, browse projections, and atomic catalog installation |
 | `catalog/` | Durable catalog records and membership audit |
 | `auth/` | Identity, durable sessions, UUID-bound current grants in `principal/`, login endpoints, and bounded provider transport |
-| `git_import/mod.rs`, `git_import/source.rs`, `git_import/git.rs` | Import jobs/workflow, source validation, and isolated Git processes |
+| `git_import/` | Durable import leases and recovery, source validation, and isolated Git processes |
 | `api/` | Browse HTTP orchestration, feature handlers, Git queries, and wire encoding |
 | `git/` | Native Git protocol, object, receive, and LFS endpoints |
 | `peer/`, `peer/tls/` | Private transport and mutual TLS |
@@ -671,10 +671,10 @@ The internal owners are:
 | `cells/repository/{checks,settings,releases,labels,statuses,projection}/` | Feature commands, local persistence/validation, and tests |
 
 Authentication always uses shared durable state, including in-memory object-store
-test fixtures; there is no separate process-local authentication mode. A cached
-session supplies only its marker location, allowing the session record and marker
-to be reread concurrently. The current record selects and validates the marker;
-missing or expired state still denies browser and derived Git credentials.
+test fixtures. A cached session supplies the marker and account addresses so all
+three durable reads can overlap. The current session selects and validates its
+marker and account revision. Git tokens also require attachment to the current
+session. See [account suspension](deploy/operations.md#manage-membership-and-sessions).
 Repository construction initializes private cache and maintenance state. Settings
 policy stays in `repository/settings.rs`; repository reads do not forward HTTP
 settings operations. HTTP mutation families share one request identity policy in

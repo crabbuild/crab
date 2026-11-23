@@ -1,8 +1,9 @@
 import { Author } from "@/components/discussion/author";
-import { endpoint, type Repository } from "@/lib/api";
+import { endpoint, useRequest, type Repository } from "@/lib/api";
 import { Reactions } from "@/components/discussion/reactions";
 import { Editor } from "@/components/discussion/editor";
 import { Failure } from "@/components/discussion/failure";
+import { useContributionFocus } from "@/components/discussion/permalink";
 import { useSubmission } from "@/components/discussion/hooks";
 import { DiscussionMarkdown } from "@/components/discussion/markdown";
 import { useMutation } from "@/components/discussion/mutations";
@@ -19,17 +20,31 @@ export function ReviewReplies({
   pull,
   thread,
   csrf,
+  selected,
 }: {
   repo: Repository;
   pull: PullRequest;
   thread: PullReviewThread;
   csrf: string;
+  selected?: number;
 }) {
   const repliesPath = (before?: number) =>
     endpoint(repo, `pulls/${pull.number}/threads/${thread.number}/replies`, {
       before: before?.toString(),
     });
   const replies = usePagedRequest<PullReviewReply>(repliesPath);
+  const linkedReply = useRequest<PullReviewReply>(
+    selected
+      ? endpoint(
+          repo,
+          `pulls/${pull.number}/threads/${thread.number}/replies/${selected}`,
+        )
+      : null,
+  );
+  const linkedReplyId = selected
+    ? `linked-review-reply-${selected}`
+    : undefined;
+  useContributionFocus(linkedReplyId, Boolean(linkedReply.data));
   const [body, setBody] = useState("");
   const mutation = useMutation(csrf, repo);
   const submission = useSubmission();
@@ -53,19 +68,42 @@ export function ReviewReplies({
           <span className="muted">{replies.items.length}</span>
         )}
       </div>
+      {selected && (
+        <div
+          aria-label="Linked reply"
+          role="region"
+          id={linkedReplyId}
+          tabIndex={-1}
+        >
+          <Result state={linkedReply} timingLabel="Linked reply">
+            {(reply) => (
+              <ReviewReplyItem
+                repo={repo}
+                pull={pull}
+                thread={thread}
+                reply={reply}
+                csrf={csrf}
+                refresh={linkedReply.retry}
+              />
+            )}
+          </Result>
+        </div>
+      )}
       <Result state={replies} timingLabel="Thread replies">
         {() =>
-          replies.items.map((reply) => (
-            <ReviewReplyItem
-              key={reply.number}
-              repo={repo}
-              pull={pull}
-              thread={thread}
-              reply={reply}
-              csrf={csrf}
-              refresh={replies.retry}
-            />
-          ))
+          replies.items
+            .filter((reply) => reply.number !== selected)
+            .map((reply) => (
+              <ReviewReplyItem
+                key={reply.number}
+                repo={repo}
+                pull={pull}
+                thread={thread}
+                reply={reply}
+                csrf={csrf}
+                refresh={replies.retry}
+              />
+            ))
         }
       </Result>
       {replies.next !== null && (

@@ -146,6 +146,9 @@ impl Mutation for UpdateRelease {
         let old_version = release.version;
         let now = timestamp(context.now_ms())?;
         if release.draft && !input.draft {
+            // A withdrawn release can retain its previous tag OID. Preparing
+            // publication clears the stored proof so the Git tag is verified again.
+            release.tag_oid = None;
             release.publication_pending = Some(ReleasePublication {
                 expected_version: input.version,
                 result_version: next_version(input.version)?,
@@ -194,6 +197,7 @@ impl Mutation for CompleteReleasePublication {
             validate_number(input.expected_version)?;
         }
         validate_oid(&input.tag_oid)?;
+        validate_author(&input.publisher)?;
         let Some(mut release) = load_release(context, input.number)? else {
             return Ok(MutationResult::Rejected(
                 CompleteReleasePublicationOutcome::NotFound,
@@ -235,6 +239,7 @@ impl Mutation for CompleteReleasePublication {
         release.updated_at_ms = now;
         update_release_row(context, &release, old_version)?;
         advance_revision(context)?;
+        collaboration::watches::published(context, release.number, input.publisher, now)?;
         Ok(MutationResult::Success(
             CompleteReleasePublicationOutcome::Completed(Box::new(release)),
         ))

@@ -11,6 +11,7 @@ mod git;
 mod git_import;
 mod integrity;
 mod local_disk;
+mod markdown;
 mod metrics;
 mod peer;
 mod repository;
@@ -28,9 +29,10 @@ pub use cells::repository::search::index::{
     RebuildSearchInput, SearchIndexPhase, SearchIndexProgress, SearchIndexStatus,
 };
 pub use config::{
-    AuthProvider, BranchProtection, CellDurabilityMode, CellsConfig, Config, GitHubConfig,
-    ImportConfig, OidcConfig, RepositoryAccess, RepositoryConfig, RepositoryGroup,
-    RepositoryMember, StorageConfig,
+    AuthProvider, BranchProtection, CellDurabilityMode, CellsConfig, Config, GitHubActionsBinding,
+    GitHubActionsConfig, GitHubConfig, ImportConfig, NotificationEmailConfig, OidcConfig,
+    RepositoryAccess, RepositoryConfig, RepositoryGroup, RepositoryMember, StorageConfig,
+    WebhookDestination,
 };
 pub use server::serve;
 pub use server::storage::probe_storage;
@@ -44,7 +46,16 @@ pub fn cell_capacity(config: &Config) -> Result<Vec<u8>> {
 /// Initializes the empty application Cell for one newly cataloged repository.
 pub async fn initialize_repository_cell(config: &Config, repository: uuid::Uuid) -> Result<()> {
     config.validate()?;
-    cells::initialize_repository(config, repository).await
+    let catalog = catalog::CatalogStore::from_config(config)?;
+    cells::prepare_repository(
+        config,
+        &catalog,
+        repository,
+        catalog::RepositoryApplicationState::EmptyCellPending,
+    )
+    .await?;
+    catalog.mark_cell_ready(repository).await?;
+    Ok(())
 }
 
 /// Startup and server lifecycle errors with their original sources retained.
@@ -96,6 +107,8 @@ pub enum Error {
     },
     #[error("object storage preflight failed: {0}")]
     StorageProbe(&'static str),
+    #[error("team preflight failed: {0}")]
+    TeamPreflight(&'static str),
     #[error("local staging setup failed")]
     LocalStaging {
         #[source]

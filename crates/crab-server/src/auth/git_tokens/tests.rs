@@ -23,7 +23,7 @@ async fn principal(h: &Harness, token: &str) -> auth::Principal {
         .auth
         .as_ref()
         .unwrap()
-        .git_principal(&headers)
+        .git_principal(&h.server, &headers, true)
         .await
 }
 

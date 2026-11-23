@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { mockPullRequest } from "./pulls/fixture";
+import { emptyIssueTemplates } from "./fixtures";
 import {
   expectNoAccessibilityViolations,
   selectDarkTheme,
@@ -67,6 +68,8 @@ async function fixture(
     const request = route.request();
     const url = new URL(request.url());
     const root = "/api/repos/team/project/";
+    if (url.pathname === root + "issues/templates")
+      return route.fulfill({ json: emptyIssueTemplates });
     if (url.pathname === root + "assignees")
       return route.fulfill({ json: { items: [person], can_manage: true } });
     if (url.pathname === root + "labels")
@@ -138,6 +141,172 @@ async function chooseMetadata(page: Page) {
   await page.getByRole("radio", { name: "Release", exact: true }).check();
   await page.getByRole("button", { name: "Done", exact: true }).click();
 }
+
+test("a Markdown template prefills an editable issue and keeps the same submission on retry", async ({
+  page,
+}) => {
+  const state = await fixture(page, "issues", "lost");
+  await page.route(
+    (url) => url.pathname === "/api/repos/team/project/issues/templates",
+    (route) =>
+      route.fulfill({
+        json: {
+          ...emptyIssueTemplates,
+          source: { owner: "team", name: ".github" },
+          blank_allowed: false,
+          blank_maintainers_only: true,
+          items: [
+            {
+              file: "feature.md",
+              name: "Feature request",
+              description: "Describe a change",
+              title: "[Feature] ",
+              content: { format: "markdown", body: "## Proposal\n" },
+              labels: [],
+              assignees: [],
+              grant: null,
+            },
+          ],
+          contact_links: [
+            {
+              name: "Support",
+              about: "Ask a question",
+              url: "https://support.example.test/",
+            },
+          ],
+        },
+      }),
+  );
+  await page.goto("/team/project/issues/new?template=blank");
+  await expect(
+    page.getByRole("heading", { name: "Choose how to open an issue" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Open blank issue" }),
+  ).toHaveCount(0);
+  const provenance = page.getByRole("link", { name: ".github", exact: true });
+  await expect(provenance).toHaveAttribute("href", "/team/.github");
+  await expect(
+    page.getByRole("link", { name: "Open Support in a new tab" }),
+  ).toHaveAttribute("href", "https://support.example.test/");
+  await page.getByRole("link", { name: "Use Feature request" }).click();
+  await expect(provenance).toBeVisible();
+  const title = page.getByRole("textbox", { name: "Title", exact: true });
+  const description = page.getByRole("textbox", {
+    name: "Description",
+    exact: true,
+  });
+  await expect(title).toHaveValue("[Feature] ");
+  await expect(description).toHaveValue("## Proposal\n");
+  await title.fill("[Feature] Add a preview");
+  await description.fill("## Proposal\n\nShow the preview before publishing.");
+  await expectNoAccessibilityViolations(page);
+  await page.getByRole("button", { name: "Create issue", exact: true }).click();
+  const retry = page.getByRole("button", {
+    name: "Retry original submission",
+    exact: true,
+  });
+  await expect(retry).toBeVisible();
+  await expect(description).toBeDisabled();
+  await retry.click();
+  await expect(
+    page
+      .getByRole("alert")
+      .filter({ hasText: "Current context is unavailable" }),
+  ).toBeVisible();
+  await retry.click();
+  await expect(page).toHaveURL(/\/issues\/2$/);
+  expect(state.writes).toHaveLength(3);
+  expect(state.writes[1]).toEqual(state.writes[0]);
+  expect(state.writes[2]).toEqual(state.writes[0]);
+  expect(state.effects()).toBe(1);
+});
+
+test("a YAML template validates required answers and posts the rendered issue body", async ({
+  page,
+}) => {
+  const state = await fixture(page, "issues", "lost");
+  await page.route(
+    (url) => url.pathname === "/api/repos/team/project/issues/templates",
+    (route) =>
+      route.fulfill({
+        json: {
+          ...emptyIssueTemplates,
+          items: [
+            {
+              file: "report.yml",
+              name: "Report a problem",
+              description: "Share reproduction details",
+              title: "[Bug] A failure",
+              content: {
+                format: "form",
+                fields: [
+                  {
+                    type: "markdown",
+                    attributes: { value: "Include one reproducible example." },
+                  },
+                  {
+                    type: "textarea",
+                    attributes: { label: "Logs", render: "text" },
+                    validations: { required: true },
+                  },
+                  {
+                    type: "dropdown",
+                    attributes: {
+                      label: "Environments",
+                      options: ["Desktop", "Web"],
+                      multiple: true,
+                      default: null,
+                    },
+                    validations: { required: false },
+                  },
+                  {
+                    type: "checkboxes",
+                    attributes: {
+                      label: "Confirmation",
+                      options: [
+                        { label: "I reviewed the guide", required: true },
+                      ],
+                    },
+                    validations: { required: false },
+                  },
+                ],
+              },
+              labels: [],
+              assignees: [],
+              grant: null,
+            },
+          ],
+        },
+      }),
+  );
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/team/project/issues/new");
+  await selectDarkTheme(page);
+  await page.getByRole("link", { name: "Use Report a problem" }).click();
+  const submit = page.getByRole("button", {
+    name: "Create issue",
+    exact: true,
+  });
+  await expect(submit).toBeDisabled();
+  await page
+    .getByRole("textbox", { name: "Logs (required)" })
+    .fill("a ``` fenced fragment");
+  await page.getByRole("checkbox", { name: "Web", exact: true }).check();
+  await expect(submit).toBeDisabled();
+  await page
+    .getByRole("checkbox", { name: "I reviewed the guide Required" })
+    .check();
+  await expectNoAccessibilityViolations(page);
+  await submit.click();
+  await expect(
+    page.getByRole("button", { name: "Retry original submission" }),
+  ).toBeVisible();
+  expect(state.writes[0].body).toBe(
+    "### Logs\n\n````text\na ``` fenced fragment\n````\n\n### Environments\n\nWeb\n\n### Confirmation\n\n- [x] I reviewed the guide",
+  );
+});
+
 for (const kind of ["issues", "pulls"] as const) {
   test(`${kind}: creation includes metadata and recovers the original frozen intent after lost replies`, async ({
     page,

@@ -1,5 +1,5 @@
 use super::ImportError;
-use std::{io, path::Path, process::Stdio, time::Duration};
+use std::{collections::BTreeMap, io, path::Path, process::Stdio, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::Command,
@@ -54,8 +54,9 @@ pub(super) async fn push_mirror(
     loop {
         let mut push = Command::new("git");
         push.current_dir(mirror)
-            .args(["push", "--quiet", "--atomic", "--mirror"])
-            .arg(destination);
+            .args(["push", "--quiet", "--atomic"])
+            .arg(destination)
+            .arg("refs/*:refs/*");
         configure_git(&mut push, None, Some(internal_key));
         match run_git(push, cancellation, Some(internal_key)).await {
             Ok(_) => return Ok(()),
@@ -85,38 +86,47 @@ pub(super) async fn push_mirror(
 pub(super) async fn mirror_refs(
     path: &Path,
     cancellation: &CancellationToken,
-) -> Result<Vec<String>, ImportError> {
+) -> Result<BTreeMap<String, String>, ImportError> {
     let mut refs = Command::new("git");
     refs.current_dir(path)
-        .args(["for-each-ref", "--format=%(refname)"]);
+        .args(["for-each-ref", "--format=%(refname)%09%(objectname)"]);
     configure_git(&mut refs, None, None);
     let output = run_git(refs, cancellation, None).await?;
-    if output.len() > MAX_GIT_OUTPUT_BYTES {
-        return Err(ImportError::Git(
-            "Git source advertised too much ref metadata".into(),
-        ));
+    let mut refs = BTreeMap::new();
+    for line in output.lines() {
+        let (name, oid) = line
+            .split_once('\t')
+            .ok_or_else(|| ImportError::Git("Invalid Git ref metadata".into()))?;
+        crab_git::validate_push_refname(name).map_err(|_| {
+            ImportError::Git("The Git source contains an unsupported ref name".into())
+        })?;
+        gix_hash::ObjectId::from_hex(oid.as_bytes()).map_err(|_| {
+            ImportError::Git("The Git source contains an invalid ref target".into())
+        })?;
+        if refs.insert(name.to_owned(), oid.to_owned()).is_some() {
+            return Err(ImportError::Git(
+                "The Git source advertised a duplicate ref".into(),
+            ));
+        }
     }
-    Ok(output
-        .lines()
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(str::to_owned)
-        .collect())
+    Ok(refs)
 }
 
 pub(super) async fn default_branch(
     path: &Path,
+    refs: &BTreeMap<String, String>,
     cancellation: &CancellationToken,
 ) -> Result<String, ImportError> {
     let mut symbolic = Command::new("git");
-    symbolic
-        .current_dir(path)
-        .args(["symbolic-ref", "--short", "HEAD"]);
+    symbolic.current_dir(path).args(["symbolic-ref", "HEAD"]);
     configure_git(&mut symbolic, None, None);
     match run_git(symbolic, cancellation, None).await {
-        Ok(branch) => {
-            let branch = branch.trim();
-            if valid_branch(branch) {
+        Ok(head) => {
+            let head = head.trim_end_matches('\n');
+            if let Some(branch) = head.strip_prefix("refs/heads/")
+                && refs.contains_key(head)
+                && valid_branch(branch)
+            {
                 return Ok(branch.to_owned());
             }
         }
@@ -124,19 +134,14 @@ pub(super) async fn default_branch(
         Err(error) => return Err(error),
     }
 
-    let mut refs = Command::new("git");
-    refs.current_dir(path)
-        .args(["for-each-ref", "--format=%(refname:strip=2)", "refs/heads"]);
-    configure_git(&mut refs, None, None);
-    let refs = run_git(refs, cancellation, None).await?;
-    let mut branches = refs.lines().filter(|branch| valid_branch(branch));
-    branches
-        .find(|branch| *branch == "main")
+    ["main", "master"]
+        .into_iter()
+        .find(|branch| refs.contains_key(&format!("refs/heads/{branch}")))
         .or_else(|| {
-            let mut fallback = refs.lines().filter(|branch| valid_branch(branch));
-            fallback.find(|branch| *branch == "master")
+            refs.keys()
+                .filter_map(|name| name.strip_prefix("refs/heads/"))
+                .find(|name| valid_branch(name))
         })
-        .or_else(|| refs.lines().find(|branch| valid_branch(branch)))
         .map(str::to_owned)
         .ok_or(ImportError::Git("Git source has no branch".into()))
 }
@@ -167,12 +172,14 @@ pub(super) fn configure_git(
     }
     if let Some(key) = internal_key {
         command
-            .env("GIT_CONFIG_COUNT", "3")
+            .env("GIT_CONFIG_COUNT", "4")
             .env("GIT_CONFIG_KEY_2", "http.extraHeader")
             .env(
                 "GIT_CONFIG_VALUE_2",
                 format!("X-Crab-Internal-Import: {key}"),
-            );
+            )
+            .env("GIT_CONFIG_KEY_3", "http.proxy")
+            .env("GIT_CONFIG_VALUE_3", "");
     }
 }
 
@@ -233,10 +240,11 @@ pub(super) async fn run_git(
         if detail.is_empty() {
             detail = "git exited unsuccessfully".into();
         }
-        detail.truncate(512);
+        detail.truncate(detail.floor_char_boundary(512));
         return Err(ImportError::Git(detail));
     }
-    Ok(String::from_utf8_lossy(&stdout).into_owned())
+    String::from_utf8(stdout)
+        .map_err(|_| ImportError::Git("The Git source returned non-UTF-8 metadata".into()))
 }
 
 #[derive(Debug)]

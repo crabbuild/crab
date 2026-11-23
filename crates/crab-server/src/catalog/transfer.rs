@@ -1,0 +1,334 @@
+use std::collections::HashSet;
+
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use super::{
+    CatalogDocument, CatalogError, CatalogRecord, CatalogStore, MembershipActor,
+    MembershipAuditEvent, OrganizationAccess, RepositoryApplicationState, organization_namespace,
+    personal_namespace, valid_actor,
+};
+use crate::{RepositoryAccess, RepositoryMember, config::valid_repository_component};
+
+const LIFETIME_MS: i64 = 24 * 60 * 60 * 1_000;
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum Recipient {
+    Account { identity: MembershipActor },
+    Organization { id: Uuid },
+}
+
+impl Recipient {
+    pub(crate) fn namespace(&self) -> String {
+        match self {
+            Self::Account { identity } => personal_namespace(&identity.issuer, &identity.subject),
+            Self::Organization { id } => organization_namespace(*id),
+        }
+    }
+
+    fn valid(&self) -> bool {
+        match self {
+            Self::Account { identity } => valid_actor(identity),
+            Self::Organization { id } => !id.is_nil(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum State {
+    Pending,
+    Accepted,
+    Cancelled,
+    Declined,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Offer {
+    pub id: Uuid,
+    pub requester: MembershipActor,
+    pub recipient: Recipient,
+    pub recipient_label: String,
+    pub from_owner: String,
+    pub from_name: String,
+    pub name: String,
+    pub version: u32,
+    pub expires_at_ms: i64,
+    pub state: State,
+}
+
+pub(crate) struct Proposal {
+    pub id: Uuid,
+    pub requester: MembershipActor,
+    pub recipient: Recipient,
+    pub recipient_label: String,
+    pub name: String,
+    pub version: u32,
+}
+
+pub(crate) enum Decision {
+    Accept {
+        actor: MembershipActor,
+        display_name: String,
+    },
+    Cancel,
+    Decline,
+}
+
+impl Offer {
+    pub(crate) fn available(&self, record: &CatalogRecord, now_ms: i64) -> bool {
+        self.state == State::Pending
+            && self.expires_at_ms > now_ms
+            && self.version == record.name_version()
+    }
+
+    fn matches(&self, input: &Proposal) -> bool {
+        self.id == input.id
+            && self.requester == input.requester
+            && self.recipient == input.recipient
+            && self.name == input.name
+            && self.version == input.version
+    }
+
+    fn valid(&self) -> bool {
+        !self.id.is_nil()
+            && valid_actor(&self.requester)
+            && self.recipient.valid()
+            && !self.recipient_label.is_empty()
+            && self.recipient_label.len() <= 100
+            && !self.recipient_label.chars().any(char::is_control)
+            && valid_repository_component(&self.from_owner)
+            && valid_repository_component(&self.from_name)
+            && valid_repository_component(&self.name)
+            && !self
+                .from_owner
+                .eq_ignore_ascii_case(&self.recipient.namespace())
+            && self.expires_at_ms > 0
+    }
+}
+
+impl CatalogDocument {
+    pub(crate) fn transfer(&self, id: Uuid) -> Option<(&CatalogRecord, &Offer)> {
+        self.repositories.iter().find_map(|record| {
+            record
+                .transfer
+                .as_ref()
+                .filter(|offer| offer.id == id)
+                .map(|offer| (record, offer))
+        })
+    }
+
+    pub(super) fn validate_transfers(&self) -> Result<(), CatalogError> {
+        let mut ids = HashSet::new();
+        for record in &self.repositories {
+            if let Some(offer) = &record.transfer
+                && (!offer.valid()
+                    || !ids.insert(offer.id)
+                    || record.application != RepositoryApplicationState::CellReady
+                    || offer.version > record.name_version())
+            {
+                return Err(CatalogError::Invalid(
+                    "repository transfer record is invalid",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn allow_transfer(&self, record: &CatalogRecord) -> Result<(), CatalogError> {
+        if record.forked_from.is_some()
+            || self
+                .repositories
+                .iter()
+                .any(|fork| fork.forked_from == Some(record.id))
+        {
+            return Err(CatalogError::Invalid(
+                "Repositories in a private fork network cannot be transferred",
+            ));
+        }
+        Ok(())
+    }
+
+    fn advance_transfer(&mut self) -> Result<(), CatalogError> {
+        self.version = self
+            .version
+            .checked_add(1)
+            .ok_or(CatalogError::Invalid("catalog version overflowed"))?;
+        Ok(())
+    }
+}
+
+impl CatalogStore {
+    pub(crate) async fn propose_transfer(
+        &self,
+        revision: u64,
+        repository: Uuid,
+        proposal: Proposal,
+        now_ms: i64,
+    ) -> Result<CatalogDocument, CatalogError> {
+        let (mut document, etag) = self.load_for_mutation().await?;
+        if document.version != revision {
+            return Err(CatalogError::Conflict);
+        }
+        let record = document
+            .repository_by_id(repository)
+            .ok_or(CatalogError::NotFound)?;
+        if let Some((existing, offer)) = document.transfer(proposal.id) {
+            return if existing.id == repository && offer.matches(&proposal) {
+                Ok(document)
+            } else {
+                Err(CatalogError::Conflict)
+            };
+        }
+        document.allow_transfer(record)?;
+        if proposal.version != record.name_version()
+            || record
+                .transfer
+                .as_ref()
+                .is_some_and(|offer| offer.available(record, now_ms))
+        {
+            return Err(CatalogError::Conflict);
+        }
+        let offer = Offer {
+            id: proposal.id,
+            requester: proposal.requester,
+            recipient: proposal.recipient,
+            recipient_label: proposal.recipient_label,
+            name: proposal.name,
+            from_owner: record.owner.clone(),
+            from_name: record.name.clone(),
+            version: proposal.version,
+            expires_at_ms: now_ms.saturating_add(LIFETIME_MS),
+            state: State::Pending,
+        };
+        if !offer.valid() {
+            return Err(CatalogError::Invalid(
+                "Choose a different owner and a valid repository name",
+            ));
+        }
+        let record = document
+            .repositories
+            .iter_mut()
+            .find(|record| record.id == repository)
+            .ok_or(CatalogError::NotFound)?;
+        record.transfer = Some(offer);
+        document.advance_transfer()?;
+        document.validate(&self.root)?;
+        if self.write_document(&document, etag).await? {
+            Ok(document)
+        } else {
+            Err(CatalogError::Conflict)
+        }
+    }
+
+    pub(crate) async fn decide_transfer(
+        &self,
+        revision: u64,
+        id: Uuid,
+        decision: Decision,
+        now_ms: i64,
+    ) -> Result<CatalogDocument, CatalogError> {
+        let (mut document, etag) = self.load_for_mutation().await?;
+        if document.version != revision {
+            return Err(CatalogError::Conflict);
+        }
+        let (record, offer) = document.transfer(id).ok_or(CatalogError::NotFound)?;
+        let state = match &decision {
+            Decision::Accept { .. } => State::Accepted,
+            Decision::Cancel => State::Cancelled,
+            Decision::Decline => State::Declined,
+        };
+        if offer.state == state {
+            return Ok(document);
+        }
+        if !offer.available(record, now_ms) {
+            return Err(CatalogError::Conflict);
+        }
+        let repository = record.id;
+        if let Decision::Accept {
+            actor,
+            display_name,
+        } = decision
+        {
+            document.allow_transfer(record)?;
+            let previous = record.membership_digest()?;
+            let offer = offer.clone();
+            if let Recipient::Account { identity } = &offer.recipient
+                && identity != &actor
+            {
+                return Err(CatalogError::Conflict);
+            }
+            let namespace = offer.recipient.namespace();
+            if let Recipient::Organization { id } = offer.recipient
+                && document.repositories.iter().any(|record| {
+                    record.owner.eq_ignore_ascii_case(&namespace)
+                        && record.organization_id() != Some(id)
+                })
+            {
+                return Err(CatalogError::NameUnavailable);
+            }
+            let new = document.relocate(repository, namespace, offer.name.clone(), id)?;
+            // Direct collaborators remain. Namespace-owned grants are replaced
+            // at the same commit as the address, including former SSO groups.
+            new.groups.clear();
+            new.organization = match offer.recipient {
+                Recipient::Organization { id } => Some(OrganizationAccess {
+                    id,
+                    teams: Vec::new(),
+                }),
+                Recipient::Account { identity } => {
+                    if let Some(entry) = new
+                        .members
+                        .iter_mut()
+                        .find(|entry| entry.subject == identity.subject)
+                    {
+                        entry.access = RepositoryAccess::Admin;
+                    } else {
+                        new.members.push(RepositoryMember {
+                            subject: identity.subject,
+                            name: display_name,
+                            access: RepositoryAccess::Admin,
+                        });
+                    }
+                    None
+                }
+            };
+            let digest = new.membership_digest()?;
+            document.advance_transfer()?;
+            document.pending_membership_audit = Some(MembershipAuditEvent {
+                id: Uuid::now_v7(),
+                repository_id: repository,
+                actor,
+                previous_members_digest: previous,
+                new_members_digest: digest,
+                repository_version: document.version,
+                occurred_at: u64::try_from(now_ms / 1_000)
+                    .map_err(|_| CatalogError::Invalid("system clock is before epoch"))?,
+                previous: document.membership_audit_head.clone(),
+            });
+            document.normalize();
+        } else {
+            document.advance_transfer()?;
+        }
+        let record = document
+            .repositories
+            .iter_mut()
+            .find(|record| record.id == repository)
+            .ok_or(CatalogError::NotFound)?;
+        record
+            .transfer
+            .as_mut()
+            .ok_or(CatalogError::NotFound)?
+            .state = state;
+        document.validate(&self.root)?;
+        if !self.write_document(&document, etag).await? {
+            return Err(CatalogError::Conflict);
+        }
+        if state == State::Accepted {
+            let _ = self.flush_membership_audit().await;
+        }
+        Ok(document)
+    }
+}

@@ -86,7 +86,10 @@ and [AKS outbound workload-identity rules](https://learn.microsoft.com/en-us/azu
 
 ## Select an immutable image
 
-Maintainer releases publish `linux/amd64` and `linux/arm64` images to
+Release publication awaits native provider, fault, restore, scale, and upgrade
+qualification. For an isolated pilot, use the source-build instructions below.
+
+Once qualified, maintainer releases will publish `linux/amd64` and `linux/arm64` images to
 `ghcr.io/crabbuild/crab-server`. The release workflow accepts only an
 annotated `crab-server-vX.Y.Z` tag that matches this crate's version and is
 reachable from `main`. A push of that tag is the only publication trigger. The
@@ -415,6 +418,12 @@ test user's browser sessions and scoped Git token fail after provider logout.
 
 ## Qualify the live deployment
 
+After [bootstrapping the organization](../../../CELLAR.md#organization-authority),
+run `crab-server --config /etc/crab/http-server/server.toml team-preflight` in
+a running pod. It checks the Directory schema, private readiness, and cloud
+storage access using the pod identity. Verify the public sign-in callback and
+Git and LFS transfers through ingress in the live qualification below.
+
 The chart is a deployment profile. Native provider, crash/partition, restore,
 scale, and upgrade qualification remain required before production release.
 Use [the native verification guide](../../../CELLAR.md#verification) for current
@@ -599,7 +608,11 @@ helm upgrade crab-server \
   --wait --history-max 10 --timeout 15m
 ```
 
-Rotate the OIDC client secret without changing the state key. Changing the state key invalidates browser sessions and in-flight OIDC transactions.
+Keep the state key stable during OIDC client-secret rotation. It signs pagination
+cursors. To revoke sessions and their derived Git tokens, use a signed
+subject-scoped Back-Channel Logout Token from the identity provider or have the
+user sign out of Crab. Changing the state key alone leaves durable sessions and
+pending sign-ins intact.
 
 ## Production boundaries
 

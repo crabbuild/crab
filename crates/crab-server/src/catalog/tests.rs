@@ -591,7 +591,7 @@ async fn retrying_create_returns_the_existing_record() {
 }
 
 #[tokio::test]
-async fn exclusive_create_rejects_an_existing_repository() {
+async fn import_reservation_rejects_an_existing_repository() {
     let catalog = catalog();
     catalog
         .create_repository(
@@ -605,13 +605,17 @@ async fn exclusive_create_rejects_an_existing_repository() {
         .await
         .unwrap();
     let result = catalog
-        .create_repository_exclusive(
-            "team".into(),
+        .reserve_git_import(
+            Uuid::now_v7(),
+            BrowserNamespace::Personal("team".into()),
             "project".into(),
-            "team/project".into(),
-            "main".into(),
             String::new(),
+            MembershipActor {
+                issuer: "issuer".into(),
+                subject: "author".into(),
+            },
             vec![],
+            None,
         )
         .await;
     assert!(matches!(result, Err(CatalogError::Conflict)));

@@ -2,8 +2,10 @@ import { useState } from "react";
 import {
   Building2Icon,
   SettingsIcon,
+  ShieldCheckIcon,
   UsersIcon,
   FolderKanbanIcon,
+  BookMarkedIcon,
 } from "lucide-react";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
@@ -27,6 +29,9 @@ import type {
 import { Teams } from "./teams";
 import type { Commands } from "./teams/commands";
 import { Invitations } from "./invitations";
+import { OrganizationRepositories } from "./repositories";
+import { MemberAccess } from "./repository-access";
+import { OrganizationRulesets } from "@/features/settings/rulesets";
 export { OrganizationInvitation } from "./invitations";
 
 export function OrganizationPage({
@@ -74,6 +79,11 @@ export function OrganizationPage({
                 </Link>
               </Button>
               {[
+                {
+                  key: "repositories",
+                  label: "Repositories",
+                  icon: BookMarkedIcon,
+                },
                 { key: "people", label: "People", icon: UsersIcon },
                 { key: "teams", label: "Teams", icon: UsersIcon },
                 ...(role === "owner"
@@ -82,6 +92,11 @@ export function OrganizationPage({
                         key: "invitations",
                         label: "Invitations",
                         icon: UsersIcon,
+                      },
+                      {
+                        key: "rulesets",
+                        label: "Rulesets",
+                        icon: ShieldCheckIcon,
                       },
                       {
                         key: "settings",
@@ -114,7 +129,16 @@ export function OrganizationPage({
                 {notice}
               </p>
             )}
-            {tab === "teams" ? (
+            {tab === "repositories" ? (
+              <OrganizationRepositories
+                id={id}
+                name={organization.name}
+                actor={actor}
+                canCreate={role === "owner"}
+                url={url}
+                csrf={csrf}
+              />
+            ) : tab === "teams" ? (
               <Teams
                 id={id}
                 actor={actor}
@@ -124,6 +148,7 @@ export function OrganizationPage({
               />
             ) : tab === "people" ? (
               <People
+                id={id}
                 endpoint={endpoint}
                 csrf={csrf}
                 onChanged={(message) => {
@@ -133,6 +158,8 @@ export function OrganizationPage({
               />
             ) : role === "owner" && tab === "invitations" ? (
               <Invitations endpoint={endpoint} id={id} csrf={csrf} />
+            ) : role === "owner" && tab === "rulesets" ? (
+              <OrganizationRulesets key={id} organization={id} csrf={csrf} />
             ) : role === "owner" && tab === "settings" ? (
               <Settings
                 key={organization.version}
@@ -154,10 +181,12 @@ export function OrganizationPage({
   );
 }
 function People({
+  id,
   endpoint,
   csrf,
   onChanged,
 }: {
+  id: string;
   endpoint: string;
   csrf: string;
   onChanged: (message: string) => void;
@@ -186,6 +215,7 @@ function People({
                 <MemberRow
                   key={`${member.actor}:${member.version}`}
                   member={member}
+                  organization={id}
                   canManage={data.can_manage}
                   endpoint={endpoint}
                   csrf={csrf}
@@ -220,12 +250,14 @@ function People({
 }
 function MemberRow({
   member,
+  organization,
   canManage,
   endpoint,
   csrf,
   onChanged,
 }: {
   member: OrganizationMembership;
+  organization: string;
   canManage: boolean;
   endpoint: string;
   csrf: string;
@@ -261,6 +293,11 @@ function MemberRow({
         <div className="flex flex-wrap items-center gap-2">
           {canManage ? (
             <>
+              <MemberAccess
+                organization={organization}
+                actor={member.actor}
+                name={member.profile?.name ?? member.actor}
+              />
               <FieldSelect
                 label={`Role for ${name}`}
                 value={role}

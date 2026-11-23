@@ -18,6 +18,8 @@ fn maximum_pull_decisions_fit_the_registered_output_bound() {
         base_ref: "refs/heads/main".into(),
         base_oid: "0123456789abcdef0123456789abcdef01234567".into(),
         head_ref: "refs/heads/feature".into(),
+        head_repository: None,
+        retargeted_base: None,
         head_oid: "89abcdef0123456789abcdef0123456789abcdef".into(),
         label_ids: (1..=20).collect(),
         assignees: (1..=10)

@@ -19,22 +19,36 @@ pub(in crate::api) async fn load<'a>(
     if pulls.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let refs: BTreeSet<_> = pulls
+    let mut refs = BTreeMap::<_, BTreeSet<_>>::new();
+    for pull in pulls
         .iter()
         .filter(|pull| pull.state != PullState::Merged && source_token.is_none())
-        .map(|pull| pull.head_ref.clone())
-        .collect();
-    let heads = if refs.is_empty() {
-        BTreeMap::new()
-    } else {
-        repo.ref_oids(&refs).await?
-    };
+    {
+        refs.entry(pull.head_repository)
+            .or_default()
+            .insert(pull.head_ref.clone());
+    }
+    let mut heads = BTreeMap::new();
+    for (id, refs) in refs {
+        let tips = match id {
+            None => repo.ref_oids(&refs).await?,
+            Some(fork) => match super::git::fork_repository(server, repo, fork) {
+                Ok(fork) => fork.ref_oids(&refs).await?,
+                Err(Error::NotFound) => continue,
+                Err(error) => return Err(error),
+            },
+        };
+        heads.insert(id, tips);
+    }
     let heads = pulls
         .iter()
         .map(|pull| Head {
             number: pull.number,
             version: pull.version,
-            oid: heads.get(&pull.head_ref).cloned(),
+            oid: heads
+                .get(&pull.head_repository)
+                .and_then(|tips| tips.get(&pull.head_ref))
+                .cloned(),
         })
         .collect();
     let input = crate::cells::repository::rollups::Input {

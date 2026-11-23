@@ -76,6 +76,9 @@ pub enum RevisionError {
     /// A direct commit is retained but not reachable from current refs.
     #[error("revision is not reachable from current references")]
     NotReachable,
+    /// Both revisions are valid but have no common ancestor.
+    #[error("revisions do not share a merge base")]
+    NoMergeBase,
     /// Tag peeling produced a cycle.
     #[error("annotated tag chain contains a cycle")]
     TagCycle,
@@ -568,7 +571,7 @@ impl Error {
             | Self::BlameUnsupported { .. }
             | Self::UnsupportedObjectFormat
             | Self::Revision {
-                reason: RevisionError::NotCommit,
+                reason: RevisionError::NotCommit | RevisionError::NoMergeBase,
             } => "unsupported",
             Self::EmptyRepository => "empty_repository",
             Self::RepositoryIndexing { .. } | Self::PathStateIndexing { .. } => "indexing",

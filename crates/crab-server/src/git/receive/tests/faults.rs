@@ -244,6 +244,7 @@ async fn prepared_artifacts_preserve_plan_attribution_through_compaction() {
                             BTreeMap::new(),
                             &cancel,
                             crab_remote::prepare::Options {
+                                inspect_visible_tip: None,
                                 layout: leased_repo.layout.clone(),
                                 graph: crab_git::receive_plan::GraphLimits {
                                     max_ref_updates: 16,

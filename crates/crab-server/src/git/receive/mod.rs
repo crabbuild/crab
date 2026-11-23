@@ -16,9 +16,13 @@ use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use crate::{auth::Principal, server::Server};
+use crate::{auth::Principal, repository::Repository, server::Server};
 
+mod fork_lfs;
+mod fork_merge;
+mod fork_sync;
 mod publish;
+pub(crate) use fork_sync::{merge_fork_head, synchronize_fork};
 mod validate;
 
 const MAX_BODY: u64 = 8 * 1024 * 1024 * 1024;
@@ -40,6 +44,8 @@ pub(crate) enum ReceiveError {
     Forbidden,
     #[error("protected branch requires a pull request")]
     Protected,
+    #[error("{0}")]
+    RefRule(&'static str),
     #[error("changed path is locked by another user")]
     Locked,
     #[error("repository is archived and read-only")]
@@ -219,6 +225,73 @@ pub(crate) async fn publish_pull_request_objects(
     key: (String, String),
     update: crab_git::receive_plan::RefUpdate,
     objects: Vec<(gix_object::Kind, Vec<u8>)>,
+    pull: PullPublication,
+) -> Result<()> {
+    let visibility_base = match &pull.candidate {
+        Some(CandidatePublication::Prepare {
+            build_ref,
+            base_oid,
+            ..
+        }) => Some((build_ref.clone(), *base_oid)),
+        _ => None,
+    };
+    publish_generated_objects(
+        server,
+        principal,
+        key,
+        update,
+        objects,
+        visibility_base,
+        publish::Publication::PullRequest(pull),
+    )
+    .await
+}
+
+pub(crate) struct SuggestionPublication {
+    pub upstream: Option<uuid::Uuid>,
+    pub number: u64,
+    pub threads: Vec<(u64, u64)>,
+}
+
+pub(crate) struct BranchUpdatePublication {
+    pub repository: uuid::Uuid,
+    pub upstream: Option<Arc<Repository>>,
+    pub number: u64,
+    pub version: u64,
+    pub base_ref: String,
+    pub base_oid: gix_hash::ObjectId,
+    pub previous_head: Option<(String, gix_hash::ObjectId)>,
+    pub plan_id: String,
+    pub rebase: bool,
+}
+
+pub(crate) async fn publish_branch_update(
+    server: Arc<Server>,
+    principal: Principal,
+    key: (String, String),
+    update: crab_git::receive_plan::RefUpdate,
+    objects: Vec<(gix_object::Kind, Vec<u8>)>,
+    source: BranchUpdatePublication,
+) -> Result<()> {
+    publish_generated_objects(
+        server,
+        principal,
+        key,
+        update,
+        objects,
+        source.previous_head.clone(),
+        publish::Publication::BranchUpdate(source),
+    )
+    .await
+}
+
+pub(crate) async fn publish_suggestion_objects(
+    server: Arc<Server>,
+    principal: Principal,
+    key: (String, String),
+    update: crab_git::receive_plan::RefUpdate,
+    objects: Vec<(gix_object::Kind, Vec<u8>)>,
+    suggestion: SuggestionPublication,
 ) -> Result<()> {
     publish_generated_objects(
         server,
@@ -227,7 +300,7 @@ pub(crate) async fn publish_pull_request_objects(
         update,
         objects,
         None,
-        publish::Publication::PullRequest,
+        publish::Publication::ReviewSuggestions(suggestion),
     )
     .await
 }
@@ -241,7 +314,7 @@ async fn publish_generated_objects(
     visibility_base: Option<(String, gix_hash::ObjectId)>,
     publication: publish::Publication,
 ) -> Result<()> {
-    let cancel = server.cancellation.child_token();
+    let cancel = publication.cancellation(&server.cancellation).child_token();
     let permit = server.acquire_transfer(&cancel).await?;
     let worker_cancel = cancel.clone();
     let worker_server = Arc::clone(&server);
@@ -249,6 +322,57 @@ async fn publish_generated_objects(
     server.receives.spawn(async move {
         let permit = permit;
         let work = async {
+            let source = match &publication {
+                publish::Publication::PullRequest(pull) => pull
+                    .head_repository
+                    .as_deref()
+                    .map(|repo| (repo, pull.head_ref.as_str(), pull.head_oid)),
+                publish::Publication::BranchUpdate(update) => update
+                    .upstream
+                    .as_deref()
+                    .map(|repo| (repo, update.base_ref.as_str(), update.base_oid)),
+                _ => None,
+            };
+            let (objects, base_pack) = match source {
+                Some(source) => {
+                    let destination =
+                        target(&worker_server, &principal, &key).ok_or(ReceiveError::NotFound)?;
+                    if !crate::app::membership(&worker_server, &principal, &destination)
+                        .await?
+                        .principal
+                        .can_write(destination.id)
+                    {
+                        return Err(ReceiveError::Forbidden);
+                    }
+                    let previous = visibility_base.as_ref();
+                    let (prior_ref, prior_oid) = if let Some((name, oid)) = previous {
+                        (name.as_str(), *oid)
+                    } else {
+                        (
+                            update.name.as_str(),
+                            update.old.ok_or(ReceiveError::BranchChanged)?,
+                        )
+                    };
+                    let result = update.new.ok_or(ReceiveError::BranchChanged)?;
+                    fork_merge::select_pack(
+                        &worker_server,
+                        &destination,
+                        (prior_ref, prior_oid),
+                        result,
+                        source,
+                        objects,
+                        &worker_cancel,
+                    )
+                    .await?
+                }
+                _ => (objects, None),
+            };
+            if base_pack
+                .as_ref()
+                .is_some_and(|pack| pack.size() > MAX_BODY)
+            {
+                return Err(ReceiveError::TooLarge);
+            }
             let directory = worker_server
                 .local_staging
                 .create(MAX_BODY, &worker_cancel)
@@ -261,9 +385,20 @@ async fn publish_generated_objects(
                 let inputs = objects
                     .iter()
                     .map(|(kind, data)| Ok((*kind, data.len() as u64, data.as_slice())));
-                crab_git::pack_writer::write_pack(output, inputs, MAX_BODY, || {
-                    packing_cancel.is_cancelled()
-                })
+                let cancelled = || packing_cancel.is_cancelled();
+                if let Some(pack) = base_pack {
+                    let mut input = std::io::BufReader::new(std::fs::File::open(pack.path())?);
+                    crab_git::pack_writer::append_objects(
+                        output,
+                        &mut input,
+                        pack.size(),
+                        inputs,
+                        MAX_BODY,
+                        cancelled,
+                    )
+                } else {
+                    crab_git::pack_writer::write_pack(output, inputs, MAX_BODY, cancelled)
+                }
             })
             .await??;
             let file = tokio::task::spawn_blocking(move || std::fs::File::open(path)).await??;
@@ -310,6 +445,7 @@ impl IntoResponse for ReceiveError {
                 StatusCode::FORBIDDEN,
                 "Protected branch requires a pull request",
             ),
+            Self::RefRule(message) => (StatusCode::FORBIDDEN, message),
             Self::Locked => (
                 StatusCode::CONFLICT,
                 "A changed path is locked by another user",
@@ -355,29 +491,58 @@ impl IntoResponse for ReceiveError {
     }
 }
 
+fn target(
+    server: &Server,
+    principal: &Principal,
+    key: &(String, String),
+) -> Option<Arc<Repository>> {
+    match principal.import_grant() {
+        Some(grant)
+            if grant.repository.config.owner == key.0 && grant.repository.config.name == key.1 =>
+        {
+            Some(Arc::clone(&grant.repository))
+        }
+        Some(_) => None,
+        None => server.repositories.get(key),
+    }
+}
+
 pub(crate) async fn advertise(
     server: &Server,
     principal: &Principal,
     owner: &str,
     name: &str,
 ) -> Result<Response> {
-    let entry = server
-        .repositories
-        .get(&(owner.to_owned(), name.to_owned()))
+    let entry = target(server, principal, &(owner.to_owned(), name.to_owned()))
         .filter(|entry| principal.can_read(entry.id))
         .ok_or(ReceiveError::NotFound)?;
     if !principal.can_write(entry.id) {
         return Err(ReceiveError::Forbidden);
     }
-    let repository = entry
-        .open_current(server, RepositoryOptions::default(), &server.cancellation)
-        .await?;
-    let refs = repository
-        .refs()
-        .entries
-        .iter()
-        .map(|reference| (reference.name.clone(), reference.target))
-        .collect();
+    let refs = if let Some(grant) = principal.import_grant() {
+        if !grant.active(server).await {
+            return Err(ReceiveError::NotFound);
+        }
+        let view = entry.open_ref_view().await?;
+        view.refs()
+            .iter()
+            .map(|(name, oid)| {
+                let target = gix_hash::ObjectId::from_hex(oid.as_bytes())
+                    .map_err(|_| ReceiveError::Request("Invalid ref in import destination"))?;
+                Ok((name.clone(), target))
+            })
+            .collect::<Result<_>>()?
+    } else {
+        let repository = entry
+            .open_current(server, RepositoryOptions::default(), &server.cancellation)
+            .await?;
+        repository
+            .refs()
+            .entries
+            .iter()
+            .map(|reference| (reference.name.clone(), reference.target))
+            .collect()
+    };
     // Smart HTTP wraps the receive advertisement in a service announcement.
     let mut response = b"001f# service=git-receive-pack\n0000".to_vec();
     receive_wire::advertise(&mut response, &refs)?;
@@ -402,9 +567,7 @@ pub(crate) async fn receive(
         .strip_suffix(".git")
         .ok_or(ReceiveError::NotFound)?
         .to_owned();
-    let entry = server
-        .repositories
-        .get(&(owner.clone(), name.clone()))
+    let entry = target(&server, &principal, &(owner.clone(), name.clone()))
         .filter(|entry| principal.can_read(entry.id))
         .ok_or(ReceiveError::NotFound)?;
     if !principal.can_write(entry.id) {
@@ -428,7 +591,7 @@ pub(crate) async fn receive(
         ));
     }
     check_cancelled(&server.cancellation)?;
-    let internal_import = headers.contains_key("x-crab-internal-import");
+    let internal_import = principal.import_grant().is_some();
     let cancel = server.cancellation.child_token();
     let permit = server.acquire_transfer(&cancel).await?;
     let _guard = cancel.clone().drop_guard();
@@ -543,6 +706,7 @@ pub(crate) async fn fast_forward(
     name: String,
     old: gix_hash::ObjectId,
     new: gix_hash::ObjectId,
+    pull: PullPublication,
 ) -> Result<()> {
     publish_ref(
         server,
@@ -554,7 +718,7 @@ pub(crate) async fn fast_forward(
                 old: Some(old),
                 new: Some(new),
             },
-            publication: publish::Publication::PullRequest,
+            publication: publish::Publication::PullRequest(pull),
         },
     )
     .await
@@ -659,13 +823,72 @@ enum RefPublication {
     },
 }
 
+pub(crate) struct PullPublication {
+    pub number: u64,
+    pub head_ref: String,
+    pub head_repository: Option<Arc<Repository>>,
+    pub head_oid: gix_hash::ObjectId,
+    pub plan_id: Option<String>,
+    pub cancel: CancellationToken,
+    pub candidate: Option<CandidatePublication>,
+    pub tested_candidate: bool,
+}
+
+pub(crate) const MERGE_CANDIDATE_PREFIX: &str = "refs/crab/merge-queue/";
+
+pub(crate) fn merge_candidate_ref(number: u64) -> String {
+    format!("{MERGE_CANDIDATE_PREFIX}{number}")
+}
+
+pub(crate) enum CandidatePublication {
+    Prepare {
+        base_ref: String,
+        build_ref: String,
+        base_oid: gix_hash::ObjectId,
+        target_oid: gix_hash::ObjectId,
+        version: u64,
+        queue: Option<uuid::Uuid>,
+        method: crate::cells::repository::MergeMethod,
+    },
+    Remove,
+}
+
+pub(crate) async fn remove_merge_candidate(
+    server: Arc<Server>,
+    principal: Principal,
+    key: (String, String),
+    old: gix_hash::ObjectId,
+    pull: PullPublication,
+) -> Result<()> {
+    publish_ref(
+        server,
+        principal,
+        key,
+        RefPublication::Update {
+            update: crab_git::receive_plan::RefUpdate {
+                name: merge_candidate_ref(pull.number),
+                old: Some(old),
+                new: None,
+            },
+            publication: publish::Publication::PullRequest(pull),
+        },
+    )
+    .await
+}
+
 async fn publish_ref(
     server: Arc<Server>,
     principal: Principal,
     key: (String, String),
     publication: RefPublication,
 ) -> Result<()> {
-    let cancel = server.cancellation.child_token();
+    let cancel = match &publication {
+        RefPublication::Update { publication, .. } => {
+            publication.cancellation(&server.cancellation)
+        }
+        RefPublication::DefaultBranch { .. } => &server.cancellation,
+    }
+    .child_token();
     let permit = server.acquire_transfer(&cancel).await?;
     let worker_cancel = cancel.clone();
     let worker_server = Arc::clone(&server);

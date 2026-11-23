@@ -85,6 +85,7 @@ async function historyFixture(page: Page) {
           version: 1,
           can_manage: false,
           candidates: [],
+          teams: [],
         },
       });
     if (

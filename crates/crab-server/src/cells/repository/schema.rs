@@ -65,6 +65,7 @@ pub(in crate::cells) fn initialize(
             | (projection::preparation::Prepare::ID, true)
             | (GetRepositoryLifecycle::ID, false)
             | (GetBranchProtections::ID, false)
+            | (rulesets::GetRefPolicy::ID, false)
             | (search::index::GetSearchIndexStatus::ID, false)
     );
     #[cfg(test)]

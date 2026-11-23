@@ -7,16 +7,18 @@ use uuid::Uuid;
 use crate::cells::{
     Error, Result,
     application::{Mutation, MutationResult, Read, Transaction},
-    directory::validate_handle,
-    repository::{self, RepositoryAuthor, timestamp, validate_number},
+    directory::{IdentityKey, validate_handle},
+    repository::{self, RepositoryAuthor, assignments::Assignee},
 };
 
 use super::{
-    Target,
+    Subject, Target, activity,
     mention_settings::{self, Settings},
+    watches,
 };
 
 const OUTBOX: &str = "collaboration/v1/mentions/outbox/";
+const FOLLOW_OUTBOX: &str = "collaboration/v2/watches/follow-outbox/";
 const MAX_MENTIONS: usize = 20;
 const BATCH: usize = 32;
 
@@ -38,6 +40,73 @@ pub(crate) struct Event {
     pub created_at_ms: u64,
     pub previous: Vec<Mention>,
     pub current: Vec<Mention>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviewers: Vec<IdentityKey>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assignees: Vec<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch: Option<Watch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow: Option<FollowSource>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FollowSource {
+    pub activity: u64,
+    pub event: Uuid,
+}
+
+impl FollowSource {
+    fn key(self) -> String {
+        format!(
+            "{FOLLOW_OUTBOX}{:016x}/{:032x}",
+            !self.activity,
+            !self.event.as_u128()
+        )
+    }
+
+    fn pending(self, subject: Subject) -> String {
+        format!(
+            "{}{:016x}/{:032x}",
+            pending_prefix(subject),
+            !self.activity,
+            !self.event.as_u128()
+        )
+    }
+}
+
+fn pending_prefix(subject: Subject) -> String {
+    format!(
+        "collaboration/v2/watches/discussions/{}/pending-follows/",
+        subject.key()
+    )
+}
+
+pub(super) fn earlier_follow(
+    context: &Transaction<'_>,
+    subject: Subject,
+    activity: u64,
+) -> Result<bool> {
+    // An unresolved source only fences events after its activation cutoff.
+    Ok(context
+        .documents::<u64>(&pending_prefix(subject), None, 1)?
+        .first()
+        .is_some_and(|(_, cutoff)| *cutoff < activity))
+}
+
+fn enqueue_follow(context: &Transaction<'_>, event: Event) -> Result<()> {
+    let source = event
+        .follow
+        .ok_or(Error::Invalid("Notification follow source is missing"))?;
+    context.put_document(&source.key(), &event)?;
+    context.put_document(&source.pending(event.target.subject()), &source.activity)
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Watch {
+    pub before: Option<watches::Key>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -45,6 +114,12 @@ pub(crate) struct Event {
 pub(crate) struct EventKey {
     pub id: Uuid,
     pub created_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch: Option<Watch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<watches::Key>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow: Option<FollowSource>,
 }
 
 fn key(id: Uuid, created_at_ms: u64) -> String {
@@ -53,26 +128,45 @@ fn key(id: Uuid, created_at_ms: u64) -> String {
     format!("{OUTBOX}{:016x}/{:032x}", !created_at_ms, !id.as_u128())
 }
 
+#[derive(Deserialize, Serialize)]
+pub(crate) struct PendingEvents {
+    pub discussions: Vec<Event>,
+    pub releases: Vec<watches::ReleaseEvent>,
+}
+
 pub(crate) struct Pending;
 impl Read for Pending {
     const CLASS: &'static str = repository::CLASS;
     const ID: u32 = 336;
     type Input = ();
-    type Output = Vec<Event>;
+    type Output = PendingEvents;
 
-    fn execute(context: &mut Transaction<'_>, (): ()) -> Result<Vec<Event>> {
-        context
-            .documents::<Event>(OUTBOX, None, BATCH)?
+    fn execute(context: &mut Transaction<'_>, (): ()) -> Result<Self::Output> {
+        // Reserve capacity for both queues. A blocked watch page must
+        // never keep its unresolved source outside the worker's next page.
+        let follows = context.documents::<Event>(FOLLOW_OUTBOX, None, BATCH / 2)?;
+        let releases = watches::pending_releases(context, BATCH / 4)?;
+        let others =
+            context.documents::<Event>(OUTBOX, None, BATCH - follows.len() - releases.len())?;
+        let discussions = follows
             .into_iter()
+            .chain(others)
             .map(|(stored_key, event)| {
-                if stored_key != key(event.id, event.created_at_ms) {
+                let expected = event
+                    .follow
+                    .map_or_else(|| key(event.id, event.created_at_ms), FollowSource::key);
+                if stored_key != expected {
                     return Err(Error::Invalid(
                         "Mention event key does not match its record",
                     ));
                 }
                 Ok(event)
             })
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        Ok(PendingEvents {
+            discussions,
+            releases,
+        })
     }
 }
 
@@ -84,16 +178,37 @@ impl Mutation for Acknowledge {
     type Output = ();
 
     fn execute(context: &mut Transaction<'_>, input: EventKey) -> Result<MutationResult<()>> {
-        context.delete_document(&key(input.id, input.created_at_ms))?;
+        if let Some(follow) = input.follow {
+            if let Some(event) = context.document::<Event>(&follow.key())? {
+                context.delete_document(&follow.pending(event.target.subject()))?;
+                context.delete_document(&follow.key())?;
+            }
+            return Ok(MutationResult::Success(()));
+        }
+        let key = key(input.id, input.created_at_ms);
+        if let Some(expected) = input.watch {
+            let Some(mut event) = context.document::<Event>(&key)? else {
+                return Ok(MutationResult::Success(()));
+            };
+            if event.watch != Some(expected) {
+                return Ok(MutationResult::Success(()));
+            }
+            if let Some(next) = input.next {
+                // Another worker may have replayed this page. Advance only
+                // from the cursor used to select its recipients.
+                event.watch = Some(Watch { before: Some(next) });
+                context.put_document(&key, &event)?;
+                return Ok(MutationResult::Success(()));
+            }
+        }
+        context.delete_document(&key)?;
         Ok(MutationResult::Success(()))
     }
 }
 
 pub(in crate::cells::repository) fn record(
     context: &Transaction<'_>,
-    target: Target,
-    actor: &RepositoryAuthor,
-    version: u64,
+    source: &activity::Event,
     previous: Option<&str>,
     body: &str,
 ) -> Result<()> {
@@ -112,16 +227,171 @@ pub(in crate::cells::repository) fn record(
     if current.difference(&previous).next().is_none() {
         return Ok(());
     }
-    target.validate()?;
-    validate_number(version)?;
+    let event = Uuid::now_v7();
+    enqueue_follow(
+        context,
+        Event {
+            id: event,
+            target: source.target,
+            version: source.number,
+            actor: source.actor.clone(),
+            created_at_ms: source.created_at,
+            previous: previous.into_iter().collect(),
+            current: current.into_iter().collect(),
+            reviewers: Vec::new(),
+            assignees: Vec::new(),
+            watch: None,
+            follow: Some(FollowSource {
+                activity: source.number,
+                event,
+            }),
+        },
+    )
+}
+
+pub(in crate::cells::repository) fn review_requested(
+    context: &Transaction<'_>,
+    source: &super::activity::Event,
+    issuer: &str,
+    subjects: impl IntoIterator<Item = String>,
+) -> Result<()> {
+    let reviewers: Vec<_> = subjects
+        .into_iter()
+        .filter(|subject| issuer != source.actor.issuer || *subject != source.actor.subject)
+        .map(|subject| IdentityKey {
+            issuer: issuer.to_owned(),
+            subject,
+        })
+        .collect();
+    for recipient in &reviewers {
+        recipient.validate()?;
+    }
+    // Keep the oldest-first outbox page bounded for long qualified identities.
+    for reviewers in reviewers.chunks(16) {
+        let id = Uuid::now_v7();
+        enqueue_follow(
+            context,
+            Event {
+                id,
+                target: source.target,
+                version: source.number,
+                actor: source.actor.clone(),
+                created_at_ms: source.created_at,
+                previous: Vec::new(),
+                current: Vec::new(),
+                reviewers: reviewers.to_vec(),
+                assignees: Vec::new(),
+                watch: None,
+                follow: Some(FollowSource {
+                    activity: source.number,
+                    event: id,
+                }),
+            },
+        )?;
+    }
+    Ok(())
+}
+
+pub(in crate::cells::repository) fn assigned(
+    context: &Transaction<'_>,
+    source: &activity::Event,
+    previous: &[Assignee],
+    current: &[Assignee],
+) -> Result<()> {
+    // Native assignment records are sorted by Directory ID. Name changes
+    // and users retained by an assignment replacement do not notify again.
+    let assignees: Vec<_> = current
+        .iter()
+        .map(|assignee| assignee.id)
+        .filter(|id| {
+            previous
+                .binary_search_by_key(id, |assignee| assignee.id)
+                .is_err()
+        })
+        .collect();
+    if assignees.is_empty() {
+        return Ok(());
+    }
+    let event = Uuid::now_v7();
+    enqueue_follow(
+        context,
+        Event {
+            id: event,
+            target: source.target,
+            version: source.number,
+            actor: source.actor.clone(),
+            created_at_ms: source.created_at,
+            previous: Vec::new(),
+            current: Vec::new(),
+            reviewers: Vec::new(),
+            assignees,
+            watch: None,
+            follow: Some(FollowSource {
+                activity: source.number,
+                event,
+            }),
+        },
+    )
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Enrollment {
+    pub source: FollowSource,
+    pub recipients: Vec<IdentityKey>,
+}
+
+pub(crate) struct Enroll;
+impl Mutation for Enroll {
+    const CLASS: &'static str = repository::CLASS;
+    const ID: u32 = 420;
+    type Input = Enrollment;
+    type Output = ();
+
+    fn execute(context: &mut Transaction<'_>, input: Enrollment) -> Result<MutationResult<()>> {
+        if input.recipients.len() > crate::cells::directory::notifications::MAX_RECIPIENTS {
+            return Err(Error::Invalid("Notification follow batch is too large"));
+        }
+        if let Some(event) = context.document::<Event>(&input.source.key())? {
+            let source =
+                activity::event(context, input.source.activity, Some(event.target.subject()))?
+                    .ok_or(Error::Invalid("Notification follow activity is missing"))?;
+            if event.follow != Some(input.source) || source.target != event.target {
+                return Err(Error::Invalid(
+                    "Notification follow source does not match activity",
+                ));
+            }
+            let reason = if event.assignees.is_empty() {
+                watches::SubscriptionReason::Mention
+            } else {
+                watches::SubscriptionReason::Assignment
+            };
+            for actor in &input.recipients {
+                watches::follow_recipient(context, &source, actor, reason)?;
+            }
+        }
+        Ok(MutationResult::Success(()))
+    }
+}
+
+pub(super) fn watched(context: &Transaction<'_>, source: &super::activity::Event) -> Result<()> {
+    if !watches::active(context, source)?
+        && !earlier_follow(context, source.target.subject(), source.number)?
+    {
+        return Ok(());
+    }
     let event = Event {
         id: Uuid::now_v7(),
-        target,
-        version,
-        actor: actor.clone(),
-        created_at_ms: timestamp(context.now_ms())?,
-        previous: previous.into_iter().collect(),
-        current: current.into_iter().collect(),
+        target: source.target,
+        version: source.number,
+        actor: source.actor.clone(),
+        created_at_ms: source.created_at,
+        previous: Vec::new(),
+        current: Vec::new(),
+        reviewers: Vec::new(),
+        assignees: Vec::new(),
+        watch: Some(Watch::default()),
+        follow: None,
     };
     context.put_document(&key(event.id, event.created_at_ms), &event)
 }

@@ -37,6 +37,19 @@ async fn dismiss(
         .await?
         .ok_or(Error::NotFound)?;
     let configured_protected = configured_protected(&repo, &pull.base_ref);
+    let default_ref = if principal.can_admin(repo.id) {
+        String::new()
+    } else {
+        repo.open_ref_view().await?.head().to_owned()
+    };
+    let organization_protected = if principal.can_admin(repo.id) {
+        false
+    } else {
+        let inherited = crate::repository::settings::inherited_rulesets(&server, &repo).await?;
+        crate::cells::repository::rulesets::ActiveRulesets::new(&inherited)
+            .map_err(Error::Cell)?
+            .requires_pull(&pull.base_ref, &default_ref)
+    };
     let cell = app::repository_cell(&server, &repo)?;
     let outcome = app::command_output(
         cell.client
@@ -55,6 +68,8 @@ async fn dismiss(
                     can_write: principal.can_write(repo.id),
                     can_admin: principal.can_admin(repo.id),
                     configured_protected,
+                    organization_protected,
+                    default_ref,
                 },
             )
             .await,

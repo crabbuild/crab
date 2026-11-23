@@ -233,6 +233,7 @@ export function RefsPage({
         >
           <TagIcon /> Tags
         </Link>
+        <Link href={repoHref(repo, { view: "rulesets" })}>Rulesets</Link>
       </nav>
       <InputGroup>
         <InputGroupInput

@@ -29,6 +29,7 @@ async fn write<M: Mutation>(cell: &RepositoryCell, input: M::Input) -> M::Output
 }
 async fn seed(cell: &RepositoryCell) {
     let input = CreatePullInput {
+        code_owner_requests: Default::default(),
         metadata: Default::default(),
         draft: false,
         submission_id: *Uuid::now_v7().as_bytes(),
@@ -38,6 +39,7 @@ async fn seed(cell: &RepositoryCell) {
         base_ref: "refs/heads/main".into(),
         base_oid: "a".repeat(40),
         head_ref: "refs/heads/topic".into(),
+        head_repository: None,
         head_oid: "b".repeat(40),
     };
     assert!(matches!(
@@ -89,6 +91,8 @@ async fn stored(cell: &RepositoryCell, subject: &str) -> Request {
 }
 fn review(subject: &str, state: ReviewState) -> CreatePullReviewInput {
     CreatePullReviewInput {
+        base_revision: None,
+        review_teams: Vec::new(),
         pull: 1,
         submission_id: *Uuid::now_v7().as_bytes(),
         author: author(subject),
@@ -379,6 +383,9 @@ async fn request_changes_invalidate_merge_admission_and_pending_merges_freeze_re
         commit_oid: "b".repeat(40),
         message: String::new(),
         created_at_ms: 1,
+        publication_plan: None,
+        bypass_rulesets: Vec::new(),
+        tested_candidate: false,
     };
     write::<SetReviewRequest>(&cell, request("Bob", 1, true)).await;
     assert_eq!(

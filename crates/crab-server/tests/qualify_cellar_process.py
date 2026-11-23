@@ -344,12 +344,14 @@ with open(run / "commands.log", "w") as log:
                                "--prefix", "team/large-files"), env=env)
         server = start()
         wait()
-        cmd(server_command("cells", "initialize-directory"), env=env)
+        directory_command = server_command("cells", "directory-status")
+        assert json.loads(subprocess.check_output(directory_command, env=env, text=True))["state"] == "missing"
         organization_id = str(uuid.uuid4())
         organization_bootstrap = run / "organization.json"
         organization_bootstrap.write_text(json.dumps({"owner": {"issuer": "urn:crab:local", "subject": "operator"}, "name": "Qualification organization", "description": "Native authority"}))
         organization_command = server_command("cells", "bootstrap-organization", "--organization", organization_id, "--input-file", organization_bootstrap)
         organization_created = json.loads(subprocess.check_output(organization_command, env=env, text=True))
+        assert json.loads(subprocess.check_output(directory_command, env=env, text=True))["state"] == "ready"
         organization_root = "/api/organizations/" + organization_id
         organization_before = request(organization_root)
         assert organization_before["role"] == "owner"
@@ -471,6 +473,23 @@ with open(run / "commands.log", "w") as log:
         })
         pull_path = f"/api/repos/team/project/pulls/{pull['number']}"
         assert pull["draft"] is True and pull["can_merge"] is False
+        search_path = "/api/code-search?q=Native+Cellar+qualification"
+        deadline = time.monotonic() + 40
+        while True:
+            workspace = request(search_path)
+            if workspace["indexed_repositories"] == 1:
+                break
+            assert time.monotonic() < deadline, "The default-branch search index was not published"
+            time.sleep(0.25)
+        assert len(workspace["groups"]) == 1
+        group = workspace["groups"][0]
+        assert (group["owner"], group["name"], group["commit"]) == ("team", "project", pull["base_oid"])
+        assert group["files"][0]["path"] == "README.md"
+        assert group["files"][0]["lines"][0]["line"] == 1
+        paths = request("/api/code-search?q=README&kind=path")
+        assert paths["indexed_repositories"] == 1
+        assert paths["groups"][0]["files"][0]["path"] == "README.md"
+        assert paths["groups"][0]["files"][0]["lines"] == []
         pull_search = "/api/repos/team/project/pulls?" + urllib.parse.urlencode({
             "q": 'is:pr draft:true no:assignee AND "Related issue"',
         })
@@ -511,6 +530,7 @@ with open(run / "commands.log", "w") as log:
         stop()
         server = start()
         wait()
+        assert request(search_path) == workspace, "The published search index did not survive restart"
         assert request("/api/profile")["profile"] == actor_profile
         assert request(organization_root) == organization_before
         assert request(organization_root + "/members") == organization_members
@@ -895,6 +915,8 @@ with open(run / "commands.log", "w") as log:
             "milestone_search_restart": True,
             "milestone_options_rebuild": True,
             "milestone_progress": True,
+            "workspace_code_and_path_search": True,
+            "workspace_search_index_restart": True,
             "git_push": True,
             "process_restart": True,
             "durable_objects": int(count),

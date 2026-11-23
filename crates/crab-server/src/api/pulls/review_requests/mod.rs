@@ -17,6 +17,8 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+pub(super) mod teams;
+
 pub(super) fn routes() -> Router<Arc<Server>> {
     Router::new().route(
         "/api/repos/{owner}/{name}/pulls/{number}/review-requests",
@@ -40,9 +42,10 @@ fn view(request: &review_requests::Request, roster: &Roster, authors: &Authors) 
     json!({
         "id":review_requests::reviewer_id(&request.reviewer),
         "reviewer":authors.view(&request.reviewer),
-        "candidate_id":member.filter(|_| !roster.principal.is_local()).map(|member| member.id),
+        "candidate_id":member.filter(|_| !roster.membership.principal.is_local()).map(|member| member.id),
         "state":request.state,
         "requested_by":authors.view(&request.requested_by),
+        "code_owner":request.code_owner,
         "requested_at":request.requested_at,
         "updated_at":request.updated_at,
     })
@@ -53,6 +56,8 @@ fn view(request: &review_requests::Request, roster: &Roster, authors: &Authors) 
 enum Change {
     Request { actor_id: uuid::Uuid },
     Cancel { id: String },
+    RequestTeam { team_id: uuid::Uuid },
+    CancelTeam { team_id: uuid::Uuid },
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -74,6 +79,13 @@ async fn set(
     let version = app::number(input.version)?;
     let cell = app::repository_cell(&server, &repo)?;
     let (reviewer, requested, current) = match input.change {
+        Change::RequestTeam { team_id } | Change::CancelTeam { team_id } => {
+            let request = matches!(input.change, Change::RequestTeam { .. });
+            return teams::set(
+                &server, &principal, &repo, number, version, team_id, request,
+            )
+            .await;
+        }
         Change::Request { actor_id } => {
             if principal.is_local() {
                 return Err(Error::Invalid(
@@ -87,7 +99,7 @@ async fn set(
                     "Reviewer must be a current repository member",
                 ))?
                 .clone();
-            (reviewer, true, roster.principal)
+            (reviewer, true, roster.membership.principal)
         }
         Change::Cancel { id } => {
             valid_id(&id)?;

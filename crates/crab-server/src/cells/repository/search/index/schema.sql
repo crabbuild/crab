@@ -82,6 +82,15 @@ CREATE TABLE IF NOT EXISTS discussion_index_reaction_counts (
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS discussion_index_reaction_lookup ON discussion_index_reaction_counts(kind, count, document);
 
+CREATE TABLE IF NOT EXISTS discussion_index_closing_issues (
+    document INTEGER NOT NULL REFERENCES discussion_index(rowid) ON DELETE CASCADE,
+    issue INTEGER NOT NULL CHECK (issue BETWEEN 1 AND 9007199254740991),
+    base_ref TEXT,
+    PRIMARY KEY (document, issue)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS discussion_index_closing_issue_lookup
+    ON discussion_index_closing_issues(issue, base_ref, document);
+
 CREATE TABLE IF NOT EXISTS discussion_index_dirty (
     kind INTEGER NOT NULL CHECK (kind IN (0, 1)),
     number INTEGER NOT NULL CHECK (number BETWEEN 1 AND 9007199254740991),

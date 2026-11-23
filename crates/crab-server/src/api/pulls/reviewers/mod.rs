@@ -104,7 +104,9 @@ async fn list(
             let author = authors.view(&reviewer.author);
             let candidate_id = roster
                 .candidate(&reviewer.author)
-                .filter(|candidate| !roster.principal.is_local() && Some(candidate.id) != author_id)
+                .filter(|candidate| {
+                    !roster.membership.principal.is_local() && Some(candidate.id) != author_id
+                })
                 .map(|candidate| candidate.id);
             let request = reviewer.request.as_ref().map(|request| {
                 let id = review_requests::reviewer_id(&request.reviewer);
@@ -113,6 +115,7 @@ async fn list(
                     "id": id,
                     "state": request.state,
                     "requested_by": requested_by,
+                    "code_owner": request.code_owner,
                     "requested_at": request.requested_at,
                     "updated_at": request.updated_at,
                 })
@@ -135,9 +138,14 @@ async fn list(
             })
         })
         .collect();
-    let can_manage = page.open && !page.merge_pending && roster.principal.can_triage(repo.id);
+    let membership = &roster.membership;
+    let can_manage = page.open && !page.merge_pending && membership.principal.can_triage(repo.id);
+    let teams = super::review_requests::teams::views(
+        &server, &principal, &repo, membership, page.teams, can_manage,
+    )
+    .await?;
     Ok(Json(
-        json!({"items":items,"next":page.next,"version":page.version,"can_manage":can_manage,"candidates":candidates,"head_oid":head}),
+        json!({"items":items,"teams":teams,"next":page.next,"version":page.version,"can_manage":can_manage,"candidates":candidates,"head_oid":head}),
     ))
 }
 

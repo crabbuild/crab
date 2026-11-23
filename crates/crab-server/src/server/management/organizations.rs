@@ -75,7 +75,7 @@ async fn set_repository_organization(
         issuer: "urn:crab:local".into(),
         subject: "operator".into(),
     };
-    catalog
+    let record = catalog
         .set_organization_access(
             &owner,
             &name,
@@ -85,8 +85,15 @@ async fn set_repository_organization(
             actor,
         )
         .await
-        .map(Json)
-        .map_err(app::repository_access_error)
+        .map_err(app::repository_access_error)?;
+    let (document, _) = catalog.load().await.map_err(app::repository_access_error)?;
+    // Publish the new owner with the repository route before returning. Until
+    // another peer refreshes, it must fail closed on a different owner binding.
+    server
+        .install_catalog(document)
+        .await
+        .map_err(|source| Error::RepositorySetup(Box::new(source)))?;
+    Ok(Json(record))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -105,11 +112,24 @@ async fn bootstrap(
         return Err(Error::Invalid("Organization ID is invalid"));
     }
     input.owner.validate().map_err(Error::Cell)?;
+    if server
+        .auth
+        .as_ref()
+        .is_some_and(|auth| auth.issuer() != input.owner.issuer)
+    {
+        return Err(Error::Invalid(
+            "First owner must use the server's configured identity issuer",
+        ));
+    }
     organization::details(&input.name, &input.description).map_err(Error::Cell)?;
     let _permit = super::admit(&server)?;
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     // Bootstrap is explicit private operator work. The qualified account is
     // registered without a profile; no catalog owner string acquires authority.
+    cells
+        .initialize(Address::Directory)
+        .await
+        .map_err(Error::Cell)?;
     let registered = app::command_output(
         cells
             .command::<RegisterAccounts>(

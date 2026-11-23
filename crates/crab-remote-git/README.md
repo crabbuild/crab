@@ -105,7 +105,7 @@ peeling; non-tip commits retain bounded breadth-first reachability traversal.
 | Reuse a handle | Caller-held Capsule capture | Revalidate root and ref-head authority in the capture owner; never infer freshness from a legacy manifest ETag |
 | Select a revision | `refs`, `resolve`, `snapshot` | Selection stays within pinned visible refs |
 | Browse content | `entry`, `list_directory`, `list_tree_blobs`, `list_tree_recursive`, `read_blob` | Paths are opaque `GitPath` bytes; bounded blob pages seek by prefix/continuation without reading bodies |
-| Inspect changes | `history`, `path_history`, `compare`, `diff`, `blame` | Aggregate work limits apply, including cache hits |
+| Inspect changes | `history`, `path_history`, `merge_bases`, `compare`, `diff`, `blame` | Aggregate work limits apply, including cache hits |
 | Stream an archive | `archive_stream` | Transfers operation cleanup ownership to the stream |
 | Generate a response pack | `generate_pack` and cached variants | Verified output; reuse requires matching identity and request policy |
 

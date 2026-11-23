@@ -19,10 +19,13 @@ use uuid::Uuid;
 
 mod background;
 pub(crate) mod capacity;
+pub(crate) mod email;
 pub(crate) mod http;
 pub(crate) mod management;
 pub(crate) mod mentions;
+pub(crate) mod repository_route;
 pub(crate) mod storage;
+pub(crate) mod webhooks;
 
 pub(crate) const MAX_RELEASE_ASSET_BYTES: u64 = 512 * 1024 * 1024;
 pub(crate) const MAX_BLOB_BYTES: u64 = 256 * 1024 * 1024;
@@ -43,6 +46,7 @@ pub(crate) struct Server {
     pub(crate) shutdown_mode: tokio::sync::watch::Sender<cellar::sdk::ShutdownMode>,
     pub(crate) options: RepositoryOptions,
     pub(crate) cursor_key: [u8; 32],
+    pub(crate) code_indexes: crate::repository::code_index::Cache,
     pub(crate) admission: Arc<Semaphore>,
     pub(crate) bulk_reads: Arc<Semaphore>,
     pub(crate) transfer_admission: TransferAdmission,
@@ -54,8 +58,12 @@ pub(crate) struct Server {
     pub(crate) cancellation: CancellationToken,
     pub(crate) receives: tokio_util::task::TaskTracker,
     pub(crate) auth: Option<Authentication>,
+    pub(crate) github_actions: Option<crate::api::GitHubActions>,
+    pub(crate) webhook_sender: Option<webhooks::Sender>,
+    pub(crate) email: Option<email::Sender>,
     pub(crate) git_import: Option<git_import::ImportContext>,
     pub(crate) catalog: Option<CatalogStore>,
+    repository_setup: Option<Arc<Config>>,
     pub(crate) catalog_healthy: AtomicBool,
     pub(crate) node_healthy: AtomicBool,
     pub(crate) cell_capacity: CellCapacityReport,
@@ -82,6 +90,7 @@ impl Server {
             shutdown_mode: tokio::sync::watch::channel(cellar::sdk::ShutdownMode::Preserve).0,
             options: RepositoryOptions::default(),
             cursor_key: [0; 32],
+            code_indexes: Default::default(),
             admission: Arc::new(Semaphore::new(READ_ADMISSION_CAPACITY)),
             bulk_reads: Arc::new(Semaphore::new(BULK_READ_CAPACITY)),
             transfer_admission,
@@ -93,8 +102,12 @@ impl Server {
             cancellation: CancellationToken::new(),
             receives: tokio_util::task::TaskTracker::new(),
             auth: None,
+            github_actions: None,
+            webhook_sender: None,
+            email: None,
             git_import: None,
             catalog: None,
+            repository_setup: None,
             catalog_healthy: AtomicBool::new(false),
             node_healthy: AtomicBool::new(false),
             cell_capacity: capacity::for_test(),
@@ -107,6 +120,43 @@ impl Server {
     }
     pub(crate) fn catalog(&self) -> Option<CatalogStore> {
         self.catalog.clone()
+    }
+
+    pub(crate) async fn initialize_catalog_repository(
+        &self,
+        id: Uuid,
+        pending: crate::catalog::RepositoryApplicationState,
+    ) -> Result<()> {
+        let catalog = self
+            .catalog()
+            .ok_or(crate::Error::Config("Repository setup requires a catalog"))?;
+        self.prepare_catalog_repository(&catalog, id, pending)
+            .await?;
+        catalog.mark_cell_ready(id).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn prepare_catalog_repository(
+        &self,
+        catalog: &CatalogStore,
+        id: Uuid,
+        pending: crate::catalog::RepositoryApplicationState,
+    ) -> Result<()> {
+        #[cfg(test)]
+        if self.cell_test_runtime.is_some() {
+            if catalog.needs_cell_initialization(id, pending).await? {
+                self.cells()
+                    .ok_or(crate::cells::Error::Unavailable)?
+                    .initialize(id)
+                    .await?;
+            }
+            return Ok(());
+        }
+        let config = self
+            .repository_setup
+            .as_deref()
+            .ok_or(crate::Error::Config("Repository setup is unavailable"))?;
+        crate::cells::prepare_repository(config, catalog, id, pending).await
     }
 
     pub(crate) async fn install_catalog(
@@ -212,6 +262,20 @@ pub async fn serve(config: Config) -> Result<()> {
         )?),
         None => None,
     };
+    let email = config
+        .notification_email
+        .as_ref()
+        .zip(config.auth.as_ref())
+        .map(|(settings, auth)| email::Sender::new(settings, &auth.public_url))
+        .transpose()?;
+    let webhook_sender = (!config.outbound_webhooks.is_empty())
+        .then(|| webhooks::Sender::new(&config.outbound_webhooks))
+        .transpose()?;
+    let github_actions = config
+        .github_actions
+        .as_ref()
+        .map(crate::api::GitHubActions::load)
+        .transpose()?;
     std::fs::create_dir_all(&config.cells.data_dir)?;
     let capacity =
         CellCapacityReport::measure(&config.cells.data_dir, config.cells.local_disk_limit_bytes)?;
@@ -316,6 +380,7 @@ pub async fn serve(config: Config) -> Result<()> {
         options,
         #[cfg(test)]
         cell_test_runtime: None,
+        code_indexes: Default::default(),
         cursor_key: auth
             .as_ref()
             .map(Authentication::cursor_key)
@@ -331,11 +396,12 @@ pub async fn serve(config: Config) -> Result<()> {
         cancellation: cancellation.clone(),
         receives: tokio_util::task::TaskTracker::new(),
         auth,
-        git_import: Some(git_import::ImportContext::new(
-            config.clone(),
-            public_address,
-        )),
+        github_actions,
+        webhook_sender,
+        email,
+        git_import: Some(git_import::ImportContext::new(&config, public_address)),
         catalog: Some(catalog),
+        repository_setup: Some(Arc::new(config.clone())),
         catalog_healthy: AtomicBool::new(true),
         node_healthy: AtomicBool::new(false),
         cell_capacity: capacity,
@@ -387,10 +453,19 @@ pub async fn serve(config: Config) -> Result<()> {
                   background.spawn(async move { background::refresh_catalog(refresh).await; Ok(()) });
                   let projection = server.clone();
                   background.spawn(async move { background::sweep_projections(projection).await });
+                  background.spawn(crate::repository::code_index::run(server.clone()));
+                  background.spawn(crate::api::auto_merge::run(server.clone()));
                   let attachments = server.clone();
                   background.spawn(async move { crate::api::discussion_attachments::sweep(attachments).await; Ok(()) });
                   let mentions = server.clone();
                   background.spawn(async move { self::mentions::sweep(mentions).await; Ok(()) });
+                  background.spawn(background::sweep_notification_filing(server.clone()));
+                  if server.email.is_some() {
+                      background.spawn(email::run(server.clone()));
+                  }
+                  if server.webhook_sender.is_some() {
+                      background.spawn(webhooks::run(server.clone()));
+                  }
                   let integrity = server.clone();
                   background.spawn(async move { crate::integrity::run(integrity).await; Ok(()) });
               },

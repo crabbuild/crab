@@ -187,6 +187,7 @@ async fn qualified_commenters_cover_all_sources_survive_rebuild_and_follow_sourc
             write::<CreatePull>(
                 &cell,
                 CreatePullInput {
+                    code_owner_requests: Default::default(),
                     metadata: Default::default(),
                     submission_id: *Uuid::now_v7().as_bytes(),
                     author: owner.clone(),
@@ -195,6 +196,7 @@ async fn qualified_commenters_cover_all_sources_survive_rebuild_and_follow_sourc
                     body: String::new(),
                     base_ref: "refs/heads/main".into(),
                     head_ref: format!("refs/heads/feature-{number}"),
+                    head_repository: None,
                     base_oid: "a".repeat(40),
                     head_oid: "b".repeat(40),
                 }
@@ -236,6 +238,8 @@ async fn qualified_commenters_cover_all_sources_survive_rebuild_and_follow_sourc
             write::<CreatePullReview>(
                 &cell,
                 CreatePullReviewInput {
+                    base_revision: None,
+                    review_teams: Vec::new(),
                     submission_id: *Uuid::now_v7().as_bytes(),
                     pull: number,
                     author: reviewer.clone(),

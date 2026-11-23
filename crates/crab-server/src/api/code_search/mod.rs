@@ -1,0 +1,468 @@
+use super::{ApiError, display_path, encode_hex, query, read_admission};
+use crate::{
+    app,
+    auth::Principal,
+    repository::{Repository, code_index},
+    server::Server,
+};
+use axum::{
+    Extension, Json,
+    extract::{Path, Query, State},
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
+};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use bytes::Bytes;
+use crab_remote_git::{
+    EntryKind, Error, GitPath, OperationContext, OperationKind, RemoteGitSnapshot, Revision,
+    TreeListingItem, TreeListingRequest,
+};
+use gix_hash::ObjectId;
+use regex::{Regex, RegexBuilder};
+use serde::{Deserialize, Serialize};
+use std::{sync::Arc, time::Duration};
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
+
+mod indexed;
+pub(super) mod workspace;
+
+const PAGE_ENTRIES: usize = 128;
+const FILE_READ_BATCH: usize = 8;
+const MAX_MATCH_LINES: usize = 6;
+const MAX_CURSOR_PATH: usize = 8 * 1024;
+const CURSOR_HEADER: usize = 20 + 32;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Parameters {
+    q: String,
+    rev: Option<String>,
+    path: Option<String>,
+    #[serde(default)]
+    case_sensitive: bool,
+    cursor: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct Page {
+    commit: String,
+    items: Vec<FileMatches>,
+    scanned: usize,
+    skipped: usize,
+    next: Option<String>,
+}
+
+#[derive(Serialize)]
+struct FileMatches {
+    path: String,
+    path_hex: String,
+    lines: Vec<Excerpt>,
+    more_lines: bool,
+}
+
+#[derive(Serialize)]
+struct Excerpt {
+    line: usize,
+    before: String,
+    matched: String,
+    after: String,
+}
+
+pub(super) async fn search(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path(key): Path<(String, String)>,
+    Query(params): Query<Parameters>,
+) -> std::result::Result<Response, Response> {
+    let repo = app::repository(&server, &principal, &key).map_err(IntoResponse::into_response)?;
+    let admission = acquire(&server)?;
+    let cancellation = server.cancellation.child_token();
+    let _cancel_on_drop = cancellation.clone().drop_guard();
+    let terms = params.q.trim();
+    let path = params.path.as_deref().unwrap_or("");
+    let limit = params.limit.unwrap_or(20);
+    if !(1..=40).contains(&limit) {
+        return Err(ApiError::Input("limit must be between 1 and 40").into_response());
+    }
+    let pattern = Pattern::new(terms, path, params.case_sensitive, false)
+        .map_err(IntoResponse::into_response)?;
+    let context = serde_json::to_vec(&(terms, params.rev.as_deref(), path, params.case_sensitive))
+        .map_err(|error| ApiError::Json(error).into_response())?;
+    let fingerprint = blake3::hash(&context);
+    let tokens = Tokens {
+        key: &server.cursor_key,
+        repository: repo.id,
+        fingerprint,
+    };
+    let cursor = params
+        .cursor
+        .as_deref()
+        .map(|value| tokens.decode(value))
+        .transpose()
+        .map_err(IntoResponse::into_response)?;
+
+    let mut scan = scan_repository(
+        &server,
+        &repo,
+        &pattern,
+        Window {
+            rev: params.rev.as_deref(),
+            resume: cursor.as_ref(),
+            paths: PAGE_ENTRIES,
+            results: limit,
+            duration: Duration::from_secs(20),
+            use_index: false,
+        },
+        &cancellation,
+    )
+    .await
+    .map_err(IntoResponse::into_response)?;
+    if let Some(after) = scan.after {
+        scan.result.next = Some(
+            tokens
+                .encode(scan.commit, &after)
+                .map_err(remote_response)?,
+        );
+    }
+    // A long scan must not return snippets after the current grant is revoked.
+    app::membership(&server, &principal, &repo)
+        .await
+        .map_err(IntoResponse::into_response)?;
+    Ok(read_admission::retain(
+        Json(scan.result).into_response(),
+        admission,
+    ))
+}
+
+fn remote_response(error: crab_remote_git::Error) -> Response {
+    ApiError::Remote(error).into_response()
+}
+
+fn acquire(server: &Server) -> std::result::Result<read_admission::Admission, Response> {
+    read_admission::acquire_bulk(server).map_err(|_| {
+        (StatusCode::TOO_MANY_REQUESTS, [(header::RETRY_AFTER, "1")],
+            Json(serde_json::json!({"error":{"code":"busy","message":"Code search is busy. Retry shortly"}}))).into_response()
+    })
+}
+
+struct Pattern {
+    matcher: Regex,
+    directory: GitPath,
+    paths_only: bool,
+    case_sensitive: bool,
+    mask: Option<code_index::Mask>,
+}
+
+impl Pattern {
+    fn new(
+        terms: &str,
+        path: &str,
+        case_sensitive: bool,
+        paths_only: bool,
+    ) -> Result<Self, ApiError> {
+        if terms.is_empty() || terms.chars().count() > 128 || terms.chars().any(char::is_control) {
+            return Err(ApiError::Input("Enter 1–128 characters to search for"));
+        }
+        if path.len() > 1024
+            || path.chars().any(char::is_control)
+            || path.split('/').any(|part| matches!(part, "." | ".."))
+        {
+            return Err(ApiError::Input("Enter a repository directory path"));
+        }
+        let directory = GitPath::new(path.as_bytes().to_vec())?;
+        let matcher = RegexBuilder::new(&regex::escape(terms))
+            .case_insensitive(!case_sensitive)
+            .build()
+            .map_err(|_| ApiError::Input("The search term could not be compiled"))?;
+        Ok(Self {
+            matcher,
+            directory,
+            paths_only,
+            case_sensitive,
+            mask: code_index::Mask::query(terms, case_sensitive),
+        })
+    }
+}
+
+struct Window<'a> {
+    rev: Option<&'a str>,
+    resume: Option<&'a (ObjectId, GitPath)>,
+    paths: usize,
+    results: usize,
+    duration: Duration,
+    use_index: bool,
+}
+
+struct Scan {
+    commit: ObjectId,
+    result: Page,
+    after: Option<GitPath>,
+    acceleration: Acceleration,
+    verified: usize,
+}
+
+enum Acceleration {
+    Indexed,
+    Scanning,
+    Limited,
+}
+
+async fn scan_repository(
+    server: &Server,
+    repo: &Repository,
+    pattern: &Pattern,
+    window: Window<'_>,
+    cancellation: &CancellationToken,
+) -> Result<Scan, ApiError> {
+    let opened = repo.revalidate(server, cancellation).await?;
+    let repository = &opened.git;
+    let revision = match window.resume {
+        Some((oid, _)) => Revision::Commit(*oid),
+        None => query::revision(repository, window.rev)?,
+    };
+    let mut limits = server.options.operation_limits();
+    limits.max_duration = limits.max_duration.min(window.duration);
+    limits.max_logical_objects = limits.max_logical_objects.min(12_000);
+    limits.max_fetched_bytes = limits.max_fetched_bytes.min(192 * 1024 * 1024);
+    limits.max_inflated_bytes = limits.max_inflated_bytes.min(128 * 1024 * 1024);
+    limits.max_response_bytes = 40 * 1024 * 1024;
+    let kind = if pattern.paths_only {
+        OperationKind::Tree
+    } else {
+        OperationKind::Content
+    };
+    let operation = repository
+        .operation_with_limits(kind, cancellation, limits)
+        .await?;
+    let found = async {
+        let snapshot = repository.snapshot(&revision, &operation).await?;
+        let mut acceleration = Acceleration::Scanning;
+        if window.use_index {
+            match code_index::load(server, repo, snapshot.root_tree_oid()).await {
+                Ok(Some(index)) => {
+                    if let Some(rows) = &index.rows {
+                        return indexed::inspect(rows, &snapshot, pattern, &window, &operation).await;
+                    }
+                    acceleration = Acceleration::Limited;
+                }
+                Ok(None) => (),
+                Err(error) => tracing::debug!(repository_id = %repo.id, ?error, "Code search index could not be read"),
+            }
+        }
+        let mut scan = inspect(&snapshot, pattern, &window, &operation).await?;
+        scan.acceleration = acceleration;
+        Ok(scan)
+    }
+    .await;
+    Ok(operation.finish(found).await?)
+}
+
+enum Inspection {
+    Match(FileMatches),
+    NoMatch,
+    Skipped,
+}
+
+async fn inspect(
+    snapshot: &RemoteGitSnapshot,
+    pattern: &Pattern,
+    window: &Window<'_>,
+    operation: &OperationContext,
+) -> crab_remote_git::Result<Scan> {
+    let directory = &pattern.directory;
+    let mut prefix = directory.as_bytes().to_vec();
+    if !directory.is_root() {
+        let entry = snapshot
+            .entry(directory, operation)
+            .await?
+            .ok_or(Error::PathNotFound)?;
+        if entry.kind != EntryKind::Tree {
+            return Err(Error::PathComponentNotTree { actual: entry.kind });
+        }
+        prefix.push(b'/');
+    }
+    let request = TreeListingRequest::new(
+        prefix,
+        window
+            .resume
+            .map(|(_, path)| Bytes::copy_from_slice(path.as_bytes())),
+        None,
+        window.paths,
+    )?;
+    let listings = snapshot.list_tree_blobs(&request, operation).await?;
+    let entries = listings.items;
+    let mut result = Page {
+        commit: snapshot.commit_oid().to_string(),
+        items: Vec::new(),
+        scanned: 0,
+        skipped: 0,
+        next: None,
+    };
+    let mut examined = 0;
+    let mut verified = 0;
+    'scan: for batch in entries.chunks(FILE_READ_BATCH) {
+        let found = futures_util::future::try_join_all(batch.iter().map(|item| async move {
+            match item {
+                TreeListingItem::Blob(entry) => {
+                    if pattern.paths_only {
+                        let path = display_path(entry.path.as_bytes());
+                        if pattern.matcher.is_match(&path) {
+                            Ok(Inspection::Match(FileMatches {
+                                path,
+                                path_hex: encode_hex(entry.path.as_bytes()),
+                                lines: Vec::new(),
+                                more_lines: false,
+                            }))
+                        } else {
+                            Ok(Inspection::NoMatch)
+                        }
+                    } else {
+                        file_matches(snapshot, entry, &pattern.matcher, operation).await
+                    }
+                }
+                TreeListingItem::CommonPrefix(_) => Err(Error::InternalInvariant {
+                    invariant: "ungrouped code search received a grouped path",
+                }),
+            }
+        }))
+        .await?;
+        if !pattern.paths_only {
+            verified += found.len();
+        }
+        for found in found {
+            examined += 1;
+            result.scanned += 1;
+            match found {
+                Inspection::Match(found) => result.items.push(found),
+                Inspection::NoMatch => {}
+                Inspection::Skipped => result.skipped += 1,
+            }
+            if result.items.len() == window.results {
+                break 'scan;
+            }
+        }
+    }
+    Ok(Scan {
+        commit: snapshot.commit_oid(),
+        result,
+        acceleration: Acceleration::Scanning,
+        verified,
+        after: if listings.has_more || examined < entries.len() {
+            entries
+                .get(examined.saturating_sub(1))
+                .map(|item| GitPath::new(Bytes::copy_from_slice(item.path())))
+                .transpose()?
+        } else {
+            None
+        },
+    })
+}
+
+async fn file_matches(
+    snapshot: &RemoteGitSnapshot,
+    entry: &crab_remote_git::TreeEntry,
+    matcher: &Regex,
+    operation: &OperationContext,
+) -> crab_remote_git::Result<Inspection> {
+    let Some(text) = code_index::text(snapshot, &entry.path, entry.oid, operation).await? else {
+        return Ok(Inspection::Skipped);
+    };
+    let mut hits = text.lines().enumerate().filter_map(|(index, line)| {
+        let found = matcher.find(line)?;
+        Some(excerpt(index + 1, line, found))
+    });
+    let lines: Vec<_> = hits.by_ref().take(MAX_MATCH_LINES).collect();
+    if lines.is_empty() {
+        return Ok(Inspection::NoMatch);
+    }
+    Ok(Inspection::Match(FileMatches {
+        path: display_path(entry.path.as_bytes()),
+        path_hex: encode_hex(entry.path.as_bytes()),
+        lines,
+        more_lines: hits.next().is_some(),
+    }))
+}
+
+fn excerpt(number: usize, text: &str, found: regex::Match<'_>) -> Excerpt {
+    let before = &text[..found.start()];
+    let from = before
+        .char_indices()
+        .rev()
+        .nth(79)
+        .map_or(0, |(index, _)| index);
+    let after = &text[found.end()..];
+    let to = after
+        .char_indices()
+        .nth(120)
+        .map_or(after.len(), |(index, _)| index);
+    Excerpt {
+        line: number,
+        before: format!("{}{}", if from > 0 { "…" } else { "" }, &before[from..]),
+        matched: found.as_str().into(),
+        after: format!(
+            "{}{}",
+            &after[..to],
+            if to < after.len() { "…" } else { "" }
+        ),
+    }
+}
+
+struct Tokens<'a> {
+    key: &'a [u8; 32],
+    repository: Uuid,
+    fingerprint: blake3::Hash,
+}
+
+impl Tokens<'_> {
+    fn encode(&self, commit: ObjectId, after: &GitPath) -> crab_remote_git::Result<String> {
+        let path = after.as_bytes();
+        if path.len() > MAX_CURSOR_PATH {
+            return Err(crab_remote_git::Error::LimitExceeded {
+                limit: "code search cursor path",
+                actual: path.len() as u64,
+                maximum: MAX_CURSOR_PATH as u64,
+            });
+        }
+        let mut payload = Vec::with_capacity(CURSOR_HEADER + path.len() + 32);
+        payload.extend(commit.as_bytes());
+        payload.extend(self.fingerprint.as_bytes());
+        payload.extend(path);
+        payload.extend(self.signature(&payload).as_bytes());
+        Ok(URL_SAFE_NO_PAD.encode(payload))
+    }
+
+    fn decode(&self, value: &str) -> Result<(ObjectId, GitPath), ApiError> {
+        let invalid = ApiError::Input("Invalid cursor for this code search");
+        if value.len() > (CURSOR_HEADER + MAX_CURSOR_PATH + 32).div_ceil(3) * 4 {
+            return Err(invalid);
+        }
+        let bytes = URL_SAFE_NO_PAD
+            .decode(value)
+            .map_err(|_| ApiError::Input("Invalid code search cursor"))?;
+        if bytes.len() <= CURSOR_HEADER + 32 || bytes.len() > CURSOR_HEADER + MAX_CURSOR_PATH + 32 {
+            return Err(invalid);
+        }
+        let (payload, signature) = bytes.split_at(bytes.len() - 32);
+        if self.signature(payload) != *signature || self.fingerprint != payload[20..CURSOR_HEADER] {
+            return Err(invalid);
+        }
+        let oid: [u8; 20] = payload[..20]
+            .try_into()
+            .map_err(|_| ApiError::Input("Invalid code search commit"))?;
+        let after = GitPath::new(payload[CURSOR_HEADER..].to_vec())?;
+        Ok((ObjectId::from(oid), after))
+    }
+
+    fn signature(&self, payload: &[u8]) -> blake3::Hash {
+        let mut hash = blake3::Hasher::new_keyed(self.key);
+        hash.update(b"crab-code-search-v1\0");
+        hash.update(self.repository.as_bytes());
+        hash.update(payload);
+        hash.finalize()
+    }
+}
+
+#[cfg(test)]
+mod tests;

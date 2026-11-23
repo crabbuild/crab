@@ -4,35 +4,21 @@ import { type CodeThemes } from "@/lib/code-theme";
 import type { DiffReviewState } from "./model";
 import { ChangeWorkspace } from "./workspace";
 
-export function ComparisonView({
-  repo,
-  base,
-  head,
-  theme,
-  codeThemes,
-  review,
-}: {
-  repo: Repository;
-  base: string;
-  head: string;
-  theme: "light" | "dark";
-  codeThemes: CodeThemes;
-  review?: DiffReviewState;
-}) {
-  const changes = useRequest<Changes>(
-    endpoint(repo, "changes", { rev: head, base }),
-  );
-  return (
-    <ChangeComparison
-      key={`${base}:${head}`}
-      state={changes}
-      repo={repo}
-      rev={head}
-      base={base}
-      theme={theme}
-      codeThemes={codeThemes}
-      review={review}
-    />
+export function usePullComparison(
+  repo: Pick<Repository, "owner" | "name">,
+  base: string,
+  head: string,
+  upstream?: string,
+) {
+  return useRequest<Changes & { base: string; base_tip: string }>(
+    base && head
+      ? endpoint(repo, "changes", {
+          rev: head,
+          base,
+          merge_base: "true",
+          upstream,
+        })
+      : null,
   );
 }
 
@@ -44,15 +30,17 @@ export function ChangeComparison({
   theme,
   codeThemes,
   sticky = false,
+  idPrefix,
   review,
 }: {
   state: ReturnType<typeof useRequest<Changes>>;
-  repo: Repository;
+  repo: Pick<Repository, "owner" | "name">;
   rev: string;
   base?: string;
   theme: "light" | "dark";
   codeThemes: CodeThemes;
   sticky?: boolean;
+  idPrefix?: string;
   review?: DiffReviewState;
 }) {
   return (
@@ -67,6 +55,7 @@ export function ChangeComparison({
           theme={theme}
           codeThemes={codeThemes}
           sticky={sticky}
+          idPrefix={idPrefix}
           review={review}
         />
       )}

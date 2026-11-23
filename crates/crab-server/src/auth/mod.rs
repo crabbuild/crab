@@ -1,11 +1,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+mod accounts;
 mod backchannel_logout;
+pub(crate) mod deploy_tokens;
 mod git_tokens;
 mod http;
 mod state;
 mod transport;
+pub(crate) use accounts::AccountState;
 use backchannel_logout::backchannel_logout;
 use git_tokens::{issue_git_token, revoke_git_tokens};
 #[cfg(test)]
@@ -38,6 +41,10 @@ const STATE_CAS_ATTEMPTS: usize = 8;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum AuthError {
+    #[error("sign-in suspended")]
+    Suspended,
+    #[error("account state changed")]
+    AccountChanged,
     #[error("invalid or expired sign-in")]
     Invalid,
     #[error("repository access denied")]
@@ -69,6 +76,16 @@ impl AuthError {
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         let (status, code, message) = match self {
+            Self::Suspended => (
+                StatusCode::FORBIDDEN,
+                "account_suspended",
+                "This account is suspended.",
+            ),
+            Self::AccountChanged => (
+                StatusCode::CONFLICT,
+                "account_changed",
+                "Account state changed. Read the current revision before retrying.",
+            ),
             Self::Forbidden => (
                 StatusCode::FORBIDDEN,
                 "repository_access_denied",
@@ -156,6 +173,7 @@ struct Flow {
 struct AuthState {
     store: Store,
     prefix: String,
+    account_prefix: String,
     pending_checks: Arc<Mutex<HashMap<Key, futures_util::future::WeakShared<SessionCheck>>>>,
 }
 
@@ -166,6 +184,7 @@ struct VerifiedSession {
     groups: Vec<String>,
     csrf: String,
     expires_at: u64,
+    git_tokens: Vec<Key>,
 }
 
 type SessionCheck = futures_util::future::BoxFuture<'static, Option<Arc<VerifiedSession>>>;
@@ -185,6 +204,9 @@ struct StoredFlow {
 #[serde(deny_unknown_fields)]
 struct StoredSession {
     identity: Identity,
+    // Sessions issued before account lifecycle was added belong to revision zero.
+    #[serde(default)]
+    account_revision: u64,
     // No group claim is a valid credential. Existing sessions gain no group
     // authority until a new login verifies that membership with the provider.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -226,6 +248,7 @@ pub(crate) struct Authentication {
     git_tokens: Mutex<HashMap<Key, Arc<GitToken>>>,
     state: AuthState,
     cursor_key: [u8; 32],
+    webhook_key: Option<[u8; 32]>,
     admission: Semaphore,
     logout_admission: Semaphore,
 }
@@ -238,6 +261,7 @@ impl Authentication {
         let state = AuthState {
             store: root.store.clone(),
             prefix: root.path(".crab/http-server/v1/auth").to_string(),
+            account_prefix: root.path(".crab/http-server/v1/accounts").to_string(),
             pending_checks: Arc::default(),
         };
         let secret = config
@@ -255,15 +279,21 @@ impl Authentication {
                 Ok(ClientSecret::new(text.to_owned()))
             })
             .transpose()?;
-        let cursor_key = match &config.state_key_file {
+        let (cursor_key, webhook_key) = match &config.state_key_file {
             Some(path) => {
                 let secret = std::fs::read(path).map_err(AuthError::provider)?;
                 if secret.len() < 32 {
                     return Err(AuthError::Invalid);
                 }
-                blake3::derive_key("crab http server state key v1", &secret)
+                (
+                    blake3::derive_key("crab http server state key v1", &secret),
+                    Some(blake3::derive_key(
+                        "crab github actions webhook key v1",
+                        &secret,
+                    )),
+                )
             }
-            None => rand::random(),
+            None => (rand::random(), None),
         };
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -283,6 +313,7 @@ impl Authentication {
             git_tokens: Mutex::new(HashMap::new()),
             state,
             cursor_key,
+            webhook_key,
             admission: Semaphore::new(8),
             logout_admission: Semaphore::new(4),
         })
@@ -298,6 +329,10 @@ impl Authentication {
 
     pub(crate) fn cursor_key(&self) -> [u8; 32] {
         self.cursor_key
+    }
+
+    pub(crate) fn webhook_key(&self) -> Option<&[u8; 32]> {
+        self.webhook_key.as_ref()
     }
 
     pub fn origin(&self) -> String {

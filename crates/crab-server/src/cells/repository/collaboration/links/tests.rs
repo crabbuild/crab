@@ -45,6 +45,7 @@ async fn seed(cell: &RepositoryCell, count: u64) {
     write::<CreatePull>(
         cell,
         CreatePullInput {
+            code_owner_requests: Default::default(),
             metadata: Default::default(),
             draft: false,
             submission_id: *Uuid::now_v7().as_bytes(),
@@ -53,6 +54,7 @@ async fn seed(cell: &RepositoryCell, count: u64) {
             body: String::new(),
             base_ref: "refs/heads/main".into(),
             head_ref: "refs/heads/feature".into(),
+            head_repository: None,
             base_oid: "a".repeat(40),
             head_oid: "b".repeat(40),
         },
@@ -65,6 +67,7 @@ fn selection(issue: u64, active: bool, version: u64) -> Selection {
         active,
         version,
         actor: actor(),
+        closes_on_merge: None,
     }
 }
 fn subject(kind: SubjectKind, number: u64) -> Subject {
@@ -84,6 +87,7 @@ async fn list(
                 subject,
                 before,
                 limit,
+                default_ref: "refs/heads/main".into(),
             },
         )
         .await
@@ -222,6 +226,191 @@ async fn linked_work_uses_live_subject_summaries_and_exclusive_pages() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn merge_completion_closes_captured_issues_once() {
+    let server = fixtures::fixture().await;
+    let cell = cell(&server);
+    seed(&cell, 4).await;
+    for number in [1, 2] {
+        let mut input = selection(number, true, 0);
+        input.closes_on_merge = Some(number == 1);
+        assert!(matches!(
+            write::<SetLink>(&cell, input).await,
+            Outcome::Applied(_)
+        ));
+    }
+    let change_body = |version, body: &str| UpdatePullInput {
+        number: 1,
+        actor: actor(),
+        can_triage: false,
+        version,
+        title: None,
+        body: Some(body.into()),
+        state: None,
+        label_ids: None,
+        assignees: None,
+    };
+    assert!(matches!(
+        write::<UpdatePull>(&cell, change_body(1, "Fixes #1 and closes #4. `Fixes #2`.")).await,
+        UpdatePullOutcome::Updated(_)
+    ));
+    let pull = subject(SubjectKind::Pull, 1);
+    let initial = list(&cell, pull, None, 2).await;
+    assert_eq!(
+        initial
+            .items
+            .iter()
+            .map(|link| (
+                link.work.subject.number,
+                link.version,
+                link.from_description
+            ))
+            .collect::<Vec<_>>(),
+        [(4, None, true), (2, Some(1), false)]
+    );
+    assert_eq!(initial.next, Some(2));
+    assert_eq!(
+        list(&cell, pull, initial.next, 2).await.items[0].version,
+        Some(1)
+    );
+    let keyword_issue = subject(SubjectKind::Issue, 4);
+    assert!(list(&cell, keyword_issue, None, 1).await.items[0].from_description);
+    for (version, base, oid) in [(2, "refs/heads/release", "c"), (3, "refs/heads/main", "a")] {
+        let retarget = write::<pull_base::Retarget>(
+            &cell,
+            pull_base::Input {
+                pull: 1,
+                actor: actor(),
+                can_write: true,
+                comparison_current: true,
+                change: pull_base::Change {
+                    request_id: Uuid::now_v7(),
+                    version,
+                    base_ref: base.into(),
+                    base_oid: oid.repeat(40),
+                    head_oid: "b".repeat(40),
+                },
+                code_owner_requests: Default::default(),
+            },
+        )
+        .await;
+        assert!(matches!(retarget, pull_base::Outcome::Saved));
+        assert_eq!(
+            !list(&cell, keyword_issue, None, 1).await.items.is_empty(),
+            base == "refs/heads/main"
+        );
+    }
+    let merge = PullMerge {
+        request_id: *Uuid::now_v7().as_bytes(),
+        author: actor(),
+        pull_version: 4,
+        method: MergeMethod::FastForward,
+        base_oid: "a".repeat(40),
+        head_oid: "b".repeat(40),
+        commit_oid: "b".repeat(40),
+        message: String::new(),
+        created_at_ms: 1,
+        publication_plan: None,
+        bypass_rulesets: Vec::new(),
+        tested_candidate: false,
+    };
+    let transition = |transition| TransitionPullMergeInput {
+        pull: 1,
+        merge: merge.clone(),
+        transition,
+    };
+    assert!(matches!(
+        write::<TransitionPullMerge>(&cell, transition(PullMergeTransition::Begin)).await,
+        TransitionPullMergeOutcome::Applied(_)
+    ));
+    assert!(
+        write::<CaptureIssueClosure>(
+            &cell,
+            CaptureIssueClosureInput {
+                pull: 1,
+                request_id: merge.request_id,
+                on_default: true
+            }
+        )
+        .await
+    );
+    // Recovery uses the snapshot taken before publication despite later edits.
+    assert!(matches!(
+        write::<SetLink>(&cell, selection(1, false, 1)).await,
+        Outcome::Applied(_)
+    ));
+    let mut late = selection(3, true, 0);
+    late.closes_on_merge = Some(true);
+    assert!(matches!(
+        write::<SetLink>(&cell, late).await,
+        Outcome::Applied(_)
+    ));
+    for _ in 0..2 {
+        assert!(matches!(
+            write::<TransitionPullMerge>(&cell, transition(PullMergeTransition::Complete)).await,
+            TransitionPullMergeOutcome::Applied(_)
+        ));
+    }
+    for (number, expected) in [(1, 1), (2, 0), (3, 0), (4, 1)] {
+        let issue = cell
+            .client
+            .query::<GetIssue>(&cell.target, None, number)
+            .await
+            .unwrap()
+            .output
+            .unwrap();
+        assert_eq!(issue.state, expected);
+    }
+    let history = activity(&cell, Some(subject(SubjectKind::Issue, 1))).await;
+    assert_eq!(
+        history
+            .iter()
+            .filter(|event| matches!(
+                event.action,
+                activity::Action::IssueClosed { pull: Some(1), .. }
+            ))
+            .count(),
+        1
+    );
+    let merged = cell
+        .client
+        .query::<GetPull>(&cell.target, None, 1)
+        .await
+        .unwrap()
+        .output
+        .unwrap();
+    assert!(matches!(
+        write::<UpdatePull>(&cell, change_body(merged.version, "Fixes #2.")).await,
+        UpdatePullOutcome::Updated(_)
+    ));
+    let historical = cell
+        .client
+        .query::<ListLinks>(
+            &cell.target,
+            None,
+            Query {
+                subject: pull,
+                before: None,
+                limit: 10,
+                default_ref: "refs/heads/renamed".into(),
+            },
+        )
+        .await
+        .unwrap()
+        .output
+        .unwrap();
+    assert_eq!(
+        historical
+            .items
+            .iter()
+            .filter(|link| link.from_description)
+            .map(|link| link.work.subject.number)
+            .collect::<Vec<_>>(),
+        [4, 1]
+    );
+    fixtures::close(&server).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn concurrent_duplicate_links_create_one_membership_and_activity_event() {
     let server = fixtures::fixture().await;
     let cell = cell(&server);
@@ -270,7 +459,8 @@ async fn missing_invalid_and_archived_links_leave_state_and_activity_unchanged()
                     Query {
                         subject: subject(SubjectKind::Pull, 1),
                         before,
-                        limit
+                        limit,
+                        default_ref: "refs/heads/main".into(),
                     }
                 )
                 .await

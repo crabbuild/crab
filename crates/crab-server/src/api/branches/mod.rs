@@ -139,6 +139,11 @@ impl IntoResponse for Error {
             )
                 .into_response();
         }
+        if let Self::Receive(error) = &self
+            && let ReceiveError::RefRule(message) = error.as_ref()
+        {
+            return crate::app::Error::RefRule(message).into_response();
+        }
         let (status, code, message) = match &self {
             Self::Input(message) => (StatusCode::BAD_REQUEST, "invalid_request", *message),
             Self::App(app::Error::NotFound) => (
@@ -402,13 +407,19 @@ async fn set_branch_protections(
 ) -> Result<Json<BranchProtections>, Error> {
     let Json(input) = input?;
     let repository = app::repository(&server, &principal, &(owner, name))?;
-    let repository = repository.as_ref();
     if !principal.can_admin(repository.id) {
         return Err(Error::AdminPermission);
     }
     app::actor(&principal)?;
     Ok(Json(
-        settings::replace(&server, repository, input.expected_version, input.rules).await?,
+        settings::replace(
+            &server,
+            &repository,
+            principal,
+            input.expected_version,
+            input.rules,
+        )
+        .await?,
     ))
 }
 

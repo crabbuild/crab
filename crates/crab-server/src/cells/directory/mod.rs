@@ -27,7 +27,7 @@ pub(crate) mod notifications;
 mod profiles;
 pub(crate) mod saved_replies;
 pub(crate) use lookup::{
-    AccountsExist, ActorSummary, LookupAccounts, LookupActors, LookupProfiles,
+    AccountsExist, ActorSummary, LookupAccounts, LookupActors, LookupIdentities, LookupProfiles,
 };
 pub(crate) use profiles::{
     CreateProfile, CreateProfileInput, EditProfile, EditProfileInput, ProfileOutcome,
@@ -225,6 +225,7 @@ pub(in crate::cells) fn dispatch_read(
         <AccountsExist as Read>::ID => invoke_read::<AccountsExist>(context, input),
         <LookupAccounts as Read>::ID => invoke_read::<LookupAccounts>(context, input),
         <LookupProfiles as Read>::ID => invoke_read::<LookupProfiles>(context, input),
+        <LookupIdentities as Read>::ID => invoke_read::<LookupIdentities>(context, input),
         #[cfg(test)]
         migration::tests::InspectSource::ID => {
             invoke_read::<migration::tests::InspectSource>(context, input)
@@ -238,6 +239,22 @@ pub(in crate::cells) fn dispatch_read(
         CompleteHandles::ID => invoke_read::<CompleteHandles>(context, input),
         MentionCandidates::ID => invoke_read::<MentionCandidates>(context, input),
         notifications::List::ID => invoke_read::<notifications::List>(context, input),
+        notifications::email::ReadEmail::ID => {
+            invoke_read::<notifications::email::ReadEmail>(context, input)
+        }
+        notifications::email::MailPending::ID => {
+            invoke_read::<notifications::email::MailPending>(context, input)
+        }
+        notifications::email::MailDestination::ID => {
+            invoke_read::<notifications::email::MailDestination>(context, input)
+        }
+        #[cfg(test)]
+        notifications::InspectFiled::ID => {
+            invoke_read::<notifications::InspectFiled>(context, input)
+        }
+        notifications::CheckSelection::ID => {
+            invoke_read::<notifications::CheckSelection>(context, input)
+        }
         notifications::ResolveHandlesAt::ID => {
             invoke_read::<notifications::ResolveHandlesAt>(context, input)
         }
@@ -262,7 +279,24 @@ pub(in crate::cells) fn dispatch_mutation(
         CreateProfile::ID => invoke_mutation::<CreateProfile>(context, input),
         EditProfile::ID => invoke_mutation::<EditProfile>(context, input),
         notifications::Deliver::ID => invoke_mutation::<notifications::Deliver>(context, input),
-        notifications::MarkRead::ID => invoke_mutation::<notifications::MarkRead>(context, input),
+        notifications::email::BindEmail::ID => {
+            invoke_mutation::<notifications::email::BindEmail>(context, input)
+        }
+        notifications::email::SetEmail::ID => {
+            invoke_mutation::<notifications::email::SetEmail>(context, input)
+        }
+        notifications::email::ClaimMail::ID => {
+            invoke_mutation::<notifications::email::ClaimMail>(context, input)
+        }
+        notifications::email::FinishMail::ID => {
+            invoke_mutation::<notifications::email::FinishMail>(context, input)
+        }
+        notifications::SetState::ID => invoke_mutation::<notifications::SetState>(context, input),
+        notifications::SweepFiling::ID => {
+            invoke_mutation::<notifications::SweepFiling>(context, input)
+        }
+        #[cfg(test)]
+        notifications::AgeFiled::ID => invoke_mutation::<notifications::AgeFiled>(context, input),
         saved_replies::PutSavedReply::ID => {
             invoke_mutation::<saved_replies::PutSavedReply>(context, input)
         }

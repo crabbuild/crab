@@ -138,11 +138,16 @@ async fn mentions_include_group_only_profiles_with_live_signed_grants() {
     )
     .await;
     assert_eq!(h.json(&by_handle, &alice).await, expected);
-    h.server
-        .auth
-        .as_ref()
-        .unwrap()
-        .revoke_identity(&h.provider.issuer, "bob-id")
+    let auth = h.server.auth.as_ref().unwrap();
+    let suspended = auth.set_account_suspended("bob-id", 0, true).await.unwrap();
+    assert_eq!(h.json(&by_handle, &alice).await, json!({"items":[]}));
+    auth.set_account_suspended("bob-id", suspended.revision, false)
+        .await
+        .unwrap();
+    assert_eq!(h.json(&by_handle, &alice).await, json!({"items":[]}));
+    h.login().await;
+    assert_eq!(h.json(&by_handle, &alice).await, expected);
+    auth.revoke_identity(&h.provider.issuer, "bob-id")
         .await
         .unwrap();
     assert_eq!(h.json(&by_handle, &alice).await, json!({"items":[]}));
@@ -210,6 +215,8 @@ async fn references_find_titles_and_disambiguate_issue_and_pull_numbers() {
             repo,
             crate::app::mutation_identity().unwrap(),
             CreatePullInput {
+                head_repository: None,
+                code_owner_requests: Default::default(),
                 metadata: Default::default(),
                 submission_id: *Uuid::now_v7().as_bytes(),
                 author: RepositoryAuthor {

@@ -1,13 +1,16 @@
+mod authority;
 mod git;
+mod jobs;
 mod source;
-use git::{configure_git, default_branch, mirror_refs, mirror_size, push_mirror, run_git};
+mod workflow;
+use authority::{ImportAccount, OrganizationOwner};
 use source::{GitImportRequest, ValidatedImport, validate_request};
+use workflow::run_import;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     net::SocketAddr,
-    sync::Arc,
-    time::{Duration, Instant},
+    sync::{Arc, Mutex},
 };
 
 use axum::{
@@ -18,38 +21,22 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use serde::Serialize;
+use serde::Deserialize;
 use serde_json::json;
-use tokio::{process::Command, sync::RwLock};
 use uuid::Uuid;
 
-use crate::{
-    Config, RepositoryAccess, RepositoryMember, app,
-    auth::{Identity, Principal},
-    catalog::CatalogStore,
-    repository::MaintenanceTrigger,
-    server::Server,
-};
-
-const MAX_ACTIVE_JOBS: usize = 4;
-const MAX_RETAINED_JOBS: usize = 256;
-const JOB_RETENTION: Duration = Duration::from_secs(60 * 60);
-const MAX_IMPORT_REFS: usize = 100_000;
-const MAX_IMPORT_MIRROR_BYTES: u64 = 8 * 1024 * 1024 * 1024;
-const IMPORT_MIRROR_RESERVE_MARGIN: u64 = 64 * 1024 * 1024;
+use crate::{Config, app, auth::Principal, repository::Repository, server::Server};
 
 #[derive(Clone)]
 pub(crate) struct ImportContext {
-    config: Config,
     address: SocketAddr,
-    internal_key: [u8; 32],
     allowed_hosts: Arc<[String]>,
-    jobs: ImportJobs,
-    importing: Arc<std::sync::Mutex<HashSet<Uuid>>>,
+    admission: jobs::Admission,
+    importing: Arc<Mutex<HashMap<blake3::Hash, InternalGit>>>,
 }
 
 impl ImportContext {
-    pub(crate) fn new(config: Config, address: SocketAddr) -> Self {
+    pub(crate) fn new(config: &Config, address: SocketAddr) -> Self {
         let allowed_hosts = config
             .import
             .allowed_hosts
@@ -57,57 +44,80 @@ impl ImportContext {
             .map(|host| host.to_ascii_lowercase())
             .collect::<Vec<_>>()
             .into();
-        Self {
-            config,
+        Self::with_hosts(address, allowed_hosts)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(address: SocketAddr) -> Self {
+        Self::with_hosts(
             address,
-            internal_key: rand::random(),
+            vec!["127.0.0.1".into(), "github.com".into()].into(),
+        )
+    }
+
+    fn with_hosts(address: SocketAddr, allowed_hosts: Arc<[String]>) -> Self {
+        Self {
+            address,
             allowed_hosts,
-            jobs: ImportJobs::default(),
-            importing: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            admission: jobs::Admission::default(),
+            importing: Arc::default(),
         }
     }
 
-    pub(crate) fn is_repository_importing(&self, repository: Uuid) -> bool {
-        self.importing
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains(&repository)
+    fn begin_repository(
+        &self,
+        repository: Arc<Repository>,
+        writer: Arc<jobs::Writer>,
+        snapshot: jobs::Snapshot,
+        organization: Option<OrganizationOwner>,
+    ) -> ImportGuard {
+        self.register(InternalGit::Receive(Arc::new(ReceiveGrant {
+            route: repository_route(&repository),
+            repository,
+            writer,
+            snapshot,
+            organization,
+        })))
     }
 
-    fn begin_repository(&self, repository: Uuid) -> ImportGuard {
+    fn register(&self, grant: InternalGit) -> ImportGuard {
+        let key = blake3::Hash::from_bytes(rand::random());
         self.importing
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(repository);
+            .insert(key, grant);
         ImportGuard {
             importing: Arc::clone(&self.importing),
-            repository,
+            key,
         }
     }
 
-    pub(crate) fn authorizes_git(&self, request: &axum::extract::Request) -> bool {
-        if !is_import_git_path(request.method(), request.uri().path()) {
-            return false;
+    pub(crate) fn authorizes_git(&self, request: &axum::extract::Request) -> Option<InternalGit> {
+        let key = blake3::Hash::from_hex(
+            request
+                .headers()
+                .get("x-crab-internal-import")?
+                .to_str()
+                .ok()?,
+        )
+        .ok()?;
+        if !self.host_matches(
+            request
+                .headers()
+                .get("host")
+                .and_then(|value| value.to_str().ok()),
+        ) {
+            return None;
         }
-        let Some(value) = request.headers().get("x-crab-internal-import") else {
-            return false;
-        };
-        let Ok(value) = value.to_str() else {
-            return false;
-        };
-        value == self.internal_key_hex()
-            && self.host_matches(
-                request
-                    .headers()
-                    .get("host")
-                    .and_then(|value| value.to_str().ok()),
-            )
-    }
-
-    fn internal_key_hex(&self) -> String {
-        blake3::Hash::from_bytes(self.internal_key)
-            .to_hex()
-            .to_string()
+        let grant = self
+            .importing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)?
+            .clone();
+        grant
+            .accepts(request.method(), request.uri())
+            .then_some(grant)
     }
 
     fn destination_url(&self, owner: &str, name: &str) -> String {
@@ -156,9 +166,151 @@ impl ImportContext {
     }
 }
 
+#[derive(Clone)]
+pub(crate) enum InternalGit {
+    Receive(Arc<ReceiveGrant>),
+    Fetch(Arc<FetchGrant>),
+}
+
+impl InternalGit {
+    fn accepts(&self, method: &axum::http::Method, uri: &axum::http::Uri) -> bool {
+        match self {
+            Self::Receive(grant) => grant.accepts(method, uri),
+            Self::Fetch(grant) => matches!(
+                (method, uri.path().strip_prefix(&grant.route), uri.query()),
+                (&axum::http::Method::POST, Some("/git-upload-pack"), None)
+                    | (
+                        &axum::http::Method::GET,
+                        Some("/info/refs"),
+                        Some("service=git-upload-pack")
+                    )
+            ),
+        }
+    }
+
+    pub(crate) async fn principal(self, server: &Server) -> Principal {
+        match self {
+            Self::Receive(grant) => Principal::import(grant),
+            Self::Fetch(grant) => {
+                if grant.writer.verify().await.is_ok()
+                    && grant.organization.check(server).await.is_ok()
+                {
+                    grant.principal.clone()
+                } else {
+                    Principal::anonymous()
+                }
+            }
+        }
+    }
+}
+
+pub(crate) struct FetchGrant {
+    route: String,
+    principal: Principal,
+    writer: Arc<jobs::Writer>,
+    organization: OrganizationOwner,
+}
+
+fn repository_route(repository: &Repository) -> String {
+    format!(
+        "/git/{}/{}.git",
+        encode_path_segment(&repository.config.owner),
+        encode_path_segment(&repository.config.name)
+    )
+}
+
+pub(crate) struct ReceiveGrant {
+    pub(crate) repository: Arc<Repository>,
+    writer: Arc<jobs::Writer>,
+    snapshot: jobs::Snapshot,
+    organization: Option<OrganizationOwner>,
+    route: String,
+}
+
+impl ReceiveGrant {
+    fn accepts(&self, method: &axum::http::Method, uri: &axum::http::Uri) -> bool {
+        let tail = uri.path().strip_prefix(&self.route);
+        matches!(
+            (method, tail, uri.query()),
+            (&axum::http::Method::POST, Some("/git-receive-pack"), None)
+                | (
+                    &axum::http::Method::GET,
+                    Some("/info/refs"),
+                    Some("service=git-receive-pack")
+                )
+        )
+    }
+
+    pub(crate) async fn active(&self, server: &Server) -> bool {
+        let result = async {
+            self.writer.verify().await?;
+            if let Some(owner) = self.organization {
+                owner.check(server).await?;
+            }
+            Ok::<_, ImportError>(())
+        }
+        .await;
+        if let Err(error) = result {
+            tracing::warn!(error = ?error, "Git import authorization expired or could not be verified");
+            return false;
+        }
+        true
+    }
+
+    pub(crate) fn has_organization_owner(&self) -> bool {
+        self.organization.is_some()
+    }
+
+    pub(crate) async fn fork_source(
+        &self,
+        server: &Server,
+    ) -> Result<Option<Arc<Repository>>, crate::git::receive::ReceiveError> {
+        use crate::git::receive::ReceiveError;
+        if self.repository.forked_from.is_none() {
+            return Ok(None);
+        }
+        if !self.active(server).await {
+            return Err(ReceiveError::Forbidden);
+        }
+        let source = self
+            .repository
+            .fork_source(server)
+            .ok_or(ReceiveError::NotFound)?;
+        Ok(Some(source))
+    }
+
+    pub(crate) async fn policy_grant(
+        &self,
+        server: &Server,
+    ) -> crate::app::Result<crate::cells::organization::teams::repository_access::ActorTeams> {
+        match self.organization {
+            Some(owner) => owner.policy_grant(server).await,
+            None => Ok(Default::default()),
+        }
+    }
+
+    pub(crate) fn accepts_updates(
+        &self,
+        head: &str,
+        refs: &BTreeMap<String, String>,
+        updates: &[crab_git::receive_plan::RefUpdate],
+    ) -> bool {
+        // A restarted job must never overwrite refs or publish a different snapshot.
+        refs.is_empty()
+            && updates
+                .iter()
+                .map(|update| {
+                    let target = update.new.filter(|_| update.old.is_none())?;
+                    Some((update.name.clone(), target.to_string()))
+                })
+                .collect::<Option<BTreeMap<_, _>>>()
+                .is_some_and(|new_refs| self.snapshot.matches(head, &new_refs))
+    }
+}
+
 struct ImportGuard {
-    importing: Arc<std::sync::Mutex<HashSet<Uuid>>>,
-    repository: Uuid,
+    importing: Arc<Mutex<HashMap<blake3::Hash, InternalGit>>>,
+    key: blake3::Hash,
 }
 
 impl Drop for ImportGuard {
@@ -166,47 +318,8 @@ impl Drop for ImportGuard {
         self.importing
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&self.repository);
+            .remove(&self.key);
     }
-}
-
-#[derive(Clone, Default)]
-struct ImportJobs {
-    entries: Arc<RwLock<HashMap<Uuid, Job>>>,
-}
-
-#[derive(Clone)]
-struct Job {
-    actor: String,
-    created_at: Instant,
-    status: GitImportStatus,
-}
-
-#[derive(Clone, Copy, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum JobState {
-    Queued,
-    Running,
-    Succeeded,
-    Failed,
-}
-
-#[derive(Clone, Serialize)]
-struct GitImportStatus {
-    id: Uuid,
-    source: String,
-    owner: String,
-    name: String,
-    state: JobState,
-    message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    repository: Option<ImportedRepository>,
-}
-
-#[derive(Clone, Serialize)]
-struct ImportedRepository {
-    owner: String,
-    name: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -217,12 +330,28 @@ enum ImportError {
     Unavailable,
     #[error("the import job was not found")]
     NotFound,
+    #[error("organization ruleset restricts an imported ref")]
+    Ruleset,
+    #[error("the organization import authority is unavailable")]
+    Organization(#[source] Box<app::Error>),
     #[error("the import queue is busy")]
     Busy,
     #[error("import staging failed")]
     Staging(#[source] crate::local_disk::Error),
     #[error("an import for this repository is already running")]
     Conflict,
+    #[error("the import request ID was already used for a different import")]
+    SubmissionConflict,
+    #[error("the Git source no longer matches the pinned snapshot")]
+    SourceChanged,
+    #[error("the import destination no longer matches the reserved repository")]
+    DestinationChanged,
+    #[error("the import worker lost its durable lease")]
+    LeaseLost,
+    #[error("durable Git import status storage failed")]
+    JobStorage(#[from] crab_storage::StorageError),
+    #[error("durable Git import status encoding failed")]
+    JobEncoding(#[from] serde_json::Error),
     #[error("the import was cancelled")]
     Cancelled,
     #[error("the import timed out")]
@@ -237,16 +366,30 @@ enum ImportError {
     Io(#[source] std::io::Error),
 }
 
+impl ImportError {
+    fn organization(source: app::Error) -> Self {
+        match source {
+            app::Error::NotFound => Self::NotFound,
+            source => Self::Organization(Box::new(source)),
+        }
+    }
+}
+
 impl IntoResponse for ImportError {
     fn into_response(self) -> Response {
         let (status, code, message) = match self {
             Self::Invalid(message) => (StatusCode::BAD_REQUEST, "invalid_request", message),
-            Self::Unavailable => (
+            Self::Unavailable | Self::Organization(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "import_unavailable",
                 "Git import is unavailable on this server",
             ),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found", "Import job not found"),
+            Self::Ruleset => (
+                StatusCode::FORBIDDEN,
+                "repository_ruleset",
+                "Organization rules restrict the imported refs",
+            ),
             Self::Busy | Self::Staging(crate::local_disk::Error::Busy(_)) => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "import_busy",
@@ -256,6 +399,21 @@ impl IntoResponse for ImportError {
                 StatusCode::CONFLICT,
                 "import_conflict",
                 "An import for this repository is already running",
+            ),
+            Self::SubmissionConflict => (
+                StatusCode::CONFLICT,
+                "import_submission_conflict",
+                "This import request ID belongs to a different submission",
+            ),
+            Self::SourceChanged | Self::DestinationChanged | Self::LeaseLost => (
+                StatusCode::CONFLICT,
+                "import_conflict",
+                "The import no longer matches the current job state",
+            ),
+            Self::JobStorage(_) | Self::JobEncoding(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "import_status_unavailable",
+                "Import status is temporarily unavailable. Retry the same request.",
             ),
             Self::Cancelled
             | Self::Timeout
@@ -282,7 +440,7 @@ impl IntoResponse for ImportError {
         };
         if !matches!(
             self,
-            Self::Invalid(_) | Self::NotFound | Self::Busy | Self::Conflict
+            Self::Invalid(_) | Self::NotFound | Self::Busy | Self::Conflict | Self::Ruleset
         ) {
             tracing::error!(error = ?self, "Git import request failed");
         }
@@ -297,329 +455,204 @@ impl IntoResponse for ImportError {
 pub(crate) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .route("/api/imports/git", post(start))
+        .route("/api/repos/{owner}/{name}/forks", post(start_fork))
         .route("/api/imports/git/{id}", get(status))
+        .route("/api/imports/git/{id}/resume", post(resume))
+        .route(
+            "/api/organizations/{organization}/repositories/imports/git",
+            post(start),
+        )
+        .route(
+            "/api/organizations/{organization}/repositories/imports/git/{id}",
+            get(status),
+        )
+        .route(
+            "/api/organizations/{organization}/repositories/imports/git/{id}/resume",
+            post(resume),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(16 * 1024))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
+}
+
+#[derive(Deserialize)]
+struct ImportPath {
+    organization: Option<Uuid>,
+    id: Option<Uuid>,
 }
 
 async fn start(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
+    AxumPath(path): AxumPath<ImportPath>,
     body: Result<Json<GitImportRequest>, JsonRejection>,
-) -> Result<(StatusCode, Json<GitImportStatus>), ImportError> {
+) -> Result<(StatusCode, Json<jobs::Status>), ImportError> {
     let context = server.git_import.as_ref().ok_or(ImportError::Unavailable)?;
-    let actor = app::actor(&principal).map_err(|_| ImportError::Invalid("sign-in required"))?;
+    let account = ImportAccount::resolve(&server, &principal, path.organization).await?;
     let Json(request) = body.map_err(|_| ImportError::Invalid("invalid import request"))?;
-    let request = validate_request(request, &context.allowed_hosts)?;
-    let actor_key = actor_key(&actor);
-    let status = context.jobs.enqueue(actor_key, &request).await?;
-    let job_id = status.id;
-    let worker_server = Arc::clone(&server);
-    let worker_context = context.clone();
-    server.receives.spawn(async move {
-        run_import(worker_server, worker_context, job_id, request, actor).await;
-    });
+    let id = request.request_id.unwrap_or_else(Uuid::now_v7);
+    let request = validate_request(request, path.organization, &context.allowed_hosts)?;
+    submit(&server, context, account, id, request).await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ForkRequest {
+    request_id: Uuid,
+    name: String,
+}
+
+async fn start_fork(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    AxumPath(key): AxumPath<(String, String)>,
+    Json(input): Json<ForkRequest>,
+) -> Result<(StatusCode, Json<jobs::Status>), ImportError> {
+    let context = server.git_import.as_ref().ok_or(ImportError::Unavailable)?;
+    let source = app::repository(&server, &principal, &key).map_err(ImportError::organization)?;
+    let organization = source
+        .organization
+        .filter(|_| source.forked_from.is_none())
+        .ok_or(ImportError::NotFound)?;
+    let account = ImportAccount::resolve(&server, &principal, Some(organization)).await?;
+    let name = source::identifier(input.name, "name")?;
+    if name.eq_ignore_ascii_case(&source.config.name) {
+        return Err(ImportError::Invalid("Choose a different name for the fork"));
+    }
+    let request = ValidatedImport {
+        source: format!("{}/{}", source.config.owner, source.config.name),
+        fork_source: Some(source.id),
+        owner: source.config.owner.clone(),
+        name,
+        description: String::new(),
+        token: None,
+    };
+    submit(&server, context, account, input.request_id, request).await
+}
+
+async fn submit(
+    server: &Arc<Server>,
+    context: &ImportContext,
+    account: ImportAccount,
+    id: Uuid,
+    request: ValidatedImport,
+) -> Result<(StatusCode, Json<jobs::Status>), ImportError> {
+    if id.is_nil() {
+        return Err(ImportError::Invalid("the import request ID is invalid"));
+    }
+    let catalog = server.catalog().ok_or(ImportError::Unavailable)?;
+    account.namespace(&request.owner)?;
+    let jobs = account.jobs(catalog.root());
+    if let Some(status) = jobs.replay(id, &request).await? {
+        account.check(server).await?;
+        return Ok((StatusCode::ACCEPTED, Json(status)));
+    }
+    let slot = context.admission.admit(&request)?;
+    let Some(writer) = jobs.create(id, &request).await? else {
+        let status = jobs
+            .replay(id, &request)
+            .await?
+            .ok_or(ImportError::Unavailable)?;
+        account.check(server).await?;
+        return Ok((StatusCode::ACCEPTED, Json(status)));
+    };
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(
+            spawn_import(
+                server.clone(),
+                context.clone(),
+                writer,
+                request,
+                account,
+                slot,
+            )
+            .await,
+        ),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResumeRequest {
+    token: Option<String>,
+}
+
+async fn resume(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    AxumPath(path): AxumPath<ImportPath>,
+    body: Result<Json<ResumeRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<jobs::Status>), ImportError> {
+    let context = server.git_import.as_ref().ok_or(ImportError::Unavailable)?;
+    let catalog = server.catalog().ok_or(ImportError::Unavailable)?;
+    let account = ImportAccount::resolve(&server, &principal, path.organization).await?;
+    let id = path.id.ok_or(ImportError::NotFound)?;
+    let Json(ResumeRequest { token }) =
+        body.map_err(|_| ImportError::Invalid("invalid resume request"))?;
+    let jobs = account.jobs(catalog.root());
+    let (status, request) = jobs
+        .resume_request(id, token, &context.allowed_hosts)
+        .await?;
+    let Some(request) = request else {
+        account.check(&server).await?;
+        return Ok((StatusCode::ACCEPTED, Json(status)));
+    };
+    account.namespace(&request.owner)?;
+    let slot = context.admission.admit(&request)?;
+    let status = match jobs.claim(id, &request).await? {
+        Some(writer) => {
+            spawn_import(
+                server.clone(),
+                context.clone(),
+                writer,
+                request,
+                account,
+                slot,
+            )
+            .await
+        }
+        None => jobs.status(id).await?,
+    };
     Ok((StatusCode::ACCEPTED, Json(status)))
+}
+
+async fn spawn_import(
+    server: Arc<Server>,
+    context: ImportContext,
+    writer: jobs::Writer,
+    request: ValidatedImport,
+    account: ImportAccount,
+    slot: jobs::Slot,
+) -> jobs::Status {
+    let status = writer.queued().await;
+    let worker_server = Arc::clone(&server);
+    server.receives.spawn(async move {
+        let _slot = slot;
+        run_import(
+            worker_server,
+            context,
+            Arc::new(writer),
+            request,
+            account,
+            status.id,
+        )
+        .await;
+    });
+    status
 }
 
 async fn status(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
-    AxumPath(id): AxumPath<Uuid>,
-) -> Result<Json<GitImportStatus>, ImportError> {
-    let context = server.git_import.as_ref().ok_or(ImportError::Unavailable)?;
-    let actor = app::actor(&principal).map_err(|_| ImportError::NotFound)?;
-    context.jobs.status(&actor_key(&actor), id).await.map(Json)
-}
-
-impl ImportJobs {
-    async fn enqueue(
-        &self,
-        actor: String,
-        request: &ValidatedImport,
-    ) -> Result<GitImportStatus, ImportError> {
-        let mut entries = self.entries.write().await;
-        let now = Instant::now();
-        entries.retain(|_, job| {
-            !matches!(job.status.state, JobState::Succeeded | JobState::Failed)
-                || now.duration_since(job.created_at) < JOB_RETENTION
-        });
-        let active = entries
-            .values()
-            .filter(|job| matches!(job.status.state, JobState::Queued | JobState::Running))
-            .count();
-        if entries.values().any(|job| {
-            matches!(job.status.state, JobState::Queued | JobState::Running)
-                && job.status.owner.eq_ignore_ascii_case(&request.owner)
-                && job.status.name.eq_ignore_ascii_case(&request.name)
-        }) {
-            return Err(ImportError::Conflict);
-        }
-        if active >= MAX_ACTIVE_JOBS || entries.len() >= MAX_RETAINED_JOBS {
-            return Err(ImportError::Busy);
-        }
-        let id = Uuid::now_v7();
-        let status = GitImportStatus {
-            id,
-            source: request.source.clone(),
-            owner: request.owner.clone(),
-            name: request.name.clone(),
-            state: JobState::Queued,
-            message: "Queued for import".into(),
-            repository: None,
-        };
-        entries.insert(
-            id,
-            Job {
-                actor,
-                created_at: now,
-                status: status.clone(),
-            },
-        );
-        Ok(status)
-    }
-
-    async fn status(&self, actor: &str, id: Uuid) -> Result<GitImportStatus, ImportError> {
-        let entries = self.entries.read().await;
-        let job = entries.get(&id).filter(|job| job.actor == actor);
-        job.map(|job| job.status.clone())
-            .ok_or(ImportError::NotFound)
-    }
-
-    async fn update(&self, id: Uuid, state: JobState, message: String) {
-        if let Some(job) = self.entries.write().await.get_mut(&id) {
-            job.status.state = state;
-            job.status.message = message;
-        }
-    }
-
-    async fn succeed(&self, id: Uuid, repository: ImportedRepository) {
-        if let Some(job) = self.entries.write().await.get_mut(&id) {
-            job.status.state = JobState::Succeeded;
-            job.status.message = "Repository imported; indexing in background".into();
-            job.status.repository = Some(repository);
-        }
-    }
-}
-
-async fn run_import(
-    server: Arc<Server>,
-    context: ImportContext,
-    id: Uuid,
-    request: ValidatedImport,
-    actor: Identity,
-) {
-    context
-        .jobs
-        .update(id, JobState::Running, "Cloning from Git".into())
-        .await;
-    let result = import_repository(&server, &context, id, &request, &actor).await;
-    match result {
-        Ok(()) => {
-            context
-                .jobs
-                .succeed(
-                    id,
-                    ImportedRepository {
-                        owner: request.owner,
-                        name: request.name,
-                    },
-                )
-                .await;
-        }
-        Err(error) => {
-            let message = match &error {
-                ImportError::Git(_) => {
-                    "The Git source could not be cloned or published; verify the URL, access, token, and server capacity".into()
-                }
-                ImportError::Cancelled | ImportError::Timeout => {
-                    "The import did not finish; retry it to continue".into()
-                }
-                ImportError::Busy => "Import storage is busy; retry shortly".into(),
-                ImportError::Catalog(crate::catalog::CatalogError::Conflict) => {
-                    "A repository with this owner and name already exists".into()
-                }
-                _ => "The repository could not be prepared for import".into(),
-            };
-            context.jobs.update(id, JobState::Failed, message).await;
-            tracing::error!(error = ?error, "Git import job failed");
-        }
-    }
-}
-
-async fn import_repository(
-    server: &Arc<Server>,
-    context: &ImportContext,
-    id: Uuid,
-    request: &ValidatedImport,
-    actor: &Identity,
-) -> Result<(), ImportError> {
-    let catalog = CatalogStore::from_config(&context.config).map_err(ImportError::Setup)?;
-    let (document, _) = catalog.load().await.map_err(ImportError::Catalog)?;
-    if document.repositories.iter().any(|record| {
-        record.owner.eq_ignore_ascii_case(&request.owner)
-            && record.name.eq_ignore_ascii_case(&request.name)
-    }) {
-        return Err(ImportError::Catalog(crate::catalog::CatalogError::Conflict));
-    }
-
-    let cancellation = server.cancellation.child_token();
-    // Leave the receiver's initial pack reservation available while cloning.
-    // A fixed 8 GiB reservation rejects small imports on a constrained node
-    // before the mirror size is known, even though the mirror would fit.
-    let clone_reservation = MAX_IMPORT_MIRROR_BYTES.min(
-        server
-            .local_staging
-            .available_bytes()
-            .saturating_sub(crate::git::receive::IMPORT_RECEIVE_INITIAL_RESERVATION),
-    );
-    if clone_reservation == 0 {
-        return Err(ImportError::Busy);
-    }
-    let directory = match server
-        .local_staging
-        .create(clone_reservation, &cancellation)
-        .await
-    {
-        Ok(directory) => directory,
-        Err(error) => return Err(ImportError::Staging(error)),
-    };
-    let mirror = directory.path().join("repository.git");
-    let mut clone = Command::new("git");
-    clone
-        .args(["clone", "--mirror", "--quiet", "--"])
-        .arg(&request.source)
-        .arg(&mirror);
-    configure_git(&mut clone, request.token.as_deref(), None);
-    run_git(clone, &cancellation, request.token.as_deref()).await?;
-
-    // The upper bound protects the clone while it is being created, but keeping
-    // that reservation during publication double-counts the local mirror and
-    // incoming receive pack. Shrink it to the measured mirror plus a small
-    // command margin before the first internal push so normal-sized imports can
-    // share the node's bounded staging budget with the receiver.
-    let mirror_bytes = mirror_size(&mirror).await?;
-    let mirror_reservation = mirror_bytes
-        .checked_add(IMPORT_MIRROR_RESERVE_MARGIN)
-        .filter(|reservation| *reservation <= MAX_IMPORT_MIRROR_BYTES)
-        .ok_or_else(|| ImportError::Git("Git source exceeds the import storage limit".into()))?;
-    server
-        .local_staging
-        .resize(&directory, mirror_reservation)
-        .map_err(ImportError::Staging)?;
-
-    let default_branch = default_branch(&mirror, &cancellation).await?;
-    context
-        .jobs
-        .update(id, JobState::Running, "Validating Git history".into())
-        .await;
-    let refs = mirror_refs(&mirror, &cancellation).await?;
-    if refs.is_empty() {
-        return Err(ImportError::Git("Git source has no refs".into()));
-    }
-    if refs.len() > MAX_IMPORT_REFS {
-        return Err(ImportError::Git(format!(
-            "Git source has too many refs (maximum {MAX_IMPORT_REFS})"
-        )));
-    }
-    context
-        .jobs
-        .update(id, JobState::Running, "Preparing Crab repository".into())
-        .await;
-    let members = if context.config.auth.is_some() {
-        vec![RepositoryMember {
-            subject: actor.subject.clone(),
-            name: actor.name.clone(),
-            access: RepositoryAccess::Admin,
-        }]
-    } else {
-        Vec::new()
-    };
-    let record = catalog
-        .create_repository_exclusive(
-            request.owner.clone(),
-            request.name.clone(),
-            format!("{}/{}", request.owner, request.name),
-            default_branch,
-            request.description.clone(),
-            members,
-        )
-        .await
-        .map_err(ImportError::Catalog)?;
-    let maintenance_guard = context.begin_repository(record.id);
-    crate::cells::initialize_repository(&context.config, record.id)
-        .await
-        .map_err(ImportError::Setup)?;
-
-    let (document, _) = catalog.load().await.map_err(ImportError::Catalog)?;
-    server
-        .install_catalog(document)
-        .await
-        .map_err(ImportError::Setup)?;
-
-    context
-        .jobs
-        .update(id, JobState::Running, "Publishing Git history".into())
-        .await;
-    let destination = context.destination_url(&request.owner, &request.name);
-    let internal_key = context.internal_key_hex();
-    context
-        .jobs
-        .update(
-            id,
-            JobState::Running,
-            format!("Publishing Git history ({} refs)", refs.len()),
-        )
-        .await;
-    push_mirror(&mirror, &destination, &internal_key, &cancellation).await?;
-
-    // Internal import receives acknowledge the durable journal without waiting
-    // for read projection. Start one projection after all refs are committed.
-    drop(maintenance_guard);
-    if let Some(repository) = server
-        .repositories
-        .get(&(request.owner.clone(), request.name.clone()))
-    {
-        repository.invalidate().await;
-        if let Err(error) = repository
-            .schedule_maintenance(server, MaintenanceTrigger::Repair)
-            .await
-        {
-            tracing::warn!(repository_id = %repository.id, error = ?error, "import projection scheduling deferred");
-        }
-    }
-    Ok(())
-}
-
-fn actor_key(actor: &Identity) -> String {
-    format!("{}\0{}", actor.issuer, actor.subject)
-}
-
-fn is_import_git_path(method: &axum::http::Method, path: &str) -> bool {
-    let mut segments = path.split('/');
-    if segments.next() != Some("") || segments.next() != Some("git") {
-        return false;
-    }
-    if segments.next().is_none_or(str::is_empty) {
-        return false;
-    }
-    let Some(repository) = segments.next() else {
-        return false;
-    };
-    if !repository.ends_with(".git") {
-        return false;
-    }
-    match *method {
-        axum::http::Method::POST => {
-            segments.next() == Some("git-receive-pack") && segments.next().is_none()
-        }
-        axum::http::Method::GET => {
-            segments.next() == Some("info")
-                && segments.next() == Some("refs")
-                && segments.next().is_none()
-        }
-        _ => false,
-    }
+    AxumPath(path): AxumPath<ImportPath>,
+) -> Result<Json<jobs::Status>, ImportError> {
+    let catalog = server.catalog().ok_or(ImportError::Unavailable)?;
+    let account = ImportAccount::resolve(&server, &principal, path.organization).await?;
+    let id = path.id.ok_or(ImportError::NotFound)?;
+    let status = account.jobs(catalog.root()).status(id).await?;
+    account.check(&server).await?;
+    app::account(&principal).map_err(|_| ImportError::NotFound)?;
+    Ok(Json(status))
 }
 
 fn encode_path_segment(value: &str) -> String {
@@ -635,65 +668,4 @@ fn encode_path_segment(value: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn receive_authorization_is_narrow() {
-        let context = ImportContext::new(test_config(), "127.0.0.1:8788".parse().unwrap());
-        let key = context.internal_key_hex();
-        let request = axum::extract::Request::builder()
-            .method("POST")
-            .uri("/git/team/repo.git/git-receive-pack")
-            .header("host", "127.0.0.1:8788")
-            .header("x-crab-internal-import", key)
-            .body(axum::body::Body::empty())
-            .unwrap();
-        assert!(context.authorizes_git(&request));
-        let request = axum::extract::Request::builder()
-            .method("GET")
-            .uri("/git/team/repo.git/info/refs/extra/info/refs")
-            .header("host", "127.0.0.1:8788")
-            .header("x-crab-internal-import", context.internal_key_hex())
-            .body(axum::body::Body::empty())
-            .unwrap();
-        assert!(!context.authorizes_git(&request));
-        let request = axum::extract::Request::builder()
-            .method("GET")
-            .uri("/git/team/repo.git/info/refs?service=git-receive-pack")
-            .header("host", "127.0.0.1:8788")
-            .header("x-crab-internal-import", context.internal_key_hex())
-            .body(axum::body::Body::empty())
-            .unwrap();
-        assert!(context.authorizes_git(&request));
-        let request = axum::extract::Request::builder()
-            .method("POST")
-            .uri("/api/imports/git")
-            .header("host", "127.0.0.1:8788")
-            .header("x-crab-internal-import", context.internal_key_hex())
-            .body(axum::body::Body::empty())
-            .unwrap();
-        assert!(!context.authorizes_git(&request));
-    }
-
-    fn test_config() -> Config {
-        // Authorization tests only exercise the derived internal key and host.
-        // The import context does not read storage until a job starts.
-        toml::from_str(
-            r#"
-listen = "127.0.0.1:8788"
-management_listen = "127.0.0.1:8789"
-[storage]
-url = "s3://bucket/prefix"
-[cells]
-data_dir = "/tmp/crab-cells"
-local_disk_limit_bytes = 21474836480
-peer_advertise = "https://127.0.0.1:8789"
-peer_certificate = "/tmp/cert.pem"
-peer_private_key = "/tmp/key.pem"
-peer_ca = "/tmp/ca.pem"
-"#,
-        )
-        .unwrap()
-    }
-}
+mod tests;

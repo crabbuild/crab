@@ -166,13 +166,19 @@ test("the private inbox links to the source and persists read state", async ({
   const { lifecycle } = await mockPullRequest(page);
   const notice = {
     id: "ba3633c5-7c00-4542-bf14-282eb2c91b0f",
-    repository: { owner: "team", name: "project" },
+    subject: { kind: "pull", number: 2 },
+    repository: { owner: "team", name: "project", id: lifecycle.repositoryId },
     title: "Plan rollout",
     href: `/team/project/pull/2/files?repository_id=${lifecycle.repositoryId}#review-thread-1`,
     sender: "Alice",
     reason: "team_mention",
-    created_at_ms: Date.now() - 60_000,
+    updated: {
+      id: "team-mention-activity",
+      created_at_ms: Date.now() - 60_000,
+    },
     read: false,
+    saved: false,
+    done: false,
   };
   await page.route("**/api/session", (route) =>
     route.fulfill({
@@ -184,8 +190,17 @@ test("the private inbox links to the source and persists read state", async ({
       },
     }),
   );
-  await page.route("**/api/notifications", (route) =>
-    route.fulfill({ json: { items: [notice], next: null } }),
+  await page.route(
+    (url) => url.pathname === "/api/notifications",
+    (route) => {
+      const unread = new URL(route.request().url()).searchParams.get("unread");
+      return route.fulfill({
+        json: {
+          items: unread === "true" && notice.read ? [] : [notice],
+          next: null,
+        },
+      });
+    },
   );
   await page.route("**/api/notifications/unread", (route) =>
     route.fulfill({ json: { unread: !notice.read } }),
@@ -194,40 +209,43 @@ test("the private inbox links to the source and persists read state", async ({
     (url) => url.pathname === "/api/repos/team/project/pulls/2/threads",
     (route) => route.fulfill({ json: { items: [], next: null } }),
   );
-  await page.route(`**/api/notifications/${notice.id}/read`, (route) => {
+  await page.route(`**/api/notifications/${notice.id}/state`, (route) => {
     expect(route.request().method()).toBe("PUT");
     expect(route.request().headers()["x-csrf-token"]).toBe("csrf");
     expect(route.request().postDataJSON()).toEqual({
-      created_at_ms: notice.created_at_ms,
+      repository_id: lifecycle.repositoryId,
+      expected: notice.updated,
+      action: { read: true },
     });
     notice.read = true;
-    return route.fulfill({ json: null });
+    return route.fulfill({ json: { read: true, saved: false, done: false } });
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/");
-  await page
-    .getByRole("link", { name: "Notifications, unread mentions" })
-    .click();
+  await page.getByRole("link", { name: "Notifications, unread" }).click();
   await expect(
     page.getByRole("heading", { name: "Notifications" }),
   ).toBeVisible();
   await selectDarkTheme(page);
   const row = page
-    .getByRole("list", { name: "Mention notifications" })
+    .getByRole("list", { name: "Notifications" })
     .getByRole("listitem");
-  await expect(row.getByText("Alice mentioned your team")).toBeVisible();
+  await expect(row.getByText(/Team mention · Updated by Alice/)).toBeVisible();
   await expect(row.getByRole("link", { name: "Plan rollout" })).toHaveAttribute(
     "href",
     notice.href,
   );
   await expectNoAccessibilityViolations(page);
   await row.getByRole("button", { name: "Mark as read" }).click();
-  await expect(row.getByRole("status")).toHaveText("Read");
+  await expect(page.getByText("No unread notifications.")).toBeVisible();
   await expect(
     page.getByRole("link", { name: "Notifications", exact: true }),
   ).toBeVisible();
+  await page.getByRole("link", { name: "All", exact: true }).click();
   await page.reload();
-  await expect(row.getByRole("status")).toHaveText("Read");
+  await expect(
+    row.getByRole("button", { name: "Mark as unread" }),
+  ).toBeVisible();
   await row.getByRole("link", { name: "Plan rollout" }).click();
   await expect(page).toHaveURL(new RegExp("#review-thread-1$"));
   const contribution = page.locator("#review-thread-1");

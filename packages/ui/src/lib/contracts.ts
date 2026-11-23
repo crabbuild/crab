@@ -11,7 +11,7 @@ export type SessionMode = "local" | "oidc" | "github";
 export type Session = { authenticated: boolean, mode: SessionMode, user: SessionIdentity | null, csrf: string | null, };
 
 // prettier-ignore
-export type BranchProtection = { branch: string, required_approvals: number, required_checks: Array<string>, };
+export type BranchProtection = { branch: string, required_approvals: number, required_code_owner_reviews?: boolean, require_conversation_resolution?: boolean, require_up_to_date?: boolean, require_merge_queue?: boolean, required_checks: Array<string>, required_integrations?: Array<string>, };
 
 // prettier-ignore
 export type FilePreviewState = { "state": "inline", text: string, } | { "state": "omitted_size" } | { "state": "binary" } | { "state": "unsupported_encoding" };
@@ -84,6 +84,18 @@ export type OrganizationMembership = { actor: string, role: OrganizationRole, ve
 
 // prettier-ignore
 export type OrganizationMembers = { can_manage: boolean, items: Array<OrganizationMembership>, next: string | null, revision: number, };
+
+// prettier-ignore
+export type MemberAccessAccount = "active" | "suspended" | "provider_unavailable";
+
+// prettier-ignore
+export type MemberAccessTeam = { id: string, name: string, access: RepositoryAccess, };
+
+// prettier-ignore
+export type AccessRepository = { id: string, owner: string, name: string, access: RepositoryAccess | null, direct: RepositoryAccess | null, teams: Array<MemberAccessTeam>, organization_owner: boolean, sso_group_ceiling: RepositoryAccess | null, inherited_from: string | null, };
+
+// prettier-ignore
+export type MemberRepositoryAccess = { account: MemberAccessAccount, items: Array<AccessRepository>, next: string | null, };
 
 // prettier-ignore
 export type InvitationOffer = { invitation: Invitation, profile: ActorSummary | null, };

@@ -53,7 +53,7 @@ fn recover(context: &Transaction<'_>, issue: u64, event: Option<&Event>) -> Resu
     if let Some(event) = event {
         match event.action {
             Action::Closed if closed => value.closed_at_ms = Some(event.created_at),
-            Action::IssueClosed { reason } if closed => {
+            Action::IssueClosed { reason, .. } if closed => {
                 value.state_reason = Some(reason);
                 value.closed_at_ms = Some(event.created_at);
             }

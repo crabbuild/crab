@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 pub(in crate::cells::repository::search) const UNREVIEWED: &str = "d.kind=1 AND NOT EXISTS (SELECT 1 FROM repository_pull_review_decisions v WHERE v.pull_number=d.number)";
@@ -8,7 +10,10 @@ use super::super::{Expression, Query, Term, navigation};
 use crate::cells::{
     Error, Result,
     application::{Read, SqlValue, Transaction},
-    repository::{BranchProtectionRecord, GetBranchProtections, projection},
+    repository::{
+        BranchProtectionRecord, MergeReviewers, projection,
+        rulesets::{ActiveRulesets, GetRefPolicy},
+    },
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -76,7 +81,12 @@ impl Query {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Context {
     pub source_token: Option<String>,
+    #[serde(default)]
+    pub default_ref: String,
     pub configured_rules: Vec<BranchProtectionRecord>,
+    #[serde(default)]
+    pub inherited_rulesets: crate::cells::repository::rulesets::Rulesets,
+    pub reviewers: MergeReviewers,
 }
 
 pub(crate) struct GetSourceState;
@@ -100,7 +110,8 @@ impl Read for GetSourceState {
 
 pub(in crate::cells::repository::search) struct Prepared {
     pub epoch: Option<u64>,
-    pub rules: Vec<BranchProtectionRecord>,
+    pub(in crate::cells::repository::search) approvals: BTreeMap<String, u8>,
+    reviewers: MergeReviewers,
 }
 pub(in crate::cells::repository::search) fn prepare(
     context: &mut Transaction<'_>,
@@ -128,14 +139,49 @@ pub(in crate::cells::repository::search) fn prepare(
         _ => return Err(Error::StaleSearch),
     };
     // Saved rules, including an empty set, override configured initial policy.
-    let rules = GetBranchProtections::execute(context, ())?
-        .map_or_else(|| input.configured_rules.clone(), |value| value.rules);
-    Ok(Prepared { epoch, rules })
+    let (classic, mut rulesets) = GetRefPolicy::execute(context, ())?;
+    rulesets
+        .rulesets
+        .extend(input.inherited_rulesets.rulesets.iter().cloned());
+    let mut approvals: BTreeMap<String, u8> = classic
+        .map_or_else(|| input.configured_rules.clone(), |value| value.rules)
+        .into_iter()
+        .filter(|rule| rule.required_approvals > 0)
+        .map(|rule| {
+            (
+                format!("refs/heads/{}", rule.branch),
+                rule.required_approvals,
+            )
+        })
+        .collect();
+    if rulesets.rulesets.iter().any(|rule| {
+        rule.enforcement == crate::cells::repository::rulesets::Enforcement::Active
+            && rule.required_approvals > 0
+    }) {
+        let rules = ActiveRulesets::new(&rulesets)?;
+        for row in context
+            .query("SELECT DISTINCT base_ref FROM repository_pulls", &[])?
+            .rows
+        {
+            let reference = crate::cells::repository::result_text(&row, 0)?;
+            let count = rules.approval_count(&reference, &input.default_ref);
+            if count > 0 {
+                let current = approvals.entry(reference).or_default();
+                *current = (*current).max(count);
+            }
+        }
+    }
+    Ok(Prepared {
+        epoch,
+        approvals,
+        reviewers: input.reviewers.clone(),
+    })
 }
 
 pub(in crate::cells::repository::search) struct Bound {
     epoch: String,
     approvals: String,
+    reviewers: String,
 }
 impl Bound {
     pub(in crate::cells::repository::search) fn new(
@@ -149,26 +195,37 @@ impl Bound {
                 .transpose()?
                 .unwrap_or(SqlValue::Null),
         );
-        let mut approvals = String::from("CASE s.base_ref");
-        for rule in &prepared.rules {
-            let branch = bind(SqlValue::Text(format!("refs/heads/{}", rule.branch)));
-            let count = bind(SqlValue::Integer(i64::from(rule.required_approvals)));
-            approvals.push_str(&format!(" WHEN {branch} THEN {count}"));
-        }
-        approvals.push_str(" ELSE 0 END");
-        if prepared.rules.is_empty() {
-            approvals = String::from("0");
-        }
-        Ok(Self { epoch, approvals })
+        let approvals = if prepared.approvals.is_empty() {
+            "0".to_owned()
+        } else {
+            let counts = bind(SqlValue::Text(serde_json::to_string(&prepared.approvals)?));
+            format!("COALESCE((SELECT value FROM json_each({counts}) WHERE key=s.base_ref),0)")
+        };
+        let issuer = bind(SqlValue::Text(prepared.reviewers.issuer.clone()));
+        let subjects = bind(SqlValue::Text(serde_json::to_string(
+            &prepared.reviewers.subjects,
+        )?));
+        let reviewers = format!(
+            "(({approvals})=0 OR (v.author_issuer={issuer} AND v.author_subject IN (SELECT value FROM json_each({subjects}))))"
+        );
+        Ok(Self {
+            epoch,
+            approvals,
+            reviewers,
+        })
     }
     pub(in crate::cells::repository::search) fn predicate(&self, status: Status) -> String {
         let head = "COALESCE(s.merged_head_oid,NULLIF(lower(hex(r.target_oid)),''))";
         let approved = format!(
-            "(SELECT COUNT(*) FROM repository_pull_review_decisions v WHERE v.pull_number=d.number AND v.state=1 AND v.commit_oid={head})"
+            "(SELECT COUNT(*) FROM repository_pull_review_decisions v WHERE v.pull_number=d.number AND v.state=1 AND v.commit_oid={head} AND {})",
+            self.reviewers
         );
         // A push invalidates approvals, but cannot resolve another reviewer’s
         // requested changes. Only a replacement decision or dismissal can do so.
-        let changes = CHANGES_REQUESTED;
+        let changes = format!(
+            "EXISTS (SELECT 1 FROM repository_pull_review_decisions v WHERE v.pull_number=d.number AND v.state=2 AND {})",
+            self.reviewers
+        );
         let condition = match status {
             Status::None => return UNREVIEWED.into(),
             Status::Required => format!("NOT ({changes}) AND {approved}<({})", self.approvals),

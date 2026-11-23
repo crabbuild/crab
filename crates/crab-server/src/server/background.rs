@@ -2,7 +2,11 @@
 
 use super::Server;
 use crate::{
-    Result,
+    Result, app,
+    cells::{
+        Address,
+        directory::notifications::{FilingSweep, SweepFiling},
+    },
     repository::{MaintenanceSchedule, MaintenanceTrigger},
 };
 use std::{
@@ -16,6 +20,46 @@ const PROJECTION_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 const PROJECTION_SWEEP_BATCH: usize = 16;
 const PROJECTION_RETRY_BASE: Duration = Duration::from_secs(10);
 const PROJECTION_RETRY_MAX: Duration = Duration::from_secs(5 * 60);
+
+pub(super) async fn sweep_notification_filing(server: Arc<Server>) -> Result<()> {
+    let Some(cells) = server.cells() else {
+        return Ok(());
+    };
+    let mut before = None;
+    let mut delay = Duration::from_secs(60);
+    loop {
+        tokio::select! {
+            () = server.cancellation.cancelled() => return Ok(()),
+            () = tokio::time::sleep(delay) => {}
+        }
+        let sweep = async {
+            app::command_output(
+                cells
+                    .command::<SweepFiling>(
+                        Address::Directory,
+                        app::mutation_identity()?,
+                        FilingSweep {
+                            before: before.clone(),
+                        },
+                    )
+                    .await,
+            )
+        };
+        tokio::select! {
+            () = server.cancellation.cancelled() => return Ok(()),
+            result = sweep => match result {
+                Ok(progress) => {
+                    before = progress.next;
+                    delay = if before.is_some() { Duration::from_secs(1) } else { Duration::from_secs(60) };
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "notification filing sweep will be retried");
+                    delay = Duration::from_secs(60);
+                }
+            }
+        }
+    }
+}
 
 pub(super) async fn refresh_catalog(server: Arc<Server>) {
     let Some(catalog) = server.catalog() else {

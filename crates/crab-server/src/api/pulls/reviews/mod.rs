@@ -61,6 +61,26 @@ pub(super) fn state(review: ReviewState, dismissed: bool) -> &'static str {
     }
 }
 
+pub(in crate::api) async fn ruleset_requires_admin(
+    server: &Server,
+    repo: &crate::repository::Repository,
+    principal: &Principal,
+    review: Option<&Detail>,
+) -> Result<bool> {
+    let Some(review) = review.filter(|review| review.dismissible) else {
+        return Ok(false);
+    };
+    if !principal.can_write(repo.id) || principal.can_admin(repo.id) {
+        return Ok(false);
+    }
+    let policy = crate::repository::settings::load_ref_policy(server, repo).await?;
+    let default_ref = policy.default_ref(repo).await?;
+    Ok(policy
+        .active()?
+        .matches(&review.base_ref, &default_ref)
+        .any(|(_, rule)| rule.requires_pull()))
+}
+
 pub(in crate::api) fn review_view(
     authors: &Authors,
     detail: &Detail,
@@ -69,12 +89,14 @@ pub(in crate::api) fn review_view(
     reactions: &reactions::View,
     principal: &Principal,
     repo: &crate::repository::Repository,
+    ruleset_protected: bool,
 ) -> Value {
     let review = &detail.review;
     let state = state(review.state, detail.dismissal.is_some());
-    let admin_required = detail
-        .admin_required
-        .unwrap_or_else(|| configured_protected(repo, &detail.base_ref));
+    let admin_required = ruleset_protected
+        || detail
+            .admin_required
+            .unwrap_or_else(|| configured_protected(repo, &detail.base_ref));
     json!({
         "number": review.number,
         "author": authors.view(&review.author),
@@ -109,7 +131,13 @@ async fn pull_and_head(
         let head = merge.head_oid.clone();
         return Ok((pull, Some(head)));
     }
-    let head = repo.ref_oid(&pull.head_ref).await?;
+    let head = if let Some(fork) = pull.head_repository {
+        super::git::fork_repository(server, repo, fork)?
+            .ref_oid(&pull.head_ref)
+            .await?
+    } else {
+        repo.ref_oid(&pull.head_ref).await?
+    };
     Ok((pull, head))
 }
 
@@ -166,6 +194,13 @@ async fn list(
         .collect();
     let authors = Authors::load(&server, &principal, actors.into_iter()).await?;
     let principal = app::membership(&server, &principal, repo).await?.principal;
+    let ruleset_protected = ruleset_requires_admin(
+        &server,
+        repo,
+        &principal,
+        reviews.iter().find(|review| review.dismissible),
+    )
+    .await?;
     let items = reviews
         .iter()
         .zip(reactions)
@@ -178,6 +213,7 @@ async fn list(
                 &reactions,
                 &principal,
                 repo,
+                ruleset_protected,
             )
         })
         .collect::<Vec<_>>();
@@ -191,6 +227,7 @@ struct NewReview {
     body: String,
     state: ReviewState,
     commit_oid: String,
+    base_revision: Option<u64>,
 }
 
 fn validate_body(body: &str, state: ReviewState) -> Result<()> {
@@ -245,6 +282,7 @@ async fn create(
     let review = storage::create_review(
         &server,
         repo,
+        &principal,
         id,
         NewPullReview {
             author: actor.clone(),
@@ -252,6 +290,7 @@ async fn create(
             body: input.body,
             state: input.state,
             commit_oid: input.commit_oid,
+            base_revision: input.base_revision,
         },
     )
     .await?;
@@ -276,6 +315,8 @@ async fn create(
     )
     .await?;
     let principal = app::membership(&server, &principal, repo).await?.principal;
+    let ruleset_protected =
+        ruleset_requires_admin(&server, repo, &principal, Some(&review)).await?;
     Ok((
         StatusCode::CREATED,
         Json(review_view(
@@ -286,6 +327,7 @@ async fn create(
             &reaction,
             &principal,
             repo,
+            ruleset_protected,
         )),
     ))
 }
@@ -321,6 +363,8 @@ async fn detail(
     )
     .await?;
     let principal = app::membership(&server, &principal, repo).await?.principal;
+    let ruleset_protected =
+        ruleset_requires_admin(&server, repo, &principal, Some(&review)).await?;
     Ok(Json(review_view(
         &authors,
         &review,
@@ -329,6 +373,7 @@ async fn detail(
         &reaction,
         &principal,
         repo,
+        ruleset_protected,
     )))
 }
 
@@ -387,6 +432,8 @@ async fn edit(
     )
     .await?;
     let principal = app::membership(&server, &principal, repo).await?.principal;
+    let ruleset_protected =
+        ruleset_requires_admin(&server, repo, &principal, Some(&review)).await?;
     Ok(Json(review_view(
         &authors,
         &review,
@@ -395,6 +442,7 @@ async fn edit(
         &reaction,
         &principal,
         repo,
+        ruleset_protected,
     )))
 }
 

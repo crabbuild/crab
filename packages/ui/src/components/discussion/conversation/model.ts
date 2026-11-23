@@ -34,6 +34,7 @@ export type Target =
     }
   | { kind: "pull_reply"; pull: number; thread: number; number: number };
 export type Action =
+  | { kind: "base_changed" | "head_changed"; from: string; to: string }
   | {
       kind: "project_changed" | "project_removed";
       project: string;
@@ -44,7 +45,7 @@ export type Action =
       number: number;
       title: string;
     }
-  | { kind: "issue_closed"; reason: "completed" | "not_planned" }
+  | { kind: "issue_closed"; reason: "completed" | "not_planned"; pull?: number }
   | {
       kind: "issue_close_reason_changed";
       from: "completed" | "not_planned" | null;
@@ -54,6 +55,9 @@ export type Action =
       kind:
         | "drafted"
         | "ready_for_review"
+        | "team_review_requested"
+        | "team_review_request_cancelled"
+        | "code_owner_reviews_requested"
         | "created"
         | "updated"
         | "closed"

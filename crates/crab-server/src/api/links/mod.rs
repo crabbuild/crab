@@ -14,7 +14,7 @@ use crate::{
     auth::Principal,
     cells::repository::collaboration::{
         Subject, SubjectKind,
-        links::{GetLink, ListLinks, Outcome, Pair, Query as LinkQuery, Selection, SetLink},
+        links::{GetLink, Link, ListLinks, Outcome, Pair, Query as LinkQuery, Selection, SetLink},
     },
     server::Server,
 };
@@ -64,6 +64,7 @@ async fn list(
         number: app::number(number)?,
     };
     let cell = app::repository_cell(&server, &repo)?;
+    let default_ref = repo.default_ref().await?;
     let page = app::query_output(
         cell.client
             .query::<ListLinks>(
@@ -73,6 +74,7 @@ async fn list(
                     subject,
                     before: params.before,
                     limit,
+                    default_ref,
                 },
             )
             .await,
@@ -96,7 +98,15 @@ async fn detail(
     let cell = app::repository_cell(&server, &repo)?;
     let link = app::query_output(cell.client.query::<GetLink>(&cell.target, None, pair).await)?
         .ok_or(Error::NotFound)?;
-    Ok(Json(json!({"active":link.active,"version":link.version})))
+    Ok(Json(link_view(link)))
+}
+
+fn link_view(link: Link) -> Value {
+    let mut view = json!({"active":link.active,"version":link.version});
+    if link.closes_on_merge {
+        view["closes_on_merge"] = json!(true);
+    }
+    view
 }
 
 #[derive(Deserialize)]
@@ -104,6 +114,7 @@ async fn detail(
 struct Edit {
     active: bool,
     version: u64,
+    closes_on_merge: Option<bool>,
 }
 
 async fn set(
@@ -136,6 +147,7 @@ async fn set(
                     active: input.active,
                     version: input.version,
                     actor: (&actor).into(),
+                    closes_on_merge: input.closes_on_merge,
                 },
             )
             .await,
@@ -145,8 +157,13 @@ async fn set(
         Outcome::Archived => return Err(Error::Archived),
         Outcome::NotFound => return Err(Error::NotFound),
         Outcome::Conflict => return Err(Error::Conflict),
+        Outcome::LimitReached => {
+            return Err(Error::Invalid(
+                "A pull request can close up to 10 linked issues",
+            ));
+        }
     };
-    Ok(Json(json!({"active":link.active,"version":link.version})))
+    Ok(Json(link_view(link)))
 }
 
 #[cfg(test)]

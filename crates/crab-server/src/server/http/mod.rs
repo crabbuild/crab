@@ -7,6 +7,7 @@ use serde_json::json;
 use std::sync::Arc;
 
 mod boundary;
+mod moved;
 
 pub(crate) fn router(server: Arc<Server>) -> Router {
     Router::new()

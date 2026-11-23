@@ -31,8 +31,8 @@ The compiled application binds `REPOSITORIES` to one native `Repository` Cell
 per catalog UUID, `DIRECTORY` to a shared native `Directory` Cell, and
 `ORGANIZATIONS` to independent native `Organization` Cells. Directory stores
 private qualified account keys and chosen public actor profiles. Organization
-stores explicit membership, invitation and standalone team authority; repository grants remain
-in the catalog.
+stores explicit membership, invitation and team authority. Repository grants
+remain in the catalog. Team grants resolve against current Organization membership.
 `cells/client.rs` sends bounded typed requests through native ingress and checks
 the operation's class and read receipt's target before routing.
 `cells/application.rs` shares transaction, replay and output handling; each
@@ -41,7 +41,7 @@ is buffered before owner dispatch so Cellar can safely retry stale routes; it is
 not forwarded as a non-replayable upload stream. Successful HTTP output
 uses the SDK output gate, including its ownership and durability checks.
 
-Repository assignment format 2 and discussion index format 12 require the explicit
+Repository assignment format 2 and discussion index format 13 require the explicit
 preparation described below. Issue lifecycle metadata also requires explicit
 `cells prepare-issue-state` on existing repositories. Pull lifecycle metadata
 requires `cells prepare-pull-state`. Other canonical records
@@ -182,8 +182,8 @@ described below. It is not a native grant cutover.
 
 ## Organization authority
 
-Organization schema 1 lives in `cells/organization/schema.sql`. Prepare Directory,
-then explicitly bootstrap through the private mTLS listener:
+Organization schema 1 lives in `cells/organization/schema.sql`. Run the private
+mTLS bootstrap to initialize a fresh Directory and organization:
 
 ```sh
 crab-server --config server.toml cells bootstrap-organization \
@@ -194,8 +194,10 @@ crab-server --config server.toml cells bootstrap-organization \
 The JSON supplies `owner: {issuer, subject}`, `name` and optional `description`.
 Use a new organization UUID and the owner's exact provider-qualified account.
 Metadata is validated before account registration or schema creation. Bootstrap
-registers that stable account without enrolling a public profile; retries with
-identical intent preserve the organization. Different bootstrap intent conflicts.
+registers that stable account without enrolling a public profile. Retry with
+the same inputs and UUID after interruption. An outdated Directory requires an
+explicit `cells migrate-directory` before bootstrap can register accounts.
+Different bootstrap intent conflicts.
 Neither a catalog owner string nor a public handle creates authority. Upgrade
 all peers before bootstrapping this new class; existing Repository/Directory
 schemas and identities do not change, and no rebuild is required.
@@ -298,21 +300,107 @@ Repository team grants are catalog-owned alongside the organization binding.
 The native owner read checks live team UUIDs and current organization membership
 epochs. This lets HTTP replicas query one authority for current membership even
 when the team's owner is on another node. The read performs no schema changes.
-Team review requests, nested teams, project grants, and atomic ordering between
-team removals and repository publication remain separate work.
+Team-backed review requests use the current grants and membership epochs.
+Nested teams, project grants, and atomic ordering between team removals and
+repository publication remain separate work.
 
 ## Repository collaboration
 
-Discussion writes store newly added mentions in a durable Repository outbox
-alongside the source body. The server drains each bounded page after commit.
-It resolves addressed Directory accounts and pages current closed-team members.
+Discussion writes store newly added mentions, review requests, and assignments
+in a durable Repository outbox alongside the source activity. Assignments use
+stable Directory actor IDs from the committed change. The server drains each
+bounded page after commit, applies current repository grants, and pages current
+closed-team members for team mentions.
 Deduplicated delivery writes to private, bounded Directory inboxes before
 acknowledging the Repository event. Separate bounded retention protects
-explicit grants from being displaced by pending SSO group notices. Retries
-preserve read state. The inbox rechecks the current signed-in account and
-repository access before disclosing unread state, titles, or links. Team
-bindings, queued mentions, and inbox entries use native document records and
-require no SQL preparation.
+explicit grants from being displaced by pending SSO group notices. The
+Directory retains 100 conversations per collection. It folds existing event
+rows per repository and typed subject, selecting the latest contribution and
+strongest reason before applying pagination. A replay of the current activity
+preserves read state across both collections. Single and bulk triage share one
+Directory mutation. It compares every selected activity and rolls back the
+whole batch on a stale row. Bulk retries use an account-scoped native receipt
+with the exact submission payload. Saved and Done
+records use per-account documents keyed by conversation plus activity-order
+indexes for each view. The indexes, recent read flags, and triage document
+update in the same native transaction. Completed rows stay out of the recent inbox. The
+Done view covers 90 days. A bounded Directory sweep removes expired completion
+indexes. Unsaved completions and their recent copies are replaced by a compact
+activity cutoff that suppresses delayed delivery in either access channel.
+Saved rows retain their filing state beyond recent retention. A newer
+delivery reopens it while preserving any bookmark. The inbox walks private
+archive pages and emits cursors from visible rows after account, grant, and mute
+checks. These native document records require no SQL preparation. Drain and
+upgrade peers together for the notification query and mutation contract.
+
+When email is enabled, Directory creates the email job in the inbox
+delivery transaction. Changes to the same activity or its access channel do
+not create more jobs. Each job retains the account's opt-in version. A
+changed sign-in address, opt-out, or revocation suppresses pending delivery.
+The worker claims a durable 60-second lease and checks current account and
+repository authority before sending. An interrupted worker can retry using
+the same provider idempotency key for the recipient and activity. Claims,
+retry times, and terminal receipts are native documents. They expire within
+23 hours of the activity, inside Resend's
+[24-hour idempotency window](https://resend.com/docs/dashboard/emails/idempotency-keys).
+
+Repository watch preferences are private native documents keyed by a digest
+of the actor's issuer and subject. A sparse index tracks actors watching
+issues or pull requests. Each
+category has its own activation activity number so a new watch skips activity
+already committed and a category that stays enabled keeps its place.
+The watched-repositories view reads those same documents in bounded windows
+of the authorized catalog and refreshes access before returning results.
+Its continuation names a repository in the rechecked window. Owner-wide
+unwatch reuses the same versioned setter per selected Repository Cell. Each
+repository reports its own outcome and a retry preserves later watch settings.
+Release watching uses a separate sparse index and a publication sequence.
+Finalizing Git-backed release publication records that sequence and enqueues
+the notification in the same Repository transaction. The worker checks the
+current published generation, skips the publisher, and uses the same paged
+Directory delivery and access rules as discussion watches. A withdrawn,
+deleted, or superseded publication ends its pending delivery. Inbox reads
+resolve live published titles and bind the release number in the link.
+Watch delivery scans at most 32 index keys per event per sweep and commits
+the exclusive cursor after Directory accepts the page. Replayed
+acknowledgements cannot move the cursor backwards. Delivery checks current
+roster and mute state. Inbox reads check current account, repository grant,
+and mute state before revealing existing notices. Issue and pull request
+overrides use typed subject addresses. The subscriptions view walks canonical
+issue and pull request keys and probes the account's current thread preference
+in the same Repository transaction. Each native read examines at most 32
+discussions. New follows store the activation reason and time alongside the
+preference and update a private chronological index in the same transaction.
+Automatic follows use the committed activity time. Changes between active
+follow modes preserve the origin, and ending a follow removes its index row.
+Existing follows keep their unknown origin and require no index preparation.
+Bulk unsubscribe
+groups changes by Repository Cell, runs each captured version through the
+canonical setter, and leaves earlier inbox activity in place. The watcher
+read merges bounded pages
+from the repository and subject indexes, applies the private override to the
+committed event, and emits each eligible actor once. The discussion sidebar
+updates future activity delivery. Inbox unsubscribe verifies the observed
+Directory activity and commits the preference and dismissal together in the
+Repository Cell. The inbox and its unread badge evaluate both from that owner.
+Saved and Done retain their own filing state. The Directory carries the most
+recent mention or review request separately from the strongest display reason
+so late ordinary delivery cannot reopen a dismissal. Replaying a dismissal
+preserves later follows. A participating actor follows
+the discussion in the same transaction that appends the activity. This
+increments the private preference version and uses the exact activity
+sequence as the cutoff. The outbox resolves qualified watchers to Directory
+accounts after checking repository access. Direct activity uses the same
+repository mute rules.
+
+A new mention or assignment stores an enrollment source with the committed
+activity and indexes the pending source under its typed discussion. Workers
+deliver the direct notice and apply the follow before acknowledging the
+source. Later watch pages wait for earlier sources on their own discussion.
+A reserved share of the outbox page lets the source advance even if watch
+delivery is waiting. Enrollment uses the existing Directory event identity
+for delivery and the source activity number for preference ordering. A newer
+manual choice wins and replay keeps the existing Directory read state.
 
 Discussion author enrichment uses the bounded native `LookupActors` read (Directory
 operation 6). It resolves qualified private keys into public UUID/handle/name
@@ -335,6 +423,32 @@ Review HTTP writes now require the inspected `commit_oid`; fresh writes verify
 the live head, while retries use the existing native immutable submission
 ledger. This adds no native field or schema change. Deploy the API and bundled
 UI together; old HTTP payloads have no fallback decoder.
+
+Team requests store stable team UUIDs and latest state in a bounded document per
+PR. The reviewer snapshot includes this document at the same version as the
+individual requests. The HTTP authority resolves current catalog grants and the
+Organization roster. The repository mutation atomically records the request,
+activity and qualified inbox deliveries. Both review submission paths pass
+current team memberships into the transaction. Submission replay precedes
+fulfillment so it cannot clear a later request. Team visibility gates names in
+the public response. Deploy peers and the UI together for these operations and
+activity kinds. No additional SQL schema preparation is required.
+
+The branch protection codec retains existing settings and provider-only records.
+Enabling required code owner reviews writes a new versioned record containing
+the code-owner flag per rule. Upgrade serving peers before enabling the flag.
+The merge service resolves the exact base policy and compares the pinned refs
+again at publication. Team ownership reads check the live team's visibility
+and approval membership epochs in one Organization Cell snapshot. The new rule
+requires no SQL preparation.
+
+Fresh ready PR creation and transitions out of draft share the base-comparison
+owner resolver. The application passes qualified accounts and stable team UUIDs
+to the native command. Requests, activity and deduplicated inbox deliveries
+commit with creation or the readiness change. Derived ownership stays outside
+the creation intent digest. Replay returns the committed PR before writing
+requests. The existing user request record and the team request history retain
+manual cancellation across later readiness changes. No preparation is needed.
 
 The Author list menu composes Directory handle completion with native query
 navigation. Directory read 8 returns a bounded `items`/`truncated` result, using
@@ -387,7 +501,7 @@ review key or exclusive KV bound. Both phases process at most eight source recor
 per transaction; unrelated pull metadata also advances the request cursor. Reads
 remain unavailable until all sources complete. Domain records, versions, request
 history, receipts and public submission mappings are unchanged. Older indexes
-require `cells rebuild-search`; fresh repositories initialize current format 12.
+require `cells rebuild-search`. Fresh repositories initialize format 13.
 
 Native list output adds `review_requested_from_me`. Author, reviewer and commenter
 names now share one ordered `people` binding collection, one Directory snapshot,
@@ -956,6 +1070,12 @@ edits and exact merge retries preserve it. No search-index format change or
 rebuild is required. Update all peers and embedded UI together; mixed-version
 serving is unsupported.
 
+Fork pull requests store the immutable head repository UUID in a native
+document alongside the upstream pull row. The document, row, submission
+digest, and search projection commit in one Cell transaction. Existing pull
+rows already imply a head in the upstream repository when the document is
+absent. This addition requires no schema preparation or index rebuild.
+
 ### Prepare review dismissal storage
 
 ```sh
@@ -1011,6 +1131,15 @@ Deploy serving peers and embedded UI together: private search inputs carry
 optional captured source context and private rollup inputs carry a source token.
 There is no old-input decoder, canonical review migration, new environment
 option, dependency override or implicit preparation.
+
+### Prepare pull request closing references
+
+Discussion index format 13 adds a derived reverse index for closing references
+in pull request descriptions. Use `cells rebuild-search --owner OWNER --name REPO`
+on each existing repository before opening traffic. The bounded Pulls phase
+indexes existing descriptions and any completed merge snapshots. Canonical
+description, manual link, lifecycle and receipt records retain their formats.
+Historical merges do not generate closure events during the rebuild.
 
 ## Initial discussion metadata
 

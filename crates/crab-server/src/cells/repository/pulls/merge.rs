@@ -2,7 +2,48 @@ use super::*;
 use crate::cells::repository::collaboration::{
     Target,
     activity::{self, Action},
+    links,
 };
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CaptureIssueClosureInput {
+    pub pull: u64,
+    pub request_id: [u8; 16],
+    pub on_default: bool,
+}
+
+pub(crate) struct CaptureIssueClosure;
+impl Mutation for CaptureIssueClosure {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
+    const ID: u32 = 232;
+    type Input = CaptureIssueClosureInput;
+    type Output = bool;
+
+    fn execute(
+        context: &mut Transaction<'_>,
+        input: Self::Input,
+    ) -> crate::cells::Result<MutationResult<Self::Output>> {
+        validate_number(input.pull)?;
+        let Some(pull) = load_pull(context, input.pull)? else {
+            return Ok(MutationResult::Rejected(false));
+        };
+        if pull
+            .merge_pending
+            .is_none_or(|merge| merge.request_id != input.request_id)
+        {
+            return Ok(MutationResult::Rejected(false));
+        }
+        links::capture_closure(
+            context,
+            input.pull,
+            input.request_id,
+            input.on_default,
+            &pull.body,
+        )?;
+        Ok(MutationResult::Success(true))
+    }
+}
 
 pub(crate) struct ReservePullMerge;
 
@@ -107,7 +148,10 @@ impl Mutation for TransitionPullMerge {
                 if pull.draft {
                     return Ok(MutationResult::Rejected(TransitionPullMergeOutcome::Draft));
                 }
-                if pull.state != PullState::Open || pull.version != input.merge.pull_version {
+                if pull.state != PullState::Open
+                    || pull.version != input.merge.pull_version
+                    || !super::auto_merge::allows_merge(context, &pull, &input.merge)?
+                {
                     return Ok(MutationResult::Rejected(
                         TransitionPullMergeOutcome::Conflict,
                     ));
@@ -126,6 +170,7 @@ impl Mutation for TransitionPullMerge {
                     ));
                 }
                 pull.merge_pending = None;
+                links::clear_closure(context, pull.number)?;
             }
             PullMergeTransition::Complete => {
                 if let Some(done) = &pull.merge {
@@ -182,6 +227,8 @@ impl Mutation for TransitionPullMerge {
                 number: pull.number,
             };
             activity::append(context, target, &merge.author, Action::Merged)?;
+            webhooks::pull(context, &pull, webhooks::PullAction::Closed)?;
+            links::complete_closure(context, pull.number, merge.request_id, &merge.author)?;
         }
         Ok(MutationResult::Success(
             TransitionPullMergeOutcome::Applied(Box::new(pull)),
@@ -220,6 +267,8 @@ fn merge_digest(pull: u64, merge: &PullMerge) -> blake3::Hash {
     hasher.update(&[match merge.method {
         MergeMethod::FastForward => 0,
         MergeMethod::MergeCommit => 1,
+        MergeMethod::Squash => 2,
+        MergeMethod::Rebase => 3,
     }]);
     hasher.update(&merge.pull_version.to_be_bytes());
     for value in [
@@ -230,6 +279,41 @@ fn merge_digest(pull: u64, merge: &PullMerge) -> blake3::Hash {
     ] {
         hash_text(&mut hasher, value);
     }
+    if let Some(plan) = &merge.publication_plan {
+        hash_text(&mut hasher, plan);
+    }
+    let scoped = merge
+        .bypass_rulesets
+        .iter()
+        .any(|id| matches!(id, rulesets::RulesetId::Organization { .. }));
+    if !merge.bypass_rulesets.is_empty() {
+        hasher.update(if scoped {
+            b"ruleset-bypass/v2\0"
+        } else {
+            b"ruleset-bypass\0"
+        });
+        for id in &merge.bypass_rulesets {
+            match id {
+                rulesets::RulesetId::Repository(id) => {
+                    if scoped {
+                        hasher.update(&[0]);
+                    }
+                    hasher.update(id.as_bytes());
+                }
+                rulesets::RulesetId::Organization {
+                    organization,
+                    ruleset,
+                } => {
+                    hasher.update(&[1]);
+                    hasher.update(organization.as_bytes());
+                    hasher.update(ruleset.as_bytes());
+                }
+            }
+        }
+    }
+    if merge.tested_candidate {
+        hasher.update(b"tested-candidate\0");
+    }
     hasher.finalize()
 }
 fn validate_merge(merge: &PullMerge) -> crate::cells::Result<()> {
@@ -238,6 +322,29 @@ fn validate_merge(merge: &PullMerge) -> crate::cells::Result<()> {
     validate_oid(&merge.base_oid)?;
     validate_oid(&merge.head_oid)?;
     validate_oid(&merge.commit_oid)?;
+    if merge.tested_candidate
+        && (!merge.method.supports_queue()
+            || merge.publication_plan.is_none()
+            || !merge.message.is_empty()
+            || !merge.bypass_rulesets.is_empty())
+    {
+        return Err(crate::cells::Error::Invalid(
+            "invalid tested merge candidate",
+        ));
+    }
+    if !rulesets::valid_bypass_ids(&merge.bypass_rulesets) {
+        return Err(crate::cells::Error::Invalid("invalid merge ruleset bypass"));
+    }
+    if merge.publication_plan.as_ref().is_some_and(|plan| {
+        plan.len() != 64
+            || !plan
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    }) {
+        return Err(crate::cells::Error::Invalid(
+            "repository pull publication plan is invalid",
+        ));
+    }
     if merge.message.chars().count() > 256
         || merge
             .message

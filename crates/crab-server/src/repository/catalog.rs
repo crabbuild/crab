@@ -145,47 +145,62 @@ pub(crate) async fn materialize(
     for record in document.repositories.into_iter().filter(|record| {
         record.application == crate::catalog::RepositoryApplicationState::CellReady
     }) {
-        let prefix = catalog.root().repository_prefix(&record.prefix)?;
-        let layout = catalog.root().repository_layout(prefix.clone());
-        let root = crab_metadata::capsule_protocol::load_root(&layout)
-            .await
-            .map_err(|source| crate::Error::Settings {
-                source: Box::new(source),
-            })?;
-        let default_branch = root
-            .record()
-            .root()
-            .head()
-            .strip_prefix("refs/heads/")
-            .ok_or(crate::Error::Config(
-                "catalog repository HEAD must name a branch",
-            ))?;
-        let entry = record.runtime_config(catalog.root(), default_branch)?;
-        let namespace = &catalog.root().provider_namespace;
-        let read_layout = crate::server::storage::repository_read_layout(catalog.root(), &layout)
+        let repository = materialize_record(catalog, &record).await?;
+        // Pending imports use the native materializer before the catalog
+        // publishes readiness. Attach viewer bindings only in the live index.
+        let root = catalog.root();
+        let read_layout = crate::server::storage::repository_read_layout(root, &repository.layout)
             .await?
             .map(|layout| {
                 RepositoryIdentity::new(
-                    format!("cdn:{namespace}"),
-                    prefix.clone(),
+                    format!("cdn:{}", root.provider_namespace),
+                    layout.repo_prefix().to_owned(),
                     record.placement_generation,
                 )
                 .map(|identity| (layout, identity))
             })
             .transpose()?;
-        let repository = Repository::new(
-            record.id,
-            entry.clone(),
-            layout,
-            RepositoryIdentity::new(namespace.clone(), prefix, record.placement_generation)?,
-        )
-        .with_read_layout(read_layout);
         repositories.insert(
-            (entry.owner.clone(), entry.name.clone()),
-            Arc::new(repository),
+            (record.owner, record.name),
+            Arc::new(repository.with_read_layout(read_layout)),
         );
     }
     Ok(RepositoryIndex::new(version, repositories))
+}
+
+pub(crate) async fn materialize_record(
+    catalog: &CatalogStore,
+    record: &crate::catalog::CatalogRecord,
+) -> Result<Repository> {
+    let prefix = catalog.root().repository_prefix(&record.prefix)?;
+    let layout = catalog.root().repository_layout(prefix.clone());
+    let root = crab_metadata::capsule_protocol::load_root(&layout)
+        .await
+        .map_err(|source| crate::Error::Settings {
+            source: Box::new(source),
+        })?;
+    let default_branch = root
+        .record()
+        .root()
+        .head()
+        .strip_prefix("refs/heads/")
+        .ok_or(crate::Error::Config(
+            "catalog repository HEAD must name a branch",
+        ))?;
+    let entry = record.runtime_config(catalog.root(), default_branch)?;
+    let mut repository = Repository::new(
+        record.id,
+        entry.clone(),
+        layout,
+        RepositoryIdentity::new(
+            catalog.root().provider_namespace.clone(),
+            prefix,
+            record.placement_generation,
+        )?,
+    );
+    repository.organization = record.organization_id();
+    repository.forked_from = record.forked_from;
+    Ok(repository)
 }
 
 #[cfg(test)]

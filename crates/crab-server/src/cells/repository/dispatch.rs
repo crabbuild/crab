@@ -6,7 +6,7 @@ use super::collaboration::reactions::{GetReactions, SetReaction};
 use super::collaboration::{
     attachments,
     links::{GetLink, ListLinks, SetLink},
-    mention_settings, mentions,
+    mention_settings, mentions, watches,
 };
 use super::*;
 use crate::cells::application::{invoke_mutation, invoke_read};
@@ -49,7 +49,19 @@ pub(in crate::cells) fn dispatch_mutation(
         attachments::Expire::ID => invoke_mutation::<attachments::Expire>(context, input),
         attachments::Collect::ID => invoke_mutation::<attachments::Collect>(context, input),
         mentions::Acknowledge::ID => invoke_mutation::<mentions::Acknowledge>(context, input),
+        mentions::Enroll::ID => invoke_mutation::<mentions::Enroll>(context, input),
         mention_settings::Set::ID => invoke_mutation::<mention_settings::Set>(context, input),
+        watches::Set::ID => invoke_mutation::<watches::Set>(context, input),
+        watches::SetThread::ID => invoke_mutation::<watches::SetThread>(context, input),
+        #[cfg(test)]
+        watches::SetFollowTimes::ID => invoke_mutation::<watches::SetFollowTimes>(context, input),
+        watches::UnsubscribeDiscussions::ID => {
+            invoke_mutation::<watches::UnsubscribeDiscussions>(context, input)
+        }
+        watches::Dismiss::ID => invoke_mutation::<watches::Dismiss>(context, input),
+        watches::AcknowledgeRelease::ID => {
+            invoke_mutation::<watches::AcknowledgeRelease>(context, input)
+        }
         #[cfg(test)]
         projection::tests::Historical::ID => {
             invoke_mutation::<projection::tests::Historical>(context, input)
@@ -150,6 +162,9 @@ pub(in crate::cells) fn dispatch_mutation(
         <review_requests::SetReviewRequest as Mutation>::ID => {
             invoke_mutation::<review_requests::SetReviewRequest>(context, input)
         }
+        <review_requests::teams::SetTeamReviewRequest as Mutation>::ID => {
+            invoke_mutation::<review_requests::teams::SetTeamReviewRequest>(context, input)
+        }
         <SetPullReadiness as Mutation>::ID => invoke_mutation::<SetPullReadiness>(context, input),
         <SetLink as Mutation>::ID => invoke_mutation::<SetLink>(context, input),
         <SetReaction as Mutation>::ID => invoke_mutation::<SetReaction>(context, input),
@@ -168,6 +183,12 @@ pub(in crate::cells) fn dispatch_mutation(
         }
         <CreateCheckRun as Mutation>::ID => invoke_mutation::<CreateCheckRun>(context, input),
         <UpdateCheckRun as Mutation>::ID => invoke_mutation::<UpdateCheckRun>(context, input),
+        <rulesets::ReplaceRulesets as Mutation>::ID => {
+            invoke_mutation::<rulesets::ReplaceRulesets>(context, input)
+        }
+        <ReplaceMergeMethods as Mutation>::ID => {
+            invoke_mutation::<ReplaceMergeMethods>(context, input)
+        }
         <ReplaceBranchProtections as Mutation>::ID => {
             invoke_mutation::<ReplaceBranchProtections>(context, input)
         }
@@ -175,7 +196,30 @@ pub(in crate::cells) fn dispatch_mutation(
             invoke_mutation::<ReplaceRepositoryLifecycle>(context, input)
         }
         <CreatePull as Mutation>::ID => invoke_mutation::<CreatePull>(context, input),
+        RejectStalePullComparison::ID => {
+            invoke_mutation::<RejectStalePullComparison>(context, input)
+        }
+        viewed::SetViewedFile::ID => invoke_mutation::<viewed::SetViewedFile>(context, input),
+        pending_reviews::Change::ID => invoke_mutation::<pending_reviews::Change>(context, input),
+        pending_reviews::Submit::ID => invoke_mutation::<pending_reviews::Submit>(context, input),
+        deploy_tokens::Change::ID => invoke_mutation::<deploy_tokens::Change>(context, input),
+        webhooks::QueuePush::ID => invoke_mutation::<webhooks::QueuePush>(context, input),
+        webhooks::Configure::ID => invoke_mutation::<webhooks::Configure>(context, input),
+        webhooks::Claim::ID => invoke_mutation::<webhooks::Claim>(context, input),
+        webhooks::Finish::ID => invoke_mutation::<webhooks::Finish>(context, input),
+        webhooks::Retry::ID => invoke_mutation::<webhooks::Retry>(context, input),
+        integrations::Edit::ID => invoke_mutation::<integrations::Edit>(context, input),
+        integrations::Record::ID => invoke_mutation::<integrations::Record>(context, input),
+        integrations::dispatches::Reserve::ID => {
+            invoke_mutation::<integrations::dispatches::Reserve>(context, input)
+        }
+        integrations::dispatches::Confirm::ID => {
+            invoke_mutation::<integrations::dispatches::Confirm>(context, input)
+        }
         <UpdatePull as Mutation>::ID => invoke_mutation::<UpdatePull>(context, input),
+        pull_base::Retarget::ID => invoke_mutation::<pull_base::Retarget>(context, input),
+        pull_head::Switch::ID => invoke_mutation::<pull_head::Switch>(context, input),
+        pull_auto_merge::Edit::ID => invoke_mutation::<pull_auto_merge::Edit>(context, input),
         <CreatePullComment as Mutation>::ID => invoke_mutation::<CreatePullComment>(context, input),
         <UpdatePullComment as Mutation>::ID => invoke_mutation::<UpdatePullComment>(context, input),
         <CreatePullReview as Mutation>::ID => invoke_mutation::<CreatePullReview>(context, input),
@@ -193,6 +237,7 @@ pub(in crate::cells) fn dispatch_mutation(
             invoke_mutation::<UpdatePullReviewReply>(context, input)
         }
         <ReservePullMerge as Mutation>::ID => invoke_mutation::<ReservePullMerge>(context, input),
+        CaptureIssueClosure::ID => invoke_mutation::<CaptureIssueClosure>(context, input),
         <TransitionPullMerge as Mutation>::ID => {
             invoke_mutation::<TransitionPullMerge>(context, input)
         }
@@ -234,6 +279,17 @@ pub(in crate::cells) fn dispatch_read(
         attachments::Due::ID => invoke_read::<attachments::Due>(context, input),
         mentions::Pending::ID => invoke_read::<mentions::Pending>(context, input),
         mention_settings::Get::ID => invoke_read::<mention_settings::Get>(context, input),
+        watches::Get::ID => invoke_read::<watches::Get>(context, input),
+        watches::GetThread::ID => invoke_read::<watches::GetThread>(context, input),
+        watches::ListDiscussions::ID => invoke_read::<watches::ListDiscussions>(context, input),
+        watches::ListTimedDiscussions::ID => {
+            invoke_read::<watches::ListTimedDiscussions>(context, input)
+        }
+        watches::InboxVisibility::ID => invoke_read::<watches::InboxVisibility>(context, input),
+        watches::PublishedReleases::ID => invoke_read::<watches::PublishedReleases>(context, input),
+        watches::ReleaseWatchers::ID => invoke_read::<watches::ReleaseWatchers>(context, input),
+        watches::ListWatchers::ID => invoke_read::<watches::ListWatchers>(context, input),
+        watches::Unmuted::ID => invoke_read::<watches::Unmuted>(context, input),
         #[cfg(test)]
         projection::tests::Inspect::ID => invoke_read::<projection::tests::Inspect>(context, input),
         #[cfg(test)]
@@ -346,10 +402,38 @@ pub(in crate::cells) fn dispatch_read(
             invoke_read::<GetCheckUpdateSubmission>(context, input)
         }
         <GetBranchProtections as Read>::ID => invoke_read::<GetBranchProtections>(context, input),
+        <rulesets::GetRulesets as Read>::ID => invoke_read::<rulesets::GetRulesets>(context, input),
+        <rulesets::GetRefPolicy as Read>::ID => {
+            invoke_read::<rulesets::GetRefPolicy>(context, input)
+        }
+        <GetMergeMethods as Read>::ID => invoke_read::<GetMergeMethods>(context, input),
+        <GetEffectiveMergeMethods as Read>::ID => {
+            invoke_read::<GetEffectiveMergeMethods>(context, input)
+        }
+        pull_auto_merge::Get::ID => invoke_read::<pull_auto_merge::Get>(context, input),
+        pull_auto_merge::Pending::ID => invoke_read::<pull_auto_merge::Pending>(context, input),
         <GetRepositoryLifecycle as Read>::ID => {
             invoke_read::<GetRepositoryLifecycle>(context, input)
         }
         <GetPull as Read>::ID => invoke_read::<GetPull>(context, input),
+        viewed::GetViewedFiles::ID => invoke_read::<viewed::GetViewedFiles>(context, input),
+        pending_reviews::Get::ID => invoke_read::<pending_reviews::Get>(context, input),
+        deploy_tokens::List::ID => invoke_read::<deploy_tokens::List>(context, input),
+        deploy_tokens::Verify::ID => invoke_read::<deploy_tokens::Verify>(context, input),
+        webhooks::View::ID => invoke_read::<webhooks::View>(context, input),
+        webhooks::HasWork::ID => invoke_read::<webhooks::HasWork>(context, input),
+        webhooks::Current::ID => invoke_read::<webhooks::Current>(context, input),
+        integrations::List::ID => invoke_read::<integrations::List>(context, input),
+        integrations::dispatches::Get::ID => {
+            invoke_read::<integrations::dispatches::Get>(context, input)
+        }
+        integrations::Receipt::ID => invoke_read::<integrations::Receipt>(context, input),
+        integrations::DeliveryHistory::ID => {
+            invoke_read::<integrations::DeliveryHistory>(context, input)
+        }
+        integrations::ReadRequirements::ID => {
+            invoke_read::<integrations::ReadRequirements>(context, input)
+        }
         <GetPullSubmission as Read>::ID => invoke_read::<GetPullSubmission>(context, input),
         <review_requests::GetReviewRequest as Read>::ID => {
             invoke_read::<review_requests::GetReviewRequest>(context, input)
@@ -365,6 +449,9 @@ pub(in crate::cells) fn dispatch_read(
         <ListPullReviews as Read>::ID => invoke_read::<ListPullReviews>(context, input),
         <GetPullReviewSubmission as Read>::ID => {
             invoke_read::<GetPullReviewSubmission>(context, input)
+        }
+        <CountUnresolvedConversations as Read>::ID => {
+            invoke_read::<CountUnresolvedConversations>(context, input)
         }
         <GetPullReviewThread as Read>::ID => invoke_read::<GetPullReviewThread>(context, input),
         <ListPullReviewThreads as Read>::ID => invoke_read::<ListPullReviewThreads>(context, input),

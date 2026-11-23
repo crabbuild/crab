@@ -21,6 +21,8 @@ export function CreationForm({
   recovering,
   rejected,
   onReview,
+  descriptionHint,
+  descriptionFields,
   children,
 }: {
   repo: Repository;
@@ -36,6 +38,8 @@ export function CreationForm({
   recovering: boolean;
   rejected: boolean;
   onReview: () => void;
+  descriptionHint?: ReactNode;
+  descriptionFields?: ReactNode;
   children: ReactNode;
 }) {
   return (
@@ -59,15 +63,18 @@ export function CreationForm({
               placeholder="Title"
             />
           </Field>
-          <Field>
-            <Editor
-              id="discussion-description"
-              label="Description"
-              value={body}
-              onChange={onBody}
-              disabled={disabled}
-            />
-          </Field>
+          {descriptionFields ?? (
+            <Field>
+              <Editor
+                id="discussion-description"
+                label="Description"
+                value={body}
+                onChange={onBody}
+                disabled={disabled}
+                hint={descriptionHint}
+              />
+            </Field>
+          )}
         </FieldGroup>
         <div className="mt-4 flex flex-col gap-3">
           {error && (

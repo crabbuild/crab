@@ -150,6 +150,7 @@ async fn items(
                     query: input.q,
                     status: input.status,
                     hide_closed: input.hide_closed,
+                    default_ref: repo.default_ref().await?,
                 },
             )
             .await,

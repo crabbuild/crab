@@ -7,20 +7,25 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
-use crab_remote_git::{GitPath, RemoteGitRepository, RepositoryOptions};
+use crab_remote_git::{GitPath, RemoteGitRepository};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+mod pending;
 mod replies;
-mod storage;
+pub(super) mod storage;
+mod suggestions;
+pub(crate) use suggestions::authorize_suggestion_publication;
 
-use super::{current_branches, storage as pull_storage};
+use super::{current_branches, git::PullGit, storage as pull_storage};
 use crate::{
     api::{self, reactions},
     app::{self, Error, Result},
     auth::{Identity, Principal},
     cells::repository::collaboration::Target,
-    cells::repository::{PullReviewThreadListInput, PullReviewThreadSide},
+    cells::repository::{
+        CreatePullReviewThreadInput, PullReviewThreadListInput, PullReviewThreadSide,
+    },
     repository::Repository,
     server::Server,
 };
@@ -39,6 +44,15 @@ pub(super) fn routes() -> Router<Arc<Server>> {
             get(detail).patch(edit),
         )
         .merge(replies::routes())
+        .merge(pending::routes())
+        .route(
+            "/api/repos/{owner}/{name}/pulls/{number}/suggestions",
+            axum::routing::post(suggestions::apply),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/upstream-pulls/{number}/suggestions",
+            axum::routing::post(suggestions::apply_to_fork),
+        )
 }
 
 #[derive(Default, Deserialize)]
@@ -92,6 +106,7 @@ struct Comparison {
     base_oid: String,
     head_oid: String,
     repository: Option<RemoteGitRepository>,
+    live: bool,
 }
 
 async fn load_pull(
@@ -109,23 +124,40 @@ async fn comparison(
     repo: &Repository,
     pull: &pull_storage::PullRequest,
 ) -> Result<Comparison> {
-    let repository = repo
-        .open_current(server, RepositoryOptions::default(), &server.cancellation)
-        .await
-        .ok();
-    let (base_oid, head_oid) = pull
+    let repository = PullGit::open(server, repo, pull.head_repository).await.ok();
+    let current = repository
+        .as_ref()
+        .and_then(|repository| current_branches(repository, pull));
+    let live = current.is_some();
+    let (base_tip, head_oid) = pull
         .merge
         .as_ref()
         .map(|merge| (merge.base_oid.clone(), merge.head_oid.clone()))
+        .or(current)
         .or_else(|| {
-            current_branches(repository.as_ref()?, pull)
-                .or_else(|| Some((pull.base_oid.clone(), pull.head_oid.clone())))
+            repository.as_ref().map(|_| {
+                let (base, head) = pull.comparison_snapshot();
+                (base.to_owned(), head.to_owned())
+            })
         })
         .ok_or(Error::Invalid("Pull request comparison is unavailable"))?;
+    let base_oid = match &repository {
+        Some(repository) => api::query::pull_comparison_base(
+            &repository.base,
+            repository.fork.as_ref(),
+            &base_tip,
+            &head_oid,
+            &server.cancellation,
+        )
+        .await
+        .map_err(|error| Error::Repository(crate::Error::Remote(error)))?,
+        None => base_tip,
+    };
     Ok(Comparison {
         base_oid,
         head_oid,
-        repository,
+        repository: repository.map(|git| git.fork.unwrap_or(git.base)),
+        live,
     })
 }
 
@@ -407,6 +439,67 @@ async fn detail(
     )))
 }
 
+async fn prepare_thread(
+    server: &Server,
+    pull: u64,
+    actor: &Identity,
+    comparison: &Comparison,
+    input: NewThread,
+) -> Result<CreatePullReviewThreadInput> {
+    validate_text(&input.body, true)?;
+    if let Some(text) = &input.suggested_text {
+        validate_text(text, false)?;
+    }
+    if input.base_oid != comparison.base_oid || input.head_oid != comparison.head_oid {
+        return Err(Error::Conflict);
+    }
+    let (path_bytes, path) = parse_path(&input.path_hex)?;
+    let Some(repository) = comparison.repository.as_ref() else {
+        return Err(Error::Invalid(
+            "Pull request branches must exist before commenting",
+        ));
+    };
+    let blobs = api::comparison_blobs(
+        repository,
+        &comparison.base_oid,
+        &comparison.head_oid,
+        &path,
+        &server.cancellation,
+    )
+    .await
+    .map_err(|error| Error::Repository(crate::Error::Remote(error)))?;
+    if !blobs.changed {
+        return Err(Error::Invalid("Review comments must target a changed file"));
+    }
+    let anchor = match input.side {
+        PullReviewThreadSide::Old => blobs.old.as_ref().ok_or(Error::Invalid(
+            "The selected old-side line no longer exists",
+        ))?,
+        PullReviewThreadSide::New => blobs.new.as_ref().ok_or(Error::Invalid(
+            "The selected new-side line no longer exists",
+        ))?,
+    };
+    validate_range(input.start_line, input.end_line, anchor)?;
+    if input.side == PullReviewThreadSide::Old && input.suggested_text.is_some() {
+        return Err(Error::Invalid("Suggestions can only target added lines"));
+    }
+    Ok(CreatePullReviewThreadInput {
+        pull,
+        author: actor.into(),
+        submission_id: pull_storage::submission_id(&input.request_id)?,
+        body: input.body,
+        suggested_text: input.suggested_text,
+        base_oid: comparison.base_oid.clone(),
+        head_oid: comparison.head_oid.clone(),
+        path: path_bytes,
+        old_blob_oid: blob_oid(blobs.old.as_ref()),
+        new_blob_oid: blob_oid(blobs.new.as_ref()),
+        side: input.side,
+        start_line: input.start_line,
+        end_line: input.end_line,
+    })
+}
+
 async fn create(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
@@ -474,64 +567,15 @@ async fn create(
         ));
     }
     let comparison = comparison(&server, repo, &pull).await?;
-    if input.base_oid != comparison.base_oid || input.head_oid != comparison.head_oid {
-        return Err(Error::Conflict);
-    }
-    let (path_bytes, path) = parse_path(&input.path_hex)?;
-    let Some(repository) = comparison.repository.as_ref() else {
-        return Err(Error::Invalid(
-            "Pull request branches must exist before commenting",
-        ));
-    };
-    let blobs = api::comparison_blobs(
-        repository,
-        &comparison.base_oid,
-        &comparison.head_oid,
-        &path,
-        &server.cancellation,
-    )
-    .await
-    .map_err(|error| Error::Repository(crate::Error::Remote(error)))?;
-    if !blobs.changed {
-        return Err(Error::Invalid("Review comments must target a changed file"));
-    }
-    let anchor = match input.side {
-        PullReviewThreadSide::Old => blobs.old.as_ref().ok_or(Error::Invalid(
-            "The selected old-side line no longer exists",
-        ))?,
-        PullReviewThreadSide::New => blobs.new.as_ref().ok_or(Error::Invalid(
-            "The selected new-side line no longer exists",
-        ))?,
-    };
-    validate_range(input.start_line, input.end_line, anchor)?;
-    if input.side == PullReviewThreadSide::Old && input.suggested_text.is_some() {
-        return Err(Error::Invalid("Suggestions can only target added lines"));
-    }
-    let thread = storage::create_thread(
-        &server,
-        repo,
-        pull.number,
-        storage::NewPullReviewThread {
-            author: actor.clone(),
-            request_id,
-            body: input.body,
-            suggested_text: input.suggested_text,
-            base_oid: comparison.base_oid.clone(),
-            head_oid: comparison.head_oid.clone(),
-            path: path_bytes,
-            old_blob_oid: blob_oid(blobs.old.as_ref()),
-            new_blob_oid: blob_oid(blobs.new.as_ref()),
-            side: input.side,
-            start_line: input.start_line,
-            end_line: input.end_line,
-        },
-    )
-    .await?;
+    let prepared = prepare_thread(&server, pull.number, &actor, &comparison, input).await?;
+    let old_blob = prepared.old_blob_oid.clone();
+    let new_blob = prepared.new_blob_oid.clone();
+    let thread = storage::create_thread(&server, repo, prepared).await?;
     let status = comparison_status(
         &thread,
         &comparison,
-        blob_oid(blobs.old.as_ref()).as_deref(),
-        blob_oid(blobs.new.as_ref()).as_deref(),
+        old_blob.as_deref(),
+        new_blob.as_deref(),
         true,
     );
     let reaction = reactions::one(

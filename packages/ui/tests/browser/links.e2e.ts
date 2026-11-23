@@ -8,6 +8,7 @@ import {
 
 async function setup(page: Page) {
   let active = false;
+  let closesOnMerge = false;
   let version = 0;
   let access = "write";
   let archived = false;
@@ -112,9 +113,12 @@ async function setup(page: Page) {
             },
           });
         active = input.active;
+        closesOnMerge = active && (input.closes_on_merge ?? closesOnMerge);
         version++;
       }
-      return route.fulfill({ json: { active, version } });
+      return route.fulfill({
+        json: { active, version, closes_on_merge: closesOnMerge },
+      });
     }
     if (path.endsWith("/reviewers"))
       return route.fulfill({ json: emptyReviewers() });
@@ -131,6 +135,7 @@ async function setup(page: Page) {
                     state: "open",
                   },
                   version,
+                  closes_on_merge: closesOnMerge,
                 },
               ]
             : [],
@@ -207,6 +212,7 @@ async function setup(page: Page) {
           branches_available: true,
           merge: null,
           merge_pending: null,
+          merge_methods: ["merge_commit", "squash", "rebase", "fast_forward"],
           merge_requirements: {
             protected: false,
             required_approvals: 0,
@@ -251,6 +257,11 @@ test("linking and unlinking related work updates both pages and retains failed d
     exact: true,
   });
   await panel.getByLabel("Issue number").fill("1");
+  const closeOnMerge = panel.getByRole("checkbox", {
+    name: "Close issue when merged into the default branch",
+  });
+  await expect(closeOnMerge).toBeChecked();
+  await closeOnMerge.uncheck();
   await expect(
     panel.getByRole("button", { name: "Link issue", exact: true }),
   ).toBeEnabled();
@@ -261,6 +272,10 @@ test("linking and unlinking related work updates both pages and retains failed d
   await panel.getByRole("button", { name: "Link issue", exact: true }).click();
   await expect(
     panel.getByRole("link", { name: "#1 Related issue" }),
+  ).toBeVisible();
+  await panel.getByRole("button", { name: "Close on merge issue #1" }).click();
+  await expect(
+    panel.getByText("Closes on merge", { exact: true }),
   ).toBeVisible();
   await expect(
     page.getByRole("region", { name: "Conversation history", exact: true }),

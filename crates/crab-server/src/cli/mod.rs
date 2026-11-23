@@ -62,6 +62,13 @@ enum Command {
     Healthcheck,
     /// Validate required storage reads, lists, writes, coordination, and deletes.
     StorageProbe,
+    /// Check a configured team deployment after bootstrapping its first organization.
+    TeamPreflight,
+    /// Inspect or change an account's sign-in and Git access through private management.
+    Accounts {
+        #[command(subcommand)]
+        command: AccountCommand,
+    },
     /// Create, adopt, or list cataloged repositories.
     Repository {
         #[command(subcommand)]
@@ -71,6 +78,29 @@ enum Command {
     Cells {
         #[command(subcommand)]
         command: CellsCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum AccountCommand {
+    /// Inspect suspension state for a subject from the configured identity provider.
+    Status {
+        #[arg(long)]
+        subject: String,
+    },
+    /// Revoke existing credentials and deny new sign-ins for a subject.
+    Suspend {
+        #[arg(long)]
+        subject: String,
+        #[arg(long)]
+        expected_revision: u64,
+    },
+    /// Permit a suspended subject to sign in again with new credentials.
+    Reactivate {
+        #[arg(long)]
+        subject: String,
+        #[arg(long)]
+        expected_revision: u64,
     },
 }
 
@@ -103,7 +133,7 @@ enum CellsCommand {
         #[arg(long)]
         identities_file: PathBuf,
     },
-    /// Bootstrap native organization authority with an explicit qualified owner.
+    /// Initialize the Directory and bootstrap an organization with a qualified owner.
     BootstrapOrganization {
         #[arg(long)]
         organization: uuid::Uuid,
@@ -346,6 +376,8 @@ pub(super) async fn run() -> crab_server::Result<()> {
         }
         Command::Healthcheck => healthcheck(&config).await,
         Command::StorageProbe => crab_server::probe_storage(&config).await,
+        Command::TeamPreflight => team_preflight(&config).await,
+        Command::Accounts { command } => accounts(&config, command).await,
         Command::Repository { command } => repository(&config, command).await,
         Command::Cells { command } => cells(&config, command).await,
     }
@@ -480,6 +512,73 @@ async fn cells(config: &crab_server::Config, command: CellsCommand) -> crab_serv
 
 async fn healthcheck(config: &crab_server::Config) -> crab_server::Result<()> {
     management_request(config, reqwest::Method::GET, "/readyz", None).await?;
+    Ok(())
+}
+
+async fn team_preflight(config: &crab_server::Config) -> crab_server::Result<()> {
+    if config.auth.is_none() {
+        return Err(crab_server::Error::Config(
+            "team deployments need sign-in configuration",
+        ));
+    }
+    let directory: serde_json::Value =
+        serde_json::from_slice(&management_body(config, "/internal/directory").await?)?;
+    match directory["state"].as_str() {
+        Some("ready") => (),
+        Some("missing") => {
+            return Err(crab_server::Error::TeamPreflight(
+                "Directory is missing. Run cells bootstrap-organization with the first owner's qualified identity",
+            ));
+        }
+        Some("outdated" | "migrating") => {
+            return Err(crab_server::Error::TeamPreflight(
+                "Directory is outdated. Run cells migrate-directory",
+            ));
+        }
+        _ => {
+            return Err(crab_server::Error::TeamPreflight(
+                "Directory reported an unknown state",
+            ));
+        }
+    }
+    healthcheck(config).await?;
+    crab_server::probe_storage(config).await?;
+    println!("Directory, private readiness, and workload storage access passed.");
+    Ok(())
+}
+
+async fn accounts(
+    config: &crab_server::Config,
+    command: AccountCommand,
+) -> crab_server::Result<()> {
+    let (path, input) = match command {
+        AccountCommand::Status { subject } => (
+            "/internal/accounts/status",
+            serde_json::json!({"subject": subject}),
+        ),
+        AccountCommand::Suspend {
+            subject,
+            expected_revision,
+        } => (
+            "/internal/accounts/state",
+            serde_json::json!({"subject": subject, "expected_revision": expected_revision, "suspended": true}),
+        ),
+        AccountCommand::Reactivate {
+            subject,
+            expected_revision,
+        } => (
+            "/internal/accounts/state",
+            serde_json::json!({"subject": subject, "expected_revision": expected_revision, "suspended": false}),
+        ),
+    };
+    let response = management_request(config, reqwest::Method::POST, path, Some(&input)).await?;
+    println!(
+        "{}",
+        response
+            .text()
+            .await
+            .map_err(|source| crab_server::Error::Healthcheck { source })?
+    );
     Ok(())
 }
 

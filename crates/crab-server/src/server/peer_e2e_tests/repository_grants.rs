@@ -126,7 +126,8 @@ async fn publication(origin: &str, credential: &str) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn organization_team_removal_revokes_existing_browser_git_and_lfs_access_across_replicas() {
-    let h = Harness::new(false).await;
+    let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+    let h = Harness::new_with_store_and_prefix(false, false, store, "repository-grants").await;
     let local = tempfile::TempDir::new().unwrap();
     let files = crate::test_support::tls::IdentityFiles::generate();
     let bucket = Bucket::open_dev(&local.path().join("objects.sqlite")).unwrap();
@@ -167,6 +168,7 @@ async fn organization_team_removal_revokes_existing_browser_git_and_lfs_access_a
         .await
         .unwrap();
     let catalog = h.server.catalog().unwrap();
+    catalog.mark_cell_ready(repo.id).await.unwrap();
     catalog
         .set_members(
             "team",
@@ -193,6 +195,10 @@ async fn organization_team_removal_revokes_existing_browser_git_and_lfs_access_a
             .body(Body::from(json!({"repository_id":repo.id,"expected_revision":revision,"organization":{"id":organization,"teams":[]}}).to_string())).unwrap())
         .await.unwrap();
     assert_eq!(binding.status(), StatusCode::OK);
+    // Replicas without the background loop need the same catalog refresh
+    // as production before they can authorize the new organization binding.
+    let (document, _) = catalog.load().await.unwrap();
+    server_b.install_catalog(document).await.unwrap();
     let org_path = format!("/api/organizations/{organization}");
     let offer: Value = write(
         &h,
@@ -350,6 +356,61 @@ async fn organization_team_removal_revokes_existing_browser_git_and_lfs_access_a
             .unwrap();
         assert_eq!(hidden["repositories"], json!([]));
     }
+    let deploy_path = "/api/repos/team/private/settings/deploy-tokens";
+    let created: Value = write(
+        &h,
+        &origin_a,
+        &alice,
+        Method::POST,
+        deploy_path,
+        json!({"expected_version":0,"edit":{"kind":"create","name":"CI checkout","days":1}}),
+    )
+    .await
+    .error_for_status()
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let deploy = created["token"].as_str().unwrap();
+    let checkout = |origin: &str| {
+        h.http
+            .get(format!(
+                "{origin}/git/team/private.git/info/refs?service=git-upload-pack"
+            ))
+            .header("Git-Protocol", "version=2")
+            .basic_auth("crab", Some(deploy))
+    };
+    let settings: Value = h
+        .http
+        .get(format!("{origin_b}{deploy_path}"))
+        .header("cookie", &alice)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        checkout(&origin_b).send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    write(
+        &h,
+        &origin_a,
+        &alice,
+        Method::POST,
+        deploy_path,
+        json!({"expected_version":1,"edit":{"kind":"revoke","id":settings["tokens"][0]["id"]}}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert_eq!(
+        checkout(&origin_b).send().await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
     for task in [task_a, task_b] {
         task.abort();
         let _ = task.await;
