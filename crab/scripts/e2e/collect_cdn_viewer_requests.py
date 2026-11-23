@@ -163,7 +163,7 @@ def front_door_resources(fixture: dict) -> tuple[str, str, SplitResult]:
     return profile_id, blob_id, origin
 
 
-def front_door_logs(exports: Iterable[object], client: dict, fixture: dict) -> dict:
+def front_door_logs(exports: Iterable[object], client: dict, fixture: dict, *, edge_location: bool = False) -> dict:
     expected = client["edge_responses"]
     resource, _, _ = front_door_resources(fixture)
     _, access, _, _, _ = scope_parts(fixture["scope"])
@@ -205,6 +205,13 @@ def front_door_logs(exports: Iterable[object], client: dict, fixture: dict) -> d
                     "Front Door log has invalid HTTP status, response size or cache status")
             record = {"status": int(status), "response_bytes": int(size), "cache": AZURE_CACHE_STATUS.get(cache, "unknown"),
                       "key_sha256": hashlib.sha256(url.path[1:].encode()).hexdigest()}
+            if edge_location:
+                pop = props.get("pop")
+                require(isinstance(pop, str) and re.fullmatch(r"[A-Za-z0-9-]{1,32}", pop),
+                        "Front Door cache reuse requires a recorded viewer point of presence")
+                record["pop_sha256"] = hashlib.sha256(pop.encode()).hexdigest()
+                # REMOTE_HIT can describe delivery from a parent cache.
+                record["cache"] = {"HIT": "hit", "MISS": "miss"}.get(cache, "unknown")
             require(fingerprint not in records or records[fingerprint] == record,
                     "Front Door exports disagree about one viewer request")
             records[fingerprint] = record
@@ -319,13 +326,18 @@ def azure_blob_front_door_reads(exports: Iterable[object], authority: object, vi
     return records
 
 
-def azure_monitor_records(fixture: dict, client: dict, authority_path: Path | None) -> tuple[dict, dict]:
-    profile, blob, _ = front_door_resources(fixture)
+def azure_monitor_tokens(profile: str) -> tuple[str, str]:
     subscription = profile.split("/")[2]
     token_args = ("az", "account", "get-access-token", "--subscription", subscription, "--query", "accessToken",
                   "--output", "tsv", "--only-show-errors")
     arm = bearer(*token_args, "--resource", "https://management.azure.com/")
     storage = bearer(*token_args, "--resource", "https://storage.azure.com/")
+    return arm, storage
+
+
+def azure_monitor_records(fixture: dict, client: dict, authority_path: Path | None) -> tuple[dict, dict]:
+    profile, blob, _ = front_door_resources(fixture)
+    arm, storage = azure_monitor_tokens(profile)
     authority = read_json_log(authority_path) if authority_path is not None else arm_document(profile, FRONT_DOOR, arm)
     viewers = front_door_logs(azure_log_archives(profile, "FrontDoorAccessLog", client, arm, storage, JSON_LOG_LIMIT),
                               client, fixture)

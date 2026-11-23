@@ -324,6 +324,14 @@ must report the same point of presence, and the second must report an
 `EDGE` hit. Update the deployment attestation after changing the response
 policy. [CloudFront Server-Timing](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/understanding-response-headers-policies.html#server-timing-header)
 
+For Front Door, archive `FrontDoorAccessLog` for the approved profile to
+an Azure Monitor storage destination. The collector uses the active Azure
+CLI identity to read diagnostic settings and the archive. After both reads,
+it waits up to ten minutes for the two viewer records, joins them by a
+fingerprint of `X-Azure-Ref`, and verifies a miss and a local hit at the
+same point of presence. It uses the viewer records emitted by the edge.
+[Front Door access logs](https://learn.microsoft.com/en-us/azure/frontdoor/monitor-front-door#access-log)
+
 To collect the same trace in GitHub Actions, dispatch **Provider contract
 qualification** with `cdn_transport` and `cdn_cache_reuse` for the selected
 private provider. Attach the `cdn-cache-reuse` label to one protected Linux

@@ -359,8 +359,7 @@ def request_sample(
     denied_statuses: tuple[int, ...] = (401, 403), origin_authorization: str | None = None,
 ) -> tuple[dict[str, Any], bytes]:
     headers = viewer | {"Accept-Encoding": "identity"}
-    observe_cloudfront_pop = edge == "cloudfront" and check == CACHE_REUSE_CHECK
-    if observe_cloudfront_pop:
+    if edge == "cloudfront" and check == CACHE_REUSE_CHECK:
         headers["Pragma"] = "server-timing"
     if edge is None:
         require(not viewer, "native origin probes cannot use viewer credentials")
@@ -404,11 +403,20 @@ def request_sample(
         if edge is not None:
             cache_header, codes = CACHE_CODES[edge]
             cache = codes.get(response.getheader(cache_header), "unknown")
-        return {
+        observation = {
             "source": "origin" if edge is None else "edge", "status": response.status, "cache": cache, "bytes": len(body),
             "elapsed_ms": (time.monotonic_ns() - started) // 1_000_000,
             "key_sha256": hashlib.sha256((key or target).encode("utf-8")).hexdigest(),
-        } | (cloudfront_cache_timing(response) if observe_cloudfront_pop else {}), body
+        }
+        if check == CACHE_REUSE_CHECK:
+            if edge == "cloudfront":
+                observation.update(cloudfront_cache_timing(response))
+            elif edge == "front-door":
+                references = response.headers.get_all("X-Azure-Ref", [])
+                require(len(references) == 1 and re.fullmatch(r"[\x21-\x7e]{1,256}", references[0]),
+                        "Front Door cache reuse requires one viewer tracking reference")
+                observation["front_door_request_sha256"] = hashlib.sha256(references[0].encode()).hexdigest()
+        return observation, body
 
 
 def authenticated_origin_read(

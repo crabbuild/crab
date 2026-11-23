@@ -20,6 +20,10 @@ from cdn_qualification import (
     verify_cache_reuse, verify_cache_reuse_read,
 )
 from cdn_viewer_issuer import BEARER, JWT, github_id_token, issue_viewer, issuer_settings
+from collect_azure_access_logs import azure_log_archives
+from collect_cdn_viewer_requests import (
+    JSON_LOG_LIMIT, azure_monitor_tokens, front_door_logs, front_door_resources,
+)
 from run_cdn_transport_checks import approved_fixture, fixture_base, fixture_object_key, request_sample, viewer_expiry
 
 
@@ -114,12 +118,32 @@ def hosted_measure(
     grants, requests = measure(fixture, key, authority, {role: None}, audience)
     if role == "primary":
         return common | {"grant": grants[role], "request": requests[0]}
-    return full_trace(provenance, authority, {"primary": primary["grant"]} | grants, [primary["request"], *requests])
+    return full_trace(fixture, provenance, authority, {"primary": primary["grant"]} | grants, [primary["request"], *requests])
 
 
-def full_trace(provenance: dict, authority: dict, grants: dict, requests: list) -> dict:
+def azure_reuse_viewer_logs(fixture: dict, requests: list) -> dict:
+    expected = {row["front_door_request_sha256"]: row for row in requests}
+    require(len(expected) == 2, "Front Door cache reuse requires two distinct viewer requests")
+    client = {"edge_responses": expected, "started_at_unix_ms": requests[0]["started_at_unix_ms"],
+              "finished_at_unix_ms": requests[1]["finished_at_unix_ms"]}
+    profile, _, _ = front_door_resources(fixture)
+    arm, storage = azure_monitor_tokens(profile)
+    deadline = time.monotonic() + 10 * 60
+    while True:
+        archives = azure_log_archives(profile, "FrontDoorAccessLog", client, arm, storage, JSON_LOG_LIMIT)
+        records = front_door_logs(archives, client, fixture, edge_location=True)
+        if records.keys() == expected.keys():
+            return records
+        remaining = deadline - time.monotonic()
+        require(remaining > 0, "Azure Monitor did not deliver both cache-reuse viewer records")
+        time.sleep(min(30, remaining))
+
+
+def full_trace(fixture: dict, provenance: dict, authority: dict, grants: dict, requests: list) -> dict:
     trace = provenance | {"schema": "crab.cdn-authenticated-cache-reuse/v1", "check": CACHE_REUSE_CHECK,
                           "authority": authority, "grants": grants, "requests": requests}
+    if scope_parts(fixture["scope"])[0] == "front-door":
+        trace["front_door_viewer_logs"] = azure_reuse_viewer_logs(fixture, requests)
     verify_cache_reuse(trace, provenance, deployment_component_digest(authority))
     return trace
 
@@ -181,7 +205,7 @@ def main() -> int:
                     "supply both OIDC ID token files")
             tokens = {"primary": read_token(args.primary_token_file), "second": read_token(args.second_token_file)}
             grants, requests = measure(fixture, key, authority, tokens, audience)
-            trace = full_trace(provenance, authority, grants, requests)
+            trace = full_trace(fixture, provenance, authority, grants, requests)
         with args.output.open("x", encoding="utf-8") as output:
             output.write(json.dumps(trace, sort_keys=True) + "\n")
     except (ValueError, OSError) as error:

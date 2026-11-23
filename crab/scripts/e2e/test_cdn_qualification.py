@@ -928,6 +928,14 @@ class CdnQualificationTests(unittest.TestCase):
                 for row in evidence["requests"]:
                     row.update(cloudfront_pop_sha256="f" * 64,
                                cloudfront_hit_layer="EDGE" if row["cache"] == "hit" else None)
+            elif self.report["scope"].startswith("front-door/"):
+                logs = {}
+                for row in evidence["requests"]:
+                    request = hashlib.sha256(row["principal"].encode()).hexdigest()
+                    row["front_door_request_sha256"] = request
+                    logs[request] = {"status": row["status"], "cache": row["cache"], "key_sha256": row["key_sha256"],
+                                     "response_bytes": row["bytes"], "pop_sha256": "f" * 64}
+                evidence["front_door_viewer_logs"] = logs
         path = self.directory / "traces" / f"{check}.json"
         self.report["checks"][check] = {"passed": True, "trace_sha256": json_file(path, evidence)}
 
@@ -2134,6 +2142,22 @@ class CdnQualificationTests(unittest.TestCase):
         self.configure("s3", "private", "direct")
         self.trace(CDN.CACHE_REUSE_CHECK, [self.request("edge", 200, "miss"), self.request("edge", 200, "hit")])
         self.rejected("invalid fields in authorized_cache_reuse")
+
+    def test_front_door_cache_reuse_requires_matched_viewer_logs(self) -> None:
+        self.configure("azure", "private", "direct")
+        trace = json.loads((self.directory / "traces" / f"{CDN.CACHE_REUSE_CHECK}.json").read_bytes())
+        self.cache_reuse_trace({key: value for key, value in trace.items() if key != "front_door_viewer_logs"})
+        self.rejected("invalid fields in authorized_cache_reuse")
+        logs = trace["front_door_viewer_logs"]
+        second = trace["requests"][1]["front_door_request_sha256"]
+        for changes, error in (
+            ({"pop_sha256": "e" * 64}, "both reads at the same point of presence"),
+            ({"cache": "unknown"}, "disagrees with the verified miss or edge hit"),
+            ({"key_sha256": "a" * 64}, "disagrees with the verified miss or edge hit"),
+        ):
+            with self.subTest(changes=changes):
+                self.cache_reuse_trace(trace | {"front_door_viewer_logs": logs | {second: logs[second] | changes}})
+                self.rejected(error)
 
     def test_cache_reuse_checks_the_read_and_its_signed_grant(self) -> None:
         self.configure("s3", "private", "direct")
