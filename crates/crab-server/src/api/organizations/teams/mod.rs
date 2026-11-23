@@ -487,6 +487,9 @@ async fn save(
             "Team description must contain at most 1000 characters, without NUL characters",
         ),
         native::Outcome::InvalidRouting => Error::Invalid("Choose between 1 and 10 reviewers"),
+        native::Outcome::InvalidRoutingExclusions => {
+            Error::Invalid("Choose up to 256 current team members to exclude")
+        }
         native::Outcome::NameTaken => Error::TeamNameConflict,
         native::Outcome::Missing => Error::NotFound,
         native::Outcome::NotMember => Error::Invalid(

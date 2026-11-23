@@ -39,6 +39,9 @@ pub(crate) enum Command {
         version: u64,
         algorithm: review_routing::Algorithm,
         reviewers: u8,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
+        excluded: Option<Vec<Uuid>>,
     },
     Policy {
         version: u64,
@@ -54,6 +57,7 @@ pub(crate) enum Outcome {
     InvalidName,
     InvalidDescription,
     InvalidRouting,
+    InvalidRoutingExclusions,
     NameTaken,
     NotMember,
     Missing,
@@ -169,15 +173,15 @@ impl Mutation for Change {
                 version,
                 algorithm,
                 reviewers,
+                excluded,
             } => review_routing::set(
                 context,
                 input.actor,
                 *team,
-                review_routing::Settings {
-                    version: *version,
-                    algorithm: *algorithm,
-                    reviewers: *reviewers,
-                },
+                *version,
+                *algorithm,
+                *reviewers,
+                excluded.as_deref(),
             )?,
             Command::Policy {
                 version,

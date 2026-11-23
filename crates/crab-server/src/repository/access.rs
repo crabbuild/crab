@@ -236,7 +236,7 @@ pub(crate) async fn team_review_plan(
             "Team review requests support up to 256 team members",
         ));
     }
-    let mut recipients = Vec::with_capacity(roster.members.len());
+    let mut members = Vec::with_capacity(roster.members.len());
     for chunk in roster.members.chunks(100) {
         let identities = app::query_output(
             cells
@@ -248,11 +248,12 @@ pub(crate) async fn team_review_plan(
                 "Team member is missing a Directory account",
             ));
         }
-        recipients.extend(
-            identities
-                .into_iter()
-                .flatten()
-                .filter_map(|key| (key.issuer == issuer).then_some(key.subject)),
+        members.extend(
+            chunk
+                .iter()
+                .copied()
+                .zip(identities.into_iter().flatten())
+                .filter_map(|(actor, key)| (key.issuer == issuer).then_some((actor, key.subject))),
         );
     }
     let routing = if roster.settings.algorithm == Algorithm::Disabled {
@@ -266,10 +267,13 @@ pub(crate) async fn team_review_plan(
                 &current
             }
         };
-        let candidates = recipients
+        let candidates = members
             .iter()
-            .filter(|subject| eligibility.contains(issuer, subject))
-            .map(|subject| RepositoryAuthor {
+            .filter(|(actor, subject)| {
+                roster.settings.excluded.binary_search(actor).is_err()
+                    && eligibility.contains(issuer, subject)
+            })
+            .map(|(_, subject)| RepositoryAuthor {
                 issuer: issuer.to_owned(),
                 subject: subject.clone(),
                 name: membership
@@ -282,7 +286,7 @@ pub(crate) async fn team_review_plan(
                     ),
             })
             .collect();
-        recipients.clear();
+        members.clear();
         Some(routing::Plan {
             algorithm: roster.settings.algorithm,
             reviewers: roster.settings.reviewers,
@@ -291,7 +295,7 @@ pub(crate) async fn team_review_plan(
     };
     Ok(TeamRecipients {
         team,
-        recipients,
+        recipients: members.into_iter().map(|(_, subject)| subject).collect(),
         routing,
     })
 }

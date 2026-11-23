@@ -12,8 +12,9 @@ pub(crate) enum Algorithm {
 }
 
 pub(crate) const MAX_REVIEWERS: u8 = 10;
+const MAX_EXCLUSIONS: usize = 256;
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(rename = "ReviewRoutingSettings"))]
@@ -21,6 +22,8 @@ pub(crate) struct Settings {
     pub version: u64,
     pub algorithm: Algorithm,
     pub reviewers: u8,
+    #[serde(default)]
+    pub excluded: Vec<Uuid>,
 }
 
 fn key(team: Uuid) -> String {
@@ -32,25 +35,58 @@ fn load(context: &Transaction<'_>, team: Uuid) -> Result<Settings> {
         version: 0,
         algorithm: Algorithm::Disabled,
         reviewers: 1,
+        excluded: Vec::new(),
     }))
+}
+
+fn members(context: &Transaction<'_>, team: Uuid) -> Result<Vec<Uuid>> {
+    Ok(repository_access::team_members(context, vec![team])?
+        .into_iter()
+        .map(|(_, actor)| actor)
+        .collect())
 }
 
 pub(super) fn set(
     context: &Transaction<'_>,
     who: Uuid,
     id: Uuid,
-    mut settings: Settings,
+    version: u64,
+    algorithm: Algorithm,
+    reviewers: u8,
+    excluded: Option<&[Uuid]>,
 ) -> Result<Outcome> {
-    if !(1..=MAX_REVIEWERS).contains(&settings.reviewers) {
+    if !(1..=MAX_REVIEWERS).contains(&reviewers) {
         return Ok(Outcome::InvalidRouting);
     }
     if team(context, id)?.is_none() {
         return Ok(Outcome::Missing);
     }
     let old = load(context, id)?;
-    if old.version != settings.version {
+    if old.version != version {
         return Ok(Outcome::Conflict);
     }
+    // An omitted field retains the policy and the digest of older submissions.
+    let excluded = match excluded {
+        Some(ids) if ids.len() > MAX_EXCLUSIONS => return Ok(Outcome::InvalidRoutingExclusions),
+        Some([]) => Vec::new(),
+        Some(ids) => {
+            let roster = members(context, id)?;
+            if ids.iter().any(|actor| roster.binary_search(actor).is_err()) {
+                return Ok(Outcome::InvalidRoutingExclusions);
+            }
+            let mut sorted = ids.to_vec();
+            sorted.sort_unstable();
+            sorted.dedup();
+            sorted
+        }
+        None => old.excluded.clone(),
+    };
+    let mut settings = Settings {
+        version,
+        algorithm,
+        reviewers,
+        excluded,
+    };
     if old != settings {
         settings.version = next(settings.version)?;
         context.put_document(&key(id), &settings)?;
@@ -67,7 +103,14 @@ impl Read for GetSettings {
     type Output = Settings;
 
     fn execute(context: &mut Transaction<'_>, key: Key) -> Result<Settings> {
-        load(context, key.team)
+        let mut settings = load(context, key.team)?;
+        if !settings.excluded.is_empty() {
+            let roster = members(context, key.team)?;
+            settings
+                .excluded
+                .retain(|actor| roster.binary_search(actor).is_ok());
+        }
+        Ok(settings)
     }
 }
 
@@ -85,10 +128,9 @@ impl Read for ReviewRoster {
     type Output = TeamReviewRoster;
 
     fn execute(context: &mut Transaction<'_>, team: Uuid) -> Result<TeamReviewRoster> {
-        let members = repository_access::team_members(context, vec![team])?;
         Ok(TeamReviewRoster {
             settings: load(context, team)?,
-            members: members.into_iter().map(|(_, actor)| actor).collect(),
+            members: members(context, team)?,
         })
     }
 }

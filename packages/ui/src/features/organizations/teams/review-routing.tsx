@@ -1,5 +1,7 @@
+import { useState } from "react";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -9,21 +11,21 @@ import {
 import type {
   ReviewRoutingAlgorithm,
   ReviewRoutingSettings,
+  TeamRoster,
 } from "@/lib/contracts";
 import type { Commands } from "./commands";
+import { TeamPages } from "./members";
 import { useTeamRead } from "./read";
 
-export function TeamReviewRouting({
-  organization,
-  actor,
-  team,
-  commands,
-}: {
+type RoutingProps = {
   organization: string;
   actor: string;
   team: string;
   commands: Commands;
-}) {
+};
+
+export function TeamReviewRouting(props: RoutingProps) {
+  const { organization, team, commands } = props;
   const state = useTeamRead<ReviewRoutingSettings>(
     `/api/organizations/${organization}/teams/${team}/review-routing`,
     commands.generation,
@@ -37,69 +39,138 @@ export function TeamReviewRouting({
       </p>
       <Result state={state} timingLabel="Review assignment settings">
         {(settings) => (
-          <form
-            key={settings.version}
-            className="flex flex-col items-start gap-4"
-            onSubmit={(event) => {
-              event.preventDefault();
-              const fields = new FormData(event.currentTarget);
-              void commands.submit(
-                organization,
-                actor,
-                {
-                  kind: "review_routing",
-                  team,
-                  version: settings.version,
-                  algorithm: fields.get("algorithm") as ReviewRoutingAlgorithm,
-                  reviewers: Number(fields.get("reviewers")),
-                },
-                "Update review assignment",
-              );
-            }}
-          >
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="review-routing-algorithm">
-                Assignment method
-              </Label>
-              <NativeSelect
-                id="review-routing-algorithm"
-                name="algorithm"
-                defaultValue={settings.algorithm}
-                disabled={commands.locked}
-              >
-                <NativeSelectOption value="disabled">
-                  Disabled
-                </NativeSelectOption>
-                <NativeSelectOption value="round_robin">
-                  Round robin
-                </NativeSelectOption>
-                <NativeSelectOption value="fewest_open">
-                  Fewest open requests
-                </NativeSelectOption>
-              </NativeSelect>
-            </div>
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="review-routing-count">
-                Reviewers per request
-              </Label>
-              <Input
-                id="review-routing-count"
-                name="reviewers"
-                type="number"
-                min={1}
-                max={10}
-                defaultValue={settings.reviewers}
-                className="w-24"
-                disabled={commands.locked}
-                required
-              />
-            </div>
-            <Button type="submit" disabled={commands.locked}>
-              Save review assignment
-            </Button>
-          </form>
+          <ReviewRoutingForm
+            key={`${team}:${settings.version}`}
+            {...props}
+            settings={settings}
+          />
         )}
       </Result>
     </section>
+  );
+}
+
+function ReviewRoutingForm({
+  organization,
+  actor,
+  team,
+  commands,
+  settings,
+}: RoutingProps & { settings: ReviewRoutingSettings }) {
+  const [excluded, setExcluded] = useState(() => new Set(settings.excluded));
+  const [after, setAfter] = useState<string>();
+  const params = new URLSearchParams(after ? { after } : {});
+  const members = useTeamRead<TeamRoster>(
+    `/api/organizations/${organization}/teams/${team}/members?${params}`,
+    commands.generation,
+  );
+
+  return (
+    <form
+      className="flex flex-col items-start gap-4"
+      onSubmit={(event) => {
+        event.preventDefault();
+        const fields = new FormData(event.currentTarget);
+        void commands.submit(
+          organization,
+          actor,
+          {
+            kind: "review_routing",
+            team,
+            version: settings.version,
+            algorithm: fields.get("algorithm") as ReviewRoutingAlgorithm,
+            reviewers: Number(fields.get("reviewers")),
+            excluded: [...excluded].sort(),
+          },
+          "Update review assignment",
+        );
+      }}
+    >
+      <div className="flex flex-col gap-2">
+        <Label htmlFor="review-routing-algorithm">Assignment method</Label>
+        <NativeSelect
+          id="review-routing-algorithm"
+          name="algorithm"
+          defaultValue={settings.algorithm}
+          disabled={commands.locked}
+        >
+          <NativeSelectOption value="disabled">Disabled</NativeSelectOption>
+          <NativeSelectOption value="round_robin">
+            Round robin
+          </NativeSelectOption>
+          <NativeSelectOption value="fewest_open">
+            Fewest open requests
+          </NativeSelectOption>
+        </NativeSelect>
+      </div>
+      <div className="flex flex-col gap-2">
+        <Label htmlFor="review-routing-count">Reviewers per request</Label>
+        <Input
+          id="review-routing-count"
+          name="reviewers"
+          type="number"
+          min={1}
+          max={10}
+          defaultValue={settings.reviewers}
+          className="w-24"
+          disabled={commands.locked}
+          required
+        />
+      </div>
+      <fieldset className="flex w-full min-w-0 flex-col gap-2">
+        <legend className="font-medium">Never auto-assign</legend>
+        <p className="text-sm text-muted-foreground">
+          Excluded members can still be requested individually. If no eligible
+          members are available, the request stays with the team.
+        </p>
+        <Result state={members} timingLabel="Members for review assignment">
+          {(data) => (
+            <>
+              {data.items.length ? (
+                <ul className="divide-y rounded-md border">
+                  {data.items.map(({ actor: member, profile }) => (
+                    <li key={member} className="p-3">
+                      <Label
+                        htmlFor={`review-routing-exclude-${member}`}
+                        className="flex items-start gap-3"
+                      >
+                        <Checkbox
+                          id={`review-routing-exclude-${member}`}
+                          checked={excluded.has(member)}
+                          disabled={commands.locked}
+                          onCheckedChange={(checked) =>
+                            setExcluded((current) => {
+                              const next = new Set(current);
+                              if (checked === true) next.add(member);
+                              else next.delete(member);
+                              return next;
+                            })
+                          }
+                        />
+                        <span className="min-w-0 break-words">
+                          {profile
+                            ? `${profile.name} (@${profile.handle})`
+                            : member}
+                        </span>
+                      </Label>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  This team has no members.
+                </p>
+              )}
+              {(after || data.next) && (
+                <TeamPages after={after} next={data.next} onPage={setAfter} />
+              )}
+            </>
+          )}
+        </Result>
+      </fieldset>
+      <Button type="submit" disabled={commands.locked}>
+        Save review assignment
+      </Button>
+    </form>
   );
 }

@@ -915,7 +915,7 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
         .await;
     assert_eq!(
         h.json(&routing, &alice).await,
-        json!({"version":1,"algorithm":"round_robin","reviewers":1})
+        json!({"version":1,"algorithm":"round_robin","reviewers":1,"excluded":[]})
     );
     browser.run(&["reload"]).await;
     browser
@@ -1024,8 +1024,7 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
     browser.run(&["wait", "--text", "No reviews yet."]).await;
     let reviewers = h.json(&format!("{pulls}/1/reviewers"), &alice).await;
     assert_eq!(reviewers["teams"][0]["state"], Value::Null);
-    // A read-only team member gets no individual assignment. After granting
-    // Write, the same browser workflow routes the request to that member.
+    // Give Bob Write so that only the team exclusion can prevent an assignment.
     let endpoint = format!("/api/repos/{owner}/library/team-access");
     let revision = h.json(&endpoint, &alice).await["revision"].clone();
     super::repositories::repository_write(
@@ -1039,6 +1038,65 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
     .await
     .error_for_status()
     .unwrap();
+    browser.run(&["open", &team_settings]).await;
+    let excluded = format!("#review-routing-exclude-{bob_id}");
+    let save_routing = [
+        "find",
+        "role",
+        "button",
+        "click",
+        "--name",
+        "Save review assignment",
+        "--exact",
+    ];
+    browser.run(&["wait", &excluded]).await;
+    browser.run(&["click", &excluded]).await;
+    browser.run(&save_routing).await;
+    browser
+        .run(&["wait", "--text", "Update review assignment completed."])
+        .await;
+    assert_eq!(
+        h.json(&routing, &alice).await,
+        json!({"version":2,"algorithm":"round_robin","reviewers":1,"excluded":[bob_id]})
+    );
+    browser.run(&["reload"]).await;
+    browser
+        .run(&["wait", &format!("{excluded}[aria-checked='true']")])
+        .await;
+
+    let pull_url = format!("{}/{owner}/library/pull/1", h.origin);
+    browser.run(&["open", &pull_url]).await;
+    let chooser = "[aria-label='Request reviewers']";
+    let request_team = "[aria-label='Request review from team Engineering']";
+    for selector in [chooser, request_team] {
+        browser.run(&["wait", selector]).await;
+        browser.run(&["click", selector]).await;
+    }
+    browser.run(&["wait", cancel]).await;
+    let reviewers = h.json(&format!("{pulls}/1/reviewers"), &alice).await;
+    assert_eq!(reviewers["teams"][0]["state"]["kind"], "requested");
+    assert_eq!(reviewers["items"], json!([]));
+    h.deliver_notifications(owner, "library").await;
+    assert_eq!(h.json(&inbox, &bob).await["items"], json!([]));
+    browser.run(&["click", chooser]).await;
+    browser
+        .run(&["wait", "[aria-label='Request review from bob']"])
+        .await;
+    browser.run(&["press", "Escape"]).await;
+    browser.run(&["click", cancel]).await;
+    browser.run(&["wait", "--text", "No reviews yet."]).await;
+
+    browser.run(&["open", &team_settings]).await;
+    browser
+        .run(&["wait", &format!("{excluded}[aria-checked='true']")])
+        .await;
+    browser.run(&["click", &excluded]).await;
+    browser.run(&save_routing).await;
+    browser
+        .run(&["wait", "--text", "Update review assignment completed."])
+        .await;
+    assert_eq!(h.json(&routing, &alice).await["excluded"], json!([]));
+    browser.run(&["open", &pull_url]).await;
     for name in ["Request reviewers", "Request review from team Engineering"] {
         let selector = format!("[aria-label='{name}']");
         browser.run(&["wait", &selector]).await;

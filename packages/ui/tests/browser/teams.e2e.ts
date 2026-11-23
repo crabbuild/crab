@@ -197,6 +197,10 @@ async function fixture(page: Page, local = false) {
             version: command.version + 1,
             algorithm: command.algorithm,
             reviewers: command.reviewers,
+            excluded:
+              command.excluded ??
+              state.reviewRouting.get(target)?.excluded ??
+              [],
           });
         } else if (command.kind === "delete")
           state.teams = state.teams.filter((view) => view.team.id !== target);
@@ -233,6 +237,7 @@ async function fixture(page: Page, local = false) {
           version: 0,
           algorithm: "disabled",
           reviewers: 1,
+          excluded: [],
         },
       });
     }
@@ -439,6 +444,11 @@ for (const mobile of [false, true])
     ).toBeVisible();
     await page.getByLabel("Assignment method").selectOption("fewest_open");
     await page.getByLabel("Reviewers per request").fill("2");
+    const excluded = page.getByRole("checkbox", {
+      name: "Bob (@bob)",
+      exact: true,
+    });
+    await excluded.check();
     await page.getByRole("button", { name: "Save review assignment" }).click();
     await expect(
       page.getByRole("status", { name: "Team submission result" }),
@@ -447,6 +457,7 @@ for (const mobile of [false, true])
       "fewest_open",
     );
     await expect(page.getByLabel("Reviewers per request")).toHaveValue("2");
+    await expect(excluded).toBeChecked();
     await expectNoAccessibilityViolations(page);
     expect(
       await page.evaluate(

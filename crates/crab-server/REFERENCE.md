@@ -2930,8 +2930,7 @@ lines omit team identity, so notifications can remain in users' history without
 exposing a team name after membership changes. The current limits are 100 team
 requests per PR and 256 members per team request. The Reviews filter offers
 direct and team-aware personal queues. Team-specific search matches pending
-requests. List rollup counts cover individual requests. Automatic reviewer
-assignment remains open.
+requests. List rollup counts cover individual requests.
 
 ### Automatically assign team reviews
 
@@ -2941,6 +2940,10 @@ reviewers per request. Round robin gives priority to members who were assigned
 least recently. Fewest open requests prioritizes members with fewer outstanding
 requests on open pull requests and breaks ties by rotation. Both methods use
 history in the current repository.
+
+Under **Never auto-assign**, select team members to skip in either assignment
+method. Excluded members can still receive a direct request, fulfill a team
+request, and count toward CODEOWNERS requirements if otherwise eligible.
 
 Crab considers current team members with durable repository Write or Admin
 access. It skips the PR author, the requester, and people who have already
