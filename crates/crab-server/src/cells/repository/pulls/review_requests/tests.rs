@@ -454,6 +454,7 @@ async fn team_assignment_rotates_once_and_balances_outstanding_open_reviews() {
             candidates: vec![author("Alice"), author("Bob"), author("Carol")],
             count_existing: None,
             keep_team: false,
+            other_workload: Default::default(),
         }),
     };
     seed(&cell).await;
@@ -542,6 +543,7 @@ async fn team_assignment_counts_pending_requests_and_retains_the_team() {
             candidates: vec![author("Carol"), author("Dave")],
             count_existing: Some(vec!["Bob".into(), "Bob".into(), "Eve".into()]),
             keep_team: true,
+            other_workload: Default::default(),
         }),
     };
     assert!(matches!(
@@ -595,6 +597,7 @@ async fn routed_code_owner_requests_keep_the_team_and_deduplicate_people() {
                     ],
                     count_existing: None,
                     keep_team: false,
+                    other_workload: Default::default(),
                 }),
             }],
         },

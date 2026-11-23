@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    time::Duration,
+};
 
 use futures_util::{StreamExt, TryStreamExt};
 use uuid::Uuid;
@@ -7,7 +10,7 @@ use crate::{
     RepositoryAccess, RepositoryMember,
     app::{self, Error, Result},
     auth::Principal,
-    catalog::TeamGrant,
+    catalog::{RepositoryApplicationState, TeamGrant},
     cells::{
         Address,
         directory::{
@@ -30,6 +33,8 @@ use crate::{
     },
     server::Server,
 };
+
+use super::Repository;
 
 pub(crate) async fn actor_id(server: &Server, key: IdentityKey) -> Result<Option<Uuid>> {
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
@@ -323,6 +328,109 @@ pub(crate) async fn team_review_plan(
             candidates,
             count_existing,
             keep_team: options.keep_team,
+            other_workload: BTreeMap::new(),
         }),
     })
+}
+
+pub(crate) async fn add_review_workload(
+    server: &Server,
+    repo: &Repository,
+    teams: &mut [TeamRecipients],
+) {
+    let plans = teams.iter_mut().filter_map(|team| {
+        team.routing
+            .as_mut()
+            .filter(|plan| plan.algorithm == Algorithm::FewestOpen)
+    });
+    let mut plans: Vec<_> = plans.collect();
+    let subjects: BTreeSet<_> = plans
+        .iter()
+        .flat_map(|plan| {
+            plan.candidates
+                .iter()
+                .map(|candidate| candidate.subject.clone())
+        })
+        .collect();
+    if subjects.is_empty() {
+        return;
+    }
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        other_review_workload(server, repo, subjects.into_iter().collect()),
+    )
+    .await;
+    let totals = match result {
+        Ok(Ok(totals)) => totals,
+        other => {
+            // Ranking is advisory. A sibling outage must not prevent the PR
+            // or team request from committing, or silently bias the choice.
+            tracing::warn!(repository = %repo.id, outcome = ?other, "team reviewer workload unavailable");
+            for plan in plans {
+                plan.candidates.clear();
+            }
+            return;
+        }
+    };
+    for plan in &mut plans {
+        for candidate in &plan.candidates {
+            if let Some(load) = totals.get(&candidate.subject) {
+                plan.other_workload.insert(candidate.subject.clone(), *load);
+            }
+        }
+    }
+}
+
+async fn other_review_workload(
+    server: &Server,
+    repo: &Repository,
+    subjects: Vec<String>,
+) -> Result<BTreeMap<String, routing::Workload>> {
+    let organization = repo.organization.ok_or(Error::NotFound)?;
+    let issuer = server.auth.as_ref().ok_or(Error::NotFound)?.issuer();
+    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    let catalog = server.catalog().ok_or(Error::NotFound)?;
+    let (document, _) = catalog
+        .load()
+        .await
+        .map_err(|error| Error::Membership(Box::new(error)))?;
+    let input = routing::WorkloadQuery {
+        issuer: issuer.to_owned(),
+        subjects,
+    };
+    // Catalog ownership scopes the private aggregate. Only the destination
+    // repository may turn today's eligible candidates into actual requests.
+    futures_util::stream::iter(document.repositories.into_iter().filter_map(|record| {
+        (record.id != repo.id
+            && record.organization_id() == Some(organization)
+            && record.application == RepositoryApplicationState::CellReady)
+            .then_some(record.id)
+    }))
+    .map(|repository| {
+        let input = input.clone();
+        let cells = &cells;
+        async move {
+            app::query_output(
+                cells
+                    .query::<routing::ReadWorkload>(Address::Repository(repository), None, input)
+                    .await,
+            )
+        }
+    })
+    .buffer_unordered(8)
+    .try_fold(BTreeMap::new(), |mut totals, loads| async {
+        if loads.len() != input.subjects.len() {
+            return Err(Error::CellContract("Invalid review workload count"));
+        }
+        for (subject, load) in input.subjects.iter().zip(loads) {
+            if load != routing::Workload::default() {
+                totals
+                    .entry(subject.clone())
+                    .or_insert_with(routing::Workload::default)
+                    .add(load);
+            }
+        }
+        Ok(totals)
+    })
+    .await
 }

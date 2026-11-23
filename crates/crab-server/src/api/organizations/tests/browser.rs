@@ -897,7 +897,7 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
     browser.run(&["open", &team_settings]).await;
     browser.run(&["wait", "#review-routing-algorithm"]).await;
     browser
-        .run(&["select", "#review-routing-algorithm", "round_robin"])
+        .run(&["select", "#review-routing-algorithm", "fewest_open"])
         .await;
     browser
         .run(&[
@@ -915,14 +915,14 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
         .await;
     assert_eq!(
         h.json(&routing, &alice).await,
-        json!({"version":1,"algorithm":"round_robin","reviewers":1,"excluded":[],"options":{"count_existing":false,"keep_team":false}})
+        json!({"version":1,"algorithm":"fewest_open","reviewers":1,"excluded":[],"options":{"count_existing":false,"keep_team":false}})
     );
     browser.run(&["reload"]).await;
     browser
         .run(&[
             "wait",
             "--fn",
-            "document.querySelector('#review-routing-algorithm')?.value === 'round_robin'",
+            "document.querySelector('#review-routing-algorithm')?.selectedOptions[0]?.textContent?.trim() === 'Load balance'",
         ])
         .await;
 
@@ -1057,7 +1057,7 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
         .await;
     assert_eq!(
         h.json(&routing, &alice).await,
-        json!({"version":2,"algorithm":"round_robin","reviewers":1,"excluded":[bob_id],"options":{"count_existing":false,"keep_team":false}})
+        json!({"version":2,"algorithm":"fewest_open","reviewers":1,"excluded":[bob_id],"options":{"count_existing":false,"keep_team":false}})
     );
     browser.run(&["reload"]).await;
     browser

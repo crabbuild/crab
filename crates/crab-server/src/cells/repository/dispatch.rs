@@ -447,6 +447,9 @@ pub(in crate::cells) fn dispatch_read(
         <review_requests::GetReviewRequest as Read>::ID => {
             invoke_read::<review_requests::GetReviewRequest>(context, input)
         }
+        review_requests::routing::ReadWorkload::ID => {
+            invoke_read::<review_requests::routing::ReadWorkload>(context, input)
+        }
         <reviewers::ListReviewers as Read>::ID => {
             invoke_read::<reviewers::ListReviewers>(context, input)
         }

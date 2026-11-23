@@ -448,7 +448,9 @@ for (const mobile of [false, true])
     await expect(
       page.getByRole("heading", { name: "My draft", exact: true }),
     ).toBeVisible();
-    await page.getByLabel("Assignment method").selectOption("fewest_open");
+    await page.getByLabel("Assignment method").selectOption({
+      label: "Load balance",
+    });
     await page.getByLabel("Reviewers per request").fill("2");
     const excluded = page.getByRole("checkbox", {
       name: "Bob (@bob)",
