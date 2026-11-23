@@ -271,7 +271,7 @@ jobs:
           docker logs cell-runtime-rustfs >&2 || true
           exit 1
 
-      - name: Verify server Cell source-loss recovery
+      - name: Verify native recovery and cross-replica SCIM revocation
         run: |
           set -euo pipefail
           run_test() {
@@ -293,10 +293,17 @@ jobs:
             -- --ignored --exact --nocapture
           run_test cargo test -p crab-server --locked --lib
           run_test cargo test -p crab-server --locked --bin crab-server
+          cargo build -p crab-server --locked --bin crab-server
+          run_test env \
+            AWS_ENDPOINT_URL_S3="$CRAB_HTTP_CELL_TEST_ENDPOINT" \
+            AWS_ALLOW_HTTP=true AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false \
+            CRAB_HTTP_CELL_TEST_BINARY="$CARGO_TARGET_DIR/debug/crab-server" \
+            cargo test -p crab-server --locked --lib \
+            server::peer_e2e_tests::scim::rustfs_scim_revocation_reaches_both_serving_processes_and_survives_restart \
+            -- --ignored --exact --nocapture
 
       - name: Qualify repository creation, Git push, and real process restart
         run: |
-          cargo build -p crab-server --locked --bin crab-server
           python3 crates/crab-server/tests/qualify_cellar_process.py \
             --binary "$CARGO_TARGET_DIR/debug/crab-server" \
             --artifacts "${RUNNER_TEMP}/crab-cellar-process-proof"

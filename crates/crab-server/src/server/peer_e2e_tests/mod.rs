@@ -4,6 +4,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 mod repository_grants;
+mod scim;
 
 use crate::cells::{application::MutationIdentity, repository::*};
 use cellar::{

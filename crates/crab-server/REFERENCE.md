@@ -1622,6 +1622,14 @@ create, look up the exact `externalId` before retrying. After an uncertain
 update, read the User and use its current ETag. For the protocol contract see
 [SCIM Protocol (RFC 7644)](https://www.rfc-editor.org/rfc/rfc7644.html).
 
+The RustFS CI qualification runs two independent serving processes with a
+shared storage root and a fixture OIDC issuer. It uses the same browser
+session and stock Git token on both replicas, deactivates the user through
+one replica, and verifies both replicas reject the existing credentials
+immediately and after restarting one replica. Reactivation accepts fresh
+credentials. The original credentials remain invalid, and the other
+managed account retains access throughout.
+
 ### Sync an organization team from SCIM
 
 Provision a group through the existing SCIM bearer credential. The
