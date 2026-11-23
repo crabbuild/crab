@@ -12,6 +12,7 @@ mod commands;
 mod preparation;
 mod reads;
 pub(crate) mod repository_access;
+pub(crate) mod sync;
 pub(super) use access::{authorize, handles};
 pub(crate) use commands::{Cancel, Change, Command, Outcome, Request};
 pub use preparation::OrganizationTeamState;

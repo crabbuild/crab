@@ -16,6 +16,8 @@ const root = `/-/organizations/${id}`;
 async function fixture(page: Page, local = false) {
   const state: {
     teams: TeamView[];
+    syncEnabled: boolean;
+    groups: Map<string, { id: string; name: string }>;
     members: Map<string, TeamMember[]>;
     writes: { body: TeamSubmission; cancel: boolean; path: string }[];
     policy: TeamPolicy;
@@ -26,6 +28,8 @@ async function fixture(page: Page, local = false) {
     account: string;
   } = {
     teams: [],
+    syncEnabled: false,
+    groups: new Map(),
     members: new Map(),
     writes: [],
     policy: { version: 1, member_creation: true },
@@ -229,7 +233,7 @@ async function fixture(page: Page, local = false) {
         },
       });
     const match = new RegExp(
-      `^${base}/teams/([^/]+)(?:/(members|candidates))?$`,
+      `^${base}/teams/([^/]+)(?:/(members|candidates|identity-group))?$`,
     ).exec(path);
     if (match) {
       const team = match[1],
@@ -240,6 +244,38 @@ async function fixture(page: Page, local = false) {
           json: { error: { message: "Team not found" } },
         });
       if (!match[2]) return route.fulfill({ json: view });
+      if (match[2] === "identity-group") {
+        if (request.method() === "PUT") {
+          expect(request.headers()["x-csrf-token"]).toBe("csrf");
+          const input = request.postDataJSON() as {
+            group: string | null;
+            version: number;
+          };
+          expect(input.version).toBe(view.team.version);
+          view.team.version += 1;
+          if (input.group) {
+            state.groups.set(team, {
+              id: input.group,
+              name: "Release engineers",
+            });
+            state.members.set(team, [
+              { actor: bob, role: "member", version: 1, profile: profile(bob) },
+            ]);
+          } else {
+            state.groups.delete(team);
+            state.members.set(team, []);
+          }
+          return route.fulfill({ json: { applied: true } });
+        }
+        return route.fulfill({
+          json: {
+            group: state.groups.get(team) ?? null,
+            version: view.team.version,
+            can_link: true,
+            enabled: state.syncEnabled,
+          },
+        });
+      }
       const members = state.members.get(team)!;
       const items =
         match[2] === "members"
@@ -254,7 +290,12 @@ async function fixture(page: Page, local = false) {
                 },
             );
       return route.fulfill({
-        json: { items, next: null, revision: 1, can_manage: true },
+        json: {
+          items,
+          next: null,
+          revision: 1,
+          can_manage: !state.groups.has(team),
+        },
       });
     }
     return route.fulfill({
@@ -272,6 +313,38 @@ async function create(page: Page, name = "Platform") {
     .fill("Repository maintainers");
   await page.getByRole("button", { name: "Create team", exact: true }).click();
 }
+test("organization owners link and unlink a provisioned group from team settings", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  state.syncEnabled = true;
+  await page.goto(`${root}?tab=teams`);
+  await create(page);
+  await page.getByRole("link", { name: "Open team", exact: true }).click();
+  const nav = page.getByRole("navigation", { name: "Team", exact: true });
+  await nav.getByRole("link", { name: "Settings" }).click();
+  const group = page.getByRole("region", { name: "Identity provider group" });
+  await group
+    .getByLabel("SCIM group ID")
+    .fill("01900000-0000-7000-8000-000000000018");
+  await group
+    .getByRole("button", { name: "Link group and replace roster" })
+    .click();
+  await expect(group.getByText("Release engineers")).toBeVisible();
+  await nav.getByRole("link", { name: "Members" }).click();
+  await expect(
+    page.getByRole("link", { name: "Bob", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Add a member" })).toHaveCount(
+    0,
+  );
+  await nav.getByRole("link", { name: "Settings" }).click();
+  await group.getByRole("button", { name: "Unlink group" }).click();
+  await group.getByRole("button", { name: "Clear roster and unlink" }).click();
+  await expect(group.getByLabel("SCIM group ID")).toBeVisible();
+  await expectNoAccessibilityViolations(page);
+});
+
 for (const mobile of [false, true])
   test(`native team controls support membership, conflict review and deletion ${mobile ? "on mobile" : "on desktop"}`, async ({
     page,

@@ -151,6 +151,7 @@ export function OrganizationPage({
                 actor={actor}
                 owner={role === "owner"}
                 url={url}
+                csrf={csrf}
                 commands={commands}
               />
             ) : tab === "people" ? (
