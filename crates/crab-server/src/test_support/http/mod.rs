@@ -27,6 +27,14 @@ mod provider;
 pub(crate) mod storage_proxy;
 pub(crate) use provider::{KEY_ONE, KEY_TWO, Provider, start_provider};
 
+pub(crate) const TEST_SCIM_TOKEN: &str = "crab-fixture-user-provisioning-token-only";
+
+#[derive(Default)]
+struct TestAuthFiles {
+    state_key: Option<std::path::PathBuf>,
+    scim_token: Option<std::path::PathBuf>,
+}
+
 type TestGitHubActions = Box<dyn FnOnce(Uuid) -> crate::api::GitHubActions + Send>;
 
 pub(crate) struct Harness {
@@ -220,7 +228,7 @@ impl Harness {
             github,
             store,
             catalog_prefix,
-            None,
+            TestAuthFiles::default(),
             None,
             None,
             None,
@@ -244,7 +252,10 @@ impl Harness {
             false,
             store,
             catalog_prefix,
-            Some(file.path().to_owned()),
+            TestAuthFiles {
+                state_key: Some(file.path().to_owned()),
+                ..Default::default()
+            },
             github_actions,
             None,
             None,
@@ -256,8 +267,17 @@ impl Harness {
 
     pub(crate) async fn with_notification_email(github: bool, endpoint: Url) -> Self {
         let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
-        let harness =
-            Self::configured(github, github, store, "", None, None, Some(endpoint), None).await;
+        let harness = Self::configured(
+            github,
+            github,
+            store,
+            "",
+            TestAuthFiles::default(),
+            None,
+            Some(endpoint),
+            None,
+        )
+        .await;
         harness.initialize_directory().await;
         harness
     }
@@ -276,10 +296,35 @@ impl Harness {
             false,
             store,
             catalog_prefix,
-            Some(file.path().to_owned()),
+            TestAuthFiles {
+                state_key: Some(file.path().to_owned()),
+                ..Default::default()
+            },
             None,
             None,
             Some((endpoint, repository)),
+        )
+        .await;
+        harness.initialize_directory().await;
+        harness
+    }
+
+    pub(crate) async fn scim() -> Self {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), format!("{TEST_SCIM_TOKEN}\n")).unwrap();
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let harness = Self::configured(
+            false,
+            false,
+            store,
+            "",
+            TestAuthFiles {
+                scim_token: Some(file.path().to_owned()),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
         )
         .await;
         harness.initialize_directory().await;
@@ -291,7 +336,7 @@ impl Harness {
         github: bool,
         store: Store,
         catalog_prefix: &str,
-        state_key_file: Option<std::path::PathBuf>,
+        auth_files: TestAuthFiles,
         github_actions: Option<TestGitHubActions>,
         email_endpoint: Option<Url>,
         webhook_endpoint: Option<(Url, Option<Uuid>)>,
@@ -314,7 +359,8 @@ impl Harness {
                 public_url: Url::parse(&origin).unwrap(),
                 client_id: "crab-browser".into(),
                 client_secret_file: secret_file.as_ref().map(|file| file.path().to_owned()),
-                state_key_file,
+                state_key_file: auth_files.state_key,
+                scim_token_file: None,
                 github: Some(crate::GitHubConfig {
                     authorize_url: format!("{}/github/authorize", provider.issuer),
                     token_url: format!("{}/github/token", provider.issuer),
@@ -328,7 +374,8 @@ impl Harness {
                 public_url: Url::parse(&origin).unwrap(),
                 client_id: "crab-browser".into(),
                 client_secret_file: secret_file.as_ref().map(|file| file.path().to_owned()),
-                state_key_file,
+                state_key_file: auth_files.state_key,
+                scim_token_file: auth_files.scim_token,
                 github: None,
             }
         };

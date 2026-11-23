@@ -107,7 +107,7 @@ export type MemberAccessTeam = { id: string, name: string, access: RepositoryAcc
 export type AccessRepository = { id: string, owner: string, name: string, access: RepositoryAccess | null, direct: RepositoryAccess | null, teams: Array<MemberAccessTeam>, organization_owner: boolean, sso_group_ceiling: RepositoryAccess | null, inherited_from: string | null, };
 
 // prettier-ignore
-export type MemberRepositoryAccess = { account: MemberAccessAccount, items: Array<AccessRepository>, next: string | null, };
+export type MemberRepositoryAccess = { account: MemberAccessAccount, managed: boolean, items: Array<AccessRepository>, next: string | null, };
 
 // prettier-ignore
 export type InvitationOffer = { invitation: Invitation, profile: ActorSummary | null, };

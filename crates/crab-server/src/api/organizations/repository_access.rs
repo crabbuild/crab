@@ -73,6 +73,7 @@ pub(in crate::api) struct AccessRepository {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub(in crate::api) struct MemberRepositoryAccess {
     account: MemberAccessAccount,
+    managed: bool,
     items: Vec<AccessRepository>,
     next: Option<String>,
 }
@@ -249,6 +250,7 @@ async fn list(
     Ok(read_admission::retain(
         Json(MemberRepositoryAccess {
             account,
+            managed: account_state.managed,
             items,
             next,
         })

@@ -81,13 +81,20 @@ function AccessList({
         )}
       </div>
       <Result state={state} timingLabel="Member repository access">
-        {({ account, items, next }) => (
+        {({ account, managed, items, next }) => (
           <>
+            {managed && (
+              <div>
+                <Badge variant="outline">
+                  Provisioned by identity provider
+                </Badge>
+              </div>
+            )}
             {account !== "active" && (
               <Alert>
                 <AlertDescription>
                   {account === "suspended"
-                    ? "Sign-in is blocked for this account. Its configured grants are shown below."
+                    ? "Sign-in and user Git credentials are blocked for this account. Its configured grants are shown below."
                     : "This member’s identity provider is unavailable on this server."}
                 </AlertDescription>
               </Alert>

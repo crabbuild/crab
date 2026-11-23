@@ -31,6 +31,7 @@ async fn replica(h: &Harness, host: &Host) -> (Arc<Server>, String, tokio::task:
             client_id: "crab-browser".into(),
             client_secret_file: None,
             state_key_file: None,
+            scim_token_file: None,
             github: None,
         },
         &root,

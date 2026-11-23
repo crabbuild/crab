@@ -62,6 +62,7 @@ fn shared_auth(store: Store) -> Authentication {
         client_id: "crab".into(),
         client_secret_file: None,
         state_key_file: None,
+        scim_token_file: None,
         github: None,
     };
     let metadata: CoreProviderMetadata = serde_json::from_value(json!({
@@ -87,10 +88,13 @@ fn shared_auth(store: Store) -> Authentication {
             store,
             prefix: "root/.crab/http-server/v1/auth".into(),
             account_prefix: "root/.crab/http-server/v1/accounts".into(),
+            require_provisioning: false,
             pending_checks: Arc::default(),
         },
         cursor_key: [7; 32],
         webhook_key: None,
+        scim_key: None,
+        scim_admission: Semaphore::new(4),
         admission: Semaphore::new(1),
         logout_admission: Semaphore::new(1),
     }

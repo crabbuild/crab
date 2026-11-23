@@ -104,6 +104,7 @@ fn github_authentication_requires_a_secret_and_bounded_endpoints() {
         public_url: Url::parse("http://127.0.0.1:8788").unwrap(),
         client_secret_file: Some("/run/secrets/github-client".into()),
         state_key_file: None,
+        scim_token_file: None,
         github: None,
     });
     assert!(config.validate().is_ok());
@@ -119,6 +120,7 @@ fn github_authentication_requires_a_secret_and_bounded_endpoints() {
         public_url: Url::parse("http://127.0.0.1:8788").unwrap(),
         client_secret_file: Some("/run/secrets/github-client".into()),
         state_key_file: None,
+        scim_token_file: None,
         github: Some(GitHubConfig {
             api_url: "https://api.github.com/api".into(),
             ..GitHubConfig::default()
@@ -337,6 +339,7 @@ fn outbound_receivers_require_one_explicit_https_binding_and_shared_auth() {
         client_id: "fixture-client".into(),
         client_secret_file: None,
         state_key_file: Some("/run/secrets/auth-state".into()),
+        scim_token_file: None,
         github: None,
     });
     assert!(config.validate().is_ok());

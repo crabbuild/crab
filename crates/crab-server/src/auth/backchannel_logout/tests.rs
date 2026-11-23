@@ -110,6 +110,7 @@ async fn logout_revokes_all_sessions_and_completed_replay_preserves_new_login() 
             client_id: "crab-browser".into(),
             client_secret_file: None,
             state_key_file: None,
+            scim_token_file: None,
             github: None,
         },
         h.server.catalog.as_ref().unwrap().root(),

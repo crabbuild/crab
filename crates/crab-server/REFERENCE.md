@@ -1360,12 +1360,13 @@ Open the organization’s **People** page and select **View repository access**
 for a current member. Organization owners can see the member's highest
 configured role from direct grants, active teams, and organization ownership.
 Fork rows identify the source of the grants. The view shows separately when
-sign-in is blocked for the account. Where a signed SSO claim could add access,
+sign-in and user Git credentials are blocked, and when the identity provider
+manages the account. Where a signed SSO claim could add access,
 the row shows the highest configured SSO role. Git credentials can have a
 lower scope than the account's role.
 
 `GET /api/organizations/{id}/members/{actor}/repository-access` returns
-`{account, items, next}`. Pass its opaque `next` as `after` to continue.
+`{account, managed, items, next}`. Pass its opaque `next` as `after` to continue.
 `limit` accepts 1–50 and defaults to 30. The continuation binds the requesting
 owner, inspected member, catalog revision, current teams and account
 suspension version. Reload from the first page after a change. The response
@@ -1465,6 +1466,49 @@ its marker. Sessions and derived Git tokens issued before a change in account
 revision stay invalid after reactivation. See [the operations runbook](deploy/operations.md#manage-membership-and-sessions).
 
 `GET /api/session` returns the current account and CSRF token to the same-origin frontend. Anonymous repository APIs return HTTP 401. No cloud credential reaches the browser.
+
+### Provision users with SCIM
+
+Crab can require SCIM provisioning for the configured OIDC issuer. Upgrade
+all serving replicas before enabling it. Mount the same operator-owned bearer
+token file on each replica and configure it under `[auth]`.
+
+```toml
+scim_token_file = "/run/secrets/crab-scim-token"
+```
+
+Use a dedicated, randomly generated token of 32–512 visible ASCII characters.
+Enter the HTTPS server URL ending in `/scim/v2` and the token in the identity
+provider. Map SCIM `externalId` to the exact, case-sensitive `sub` the provider
+signs for this OIDC application. `userName`, email, and display name are
+profile fields. Obtain the mapping from the provider before enabling the
+integration. Provision the operator or organization owner before their next
+sign-in. Enabling this setting blocks sign-in and use of session-bound Git
+tokens for unprovisioned identities. Restart the serving replicas to change
+the token. Protect the token as a server-wide account lifecycle credential.
+
+Crab supports User creation, retrieval, replacement, patch, deletion, and
+paged discovery with `userName eq` and `externalId eq` filters. The
+case-insensitive username is unique among current User resources.
+Changes can send the last returned ETag in `If-Match`. Use
+`PATCH active=false` to disable a user while keeping the resource visible to
+the provider. `DELETE` hides the User and retains its identity binding so a
+later create for the same subject can reuse its ID. The last profile remains
+in operator-owned storage. The directory holds up to 4,096 subjects and
+8 MiB, including deleted users.
+Deployment operators should qualify their IdP’s attribute mappings and
+operations before enrolling production users. Team and organization role
+assignment stay with Crab’s existing membership and signed OIDC group rules.
+
+A successful deactivation applies to the next browser or user Git
+authorization. Reactivation requires a fresh sign-in and a new Git token.
+Independent operator holds remain in effect after SCIM reactivation.
+Disabling the SCIM endpoint preserves previously recorded provider holds. A
+transient failure can happen after the change is recorded. The next User
+request reconciles any such change before answering. After an uncertain
+create, look up the exact `externalId` before retrying. After an uncertain
+update, read the User and use its current ETag. For the protocol contract see
+[SCIM Protocol (RFC 7644)](https://www.rfc-editor.org/rfc/rfc7644.html).
 
 ## Git HTTP reads
 

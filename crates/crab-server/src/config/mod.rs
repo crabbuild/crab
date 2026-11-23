@@ -352,6 +352,11 @@ impl Config {
                     "browser authentication requires a client ID, an issuer without query parameters, and a public URL without a path or query",
                 ));
             }
+            if auth.scim_token_file.is_some() && auth.provider != AuthProvider::Oidc {
+                return Err(Error::Config(
+                    "SCIM user provisioning requires OIDC sign-in",
+                ));
+            }
             if auth.provider == AuthProvider::GitHub {
                 if auth.client_secret_file.is_none() {
                     return Err(Error::Config(
@@ -626,6 +631,7 @@ pub struct OidcConfig {
     pub public_url: Url,
     pub client_secret_file: Option<PathBuf>,
     pub state_key_file: Option<PathBuf>,
+    pub scim_token_file: Option<PathBuf>,
     #[serde(default)]
     pub github: Option<GitHubConfig>,
 }
