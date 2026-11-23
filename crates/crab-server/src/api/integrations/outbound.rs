@@ -1,3 +1,6 @@
+use std::collections::BTreeMap;
+
+use axum::extract::Query;
 use serde::Deserialize;
 
 use super::*;
@@ -12,14 +15,24 @@ pub(super) fn routes() -> Router<Arc<Server>> {
     )
 }
 
-fn target<'a>(server: &'a Server, repo: &Repository) -> Option<&'a url::Url> {
-    server.webhook_sender.as_ref()?.target(repo.id)
+fn destinations<'a>(
+    server: &'a Server,
+    repo: &Repository,
+) -> Option<&'a BTreeMap<String, url::Url>> {
+    server.webhook_sender.as_ref()?.destinations(repo.id)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Selection {
+    destination: Option<String>,
 }
 
 async fn settings(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path(key): Path<(String, String)>,
+    Query(selection): Query<Selection>,
 ) -> Result<Json<Value>> {
     let repo = admin(&server, &principal, &key)?;
     let cell = app::repository_cell(&server, &repo)?;
@@ -29,11 +42,41 @@ async fn settings(
             .await,
     )?;
     require_admin(&server, &principal, &repo).await?;
-    let target = target(&server, &repo);
-    let binding = target.map(webhooks::destination);
-    let current = snapshot.subscription.as_ref();
-    let active = current.is_some_and(|hook| Some(&hook.destination) == binding.as_ref());
-    let deliveries = snapshot.deliveries.into_iter().map(|delivery| {
+    let approved = destinations(&server, &repo);
+    let mut receivers: BTreeMap<_, _> = approved
+        .into_iter()
+        .flat_map(|map| map.iter())
+        .map(|(id, url)| (id.clone(), Some(url)))
+        .collect();
+    for id in snapshot
+        .subscriptions
+        .iter()
+        .map(|hook| &hook.destination)
+        .chain(
+            snapshot
+                .deliveries
+                .iter()
+                .map(|delivery| &delivery.subscription.destination),
+        )
+    {
+        receivers.entry(id.clone()).or_insert(None);
+    }
+    let selected = selection
+        .destination
+        .filter(|id| receivers.contains_key(id))
+        .or_else(|| approved.and_then(|map| map.keys().next().cloned()))
+        .or_else(|| receivers.keys().next().cloned());
+    let target = selected
+        .as_ref()
+        .and_then(|id| receivers.get(id).copied().flatten());
+    let current = snapshot
+        .subscriptions
+        .iter()
+        .find(|hook| Some(&hook.destination) == selected.as_ref());
+    let active = current.is_some() && target.is_some();
+    let deliveries = snapshot.deliveries.into_iter()
+        .filter(|delivery| Some(&delivery.subscription.destination) == selected.as_ref())
+        .map(|delivery| {
         use hooks::Event;
         let (event, action, pull, head_change) = match delivery.event {
             Event::Push { .. } => ("push", None, None, None),
@@ -50,8 +93,12 @@ async fn settings(
     }).collect::<Vec<_>>();
     let subscription =
         current.map(|hook| json!({"id":hook.id,"push":hook.push,"pull_request":hook.pull_request}));
+    let receivers: Vec<_> = receivers
+        .into_iter()
+        .map(|(id, url)| json!({"id":id,"url":url}))
+        .collect();
     Ok(Json(
-        json!({"destination":target,"subscription":subscription,"active":active,"deliveries":deliveries}),
+        json!({"destinations":receivers,"selected":selected,"destination":target,"subscription":subscription,"active":active,"deliveries":deliveries}),
     ))
 }
 
@@ -88,19 +135,34 @@ async fn change(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path(key): Path<(String, String)>,
+    Query(selection): Query<Selection>,
     Json(input): Json<Change>,
 ) -> Result<Json<Value>> {
     let repo = admin(&server, &principal, &key)?;
     require_admin(&server, &principal, &repo).await?;
     let cell = app::repository_cell(&server, &repo)?;
+    let approved = destinations(&server, &repo);
+    let destination = match selection.destination {
+        Some(id) if blake3::Hash::from_hex(&id).is_ok() => id,
+        Some(_) => return Err(Error::Invalid("Invalid webhook destination")),
+        None => {
+            let destinations = approved.ok_or(Error::NotFound)?;
+            if destinations.len() != 1 {
+                return Err(Error::Invalid("Select a webhook destination"));
+            }
+            destinations.keys().next().cloned().ok_or(Error::NotFound)?
+        }
+    };
     if let Change::Redeliver { id, version } = input {
-        let url = target(&server, &repo).ok_or(Error::NotFound)?;
+        if !approved.is_some_and(|map| map.contains_key(&destination)) {
+            return Err(Error::NotFound);
+        }
         let saved = app::command_output(
             cell.client
                 .command::<hooks::Retry>(
                     cell.target,
                     app::mutation_identity()?,
-                    (id, version, webhooks::destination(url)),
+                    (id, version, destination),
                 )
                 .await,
         )?;
@@ -117,7 +179,9 @@ async fn change(
             push,
             pull_request,
         } => {
-            let receiver = target(&server, &repo).ok_or(Error::NotFound)?;
+            if !approved.is_some_and(|map| map.contains_key(&destination)) {
+                return Err(Error::NotFound);
+            }
             if !(push || pull_request) || id.is_nil() {
                 return Err(Error::Invalid("Choose at least one webhook event"));
             }
@@ -126,7 +190,7 @@ async fn change(
                 expected,
                 Some(hooks::Subscription {
                     id,
-                    destination: webhooks::destination(receiver),
+                    destination: destination.clone(),
                     push,
                     pull_request,
                 }),
@@ -142,6 +206,7 @@ async fn change(
                 cell.target,
                 app::mutation_identity()?,
                 hooks::ConfigureInput {
+                    destination,
                     expected,
                     subscription,
                 },

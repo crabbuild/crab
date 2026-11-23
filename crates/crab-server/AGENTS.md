@@ -112,9 +112,9 @@ checkout. The operator App webhook authenticates before resolving an exact
 installation/repository/workflow binding. The Repository Cell keeps standalone
 and App results separate so a signing authority change requires a new result. Dispatch reservations and run binding live in
 `cells/repository/integrations/dispatches.rs`.
-`cells/repository/webhooks.rs` owns outbound subscriptions, leased deliveries,
-and bounded completed history. `server/webhooks.rs` signs and sends only to
-the approved receiver. Public Git ref writes from HTTP Git and the browser
+`cells/repository/webhooks.rs` owns destination-bound subscriptions, leased
+deliveries, and bounded completed history. `server/webhooks.rs` rechecks each
+approved destination before signing and sending. Public Git ref writes from HTTP Git and the browser
 reserve before publication and recover through the immutable plan receipt.
 `webhooks/sync.rs` expands committed branch updates into signed PR deliveries
 using bounded open-pull pages. A private fork reserves this work in its upstream

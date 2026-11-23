@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn pull_only_subscription_delivers_every_committed_head_and_stable_redelivery() {
     let (endpoint, received, target) = receiver(false).await;
-    let h = Harness::with_webhook_receiver(endpoint, None).await;
+    let h = Harness::with_webhook_receivers([endpoint], None).await;
     let alice = h.login().await;
     let head = stock_push(&h, &alice).await;
     let checkout = checkout_feature(&h, &alice).await;
@@ -133,7 +133,7 @@ async fn private_fork_push_synchronizes_only_the_matching_upstream_pull() {
 
     let (endpoint, received, target) = receiver(false).await;
     let upstream_id = Uuid::now_v7();
-    let h = Harness::with_webhook_receiver(endpoint, Some(upstream_id)).await;
+    let h = Harness::with_webhook_receivers([endpoint], Some(upstream_id)).await;
     let catalog = h.server.catalog().unwrap();
     catalog
         .mark_cell_ready(h.server.repositories.values()[0].id)

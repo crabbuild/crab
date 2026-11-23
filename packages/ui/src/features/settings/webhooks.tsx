@@ -4,7 +4,12 @@ import { useMutation } from "@/components/discussion/mutations";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
+import { FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import {
+  NativeSelect,
+  NativeSelectOption,
+} from "@/components/ui/native-select";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
 import { short } from "@/lib/format";
 import { repoHref } from "@/lib/repository-route";
@@ -30,6 +35,8 @@ type Delivery = {
 };
 
 type Webhooks = {
+  destinations: { id: string; url: string | null }[];
+  selected: string | null;
   destination: string | null;
   subscription: Subscription | null;
   active: boolean;
@@ -48,14 +55,16 @@ export function OutboundWebhooks({
   repo: Repository;
   csrf: string;
 }) {
-  const path = endpoint(repo, "settings/webhooks");
-  const settings = useRequest<Webhooks>(path, repo.id);
+  const [destinationKey, setDestinationKey] = useState("");
+  const selectedPath = (key: string) =>
+    endpoint(repo, "settings/webhooks", { destination: key || undefined });
+  const settings = useRequest<Webhooks>(selectedPath(destinationKey), repo.id);
   const mutation = useMutation(csrf, repo);
   const [secret, setSecret] = useState<string>();
 
-  async function change(body: object) {
+  async function change(key: string, body: object) {
     const result = await mutation.run<{ secret?: string | null }>(
-      path,
+      selectedPath(key),
       "POST",
       body,
     );
@@ -70,7 +79,7 @@ export function OutboundWebhooks({
       <div className="settings-title">
         <div>
           <h2 id="webhooks-title">Webhooks</h2>
-          <p>Send repository events to an external receiver.</p>
+          <p>Send repository events to approved receivers.</p>
         </div>
       </div>
       {secret && (
@@ -112,7 +121,14 @@ export function OutboundWebhooks({
         </div>
       )}
       <Result state={settings} timingLabel="Outgoing webhooks">
-        {({ destination, subscription, active, deliveries }) => (
+        {({
+          destinations,
+          selected,
+          destination,
+          subscription,
+          active,
+          deliveries,
+        }) => (
           <>
             <section
               className="settings-section"
@@ -123,16 +139,18 @@ export function OutboundWebhooks({
                   <h3 id="webhook-destination">Destination</h3>
                   <p className="break-all">
                     {destination ??
-                      "Ask your Crab operator to configure a receiver for this repository."}
+                      (selected
+                        ? "This destination is no longer approved."
+                        : "Ask your Crab operator to configure a receiver for this repository.")}
                   </p>
                 </div>
-                {subscription && (
+                {selected && subscription && (
                   <Button
                     size="sm"
                     variant="outline"
                     disabled={mutation.pending}
                     onClick={() =>
-                      void change({
+                      void change(selected, {
                         kind: "disable",
                         expected: subscription.id,
                       })
@@ -142,18 +160,36 @@ export function OutboundWebhooks({
                   </Button>
                 )}
               </header>
-              {subscription && !active && (
-                <p className="border-t px-4 py-3 text-sm" role="status">
-                  The approved destination changed. Save the webhook again to
-                  authorize it.
-                </p>
+              {destinations.length > 1 && (
+                <div className="grid gap-2 border-t px-4 py-3">
+                  <FieldLabel htmlFor="webhook-destination-picker">
+                    Webhook destination
+                  </FieldLabel>
+                  <NativeSelect
+                    id="webhook-destination-picker"
+                    className="w-full"
+                    value={selected ?? ""}
+                    disabled={mutation.pending}
+                    onChange={(event) => {
+                      setSecret(undefined);
+                      mutation.reset();
+                      setDestinationKey(event.target.value);
+                    }}
+                  >
+                    {destinations.map(({ id, url }) => (
+                      <NativeSelectOption key={id} value={id}>
+                        {url ?? `Former destination ${short(id)}`}
+                      </NativeSelectOption>
+                    ))}
+                  </NativeSelect>
+                </div>
               )}
-              {destination && !repo.archived && (
+              {selected && destination && !repo.archived && (
                 <EventsForm
-                  key={subscription?.id}
+                  key={`${selected}:${subscription?.id ?? ""}`}
                   subscription={subscription}
                   pending={mutation.pending}
-                  change={change}
+                  change={(body) => change(selected, body)}
                 />
               )}
             </section>
@@ -189,13 +225,13 @@ export function OutboundWebhooks({
                             · {timeFormat.format(delivery.queued_at)}
                           </span>
                         </div>
-                        {delivery.can_redeliver && (
+                        {selected && active && delivery.can_redeliver && (
                           <Button
                             size="sm"
                             variant="outline"
                             disabled={mutation.pending}
                             onClick={() =>
-                              void change({
+                              void change(selected, {
                                 kind: "redeliver",
                                 id: delivery.id,
                                 version: delivery.version,
