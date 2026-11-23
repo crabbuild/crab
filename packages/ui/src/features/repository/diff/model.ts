@@ -1,3 +1,4 @@
+import { type CommentMinimization } from "@/components/discussion/conversation/comment-visibility";
 import type { DiscussionAuthor } from "@/components/discussion/author";
 import type { SelectedLineRange } from "@pierre/diffs";
 import { type ReactNode } from "react";
@@ -8,6 +9,7 @@ export function changePanelId(pathHex: string) {
 }
 
 export interface InlineDiffThread {
+  minimization?: CommentMinimization | null;
   number: number;
   path_hex: string;
   side: "old" | "new";

@@ -102,6 +102,7 @@ pub(in crate::api) fn review_view(
         "author": authors.view(&review.author),
         "body": review.body,
         "reactions": reactions,
+        "minimization": reactions.minimization,
         "state": state,
         "dismissal": detail.dismissal.as_ref().map(|value| json!({
             "author": authors.view(&value.author),

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use super::discussion_target::can_manage;
 use axum::{
     Extension, Json, Router,
     extract::{DefaultBodyLimit, Path, State, rejection::JsonRejection},
@@ -7,7 +8,6 @@ use axum::{
     routing::get,
 };
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::{
     app::{self, Error, Result},
@@ -36,13 +36,6 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         )
         .layer(DefaultBodyLimit::max(1024))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
-}
-
-pub(super) fn can_manage(principal: &Principal, repo: Uuid, kind: SubjectKind) -> bool {
-    match kind {
-        SubjectKind::Issue => principal.can_moderate(repo),
-        SubjectKind::Pull => principal.can_write(repo),
-    }
 }
 
 #[derive(Serialize)]

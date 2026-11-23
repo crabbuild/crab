@@ -145,12 +145,14 @@ export function Conversation({
                       target={target}
                       href={href}
                       csrf={csrf}
+                      refresh={history.retry}
                       onSaved={(value) =>
                         history.upsert({ kind: "comment", value })
                       }
                     />
                   ) : (
                     <ReviewCard
+                      onVisibilityChanged={history.retry}
                       onSaved={() => {
                         history.refresh();
                         onChanged?.();

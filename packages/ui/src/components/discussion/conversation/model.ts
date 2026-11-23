@@ -1,8 +1,13 @@
+import {
+  type CommentMinimization,
+  type MinimizationReason,
+} from "./comment-visibility";
 import type { LockReason } from "./lock";
 import type { DiscussionAuthor } from "../author";
 import type { ReactionSummary } from "../reactions";
 
 export interface Comment {
+  minimization?: CommentMinimization | null;
   reactions: ReactionSummary;
   number: number;
   author: DiscussionAuthor;
@@ -36,6 +41,7 @@ export type Target =
   | { kind: "pull_reply"; pull: number; thread: number; number: number };
 export type Action =
   | { kind: "locked"; reason: LockReason | null }
+  | { kind: "comment_hidden"; reason: MinimizationReason }
   | { kind: "base_changed" | "head_changed"; from: string; to: string }
   | {
       kind: "project_changed" | "project_removed";
@@ -73,6 +79,7 @@ export type Action =
         | "pinned"
         | "unpinned"
         | "unlocked"
+        | "comment_restored"
         | "approved"
         | "changes_requested"
         | "review_dismissed"

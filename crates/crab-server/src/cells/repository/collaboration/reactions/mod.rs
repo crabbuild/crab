@@ -57,6 +57,8 @@ pub(crate) struct Group {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Summary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimization: Option<super::minimization::State>,
     pub groups: BTreeMap<Kind, Group>,
 }
 
@@ -143,7 +145,10 @@ fn summary(
             Ok((kind, Group { count, reacted }))
         })
         .collect::<crate::cells::Result<BTreeMap<_, _>>>()?;
-    Ok(Summary { groups })
+    Ok(Summary {
+        groups,
+        minimization: None,
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -249,7 +254,9 @@ impl Read for GetReactions {
                 if !target.exists(context)? {
                     return Ok(None);
                 }
-                summary(context, target, &input.actor).map(Some)
+                let mut card = summary(context, target, &input.actor)?;
+                card.minimization = super::minimization::load(context, target)?;
+                Ok(Some(card))
             })
             .collect()
     }

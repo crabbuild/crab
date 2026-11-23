@@ -109,6 +109,9 @@ pub(in crate::cells) fn dispatch_mutation(
         collaboration::state::ChangeState::ID => {
             invoke_mutation::<collaboration::state::ChangeState>(context, input)
         }
+        collaboration::minimization::Set::ID => {
+            invoke_mutation::<collaboration::minimization::Set>(context, input)
+        }
         collaboration::locks::Set::ID => {
             invoke_mutation::<collaboration::locks::Set>(context, input)
         }

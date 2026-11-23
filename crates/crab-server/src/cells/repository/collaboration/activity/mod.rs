@@ -54,6 +54,10 @@ pub(crate) enum Action {
         reason: Option<super::locks::Reason>,
     },
     Unlocked,
+    CommentHidden {
+        reason: super::minimization::Reason,
+    },
+    CommentRestored,
     Closed,
     IssueClosed {
         reason: crate::cells::repository::issues::lifecycle::Reason,
@@ -109,6 +113,11 @@ impl Action {
     }
 
     fn validate(&self, target: Target) -> crate::cells::Result<()> {
+        if matches!(self, Self::CommentHidden { .. } | Self::CommentRestored)
+            && super::minimization::supports(target)
+        {
+            return Ok(());
+        }
         let valid = match target {
             Target::Issue { .. } => matches!(
                 self,

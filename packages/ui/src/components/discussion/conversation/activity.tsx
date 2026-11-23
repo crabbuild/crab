@@ -79,6 +79,10 @@ function action(event: ActivityEvent): string {
       return "pinned";
     case "locked":
       return "locked the conversation on";
+    case "comment_hidden":
+      return "hid a comment on";
+    case "comment_restored":
+      return "unhid a comment on";
     case "unlocked":
       return "unlocked the conversation on";
     case "unpinned":

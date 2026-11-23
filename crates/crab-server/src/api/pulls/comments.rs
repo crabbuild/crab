@@ -42,6 +42,7 @@ pub(in crate::api) fn comment_view(
         "number": comment.number,
         "body": comment.body,
         "reactions": reactions,
+        "minimization": reactions.minimization,
         "author": authors.view(&comment.author),
         "version": comment.version,
         "created_at": comment.created_at,

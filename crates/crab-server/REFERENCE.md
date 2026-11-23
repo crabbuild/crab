@@ -2434,6 +2434,7 @@ owner label does not acquire ownership.
 | Reactions | `PUT /api/repos/{owner}/{name}/reactions/{target}`; discussion responses include personalized summaries |
 | Conversation | `GET /api/repos/{owner}/{name}/issues/{number}/conversation`, `GET /api/repos/{owner}/{name}/pulls/{number}/conversation` |
 | Conversation lock | `GET/PUT /api/repos/{owner}/{name}/issues/{number}/lock` and `GET/PUT /api/repos/{owner}/{name}/pulls/{number}/lock` |
+| Comment visibility | `PUT /api/repos/{owner}/{name}/comment-visibility/{target}` |
 | Activity | `GET /api/repos/{owner}/{name}/activity`, `GET /api/repos/{owner}/{name}/issues/{number}/activity`, `GET /api/repos/{owner}/{name}/pulls/{number}/activity` |
 | Linked work | Issue/pull `GET .../{number}/links`; `GET/PUT /api/repos/{owner}/{name}/pulls/{pull}/linked-issues/{issue}` |
 
@@ -2650,6 +2651,31 @@ Update every API and Repository Cell peer before setting conversation locks.
 Older collaboration writers lack the lock check, and older activity readers
 lack the new event kinds. Existing repositories default to unlocked without
 a migration.
+
+### Hide or unhide a comment
+
+Choose **Hide comment** and a reason on an issue comment, pull request comment,
+review, or inline review comment or reply. Issue comments require Moderate.
+Pull request contributions require Write. Repository readers can use **Show
+comment** to expand the original content. Expanded comments offer **Unhide
+comment** to current moderators. Hidden review bodies leave decisions in force.
+Hidden inline comments keep their anchors, resolution controls, and replies.
+
+A contribution's `minimization` value is `null` before the first change and
+`{version, reason}` thereafter. Visibility begins at version zero. A null
+reason marks a restored contribution. Write through `PUT .../comment-visibility/{target}`
+with `{version, change}`. The change is `{kind:"hide", reason}` or
+`{kind:"unhide"}`. Use a relative contribution address such as
+`issues/42/comments/3` or `pulls/42/threads/1/replies/2`.
+Reasons are `abuse`, `duplicate`, `low_quality`, `off_topic`, `outdated`,
+`resolved`, and `spam`.
+
+Visibility changes commit with their activity events. Retry a lost response
+with the original version and change. If the version and desired state conflict,
+reload on HTTP 409. Minimization controls the default display. Authorized API
+reads, attachments, and discussion search retain the original content. Update
+serving peers together before hiding comments to enable the new activity events
+and batched presentation response. Existing comments need no migration.
 
 ### Search issues and pull requests
 
@@ -4285,8 +4311,8 @@ namespace and immutable asset bodies in backups. Restoring visible records
 without counters, claims, request ledgers,
 control and immutable roots loses numbering, ownership and retry guarantees.
 
-Discussion deletion, comment hiding, edit history, and broader activity and
-email delivery qualification remain pending. The isolated RustFS process qualification
+Discussion deletion, edit history, and broader activity and email delivery
+qualification remain pending. The isolated RustFS process qualification
 restores version-selected product roots, including release asset bodies.
 Cross-provider export and restore on a production deployment remain pending.
 

@@ -1,3 +1,4 @@
+import { CommentVisibility } from "./comment-visibility";
 import { useConversationLock } from "./lock";
 import { useState } from "react";
 import { Author } from "../author";
@@ -20,6 +21,7 @@ export function CommentCard({
   href,
   csrf,
   onSaved,
+  refresh,
 }: {
   comment: Comment;
   repo: Repository;
@@ -27,6 +29,7 @@ export function CommentCard({
   href: string;
   csrf: string;
   onSaved: (comment: Comment) => void;
+  refresh: () => void;
 }) {
   const [draft, setDraft] = useState<{ body: string; version: number }>();
   const canPost = useConversationLock()?.lock?.can_post !== false;
@@ -53,96 +56,104 @@ export function CommentCard({
           </time>
         </Link>
         {comment.version > 1 && <span className="muted">edited</span>}
-        {comment.can_edit && canPost && !repo.archived && !draft && (
-          <Button
-            variant="outline"
-            ref={editTrigger}
-            size="sm"
-            onClick={() => {
-              mutation.reset();
-              setDraft({ body: comment.body, version: comment.version });
+      </header>
+      <CommentVisibility
+        repo={repo}
+        csrf={csrf}
+        target={`${target}/comments/${comment.number}`}
+        minimization={comment.minimization}
+        onChanged={refresh}
+      >
+        {draft ? (
+          <form
+            className="comment-edit"
+            onSubmit={async (event) => {
+              event.preventDefault();
+              if (!canPost || mutation.conflict) return;
+              const updated = await mutation.run<Comment>(
+                endpoint(repo, `${target}/comments/${comment.number}`),
+                "PATCH",
+                draft,
+              );
+              if (updated) {
+                onSaved(updated);
+                setDraft(undefined);
+              }
             }}
           >
-            Edit comment
-          </Button>
-        )}
-      </header>
-      {draft ? (
-        <form
-          className="comment-edit"
-          onSubmit={async (event) => {
-            event.preventDefault();
-            if (!canPost || mutation.conflict) return;
-            const updated = await mutation.run<Comment>(
-              endpoint(repo, `${target}/comments/${comment.number}`),
-              "PATCH",
-              draft,
-            );
-            if (updated) {
-              onSaved(updated);
-              setDraft(undefined);
-            }
-          }}
-        >
-          <Editor
-            autoFocus
-            id={`edit-comment-${comment.number}`}
-            label="Edit comment"
-            value={draft.body}
-            onChange={(body) => setDraft({ ...draft, body })}
-            disabled={mutation.pending}
-            required
-          />
-          {mutation.conflict ? (
-            <ConflictReview<Comment>
-              url={endpoint(repo, `${target}/comments/${comment.number}`)}
-              onResolve={(latest, choice) => {
-                setDraft({
-                  body: choice === "saved" ? latest.body : draft.body,
-                  version: latest.version,
-                });
-                onSaved(latest);
-                mutation.reset();
-              }}
-            />
-          ) : (
-            <Failure message={mutation.error} />
-          )}
-          <div className="discussion-actions">
-            <Button
-              ref={save}
-              type="submit"
-              variant="default"
-              disabled={
-                !canPost ||
-                mutation.pending ||
-                mutation.conflict ||
-                !draft.body.trim()
-              }
-            >
-              Save comment
-            </Button>
-            <Button
-              variant="outline"
-              type="button"
-              onClick={() => setDraft(undefined)}
+            <Editor
+              autoFocus
+              id={`edit-comment-${comment.number}`}
+              label="Edit comment"
+              value={draft.body}
+              onChange={(body) => setDraft({ ...draft, body })}
               disabled={mutation.pending}
-            >
-              Cancel edit
-            </Button>
-          </div>
-        </form>
-      ) : (
-        <>
-          <DiscussionMarkdown>{comment.body}</DiscussionMarkdown>
-          <Reactions
-            repo={repo}
-            target={`${target}/comments/${comment.number}`}
-            summary={comment.reactions}
-            csrf={csrf}
-          />
-        </>
-      )}
+              required
+            />
+            {mutation.conflict ? (
+              <ConflictReview<Comment>
+                url={endpoint(repo, `${target}/comments/${comment.number}`)}
+                onResolve={(latest, choice) => {
+                  setDraft({
+                    body: choice === "saved" ? latest.body : draft.body,
+                    version: latest.version,
+                  });
+                  onSaved(latest);
+                  mutation.reset();
+                }}
+              />
+            ) : (
+              <Failure message={mutation.error} />
+            )}
+            <div className="discussion-actions">
+              <Button
+                ref={save}
+                type="submit"
+                variant="default"
+                disabled={
+                  !canPost ||
+                  mutation.pending ||
+                  mutation.conflict ||
+                  !draft.body.trim()
+                }
+              >
+                Save comment
+              </Button>
+              <Button
+                variant="outline"
+                type="button"
+                onClick={() => setDraft(undefined)}
+                disabled={mutation.pending}
+              >
+                Cancel edit
+              </Button>
+            </div>
+          </form>
+        ) : (
+          <>
+            {comment.can_edit && canPost && !repo.archived && !draft && (
+              <Button
+                variant="outline"
+                ref={editTrigger}
+                size="sm"
+                onClick={() => {
+                  mutation.reset();
+                  setDraft({ body: comment.body, version: comment.version });
+                }}
+              >
+                Edit comment
+              </Button>
+            )}
+            <DiscussionMarkdown>{comment.body}</DiscussionMarkdown>
+            <Reactions
+              repo={repo}
+              target={`${target}/comments/${comment.number}`}
+              summary={comment.reactions}
+              csrf={csrf}
+            />
+          </>
+        )}
+      </CommentVisibility>
     </article>
   );
 }

@@ -1,5 +1,6 @@
 export type RulesetId = string | { organization: string; ruleset: string };
 
+import { type CommentMinimization } from "@/components/discussion/conversation/comment-visibility";
 import type { DiscussionTotals, ListLabel } from "@/components/discussion/list";
 import type { DiscussionAuthor } from "@/components/discussion/author";
 import type { RepositoryAssignee } from "@/lib/contracts";
@@ -159,6 +160,7 @@ export interface PullReviewThread extends InlineDiffThread {
 }
 
 export interface PullReviewReply {
+  minimization?: CommentMinimization | null;
   reactions: ReactionSummary;
   number: number;
   author: DiscussionAuthor;

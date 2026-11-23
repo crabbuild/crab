@@ -56,6 +56,7 @@ fn reply_view(
         "author": authors.view(&reply.author),
         "body": reply.body,
         "reactions": reactions,
+        "minimization": reactions.minimization,
         "version": reply.version,
         "created_at": reply.created_at,
         "updated_at": reply.updated_at,

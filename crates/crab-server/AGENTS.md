@@ -188,6 +188,10 @@ and owns the bulk HTTP contract.
 activity. Posting, edit, review batch, state-with-comment and reaction commands
 read the parent lock before mutating. Published submission receipts remain
 recoverable. `api/discussion_lock/` resolves current role authority for locks.
+`collaboration/minimization.rs` owns per-contribution visibility and activity.
+The API checks the same discussion moderation roles, and contribution responses
+read visibility in the batched reaction summary query. A hidden review stays part
+of the merge decision and a hidden thread stays part of conversation resolution.
 `auth/oidc/` owns verified signed group claims and their bounds; group-backed
 sessions have a fifteen-minute ceiling. `auth/principal/` resolves individual/group
 role union against current repository ACLs and intersects Git token scope.

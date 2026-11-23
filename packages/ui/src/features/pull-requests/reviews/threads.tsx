@@ -1,3 +1,4 @@
+import { useCommentVisibility } from "@/components/discussion/conversation/comment-visibility";
 import { useConversationLock } from "@/components/discussion/conversation/lock";
 import { Link } from "@/components/navigation/link";
 import { repoHref } from "@/lib/repository-route";
@@ -83,6 +84,7 @@ export function PullReviewThreads({
   submittingReview: boolean;
   unresolvedOnly: boolean;
 }) {
+  const visibility = useCommentVisibility();
   const canPost = useConversationLock()?.lock?.can_post !== false;
   const path = (before?: number) =>
     endpoint(repo, `pulls/${pull.number}/threads`, {
@@ -270,7 +272,11 @@ export function PullReviewThreads({
     fileSummaryPartial: incompleteFiles,
     fileSummaryVersion,
     renderAnnotation(thread) {
-      const preview = thread.body.replace(/\s+/g, " ").trim();
+      const target = `pulls/${pull.number}/threads/${thread.number}`;
+      const minimized = visibility.current(target, thread.minimization)?.reason;
+      const preview = minimized
+        ? "Comment hidden"
+        : thread.body.replace(/\s+/g, " ").trim();
       return (
         <span className="inline-review-annotation-content">
           <span className="inline-review-annotation-number">

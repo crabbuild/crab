@@ -1,3 +1,4 @@
+import { CommentVisibilityProvider } from "@/components/discussion/conversation/comment-visibility";
 import { ConversationLockProvider } from "@/components/discussion/conversation/lock";
 import { repoHref, repositoryRoute } from "@/lib/repository-route";
 
@@ -48,7 +49,9 @@ export function Issues({
         repo={repo}
         target={`issues/${number}`}
       >
-        <IssueDetail repo={repo} number={number} csrf={csrf} />
+        <CommentVisibilityProvider>
+          <IssueDetail repo={repo} number={number} csrf={csrf} />
+        </CommentVisibilityProvider>
       </ConversationLockProvider>
     );
   }

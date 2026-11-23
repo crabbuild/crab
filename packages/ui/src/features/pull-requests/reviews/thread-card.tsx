@@ -1,3 +1,7 @@
+import {
+  CommentVisibility,
+  useCommentVisibility,
+} from "@/components/discussion/conversation/comment-visibility";
 import { useConversationLock } from "@/components/discussion/conversation/lock";
 import { Author } from "@/components/discussion/author";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
@@ -125,6 +129,11 @@ export function ReviewThreadCard({
       ? `line ${thread.start_line}`
       : `lines ${thread.start_line}–${thread.end_line}`;
   const selected = suggestions?.selected.includes(thread.number);
+  const target = `pulls/${pull.number}/threads/${thread.number}`;
+  const minimized = useCommentVisibility().current(
+    target,
+    thread.minimization,
+  )?.reason;
   const canPost = useConversationLock()?.lock?.can_post !== false;
   async function saveEdit(event: React.FormEvent) {
     event.preventDefault();
@@ -177,9 +186,13 @@ export function ReviewThreadCard({
             </span>
           </span>
           <span className="review-thread-statuses">
-            {thread.suggested_text !== null && !thread.outdated && (
-              <span className="review-thread-badge suggestion">Suggestion</span>
-            )}
+            {!minimized &&
+              thread.suggested_text !== null &&
+              !thread.outdated && (
+                <span className="review-thread-badge suggestion">
+                  Suggestion
+                </span>
+              )}
             {thread.outdated && (
               <span className="review-thread-badge">Outdated</span>
             )}
@@ -189,82 +202,107 @@ export function ReviewThreadCard({
           </span>
         </summary>
         <div className="review-thread-content">
-          <div className="review-thread-body">
-            {editing ? (
-              <form className="review-thread-edit" onSubmit={saveEdit}>
-                <Editor
-                  id={`thread-${thread.number}-edit`}
-                  label="Edit comment"
-                  value={editBody}
-                  onChange={setEditBody}
-                  disabled={mutation.pending}
-                  required
-                  autoFocus
-                />
-                <div className="discussion-actions">
-                  <Button
-                    size="sm"
-                    variant="default"
-                    type="submit"
-                    disabled={!canPost || mutation.pending || !editBody.trim()}
-                  >
-                    {mutation.pending ? "Saving…" : "Save"}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    type="button"
-                    disabled={mutation.pending}
-                    onClick={() => {
-                      setEditBody(thread.body);
-                      setEditing(false);
-                    }}
-                  >
-                    Cancel
-                  </Button>
-                </div>
-              </form>
-            ) : (
-              <DiscussionMarkdown>{thread.body}</DiscussionMarkdown>
-            )}
-          </div>
-          <Reactions
+          <CommentVisibility
             repo={repo}
             csrf={csrf}
-            target={`pulls/${pull.number}/threads/${thread.number}`}
-            summary={thread.reactions}
-          />
-          {thread.suggested_text !== null && (
-            <div className="review-suggestion">
-              <pre>{thread.suggested_text || "Remove selected lines"}</pre>
-              {suggestions?.enabled && canApplySuggestion(thread) && (
-                <div className="discussion-actions">
-                  <Button
-                    size="sm"
-                    disabled={suggestions.pending}
-                    onClick={() => suggestions.review(thread)}
-                  >
-                    Apply suggestion
-                  </Button>
-                  {allowBatch && (
-                    <label className="inline-flex items-center gap-2 text-sm">
-                      <Checkbox
-                        checked={selected}
-                        aria-label={`Select suggestion from thread #${thread.number}`}
-                        disabled={
-                          suggestions.pending ||
-                          !!suggestions.retry ||
-                          (suggestions.atLimit && !selected)
-                        }
-                        onCheckedChange={() => suggestions.toggle(thread)}
-                      />
-                      Include in batch
-                    </label>
-                  )}
-                </div>
+            target={target}
+            minimization={thread.minimization}
+            onChanged={refresh}
+          >
+            <div className="review-thread-body">
+              {editing ? (
+                <form className="review-thread-edit" onSubmit={saveEdit}>
+                  <Editor
+                    id={`thread-${thread.number}-edit`}
+                    label="Edit comment"
+                    value={editBody}
+                    onChange={setEditBody}
+                    disabled={mutation.pending}
+                    required
+                    autoFocus
+                  />
+                  <div className="discussion-actions">
+                    <Button
+                      size="sm"
+                      variant="default"
+                      type="submit"
+                      disabled={
+                        !canPost || mutation.pending || !editBody.trim()
+                      }
+                    >
+                      {mutation.pending ? "Saving…" : "Save"}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      type="button"
+                      disabled={mutation.pending}
+                      onClick={() => {
+                        setEditBody(thread.body);
+                        setEditing(false);
+                      }}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                </form>
+              ) : (
+                <DiscussionMarkdown>{thread.body}</DiscussionMarkdown>
               )}
             </div>
-          )}
+            <Reactions
+              repo={repo}
+              csrf={csrf}
+              target={`pulls/${pull.number}/threads/${thread.number}`}
+              summary={thread.reactions}
+            />
+            {thread.suggested_text !== null && (
+              <div className="review-suggestion">
+                <pre>{thread.suggested_text || "Remove selected lines"}</pre>
+                {suggestions?.enabled && canApplySuggestion(thread) && (
+                  <div className="discussion-actions">
+                    <Button
+                      size="sm"
+                      disabled={suggestions.pending}
+                      onClick={() => suggestions.review(thread)}
+                    >
+                      Apply suggestion
+                    </Button>
+                    {allowBatch && (
+                      <label className="inline-flex items-center gap-2 text-sm">
+                        <Checkbox
+                          checked={selected}
+                          aria-label={`Select suggestion from thread #${thread.number}`}
+                          disabled={
+                            suggestions.pending ||
+                            !!suggestions.retry ||
+                            (suggestions.atLimit && !selected)
+                          }
+                          onCheckedChange={() => suggestions.toggle(thread)}
+                        />
+                        Include in batch
+                      </label>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+            <div className="discussion-actions review-thread-actions">
+              {thread.can_edit && canPost && !repo.archived && !editing && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={mutation.pending}
+                  onClick={() => {
+                    setEditBody(thread.body);
+                    setEditing(true);
+                  }}
+                >
+                  Edit
+                </Button>
+              )}
+            </div>
+          </CommentVisibility>
           <div className="discussion-actions review-thread-actions">
             {onJumpToDiff && !thread.outdated && !thread.vanished && (
               <Button
@@ -274,19 +312,6 @@ export function ReviewThreadCard({
                 disabled={mutation.pending}
               >
                 Jump to diff
-              </Button>
-            )}
-            {thread.can_edit && canPost && !repo.archived && !editing && (
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={mutation.pending}
-                onClick={() => {
-                  setEditBody(thread.body);
-                  setEditing(true);
-                }}
-              >
-                Edit
               </Button>
             )}
             {thread.can_resolve &&

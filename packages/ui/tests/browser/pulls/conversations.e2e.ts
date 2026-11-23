@@ -63,3 +63,33 @@ test("resolve an outdated conversation from the merge requirement", async ({
     panel.getByRole("button", { name: "Merge pull request", exact: true }),
   ).toBeVisible();
 });
+
+test("a hidden inline comment keeps its anchor and reveals its suggestion on demand", async ({
+  page,
+}) => {
+  const fixture = await mockPullRequest(page);
+  fixture.threads[0].minimization = { version: 1, reason: "off_topic" };
+  await page.goto("/team/project/pull/1/files");
+  const thread = page.locator("#review-thread-1");
+  await expect(thread.getByText("Comment hidden · Off topic")).toBeVisible();
+  await expect(page.getByText("Consider a clearer opening.")).toHaveCount(0);
+  await expect(thread.getByText("Applied content")).toHaveCount(0);
+  await expect(
+    thread.getByRole("button", { name: "Jump to diff" }),
+  ).toBeVisible();
+  await expect(
+    thread.getByRole("button", { name: "Resolve", exact: true }),
+  ).toBeVisible();
+  const show = thread.getByRole("button", {
+    name: "Show comment",
+    exact: true,
+  });
+  await show.click();
+  await expect(thread.getByText("Consider a clearer opening.")).toBeVisible();
+  await expect(thread.getByText("Applied content")).toBeVisible();
+  await expect(
+    thread.getByRole("button", { name: "Unhide comment" }),
+  ).toHaveCount(0);
+  await thread.getByRole("button", { name: "Collapse comment" }).click();
+  await expect(page.getByText("Consider a clearer opening.")).toHaveCount(0);
+});

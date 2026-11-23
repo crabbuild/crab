@@ -1,3 +1,4 @@
+import { CommentVisibility } from "@/components/discussion/conversation/comment-visibility";
 import { useConversationLock } from "@/components/discussion/conversation/lock";
 import { Author } from "@/components/discussion/author";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
@@ -181,62 +182,70 @@ function ReviewReplyItem({
         <Author author={reply.author} />
       </strong>
       <span className="muted">replied {timestamp(reply.created_at)}</span>
-      {editing ? (
-        <form className="review-reply-edit" onSubmit={save}>
-          <Editor
-            id={`reply-${thread.number}-${reply.number}-edit`}
-            label="Edit reply"
-            value={body}
-            onChange={setBody}
-            disabled={mutation.pending}
-            required
-            autoFocus
-          />
-          <div className="discussion-actions">
-            <Button
-              size="sm"
-              variant="default"
-              type="submit"
-              disabled={!canPost || mutation.pending || !body.trim()}
-            >
-              {mutation.pending ? "Saving…" : "Save"}
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              type="button"
-              disabled={mutation.pending}
-              onClick={() => {
-                setBody(reply.body);
-                setEditing(false);
-              }}
-            >
-              Cancel
-            </Button>
-          </div>
-        </form>
-      ) : (
-        <>
-          <DiscussionMarkdown>{body}</DiscussionMarkdown>
-          {reply.can_edit && canPost && !repo.archived && (
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={mutation.pending}
-              onClick={() => setEditing(true)}
-            >
-              Edit
-            </Button>
-          )}
-        </>
-      )}
-      <Reactions
+      <CommentVisibility
         repo={repo}
         csrf={csrf}
         target={`pulls/${pull.number}/threads/${thread.number}/replies/${reply.number}`}
-        summary={reply.reactions}
-      />
-      <Failure message={mutation.error} />
+        minimization={reply.minimization}
+        onChanged={refresh}
+      >
+        {editing ? (
+          <form className="review-reply-edit" onSubmit={save}>
+            <Editor
+              id={`reply-${thread.number}-${reply.number}-edit`}
+              label="Edit reply"
+              value={body}
+              onChange={setBody}
+              disabled={mutation.pending}
+              required
+              autoFocus
+            />
+            <div className="discussion-actions">
+              <Button
+                size="sm"
+                variant="default"
+                type="submit"
+                disabled={!canPost || mutation.pending || !body.trim()}
+              >
+                {mutation.pending ? "Saving…" : "Save"}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                type="button"
+                disabled={mutation.pending}
+                onClick={() => {
+                  setBody(reply.body);
+                  setEditing(false);
+                }}
+              >
+                Cancel
+              </Button>
+            </div>
+          </form>
+        ) : (
+          <>
+            <DiscussionMarkdown>{body}</DiscussionMarkdown>
+            {reply.can_edit && canPost && !repo.archived && (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={mutation.pending}
+                onClick={() => setEditing(true)}
+              >
+                Edit
+              </Button>
+            )}
+          </>
+        )}
+        <Reactions
+          repo={repo}
+          csrf={csrf}
+          target={`pulls/${pull.number}/threads/${thread.number}/replies/${reply.number}`}
+          summary={reply.reactions}
+        />
+        <Failure message={mutation.error} />
+      </CommentVisibility>
     </div>
   );
 }

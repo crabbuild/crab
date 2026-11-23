@@ -1,3 +1,4 @@
+import { CommentVisibility } from "./comment-visibility";
 import { ReviewDismissal } from "@/features/pull-requests/reviews/dismissal";
 import { RelativeTime } from "../time";
 import { Badge } from "@/components/ui/badge";
@@ -23,6 +24,7 @@ export function ReviewCard({
   target,
   review,
   onSaved,
+  onVisibilityChanged,
 }: {
   repo: Repository;
   href: string;
@@ -30,6 +32,7 @@ export function ReviewCard({
   csrf: string;
   review: Review;
   onSaved: () => void;
+  onVisibilityChanged: () => void;
 }) {
   const action =
     review.state === "approved"
@@ -86,7 +89,7 @@ export function ReviewCard({
           onSaved={onSaved}
         />
       </header>
-      {review.body && <DiscussionMarkdown>{review.body}</DiscussionMarkdown>}
+
       {review.dismissal && (
         <div className="review-dismissal mx-4 mb-4 rounded-md border p-3 text-sm">
           <p className="mb-2 text-muted-foreground">
@@ -96,12 +99,21 @@ export function ReviewCard({
           <DiscussionMarkdown>{review.dismissal.body}</DiscussionMarkdown>
         </div>
       )}
-      <Reactions
+      <CommentVisibility
         repo={repo}
         csrf={csrf}
         target={`${target}/reviews/${review.number}`}
-        summary={review.reactions}
-      />
+        minimization={review.minimization}
+        onChanged={onVisibilityChanged}
+      >
+        {review.body && <DiscussionMarkdown>{review.body}</DiscussionMarkdown>}
+        <Reactions
+          repo={repo}
+          csrf={csrf}
+          target={`${target}/reviews/${review.number}`}
+          summary={review.reactions}
+        />
+      </CommentVisibility>
       <footer className="muted">
         Reviewed commit <code>{short(review.commit_oid)}</code>
       </footer>

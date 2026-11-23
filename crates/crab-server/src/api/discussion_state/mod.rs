@@ -114,7 +114,7 @@ async fn change(
                     subject,
                     actor: (&author).into(),
                     can_triage: membership.principal.can_triage(repo.id),
-                    can_post_locked: super::discussion_lock::can_manage(
+                    can_post_locked: super::discussion_target::can_manage(
                         &membership.principal,
                         repo.id,
                         subject.kind,

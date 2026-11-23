@@ -15,6 +15,7 @@ pub(crate) mod locks;
 pub(crate) mod mention_settings;
 pub(crate) mod mentions;
 pub(crate) mod milestones;
+pub(crate) mod minimization;
 pub(crate) mod reactions;
 pub(crate) mod state;
 pub(crate) mod submissions;
