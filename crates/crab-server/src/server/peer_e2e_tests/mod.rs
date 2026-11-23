@@ -3,6 +3,8 @@
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+mod automation;
+mod process;
 mod repository_grants;
 mod scim;
 

@@ -4493,6 +4493,12 @@ grants and token metadata. `POST` uses `{expected_version, edit}`, where
 returns 409. Upgrade all serving replicas before using automation or
 transferring repositories with the new ownership epoch.
 
+The RustFS CI gate runs two `crab-server` processes against shared object
+storage. It revokes a token through one replica while the other holds an
+admitted Git push, verifies that neither replica serves or advances the
+branch using the old token, and verifies that a replacement token can
+still publish after restart.
+
 ### Review and export organization audit history
 
 **Audit log** in the organization displays recorded organization, invitation,
