@@ -143,9 +143,13 @@ class CdnViewerIssuerQualificationTests(TestCase):
                 issued = response(200, json.dumps(reply).encode(), Cache_Control="no-store", X_Crab_CDN_Approval_Sha256="a" * 64)
                 second = response(200, json.dumps(issue_reply(edge, config, expires_in=181)).encode(),
                                   Cache_Control="no-store", X_Crab_CDN_Approval_Sha256="a" * 64)
+                cold_timing, warm_timing = {}, {}
+                if edge == "cloudfront":
+                    cold_timing["Server_Timing"] = 'cdn-cache-miss,cdn-pop;desc="PHX50-C2"'
+                    warm_timing["Server_Timing"] = 'cdn-cache-hit,cdn-pop;desc="PHX50-C2",cdn-hit-layer;desc="EDGE"'
                 self.connection.getresponse.side_effect = [
-                    issued, response(200, BODY, Cache_Control="private, no-store", **{header: miss}),
-                    second, response(200, BODY, Cache_Control="private, no-store", **{header: hit}),
+                    issued, response(200, BODY, Cache_Control="private, no-store", **{header: miss}, **cold_timing),
+                    second, response(200, BODY, Cache_Control="private, no-store", **{header: hit}, **warm_timing),
                 ]
                 self.http.reset_mock()
                 output = root / "trace.json"
@@ -172,11 +176,26 @@ class CdnViewerIssuerQualificationTests(TestCase):
                     self.assertEqual(json.loads(grant.kwargs["body"])["id_token"], tokens[role])
                     self.assertEqual(grant.kwargs["headers"]["Authorization"], f"Bearer {tokens[role]}")
                     self.assertNotIn(tokens[role], str(read.kwargs["headers"]))
+                    if edge == "cloudfront":
+                        self.assertEqual(read.kwargs["headers"].get("Pragma"), "server-timing")
                 self.assertEqual(calls[1].args, calls[3].args)
                 trace = output.read_text()
                 for secret in (*tokens.values(), "primary@example.com", "native-credential-fixture", "fixture-signature"):
                     self.assertNotIn(secret, trace)
                 self.assertEqual([row["cache"] for row in json.loads(trace)["requests"]], ["miss", "hit"])
+                if edge == "cloudfront":
+                    reads = json.loads(trace)["requests"]
+                    self.assertEqual({row["cloudfront_pop_sha256"] for row in reads}, {hashlib.sha256(b"PHX50-C2").hexdigest()})
+                    self.assertEqual([row["cloudfront_hit_layer"] for row in reads], [None, "EDGE"])
+                    self.assertNotIn("PHX50-C2", trace)
+
+    def test_cloudfront_cache_reuse_requires_one_point_of_presence(self):
+        for timing, error in (
+            ("cdn-cache-hit", "requires an observed point of presence"),
+            ('cdn-pop;desc="PHX50-C2",cdn-pop;desc="SEA19-C1"', "invalid or repeated CloudFront cache timing metric"),
+        ):
+            with self.subTest(timing=timing), self.assertRaisesRegex(ValueError, error):
+                TRANSPORT.cloudfront_cache_timing(response(200, Server_Timing=timing))
 
     def test_cache_reuse_cannot_relabel_one_policy_identity_as_two_principals(self):
         with TemporaryDirectory() as directory:
@@ -224,11 +243,16 @@ class CdnViewerIssuerQualificationTests(TestCase):
                 output = root / "authorized_cache_reuse.json"
                 for role, cache in (("primary", miss), ("second", hit)):
                     reply = issue_reply(edge, config, expires_in=180 if role == "primary" else 181)
+                    timing = {}
+                    if edge == "cloudfront":
+                        timing["Server_Timing"] = 'cdn-pop;desc="PHX50-C2"'
+                        if role == "second":
+                            timing["Server_Timing"] += ',cdn-hit-layer;desc="EDGE"'
                     self.connection.getresponse.side_effect = [
                         response(200, json.dumps({"value": tokens[role]}).encode()),
                         response(200, json.dumps(reply).encode(),
                                  Cache_Control="no-store", X_Crab_CDN_Approval_Sha256="a" * 64),
-                        response(200, BODY, Cache_Control="private, no-store", **{header: cache}),
+                        response(200, BODY, Cache_Control="private, no-store", **{header: cache}, **timing),
                     ]
                     selected = args + ["--github-role", role, "--output", str(primary if role == "primary" else output)]
                     if role == "second":

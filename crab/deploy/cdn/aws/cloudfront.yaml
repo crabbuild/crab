@@ -131,6 +131,9 @@ Resources:
     Properties:
       ResponseHeadersPolicyConfig:
         Name: !Sub '${AWS::StackName}-private'
+        ServerTimingHeadersConfig:
+          Enabled: true
+          SamplingRate: 0
         CustomHeadersConfig:
           Items:
             - Header: Cache-Control

@@ -1181,29 +1181,39 @@ def verify_cache_reuse(value: Any, report: dict[str, Any], approved: str) -> tup
     grants = fields(trace["grants"], roles, "authenticated cache reuse grants")
     requests = trace["requests"]
     require(isinstance(requests, list) and len(requests) == 2, "cache reuse requires two authenticated reads")
+    edge = scope_parts(report["scope"])[0]
     previous_finish = 0
     for role, row in zip(CACHE_REUSE_ROLES, requests, strict=True):
-        previous_finish = verify_cache_reuse_read(role, principals[role], obj, grants[role], row, previous_finish)
+        previous_finish = verify_cache_reuse_read(role, principals[role], obj, grants[role], row, edge, previous_finish)
+    if edge == "cloudfront":
+        require(requests[0]["cloudfront_pop_sha256"] == requests[1]["cloudfront_pop_sha256"],
+                "CloudFront cache reuse requires both reads at the same point of presence")
     require(grants["primary"]["expires_at_unix"] != grants["second"]["expires_at_unix"],
             "cache reuse needs distinct signed viewer grants with different expirations")
     return obj["key_sha256"], obj["bytes"]
 
 
 def verify_cache_reuse_read(
-    role: str, principal: dict[str, str], obj: dict[str, Any], grant: Any, row: Any, previous_finish: int = 0,
+    role: str, principal: dict[str, str], obj: dict[str, Any], grant: Any, row: Any, edge: str, previous_finish: int = 0,
 ) -> int:
     fields(grant, {"subject_sha256", "policy_identity_sha256", "issued_at_unix_ms", "expires_at_unix"},
            "authenticated cache reuse grant")
     require(all(grant[key] == principal[key] for key in principal)
             and positive(grant["issued_at_unix_ms"]) and positive(grant["expires_at_unix"]),
             "cache reuse requires an authenticated grant for each approved principal")
-    fields(row, TRACE_REQUEST_FIELDS | {"principal", "body_sha256", "started_at_unix_ms", "finished_at_unix_ms"},
-           "authenticated cache reuse read")
+    read_fields = TRACE_REQUEST_FIELDS | {"principal", "body_sha256", "started_at_unix_ms", "finished_at_unix_ms"}
+    if edge == "cloudfront":
+        read_fields |= {"cloudfront_pop_sha256", "cloudfront_hit_layer"}
+    fields(row, read_fields, "authenticated cache reuse read")
     cache = "miss" if role == "primary" else "hit"
     require(row["principal"] == role and row["source"] == "edge" and type(row["status"]) is int
             and row["status"] == 200 and row["cache"] == cache
             and all(row[key] == obj[key] for key in obj),
             "cache reuse requires a verified first miss and second hit for the same complete object")
+    if edge == "cloudfront":
+        require(matches(SHA256, row["cloudfront_pop_sha256"])
+                and row["cloudfront_hit_layer"] == (None if role == "primary" else "EDGE"),
+                "CloudFront cache reuse requires a recorded point of presence and a hit at the edge layer")
     start, finish, expires = row["started_at_unix_ms"], row["finished_at_unix_ms"], grant["expires_at_unix"] * 1000
     require(type(row["elapsed_ms"]) is int and row["elapsed_ms"] >= 0 and type(row["bytes"]) is int
             and positive(start) and positive(finish)

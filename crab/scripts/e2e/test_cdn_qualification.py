@@ -924,6 +924,10 @@ class CdnQualificationTests(unittest.TestCase):
                     "started_at_unix_ms": 1010 + index * 100, "finished_at_unix_ms": 1020 + index * 100,
                 } for index, (role, cache) in enumerate((("primary", "miss"), ("second", "hit")))],
             }
+            if self.report["scope"].startswith("cloudfront/"):
+                for row in evidence["requests"]:
+                    row.update(cloudfront_pop_sha256="f" * 64,
+                               cloudfront_hit_layer="EDGE" if row["cache"] == "hit" else None)
         path = self.directory / "traces" / f"{check}.json"
         self.report["checks"][check] = {"passed": True, "trace_sha256": json_file(path, evidence)}
 
@@ -2137,6 +2141,9 @@ class CdnQualificationTests(unittest.TestCase):
         for changes, reason in (
             ({"cache": "miss"}, "verified first miss and second hit"),
             ({"key_sha256": "f" * 64}, "verified first miss and second hit"),
+            ({"cloudfront_pop_sha256": "a" * 64}, "both reads at the same point of presence"),
+            ({"cloudfront_hit_layer": "REC"}, "a hit at the edge layer"),
+            ({"cloudfront_hit_layer": "Origin Shield"}, "a hit at the edge layer"),
             ({"finished_at_unix_ms": 6000}, "complete within the corresponding signed grant lifetime"),
         ):
             with self.subTest(changes=changes):

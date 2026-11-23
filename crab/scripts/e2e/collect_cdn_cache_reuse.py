@@ -87,7 +87,7 @@ def measure(fixture: dict, key: str, authority: dict, tokens: dict[str, str | No
         finished = time.time_ns() // 1_000_000
         row |= {"principal": role, "body_sha256": hashlib.sha256(body).hexdigest(),
                 "started_at_unix_ms": started, "finished_at_unix_ms": finished}
-        verify_cache_reuse_read(role, authority["principals"][role], authority["object"], grants[role], row)
+        verify_cache_reuse_read(role, authority["principals"][role], authority["object"], grants[role], row, edge)
         requests.append(row)
     attest_fixture(fixture, edge, access)
     return grants, requests
@@ -110,7 +110,7 @@ def hosted_measure(
         require(all(primary[name] == value for name, value in common.items()),
                 "primary cache reuse observation must match the approved fixture, runner, and attempt")
         verify_cache_reuse_read("primary", authority["principals"]["primary"], authority["object"],
-                                primary["grant"], primary["request"])
+                                primary["grant"], primary["request"], scope_parts(fixture["scope"])[0])
     grants, requests = measure(fixture, key, authority, {role: None}, audience)
     if role == "primary":
         return common | {"grant": grants[role], "request": requests[0]}

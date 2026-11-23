@@ -23,7 +23,7 @@ from urllib.parse import SplitResult, parse_qsl, urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cdn_qualification import (  # noqa: E402
-    COMMIT, EDGE_ROUTE_QUERY_PROBES, EXPIRY_CHECKS, EXPIRY_FULL_CHECK, EXPIRY_RANGE_CHECK, EXPIRY_SETTLE_SECONDS,
+    CACHE_REUSE_CHECK, COMMIT, EDGE_ROUTE_QUERY_PROBES, EXPIRY_CHECKS, EXPIRY_FULL_CHECK, EXPIRY_RANGE_CHECK, EXPIRY_SETTLE_SECONDS,
     MAX_VIEWER_GRANT_SECONDS, PREFIX, PROVIDERS, PROVIDER_FOR_EDGE, PUBLIC_EXPORT_CHECK,
     RUN_NUMBER, SHA256, UNRELATED_VIEWER_CHECK, checked_placement, cli_payload_bytes, decode, edge_head_denials, edge_route_probe_names,
     fields, matches, require, requires_cli_workload, scope_parts, require_isolated_public_origins,
@@ -337,12 +337,31 @@ def signed_native_target(raw: bytes, native: SplitResult, edge: str, key: str) -
     return url._replace(path=prefix)
 
 
+def cloudfront_cache_timing(response: http.client.HTTPResponse) -> dict[str, Any]:
+    metrics = {}
+    descriptions = {"cdn-pop": r"[A-Z0-9][A-Z0-9-]{0,31}", "cdn-hit-layer": r"EDGE|REC|Origin Shield"}
+    for header in response.headers.get_all("Server-Timing", []):
+        for metric in header.split(","):
+            name, _, argument = metric.strip().partition(";")
+            name = name.strip()
+            if name in descriptions:
+                match = re.fullmatch(rf'desc\s*=\s*"({descriptions[name]})"', argument.strip())
+                require(name not in metrics and match is not None, "invalid or repeated CloudFront cache timing metric")
+                metrics[name] = match[1]
+    require("cdn-pop" in metrics, "CloudFront cache reuse requires an observed point of presence")
+    return {"cloudfront_pop_sha256": hashlib.sha256(metrics["cdn-pop"].encode()).hexdigest(),
+            "cloudfront_hit_layer": metrics.get("cdn-hit-layer")}
+
+
 def request_sample(
     base: SplitResult, edge: str | None, key: str, viewer: dict[str, str], *, size: int, check: str,
     wanted: int | None = None, range_offset: int | None = None, query: str = "", method: str = "GET",
     denied_statuses: tuple[int, ...] = (401, 403), origin_authorization: str | None = None,
 ) -> tuple[dict[str, Any], bytes]:
     headers = viewer | {"Accept-Encoding": "identity"}
+    observe_cloudfront_pop = edge == "cloudfront" and check == CACHE_REUSE_CHECK
+    if observe_cloudfront_pop:
+        headers["Pragma"] = "server-timing"
     if edge is None:
         require(not viewer, "native origin probes cannot use viewer credentials")
         if not base.query and base.netloc.endswith(".blob.core.windows.net"):
@@ -389,7 +408,7 @@ def request_sample(
             "source": "origin" if edge is None else "edge", "status": response.status, "cache": cache, "bytes": len(body),
             "elapsed_ms": (time.monotonic_ns() - started) // 1_000_000,
             "key_sha256": hashlib.sha256((key or target).encode("utf-8")).hexdigest(),
-        }, body
+        } | (cloudfront_cache_timing(response) if observe_cloudfront_pop else {}), body
 
 
 def authenticated_origin_read(

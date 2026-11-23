@@ -317,6 +317,13 @@ credentials. The trace retains
 fingerprints and request observations. OIDC tokens stay in the issuer
 exchange. Only the viewer credentials go to the CDN.
 
+For CloudFront, enable `Server-Timing` on the private viewer response
+policy. The fixture uses zero-percent sampling and requests the header
+with `Pragma: server-timing` for the two cache-reuse reads. Both responses
+must report the same point of presence, and the second must report an
+`EDGE` hit. Update the deployment attestation after changing the response
+policy. [CloudFront Server-Timing](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/understanding-response-headers-policies.html#server-timing-header)
+
 To collect the same trace in GitHub Actions, dispatch **Provider contract
 qualification** with `cdn_transport` and `cdn_cache_reuse` for the selected
 private provider. Attach the `cdn-cache-reuse` label to one protected Linux

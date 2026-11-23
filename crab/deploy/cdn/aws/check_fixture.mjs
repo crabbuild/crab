@@ -68,6 +68,7 @@ assert.ok(template.includes('Assert: !Not [!Equals [!Ref ViewerPublicKey, !Ref S
 assert.ok(template.includes("!If [PrimaryViewerKey, !Ref ViewerKey, !Ref 'AWS::NoValue']"));
 assert.ok(template.includes("!If [SecondaryViewerKey, !Ref ViewerKeySecondary, !Ref 'AWS::NoValue']"));
 assert.ok(template.includes('TrustedKeyGroups: [!Ref ViewerKeyGroup]'));
+assert.match(template, /ServerTimingHeadersConfig:\n          Enabled: true\n          SamplingRate: 0/);
 assert.match(publicTemplate, /Enabled: !If \[PublicDelivery, true, false\]/);
 assert.match(publicTemplate, /EnablePublicDelivery:\n    Type: String\n    Default: 'false'/);
 assert.match(publicTemplate, /DomainName: !GetAtt ExportBucket\.RegionalDomainName/);
