@@ -17,6 +17,7 @@ from test_verify_provider_qualification_report import SCRIPT, valid_report
 
 import cdn_qualification as CDN
 from public_inventory import PUBLICATION_BINDING_FIELDS, SCHEMA as INVENTORY_SCHEMA, Object, publication_receipt
+from release_cli_features import packaged_cli_features
 
 
 COMMIT = "a" * 40
@@ -67,10 +68,12 @@ def release_policy_row(scope: str) -> str:
 
 def cli_candidate(scope: str, platform: str) -> dict:
     system, arch = platform.split("-", 1)
-    target = {"darwin": "apple-darwin", "linux": "unknown-linux-gnu", "windows": "pc-windows-msvc"}[system]
+    target = f'{arch}-' + {
+        "darwin": "apple-darwin", "linux": "unknown-linux-gnu", "windows": "pc-windows-msvc",
+    }[system]
     return {
-        "source_sha": COMMIT, "target_triple": f"{arch}-{target}", "cargo_profile": "release",
-        "cargo_features": "default,tier",
+        "source_sha": COMMIT, "target_triple": target, "cargo_profile": "release",
+        "cargo_features": packaged_cli_features(target),
         "qualification_feature": False, "binary_sha256": hashlib.sha256(platform.encode()).hexdigest(),
         "release_policy_sha256": hashlib.sha256(release_policy_row(scope).encode()).hexdigest(),
     }
@@ -1184,6 +1187,20 @@ class CdnQualificationTests(unittest.TestCase):
     def test_repository_release_policy_contains_only_valid_rows(self) -> None:
         policy = SCRIPT.parents[2] / "crates/crab-storage/src/cdn/qualified-scopes.txt"
         CDN.release_scopes(policy)
+
+    def test_release_cli_candidate_requires_the_packaged_cargo_features(self) -> None:
+        self.configure("s3", "private", "direct")
+        policy = self.directory / "qualified-scopes.txt"
+        policy.write_text(release_policy_row(self.scope), encoding="utf-8")
+        qualified = self.registration["candidate"]["cargo_features"]
+        for features in (
+            "default,tier",
+            packaged_cli_features("x86_64-pc-windows-msvc"),
+            ",".join(sorted(["fuse", *qualified.split(",")])),
+        ):
+            with self.subTest(features=features):
+                self.registration["candidate"]["cargo_features"] = features
+                self.rejected("does not match the packaged CLI Cargo features", "--cdn-release-policy", str(policy))
 
     def test_release_policy_rejects_unbounded_or_ambiguous_rows(self):
         scope = "cloudfront/private/cli/git/direct"

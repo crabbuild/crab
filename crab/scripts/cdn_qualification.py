@@ -13,6 +13,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Callable, NamedTuple
 
+from release_cli_features import packaged_cli_features
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "deploy/cdn"))
 from public_inventory import ExportError, native_placement, read_publication, validate_public_origins  # noqa: E402
 
@@ -3221,7 +3223,10 @@ def verify_cdn_report(
     require(policy is None or cli_workload or sdk_git or xorb_read or desktop or service,
             "CDN promotion requires a product-specific workload and per-run regional evidence verifier")
     if cli_workload or desktop or mount:
-        verify_read_candidate(registration.get("candidate"), source_sha, platform, policy=policy)
+        candidate = verify_read_candidate(registration.get("candidate"), source_sha, platform, policy=policy)
+        if cli_workload and policy is not None:
+            require(candidate["cargo_features"] == packaged_cli_features(candidate["target_triple"]),
+                    "CDN release candidate does not match the packaged CLI Cargo features")
     if desktop:
         verify_read_candidate(registration.get("desktop_candidate"), source_sha, platform,
                               policy=policy, consumer="desktop sidecar")

@@ -1115,9 +1115,12 @@ identity on the native publication, fetches, and ref retirement. Every timed
 arm uses the registered binary for its platform. [Cargo build-script environment](https://doc.rust-lang.org/cargo/reference/environment-variables.html#environment-variables-cargo-sets-for-build-scripts)
 
 Promotion requires the packaged target triple, the ordinary release profile,
-the qualification feature disabled, and the exact release checkout's policy
-embedded. Use native writer credentials restricted to the approved origin
-and prefix. The qualification workload publishes directly to one native
+the packaged CLI's Cargo features for that platform, the qualification feature
+disabled, and the exact release checkout's policy embedded. Build each CLI
+archive from that checkout with `crab/scripts/release/release.sh --target <platform>`.
+Use the archive's main `crab` executable for inspection and measurement.
+Use native writer credentials restricted to the approved origin and prefix.
+The qualification workload publishes directly to one native
 store. Set up the reader separately when measuring a private CDN that uses
 Crab Auth viewer grants.
 Retain provider observations for the publication and retirement in addition
