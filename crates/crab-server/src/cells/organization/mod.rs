@@ -302,6 +302,7 @@ pub(in crate::cells) fn authorize(
         (
             repositories::Owners::ID
             | RepositoryTeamsForActor::ID
+            | teams::review_routing::ReviewRoster::ID
             | RepositoryTeamRoster::ID
             | RepositoryTeamNames::ID
             | CodeOwnerTeams::ID
@@ -390,6 +391,12 @@ pub(in crate::cells) fn dispatch_read(
         teams::Candidates::ID => invoke_read::<teams::Candidates>(context, input),
         teams::GetPolicy::ID => invoke_read::<teams::GetPolicy>(context, input),
         RepositoryTeamsForActor::ID => invoke_read::<RepositoryTeamsForActor>(context, input),
+        teams::review_routing::ReviewRoster::ID => {
+            invoke_read::<teams::review_routing::ReviewRoster>(context, input)
+        }
+        teams::review_routing::GetSettings::ID => {
+            invoke_read::<teams::review_routing::GetSettings>(context, input)
+        }
         RepositoryTeamRoster::ID => invoke_read::<RepositoryTeamRoster>(context, input),
         RepositoryTeamNames::ID => invoke_read::<RepositoryTeamNames>(context, input),
         CodeOwnerTeams::ID => invoke_read::<CodeOwnerTeams>(context, input),

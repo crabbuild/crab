@@ -4,6 +4,7 @@ import {
   selectDarkTheme,
 } from "./accessibility";
 import type {
+  ReviewRoutingSettings,
   TeamMember,
   TeamPolicy,
   TeamSubmission,
@@ -19,6 +20,7 @@ async function fixture(page: Page, local = false) {
     members: Map<string, TeamMember[]>;
     writes: { body: TeamSubmission; cancel: boolean; path: string }[];
     policy: TeamPolicy;
+    reviewRouting: Map<string, ReviewRoutingSettings>;
     lost: boolean;
     denied: boolean;
     revoked: boolean;
@@ -29,6 +31,7 @@ async function fixture(page: Page, local = false) {
     members: new Map(),
     writes: [],
     policy: { version: 1, member_creation: true },
+    reviewRouting: new Map(),
     lost: false,
     denied: false,
     revoked: false,
@@ -185,6 +188,12 @@ async function fixture(page: Page, local = false) {
             });
           state.teams.find((view) => view.team.id === target)!.team.version +=
             1;
+        } else if (command.kind === "review_routing") {
+          state.reviewRouting.set(target, {
+            version: command.version + 1,
+            algorithm: command.algorithm,
+            reviewers: command.reviewers,
+          });
         } else if (command.kind === "delete")
           state.teams = state.teams.filter((view) => view.team.id !== target);
         else
@@ -229,7 +238,7 @@ async function fixture(page: Page, local = false) {
         },
       });
     const match = new RegExp(
-      `^${base}/teams/([^/]+)(?:/(members|candidates))?$`,
+      `^${base}/teams/([^/]+)(?:/(members|candidates|review-routing))?$`,
     ).exec(path);
     if (match) {
       const team = match[1],
@@ -240,6 +249,14 @@ async function fixture(page: Page, local = false) {
           json: { error: { message: "Team not found" } },
         });
       if (!match[2]) return route.fulfill({ json: view });
+      if (match[2] === "review-routing")
+        return route.fulfill({
+          json: state.reviewRouting.get(team) ?? {
+            version: 0,
+            algorithm: "disabled",
+            reviewers: 1,
+          },
+        });
       const members = state.members.get(team)!;
       const items =
         match[2] === "members"
@@ -338,6 +355,16 @@ for (const mobile of [false, true])
     await expect(
       page.getByRole("heading", { name: "My draft", exact: true }),
     ).toBeVisible();
+    await page.getByLabel("Assignment method").selectOption("fewest_open");
+    await page.getByLabel("Reviewers per request").fill("2");
+    await page.getByRole("button", { name: "Save review assignment" }).click();
+    await expect(
+      page.getByRole("status", { name: "Team submission result" }),
+    ).toContainText("Update review assignment completed.");
+    await expect(page.getByLabel("Assignment method")).toHaveValue(
+      "fewest_open",
+    );
+    await expect(page.getByLabel("Reviewers per request")).toHaveValue("2");
     await expectNoAccessibilityViolations(page);
     expect(
       await page.evaluate(

@@ -15,7 +15,7 @@ use crate::{
     },
     repository::{
         Repository,
-        access::{team_review_recipients, visible_team_names},
+        access::{team_review_plan, visible_team_names},
     },
     server::Server,
 };
@@ -101,10 +101,11 @@ pub(super) async fn set(
     if visible.names.is_empty() && (request || !visible.owner) {
         return Err(Error::NotFound);
     }
-    let recipients = if request {
-        Some(team_review_recipients(server, organization, team).await?)
+    let (recipients, routing) = if request {
+        let plan = team_review_plan(server, &current, team, None).await?;
+        (Some(plan.recipients), plan.routing)
     } else {
-        None
+        (None, None)
     };
     let current = app::membership(server, principal, repo).await?;
     if !current.principal.can_triage(repo.id) {
@@ -130,6 +131,7 @@ pub(super) async fn set(
                     actor: (&actor).into(),
                     team,
                     recipients,
+                    routing,
                 },
             )
             .await,

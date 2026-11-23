@@ -2638,6 +2638,23 @@ requests per PR and 256 members per team request. `review-requested:` search and
 list rollup counts still cover individual requests. Automatic reviewer
 assignment remains open.
 
+### Automatically assign team reviews
+
+Organization owners and team maintainers can open **Teams → Settings →
+Automatic review assignment** and select an assignment method and up to ten
+reviewers per request. Round robin gives priority to members who were assigned
+least recently. Fewest open requests prioritizes members with fewer outstanding
+requests on open pull requests and breaks ties by rotation. Both methods use
+history in the current repository.
+
+Crab considers current team members with durable repository Write or Admin
+access. It skips the PR author, the requester, and people who have already
+reviewed or received an individual request on that PR. Manual team requests
+appear as individual requests when members are assigned. A request with no
+available members stays on the team. CODEOWNERS keeps the team request visible
+alongside any individual assignments, and any eligible code owner can satisfy
+the merge requirement. Only assigned individuals receive routing notifications.
+
 ### Require code owner reviews
 
 In **Settings → Branches**, enable **Require review from code owners** on the

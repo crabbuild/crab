@@ -11,6 +11,7 @@ import type { Commands } from "./commands";
 import { TeamFields } from "./form";
 import { TeamMembers } from "./members";
 import { useTeamRead } from "./read";
+import { TeamReviewRouting } from "./review-routing";
 
 export function TeamDetail({
   organization,
@@ -186,6 +187,13 @@ export function TeamDetail({
                     Save team changes
                   </Button>
                 </form>
+                <Separator />
+                <TeamReviewRouting
+                  organization={organization}
+                  actor={actor}
+                  team={team}
+                  commands={commands}
+                />
                 <Separator />
                 <section className="flex flex-col items-start gap-3">
                   <h3 className="font-semibold">Delete this team</h3>

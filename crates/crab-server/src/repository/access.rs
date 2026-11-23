@@ -13,10 +13,17 @@ use crate::{
         directory::{IdentityKey, LookupAccounts, LookupIdentities},
         organization::{
             Caller, GetOrganization, Role,
-            teams::repository_access::{
-                ActorTeams, RepositoryActor, RepositoryTeamNames, RepositoryTeamQuery,
-                RepositoryTeamRoster, RepositoryTeamsForActor, VisibleRepositoryTeams,
+            teams::{
+                repository_access::{
+                    ActorTeams, RepositoryActor, RepositoryTeamNames, RepositoryTeamQuery,
+                    RepositoryTeamRoster, RepositoryTeamsForActor, VisibleRepositoryTeams,
+                },
+                review_routing::{Algorithm, ReviewRoster},
             },
+        },
+        repository::{
+            MergeReviewers, RepositoryAuthor,
+            review_requests::{automatic::TeamRecipients, routing},
         },
     },
     server::Server,
@@ -205,18 +212,23 @@ pub(crate) async fn organization_members(
     Ok(members)
 }
 
-pub(crate) async fn team_review_recipients(
+pub(crate) async fn team_review_plan(
     server: &Server,
-    organization: Uuid,
+    membership: &app::Membership,
     team: Uuid,
-) -> Result<Vec<String>> {
+    eligibility: Option<&MergeReviewers>,
+) -> Result<TeamRecipients> {
     use crate::cells::repository::review_requests::teams::MAX_REVIEW_RECIPIENTS;
 
     let issuer = server.auth.as_ref().ok_or(Error::NotFound)?.issuer();
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     let roster = app::query_output(
         cells
-            .query::<RepositoryTeamRoster>(Address::Organization(organization), None, vec![team])
+            .query::<ReviewRoster>(
+                Address::Organization(membership.organization.ok_or(Error::NotFound)?),
+                None,
+                team,
+            )
             .await,
     )?;
     if roster.members.len() > MAX_REVIEW_RECIPIENTS {
@@ -224,9 +236,8 @@ pub(crate) async fn team_review_recipients(
             "Team review requests support up to 256 team members",
         ));
     }
-    let ids: Vec<_> = roster.members.into_iter().map(|(_, actor)| actor).collect();
-    let mut recipients = Vec::with_capacity(ids.len());
-    for chunk in ids.chunks(100) {
+    let mut recipients = Vec::with_capacity(roster.members.len());
+    for chunk in roster.members.chunks(100) {
         let identities = app::query_output(
             cells
                 .query::<LookupIdentities>(Address::Directory, None, chunk.to_vec())
@@ -244,5 +255,43 @@ pub(crate) async fn team_review_recipients(
                 .filter_map(|key| (key.issuer == issuer).then_some(key.subject)),
         );
     }
-    Ok(recipients)
+    let routing = if roster.settings.algorithm == Algorithm::Disabled {
+        None
+    } else {
+        let current;
+        let eligibility = match eligibility {
+            Some(eligibility) => eligibility,
+            None => {
+                current = membership.merge_reviewers(server).await?;
+                &current
+            }
+        };
+        let candidates = recipients
+            .iter()
+            .filter(|subject| eligibility.contains(issuer, subject))
+            .map(|subject| RepositoryAuthor {
+                issuer: issuer.to_owned(),
+                subject: subject.clone(),
+                name: membership
+                    .members
+                    .iter()
+                    .find(|member| member.subject == *subject)
+                    .map_or_else(
+                        || "Organization member".into(),
+                        |member| member.name.clone(),
+                    ),
+            })
+            .collect();
+        recipients.clear();
+        Some(routing::Plan {
+            algorithm: roster.settings.algorithm,
+            reviewers: roster.settings.reviewers,
+            candidates,
+        })
+    };
+    Ok(TeamRecipients {
+        team,
+        recipients,
+        routing,
+    })
 }

@@ -725,13 +725,57 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
         .mark_cell_ready(h.server.repositories.values()[0].id)
         .await
         .unwrap();
-    let (organization, _, _) = crate::test_support::http::organizations::bootstrap(&h).await;
+    let (organization, _, bob_id) = crate::test_support::http::organizations::bootstrap(&h).await;
     let alice = h.login().await;
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    *h.provider.mode.lock().await = "valid".into();
     let org = format!("/api/organizations/{organization}");
     let team = Uuid::now_v7();
     h.write(Method::POST, &format!("{org}/teams/commands"), &alice,
         json!({"request_id":team,"command":{"kind":"create","name":"Engineering","description":"","visibility":"secret"}}))
         .await.error_for_status().unwrap();
+    h.write(
+        Method::PUT,
+        &format!("{org}/invitations/{bob_id}"),
+        &alice,
+        json!({"version":0,"role":"member"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    h.write(
+        Method::POST,
+        &format!("{org}/invitation"),
+        &bob,
+        json!({"version":1,"accept":true}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    h.write(Method::POST, &format!("{org}/teams/commands"), &alice,
+        json!({"request_id":Uuid::now_v7(),"command":{"kind":"member","team":team,"member":bob_id,"version":0,"role":"member"}}))
+        .await.error_for_status().unwrap();
+    h.write(
+        Method::POST,
+        "/api/profile",
+        &bob,
+        json!({"request_id":Uuid::now_v7(),"handle":"bob","name":"Bob"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let routing = format!("{org}/teams/{team}/review-routing");
+    assert_eq!(
+        h.http
+            .get(format!("{}{routing}", h.origin))
+            .header(header::COOKIE, &bob)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
     let repository: Value = h
         .write(
             Method::POST,
@@ -793,6 +837,42 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
         .run(&["wait", "[aria-label='Role for Engineering']"])
         .await;
 
+    let team_settings = format!(
+        "{}/-/organizations/{organization}?tab=teams&team={team}&view=settings",
+        h.origin
+    );
+    browser.run(&["open", &team_settings]).await;
+    browser.run(&["wait", "#review-routing-algorithm"]).await;
+    browser
+        .run(&["select", "#review-routing-algorithm", "round_robin"])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Save review assignment",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", "--text", "Update review assignment completed."])
+        .await;
+    assert_eq!(
+        h.json(&routing, &alice).await,
+        json!({"version":1,"algorithm":"round_robin","reviewers":1})
+    );
+    browser.run(&["reload"]).await;
+    browser
+        .run(&[
+            "wait",
+            "--fn",
+            "document.querySelector('#review-routing-algorithm')?.value === 'round_robin'",
+        ])
+        .await;
+
     let repo_id = Uuid::parse_str(repository["id"].as_str().unwrap()).unwrap();
     let token: Value = h
         .write(
@@ -827,6 +907,9 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
     browser
         .run(&["wait", "--text", "Team review requested"])
         .await;
+    let inbox = format!("/api/notifications?repository={repo_id}");
+    h.deliver_notifications(owner, "library").await;
+    assert_eq!(h.json(&inbox, &bob).await["items"], json!([]));
     browser.run(&["reload"]).await;
     let cancel = "[aria-label='Cancel review request for team Engineering']";
     browser.run(&["wait", cancel]).await;
@@ -834,6 +917,37 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
     browser.run(&["wait", "--text", "No reviews yet."]).await;
     let reviewers = h.json(&format!("{pulls}/1/reviewers"), &alice).await;
     assert_eq!(reviewers["teams"][0]["state"], Value::Null);
+    // A read-only team member gets no individual assignment. After granting
+    // Write, the same browser workflow routes the request to that member.
+    let endpoint = format!("/api/repos/{owner}/library/team-access");
+    let revision = h.json(&endpoint, &alice).await["revision"].clone();
+    super::repositories::repository_write(
+        &h,
+        Method::PUT,
+        &endpoint,
+        &alice,
+        repo_id,
+        json!({"expected_revision":revision,"teams":[{"team":team,"access":"write"}]}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    for name in ["Request reviewers", "Request review from team Engineering"] {
+        let selector = format!("[aria-label='{name}']");
+        browser.run(&["wait", &selector]).await;
+        browser.run(&["click", &selector]).await;
+    }
+    browser
+        .run(&["wait", "[aria-label='Cancel review request for bob']"])
+        .await;
+    let routed = h.json(&format!("{pulls}/1/reviewers"), &alice).await;
+    assert_eq!(routed["teams"][0]["state"], Value::Null);
+    assert_eq!(routed["items"][0]["request"]["state"]["kind"], "requested");
+    h.deliver_notifications(owner, "library").await;
+    let inbox = h.json(&inbox, &bob).await;
+    assert_eq!(inbox["items"].as_array().unwrap().len(), 1);
+    assert_eq!(inbox["items"][0]["reason"], "review_requested");
+
     browser
         .run(&[
             "open",

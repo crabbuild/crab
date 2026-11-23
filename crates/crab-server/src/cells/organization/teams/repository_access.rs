@@ -136,40 +136,43 @@ impl Read for RepositoryTeamRoster {
     type Output = RepositoryRoster;
 
     fn execute(context: &mut Transaction<'_>, teams: Self::Input) -> Result<Self::Output> {
-        validate_ids(&teams)?;
         let owners = super::super::repositories::Owners::execute(context, ())?;
-        if teams.is_empty() {
-            return Ok(RepositoryRoster {
-                owners,
-                members: Vec::new(),
-            });
-        }
-        ensure_ready(context)?;
-        let ids = vec!["?"; teams.len()].join(",");
-        let mut params = teams.into_iter().map(blob).collect::<Vec<_>>();
-        params.push(SqlValue::Integer((MAX_TEAM_ACCESS_ROWS + 1) as i64));
-        let rows = context.query(
-            &format!(
-                "SELECT m.team,m.actor FROM organization_team_members m
+        let members = team_members(context, teams)?;
+        Ok(RepositoryRoster { owners, members })
+    }
+}
+
+pub(super) fn team_members(
+    context: &Transaction<'_>,
+    teams: Vec<Uuid>,
+) -> Result<Vec<(Uuid, Uuid)>> {
+    validate_ids(&teams)?;
+    if teams.is_empty() {
+        return Ok(Vec::new());
+    }
+    ensure_ready(context)?;
+    let ids = vec!["?"; teams.len()].join(",");
+    let mut params = teams.into_iter().map(blob).collect::<Vec<_>>();
+    params.push(SqlValue::Integer((MAX_TEAM_ACCESS_ROWS + 1) as i64));
+    let rows = context.query(
+        &format!(
+            "SELECT m.team,m.actor FROM organization_team_members m
                  JOIN organization_teams t ON t.id=m.team
                  JOIN organization_members o ON o.actor=m.actor
                  JOIN organization_membership_epochs e ON e.actor=o.actor
                  WHERE m.team IN ({ids}) AND t.deleted_at_ms IS NULL AND {ACTIVE_MEMBERSHIP}
                  ORDER BY m.team,m.actor LIMIT ?"
-            ),
-            &params,
-        )?;
-        enforce_row_budget(rows.rows.len())?;
-        let members = rows
-            .rows
-            .iter()
-            .map(|row| match row.as_slice() {
-                [team, actor] => Ok((uuid(team)?, uuid(actor)?)),
-                _ => Err(Error::Invalid("invalid repository team roster")),
-            })
-            .collect::<Result<_>>()?;
-        Ok(RepositoryRoster { owners, members })
-    }
+        ),
+        &params,
+    )?;
+    enforce_row_budget(rows.rows.len())?;
+    rows.rows
+        .iter()
+        .map(|row| match row.as_slice() {
+            [team, actor] => Ok((uuid(team)?, uuid(actor)?)),
+            _ => Err(Error::Invalid("invalid repository team roster")),
+        })
+        .collect()
 }
 
 #[derive(Deserialize, Serialize)]
