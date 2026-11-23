@@ -86,6 +86,9 @@ Use `collect_cdn_viewer_requests.py --gcp-logging` on the protected
 worker to collect viewer and origin records for the approved forwarding
 rule. The active `gcloud` identity needs permission to list log entries in
 the fixture project. [Cloud Logging entries.list](https://docs.cloud.google.com/logging/docs/reference/v2/rest/v2/entries/list)
+For each object, the benchmark counts linked origin GETs and requires at
+least one GET when a viewer record reports a fill. Several viewer records
+can describe the same origin transfer. [Cloud CDN logging](https://docs.cloud.google.com/cdn/docs/logging)
 
 For the protected fixture, hydrate projected Xet content and require denial
 for keys from a different scope or generation, the source repository, and the

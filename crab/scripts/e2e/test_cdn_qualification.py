@@ -56,7 +56,7 @@ def sample(provider: str) -> dict[str, Any]:
     return {
         "origin": metrics | {"elapsed_ms": 300, "client_bytes": 8},
         "cold_edge": metrics | {"elapsed_ms": 420, "edge_misses": 1, "origin_fill_bytes": 8, "edge_bytes": 8,
-                                "origin_gets": 2 if provider in ("s3", "azure") else 1},
+                                "origin_gets": 2 if provider in CDN.VIEWER_REQUEST_FILES else 1},
         "warm_edge": metrics | {"elapsed_ms": 120, "edge_hits": 1, "edge_bytes": 8},
         "warm_local": metrics | {"elapsed_ms": 6, "local_payload_hits": 1},
     }
@@ -249,8 +249,6 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, nati
                             record["key_sha256"] = service["lfs_key_sha256"]
                     if arm == "warm_local":
                         client["primer_sha256"] = hashlib.sha256((directory.parent / "warm_edge/client.json").read_bytes()).hexdigest()
-                    if provider == "gcs" and arm == "cold_edge":
-                        client["native_traffic"] = {"get_responses": 0, "head_responses": 0, "body_bytes": 0}
                 elif hydration is not None:
                     root = client["reader"]["cache_root_sha256"]
                     read_fields = CDN.PRODUCT_COUNTERS | CDN.SDK_TIMING_FIELDS | {"arm", "edge_responses", "native_traffic"}
@@ -1995,7 +1993,7 @@ class CdnQualificationTests(unittest.TestCase):
         json_file(log, proof)
 
         measurement = cold / "measurement.json"
-        totals = {"origin_gets": read["native_traffic"]["get_responses"] + 1, "origin_fill_bytes": 20,
+        totals = {"origin_gets": read["native_traffic"]["get_responses"] + 2, "origin_fill_bytes": 20,
                   "client_bytes": read["native_traffic"]["body_bytes"] + read["edge_bytes"] + 12}
         measured = json.loads(measurement.read_bytes()) | {"client_report_sha256": digest} | totals
         for name, error in (("origin_gets", "undercounts observed native GET responses"),

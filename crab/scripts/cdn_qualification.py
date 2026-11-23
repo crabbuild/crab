@@ -2069,9 +2069,9 @@ def verify_viewer_requests(
     # Sparse xorb proof measures origin independence for that object.
     # Benchmarks also charge origin traffic from adjacent reads.
     keys = viewer_keys if xorb_key is None or include_adjacent_origin else {xorb_key}
-    origin_gets = sum(origin_gets_by_key[key] for key in keys)
-    # Cloud CDN can report one fill at both levels or collapse same-key
-    # requests. Distinct keys cannot share a fill and add to the floor.
+    # A Cloud CDN viewer fill implies at least one GET for that key. It may
+    # describe a linked GET or a fill shared by several viewers.
+    origin_gets = sum(max(origin_gets_by_key[key], int(viewer_fill_by_key[key] > 0)) for key in keys)
     fill_bytes = sum(max(viewer_fill_by_key[key], origin_fill_by_key[key]) for key in keys)
     return ViewerRequestMetrics(logged_ids, origin_gets, fill_bytes, successful_fill, completed_cache)
 

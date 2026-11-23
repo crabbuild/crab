@@ -344,7 +344,11 @@ class CdnGitPerformanceQualificationTests(unittest.TestCase):
         fixture.json_file(log, proof | {"client_report_sha256": digest})
 
         report = arm / "measurement.json"
-        external = json.loads(report.read_bytes()) | {"client_report_sha256": digest, "origin_gets": 2}
+        external = json.loads(report.read_bytes()) | {"client_report_sha256": digest}
+        fixture.json_file(report, external | {"origin_gets": 2, "origin_fill_bytes": 25})
+        with self.assertRaisesRegex(ValueError, "undercounts observed native GET responses or logged CDN origin GETs"):
+            self.collect()
+        external["origin_gets"] = 3
         fixture.json_file(report, external | {"origin_fill_bytes": 24})
         with self.assertRaisesRegex(ValueError, "undercounts logged CDN cache fill bytes"):
             self.collect()
