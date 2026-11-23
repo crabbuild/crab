@@ -266,6 +266,38 @@ jobs:
             "$publisher_python" -B "crab/deploy/cdn/$provider/test_publish_export.py"
           done
 
+      - name: Verify Cloud CDN fixture plans
+        shell: bash
+        env:
+          TF_IN_AUTOMATION: "1"
+          CHECKPOINT_DISABLE: "1"
+        run: |
+          tools=$(mktemp -d "$RUNNER_TEMP/crab-cdn-terraform.XXXXXX")
+          curl -fsSLo "$tools/terraform.zip" \
+            https://releases.hashicorp.com/terraform/1.13.3/terraform_1.13.3_linux_amd64.zip
+          printf '%s  %s\n' 71fc43d92ea09907be5d416d2405a6a9c2d1ceaed633f5e175c0af26e8c4b365 \
+            "$tools/terraform.zip" | sha256sum --check
+          unzip -q "$tools/terraform.zip" terraform -d "$tools"
+          for module in crab/deploy/cdn/gcp crab/deploy/cdn/gcp/public-export; do
+            "$tools/terraform" -chdir="$module" init -backend=false -input=false -no-color
+            "$tools/terraform" -chdir="$module" validate -no-color
+            "$tools/terraform" -chdir="$module" test -no-color
+          done
+
+      - name: Verify Front Door fixture templates
+        shell: bash
+        run: |
+          tools=$(mktemp -d "$RUNNER_TEMP/crab-cdn-bicep.XXXXXX")
+          curl -fsSLo "$tools/bicep" \
+            https://github.com/Azure/bicep/releases/download/v0.47.16/bicep-linux-x64
+          printf '%s  %s\n' 64c345a58e0c3e48b1bc98a4e62d6b3adb1d238281297de3400aeafb2697aa5a \
+            "$tools/bicep" | sha256sum --check
+          chmod +x "$tools/bicep"
+          for fixture in crab/deploy/cdn/azure crab/deploy/cdn/azure/public-export; do
+            "$tools/bicep" build "$fixture/main.bicep" --outfile "$tools/fixture.json"
+            python3 -B "$fixture/tests/check_fixture.py" "$tools/fixture.json"
+          done
+
       - name: Check default and qualification CDN builds
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/provider-cdn-features

@@ -798,6 +798,9 @@ and edge payload through redacted observations.
   finalized directory published for that exact attempt before verifying it.
   The live product, deployment, and regional jobs or external workers
   still need configured fixtures.
+  The evidence contract checks the CloudFront policy, runs both Cloud CDN
+  Terraform fixture plans, and compiles both Front Door Bicep templates
+  before checking the compiled gateway and cache policies.
   Record provider/profile, configuration, region, client
   and product action, expected/observed bytes, redacted traces, metrics and
   cleanup. Use test-owned prefixes and distributions in dedicated CI. Level 3
