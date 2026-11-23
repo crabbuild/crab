@@ -526,6 +526,11 @@ pub(super) async fn load_run_git_control(
         }
     }
     let capsules = control.materialize_capsules_with_paged_visibility(router, read_ahead)?;
+    if prefetch {
+        // Leaf control bytes came from one coalesced native read. Report
+        // only after verification because this branch bypasses read_verified.
+        router.store().observe_verified_origin_only_read(&path);
+    }
     Ok((control, capsules))
 }
 

@@ -21,7 +21,7 @@ use crate::{
     Result, StorageError,
     cdn::{
         CdnAccess, CdnGet, CdnReadFamily, CdnRoute, CdnViewer, PayloadObservation,
-        PublicTransitionObservation, ReadLimits,
+        PublicTransitionObservation, ReadLimits, observe_origin_only_read,
     },
     transport_read_admission,
 };
@@ -264,7 +264,12 @@ impl Store {
                     Some(range) => self.range_get(path, range.clone()).await?,
                     None => self.get_immutable_bounded(path, size).await?,
                 };
-                verify(bytes).await
+                let nonempty = !bytes.is_empty();
+                let value = verify(bytes).await?;
+                if nonempty {
+                    self.observe_verified_origin_only_read(path);
+                }
+                Ok(value)
             };
             let range_bytes = range
                 .as_ref()
@@ -294,7 +299,20 @@ impl Store {
         })
     }
 
-    fn cdn_route_for(&self, path: &Path) -> Option<(&Arc<CdnRoute>, CdnReadFamily, ReadLimits)> {
+    /// Report a nonempty native immutable read after authenticating its bytes.
+    ///
+    /// The active route must exclude this family. Reads that restarted at
+    /// origin after an eligible edge attempt cannot supply this evidence.
+    pub fn observe_verified_origin_only_read(&self, path: &Path) {
+        if let Some((route, family)) = self.cdn_path_route(path)
+            && route.limits_for(family).is_none()
+            && let Some(policy) = route.policy()
+        {
+            observe_origin_only_read(policy, family);
+        }
+    }
+
+    fn cdn_path_route(&self, path: &Path) -> Option<(&Arc<CdnRoute>, CdnReadFamily)> {
         let route = self.cdn.as_ref()?;
         let family = route.layout.cdn_read_family(path)?;
         if self.read_prefix_target_identity(path) != Some(&route.target)
@@ -302,6 +320,11 @@ impl Store {
         {
             return None;
         }
+        Some((route, family))
+    }
+
+    fn cdn_route_for(&self, path: &Path) -> Option<(&Arc<CdnRoute>, CdnReadFamily, ReadLimits)> {
+        let (route, family) = self.cdn_path_route(path)?;
         Some((route, family, route.limits_for(family)?))
     }
 

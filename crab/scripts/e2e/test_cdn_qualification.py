@@ -187,6 +187,7 @@ def write_git_measurements(inputs: Path, registration: dict, platform: str, nati
                     "started_at_unix_ms": started, "finished_at_unix_ms": started + metrics["elapsed_ms"],
                     "visible_new_ref": True, "native_writes": 1,
                     "edge_responses": {}, "native_traffic": {"get_responses": 1, "head_responses": 0, "body_bytes": 8},
+                    "origin_only_scopes": [],
                 }
                 if managed:
                     client["managed_grant"] = registration["managed_issuer"] | {"grant_version": 2}
@@ -508,7 +509,8 @@ class CdnQualificationTests(unittest.TestCase):
         public = "publication_sha256" in self.registration
         transition = {"transition_key_sha256": self.object_key} if public else {}
         fetch_path = records / "fetch.json"
-        json_file(fetch_path, fetch | {"publication_sha256": receipt} | transition)
+        native_scopes = ["cloudfront/private/cli/capsule/direct"] if self.scope == "cloudfront/private/cli/git/direct" else []
+        json_file(fetch_path, fetch | {"publication_sha256": receipt, "origin_only_scopes": native_scopes} | transition)
         write_product_viewer_proof(fetch_path, transition.get("transition_key_sha256"))
         rollback = fetch | dict.fromkeys(CDN.PRODUCT_COUNTERS, 0) | {
             "publication_sha256": receipt, "arm": "origin", "edge_responses": {},
@@ -1182,6 +1184,25 @@ class CdnQualificationTests(unittest.TestCase):
                 policy.write_text(f"{scope} {limits}\n")
                 with self.assertRaisesRegex(ValueError, "invalid CDN release read limits"):
                     CDN.release_scopes(policy)
+
+    def test_first_cloudfront_git_release_requires_adjacent_capsule_origin_evidence(self):
+        self.configure("s3", "private", "direct")
+        policy = self.directory / "qualified-scopes.txt"
+        policy.write_text(release_policy_row(self.scope))
+        fetch = self.directory / CDN.GIT_PRODUCT_DIR / "fetch.json"
+        original = json.loads(fetch.read_bytes())
+        for scopes, error in (
+            ([], "must verify unpromoted capsule bytes from native storage"),
+            (["cloudfront/private/sdk/capsule/direct"], "outside its active binding or native traffic"),
+            ([self.scope], "origin-only read for a compiled CDN scope"),
+        ):
+            with self.subTest(scopes=scopes):
+                json_file(fetch, original | {"origin_only_scopes": scopes})
+                self.rejected(error, "--cdn-release-policy", str(policy))
+        json_file(fetch, original)
+        write_product_viewer_proof(fetch)
+        result = self.command("--cdn-release-policy", str(policy))
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_release_verification_rejects_provider_joined_transfer_outside_limits(self):
         self.configure("s3", "private", "direct")

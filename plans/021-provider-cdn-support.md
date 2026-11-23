@@ -537,8 +537,11 @@ Promote private CloudFront direct CLI Git pack reads first. Qualify the
 exact release candidate commit and the ordinary release build for that row.
 Use the qualification feature to develop and test fixtures. The candidate's
 ordinary build must demonstrate the promoted read and the origin behavior of
-adjacent unpromoted families. Block promotion when required evidence still
-depends on a generic trace or an externally supplied pass flag.
+adjacent unpromoted families. The Git fixture verifies capsule controls in
+the same fetch. Until its capsule scope is enabled, the product record must
+show verified capsule bytes from the selected native target. Block promotion
+when required evidence depends on a generic trace or an externally supplied
+pass flag.
 
 Start with the dedicated S3 repository and CloudFront distribution. Configure
 `provider-qualification-s3` for the native contract job and

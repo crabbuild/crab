@@ -931,6 +931,10 @@ ordinary-build lifecycle reads, including SDK clone and fetch and sparse Xet
 reads. Adjacent reads, such as capsule reads during a Git fetch or shard reads
 during hydration, can use the edge only after their own scope appears in the
 compiled policy.
+For the first private direct CloudFront CLI Git scope, keep the capsule
+control read in the product fetch. While the adjacent capsule scope is
+absent from the compiled policy, the retained fetch must show that the same
+active binding verified capsule control bytes from the selected S3 origin.
 On every release platform, retain a provider-confirmed warm cache hit that
 completed at the exact byte limit for each enabled form. A ranged hit must
 reach both the object-size and single-range limits in the same request. A hit

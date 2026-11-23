@@ -120,6 +120,7 @@ class CdnManagedIssuerQualificationTests(unittest.TestCase):
                                "binding_sha256": registration["viewer_binding_sha256"] if version == 2 else "",
                                "public_export_sha256": "", "cache_root_sha256": str(version) * 64},
                     "edge_responses": responses, "native_traffic": measure_native(lines, config["scope"]),
+                    "origin_only_scopes": [],
                 }
                 path = "git-product/fetch.json" if version == 2 else "traces/rollback.json"
                 write_json(root / path, client)

@@ -188,7 +188,7 @@ GIT_MEASUREMENT_FIELDS = GIT_EXTERNAL_METRICS | {"schema", "client_report_sha256
 GIT_FETCH_FIELDS = PRODUCT_COUNTERS | CDN_PROVENANCE_FIELDS | {
     "schema", "name", "arm", "expected_sha256", "observed_sha256", "expected_bytes", "observed_bytes",
     "native_writes", "visible_new_ref", "elapsed_ms", "publication_oid", "started_at_unix_ms", "finished_at_unix_ms",
-    "platform", "publication_sha256", "candidate", "reader", "edge_responses", "native_traffic",
+    "platform", "publication_sha256", "candidate", "reader", "edge_responses", "native_traffic", "origin_only_scopes",
 }
 MANAGED_GIT_GRANT_FIELDS = MANAGED_ISSUER_FIELDS | {"repository_sha256", "grant_version"}
 MANAGED_GIT_READ_ROLES = ("approved_v2", "v1_peer")
@@ -1575,6 +1575,16 @@ def validate_git_fetch(
             f"{label} did not verify the published payload")
     verify_git_traffic(client, edge, label)
     native = client["native_traffic"]
+    origin_only_scopes = client["origin_only_scopes"]
+    require(isinstance(origin_only_scopes, list) and len(origin_only_scopes) <= len(FAMILIES)
+            and all(isinstance(scope, str) for scope in origin_only_scopes)
+            and origin_only_scopes == sorted(set(origin_only_scopes)), f"{label} has invalid origin-only read scopes")
+    selected = scope_parts(provenance["scope"])
+    for scope in origin_only_scopes:
+        observed = scope_parts(scope)
+        require(observed[:3] == selected[:3] and observed[4] == selected[4]
+                and reader["binding_sha256"] and positive(native["get_responses"]) and positive(native["body_bytes"]),
+                f"{label} has origin-only read evidence outside its active binding or native traffic")
     if mode == "origin":
         require(reader["binding_sha256"] == "" and all(client[key] == 0 for key in PRODUCT_COUNTERS),
                 f"{label} requires an inactive viewer binding and zero edge or local payload reads")
@@ -2437,6 +2447,14 @@ def collect_git_product_action(
     fetch_raw = read_git_record(inputs / "fetch.json", limit=GIT_FETCH_RECORD_LIMIT)
     issuer = row.get("managed_issuer")
     fetch = validate_git_fetch(fetch_raw, fetch_provenance, "edge", "Git product action", managed_issuer=issuer)
+    if policies is not None:
+        native_scopes = fetch["origin_only_scopes"]
+        require(all(scope not in policies for scope in native_scopes),
+                "Git product action reported an origin-only read for a compiled CDN scope")
+        if row["scope"] == "cloudfront/private/cli/git/direct":
+            capsule = "cloudfront/private/cli/capsule/direct"
+            require(capsule in policies or capsule in native_scopes,
+                    "ordinary CloudFront Git fetch must verify unpromoted capsule bytes from native storage")
     require(fetch["reader"]["binding_sha256"] == row.get("viewer_binding_sha256"),
             "product fetch did not use the registered viewer binding")
     require(fetch["reader"]["public_export_sha256"] == public_export_sha256,

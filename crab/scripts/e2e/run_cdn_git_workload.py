@@ -433,11 +433,13 @@ def fetch_once(
             retain_managed_observation(managed_capture, run, events, payload)
     lines = run.stderr.splitlines()
     edge_responses = {}
+    origin_only_scopes = set()
     lfs_key = None
     if crab is not None:
         physical_key = f"{target['repository_prefix']}/{lfs_object_path(record['sha256'])}"
         lfs_key = hashlib.sha256(physical_key.encode()).hexdigest()
-    metrics = measure(lines, record["scope"], edge_responses=edge_responses, expected_lfs_key=lfs_key)
+    metrics = measure(lines, record["scope"], edge_responses=edge_responses, expected_lfs_key=lfs_key,
+                      origin_only_scopes=origin_only_scopes)
     if proof is not None:
         verify_transition_events(lines, record["scope"], proof)
     action = cli_action_name(record["scope"])
@@ -448,7 +450,7 @@ def fetch_once(
         "publication_oid": record["oid"], "started_at_unix_ms": started_at, "finished_at_unix_ms": finished_at,
         "platform": guard.platform, "candidate": guard.candidate,
         "reader": verified_read(lines, read) | guard.fingerprints, "edge_responses": edge_responses,
-        "native_traffic": measure_native(lines, record["scope"]),
+        "native_traffic": measure_native(lines, record["scope"]), "origin_only_scopes": sorted(origin_only_scopes),
     } | metrics | authority
 
 

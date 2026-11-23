@@ -31,6 +31,16 @@ def verified(**fields):
 
 
 class CdnProductQualificationTests(unittest.TestCase):
+    def test_origin_only_evidence_keeps_adjacent_families_for_the_same_binding(self):
+        scopes = set()
+        fields = {"message": PRODUCT.ORIGIN_ONLY_EVENT, "provider": "s3", "access": "private",
+                  "consumer": "cli", "family": "capsule", "profile": "direct"}
+        lines = [json.dumps({"target": PRODUCT.TARGET, "fields": fields | change}).encode()
+                 for change in ({}, {"consumer": "sdk"}, {"profile": "managed"}, {"provider": "gcs"})]
+        metrics = PRODUCT.measure(lines, SCOPE, origin_only_scopes=scopes)
+        self.assertEqual(scopes, {"cloudfront/private/cli/capsule/direct"})
+        self.assertTrue(all(value == 0 for value in metrics.values()))
+
     def test_counts_actual_attempts_and_completed_bodies_for_the_requested_row(self):
         messages = [
             b"remote: progress",

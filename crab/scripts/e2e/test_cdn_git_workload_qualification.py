@@ -136,6 +136,10 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             "        if command == 'git-upload-pack':\n"
             "            emit_read()\n"
             "            emit_native()\n"
+            "            if managed_url is None and not evidence.exists() and not (origin.parent / 'binding-off').exists():\n"
+            "                print(json.dumps({'target':'crab_storage::cdn::transfer', 'fields':{\n"
+            "                    'message':'CDN verified origin-only read', 'provider':'s3', 'access':'private',\n"
+            "                    'consumer':'cli', 'family':'capsule', 'profile':'direct'}}), file=sys.stderr, flush=True)\n"
             "        if command == 'git-upload-pack' and evidence.exists():\n"
             "            for event in json.loads(evidence.read_bytes()):\n"
             "                print(json.dumps(event), file=sys.stderr, flush=True)\n"
@@ -200,10 +204,12 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         self.assertEqual((publication["payload_bytes"], fetched["observed_bytes"]), (payload_bytes, payload_bytes))
         self.assertEqual(fetched["observed_edge_gets"], 1)
         self.assertEqual(fetched["verified_edge_payloads"], 1)
+        self.assertEqual(fetched["origin_only_scopes"], ["cloudfront/private/cli/capsule/direct"])
         self.assertNotIn("fixture_cleanup_verified", fetched)
         (self.root / "binding-off").touch()
         (self.root / "origin-only").touch()
         rollback = self.run_phase("fetch-origin")
+        self.assertEqual(rollback["origin_only_scopes"], [])
         retired = self.run_phase("retire")
         self.assertTrue(retired["ref_retired"])
         records = self.root / "git-product"

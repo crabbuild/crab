@@ -34,6 +34,17 @@ pub fn is_read_evidence_target(target: &str) -> bool {
     )
 }
 
+pub(crate) fn observe_origin_only_read(policy: CdnPolicy, family: CdnReadFamily) {
+    tracing::debug!(target: TARGET, parent: None,
+        provider = provider_label(policy.provider),
+        consumer = policy.consumer.label(),
+        access = policy.visibility.label(),
+        profile = policy.profile.label(),
+        family = family.label(),
+        "CDN verified origin-only read"
+    );
+}
+
 fn service_instance() -> &'static str {
     SERVICE_INSTANCE.get_or_init(|| format!("{:x}", Sha256::digest(rand::random::<[u8; 32]>())))
 }
