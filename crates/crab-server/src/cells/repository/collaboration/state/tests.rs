@@ -73,6 +73,7 @@ fn input(kind: SubjectKind) -> Input {
         actor: actor(),
         can_triage: false,
         can_post_locked: false,
+        can_mark_duplicate: false,
         version: 1,
         state: State::Closed,
         reason: None,

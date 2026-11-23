@@ -117,6 +117,9 @@ pub(in crate::cells) fn dispatch_mutation(
         collaboration::dependencies::Set::ID => {
             invoke_mutation::<collaboration::dependencies::Set>(context, input)
         }
+        collaboration::duplicates::Undo::ID => {
+            invoke_mutation::<collaboration::duplicates::Undo>(context, input)
+        }
         collaboration::minimization::Set::ID => {
             invoke_mutation::<collaboration::minimization::Set>(context, input)
         }

@@ -176,6 +176,7 @@ async fn descending_subject_pages_remain_stable_when_new_events_arrive() {
         write::<CreateComment>(
             &cell,
             CreateCommentInput {
+                can_mark_duplicate: false,
                 can_post_locked: false,
                 issue: 1,
                 submission_id: *Uuid::now_v7().as_bytes(),
@@ -197,6 +198,7 @@ async fn descending_subject_pages_remain_stable_when_new_events_arrive() {
     write::<CreateComment>(
         &cell,
         CreateCommentInput {
+            can_mark_duplicate: false,
             can_post_locked: false,
             issue: 1,
             submission_id: *Uuid::now_v7().as_bytes(),
@@ -297,6 +299,7 @@ async fn event_sequence_subject_index_and_receipts_survive_native_restart() {
             &repository,
             identity(),
             CreateCommentInput {
+                can_mark_duplicate: false,
                 can_post_locked: false,
                 issue: 1,
                 submission_id: *Uuid::now_v7().as_bytes(),
@@ -340,6 +343,7 @@ async fn review_threads_replies_and_merge_completion_record_their_actual_targets
     write::<CreateComment>(
         &cell,
         CreateCommentInput {
+            can_mark_duplicate: false,
             can_post_locked: false,
             issue: 1,
             submission_id: *Uuid::now_v7().as_bytes(),
@@ -369,6 +373,7 @@ async fn review_threads_replies_and_merge_completion_record_their_actual_targets
     write::<CreatePullComment>(
         &cell,
         CreatePullCommentInput {
+            can_mark_duplicate: false,
             can_post_locked: false,
             pull: 1,
             submission_id: *Uuid::now_v7().as_bytes(),

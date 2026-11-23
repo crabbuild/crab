@@ -5,6 +5,7 @@ import { Author } from "../author";
 import { Link } from "@/components/navigation/link";
 import { repoHref } from "@/lib/repository-route";
 import type { Repository } from "@/lib/api";
+import type { ReactNode } from "react";
 import type { ActivityEvent, Target } from "./model";
 
 function subject(target: Target) {
@@ -29,6 +30,10 @@ function action(event: ActivityEvent): string {
       return "removed parent issue";
     case "dependency_changed":
       return event.action.active ? "added blocker" : "removed blocker";
+    case "duplicate_marked":
+      return "linked the canonical discussion";
+    case "duplicate_unmarked":
+      return "removed the duplicate link to";
     case "created":
       switch (event.target.kind) {
         case "issue":
@@ -120,11 +125,13 @@ export function ActivityItem({
   event,
   href,
   hidden,
+  children,
 }: {
   repo: Repository;
   event: ActivityEvent;
   href?: string;
   hidden?: boolean;
+  children?: ReactNode;
 }) {
   const parent = subject(event.target);
   const parameters = {
@@ -144,14 +151,25 @@ export function ActivityItem({
     "number" in event.action || "project" in event.action
       ? event.action
       : undefined;
+  const duplicate =
+    event.action.kind === "duplicate_marked" ||
+    event.action.kind === "duplicate_unmarked"
+      ? event.action
+      : null;
   const linkedIssue =
     related?.kind === "issue_linked" ||
     related?.kind === "issue_unlinked" ||
     related?.kind === "dependency_changed" ||
     related?.kind === "parent_assigned" ||
     related?.kind === "parent_removed";
-  const relatedHref =
-    related && "project" in related
+  const relatedHref = duplicate
+    ? repoHref(
+        repo,
+        duplicate.subject_kind === "pull"
+          ? { view: "pulls", pull: String(duplicate.number) }
+          : { view: "issues", issue: String(duplicate.number) },
+      )
+    : related && "project" in related
       ? repoHref(repo, { view: "projects", project: related.project })
       : related
         ? repoHref(repo, {
@@ -174,22 +192,38 @@ export function ActivityItem({
         <strong>
           <Author author={event.actor} />
         </strong>{" "}
-        {action(event)}{" "}
-        {related && (
+        {event.action.kind === "duplicate_marked" ? (
           <>
-            <Link href={relatedHref}>{related.title}</Link> on{" "}
+            marked{" "}
+            <Link href={parentHref}>
+              #{parent.number} {event.title}
+            </Link>{" "}
+            as a duplicate of{" "}
+            <Link href={relatedHref}>
+              #{event.action.number} {event.action.title}
+            </Link>
+          </>
+        ) : (
+          <>
+            {action(event)}{" "}
+            {related && (
+              <>
+                <Link href={relatedHref}>{related.title}</Link> on{" "}
+              </>
+            )}
+            <Link
+              href={
+                event.action.kind === "review_dismissed" &&
+                event.target.kind === "pull_review"
+                  ? `${parentHref}#pullrequestreview-${event.target.number}`
+                  : parentHref
+              }
+            >
+              #{parent.number} {event.title}
+            </Link>
           </>
         )}
-        <Link
-          href={
-            event.action.kind === "review_dismissed" &&
-            event.target.kind === "pull_review"
-              ? `${parentHref}#pullrequestreview-${event.target.number}`
-              : parentHref
-          }
-        >
-          #{parent.number} {event.title}
-        </Link>
+        {children}
         {event.action.kind === "locked" &&
           event.action.expires_at_ms !== undefined && (
             <> until {timestamp(event.action.expires_at_ms)}</>

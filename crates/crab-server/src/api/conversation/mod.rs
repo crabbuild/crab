@@ -210,9 +210,15 @@ async fn page(
             "Conversation reaction count is invalid",
         ));
     }
-    Ok(Json(
-        json!({"items":items,"start":encode(page.start)?,"end":encode(page.end)?,"has_earlier":page.has_earlier,"has_later":page.has_later,"head_oid":head}),
-    ))
+    Ok(Json(json!({
+        "items": items,
+        "start": encode(page.start)?,
+        "end": encode(page.end)?,
+        "has_earlier": page.has_earlier,
+        "has_later": page.has_later,
+        "head_oid": head,
+        "undo_duplicate_event": page.duplicate_event.filter(|_| principal.can_write(repo.id)),
+    })))
 }
 async fn issue(
     State(server): State<Arc<Server>>,

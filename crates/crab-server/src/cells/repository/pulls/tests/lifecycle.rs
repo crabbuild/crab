@@ -170,6 +170,7 @@ async fn every_fresh_pull_mutation_obeys_archive_while_committed_receipts_replay
         write::<CreatePullComment>(
             &cell,
             CreatePullCommentInput {
+                can_mark_duplicate: false,
                 can_post_locked: false,
                 pull: 1,
                 submission_id: *Uuid::now_v7().as_bytes(),
@@ -264,6 +265,7 @@ async fn every_fresh_pull_mutation_obeys_archive_while_committed_receipts_replay
         &cell,
         revision,
         CreatePullCommentInput {
+            can_mark_duplicate: false,
             can_post_locked: false,
             pull: 1,
             submission_id: *Uuid::now_v7().as_bytes(),

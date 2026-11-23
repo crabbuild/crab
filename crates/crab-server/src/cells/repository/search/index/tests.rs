@@ -216,6 +216,7 @@ async fn comments_reactions_and_rejected_edits_keep_index_totals_consistent() {
         write::<CreateComment>(
             &cell,
             CreateCommentInput {
+                can_mark_duplicate: false,
                 can_post_locked: false,
                 submission_id: *Uuid::now_v7().as_bytes(),
                 issue: 1,
@@ -623,6 +624,7 @@ async fn temporary_locks_expire_in_enforcement_and_search_and_invalidate_continu
         .await
         .unwrap();
     let comment = || CreateCommentInput {
+        can_mark_duplicate: false,
         can_post_locked: false,
         issue: 1,
         submission_id: *Uuid::now_v7().as_bytes(),

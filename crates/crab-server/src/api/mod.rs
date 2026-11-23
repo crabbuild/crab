@@ -17,6 +17,7 @@ mod discussion_lock;
 mod discussion_search;
 mod discussion_state;
 mod discussion_target;
+mod duplicates;
 mod edit_history;
 mod fork_sync;
 mod issue_dependencies;
@@ -557,6 +558,7 @@ pub(crate) fn routes(server: Arc<Server>) -> axum::Router<Arc<Server>> {
         .merge(conversation::routes(Arc::clone(&server)))
         .merge(discussion_lock::routes(Arc::clone(&server)))
         .merge(edit_history::routes(Arc::clone(&server)))
+        .merge(duplicates::routes(Arc::clone(&server)))
         .merge(issue_dependencies::routes(Arc::clone(&server)))
         .merge(comment_visibility::routes(Arc::clone(&server)))
         .merge(discussion_state::routes(Arc::clone(&server)))

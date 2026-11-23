@@ -78,6 +78,7 @@ async fn seed(cell: &RepositoryCell, count: usize) {
         write::<CreateComment>(
             cell,
             CreateCommentInput {
+                can_mark_duplicate: false,
                 can_post_locked: false,
                 issue: 1,
                 submission_id: *Uuid::now_v7().as_bytes(),
@@ -89,6 +90,7 @@ async fn seed(cell: &RepositoryCell, count: usize) {
         write::<CreatePullComment>(
             cell,
             CreatePullCommentInput {
+                can_mark_duplicate: false,
                 can_post_locked: false,
                 pull: 1,
                 submission_id: *Uuid::now_v7().as_bytes(),
@@ -293,6 +295,7 @@ async fn serialized_byte_bounds_keep_every_large_contribution_reachable() {
         write::<CreateComment>(
             &cell,
             CreateCommentInput {
+                can_mark_duplicate: false,
                 can_post_locked: false,
                 issue: 1,
                 submission_id: *Uuid::now_v7().as_bytes(),

@@ -114,6 +114,7 @@ async fn change(
                     subject,
                     actor: (&author).into(),
                     can_triage: membership.principal.can_triage(repo.id),
+                    can_mark_duplicate: membership.principal.can_write(repo.id),
                     can_post_locked: super::discussion_target::can_manage(
                         &membership.principal,
                         repo.id,

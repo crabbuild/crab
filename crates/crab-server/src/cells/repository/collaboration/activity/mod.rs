@@ -33,6 +33,16 @@ pub(crate) enum Action {
         title: String,
         active: bool,
     },
+    DuplicateMarked {
+        number: u64,
+        subject_kind: super::SubjectKind,
+        title: String,
+    },
+    DuplicateUnmarked {
+        number: u64,
+        subject_kind: super::SubjectKind,
+        title: String,
+    },
     Created,
     Drafted,
     ReadyForReview,
@@ -108,6 +118,19 @@ pub(crate) enum Action {
 impl Action {
     pub(super) fn related_subject(&self) -> Option<Subject> {
         match self {
+            Self::DuplicateMarked {
+                number,
+                subject_kind,
+                ..
+            }
+            | Self::DuplicateUnmarked {
+                number,
+                subject_kind,
+                ..
+            } => Some(Subject {
+                kind: *subject_kind,
+                number: *number,
+            }),
             Self::IssueLinked { number, .. }
             | Self::IssueUnlinked { number, .. }
             | Self::ParentAssigned { number, .. }
@@ -121,6 +144,29 @@ impl Action {
     }
 
     fn validate(&self, target: Target) -> crate::cells::Result<()> {
+        if let Self::DuplicateMarked {
+            number,
+            subject_kind,
+            title,
+        }
+        | Self::DuplicateUnmarked {
+            number,
+            subject_kind,
+            title,
+        } = self
+        {
+            validate_number(*number)?;
+            validate_title(title)?;
+            if matches!(target, Target::Issue { .. } | Target::Pull { .. })
+                && *subject_kind == target.subject().kind
+                && *number != target.subject().number
+            {
+                return Ok(());
+            }
+            return Err(crate::cells::Error::Invalid(
+                "duplicate action does not match its discussion",
+            ));
+        }
         if matches!(self, Self::CommentHidden { .. } | Self::CommentRestored)
             && super::minimization::supports(target)
         {

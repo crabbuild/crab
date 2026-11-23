@@ -2686,6 +2686,22 @@ reads, attachments, and discussion search retain the original content. Update
 serving peers together before hiding comments to enable the new activity events
 and batched presentation response. Existing comments need no migration.
 
+### Mark duplicate issues and pull requests
+
+Repository writers can post `Duplicate of #42` on its own line in a new
+issue or pull request comment. The number resolves within the same repository
+and discussion kind. Crab records the comment and an attributed event that
+links the duplicate and canonical discussion. The same instruction works when
+posting a comment with a close or reopen action. Closing remains an explicit
+action.
+
+The source conversation shows **Undo** on its current duplicate mark. An
+authorized writer can remove that mark while retaining the original comment
+and both events. The conversation response includes `undo_duplicate_event`
+for writers. Use `PUT .../duplicates/{issue|pull}/{number}/undo` with
+`{event}`. An exact retry returns the same result, and a stale event cannot
+remove a newer mark.
+
 ### Track issue dependencies
 
 Open **Issue dependencies** in the issue sidebar to see **Blocked by** and

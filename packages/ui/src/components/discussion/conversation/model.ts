@@ -61,6 +61,12 @@ export type Action =
       active: boolean;
     }
   | {
+      kind: "duplicate_marked" | "duplicate_unmarked";
+      number: number;
+      subject_kind: "issue" | "pull";
+      title: string;
+    }
+  | {
       kind: "issue_closed";
       reason: "completed" | "not_planned";
       pull?: number;
@@ -124,6 +130,7 @@ export interface Page {
   has_earlier: boolean;
   has_later: boolean;
   head_oid: string | null;
+  undo_duplicate_event?: number | null;
 }
 export function entryKey(entry: Entry) {
   return `${entry.kind}:${entry.value.number}`;

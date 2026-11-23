@@ -509,6 +509,16 @@ digest encoding and validation. Public HTTP cannot supply bindings.
 Update peers together; there is no old list-shape reader or source-scan fallback.
 Review-status predicates are described below.
 
+## Duplicate discussion marks
+
+A new top-level comment can install a typed duplicate mark with its
+contribution and activity in one Repository transaction. The mark binds
+the original event number. Undo retains its tombstone, and submitting a
+recorded comment again replays its receipt before looking at its text or
+current Write authority. Both issue and PR writers share the same parser
+and bounded chain check. Update serving peers together before recording
+the new activity variants. Existing discussions need no preparation.
+
 ## Issue dependencies
 
 The Repository Cell records the issue pair, version tombstone, and both active

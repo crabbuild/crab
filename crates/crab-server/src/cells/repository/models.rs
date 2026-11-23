@@ -151,6 +151,8 @@ pub(crate) struct IssueRecord {
 pub(crate) struct CreateCommentInput {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub can_post_locked: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_mark_duplicate: bool,
     pub submission_id: [u8; 16],
     pub issue: u64,
     pub author: RepositoryAuthor,

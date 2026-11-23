@@ -208,6 +208,7 @@ async fn qualified_commenters_cover_all_sources_survive_rebuild_and_follow_sourc
     for i in 0..18 {
         let number = if i < 9 { 1 } else { 2 };
         let comment = CreateCommentInput {
+            can_mark_duplicate: false,
             can_post_locked: false,
             submission_id: *Uuid::now_v7().as_bytes(),
             issue: number,
@@ -226,6 +227,7 @@ async fn qualified_commenters_cover_all_sources_survive_rebuild_and_follow_sourc
             write::<CreatePullComment>(
                 &cell,
                 CreatePullCommentInput {
+                    can_mark_duplicate: false,
                     can_post_locked: false,
                     submission_id: *Uuid::now_v7().as_bytes(),
                     pull: number,
@@ -487,6 +489,7 @@ async fn qualified_commenters_cover_all_sources_survive_rebuild_and_follow_sourc
         write::<CreateComment>(
             &cell,
             CreateCommentInput {
+                can_mark_duplicate: false,
                 can_post_locked: false,
                 submission_id: *Uuid::now_v7().as_bytes(),
                 issue: 3,

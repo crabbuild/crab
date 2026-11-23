@@ -158,6 +158,7 @@ async fn field_search_covers_all_contribution_bodies_and_keeps_edits_deletion_an
             write::<CreateComment>(
                 &cell,
                 CreateCommentInput {
+                    can_mark_duplicate: false,
                     can_post_locked: false,
                     submission_id: *Uuid::now_v7().as_bytes(),
                     issue: 1,
@@ -173,6 +174,7 @@ async fn field_search_covers_all_contribution_bodies_and_keeps_edits_deletion_an
         write::<CreatePullComment>(
             &cell,
             CreatePullCommentInput {
+                can_mark_duplicate: false,
                 can_post_locked: false,
                 submission_id: *Uuid::now_v7().as_bytes(),
                 pull: 1,

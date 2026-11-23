@@ -478,10 +478,7 @@ async fn comment(
     let Json(input) = input?;
     let author = actor(&principal)?;
     body(&input.body, true)?;
-    let can_post_locked = app::membership(&server, &principal, &repo)
-        .await?
-        .principal
-        .can_moderate(repo.id);
+    let membership = app::membership(&server, &principal, &repo).await?;
     let routed = app::repository_cell(&server, &repo)?;
     let output = crate::app::command_output(
         routed
@@ -490,7 +487,8 @@ async fn comment(
                 &routed.target,
                 crate::app::mutation_identity()?,
                 CreateCommentInput {
-                    can_post_locked,
+                    can_post_locked: membership.principal.can_moderate(repo.id),
+                    can_mark_duplicate: membership.principal.can_write(repo.id),
                     submission_id: app::submission_id(&input.request_id)?,
                     issue: number(id)?,
                     author: crate::cells::repository::RepositoryAuthor::from(&author),

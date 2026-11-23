@@ -286,6 +286,7 @@ async fn retention_preserves_original_and_bounds_large_escaped_revisions() {
             &cell.target,
             crate::app::mutation_identity().unwrap(),
             crate::cells::repository::CreateCommentInput {
+                can_mark_duplicate: false,
                 can_post_locked: false,
                 submission_id: *Uuid::now_v7().as_bytes(),
                 issue: 1,

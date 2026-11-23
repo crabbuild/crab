@@ -237,6 +237,7 @@ async fn pinned_cards_read_current_titles_close_reasons_and_indexed_comment_coun
     write::<CreateComment>(
         &cell,
         CreateCommentInput {
+            can_mark_duplicate: false,
             can_post_locked: false,
             submission_id: *uuid::Uuid::now_v7().as_bytes(),
             issue: 1,

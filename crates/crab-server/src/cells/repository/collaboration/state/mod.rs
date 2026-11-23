@@ -24,6 +24,8 @@ pub(crate) struct Input {
     pub can_triage: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub can_post_locked: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_mark_duplicate: bool,
     pub version: u64,
     pub state: State,
     pub reason: Option<Reason>,
@@ -160,19 +162,23 @@ fn apply(context: &mut Transaction<'_>, input: Input) -> Result<MutationResult<O
     }
     // The contribution precedes the state event in the timeline. Rejection
     // rolls this scope back before the terminal decision is recorded.
-    let comment =
-        match (&input.body, input.subject.kind) {
-            (Some(body), SubjectKind::Issue) => Some(Comment::Issue(issues::append_comment(
-                context,
-                input.subject.number,
-                &input.actor,
-                body,
-            )?)),
-            (Some(body), SubjectKind::Pull) => Some(Comment::Pull(
-                pulls::comments::append_comment(context, input.subject.number, &input.actor, body)?,
-            )),
-            (None, _) => None,
-        };
+    let comment = match (&input.body, input.subject.kind) {
+        (Some(body), SubjectKind::Issue) => Some(Comment::Issue(issues::append_comment(
+            context,
+            input.subject.number,
+            &input.actor,
+            body,
+            input.can_mark_duplicate,
+        )?)),
+        (Some(body), SubjectKind::Pull) => Some(Comment::Pull(pulls::comments::append_comment(
+            context,
+            input.subject.number,
+            &input.actor,
+            body,
+            input.can_mark_duplicate,
+        )?)),
+        (None, _) => None,
+    };
     let rejected = match input.subject.kind {
         SubjectKind::Issue => match UpdateIssue::execute(
             context,

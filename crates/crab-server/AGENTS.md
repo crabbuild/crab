@@ -245,6 +245,8 @@ single activity event is indexed into both timelines.
 `dependencies.rs` owns the versioned issue graph, its active direction indexes,
 and bounded cycle checking. It shares one dependency event between both issues
 and computes blocked status for issue and Project reads in the source snapshot.
+`duplicates.rs` owns typed duplicate marks and event-bound undo; the canonical
+issue and PR comment writers call it before their native receipts commit.
 `collaboration/mentions.rs` records Markdown mentions with the source body.
 `collaboration/mention_settings.rs` owns versioned aliases. `server/mentions.rs`
 delivers the durable outbox to `cells/directory/notifications.rs`.

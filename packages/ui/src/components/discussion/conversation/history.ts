@@ -105,6 +105,7 @@ export function useConversation(
     entries: Object.values(cache).sort(entryOrder),
     window,
     head: settled?.head_oid ?? null,
+    undoDuplicateEvent: settled?.undo_duplicate_event ?? null,
     older: bounds.has_earlier,
     newer: bounds.has_later,
     initialized: Boolean(settled || resource.error),

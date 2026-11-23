@@ -63,6 +63,8 @@ pub(crate) struct Page {
     pub has_earlier: bool,
     pub has_later: bool,
     pub source: Option<ReviewSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate_event: Option<u64>,
 }
 
 fn indexed(
@@ -235,6 +237,7 @@ impl Read for ListConversation {
             has_earlier,
             has_later,
             source,
+            duplicate_event: super::super::duplicates::current(context, input.subject)?,
         }))
     }
 }

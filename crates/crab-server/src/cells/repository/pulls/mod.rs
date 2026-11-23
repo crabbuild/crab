@@ -324,6 +324,8 @@ pub(crate) enum UpdatePullOutcome {
 pub(crate) struct CreatePullCommentInput {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub can_post_locked: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_mark_duplicate: bool,
     pub pull: u64,
     pub submission_id: [u8; 16],
     pub author: RepositoryAuthor,

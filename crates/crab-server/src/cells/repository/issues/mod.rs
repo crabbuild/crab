@@ -212,7 +212,13 @@ impl Mutation for CreateComment {
         )? {
             return Ok(MutationResult::Rejected(CreateCommentOutcome::Locked));
         }
-        let record = append_comment(context, input.issue, &input.author, &input.body)?;
+        let record = append_comment(
+            context,
+            input.issue,
+            &input.author,
+            &input.body,
+            input.can_mark_duplicate,
+        )?;
         context.sql(&SqlBatch {
             statements: vec![statement(
                 "INSERT INTO repository_comment_submissions(issue_number, request_id, payload_digest, comment_number) VALUES (?, ?, ?, ?)",
@@ -238,6 +244,7 @@ pub(in crate::cells::repository) fn append_comment(
     issue: u64,
     author: &RepositoryAuthor,
     body: &str,
+    can_mark_duplicate: bool,
 ) -> crate::cells::Result<CommentRecord> {
     let now = timestamp(context.now_ms())?;
     let sequence = context.sql(&SqlBatch {
@@ -276,6 +283,9 @@ pub(in crate::cells::repository) fn append_comment(
     search::contributions::project(context, target, &record.author, &record.body)?;
     let source = activity::append(context, target, &record.author, Action::Created)?;
     crate::cells::repository::collaboration::body_written(context, &source, None, &record.body)?;
+    if can_mark_duplicate {
+        collaboration::duplicates::from_comment(context, &source, body)?;
+    }
     Ok(record)
 }
 

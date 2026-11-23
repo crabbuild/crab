@@ -341,6 +341,10 @@ pub(super) async fn create_comment(
     body: String,
 ) -> Result<PullComment> {
     let routed = app::repository_cell(server, repo)?;
+    let can_write = app::membership(server, principal, repo)
+        .await?
+        .principal
+        .can_write(repo.id);
     match crate::app::command_output(
         routed
             .client
@@ -348,10 +352,8 @@ pub(super) async fn create_comment(
                 &routed.target,
                 crate::app::mutation_identity()?,
                 CreatePullCommentInput {
-                    can_post_locked: app::membership(server, principal, repo)
-                        .await?
-                        .principal
-                        .can_write(repo.id),
+                    can_post_locked: can_write,
+                    can_mark_duplicate: can_write,
                     pull,
                     submission_id: submission_id(&request_id)?,
                     author: crate::cells::repository::RepositoryAuthor::from(&author),

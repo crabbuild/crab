@@ -168,6 +168,7 @@ async fn every_discussion_target_is_scoped_to_its_parent() {
     write::<CreateComment>(
         &cell,
         CreateCommentInput {
+            can_mark_duplicate: false,
             can_post_locked: false,
             issue: 1,
             submission_id: *Uuid::now_v7().as_bytes(),
@@ -197,6 +198,7 @@ async fn every_discussion_target_is_scoped_to_its_parent() {
     write::<CreatePullComment>(
         &cell,
         CreatePullCommentInput {
+            can_mark_duplicate: false,
             can_post_locked: false,
             pull: 1,
             submission_id: *Uuid::now_v7().as_bytes(),
