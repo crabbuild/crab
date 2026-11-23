@@ -147,6 +147,21 @@ async fn validate_barriers(barriers: &[GcReadBarrier; 2]) -> Result<()> {
     Ok(())
 }
 
+pub(crate) async fn check_read_authority(
+    retained: Option<&RetainedRead>,
+    store: &Store,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    read(retained, cancel, |_, cancel| async move {
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => Err(ReadError::Cancelled),
+            result = store.check_read_authority() => result.map_err(Into::into),
+        }
+    })
+    .await
+}
+
 pub(crate) fn read<'a, T: Send + 'a, F>(
     retained: Option<&'a RetainedRead>,
     cancel: &'a CancellationToken,

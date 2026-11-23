@@ -141,13 +141,11 @@ impl ShardHydrator {
 
     #[cfg(feature = "local-staging")]
     pub(crate) async fn check_read_authority(&self, cancel: &CancellationToken) -> Result<()> {
-        crate::read_retention::read(self.retention.as_ref(), cancel, |_, cancel| async move {
-            tokio::select! {
-                biased;
-                () = cancel.cancelled() => Err(ReadError::Cancelled),
-                result = self.router.store().check_read_authority() => result.map_err(Into::into),
-            }
-        })
+        crate::read_retention::check_read_authority(
+            self.retention.as_ref(),
+            self.router.store(),
+            cancel,
+        )
         .await
     }
 
@@ -335,8 +333,14 @@ impl ShardHydrator {
         if cancel.is_cancelled() {
             return Err(ReadError::Cancelled);
         }
-        self.reconstruct_writer(ptr, || Ok(std::fs::File::create(dest)?), None, None, cancel)
-            .await
+        self.reconstruct_writer(
+            ptr,
+            |_| Ok(std::fs::File::create(dest)?),
+            None,
+            None,
+            cancel,
+        )
+        .await
     }
 
     /// Reconstruct `[start, end)` into `dest` without buffering the selected range.
@@ -359,7 +363,7 @@ impl ShardHydrator {
         let (start, end) = checked_range(ptr.size, start, end, "reconstruct_range_to_path")?;
         self.reconstruct_writer(
             ptr,
-            || Ok(std::fs::File::create(dest)?),
+            |_| Ok(std::fs::File::create(dest)?),
             Some((FileRange::new(start, end), XorbReadMode::Selective)),
             None,
             &CancellationToken::new(),
@@ -387,7 +391,7 @@ impl ShardHydrator {
     where
         W: Write + Send + 'static,
     {
-        self.reconstruct_writer(ptr, || Ok(writer), None, file_index_lookup, cancel)
+        self.reconstruct_writer(ptr, |_| Ok(writer), None, file_index_lookup, cancel)
             .await
     }
 
@@ -400,6 +404,21 @@ impl ShardHydrator {
         ptr: &Pointer,
         range: std::ops::Range<u64>,
         writer: W,
+        file_index_lookup: Option<&SharedFileIndexLookup>,
+        cancel: &CancellationToken,
+    ) -> Result<u64>
+    where
+        W: Write + Send + 'static,
+    {
+        self.reconstruct_range_writer(ptr, range, |_| Ok(writer), file_index_lookup, cancel)
+            .await
+    }
+
+    async fn reconstruct_range_writer<W>(
+        &self,
+        ptr: &Pointer,
+        range: std::ops::Range<u64>,
+        open_writer: impl FnOnce(&CancellationToken) -> Result<W> + Send,
         file_index_lookup: Option<&SharedFileIndexLookup>,
         cancel: &CancellationToken,
     ) -> Result<u64>
@@ -421,7 +440,7 @@ impl ShardHydrator {
         }
         self.reconstruct_writer(
             ptr,
-            || Ok(writer),
+            open_writer,
             Some((
                 FileRange::new(range.start, range.end),
                 XorbReadMode::SelectiveCdn,
@@ -436,19 +455,20 @@ impl ShardHydrator {
     ///
     /// Selected Xet chunks and the exact output length are verified. Source or
     /// integrity failures discovered after delivery starts are returned by the
-    /// stream, so callers must consume it through successful EOF.
+    /// stream, so callers must consume it through successful EOF. Queued bytes
+    /// and EOF require a current retention claim and online grant where bound.
     pub fn reconstruct_range_stream(
         &self,
         ptr: &Pointer,
         range: std::ops::Range<u64>,
     ) -> Result<ReconstructionStream> {
-        stream::reconstruct_range(self.clone(), ptr.clone(), range)
+        stream::reconstruct_range(self, ptr.clone(), range)
     }
 
     async fn reconstruct_writer<W>(
         &self,
         ptr: &Pointer,
-        open_writer: impl FnOnce() -> Result<W> + Send,
+        open_writer: impl FnOnce(&CancellationToken) -> Result<W> + Send,
         range: Option<(FileRange, XorbReadMode)>,
         file_index_lookup: Option<&SharedFileIndexLookup>,
         cancel: &CancellationToken,
@@ -466,7 +486,7 @@ impl ShardHydrator {
     async fn reconstruct_pinned_writer<W>(
         &self,
         ptr: &Pointer,
-        open_writer: impl FnOnce() -> Result<W> + Send,
+        open_writer: impl FnOnce(&CancellationToken) -> Result<W> + Send,
         range: Option<(FileRange, XorbReadMode)>,
         file_index_lookup: Option<&SharedFileIndexLookup>,
         cancel: &CancellationToken,
@@ -479,7 +499,7 @@ impl ShardHydrator {
             return Err(ReadError::Cancelled);
         }
         // A rejected retained read must not create or truncate its file.
-        let writer = open_writer()?;
+        let writer = open_writer(cancel)?;
         let (range, mode) = range.map_or((None, XorbReadMode::Whole), |(range, mode)| {
             (Some(range), mode)
         });
@@ -976,7 +996,7 @@ mod tests {
         reconstruction_fixture_with_origin(root, corrupt_origin, origin).await
     }
 
-    async fn reconstruction_fixture_with_origin(
+    pub(super) async fn reconstruction_fixture_with_origin(
         root: &std::path::Path,
         corrupt_origin: bool,
         origin: crab_storage::Store,

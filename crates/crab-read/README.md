@@ -333,7 +333,10 @@ High-coverage reads may cache a complete verified xorb. The in-memory API
 retains its non-installing whole-xorb source read so VFS windows preserve
 one-request fetch and decoded-range reuse.
 With a retained view, reconstruction checks the claim before opening a file
-destination and holds it through worker completion.
+destination and holds it through worker completion. Range streams recheck the
+claim and any bound online grant before delivering queued bytes or returning
+successful EOF. Claim loss cancels the producer while it waits for space in
+the output queue.
 
 The pointer and metadata remain the source of truth; caches only change where
 immutable bytes are fetched from.
