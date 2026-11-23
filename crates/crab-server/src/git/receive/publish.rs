@@ -416,7 +416,7 @@ async fn run_request(
     let request = &request;
     let defer_readiness = input.defer_readiness;
     let plan_id = input.plan_id.clone().or_else(|| {
-        if sends_push_webhook(server, principal, entry, &request.updates) {
+        if sends_publication_webhook(server, principal, entry, &request.updates) {
             // A ref can be deleted and recreated with identical old and new
             // OIDs. Give an unplanned write its own receipt for this operation.
             Some(
@@ -536,20 +536,14 @@ async fn run_request(
     result
 }
 
-fn sends_push_webhook(
+fn sends_publication_webhook(
     server: &Server,
     principal: &Principal,
     repository: &Repository,
     updates: &[crab_git::receive_plan::RefUpdate],
 ) -> bool {
     principal.import_grant().is_none()
-        && server
-            .webhook_sender
-            .as_ref()
-            .is_some_and(|sender| sender.target(repository.id).is_some())
-        && updates
-            .iter()
-            .any(|update| update.old != update.new && webhooks::is_push_ref(&update.name))
+        && webhooks::observes_publication(server, repository, updates)
 }
 
 struct RefMutation<'a> {
@@ -1162,11 +1156,11 @@ async fn commit_authorized(
         crate::api::authorize_branch_update(server, entry, branch, &update.name).await?;
     }
     if let Some(plan) = plan_id
-        && sends_push_webhook(server, principal, entry, mutation.updates)
+        && sends_publication_webhook(server, principal, entry, mutation.updates)
     {
         // Reserve before publication so a process loss after the ref CAS
         // cannot lose the event. Delivery requires the exact plan receipt.
-        webhooks::reserve_push(server, entry, plan).await?;
+        webhooks::reserve_publication(server, entry, plan, mutation.updates).await?;
     }
     let outcome = artifacts
         .commit(plan_id, TTL, cancel)

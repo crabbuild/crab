@@ -208,6 +208,8 @@ pub(in crate::cells) fn dispatch_mutation(
         webhooks::Claim::ID => invoke_mutation::<webhooks::Claim>(context, input),
         webhooks::Finish::ID => invoke_mutation::<webhooks::Finish>(context, input),
         webhooks::Retry::ID => invoke_mutation::<webhooks::Retry>(context, input),
+        webhooks::sync::Reserve::ID => invoke_mutation::<webhooks::sync::Reserve>(context, input),
+        webhooks::sync::Advance::ID => invoke_mutation::<webhooks::sync::Advance>(context, input),
         integrations::Edit::ID => invoke_mutation::<integrations::Edit>(context, input),
         integrations::Record::ID => invoke_mutation::<integrations::Record>(context, input),
         integrations::dispatches::Reserve::ID => {
@@ -423,6 +425,7 @@ pub(in crate::cells) fn dispatch_read(
         webhooks::View::ID => invoke_read::<webhooks::View>(context, input),
         webhooks::HasWork::ID => invoke_read::<webhooks::HasWork>(context, input),
         webhooks::Current::ID => invoke_read::<webhooks::Current>(context, input),
+        webhooks::sync::Next::ID => invoke_read::<webhooks::sync::Next>(context, input),
         integrations::List::ID => invoke_read::<integrations::List>(context, input),
         integrations::dispatches::Get::ID => {
             invoke_read::<integrations::dispatches::Get>(context, input)

@@ -10,6 +10,8 @@ use crate::test_support::{
     http::{Harness, browser::Browser},
 };
 
+mod synchronize;
+
 const PATH: &str = "/api/repos/team/private/settings/webhooks";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,13 +63,13 @@ async fn receiver(
     (url::Url::parse(&endpoint).unwrap(), rows, task)
 }
 
-async fn stock_push(h: &Harness, account: &str) -> String {
+async fn git_remote(h: &Harness, account: &str, owner: &str, name: &str) -> url::Url {
     let credential: Value = h
         .write(
             Method::POST,
             "/api/git-token",
             account,
-            json!({"owner":"team","repository":"private","access":"write"}),
+            json!({"owner":owner,"repository":name,"access":"write"}),
         )
         .await
         .error_for_status()
@@ -75,11 +77,40 @@ async fn stock_push(h: &Harness, account: &str) -> String {
         .json()
         .await
         .unwrap();
-    let clone = tempfile::tempdir().unwrap();
-    let mut remote = url::Url::parse(&format!("{}/git/team/private.git", h.origin)).unwrap();
+    let mut remote = url::Url::parse(&format!("{}/git/{owner}/{name}.git", h.origin)).unwrap();
     remote.set_username("crab").unwrap();
     remote.set_password(credential["token"].as_str()).unwrap();
+    remote
+}
+
+async fn stock_push(h: &Harness, account: &str) -> String {
+    let clone = tempfile::tempdir().unwrap();
+    let remote = git_remote(h, account, "team", "private").await;
     git::push_review_branches(clone.path(), remote.as_str()).await
+}
+
+async fn checkout_feature(h: &Harness, account: &str) -> tempfile::TempDir {
+    let directory = tempfile::tempdir().unwrap();
+    let remote = git_remote(h, account, "team", "private").await;
+    let cloned = git::git(
+        directory.path(),
+        &["clone", "--branch", "feature", remote.as_str(), "."],
+    )
+    .await;
+    assert!(cloned.status.success(), "stock Git clone failed");
+    directory
+}
+
+async fn advance_feature(checkout: &std::path::Path, remote: &str) -> String {
+    git::success(
+        checkout,
+        &["commit", "--allow-empty", "-m", "Advance feature"],
+    )
+    .await;
+    let head = git::success(checkout, &["rev-parse", "HEAD"]).await;
+    let pushed = git::git(checkout, &["push", remote, "HEAD:refs/heads/feature"]).await;
+    assert!(pushed.status.success(), "stock Git push failed");
+    head
 }
 
 async fn open(h: &Harness, admin: &str, request: &Value) {
@@ -104,7 +135,7 @@ async fn drain(h: &Harness) {
 #[tokio::test]
 async fn outbound_delivery_binds_publication_and_replays_signed_bytes() {
     let (endpoint, received, target) = receiver(false).await;
-    let h = Harness::with_webhook_receiver(endpoint).await;
+    let h = Harness::with_webhook_receiver(endpoint, None).await;
     let alice = h.login().await;
     let id = Uuid::now_v7();
     let configure =
@@ -228,7 +259,7 @@ async fn outbound_delivery_binds_publication_and_replays_signed_bytes() {
 #[ignore = "requires agent-browser and the embedded UI with native Git and Cells"]
 async fn native_browser_enables_an_outbound_webhook_and_reads_the_delivered_pull() {
     let (endpoint, received, target) = receiver(true).await;
-    let h = Harness::with_webhook_receiver(endpoint).await;
+    let h = Harness::with_webhook_receiver(endpoint, None).await;
     let alice = h.login().await;
     stock_push(&h, &alice).await;
     let worker = tokio::spawn(crate::server::webhooks::run(h.server.clone()));
@@ -336,6 +367,40 @@ async fn native_browser_enables_an_outbound_webhook_and_reads_the_delivered_pull
         view["deliveries"][0]["recent_attempts"][1]["http_status"],
         503
     );
+    let checkout = checkout_feature(&h, &alice).await;
+    let head = advance_feature(checkout.path(), "origin").await;
+    tokio::time::timeout(std::time::Duration::from_secs(12), async {
+        loop {
+            let history = h.json(PATH, &alice).await;
+            if history["deliveries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["head_change"]["after"] == head && row["status"] == "delivered")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Refresh deliveries",
+        ])
+        .await;
+    browser
+        .run(&["wait", "--text", "Pull Request Head Updated"])
+        .await;
+    browser
+        .run(&["wait", &format!("code[title='{head}']")])
+        .await;
     browser.run(&["close"]).await;
     h.server.cancellation.cancel();
     worker.await.unwrap().unwrap();
@@ -359,7 +424,7 @@ async fn enable_push(h: &Harness, account: &str) {
 #[tokio::test]
 async fn browser_writes_emit_exact_public_refs_even_when_a_branch_address_is_reused() {
     let (endpoint, received, target) = receiver(false).await;
-    let h = Harness::with_webhook_receiver(endpoint).await;
+    let h = Harness::with_webhook_receiver(endpoint, None).await;
     let alice = h.login().await;
     let head = stock_push(&h, &alice).await;
     enable_push(&h, &alice).await;
@@ -527,7 +592,7 @@ async fn browser_writes_emit_exact_public_refs_even_when_a_branch_address_is_reu
 #[ignore = "requires agent-browser and embedded assets for browser Git write and delivery verification"]
 async fn native_browser_file_edit_triggers_a_push_webhook() {
     let (endpoint, received, target) = receiver(false).await;
-    let h = Harness::with_webhook_receiver(endpoint).await;
+    let h = Harness::with_webhook_receiver(endpoint, None).await;
     let alice = h.login().await;
     let before = stock_push(&h, &alice).await;
     enable_push(&h, &alice).await;
