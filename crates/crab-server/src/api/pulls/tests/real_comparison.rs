@@ -400,6 +400,46 @@ async fn qualify(h: &Harness, alice: &str, case: &Case, root: &Path, scratch: &P
         expected[&path_hex][1].as_ref().unwrap().1
     );
     assert_eq!(thread["current"], true);
+    let viewed_path = format!("{pull_url}/viewed");
+    let mut already_viewed = 0;
+    let mut continuation = None;
+    if case.paths > 950 {
+        let put = h
+            .http
+            .put(format!("{}{viewed_path}", h.origin))
+            .header(header::COOKIE, alice)
+            .header(header::ORIGIN, &h.origin)
+            .header("x-csrf-token", session["csrf"].as_str().unwrap())
+            .header("x-crab-repository-id", repo.id.to_string());
+        let changes = h.json(&compare, alice).await;
+        for file in changes["changes"].as_array().unwrap() {
+            if file["path"] == case.review_file {
+                continue;
+            }
+            let saved: Value = put
+                .try_clone()
+                .unwrap()
+                .json(&json!({
+                    "version": already_viewed, "viewed": true, "file": file["view_id"],
+                }))
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            already_viewed += 1;
+            assert_eq!(saved["version"], already_viewed);
+        }
+        assert_eq!(already_viewed, case.paths - 1);
+        let page = h.json(&viewed_path, alice).await;
+        let after = page["next"].as_str().unwrap();
+        continuation = Some(format!(
+            "{viewed_path}?version={already_viewed}&after={after}"
+        ));
+    }
     let started = Instant::now();
     browser
         .run(&[
@@ -433,6 +473,8 @@ async fn qualify(h: &Harness, alice: &str, case: &Case, root: &Path, scratch: &P
         case.name,
         started.elapsed().as_millis()
     );
+    let before = format!("{already_viewed} of {} files viewed", case.paths);
+    browser.run(&["wait", "--text", &before]).await;
     browser
         .run(&[
             "find",
@@ -444,8 +486,22 @@ async fn qualify(h: &Harness, alice: &str, case: &Case, root: &Path, scratch: &P
             "--exact",
         ])
         .await;
-    let viewed = format!("1 of {} files viewed", case.paths);
+    let viewed = format!("{} of {} files viewed", already_viewed + 1, case.paths);
     browser.run(&["wait", "--text", &viewed]).await;
+    if let Some(path) = continuation {
+        let stale = h
+            .http
+            .get(format!("{}{path}", h.origin))
+            .header(header::COOKIE, alice)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            stale.json::<Value>().await.unwrap()["error"]["code"],
+            "page_changed"
+        );
+    }
     browser.run(&["reload"]).await;
     browser.run(&["wait", "--text", &viewed]).await;
 }

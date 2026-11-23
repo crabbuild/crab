@@ -201,6 +201,10 @@ async fn viewed_files_are_private_and_track_the_diff_identity() {
     assert_eq!(marked["version"], 1);
     assert_eq!(h.json(&reviewed, &bob).await["files"][path], revision);
     assert_eq!(h.json(&reviewed, &alice).await["files"], json!({}));
+    let stale_noop = h
+        .write(reqwest::Method::PUT, &reviewed, &bob, mark(first, 0))
+        .await;
+    assert_eq!(stale_noop.status(), StatusCode::CONFLICT);
 
     git::success(
         source.path(),
@@ -233,7 +237,11 @@ async fn viewed_files_are_private_and_track_the_diff_identity() {
         .json()
         .await
         .unwrap();
-    assert_eq!(updated["files"], json!({(path):second_revision}));
+    assert_eq!(updated, json!({"version": 2}));
+    assert_eq!(
+        h.json(&reviewed, &bob).await["files"],
+        json!({(path):second_revision}),
+    );
     h.close().await;
 }
 

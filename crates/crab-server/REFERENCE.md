@@ -3338,9 +3338,11 @@ histories. It checks every changed path, mode and object ID against stock Git,
 checks the full bytes of one lazily loaded file, and moves the source branch
 while the browser holds an open draft. Chromium checks that the author must
 refresh and resubmit, that an inline comment appears on the expected change,
-and that viewed progress survives reload. The fixture reports cold comparison
-latency and warm concurrent comparison and file-read latency. It pauses
-unrelated repository maintenance during timing.
+and that viewed progress survives reload. The Next.js case saves 1,178 marks
+through the HTTP API and uses Chromium to save the final mark and reload the
+full count. The fixture also checks that the server rejects a continuation
+from the earlier snapshot. It reports cold comparison and warm concurrent
+comparison and file-read latency with unrelated repository maintenance paused.
 
 One local RustFS run recorded the following timings. Each warm p95 uses eight
 requests of its type, with two comparisons and two file reads in flight per
@@ -3418,12 +3420,17 @@ detail `base_oid` identifies the destination tip for merge publication. Existing
 threads keep their original anchors and may appear as outdated after this change.
 
 The Files changed tab stores Viewed progress per signed-in account and PR.
-`GET /api/repos/{owner}/{name}/pulls/{number}/viewed` returns a `version` and
-the account's file revisions. `PUT` takes `version`, `file` (the `view_id`
-from the comparison), and `viewed`. A stale write requires reloading progress.
+`GET /api/repos/{owner}/{name}/pulls/{number}/viewed` returns `version`, a
+map of path IDs to file revisions, and a nullable `next` cursor. For another
+page, send `after` with that cursor and `version` from the first page. The
+server returns `409 page_changed` if a write changes the snapshot. The browser
+loads the complete snapshot before showing progress or enabling **Hide viewed**.
+`PUT` takes `version`, `file` (the `view_id` from the comparison), and `viewed`,
+and returns the resulting `version`. A stale write requires reloading progress.
 A new commit retains marks for identical diff entries and clears them for files
-whose compared content or mode changed. Each account can track 950 paths per
-PR. Progress writes stay separate from PR versions, checks and activity.
+whose compared content or mode changed. Each account can save up to 100,000
+path identities per PR across its comparisons. Existing marks remain readable.
+Progress writes stay separate from PR versions, checks and activity.
 
 Use **Filter changed files** to narrow the file tree and diffs by path on
 pull requests, branch comparisons, and commits. **Hide viewed** in a pull

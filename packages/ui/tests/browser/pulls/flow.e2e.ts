@@ -256,6 +256,8 @@ test("viewed files survive reload and clear when the file changes", async ({
   const path = "1".repeat(64);
   let revision = "2".repeat(64);
   let saved = { version: 0, files: {} as Record<string, string> };
+  const after = "0".repeat(64);
+  let expirePage = false;
   await page.route("**/api/repos/team/project/changes?**", (route) => {
     const { base_oid, head_oid } = fixture.pull();
     return route.fulfill({
@@ -286,8 +288,30 @@ test("viewed files survive reload and clear when the file changes", async ({
           viewed: true,
         });
         saved = { version: saved.version + 1, files: { [path]: revision } };
+        return route.fulfill({ json: { version: saved.version } });
       }
-      return route.fulfill({ json: saved });
+      const query = new URL(route.request().url()).searchParams;
+      if (saved.version && !query.has("after")) {
+        return route.fulfill({
+          json: { version: saved.version, files: {}, next: after },
+        });
+      }
+      if (query.has("after")) {
+        expect(query.get("after")).toBe(after);
+        expect(query.get("version")).toBe(String(saved.version));
+        if (expirePage) {
+          expirePage = false;
+          return route.fulfill({
+            status: 409,
+            json: {
+              error: {
+                message: "This list changed; reload from the first page",
+              },
+            },
+          });
+        }
+      }
+      return route.fulfill({ json: { ...saved, next: null } });
     },
   );
   await page.goto("/team/project/pull/1/files");
@@ -316,7 +340,11 @@ test("viewed files survive reload and clear when the file changes", async ({
   await page.getByRole("button", { name: "Clear filters" }).click();
   await expect(hideViewed).not.toBeChecked();
   await expect(viewed).toBeChecked();
+  expirePage = true;
   await page.reload();
+  await expect(page.getByRole("alert")).toHaveText(/This list changed/);
+  await expect(viewed).toHaveCount(0);
+  await page.getByRole("button", { name: "Reload viewed files" }).click();
   await expect(viewed).toBeChecked();
   revision = "3".repeat(64);
   fixture.lifecycle.head = "e".repeat(40);
