@@ -288,6 +288,10 @@ Prove one private repository from an author’s browser and stock Git through a 
   Reusing the packed bytes from the size check reduced backend reads during
   the same build workload by 10.5%. The largest build took 153 seconds in
   the follow-up run. Warm p95 page latency was 60–110 ms across all four modes.
+  Parsing pages in parallel under the shared CPU limit reduced the largest
+  build from 154 to 127 seconds in the next paired run. All 81 warm pages
+  returned the expected results, and eight concurrent pages during indexing
+  completed at 56 ms p95.
 
 - Embedded Chromium previewed and downloaded a native Crab file through the
   same server API. Native HTTP tests exercised authorized full reads, ranges,

@@ -27,6 +27,7 @@ const PATH: &str = "v2/derived/code-search-v3";
 const MAX_FILE_BYTES: u64 = 256 * 1024;
 const BUILD_PAGE: usize = 96;
 const BUILD_CONCURRENCY: usize = 8;
+const BUILD_PARSE_JOBS: usize = 4;
 const MAX_INDEX_BYTES: usize = 32 * 1024 * 1024;
 const CACHE_BYTES: usize = 64 * 1024 * 1024;
 
@@ -275,35 +276,53 @@ async fn build(
         }
         .await;
         let (batch, more) = operation.finish(page).await?;
-        let parse_cancel = cancel.clone();
-        let page = tokio::task::spawn_blocking(move || {
-            batch
-                .into_iter()
-                .map(|(path, oid, syntax, data)| {
-                    let (filter, symbols) = match data {
-                        BuildData::Reused(filter, symbols) => (filter, symbols),
-                        BuildData::Text(text) => {
-                            let filter = text.as_deref().map(Mask::from_text);
-                            let symbols = syntax.zip(text.as_deref()).and_then(|(syntax, text)| {
-                                symbols::definitions(syntax, text, &parse_cancel).map(|defs| {
-                                    Mask::from_symbols(
-                                        defs.into_iter().map(|definition| &text[definition.bytes]),
-                                    )
-                                })
-                            });
-                            (filter, symbols)
+        let partition_size = batch.len().div_ceil(BUILD_PARSE_JOBS).max(1);
+        let mut batch = batch.into_iter();
+        let partitions = std::iter::from_fn(|| {
+            let partition: Vec<_> = batch.by_ref().take(partition_size).collect();
+            (!partition.is_empty()).then_some(partition)
+        });
+        // Run independently admitted partitions in parallel, then assemble
+        // them in tree order so the published index keeps its path cursor.
+        let parsed = futures_util::future::try_join_all(partitions.map(|partition| {
+            let parse_cancel = cancel.clone();
+            server.runtime.run_cpu(cancel, move || {
+                partition
+                    .into_iter()
+                    .map(|(path, oid, syntax, data)| {
+                        if parse_cancel.is_cancelled() {
+                            return Err(crab_remote_git::Error::Cancelled);
                         }
-                    };
-                    Row {
-                        path,
-                        oid,
-                        filter,
-                        symbols,
-                    }
-                })
-                .collect::<Vec<_>>()
-        })
+                        let (filter, symbols) = match data {
+                            BuildData::Reused(filter, symbols) => (filter, symbols),
+                            BuildData::Text(text) => {
+                                let filter = text.as_deref().map(Mask::from_text);
+                                let symbols =
+                                    syntax.zip(text.as_deref()).and_then(|(syntax, text)| {
+                                        symbols::definitions(syntax, text, &parse_cancel).map(
+                                            |defs| {
+                                                Mask::from_symbols(
+                                                    defs.into_iter()
+                                                        .map(|definition| &text[definition.bytes]),
+                                                )
+                                            },
+                                        )
+                                    });
+                                (filter, symbols)
+                            }
+                        };
+                        Ok(Row {
+                            path,
+                            oid,
+                            filter,
+                            symbols,
+                        })
+                    })
+                    .collect::<crab_remote_git::Result<Vec<_>>>()
+            })
+        }))
         .await?;
+        let page = parsed.into_iter().flatten().collect::<Vec<_>>();
         size += page.iter().map(Row::encoded_size).sum::<usize>();
         row_weight += page.len() * size_of::<Row>();
         if size > MAX_INDEX_BYTES || size + row_weight > CACHE_BYTES {

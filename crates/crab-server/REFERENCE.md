@@ -660,6 +660,8 @@ and separate trigram filters for file text and supported definition names.
 Index construction follows the verified tree and checks each blob's size
 before reconstructing its contents. Eligible objects reuse the packed bytes
 from the size check. Search uses the same bounded read to verify candidates.
+The indexer parses each page in parallel under the shared Git CPU limit
+and assembles the filters in Git path order.
 Larger files get larger text filters to reduce false positives. An
 index answers only for its exact Git tree. Crab verifies returned paths, text,
 and definition locations against Git. It reuses unchanged blobs' filters when
@@ -712,6 +714,12 @@ backend reads during search and index construction from 57,511 to 51,489.
 The largest build took 153 seconds. Warm search used 1,259 backend reads
 across 81 successful pages. Per-mode p95 page latency was 75 ms for path,
 110 ms for literal, 60 ms for regex, and 88 ms for Boolean content and symbols.
+
+Sampling the largest build showed time in tree-sitter and trigram generation
+on a single parser worker. Using four partitions under the shared CPU budget
+reduced the Next.js index build from 154 to 127 seconds and the Neovim
+build from 12.8 to 8.3 seconds on the same local corpus. The concurrent
+searches during construction completed eight pages at 56 ms p95.
 
 ### Create a repository in the browser
 
