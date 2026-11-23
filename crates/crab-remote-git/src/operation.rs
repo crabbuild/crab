@@ -1417,6 +1417,12 @@ impl OperationContext {
         self.budget.remaining(BudgetDimension::ResponseBytes).await
     }
 
+    pub(crate) async fn remaining_history_reads(&self) -> u64 {
+        let commits = self.budget.remaining(BudgetDimension::HistoryCommits).await;
+        let objects = self.budget.remaining(BudgetDimension::LogicalObjects).await;
+        commits.min(objects)
+    }
+
     pub(crate) async fn charge_cached(&self, usage: BudgetUsage) -> Result<()> {
         self.budget.charge_cached(usage).await
     }

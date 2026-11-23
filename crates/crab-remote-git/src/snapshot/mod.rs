@@ -1,3 +1,4 @@
+mod ahead;
 mod blame;
 mod history;
 mod membership;
@@ -135,13 +136,21 @@ impl RemoteGitSnapshot {
             Walked(HashSet<ObjectId>),
         }
         let graph = base.commit_graph.as_deref();
+        let mut prefetched = HashMap::new();
         let base_ancestors = match graph.filter(|graph| graph.has_ancestor_sets()) {
             Some(graph) => BaseAncestors::Indexed(graph),
-            // Without stored ancestor sets, walk the base once. Repeating a
-            // full membership walk for each head commit exhausts the budget.
-            None => BaseAncestors::Walked(
-                commit_ancestors(base.commit_oid, base_operation, graph).await?,
-            ),
+            None => {
+                let (shared, commits) = ahead::raw_base_ancestry(
+                    self.commit_oid,
+                    base.commit_oid,
+                    operation,
+                    base_operation,
+                    graph,
+                )
+                .await?;
+                prefetched = commits;
+                BaseAncestors::Walked(shared)
+            }
         };
         let mut pending = vec![self.commit_oid];
         let mut visited = HashSet::new();
@@ -170,11 +179,14 @@ impl RemoteGitSnapshot {
                 has_next = true;
                 break;
             }
-            operation.charge(BudgetDimension::HistoryCommits, 1).await?;
-            let commit = operation.read_commit(oid).await?;
+            let commit = match prefetched.remove(&oid) {
+                Some(commit) => commit?,
+                None => ahead::read_commit(oid, operation).await?,
+            };
+            let commit = &commit.value;
             queue_all_parents(
                 &mut pending,
-                &commit,
+                commit,
                 self.commit_graph.as_deref(),
                 operation,
             )
@@ -183,14 +195,14 @@ impl RemoteGitSnapshot {
                 operation
                     .charge(
                         BudgetDimension::ResponseBytes,
-                        commit_response_bytes(&commit),
+                        commit_response_bytes(commit),
                     )
                     .await?;
                 items.try_reserve(1).map_err(|source| Error::Allocation {
                     requested: mem::size_of::<Commit>(),
                     source,
                 })?;
-                items.push(commit);
+                items.push(commit.clone());
             }
             traversed = traversed.checked_add(1).ok_or(Error::LimitExceeded {
                 limit: "history commits",
@@ -1822,18 +1834,9 @@ async fn commit_ancestors(
     operation: &OperationContext,
     commit_graph: Option<&CommitGraphIndex>,
 ) -> Result<HashSet<ObjectId>> {
-    let mut pending = vec![root];
-    let mut ancestors = HashSet::new();
-    while let Some(oid) = pending.pop() {
-        operation.ensure_active()?;
-        if !ancestors.insert(oid) {
-            continue;
-        }
-        operation.charge(BudgetDimension::HistoryCommits, 1).await?;
-        let commit = operation.read_commit(oid).await?;
-        queue_all_parents(&mut pending, &commit, commit_graph, operation).await?;
-    }
-    Ok(ancestors)
+    ahead::BaseWalk::new(root)
+        .finish(operation, commit_graph)
+        .await
 }
 
 async fn queue_all_parents(

@@ -272,7 +272,11 @@ base's authenticated ancestor set. A shared commit and its parents are excluded
 without decoding them as raw commits. The head walk still reads verified raw
 commits and follows their parent links. Cross-repository comparisons use the
 base operation for membership and the head operation for commit reads. Without
-stored ancestor sets, the base ancestry uses its bounded raw walk.
+a graph, a short raw walk can prove that every topic path terminates at a shared
+commit above every unexplored base path. That proof excludes unseen base
+ancestors without reading them. If the proof is inconclusive, the existing
+bounded base walk resumes from the verified frontier. Probe reads share the
+operation budget, and the page reuses the topic commits they decoded.
 
 Merge-base discovery retains the parent links it has already verified. Once a
 common commit is known, it follows those links immediately to mark dominated

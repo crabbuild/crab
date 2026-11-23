@@ -3361,14 +3361,17 @@ isolated loopback RustFS variables as the search corpus test. Run
 `cargo test -p crab-server --lib --locked real_repository_pull_review_matches_git_and_reconfirms_a_moved_head -- --ignored --nocapture`.
 
 The **Commits** tab lists commits reachable from the pinned PR head and absent
-from the pinned base. Once the current commit graph is ready, its verified
-ancestor sets let the server exclude shared commits without reading the entire
-base history for each page. The native RustFS fixture builds 10,050 shared
-commits and a topic merge with a parent below the merge base. It checks the
-unindexed merge base with a ten-commit read budget, compares the preview against
-stock Git, and opens a PR against the inspected tips. After graph publication,
-it compares two one-item commit pages with `git rev-list` and opens the Commits
-tab in Chromium. Run with the same RustFS environment and built UI using
+from the pinned base. The verified ancestor index lets the server exclude shared
+commits without reading the entire base history for each page. While the index
+is building, the server can also exclude older history if a bounded read of
+verified parent links proves that all topic paths end in the known shared
+history. Inconclusive cases retain the bounded base walk. The native RustFS
+fixture builds 10,050 shared commits and a topic merge with a parent below the
+merge base. It checks the unindexed merge base with a ten-commit read budget and
+opens a PR against the inspected tips. Two unindexed one-item commit pages match
+`git rev-list` and Chromium shows the commits before graph publication. The
+same continuation still yields the expected page after publication. Run with the
+same RustFS environment and built UI using
 `cargo test -p crab-server --lib --locked deep_pull_commit_pages_match_git_and_render_in_the_browser -- --ignored --nocapture`.
 
 Pull details and summaries expose nullable `closed_at` and `merged_at` in Unix

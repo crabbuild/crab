@@ -180,46 +180,20 @@ async fn deep_pull_commit_pages_match_git_and_render_in_the_browser() {
         .unwrap();
     assert_eq!(pull["number"], 1);
 
+    let range = format!("{api}/commits?rev={head}&base={base}&limit=1");
     let started = Instant::now();
-    assert!(
-        crab_remote::browse_indexes::ensure(
-            &repo.layout,
-            &repo.identity,
-            Arc::clone(&h.server.runtime),
-            h.server.options,
-            2 * 1024 * 1024 * 1024,
-            &h.server.cancellation,
-        )
-        .await
-        .unwrap()
-        .is_some()
-    );
-    repo.expire_browse_probe().await;
-    assert!(
-        repo.open(&h.server, &h.server.cancellation)
-            .await
-            .unwrap()
-            .git
-            .commit_graph_available()
-    );
+    let first = h.json(&range, &alice).await;
+    let next = first["next"].as_str().unwrap().to_owned();
+    let second = h.json(&format!("{range}&cursor={next}"), &alice).await;
+    for (page, oid) in [&first, &second].into_iter().zip(expected.lines()) {
+        assert_eq!(page["items"].as_array().unwrap().len(), 1);
+        assert_eq!(page["items"][0]["oid"], oid);
+    }
+    assert!(second["next"].is_null());
     eprintln!(
-        "deep pull history graph_ms={}",
+        "deep pull history cold_pages_ms={}",
         started.elapsed().as_millis()
     );
-
-    let range = format!("{api}/commits?rev={head}&base={base}&limit=1");
-    let first = h.json(&range, &alice).await;
-    let next = first["next"].as_str().unwrap();
-    let second = h.json(&format!("{range}&cursor={next}"), &alice).await;
-    assert_eq!(
-        [first, second.clone()]
-            .iter()
-            .flat_map(|page| page["items"].as_array().unwrap())
-            .map(|commit| commit["oid"].as_str().unwrap())
-            .collect::<Vec<_>>(),
-        expected.lines().collect::<Vec<_>>(),
-    );
-    assert!(second["next"].is_null());
 
     let browser = Browser::new("deep-pull-history");
     browser
@@ -249,6 +223,36 @@ async fn deep_pull_commit_pages_match_git_and_render_in_the_browser() {
         browser.run(&["wait", "--text", message]).await;
     }
     drop(browser);
+
+    let started = Instant::now();
+    assert!(
+        crab_remote::browse_indexes::ensure(
+            &repo.layout,
+            &repo.identity,
+            Arc::clone(&h.server.runtime),
+            h.server.options,
+            2 * 1024 * 1024 * 1024,
+            &h.server.cancellation,
+        )
+        .await
+        .unwrap()
+        .is_some()
+    );
+    repo.expire_browse_probe().await;
+    assert!(
+        repo.open(&h.server, &h.server.cancellation)
+            .await
+            .unwrap()
+            .git
+            .commit_graph_available()
+    );
+    eprintln!(
+        "deep pull history graph_ms={}",
+        started.elapsed().as_millis()
+    );
+
+    let resumed = h.json(&format!("{range}&cursor={next}"), &alice).await;
+    assert_eq!(resumed, second);
     drop(permit);
     h.close().await;
 }
