@@ -50,8 +50,11 @@ Sparse CDN reads authenticate the footer and chunk table, then fetch the
 selected compressed spans. Span requests that exceed the qualified range
 size are split before decoding. The edge attempt reuses the encoded size
 from a captured file catalog when available. Otherwise it uses a native
-HEAD before requesting bytes. High-coverage reads can use an admitted full
-GET. Complete reads can also assemble a bounded xorb from admitted CDN
+HEAD before requesting bytes. If the authenticated shard shows that a single
+span covers every chunk of an xorb, the reader can use an admitted whole GET
+directly. Other high-coverage reads can choose a whole GET after validating
+the chunk table.
+Complete reads can also assemble a bounded xorb from admitted CDN
 ranges and verify the full body before returning chunks. SDK and mount
 range hydration keeps its decoded-chunk cache policy.
 

@@ -1913,16 +1913,25 @@ mod tests {
     #[tokio::test]
     async fn sparse_range_stream_verifies_only_the_needed_xorb_bytes_from_cdn() {
         for range_cap in [64, 1024] {
-            reconstruct_over_cdn_ranges(Some(1024..8192), range_cap).await;
+            reconstruct_over_cdn(Some(1024..8192), range_cap, false).await;
         }
     }
 
     #[tokio::test]
     async fn complete_hydration_uses_cdn_ranges_when_full_get_is_disabled() {
-        reconstruct_over_cdn_ranges(None, 64).await;
+        reconstruct_over_cdn(None, 64, false).await;
     }
 
-    async fn reconstruct_over_cdn_ranges(window: Option<std::ops::Range<u64>>, range_cap: usize) {
+    #[tokio::test]
+    async fn range_stream_covering_every_chunk_uses_one_whole_cdn_get() {
+        reconstruct_over_cdn(Some(1..4 * 32 * 1024 - 1), 1024, true).await;
+    }
+
+    async fn reconstruct_over_cdn(
+        window: Option<std::ops::Range<u64>>,
+        range_cap: usize,
+        expect_whole_get: bool,
+    ) {
         use crab_storage::cdn::{
             CdnAccess, CdnCredential, CdnCredentials, CdnReadFamily, CdnRoute, CdnTransport,
         };
@@ -1977,7 +1986,9 @@ mod tests {
             .unwrap();
         let size = body.len();
         let range_cap = range_cap.min(size);
-        let spans = if window.is_some() {
+        let spans = if expect_whole_get {
+            Vec::new()
+        } else if window.is_some() {
             let footer = size - FOOTER_SIZE..size;
             let metadata = xorb_metadata_region(size, &body[footer.clone()]).unwrap();
             let parsed = XorbParser::parse(body.clone()).unwrap();
@@ -2002,20 +2013,23 @@ mod tests {
             .flat_map(|range| {
                 (range.start..range.end)
                     .step_by(range_cap)
-                    .map(move |start| (start, (start + range_cap).min(range.end) - 1))
+                    .map(move |start| Some((start, (start + range_cap).min(range.end) - 1)))
             })
             .collect::<Vec<_>>();
-        expected.sort_unstable();
-        if window.is_some() {
+        if expect_whole_get {
+            expected.push(None);
+        } else if window.is_some() {
             assert!(
                 expected
                     .iter()
+                    .flatten()
                     .map(|(start, end)| end - start + 1)
                     .sum::<usize>()
                     < size
             );
         }
 
+        expected.sort_unstable();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let transport = CdnTransport::loopback_fixture(listener.local_addr().unwrap()).unwrap();
         let path = xorb.location;
@@ -2053,20 +2067,30 @@ mod tests {
                 assert!(request.starts_with(&format!("GET /{path} HTTP/1.1\r\n")));
                 let request = request.to_ascii_lowercase();
                 assert!(request.contains("authorization: bearer fixture-viewer\r\n"));
-                let (start, end) = request
+                let range = request
                     .lines()
                     .find_map(|line| line.strip_prefix("range: bytes="))
-                    .unwrap()
-                    .split_once('-')
-                    .unwrap();
-                let (start, end): (usize, usize) = (start.parse().unwrap(), end.parse().unwrap());
+                    .map(|value| {
+                        let (start, end) = value.split_once('-').unwrap();
+                        (
+                            start.parse::<usize>().unwrap(),
+                            end.parse::<usize>().unwrap(),
+                        )
+                    });
+                let (status, bytes) = match range {
+                    Some((start, end)) => (
+                        format!("206 Partial Content\r\nContent-Range: bytes {start}-{end}/{size}"),
+                        &body[start..=end],
+                    ),
+                    None => ("200 OK".to_owned(), body.as_ref()),
+                };
                 let response = format!(
-                    "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{size}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    end - start + 1
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    bytes.len()
                 );
                 stream.write_all(response.as_bytes()).await.unwrap();
-                stream.write_all(&body[start..=end]).await.unwrap();
-                observed.push((start, end));
+                stream.write_all(bytes).await.unwrap();
+                observed.push(range);
             }
             observed.sort_unstable();
             assert_eq!(observed, expected);

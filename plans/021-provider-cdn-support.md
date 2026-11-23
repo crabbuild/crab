@@ -322,8 +322,10 @@ admitted for ranges and exceeds the full-GET profile. Verify the assembled
 xorb before returning any decoded chunks.
 SDK and mount range hydration can use authenticated compressed xorb spans
 from the edge. Keep the selected source through footer, metadata and payload
-verification. When the shard's chunk count fits the qualified range limit,
-read the exact footer and chunk-table suffix in one edge request. Use the
+verification. If one requested span covers every chunk according to the
+authenticated shard, an admitted whole GET skips the metadata request and
+verifies the complete xorb. When the shard's chunk table and footer fit the
+qualified range limit, read that suffix in one edge request. Use the
 validated footer to locate the table and authenticate its xorb hash before
 fetching payload ranges. Xet terms that reference the same xorb and start
 chunk share the longest required fetch. Reconstruction preserves term order.

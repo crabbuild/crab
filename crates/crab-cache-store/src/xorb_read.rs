@@ -320,9 +320,11 @@ impl CachingStore {
                 None => source.read_origin(self.origin.head(path)).await?.size,
             };
             Self::validate_xorb_size(path, size)?;
-            if edge.range_chunk_bytes(size).is_none() {
-                // A full-only policy can still serve this xorb. Select that
-                // form before requesting any viewer credential for a range.
+            let full_span = matches!(ranges, [(0, end)] if *end > 0
+                && Some(*end as usize) == hint.chunk_count);
+            if edge.range_chunk_bytes(size).is_none() || full_span && edge.admits(size, None) {
+                // A shard's full-span hint skips the metadata round trip.
+                // The whole-object reader still authenticates the xorb and chunks.
                 return self
                     .complete_xorb_ranges(path, xorb_hash, ranges, source, Some(size), install)
                     .await;
