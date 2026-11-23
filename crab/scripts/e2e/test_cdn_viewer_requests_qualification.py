@@ -47,7 +47,8 @@ class CdnViewerRequestQualificationTests(unittest.TestCase):
             "status": 200, "range": False, "object_bytes": 64,
         }
         read = dict.fromkeys(cdn.PRODUCT_COUNTERS, 0) | {
-            "schema": cdn.MOUNT_XORB_RANGE_READ, "xorb_key_sha256": xorb_key, "started_at_unix_ms": 1000,
+            "schema": cdn.MOUNT_XORB_RANGE_READ, "scope": xorb_response["scope"],
+            "xorb_key_sha256": xorb_key, "started_at_unix_ms": 1000,
             "finished_at_unix_ms": 1001, "all_edge_attempts": 2, "edge_attempts": 1, "observed_edge_gets": 1,
             "verified_edge_payloads": 1, "edge_hits": 1, "edge_bytes": 64,
             "edge_responses": {"c" * 64: xorb_response, "d" * 64: shard_response},

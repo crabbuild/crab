@@ -2003,7 +2003,12 @@ def verify_viewer_requests(
     return ViewerRequestMetrics(logged_ids, origin_gets, fill_bytes, successful_fill, completed_cache)
 
 
-def verify_product_viewer_requests(raw: bytes, client: dict[str, Any], client_raw: bytes, edge: str) -> set[str]:
+def verify_product_viewer_requests(
+    raw: bytes, client: dict[str, Any], client_raw: bytes, edge: str, *,
+    policies: dict[str, ReleaseReadLimits] | None = None,
+) -> set[str]:
+    if policies is not None:
+        verify_compiled_edge_limits(client, policies, "CDN product read")
     verify_viewer_requests(decode(raw), client, hashlib.sha256(client_raw).hexdigest(), edge)
     require(any(response["status"] in (200, 206) and response["complete"] and response["bytes"] > 0
                 for response in client["edge_responses"].values()), "provider logs confirm no completed product response")
@@ -2076,7 +2081,7 @@ def verify_git_retirement(raw: bytes, row: dict[str, Any], publication_digest: s
 
 def verify_service_lifecycle(
     records: dict[str, bytes], row: dict[str, Any], spec: dict[str, Any], *,
-    cleanup_at: int, native_origin_sha256: str,
+    cleanup_at: int, native_origin_sha256: str, policies: dict[str, ReleaseReadLimits] | None = None,
 ) -> dict[str, Any]:
     publication_raw = records["publication"]
     publication = validate_git_publication(publication_raw, row)
@@ -2115,7 +2120,7 @@ def verify_service_lifecycle(
     require(edge["git_blob_oid_sha256"] == origin["git_blob_oid_sha256"]
             and edge["finished_at_unix_ms"] <= origin["started_at_unix_ms"],
             "service rollback must follow the edge read and verify the same published blob")
-    verify_viewer_requests(decode(records["viewer_requests"]), edge, hashlib.sha256(records["edge"]).hexdigest(), provider)
+    verify_product_viewer_requests(records["viewer_requests"], edge, records["edge"], provider, policies=policies)
     retired_at = verify_git_retirement(
         records["retirement"], row, publication_sha, publication["candidate"], origin["finished_at_unix_ms"],
     )
@@ -2137,6 +2142,7 @@ def verify_service_lifecycle(
 def collect_service_product_action(
     inputs: Path, row: dict[str, Any], spec: dict[str, Any], rollback_raw: bytes,
     *, cleanup_at: int, native_origin_sha256: str, retain: Path | None = None,
+    policies: dict[str, ReleaseReadLimits] | None = None,
 ) -> dict[str, Any]:
     paths = SERVICE_PRODUCT_FILES
     if scope_parts(row["scope"])[1] == "public":
@@ -2144,7 +2150,7 @@ def collect_service_product_action(
     records = {name: read_git_record(inputs / filename, limit=GIT_FETCH_RECORD_LIMIT if name in ("edge", "viewer_requests")
                                     else 8 * 1024) for name, filename in paths.items()}
     result = verify_service_lifecycle(records | {"origin": rollback_raw}, row, spec,
-                                      cleanup_at=cleanup_at, native_origin_sha256=native_origin_sha256)
+                                      cleanup_at=cleanup_at, native_origin_sha256=native_origin_sha256, policies=policies)
     if retain is not None:
         retain.mkdir()
         for name, filename in paths.items():
@@ -2187,7 +2193,7 @@ def validate_xorb_workload(raw: bytes, approval: str, configuration: str, *, mou
 def verify_sparse_xorb_traffic(read: dict[str, Any], object_bytes: int) -> None:
     # Related catalog and shard requests still need a provider log join.
     # Only xorb responses can prove the file window was sparse.
-    transfers = [response for response in read["edge_responses"].values() if response["family"] == "xorb"]
+    transfers = [response for response in read["edge_responses"].values() if response["scope"] == read["scope"]]
     require(0 < read["edge_bytes"] == sum(response["bytes"] for response in transfers) < object_bytes
             and read["edge_attempts"] == read["observed_edge_gets"] == len(transfers)
             and read["all_edge_attempts"] == len(read["edge_responses"])
@@ -2279,7 +2285,7 @@ def verify_xorb_read(
 def verify_sparse_xorb_product(
     inputs: Path, row: dict[str, Any], registration: dict[str, Any], placement: dict[str, Any],
     full_spec: dict[str, Any], published: int, retired: int, cache_roots: set[str], viewer_ids: set[str],
-    *, limits: ReleaseReadLimits | None,
+    *, policies: dict[str, ReleaseReadLimits] | None,
 ) -> tuple[dict[str, bytes], tuple[int, int] | None]:
     edge = scope_parts(row["scope"])[0]
     mount = is_direct_mount_xorb_scope(row["scope"])
@@ -2311,9 +2317,8 @@ def verify_sparse_xorb_product(
             continue
         verify_sparse_xorb_traffic(read, object_bytes)
         requests = read["edge_responses"]
-        if limits is not None:
-            require(all(limits.admits(response) for response in requests.values() if response["family"] == "xorb"),
-                    "sparse xorb read exceeded its compiled CDN read limits")
+        if policies is not None:
+            verify_compiled_edge_limits(read, policies, f"{name} xorb read")
         log_name = f"{name}-viewer-requests.json"
         log = records[log_name] = read_git_record(inputs / log_name, limit=GIT_FETCH_RECORD_LIMIT)
         metrics = verify_viewer_requests(decode(log), read, hashlib.sha256(raw).hexdigest(), edge)
@@ -2327,7 +2332,7 @@ def verify_sparse_xorb_product(
                     and all(result == "hit" for result in metrics.completed_cache.values()),
                     "warm sparse xorb read needs provider-confirmed hits for every xorb range")
             range_witness = (object_bytes, max(response["requested_bytes"] for response in requests.values()
-                                               if response["family"] == "xorb"))
+                                               if response["scope"] == row["scope"]))
     return records, range_witness
 
 
@@ -2356,12 +2361,12 @@ def collect_xorb_read_evidence(
             "xorb read must use the approved Crab executable for the native publication and reads")
     read_name = "mount.json" if mount else "hydration.json"
     edge_raw = read_git_record(inputs / read_name, limit=GIT_FETCH_RECORD_LIMIT)
-    limits = release_read_limits(policy).get(row["scope"]) if policy is not None else None
+    policies = release_read_limits(policy) if policy is not None else None
     object_bytes = placement["views"]["target"]["bytes"]
 
     def verify_read(raw: bytes, arm: str) -> dict[str, Any]:
         read = verify_xorb_read(raw, row, registration, arm, spec, placement)
-        xorbs = [response for response in read["edge_responses"].values() if response["family"] == "xorb"]
+        xorbs = [response for response in read["edge_responses"].values() if response["scope"] == row["scope"]]
         require(arm != "edge" or any(response["complete"] and response["bytes"] for response in xorbs),
                 "complete xorb read has no completed xorb response")
         require(all(response["object_bytes"] == object_bytes for response in xorbs),
@@ -2369,9 +2374,6 @@ def collect_xorb_read_evidence(
         return read
 
     edge, native = verify_read(edge_raw, "edge"), verify_read(rollback_raw, "origin")
-    if limits is not None:
-        require(all(limits.admits(response) for response in edge["edge_responses"].values()
-                    if response["family"] == "xorb"), "complete xorb read exceeded its compiled CDN read limits")
     product_caches = {read["reader"]["cache_root_sha256"] for read in (edge, native)}
     require(len(product_caches) == 2
             and edge["finished_at_unix_ms"] <= native["started_at_unix_ms"],
@@ -2384,10 +2386,11 @@ def collect_xorb_read_evidence(
     published = verify_git_lifecycle(observations, row, publication, receipt, edge["started_at_unix_ms"], source,
                                      retired, cleanup_at, native_origin_sha256)
     viewer_raw = read_git_record(inputs / PRODUCT_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
-    product_request_ids = verify_product_viewer_requests(viewer_raw, edge, edge_raw, scope_parts(row["scope"])[0])
+    product_request_ids = verify_product_viewer_requests(viewer_raw, edge, edge_raw, scope_parts(row["scope"])[0],
+                                                         policies=policies)
     sparse_records, range_witness = verify_sparse_xorb_product(
         inputs, row, registration, placement, spec, published, retired, product_caches, product_request_ids,
-        limits=limits,
+        policies=policies,
     )
 
     def verify_measurement(raw: bytes, arm: str) -> dict[str, Any]:
@@ -2422,7 +2425,8 @@ def collect_xorb_read_evidence(
 
 def collect_git_product_action(
     inputs: Path, row: dict[str, Any], rollback_raw: bytes, *, retain: Path | None = None, cleanup_at: int | None = None,
-    native_origin_sha256: str | None = None, public_export_sha256: str = "", policy: Path | None = None,
+    native_origin_sha256: str | None = None, public_export_sha256: str = "",
+    policies: dict[str, ReleaseReadLimits] | None = None,
 ) -> dict[str, Any]:
     publication_raw = read_git_record(inputs / "publication.json")
     publication = validate_git_publication(publication_raw, row)
@@ -2433,8 +2437,6 @@ def collect_git_product_action(
     fetch_raw = read_git_record(inputs / "fetch.json", limit=GIT_FETCH_RECORD_LIMIT)
     issuer = row.get("managed_issuer")
     fetch = validate_git_fetch(fetch_raw, fetch_provenance, "edge", "Git product action", managed_issuer=issuer)
-    if policy is not None:
-        verify_compiled_edge_limits(fetch, release_read_limits(policy), "Git product action")
     require(fetch["reader"]["binding_sha256"] == row.get("viewer_binding_sha256"),
             "product fetch did not use the registered viewer binding")
     require(fetch["reader"]["public_export_sha256"] == public_export_sha256,
@@ -2466,7 +2468,7 @@ def collect_git_product_action(
         verify_git_lifecycle(observations, row, publication, digest, fetch["started_at_unix_ms"], fetch["reader"],
                              retired_at, cleanup_at, native_origin_sha256)
     viewer_raw = read_git_record(inputs / PRODUCT_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
-    verify_product_viewer_requests(viewer_raw, fetch, fetch_raw, scope_parts(row["scope"])[0])
+    verify_product_viewer_requests(viewer_raw, fetch, fetch_raw, scope_parts(row["scope"])[0], policies=policies)
     if retain is not None:
         retain.mkdir()
         retained = {"publication.json": publication_raw, "fetch.json": fetch_raw,
@@ -2486,6 +2488,7 @@ def collect_git_product_action(
 def collect_sdk_product_action(
     inputs: Path, row: dict[str, Any], spec: dict[str, Any], rollback_raw: bytes,
     *, cleanup_at: int, native_origin_sha256: str, retain: Path | None = None,
+    policies: dict[str, ReleaseReadLimits] | None = None,
 ) -> tuple[dict[str, Any], set[str]]:
     provider_edge, access, _, _, _ = scope_parts(row["scope"])
     native_records = {phase: read_git_record(inputs / name) for phase, name in GIT_NATIVE_REF_FILES.items()}
@@ -2507,7 +2510,7 @@ def collect_sdk_product_action(
             "SDK rollback must follow the verified edge snapshot")
     retained = {"publication.json": publication_raw, "snapshot.json": edge_raw}
     viewer_raw = read_git_record(inputs / PRODUCT_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
-    viewer_ids = verify_product_viewer_requests(viewer_raw, edge, edge_raw, provider_edge)
+    viewer_ids = verify_product_viewer_requests(viewer_raw, edge, edge_raw, provider_edge, policies=policies)
     retained[PRODUCT_VIEWER_RECORD] = viewer_raw
     previous_end = origin["finished_at_unix_ms"]
     for action, files in (("clone", SDK_CLONE_FILES), ("fetch", SDK_FETCH_FILES)):
@@ -2534,7 +2537,8 @@ def collect_sdk_product_action(
                 f"SDK {action} arms must follow the preceding workload in order")
         viewer_name = SDK_WORKTREE_VIEWER_FILES[action]
         viewer_raw = read_git_record(inputs / viewer_name, limit=GIT_FETCH_RECORD_LIMIT)
-        ids = verify_product_viewer_requests(viewer_raw, edge_worktree, retained[files["edge"]], provider_edge)
+        ids = verify_product_viewer_requests(viewer_raw, edge_worktree, retained[files["edge"]], provider_edge,
+                                             policies=policies)
         require(viewer_ids.isdisjoint(ids), "SDK product actions reused provider requests")
         viewer_ids.update(ids)
         retained[viewer_name] = viewer_raw
@@ -2574,6 +2578,7 @@ class DesktopProductEvidence(NamedTuple):
 def collect_desktop_product_action(
     inputs: Path, row: dict[str, Any], spec: dict[str, Any], rollback_raw: bytes,
     *, cleanup_at: int, native_origin_sha256: str, retain: Path | None = None,
+    policies: dict[str, ReleaseReadLimits] | None = None,
 ) -> DesktopProductEvidence:
     provider_edge, access, _, _, _ = scope_parts(row["scope"])
     files = ("publication.json", "retirement.json", *GIT_NATIVE_REF_FILES.values())
@@ -2605,7 +2610,8 @@ def collect_desktop_product_action(
     require(len(roots) == len(reads) and all(left["finished_at_unix_ms"] <= right["started_at_unix_ms"]
                                            for left, right in zip(reads, reads[1:])),
             "desktop product reads must run in order with fresh caches")
-    viewers = verify_product_viewer_requests(retained[PRODUCT_VIEWER_RECORD], edge, edge_raw, provider_edge)
+    viewers = verify_product_viewer_requests(retained[PRODUCT_VIEWER_RECORD], edge, edge_raw, provider_edge,
+                                             policies=policies)
     retired_at = verify_git_retirement(retained["retirement.json"], row, receipt, spec["candidate"], native["finished_at_unix_ms"])
     native_records = {phase: retained[name] for phase, name in GIT_NATIVE_REF_FILES.items()}
     verify_git_lifecycle(native_records, row, publication, receipt, earliest["started_at_unix_ms"], earliest["reader"],
@@ -2760,8 +2766,8 @@ def collect_git_performance(
 ) -> dict[str, Any]:
     spec = benchmark_registration(registration)
     scope = spec["scope"]
-    policies = release_read_limits(policy) if policy is not None else {}
-    limits = policies.get(scope)
+    policies = release_read_limits(policy) if policy is not None else None
+    limits = policies.get(scope) if policies is not None else None
     missing_boundaries = {}
     if limits is not None:
         if limits.full_bytes:
@@ -2819,7 +2825,8 @@ def collect_git_performance(
         managed_commits.add(edge_fetch["publication_oid"])
         cache_roots.update(fetch["reader"]["cache_root_sha256"] for fetch in (edge_fetch, origin_fetch))
         viewer_raw = read_git_record(managed_product / PRODUCT_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
-        provider_request_ids.update(verify_product_viewer_requests(viewer_raw, edge_fetch, edge_raw, PROVIDERS[provider][0]))
+        provider_request_ids.update(verify_product_viewer_requests(viewer_raw, edge_fetch, edge_raw, PROVIDERS[provider][0],
+                                                                   policies=policies))
         publication_raw = read_git_record(managed_product / "publication.json")
         publication = validate_git_publication(publication_raw, provenance)
         observed = verify_git_native_ref(decode(read_git_record(managed_product / GIT_NATIVE_REF_FILES["published"])),
@@ -2875,10 +2882,10 @@ def collect_git_performance(
                                                     service_anchor, provenance, spec)
             service_instances.add(prior["service_instance_sha256"])
             _, _, export_ready_at = verified_publication(service_row / PUBLIC_EXPORT_DIR, spec["publication_sha256"])
-        provider_request_ids = verify_viewer_requests(
-            decode(read_trace(product / PRODUCT_VIEWER_RECORD, "service viewer requests")), service_anchor,
-            hashlib.sha256(edge_raw).hexdigest(), PROVIDERS[provider][0],
-        ).request_ids
+        provider_request_ids = verify_product_viewer_requests(
+            read_trace(product / PRODUCT_VIEWER_RECORD, "service viewer requests"), service_anchor,
+            edge_raw, PROVIDERS[provider][0], policies=policies,
+        )
     seen = set()
     performance = {}
     for location, region in spec["regions"].items():
@@ -2994,7 +3001,7 @@ def collect_git_performance(
                 viewer_log = None
                 traffic = ViewerRequestMetrics(set(), 0, 0, False, {})
                 cache_corrections = dict.fromkeys(("hit", "miss", "unknown"), 0)
-                if policy is not None:
+                if policies is not None:
                     verify_compiled_edge_limits(client, policies, label)
                 if provider in VIEWER_REQUEST_FILES and client["all_edge_attempts"]:
                     log_name = VIEWER_REQUEST_FILES[provider]
@@ -3182,6 +3189,7 @@ def verify_cdn_report(
     if cli_workload or sdk_git or desktop:
         native_target = {"origin_sha256": native_origin_sha256,
                          "prefix_sha256": hashlib.sha256(f"{row['fixture_prefix']}/".encode()).hexdigest()}
+    policies = release_read_limits(policy) if policy is not None else None
     if cli_workload:
         require(rollback is not None, "CLI qualification requires a product rollback fetch")
         registered_read = {key: registration[key] for key in ("candidate", "viewer_binding_sha256")}
@@ -3191,7 +3199,7 @@ def verify_cdn_report(
         product = collect_git_product_action(
             directory / GIT_PRODUCT_DIR, row | registered_read, rollback, cleanup_at=cleanup_at,
             native_origin_sha256=native_origin_sha256, public_export_sha256=registration.get("publication_sha256", ""),
-            policy=policy,
+            policies=policies,
         )
         require(row["product_action"] == product | {"fixture_cleanup_verified": True},
                 "product action differs from the retained publication, fetch, and retirement evidence")
@@ -3203,7 +3211,8 @@ def verify_cdn_report(
     if sdk_git:
         require(rollback is not None, "direct SDK qualification requires an ordinary SDK rollback read")
         product, request_ids = collect_sdk_product_action(directory / GIT_PRODUCT_DIR, row, registration, rollback,
-                                                          cleanup_at=cleanup_at, native_origin_sha256=native_origin_sha256)
+                                                          cleanup_at=cleanup_at, native_origin_sha256=native_origin_sha256,
+                                                          policies=policies)
         require(row["product_action"] == product, "product action differs from the retained SDK snapshot evidence")
         measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt,
                                           native_target=native_target, product_request_ids=request_ids, policy=policy)
@@ -3220,7 +3229,8 @@ def verify_cdn_report(
     if desktop:
         require(rollback is not None, "direct desktop qualification requires an ordinary desktop rollback read")
         product = collect_desktop_product_action(directory / GIT_PRODUCT_DIR, row, registration, rollback,
-                                                 cleanup_at=cleanup_at, native_origin_sha256=native_origin_sha256)
+                                                 cleanup_at=cleanup_at, native_origin_sha256=native_origin_sha256,
+                                                 policies=policies)
         require(row["product_action"] == product.action, "product action differs from the retained desktop read evidence")
         measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt,
                                           native_target=native_target, desktop_product=product, policy=policy)
@@ -3228,7 +3238,8 @@ def verify_cdn_report(
     if service:
         require(rollback is not None, "direct service qualification requires an ordinary HTTP rollback read")
         product = collect_service_product_action(directory / SERVICE_PRODUCT_DIR, row, registration, rollback,
-                                                 cleanup_at=cleanup_at, native_origin_sha256=native_origin_sha256)
+                                                 cleanup_at=cleanup_at, native_origin_sha256=native_origin_sha256,
+                                                 policies=policies)
         require(row["product_action"] == product, "product action differs from the retained service lifecycle evidence")
         measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt,
                                            service_row=directory, policy=policy)

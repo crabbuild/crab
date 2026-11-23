@@ -88,7 +88,8 @@ def xorb_evidence(lines: list[bytes], fixture: dict, key: str, reader: dict, arm
         require(all(counts[name] == 0 for name in PRODUCT_COUNTERS)
                 and native["get_responses"] > 0 and native["body_bytes"] > 0,
                 "native hydration control requires origin reads and zero edge attempts")
-    evidence = counts | {"reader": reader, "xorb_key_sha256": key_sha256, "native_traffic": native, "edge_responses": responses}
+    evidence = counts | {"scope": fixture["scope"], "reader": reader, "xorb_key_sha256": key_sha256,
+                         "native_traffic": native, "edge_responses": responses}
     if sparse and arm == "edge":
         verify_sparse_xorb_traffic(evidence, fixture["size"])
     return evidence

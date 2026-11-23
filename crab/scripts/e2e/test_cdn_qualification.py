@@ -1694,7 +1694,7 @@ class CdnQualificationTests(unittest.TestCase):
         request, response = next(iter(edge_read["edge_responses"].items()))
         for changes, reason in (
             ({"object_bytes": 17}, "xorb read disagrees with the approved object size"),
-            ({"elapsed_ms": 5001}, "complete xorb read exceeded its compiled CDN read limits"),
+            ({"elapsed_ms": 5001}, "CDN product read disagrees with its compiled CDN read limits"),
         ):
             with self.subTest(changes=changes):
                 json_file(edge, edge_read | {"edge_responses": {request: response | changes}})
@@ -1718,6 +1718,54 @@ class CdnQualificationTests(unittest.TestCase):
         publication.write_bytes(approved_publication)
         (records / CDN.GIT_NATIVE_REF_FILES["published"]).unlink()
         self.rejected(CDN.GIT_NATIVE_REF_FILES["published"])
+
+    def test_release_checks_adjacent_scopes_in_full_and_sparse_xorb_lifecycle_reads(self) -> None:
+        for provider, consumer in (("s3", "mount"), ("gcs", "sdk"), ("azure", "sdk")):
+            with self.subTest(provider=provider), TemporaryDirectory() as directory:
+                self.directory = Path(directory)
+                (self.directory / "traces").mkdir()
+                edge = CDN.PROVIDERS[provider][0]
+                scope = f"{edge}/private/{consumer}/xorb/direct"
+                shard = scope.replace("/xorb/", "/shard/")
+                capsule = scope.replace("/xorb/", "/capsule/")
+                release_rows = release_policy_row(scope) + release_policy_row(shard)
+                with patch(f"{__name__}.release_policy_row", return_value=release_rows):
+                    self.configure(provider, "private", "direct", consumer=consumer, family="xorb")
+                policy = self.directory / "qualified-scopes.txt"
+                policy.write_text(release_rows, encoding="utf-8")
+                args = ("--cdn-release-policy", str(policy))
+                product = self.directory / CDN.XORB_PRODUCT_DIR
+                full = "mount.json" if consumer == "mount" else "hydration.json"
+                for name, log_name in ((full, CDN.PRODUCT_VIEWER_RECORD),
+                                       ("sparse-warm-edge.json", "sparse-warm-edge-viewer-requests.json")):
+                    with self.subTest(record=name):
+                        path, log_path = product / name, product / log_name
+                        original, original_log = path.read_bytes(), log_path.read_bytes()
+                        read, proof = json.loads(original), json.loads(original_log)
+                        fingerprint = hashlib.sha256(f"adjacent/{name}".encode()).hexdigest()
+                        for adjacent, size, error in (
+                            (capsule, 8, "outside its compiled release scopes"),
+                            (shard, 9, "disagrees with its compiled CDN read limits"),
+                            (shard, 8, ""),
+                        ):
+                            with self.subTest(adjacent=adjacent, size=size):
+                                response = range_response(adjacent, size)
+                                digest = json_file(path, read | {
+                                    "all_edge_attempts": read["all_edge_attempts"] + 1,
+                                    "edge_responses": read["edge_responses"] | {fingerprint: response},
+                                })
+                                logged = {"status": 206, "cache": "hit", "response_bytes": size, "key_sha256": "f" * 64}
+                                if provider == "gcs":
+                                    logged.update(cache_fill_bytes=0, origin_requests={})
+                                json_file(log_path, proof | {"client_report_sha256": digest,
+                                                             "records": proof["records"] | {fingerprint: logged}})
+                                if error:
+                                    self.rejected(error, *args)
+                                else:
+                                    result = self.command(*args)
+                                    self.assertEqual(result.returncode, 0, result.stderr)
+                        path.write_bytes(original)
+                        log_path.write_bytes(original_log)
 
     def test_sparse_xorb_release_requires_verified_ranges_and_provider_observations(self) -> None:
         self.configure("gcs", "private", "direct", consumer="sdk", family="xorb")

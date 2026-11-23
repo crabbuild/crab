@@ -632,7 +632,7 @@ and edge payload through redacted observations.
   bodies and incomplete bytes separately. The product record retains each
   correlated request's full scope, expected object and request sizes, range
   flag, and elapsed time for sizing qualification. Completed requests must
-  agree with those sizes. Ordinary-build regional and CLI lifecycle evidence
+  agree with those sizes. Ordinary-build regional and lifecycle evidence
   requires every correlated request, including adjacent reads, to match a
   compiled scope and its limits. Redact cookies, JWTs, signed
   URLs and sensitive headers in all client and infrastructure logs. An
