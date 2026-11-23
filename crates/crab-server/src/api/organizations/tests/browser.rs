@@ -325,7 +325,11 @@ async fn native_browser_squashes_a_protected_private_fork_pull_request() {
         .set_password(fork_token["token"].as_str())
         .unwrap();
     std::fs::write(local.path().join("CONTRIBUTION.txt"), "from the fork\n").unwrap();
-    std::fs::write(local.path().join("NOTES.txt"), "draft notes\n").unwrap();
+    let mut notes = String::from("draft notes\n");
+    for line in 2..=19 {
+        notes.push_str(&format!("Draft line {line}\n"));
+    }
+    std::fs::write(local.path().join("NOTES.txt"), notes).unwrap();
     git(local.path(), &["add", "CONTRIBUTION.txt", "NOTES.txt"]).await;
     git(local.path(), &["commit", "-m", "Contribute from the fork"]).await;
     git(local.path(), &["push", fork_remote.as_str(), "main"]).await;

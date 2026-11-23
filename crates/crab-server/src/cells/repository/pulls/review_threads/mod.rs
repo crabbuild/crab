@@ -223,6 +223,8 @@ pub(crate) enum UpdatePullReviewReplyOutcome {
 mod navigation;
 pub(crate) use navigation::{GetReviewNavigation, ReviewNavigationInput};
 
+pub(crate) mod suggestions;
+
 mod operations;
 pub(crate) use operations::{
     CountUnresolvedConversations, CreatePullReviewReply, CreatePullReviewThread,

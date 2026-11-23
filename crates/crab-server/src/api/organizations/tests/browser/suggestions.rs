@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{path::Path, sync::atomic::Ordering};
 
 use super::{Browser, Harness, Method, StatusCode, Uuid, Value, json};
 use crate::api::organizations::tests::repositories::repository_write;
@@ -33,17 +33,30 @@ pub(super) async fn apply_to_fork(
         ],
     )
     .await;
+    let comment = async |path: &str, line: u64, suggestion: Option<&str>| -> Value {
+        repository_write(h, Method::POST, &format!("{pull}/threads"), reviewer, upstream,
+            json!({"request_id":Uuid::now_v7(),"body":"Review this wording",
+                "base_oid":comparison_base,"head_oid":selected["head_oid"],"path_hex":crate::api::encode_hex(path.as_bytes()),
+                "side":"new","start_line":line,"end_line":line,"suggested_text":suggestion}))
+            .await.error_for_status().unwrap().json().await.unwrap()
+    };
+    let selection = |thread: Value| json!({"number":thread["number"],"version":thread["version"]});
     let mut threads = Vec::new();
     for (path, text) in [
         ("CONTRIBUTION.txt", "reviewed fork contribution"),
         ("NOTES.txt", "reviewed notes"),
     ] {
-        let thread: Value = repository_write(h, Method::POST, &format!("{pull}/threads"), reviewer, upstream,
-            json!({"request_id":Uuid::now_v7(),"body":"Suggested wording",
-                "base_oid":comparison_base,"head_oid":selected["head_oid"],"path_hex":crate::api::encode_hex(path.as_bytes()),
-                "side":"new","start_line":1,"end_line":1,"suggested_text":text}))
-            .await.error_for_status().unwrap().json().await.unwrap();
-        threads.push(json!({"number":thread["number"],"version":thread["version"]}));
+        threads.push(selection(comment(path, 1, Some(text)).await));
+    }
+    for _ in 0..12 {
+        comment("NOTES.txt", 1, None).await;
+    }
+    let mut expected_notes = String::from("reviewed notes");
+    for line in 2..=19 {
+        let text = format!("Reviewed line {line}");
+        threads.push(selection(comment("NOTES.txt", line, Some(&text)).await));
+        expected_notes.push('\n');
+        expected_notes.push_str(&text);
     }
     let action = format!("{fork_api}/upstream-pulls/1/suggestions");
     let input = json!({
@@ -112,13 +125,29 @@ pub(super) async fn apply_to_fork(
             "--exact",
         ])
         .await;
-    for thread in &threads {
+    let select = async |thread: &Value| {
         let selector = format!(
             "[aria-label='Select suggestion from thread #{}']",
             thread["number"]
         );
         browser.run(&["wait", &selector]).await;
         browser.run(&["click", &selector]).await;
+    };
+    let (last, earlier) = threads.split_last().unwrap();
+    select(last).await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Load more threads",
+            "--exact",
+        ])
+        .await;
+    for thread in earlier {
+        select(thread).await;
     }
     browser
         .run(&[
@@ -127,12 +156,12 @@ pub(super) async fn apply_to_fork(
             "button",
             "click",
             "--name",
-            "Commit suggestions (2)",
+            "Commit suggestions (20)",
             "--exact",
         ])
         .await;
     browser
-        .run(&["wait", "--text", "Commit 2 suggestions"])
+        .run(&["wait", "--text", "Commit 20 suggestions"])
         .await;
     let dialogue = browser.run(&["get", "text", "[role=dialog]"]).await;
     assert!(dialogue.contains("library-fork"));
@@ -142,9 +171,10 @@ pub(super) async fn apply_to_fork(
             "label",
             "Commit message",
             "fill",
-            "Polish both fork files",
+            "Apply the full fork review batch",
         ])
         .await;
+    h.drop_next_suggestion_reply.store(true, Ordering::SeqCst);
     browser
         .run(&[
             "find",
@@ -153,6 +183,23 @@ pub(super) async fn apply_to_fork(
             "click",
             "--name",
             "Commit changes",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", "--text", "Retry suggestion commit"])
+        .await;
+    assert!(!h.drop_next_suggestion_reply.load(Ordering::SeqCst));
+    git(checkout, &["fetch", fork_git, "main"]).await;
+    let committed = git(checkout, &["rev-parse", "FETCH_HEAD"]).await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Retry suggestion commit",
             "--exact",
         ])
         .await;
@@ -166,6 +213,7 @@ pub(super) async fn apply_to_fork(
         selected["base_oid"].as_str().unwrap()
     );
     git(checkout, &["fetch", fork_git, "main"]).await;
+    assert_eq!(git(checkout, &["rev-parse", "FETCH_HEAD"]).await, committed);
     assert_eq!(
         git(checkout, &["rev-parse", "FETCH_HEAD^"]).await,
         selected["head_oid"].as_str().unwrap()
@@ -176,11 +224,11 @@ pub(super) async fn apply_to_fork(
     );
     assert_eq!(
         git(checkout, &["show", "FETCH_HEAD:NOTES.txt"]).await,
-        "reviewed notes"
+        expected_notes
     );
     assert_eq!(
         git(checkout, &["show", "-s", "--format=%s", "FETCH_HEAD"]).await,
-        "Polish both fork files"
+        "Apply the full fork review batch"
     );
     let credits = git(
         checkout,

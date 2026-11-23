@@ -1,17 +1,19 @@
 use super::*;
 use crate::api::contents;
+use crate::cells::repository::suggestions::{
+    MAX_SUGGESTIONS, PrepareSuggestions, PrepareSuggestionsInput, PrepareSuggestionsOutcome,
+    SuggestionSelection, SuggestionVersion, VerifySuggestionVersions,
+};
 use crate::git::objects::{commit_bytes, commit_identity};
 use crate::git::receive::{self, ReceiveError, SuggestionPublication};
 use crab_remote::objects::{TreeEdits, object_id};
 use crab_remote_git::{ContentClassification, EntryKind, EntryMode, OperationKind, Revision};
 use gix_hash::ObjectId;
 use gix_object::{Kind, tree};
-use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use uuid::Uuid;
 
-const MAX_SUGGESTIONS: usize = 20;
 const MAX_FILE_BYTES: usize = 900 * 1024;
 const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
 
@@ -20,21 +22,14 @@ const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
 pub(super) struct Input {
     request_id: Uuid,
     expected_head: String,
-    threads: Vec<ThreadVersion>,
+    threads: Vec<SuggestionVersion>,
     message: Option<String>,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct ThreadVersion {
-    number: u64,
-    version: u64,
 }
 
 struct Batch {
     number: u64,
     head: ObjectId,
-    threads: Vec<ThreadVersion>,
+    threads: Vec<SuggestionVersion>,
     message: String,
     plan_id: String,
 }
@@ -191,37 +186,48 @@ async fn publish_batch(
         return Err(WriteError::Conflict);
     };
     let head = batch.head;
+    for selected in &batch.threads {
+        app::number(selected.number)?;
+    }
+    let cell = app::repository_cell(server, discussion)?;
+    let selected = app::query_output(
+        cell.client
+            .query::<PrepareSuggestions>(
+                &cell.target,
+                None,
+                PrepareSuggestionsInput {
+                    selection: SuggestionSelection {
+                        pull: pull.number,
+                        threads: batch.threads.clone(),
+                    },
+                    base_oid: source.base_oid,
+                    head_oid: source.head_oid,
+                },
+            )
+            .await,
+    )?;
+    let selected = match selected {
+        PrepareSuggestionsOutcome::Ready(selected) => selected,
+        PrepareSuggestionsOutcome::Missing => {
+            return Err(WriteError::Input("A selected suggestion no longer exists"));
+        }
+        PrepareSuggestionsOutcome::NotSuggestion => {
+            return Err(WriteError::Input("Select review comments with suggestions"));
+        }
+        PrepareSuggestionsOutcome::Changed => return Err(WriteError::FileChanged),
+    };
     let mut files: BTreeMap<Vec<u8>, Vec<Replacement>> = BTreeMap::new();
     let mut authors = BTreeMap::new();
-    for selected in &batch.threads {
-        let thread = storage::thread(
-            server,
-            discussion,
-            pull.number,
-            app::number(selected.number)?,
-        )
-        .await?
-        .ok_or(WriteError::Input("A selected suggestion no longer exists"))?;
-        let (Some(text), Some(blob)) = (thread.suggested_text, thread.new_blob_oid) else {
-            return Err(WriteError::Input("Select review comments with suggestions"));
-        };
-        if thread.version != selected.version
-            || thread.resolved
-            || thread.side != PullReviewThreadSide::New
-            || thread.base_oid != source.base_oid
-            || thread.head_oid != source.head_oid
-        {
-            return Err(WriteError::FileChanged);
-        }
+    for thread in selected {
         if thread.author.issuer != actor.issuer || thread.author.subject != actor.subject {
-            let (name, email) = commit_identity(&thread.author);
+            let (name, email) = commit_identity(&super::super::storage::from_author(thread.author));
             authors.entry(email).or_insert(name);
         }
         files.entry(thread.path).or_default().push(Replacement {
             start: usize::try_from(thread.start_line).map_err(|_| WriteError::FileChanged)?,
             end: usize::try_from(thread.end_line).map_err(|_| WriteError::FileChanged)?,
-            blob,
-            text,
+            blob: thread.blob,
+            text: thread.text,
         });
     }
     let operation = repository
@@ -263,11 +269,7 @@ async fn publish_batch(
         SuggestionPublication {
             upstream: (target.id != discussion.id).then_some(discussion.id),
             number: batch.number,
-            threads: batch
-                .threads
-                .iter()
-                .map(|thread| (thread.number, thread.version))
-                .collect(),
+            threads: batch.threads.clone(),
             plan_id: batch.plan_id.clone(),
         },
     )
@@ -331,11 +333,21 @@ pub(crate) async fn authorize_suggestion_publication(
     }
     // The native lease also covers the exact head. Recheck the selected
     // versions here so edits or a merge admitted during packing win first.
-    for (number, version) in &suggestion.threads {
-        let thread = storage::thread(server, discussion, pull.number, *number).await?;
-        if thread.is_none_or(|thread| thread.version != *version || thread.resolved) {
-            return Err(ReceiveError::BranchChanged);
-        }
+    let cell = app::repository_cell(server, discussion)?;
+    let current = app::query_output(
+        cell.client
+            .query::<VerifySuggestionVersions>(
+                &cell.target,
+                None,
+                SuggestionSelection {
+                    pull: pull.number,
+                    threads: suggestion.threads.clone(),
+                },
+            )
+            .await,
+    )?;
+    if !current {
+        return Err(ReceiveError::BranchChanged);
     }
     Ok(())
 }

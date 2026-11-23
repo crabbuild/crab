@@ -352,7 +352,10 @@ pub(super) fn reply_from_row(row: &[SqlValue]) -> crate::cells::Result<PullRevie
     Ok(record)
 }
 
-fn author_from_row(row: &[SqlValue], start: usize) -> crate::cells::Result<RepositoryAuthor> {
+pub(super) fn author_from_row(
+    row: &[SqlValue],
+    start: usize,
+) -> crate::cells::Result<RepositoryAuthor> {
     Ok(RepositoryAuthor {
         issuer: result_text(row, start)?,
         subject: result_text(row, start + 1)?,
