@@ -7,6 +7,11 @@ test("workspace search clears old results when access changes between pages", as
   const repository = "01905010-0000-7000-8000-000000000002";
   const commit = "1".repeat(40);
   let revoked = false;
+  await page.route("**/api/session", (route) =>
+    route.fulfill({
+      json: { authenticated: true, mode: "local", user: null, csrf: null },
+    }),
+  );
   await page.route(
     (url) => url.pathname === "/api/code-search",
     (route) => {
