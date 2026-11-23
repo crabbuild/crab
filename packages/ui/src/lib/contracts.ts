@@ -167,10 +167,13 @@ export type TeamPolicy = { member_creation: boolean, version: number, };
 export type ReviewRoutingAlgorithm = "disabled" | "round_robin" | "fewest_open";
 
 // prettier-ignore
-export type ReviewRoutingSettings = { version: number, algorithm: ReviewRoutingAlgorithm, reviewers: number, excluded: Array<string>, };
+export type ReviewRoutingOptions = { count_existing: boolean, keep_team: boolean, };
 
 // prettier-ignore
-export type TeamCommand = { "kind": "create", name: string, description: string, visibility: TeamVisibility, } | { "kind": "edit", team: string, version: number, name: string, description: string, visibility: TeamVisibility, } | { "kind": "delete", team: string, version: number, } | { "kind": "member", team: string, member: string, version: number, role: TeamRole | null, } | { "kind": "review_routing", team: string, version: number, algorithm: ReviewRoutingAlgorithm, reviewers: number, excluded?: Array<string>, } | { "kind": "policy", version: number, member_creation: boolean, };
+export type ReviewRoutingSettings = { version: number, algorithm: ReviewRoutingAlgorithm, reviewers: number, excluded: Array<string>, options: ReviewRoutingOptions, };
+
+// prettier-ignore
+export type TeamCommand = { "kind": "create", name: string, description: string, visibility: TeamVisibility, } | { "kind": "edit", team: string, version: number, name: string, description: string, visibility: TeamVisibility, } | { "kind": "delete", team: string, version: number, } | { "kind": "member", team: string, member: string, version: number, role: TeamRole | null, } | { "kind": "review_routing", team: string, version: number, algorithm: ReviewRoutingAlgorithm, reviewers: number, excluded?: Array<string>, options?: ReviewRoutingOptions, } | { "kind": "policy", version: number, member_creation: boolean, };
 
 // prettier-ignore
 export type TeamSubmission = { request_id: string, command: TeamCommand, };

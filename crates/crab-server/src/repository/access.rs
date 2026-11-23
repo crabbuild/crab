@@ -272,47 +272,57 @@ pub(crate) async fn team_review_plan(
                 }),
         );
     }
-    let routing = if !automatic {
-        None
-    } else {
-        let current;
-        let eligibility = match eligibility {
-            Some(eligibility) => eligibility,
-            None => {
-                current = membership.merge_reviewers(server).await?;
-                &current
-            }
-        };
-        let candidates = members
+    if !automatic {
+        return Ok(TeamRecipients {
+            team,
+            recipients: members.into_iter().map(|(_, subject, _)| subject).collect(),
+            routing: None,
+        });
+    }
+    let current;
+    let eligibility = match eligibility {
+        Some(eligibility) => eligibility,
+        None => {
+            current = membership.merge_reviewers(server).await?;
+            &current
+        }
+    };
+    let options = roster.settings.options;
+    let mut count_existing = options.count_existing.then(Vec::new);
+    let mut candidates = Vec::new();
+    for (actor, subject, busy) in members {
+        if !eligibility.contains(issuer, &subject) {
+            continue;
+        }
+        if let Some(eligible) = &mut count_existing {
+            eligible.push(subject.clone());
+        }
+        if busy || roster.settings.excluded.binary_search(&actor).is_ok() {
+            continue;
+        }
+        let name = membership
+            .members
             .iter()
-            .filter(|(actor, subject, busy)| {
-                !busy
-                    && roster.settings.excluded.binary_search(actor).is_err()
-                    && eligibility.contains(issuer, subject)
-            })
-            .map(|(_, subject, _)| RepositoryAuthor {
-                issuer: issuer.to_owned(),
-                subject: subject.clone(),
-                name: membership
-                    .members
-                    .iter()
-                    .find(|member| member.subject == *subject)
-                    .map_or_else(
-                        || "Organization member".into(),
-                        |member| member.name.clone(),
-                    ),
-            })
-            .collect();
-        members.clear();
-        Some(routing::Plan {
+            .find(|member| member.subject == subject)
+            .map_or_else(
+                || "Organization member".into(),
+                |member| member.name.clone(),
+            );
+        candidates.push(RepositoryAuthor {
+            issuer: issuer.to_owned(),
+            subject,
+            name,
+        });
+    }
+    Ok(TeamRecipients {
+        team,
+        recipients: Vec::new(),
+        routing: Some(routing::Plan {
             algorithm: roster.settings.algorithm,
             reviewers: roster.settings.reviewers,
             candidates,
-        })
-    };
-    Ok(TeamRecipients {
-        team,
-        recipients: members.into_iter().map(|(_, subject, _)| subject).collect(),
-        routing,
+            count_existing,
+            keep_team: options.keep_team,
+        }),
     })
 }

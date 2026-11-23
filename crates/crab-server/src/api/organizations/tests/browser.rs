@@ -915,7 +915,7 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
         .await;
     assert_eq!(
         h.json(&routing, &alice).await,
-        json!({"version":1,"algorithm":"round_robin","reviewers":1,"excluded":[]})
+        json!({"version":1,"algorithm":"round_robin","reviewers":1,"excluded":[],"options":{"count_existing":false,"keep_team":false}})
     );
     browser.run(&["reload"]).await;
     browser
@@ -1057,7 +1057,7 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
         .await;
     assert_eq!(
         h.json(&routing, &alice).await,
-        json!({"version":2,"algorithm":"round_robin","reviewers":1,"excluded":[bob_id]})
+        json!({"version":2,"algorithm":"round_robin","reviewers":1,"excluded":[bob_id],"options":{"count_existing":false,"keep_team":false}})
     );
     browser.run(&["reload"]).await;
     browser
@@ -1091,11 +1091,19 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
         .run(&["wait", &format!("{excluded}[aria-checked='true']")])
         .await;
     browser.run(&["click", &excluded]).await;
+    for option in ["#review-routing-existing", "#review-routing-keep-team"] {
+        browser.run(&["click", option]).await;
+    }
     browser.run(&save_routing).await;
     browser
         .run(&["wait", "--text", "Update review assignment completed."])
         .await;
-    assert_eq!(h.json(&routing, &alice).await["excluded"], json!([]));
+    let updated = h.json(&routing, &alice).await;
+    assert_eq!(updated["excluded"], json!([]));
+    assert_eq!(
+        updated["options"],
+        json!({"count_existing":true,"keep_team":true})
+    );
 
     // Availability is self-managed in a separate signed-in browser.
     let bob_browser = Browser::new("review-availability");
@@ -1180,12 +1188,75 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
         .run(&["wait", "[aria-label='Cancel review request for bob']"])
         .await;
     let routed = h.json(&format!("{pulls}/1/reviewers"), &alice).await;
-    assert_eq!(routed["teams"][0]["state"], Value::Null);
+    assert_eq!(routed["teams"][0]["state"]["kind"], "requested");
     assert_eq!(routed["items"][0]["request"]["state"]["kind"], "requested");
     h.deliver_notifications(owner, "library").await;
     let inbox = h.json(&inbox, &bob).await;
     assert_eq!(inbox["items"].as_array().unwrap().len(), 1);
     assert_eq!(inbox["items"][0]["reason"], "review_requested");
+
+    // Add another eligible reviewer. Re-requesting the team should reuse
+    // Bob's pending individual request and leave the new member unassigned.
+    let alternate = h
+        .server
+        .cells()
+        .unwrap()
+        .command::<crate::cells::directory::RegisterAccounts>(
+            crate::cells::Address::Directory,
+            crate::app::mutation_identity().unwrap(),
+            vec![crate::cells::directory::IdentityKey {
+                issuer: h.provider.issuer.clone(),
+                subject: "outsider-id".into(),
+            }],
+        )
+        .await
+        .unwrap()
+        .output[0];
+    *h.provider.mode.lock().await = "outsider".into();
+    let outsider = h.login().await;
+    *h.provider.mode.lock().await = "valid".into();
+    h.write(
+        Method::PUT,
+        &format!("{org}/invitations/{alternate}"),
+        &alice,
+        json!({"version":0,"role":"member"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    h.write(
+        Method::POST,
+        &format!("{org}/invitation"),
+        &outsider,
+        json!({"version":1,"accept":true}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    h.write(Method::POST, &format!("{org}/teams/commands"), &alice,
+        json!({"request_id":Uuid::now_v7(),"command":{"kind":"member","team":team,"member":alternate,"version":0,"role":"member"}}))
+        .await.error_for_status().unwrap();
+    let visible = h
+        .json(
+            &format!("/api/repos?organization={organization}"),
+            &outsider,
+        )
+        .await;
+    assert_eq!(visible["repositories"][0]["id"], json!(repo_id));
+    assert_eq!(visible["repositories"][0]["access"], "write");
+    browser.run(&["click", cancel]).await;
+    let ready = format!(
+        "!document.querySelector({cancel:?}) && !!document.querySelector(\"{chooser}:not([disabled])\")"
+    );
+    browser.run(&["wait", "--fn", &ready]).await;
+    for selector in [chooser, request_team] {
+        browser.run(&["wait", selector]).await;
+        browser.run(&["click", selector]).await;
+    }
+    browser.run(&["wait", cancel]).await;
+    let counted = h.json(&format!("{pulls}/1/reviewers"), &alice).await;
+    assert_eq!(counted["items"], routed["items"]);
+    assert_eq!(counted["teams"][0]["state"]["kind"], "requested");
 
     browser
         .run(&[

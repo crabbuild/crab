@@ -188,7 +188,9 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
 - Team maintainers can distribute review requests by repository-scoped
   rotation or fewest open requests and exclude selected members from both
   methods. Reviewers can set an expiring or indefinite Busy status for
-  automatic assignment. Organization-wide reviewer balancing remains open.
+  automatic assignment. Team routing can count eligible pending requests and
+  keep the team on a pull request after individual assignment.
+  Organization-wide reviewer balancing remains open.
   [Team review settings](https://docs.github.com/en/organizations/organizing-members-into-teams/managing-code-review-settings-for-your-team)
 
 ## Platform investments

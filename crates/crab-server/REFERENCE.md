@@ -2959,6 +2959,14 @@ available members stays on the team. CODEOWNERS keeps the team request visible
 alongside any individual assignments, and any eligible code owner can satisfy
 the merge requirement. Only assigned individuals receive routing notifications.
 
+**Count existing review requests** reduces new assignments by the number of
+current team members with Write or Admin access who already have a pending
+individual request on the PR. Existing requests count even if their reviewers
+are now Busy or excluded from automatic assignment. **Keep the team requested
+after assignment** leaves an explicit team request visible alongside the
+individual assignments. If automatic routing creates zero new assignments,
+the request stays with the team.
+
 ### Require code owner reviews
 
 In **Settings → Branches**, enable **Require review from code owners** on the

@@ -452,6 +452,8 @@ async fn team_assignment_rotates_once_and_balances_outstanding_open_reviews() {
             algorithm,
             reviewers: 1,
             candidates: vec![author("Alice"), author("Bob"), author("Carol")],
+            count_existing: None,
+            keep_team: false,
         }),
     };
     seed(&cell).await;
@@ -515,6 +517,60 @@ async fn team_assignment_rotates_once_and_balances_outstanding_open_reviews() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn team_assignment_counts_pending_requests_and_retains_the_team() {
+    use crate::cells::organization::teams::review_routing::Algorithm;
+    use teams::{SetTeamReviewRequest, TeamOutcome, TeamSelection};
+
+    let server = fixtures::fixture().await;
+    let cell = cell(&server);
+    seed(&cell).await;
+    assert!(matches!(
+        write::<SetReviewRequest>(&cell, request("Bob", 1, true)).await,
+        Outcome::Applied(_)
+    ));
+    let team = Uuid::now_v7();
+    let request_team = || TeamSelection {
+        pull: 1,
+        version: 2,
+        actor: author("Alice"),
+        team,
+        recipients: Some(Vec::new()),
+        routing: Some(routing::Plan {
+            algorithm: Algorithm::RoundRobin,
+            reviewers: 2,
+            // Bob is already requested and unavailable for a new assignment.
+            candidates: vec![author("Carol"), author("Dave")],
+            count_existing: Some(vec!["Bob".into(), "Bob".into(), "Eve".into()]),
+            keep_team: true,
+        }),
+    };
+    assert!(matches!(
+        write::<SetTeamReviewRequest>(&cell, request_team()).await,
+        TeamOutcome::Applied
+    ));
+    let routed = page_for(&cell, 1).await;
+    assert_eq!(routed.items.len(), 2);
+    assert_eq!(routed.teams[0].team, team);
+    let mut cancel = request_team();
+    cancel.version = routed.version;
+    cancel.recipients = None;
+    cancel.routing = None;
+    assert!(matches!(
+        write::<SetTeamReviewRequest>(&cell, cancel).await,
+        TeamOutcome::Applied
+    ));
+    assert!(matches!(
+        write::<SetTeamReviewRequest>(&cell, request_team()).await,
+        TeamOutcome::Applied
+    ));
+    let after_retry = page_for(&cell, 1).await;
+    assert!(after_retry.teams.is_empty());
+    assert_eq!(after_retry.items, routed.items);
+    assert_eq!(after_retry.version, routed.version + 1);
+    fixtures::close(&server).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn routed_code_owner_requests_keep_the_team_and_deduplicate_people() {
     use crate::cells::organization::teams::review_routing::Algorithm;
 
@@ -537,6 +593,8 @@ async fn routed_code_owner_requests_keep_the_team_and_deduplicate_people() {
                         author("Carol"),
                         author("Carol"),
                     ],
+                    count_existing: None,
+                    keep_team: false,
                 }),
             }],
         },

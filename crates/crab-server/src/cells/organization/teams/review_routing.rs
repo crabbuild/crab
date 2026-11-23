@@ -14,6 +14,15 @@ pub(crate) enum Algorithm {
 pub(crate) const MAX_REVIEWERS: u8 = 10;
 const MAX_EXCLUSIONS: usize = 256;
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(rename = "ReviewRoutingOptions"))]
+pub(crate) struct Options {
+    pub count_existing: bool,
+    pub keep_team: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -24,6 +33,8 @@ pub(crate) struct Settings {
     pub reviewers: u8,
     #[serde(default)]
     pub excluded: Vec<Uuid>,
+    #[serde(default)]
+    pub options: Options,
 }
 
 fn key(team: Uuid) -> String {
@@ -36,6 +47,7 @@ fn load(context: &Transaction<'_>, team: Uuid) -> Result<Settings> {
         algorithm: Algorithm::Disabled,
         reviewers: 1,
         excluded: Vec::new(),
+        options: Options::default(),
     }))
 }
 
@@ -46,15 +58,27 @@ fn members(context: &Transaction<'_>, team: Uuid) -> Result<Vec<Uuid>> {
         .collect())
 }
 
+pub(super) struct Update<'a> {
+    pub version: u64,
+    pub algorithm: Algorithm,
+    pub reviewers: u8,
+    pub excluded: Option<&'a [Uuid]>,
+    pub options: Option<Options>,
+}
+
 pub(super) fn set(
     context: &Transaction<'_>,
     who: Uuid,
     id: Uuid,
-    version: u64,
-    algorithm: Algorithm,
-    reviewers: u8,
-    excluded: Option<&[Uuid]>,
+    update: Update<'_>,
 ) -> Result<Outcome> {
+    let Update {
+        version,
+        algorithm,
+        reviewers,
+        excluded,
+        options,
+    } = update;
     if !(1..=MAX_REVIEWERS).contains(&reviewers) {
         return Ok(Outcome::InvalidRouting);
     }
@@ -86,6 +110,7 @@ pub(super) fn set(
         algorithm,
         reviewers,
         excluded,
+        options: options.unwrap_or(old.options),
     };
     if old != settings {
         settings.version = next(settings.version)?;

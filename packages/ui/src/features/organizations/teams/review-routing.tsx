@@ -81,6 +81,10 @@ function ReviewRoutingForm({
             algorithm: fields.get("algorithm") as ReviewRoutingAlgorithm,
             reviewers: Number(fields.get("reviewers")),
             excluded: [...excluded].sort(),
+            options: {
+              count_existing: fields.has("count-existing"),
+              keep_team: fields.has("keep-team"),
+            },
           },
           "Update review assignment",
         );
@@ -116,6 +120,26 @@ function ReviewRoutingForm({
           disabled={commands.locked}
           required
         />
+      </div>
+      <div className="flex flex-col gap-3">
+        <Label htmlFor="review-routing-existing" className="min-h-6">
+          <Checkbox
+            id="review-routing-existing"
+            name="count-existing"
+            defaultChecked={settings.options.count_existing}
+            disabled={commands.locked}
+          />
+          Count existing review requests
+        </Label>
+        <Label htmlFor="review-routing-keep-team" className="min-h-6">
+          <Checkbox
+            id="review-routing-keep-team"
+            name="keep-team"
+            defaultChecked={settings.options.keep_team}
+            disabled={commands.locked}
+          />
+          Keep the team requested after assignment
+        </Label>
       </div>
       <fieldset className="flex w-full min-w-0 flex-col gap-2">
         <legend className="font-medium">Never auto-assign</legend>

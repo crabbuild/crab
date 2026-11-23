@@ -133,7 +133,7 @@ async fn public_team_routes_preserve_secret_visibility_and_current_maintainer_au
         &h,
         id,
         &bob,
-        json!({"kind":"review_routing","team":team,"version":0,"algorithm":"round_robin","reviewers":1,"excluded":[bob_id]}),
+        json!({"kind":"review_routing","team":team,"version":0,"algorithm":"round_robin","reviewers":1,"excluded":[bob_id],"options":{"count_existing":true,"keep_team":true}}),
     )
     .await
     .error_for_status()
@@ -155,7 +155,7 @@ async fn public_team_routes_preserve_secret_visibility_and_current_maintainer_au
     }
     assert_eq!(
         h.json(&routing, &bob).await,
-        json!({"version":2,"algorithm":"fewest_open","reviewers":2,"excluded":[bob_id]})
+        json!({"version":2,"algorithm":"fewest_open","reviewers":2,"excluded":[bob_id],"options":{"count_existing":true,"keep_team":true}})
     );
     h.close().await;
 }

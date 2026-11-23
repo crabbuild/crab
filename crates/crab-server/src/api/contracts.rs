@@ -70,6 +70,7 @@ fn typescript() -> String {
         organization::teams::Membership::decl(&config),
         organization::teams::Policy::decl(&config),
         organization::teams::review_routing::Algorithm::decl(&config),
+        organization::teams::review_routing::Options::decl(&config),
         organization::teams::review_routing::Settings::decl(&config),
         organization::teams::Command::decl(&config),
         organizations::teams::ChangeRequest::decl(&config),

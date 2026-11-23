@@ -42,6 +42,9 @@ pub(crate) enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(test, ts(optional))]
         excluded: Option<Vec<Uuid>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
+        options: Option<review_routing::Options>,
     },
     Policy {
         version: u64,
@@ -174,14 +177,18 @@ impl Mutation for Change {
                 algorithm,
                 reviewers,
                 excluded,
+                options,
             } => review_routing::set(
                 context,
                 input.actor,
                 *team,
-                *version,
-                *algorithm,
-                *reviewers,
-                excluded.as_deref(),
+                review_routing::Update {
+                    version: *version,
+                    algorithm: *algorithm,
+                    reviewers: *reviewers,
+                    excluded: excluded.as_deref(),
+                    options: *options,
+                },
             )?,
             Command::Policy {
                 version,

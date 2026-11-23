@@ -201,6 +201,11 @@ async function fixture(page: Page, local = false) {
               command.excluded ??
               state.reviewRouting.get(target)?.excluded ??
               [],
+            options: command.options ??
+              state.reviewRouting.get(target)?.options ?? {
+                count_existing: false,
+                keep_team: false,
+              },
           });
         } else if (command.kind === "delete")
           state.teams = state.teams.filter((view) => view.team.id !== target);
@@ -238,6 +243,7 @@ async function fixture(page: Page, local = false) {
           algorithm: "disabled",
           reviewers: 1,
           excluded: [],
+          options: { count_existing: false, keep_team: false },
         },
       });
     }
@@ -449,6 +455,14 @@ for (const mobile of [false, true])
       exact: true,
     });
     await excluded.check();
+    const countExisting = page.getByRole("checkbox", {
+      name: "Count existing review requests",
+    });
+    const keepTeam = page.getByRole("checkbox", {
+      name: "Keep the team requested after assignment",
+    });
+    await countExisting.check();
+    await keepTeam.check();
     await page.getByRole("button", { name: "Save review assignment" }).click();
     await expect(
       page.getByRole("status", { name: "Team submission result" }),
@@ -458,6 +472,8 @@ for (const mobile of [false, true])
     );
     await expect(page.getByLabel("Reviewers per request")).toHaveValue("2");
     await expect(excluded).toBeChecked();
+    await expect(countExisting).toBeChecked();
+    await expect(keepTeam).toBeChecked();
     await expectNoAccessibilityViolations(page);
     expect(
       await page.evaluate(
