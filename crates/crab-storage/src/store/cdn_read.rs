@@ -74,8 +74,10 @@ pub struct CdnBindingInfo<'a> {
 /// Independent results for an explicit read-only CDN probe.
 pub struct CdnProbeResult {
     pub viewer_expires_at: Option<SystemTime>,
-    pub whole_object: Result<()>,
-    pub range: Result<()>,
+    /// Absent when the compiled profile excludes a full GET of the sample.
+    pub whole_object: Option<Result<()>>,
+    /// Absent when the compiled profile excludes a one-byte range of the sample.
+    pub range: Option<Result<()>>,
     pub mutable_status: Option<Result<u16>>,
 }
 
@@ -504,17 +506,15 @@ impl CdnReadAttempt {
     ) -> Result<CdnProbeResult> {
         let size = expected.len() as u64;
         let mutable = self.route.layout.capsule_root_path();
+        let admits_whole = self.admits(size, None);
+        let admits_range = self.admits(size, Some(1));
         if !(2..=CDN_PROBE_MAX_BYTES).contains(&size)
             || self.family.global()
             || self.store.read_prefix_target_identity(&mutable) != Some(&self.route.target)
-            || self
-                .route
-                .publication
-                .as_ref()
-                .is_some_and(|receipt| receipt.sizes.get(self.path.as_ref()) != Some(&size))
+            || !(admits_whole || admits_range)
         {
             return Err(StorageError::Forbidden {
-                path: "CDN probe requires a bounded immutable object in the selected repository"
+                path: "CDN probe requires an admitted immutable object in the selected repository"
                     .into(),
             });
         }
@@ -554,45 +554,54 @@ impl CdnReadAttempt {
                     }
                     Ok(())
                 };
-                self.store.record_read_request(StorageReadKind::Get);
-                let whole_object = verify(
-                    self.route
-                        .transport
-                        .get(
-                            CdnGet::diagnostic(&self.path, size, None),
-                            viewer(),
-                            timeout,
-                            cancel,
-                        )
-                        .await,
-                    expected,
-                );
-                self.store.record_read_request(StorageReadKind::Range);
-                let range = verify(
-                    self.route
-                        .transport
-                        .get(
-                            CdnGet::diagnostic(&self.path, size, Some(0..1)),
-                            viewer(),
-                            timeout,
-                            cancel,
-                        )
-                        .await,
-                    &expected[..1],
-                );
-                // A denied mutable request only proves the route boundary
-                // after the same viewer has demonstrated authorized reads.
-                let mutable_status = if whole_object.is_ok() && range.is_ok() {
-                    self.store.record_read_request(StorageReadKind::Range);
-                    Some(
+                let whole_object = if admits_whole {
+                    self.store.record_read_request(StorageReadKind::Get);
+                    Some(verify(
                         self.route
                             .transport
-                            .probe_mutable_status(&mutable, viewer(), timeout)
+                            .get(
+                                CdnGet::diagnostic(&self.path, size, None),
+                                viewer(),
+                                timeout,
+                                cancel,
+                            )
                             .await,
-                    )
+                        expected,
+                    ))
                 } else {
                     None
                 };
+                let range = if admits_range {
+                    self.store.record_read_request(StorageReadKind::Range);
+                    Some(verify(
+                        self.route
+                            .transport
+                            .get(
+                                CdnGet::diagnostic(&self.path, size, Some(0..1)),
+                                viewer(),
+                                timeout,
+                                cancel,
+                            )
+                            .await,
+                        &expected[..1],
+                    ))
+                } else {
+                    None
+                };
+                // A denied mutable request only proves the route boundary
+                // after the same viewer has demonstrated authorized reads.
+                let mutable_status =
+                    if matches!((&whole_object, &range), (Some(Ok(())), Some(Ok(())))) {
+                        self.store.record_read_request(StorageReadKind::Range);
+                        Some(
+                            self.route
+                                .transport
+                                .probe_mutable_status(&mutable, viewer(), timeout)
+                                .await,
+                        )
+                    } else {
+                        None
+                    };
                 Ok(CdnProbeResult {
                     viewer_expires_at: credential.and_then(|value| value.expires_at),
                     whole_object,

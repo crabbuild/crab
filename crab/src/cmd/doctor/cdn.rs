@@ -153,7 +153,7 @@ async fn probe(
     let Some((path, digest, size)) = sample else {
         checks.push(CheckResult::warn(
             "CDN eligibility",
-            "the current root has no eligible immutable Git object within the 1 MiB probe limit",
+            "the current root has no immutable Git object within both the compiled limits and the 1 MiB probe limit",
         ));
         return checks;
     };
@@ -273,9 +273,11 @@ fn immutable_sample<'a>(
         })
         .chain(checkpoint)
         .chain(history)
-        .filter(|(_, _, size)| (2..=CDN_PROBE_MAX_BYTES).contains(size))
-        .filter(|(path, _, _)| layout.store().cdn_attempt(path).is_some())
-        .min_by_key(|(_, _, size)| *size)
+        .filter_map(|sample| {
+            probe_rank(layout.store(), &sample.0, sample.2).map(|rank| (rank, sample))
+        })
+        .min_by_key(|(rank, _)| *rank)
+        .map(|(_, sample)| sample)
 }
 
 async fn checkpoint_pack_sample(
@@ -296,13 +298,23 @@ async fn checkpoint_pack_sample(
         .sources()
         .iter()
         .filter(|source| source.kind() == PackSourceKind::PackLayer)
-        .filter(|source| (2..=CDN_PROBE_MAX_BYTES).contains(&source.object_size()))
         .filter_map(|source| {
             let path = layout.capsule_pack_layer_path(source.object_hash());
-            layout.store().cdn_attempt(&path).map(|_| (path, source))
+            probe_rank(layout.store(), &path, source.object_size()).map(|rank| (rank, path, source))
         })
-        .min_by_key(|(_, source)| source.object_size())
-        .map(|(path, source)| (path, source.object_hash().to_owned(), source.object_size())))
+        .min_by_key(|(rank, _, _)| *rank)
+        .map(|(_, path, source)| (path, source.object_hash().to_owned(), source.object_size())))
+}
+
+fn probe_rank(store: &Store, path: &ObjectPath, size: u64) -> Option<(bool, u64)> {
+    if !(2..=CDN_PROBE_MAX_BYTES).contains(&size) {
+        return None;
+    }
+    let attempt = store.cdn_attempt(path)?;
+    let whole = attempt.admits(size, None);
+    let range = attempt.admits(size, Some(1));
+    // A sample that admits both forms can also verify mutable-route denial.
+    (whole || range).then_some((!(whole && range), size))
 }
 
 fn failed(name: &'static str, error: CrabError) -> CheckResult {
@@ -311,10 +323,11 @@ fn failed(name: &'static str, error: CrabError) -> CheckResult {
     CheckResult::fail(name, format!("failed ({})", error.code()))
 }
 
-fn read_check(name: &'static str, result: crab_storage::Result<()>) -> CheckResult {
+fn read_check(name: &'static str, result: Option<crab_storage::Result<()>>) -> CheckResult {
     match result {
-        Ok(()) => CheckResult::ok(name, "matches verified native bytes"),
-        Err(error) => failed(name, error.into()),
+        Some(Ok(())) => CheckResult::ok(name, "matches verified native bytes"),
+        Some(Err(error)) => failed(name, error.into()),
+        None => CheckResult::warn(name, "skipped by the compiled CDN read limits"),
     }
 }
 
@@ -327,7 +340,9 @@ mod tests {
         CapsuleGitPack, CapsulePointer, LayeredCheckpoint, PackLayer, PointerCatalog, RootRecord,
         load_root,
     };
-    use crab_storage::cdn::{CdnAccess, CdnCredential, CdnCredentials, CdnRoute, CdnTransport};
+    use crab_storage::cdn::{
+        CdnAccess, CdnCredential, CdnCredentials, CdnReadFamily, CdnRoute, CdnTransport,
+    };
     use object_store::memory::InMemory;
     use tokio::{
         io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -590,5 +605,68 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn probe_sends_only_admitted_immutable_reads() {
+        for (limits, ranged) in [
+            ("0 4 1 3000", Some(true)),
+            ("4 0 0 3000", Some(false)),
+            ("3 3 1 3000", None),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let route = CdnRoute::new(
+                [7; 32],
+                "replica/org/repo".into(),
+                None,
+                CdnAccess::Public,
+                CdnTransport::loopback_fixture(listener.local_addr().unwrap()).unwrap(),
+                Duration::from_secs(3),
+            )
+            .with_loopback_read_limits(CdnReadFamily::Capsule, limits)
+            .unwrap();
+            let (resolved, object_path) = populated_store(route, Bytes::from_static(b"good")).await;
+            let responder = tokio::spawn(async move {
+                if let Some(ranged) = ranged {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut stream = BufReader::new(stream);
+                    let mut request = String::new();
+                    while !request.ends_with("\r\n\r\n") {
+                        assert_ne!(stream.read_line(&mut request).await.unwrap(), 0);
+                    }
+                    assert!(request.starts_with(&format!("GET /{object_path} HTTP/1.1\r\n")));
+                    assert_eq!(request.contains("range: bytes=0-0\r\n"), ranged);
+                    let response = if ranged {
+                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-0/4\r\nContent-Length: 1\r\nConnection: close\r\n\r\ng"
+                    } else {
+                        "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ngood"
+                    };
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                }
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                        .await
+                        .is_err()
+                );
+            });
+            let checks = probe(resolved, Duration::from_secs(3), &CancellationToken::new()).await;
+            tokio::time::timeout(Duration::from_secs(2), responder)
+                .await
+                .unwrap()
+                .unwrap();
+            if let Some(ranged) = ranged {
+                let (pass, skipped) = if ranged { (6, 5) } else { (5, 6) };
+                assert_eq!(checks[pass].status, CheckStatus::Ok);
+                assert_eq!(checks[skipped].status, CheckStatus::Warn);
+                assert!(checks[skipped].detail.contains("compiled CDN read limits"));
+                assert_eq!(checks[7].name, "CDN mutable route");
+                assert_eq!(checks[7].status, CheckStatus::Warn);
+            } else {
+                let eligibility = checks.last().unwrap();
+                assert_eq!(eligibility.name, "CDN eligibility");
+                assert_eq!(eligibility.status, CheckStatus::Warn);
+                assert!(eligibility.detail.contains("compiled limits"));
+            }
+        }
     }
 }

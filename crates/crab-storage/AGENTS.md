@@ -67,9 +67,10 @@ dependency source before asserting provider behavior.
 - Logical bucket identity and credential-free transport target identity serve different consumers; do not derive the latter from display text.
   Source: `crates/crab-storage/src/identity.rs`.
 
-- Explicit CDN diagnostics prove two edge reads against a bounded, verified
-  native object before checking mutable-root denial with the same viewer. Only
-  the diagnostic path sends a mutable GET to the edge and it inspects status.
+- Explicit CDN diagnostics use only admitted immutable read forms. They
+  prove both edge reads against a bounded, verified native object before
+  checking mutable-root denial with the same viewer. Only the diagnostic
+  path sends a mutable GET to the edge and it inspects status.
   Sources: `crates/crab-storage/src/store/cdn_read.rs`, `crab/src/cmd/doctor/cdn.rs`.
 
 - HTTPS public CDN routes pin the operator-approved publication receipt before

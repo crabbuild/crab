@@ -56,9 +56,11 @@ read-only.
 `--cdn-probe` checks an authorized CloudFront, Cloud CDN, or Front Door
 deployment using the same primary or read replica selected by Git fetch. Use
 a build with `provider-cdn-qualification` to exercise HTTPS delivery. The probe
-compares a full CDN GET and a one-byte range with verified origin bytes for a
-root-referenced Git object up to 1 MiB. It reports private viewer credential lifetime and checks
-that the same viewer gets HTTP 401 or 403 for the mutable repository root.
+compares an admitted full CDN GET or one-byte range with verified origin bytes
+for a root-referenced Git object up to 1 MiB. It prefers a sample that admits
+both forms and warns about skipped forms. It reports private viewer credential
+lifetime. When both immutable reads pass, it checks that the same viewer gets
+HTTP 401 or 403 for the mutable repository root.
 Use it on a qualification deployment containing the sample object.
 
 For conceptual background, see [Health Check](/docs/cli/diagnostics/health-check).

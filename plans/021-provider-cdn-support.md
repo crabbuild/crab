@@ -620,7 +620,8 @@ and edge payload through redacted observations.
   assignment or public export settings. `crab doctor --cdn-probe` uses the
   fetch resolver to report the primary or ready replica binding, eligibility,
   credential lifetime, origin availability,
-  byte-verified GET and range delivery, and the mutable-root denial status. It
+  byte-verified delivery for the forms admitted by the compiled profile, and
+  the mutable-root denial status when both forms pass. It
   uses an origin-verified Git object of at most 1 MiB referenced by the current
   root on the selected physical target, including a pack layer from a native
   checkpoint. Exercise it on existing authorized cloud fixtures.

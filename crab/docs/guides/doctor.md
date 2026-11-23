@@ -40,14 +40,15 @@ deployment. Build with `provider-cdn-qualification` to exercise HTTPS delivery.
 The probe follows Git fetch replica discovery and selection. It
 reports the selected primary or read replica and that store's CDN binding.
 It verifies a root-referenced immutable Git object up to 1 MiB at the selected
-origin, then compares a full CDN GET and a one-byte range. The probe can
-select a standalone pack layer from the native checkpoint when the route
-covers pack layers. Provide an export containing the sample when checking
-public delivery. A repository without an eligible object of that size
-reports no eligible sample.
+origin, then compares the admitted full CDN GET and one-byte range with those
+bytes. The probe prefers a sample that admits both and warns when the compiled
+profile skips a request form. It can select a standalone pack layer from the
+native checkpoint when the route covers pack layers. Provide an export
+containing the sample when checking public delivery. If no eligible object
+fits, the probe reports that the repository has no eligible sample.
 
 For private delivery, the probe reports the viewer grant's remaining lifetime
-and uses that same viewer for all edge requests. After the immutable reads
+and uses that same viewer for all edge requests. After both immutable reads
 pass, the final request asks the CDN for one byte of `v2/root` and checks for
 HTTP 401 or 403 without reading the response body. The probe makes no
 repository writes. Its output omits credential values and raw provider errors.
