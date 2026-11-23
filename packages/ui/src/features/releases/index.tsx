@@ -496,6 +496,7 @@ export function Releases({
           <EditRelease
             repo={repo}
             tag={selected}
+            refs={refs}
             csrf={csrf}
             onPublished={onPublished}
           />

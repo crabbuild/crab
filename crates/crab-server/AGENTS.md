@@ -229,7 +229,9 @@ reads current follows by paging the canonical discussion keys.
 `api/notifications/discussions/timed.rs` merges authorized Repository pages.
 `collaboration/watches/publications.rs`
 owns release watch activation and the publication outbox. Release completion
-queues the notice in its publication transaction. Activity writes enroll participants under
+queues the notice in its publication transaction. `api/releases/notes.rs`
+composes canonical completed pull merges with a pinned Git ancestry range
+for the editable release preview. Activity writes enroll participants under
 their qualified identity before scheduling delivery. Watch outbox events carry
 the activity number and advance by bounded pages after Directory delivery.
 The mention outbox pins enrollment sources to committed activity and gates

@@ -316,12 +316,14 @@ export function Directory({
 export function History({
   repo,
   rev,
+  base,
   revision,
   path,
   kind,
 }: {
   repo: Repository;
   rev: string;
+  base?: string;
   revision: string;
   path: string;
   kind: string;
@@ -330,6 +332,7 @@ export function History({
   const state = useRequest<Page<Commit>>(
     endpoint(repo, "commits", {
       rev,
+      base,
       path_hex: path || undefined,
       cursor: cursors[cursors.length - 1],
       limit: path ? "1" : "30",
@@ -346,6 +349,13 @@ export function History({
                 History for{" "}
                 <Link href={repoHref(repo, { rev: revision, path, kind })}>
                   {displayHex(path)}
+                </Link>
+              </span>
+            ) : base ? (
+              <span className="muted">
+                Commits since{" "}
+                <Link href={repoHref(repo, { view: "commit", rev: base })}>
+                  {short(base)}
                 </Link>
               </span>
             ) : (

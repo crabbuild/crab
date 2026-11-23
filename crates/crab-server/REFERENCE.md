@@ -1113,12 +1113,28 @@ Release routes use durable request reservations and versioned records:
 | Method and route | Purpose |
 | --- | --- |
 | `GET/POST /api/repos/{owner}/{name}/releases` | List or create releases |
+| `GET /api/repos/{owner}/{name}/releases/generate-notes` | Preview generated Markdown for an exact target commit |
 | `GET/PATCH/DELETE /api/repos/{owner}/{name}/releases/{number}` | Read, edit, or tombstone one release |
 | `GET /api/repos/{owner}/{name}/releases/tag/{tag}` | Read by unique tag, including slash-containing tags; same draft visibility as numbered reads |
 | `POST /api/repos/{owner}/{name}/releases/{number}/assets` | Upload a release asset |
 | `GET/DELETE /api/repos/{owner}/{name}/releases/{number}/assets/{asset_id}` | Download or remove an asset |
 
 Creation includes a stable universally unique identifier (UUID) in `request_id`, short `tag_name`, full target commit OID, title, Markdown body, prerelease flag, and draft state. The target must be a visible commit.
+
+Repository writers can pick a previous tag and generate a preview in the new
+release form or an existing draft. The preview includes merged pull requests
+in the Git range, contributors, and a link to the commit history for that
+range. Inserting the preview appends editable Markdown to the release body.
+
+The preview route accepts a full `target_oid` and an optional `previous_tag`.
+Omitting `previous_tag` selects the highest-numbered published release whose
+tag still points to its recorded commit and whose commit is a strict ancestor
+of the target. An empty string includes all history. An explicit tag must
+resolve to the target commit or an ancestor. The response returns the pinned
+`target_oid`, the selected `previous_tag` and `previous_oid` (both null for
+all history), and the Markdown `body`. Generation supports up to 4,096
+merged pull requests in the repository and returns an error if the scan or
+64 KiB body limit is exceeded.
 
 An existing lightweight or annotated tag is accepted only when it peels to the exact target. A new published release creates a lightweight tag through canonical ref publication. Drafts reserve their release tag but do not publish a new Git tag until a version-bound edit publishes the draft. Republishing a withdrawn release verifies the existing Git tag again before notifying watchers.
 

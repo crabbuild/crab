@@ -70,6 +70,31 @@ impl RemoteGitSnapshot {
         operation.read_commit(self.commit_oid).await
     }
 
+    /// Test whether each candidate is the pinned commit or an ancestor of it.
+    pub async fn commit_membership(
+        &self,
+        candidates: &[ObjectId],
+        operation: &OperationContext,
+    ) -> Result<Vec<bool>> {
+        self.ensure_operation(operation)?;
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some(graph) = self.commit_graph.as_deref() {
+            return graph
+                .reachable_from_roots(candidates, &[self.commit_oid], operation)
+                .await;
+        }
+        operation
+            .charge(BudgetDimension::Entries, candidates.len() as u64)
+            .await?;
+        let ancestors = commit_ancestors(self.commit_oid, operation, None).await?;
+        Ok(candidates
+            .iter()
+            .map(|oid| ancestors.contains(oid))
+            .collect())
+    }
+
     /// Return commits reachable from this snapshot and not from the base snapshot.
     ///
     /// Every parent is considered, so merge-side commits remain visible while
