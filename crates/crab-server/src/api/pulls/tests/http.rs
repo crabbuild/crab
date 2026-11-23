@@ -1187,10 +1187,14 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     .await;
     assert_eq!(invalid_annotation.0, StatusCode::BAD_REQUEST);
     let blocked = h.json(&format!("{ROOT}/1"), &alice).await;
-    assert_eq!(
-        blocked["merge_requirements"]["checks"][0]["state"],
-        "failure"
-    );
+    let check = &blocked["merge_requirements"]["checks"][0];
+    assert_eq!(check["state"], "failure");
+    assert_eq!(check["provider"], "crab_status");
+    assert_eq!(check["head_sha"], first_head);
+    assert_eq!(check["additional_report"]["provider"], "crab_check_run");
+    assert_eq!(check["additional_report"]["state"], "success");
+    assert_eq!(check["additional_report"]["conclusion"], "success");
+    assert_eq!(check["additional_report"]["run_id"], run_id);
     assert_eq!(blocked["can_merge"], false);
     let pass_status = report_status(
         &h,
@@ -1202,6 +1206,10 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     assert_eq!(pass_status.0, StatusCode::CREATED);
     let ready = h.json(&format!("{ROOT}/1"), &alice).await;
     assert_eq!(ready["merge_requirements"]["checks"][0]["state"], "success");
+    assert_eq!(
+        ready["merge_requirements"]["checks"][0]["additional_report"]["state"],
+        "success"
+    );
     assert_eq!(ready["merge_requirements"]["checks_satisfied"], true);
     assert_eq!(ready["merge_requirements"]["satisfied"], true);
     assert_eq!(ready["can_merge"], true);
@@ -1260,10 +1268,11 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     );
     let stale = h.json(&format!("{ROOT}/1"), &alice).await;
     assert_eq!(stale["merge_requirements"]["approvals"], 0);
-    assert_eq!(
-        stale["merge_requirements"]["checks"][0]["state"],
-        Value::Null
-    );
+    let check = &stale["merge_requirements"]["checks"][0];
+    assert_eq!(check["state"], Value::Null);
+    assert_eq!(check["head_sha"], second_head);
+    assert_eq!(check["provider"], "crab_status_or_check_run");
+    assert!(check.get("additional_report").is_none());
     assert_eq!(stale["merge_requirements"]["satisfied"], false);
     assert_eq!(stale["can_merge"], false);
     let reviews = h.json(&format!("{ROOT}/1/reviews"), &bob).await;

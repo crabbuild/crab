@@ -520,6 +520,13 @@ async fn native_browser_squashes_a_protected_private_fork_pull_request() {
         .run(&["open", &format!("{}/{owner}/library/pull/1", h.origin)])
         .await;
     browser.run(&["wait", "--text", "Eligible approval"]).await;
+    assert_eq!(
+        browser
+            .run(&["get", "attr", ".required-checks-summary a", "href"])
+            .await
+            .trim(),
+        format!("/{owner}/library-fork/commit/{head}?repository_id={fork_id}")
+    );
     let refresh_checks = async || {
         browser
             .run(&[

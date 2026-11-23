@@ -4366,8 +4366,10 @@ branch was rebased, fetch the current mirror branch before updating it with
 
 For each named Crab context, the latest commit status and latest Crab check run must
 both pass when both exist. A single existing report can satisfy the rule. The
-merge panel shows the blocking result first, along with its reporter and tested
-commit. A required GitHub Actions connection needs a completed successful
+merge panel shows both reports, their source, reporter and outcome. The panel
+identifies the exact PR head or merge candidate that must pass, including while
+results are missing. On fork PRs the head link opens the fork's commit. A
+required GitHub Actions connection needs a completed successful
 result from that active connection for the exact same head. Neutral, skipped,
 pending, disconnected, and missing workflow results block merge.
 
@@ -4379,14 +4381,21 @@ pending, disconnected, and missing workflow results block merge.
 | Required GitHub Actions workflow conclusion `success` | Success |
 | Missing, `failure`, `error`, or any other completed run conclusion | Unsuccessful and blocks merge |
 
-Required checks bind to the pull request's exact current head. A new head starts
-with missing checks. Publication refreshes required checks immediately before
-attempting the ref edit. A recorded receipt proves a previous publication even
-if policy or check results have since changed.
+Each `merge_requirements.checks` entry retains the required name's summary fields
+and tested `head_sha`. When a name has both report types, the top-level fields
+describe the strongest blocker and `additional_report` contains the other
+report. A missing named result accepts a Crab commit status or check run.
+Candidate requirements use the same report shape.
 
-Update the repository Cell peers and the bundled UI together before saving any
-branch rules that require workflow connections. Rules containing only named
-Crab contexts retain their existing storage representation.
+The server reads the named statuses, check runs, and provider-bound results for
+the head and any tested candidate in one Repository Cell transaction. A new head
+starts with missing checks. Publication refreshes required checks immediately
+before attempting the ref edit. A recorded receipt proves a previous publication
+even if policy or check results have since changed.
+
+Update the repository Cell peers and bundled UI together for the check snapshot
+read. Rules containing only named Crab contexts retain their existing storage
+representation.
 
 ## Resource and lifecycle limits
 

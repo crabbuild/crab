@@ -18,6 +18,7 @@ use crate::cells::records::{RecordDecoder, RecordEncoder, StoredRecord};
 
 use crate::cells::application::{Mutation, MutationResult, Read, Transaction};
 
+pub(crate) use checks::required as required_checks;
 pub(crate) use checks::{
     CheckAnnotationRecord, CheckOutputRecord, CheckReportInput, CheckRunDetail, CheckRunKey,
     CheckRunRecord, CheckStepRecord, CheckSubmissionKey, CreateCheckRun, CreateCheckRunInput,

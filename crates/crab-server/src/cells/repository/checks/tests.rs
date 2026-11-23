@@ -32,6 +32,47 @@ fn maximum_check_results_fit_their_registered_output_bounds() {
     };
     assert!(serde_json::to_vec(&page).unwrap().len() <= 1024 * 1024);
 
+    let mut escaped = run.clone();
+    // Exercise the worst JSON escaping at the stored target URL limit.
+    escaped.details_url = Some("\\".repeat(2_048));
+    let status = CommitStatusRecord {
+        number: 1,
+        submission_id: [1; 16],
+        author: escaped.author.clone(),
+        oid: escaped.oid.clone(),
+        context: escaped.name.clone(),
+        state: 3,
+        description: Some("🦀".repeat(140)),
+        target_url: escaped.details_url.clone(),
+        created_at_ms: 1,
+    };
+    let reports = |include_evidence| required::Reports {
+        statuses: (0..MAX_STATUS_CONTEXTS)
+            .map(|_| required::Status::from_record(status.clone(), include_evidence))
+            .collect(),
+        runs: (0..MAX_CHECK_RUNS_PER_COMMIT)
+            .map(|_| required::Run::from_record(escaped.clone(), include_evidence))
+            .collect(),
+        connections: (0..16)
+            .map(|_| integrations::RequiredConnection {
+                id: uuid::Uuid::nil(),
+                name: escaped.name.clone(),
+                run: Some(required::Run::from_record(
+                    escaped.clone(),
+                    include_evidence,
+                )),
+            })
+            .collect(),
+    };
+    let snapshot = required::Snapshot {
+        head: reports(false),
+        candidate: Some(reports(true)),
+    };
+    assert!(
+        serde_json::to_vec(&snapshot).unwrap().len()
+            < crate::cells::application::MAX_RESULT_BYTES - 256
+    );
+
     let detail = CheckRunDetail {
         run,
         output: CheckOutputRecord {

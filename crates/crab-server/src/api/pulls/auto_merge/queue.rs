@@ -105,10 +105,12 @@ pub(super) async fn reconcile(
     };
     let checks = report.candidate_checks.as_deref().unwrap_or_default();
     if report.enforce().is_err() {
-        let stopped = if checks
-            .iter()
-            .any(|check| matches!(check.state, Some(StatusState::Error | StatusState::Failure)))
-        {
+        let stopped = if checks.iter().any(|check| {
+            matches!(
+                check.state(),
+                Some(StatusState::Error | StatusState::Failure)
+            )
+        }) {
             Some(Stop::ChecksFailed)
         } else if check_timed_out(queue, timeout_minutes)? {
             Some(Stop::ChecksTimedOut)

@@ -1,4 +1,5 @@
 mod codec;
+pub(crate) mod required;
 
 use super::*;
 

@@ -212,6 +212,7 @@ export function MergePanel({
           pull={pull.number}
           oid={pull.head_oid}
           checks={requirements.checks}
+          source={pull.head_repository}
           refresh={refresh}
         />
       )}

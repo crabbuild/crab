@@ -442,9 +442,7 @@ pub(in crate::cells) fn dispatch_read(
         integrations::DeliveryHistory::ID => {
             invoke_read::<integrations::DeliveryHistory>(context, input)
         }
-        integrations::ReadRequirements::ID => {
-            invoke_read::<integrations::ReadRequirements>(context, input)
-        }
+        required_checks::Get::ID => invoke_read::<required_checks::Get>(context, input),
         <GetPullSubmission as Read>::ID => invoke_read::<GetPullSubmission>(context, input),
         <review_requests::GetReviewRequest as Read>::ID => {
             invoke_read::<review_requests::GetReviewRequest>(context, input)

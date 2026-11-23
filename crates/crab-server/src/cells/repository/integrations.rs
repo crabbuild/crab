@@ -362,83 +362,74 @@ fn run_key(connection: &Connection, oid: &str, generation: Option<Uuid>) -> Stri
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Requirements {
-    pub oid: String,
-    pub connections: Vec<Uuid>,
-    #[serde(default)]
-    pub queued_candidate: bool,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct RequiredConnection {
     pub id: Uuid,
     pub name: String,
-    pub run: Option<CheckRunRecord>,
+    pub run: Option<checks::required::Run>,
 }
 
-pub(crate) struct ReadRequirements;
-impl Read for ReadRequirements {
-    const CLASS: &'static str = CLASS;
-    const ID: u32 = 407;
-    type Input = Requirements;
-    type Output = Vec<RequiredConnection>;
-
-    fn execute(
-        context: &mut Transaction<'_>,
-        input: Requirements,
-    ) -> crate::cells::Result<Self::Output> {
-        checks::validate_commit(&input.oid)?;
-        if input.connections.len() > MAX_CONNECTIONS * (super::rulesets::MAX_RULESETS + 1) {
-            return Err(crate::cells::Error::Invalid(
-                "Too many required integrations",
-            ));
-        }
-        let active = connections(context)?;
-        // An active connection and its selected exact-commit attempt must
-        // come from the same repository Cell snapshot at publication.
-        active
-            .into_iter()
-            .filter(|row| input.connections.contains(&row.id))
-            .map(|row| {
-                let generation = row
-                    .dispatch
-                    .as_ref()
-                    .filter(|_| input.queued_candidate)
-                    .map(|config| config.id);
-                let run = if let Some(cursor) =
-                    context.document::<Cursor>(&run_key(&row, &input.oid, generation))?
-                {
-                    let detail = GetCheckRun::execute(
-                        context,
-                        CheckRunKey {
-                            oid: input.oid.clone(),
-                            number: cursor.number,
-                        },
-                    )?
-                    .ok_or(crate::cells::Error::Invalid(
-                        "Required workflow result is missing",
-                    ))?;
-                    if detail.run.version != cursor.version
-                        || github_connection(&detail.run.author.issuer, &detail.run.author.subject)
-                            != Some(row.id)
-                    {
-                        return Err(crate::cells::Error::Invalid(
-                            "Required workflow result changed outside its connection",
-                        ));
-                    }
-                    Some(detail.run)
-                } else {
-                    None
-                };
-                Ok(RequiredConnection {
-                    id: row.id,
-                    name: row.name,
-                    run,
-                })
-            })
-            .collect()
+pub(super) fn required_connections(
+    context: &mut Transaction<'_>,
+    oid: &str,
+    required: &[Uuid],
+    queued_candidate: bool,
+    include_evidence: bool,
+) -> crate::cells::Result<Vec<RequiredConnection>> {
+    if required.is_empty() {
+        return Ok(Vec::new());
     }
+    if required.len() > MAX_CONNECTIONS * (super::rulesets::MAX_RULESETS + 1) {
+        return Err(crate::cells::Error::Invalid(
+            "Too many required integrations",
+        ));
+    }
+    let active = connections(context)?;
+    // An active connection and its selected exact-commit attempt must
+    // come from the same repository Cell snapshot at publication.
+    active
+        .into_iter()
+        .filter(|row| required.contains(&row.id))
+        .map(|row| {
+            let generation = row
+                .dispatch
+                .as_ref()
+                .filter(|_| queued_candidate)
+                .map(|config| config.id);
+            let run = if let Some(cursor) =
+                context.document::<Cursor>(&run_key(&row, oid, generation))?
+            {
+                let detail = GetCheckRun::execute(
+                    context,
+                    CheckRunKey {
+                        oid: oid.to_owned(),
+                        number: cursor.number,
+                    },
+                )?
+                .ok_or(crate::cells::Error::Invalid(
+                    "Required workflow result is missing",
+                ))?;
+                if detail.run.version != cursor.version
+                    || github_connection(&detail.run.author.issuer, &detail.run.author.subject)
+                        != Some(row.id)
+                {
+                    return Err(crate::cells::Error::Invalid(
+                        "Required workflow result changed outside its connection",
+                    ));
+                }
+                Some(checks::required::Run::from_record(
+                    detail.run,
+                    include_evidence,
+                ))
+            } else {
+                None
+            };
+            Ok(RequiredConnection {
+                id: row.id,
+                name: row.name,
+                run,
+            })
+        })
+        .collect()
 }
 
 #[derive(Deserialize, Serialize)]

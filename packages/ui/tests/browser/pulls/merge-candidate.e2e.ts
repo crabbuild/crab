@@ -169,6 +169,10 @@ test("a tested merge retries the same commit and submission after an empty reply
   await page.goto("/team/project/pull/1/checks?candidate=1");
   const candidate = page.getByRole("region", { name: "Merge candidate" });
   await expect(page.getByText("All required checks have passed")).toBeVisible();
+  await expect(page.locator(".required-checks-summary code")).toHaveAttribute(
+    "title",
+    commit,
+  );
   await candidate
     .getByRole("button", { name: "Merge tested candidate" })
     .click();

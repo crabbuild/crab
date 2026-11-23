@@ -16,7 +16,6 @@ use uuid::Uuid;
 use crate::{
     BranchProtection,
     api::assignees::Selection,
-    api::checks::{self, CheckRun},
     api::labels,
     api::reactions,
     api::statuses::{self, StatusState},
@@ -40,6 +39,7 @@ pub(super) use git::review_head;
 mod merge;
 mod merge_methods;
 mod readiness;
+mod required_checks;
 mod review_requests;
 mod review_threads;
 pub(crate) use review_threads::authorize_suggestion_publication;
@@ -49,6 +49,7 @@ pub(super) mod rollups;
 pub(super) mod storage;
 mod viewed;
 use crate::cells::repository::{ListPulls, PullSummary};
+use required_checks::RequiredCheck;
 use storage::{NewPullRequest, PullRequest, PullState};
 
 pub(super) async fn require_check_head(
@@ -383,59 +384,11 @@ impl MergeRequirements {
             checks.is_empty()
                 || checks
                     .iter()
-                    .any(|check| check.state != Some(StatusState::Success))
+                    .any(|check| check.state() != Some(StatusState::Success))
         }) {
             return Err(Error::MergeCandidateChecks);
         }
         Ok(())
-    }
-}
-
-struct RequiredCheck {
-    context: String,
-    state: Option<StatusState>,
-    description: Option<String>,
-    target_url: Option<String>,
-    author: Option<String>,
-    updated_at: Option<u64>,
-    run_id: Option<u64>,
-    provider: &'static str,
-    integration: Option<Uuid>,
-}
-
-impl RequiredCheck {
-    fn view(&self, oid: &str) -> Value {
-        json!({
-            "context": self.context,
-            "state": self.state,
-            "description": self.description,
-            "target_url": self.target_url,
-            "author": self.author,
-            "updated_at": self.updated_at,
-            "run_id": self.run_id,
-            "provider": self.provider,
-            "integration_id": self.integration,
-            "head_sha": oid,
-        })
-    }
-
-    fn run(run: &CheckRun) -> Self {
-        let integration = run.integration_id();
-        Self {
-            context: run.name.clone(),
-            state: Some(run.requirement_state()),
-            description: Some(run.output_title.clone()),
-            target_url: run.details_url.clone(),
-            author: Some(run.author.name.clone()),
-            updated_at: Some(run.updated_at),
-            run_id: Some(run.number),
-            provider: if integration.is_some() {
-                "github_actions"
-            } else {
-                "crab_check_run"
-            },
-            integration,
-        }
     }
 }
 
@@ -489,24 +442,16 @@ async fn requirements(
     };
     let policy = policy.merge_protection(&pull.base_ref, &default_ref, actor, bypass)?;
     let protection = policy.protection.as_ref();
-    let (checks, candidate_checks, unresolved, code_owners, head_up_to_date) = match protection {
+    let ((checks, candidate_checks), unresolved, code_owners, head_up_to_date) = match protection {
         Some(rule) => tokio::try_join!(
-            load_required_checks(server, repo, head_oid, rule, false),
-            async {
-                if let Some(oid) = tested_oid {
-                    load_required_checks(
-                        server,
-                        repo,
-                        oid,
-                        rule,
-                        matches!(target, MergeCheckTarget::Queue(_)),
-                    )
-                    .await
-                    .map(Some)
-                } else {
-                    Ok(None)
-                }
-            },
+            required_checks::load(
+                server,
+                repo,
+                rule,
+                head_oid,
+                tested_oid,
+                matches!(target, MergeCheckTarget::Queue(_))
+            ),
             async {
                 if rule.require_conversation_resolution {
                     review_threads::storage::unresolved_conversations(server, repo, pull.number)
@@ -558,7 +503,7 @@ async fn requirements(
                     .map(Some)
             },
         )?,
-        _ => (vec![], tested_oid.map(|_| vec![]), None, None, None),
+        _ => ((vec![], tested_oid.map(|_| vec![])), None, None, None),
     };
     let mut requirements = merge_requirements(pull, protection, head_oid, reviewers, checks);
     requirements.candidate_checks = candidate_checks;
@@ -689,7 +634,7 @@ fn merge_requirements(
     let required_approvals = usize::from(rule.required_approvals);
     let checks_satisfied = checks
         .iter()
-        .all(|check| check.state == Some(StatusState::Success));
+        .all(|check| check.state() == Some(StatusState::Success));
     let reviews_satisfied = (required_approvals == 0 && !rule.required_code_owner_reviews)
         || (changes_requested == 0 && approvals >= required_approvals);
     MergeRequirements {
@@ -708,102 +653,6 @@ fn merge_requirements(
         candidate_checks: None,
         satisfied: reviews_satisfied && checks_satisfied,
     }
-}
-
-async fn load_required_checks(
-    server: &Server,
-    repo: &Repository,
-    oid: &str,
-    rule: &BranchProtection,
-    queued_candidate: bool,
-) -> Result<Vec<RequiredCheck>> {
-    let ((statuses, check_runs), integrations) = tokio::try_join!(
-        async {
-            if rule.required_checks.is_empty() {
-                Ok((vec![], vec![]))
-            } else {
-                tokio::try_join!(
-                    statuses::latest(server, repo, oid),
-                    checks::latest(server, repo, oid)
-                )
-            }
-        },
-        super::integrations::required(
-            server,
-            repo,
-            oid,
-            &rule.required_integrations,
-            queued_candidate
-        ),
-    )?;
-    let mut checks = rule
-        .required_checks
-        .iter()
-        .map(|context| {
-            let status = statuses
-                .iter()
-                .find(|status| statuses::same_context(&status.context, context));
-            let run = check_runs.iter().find(|run| {
-                run.integration_id().is_none() && statuses::same_context(&run.name, context)
-            });
-            if let Some(run) = run.filter(|run| {
-                status.is_none_or(|status| {
-                    // Both report kinds must pass. Show the report that blocks
-                    // the merge first, and use recency only within that state.
-                    let blocking = |state| match state {
-                        StatusState::Error | StatusState::Failure => 2,
-                        StatusState::Pending => 1,
-                        StatusState::Success => 0,
-                    };
-                    (blocking(run.requirement_state()), run.updated_at)
-                        >= (blocking(status.state), status.created_at)
-                })
-            }) {
-                return RequiredCheck {
-                    context: context.clone(),
-                    ..RequiredCheck::run(run)
-                };
-            }
-            RequiredCheck {
-                context: context.clone(),
-                state: status.map(|status| status.state),
-                description: status.and_then(|status| status.description.clone()),
-                target_url: status.and_then(|status| status.target_url.clone()),
-                author: status.map(|status| status.author.name.clone()),
-                updated_at: status.map(|status| status.created_at),
-                run_id: None,
-                provider: "crab_status",
-                integration: None,
-            }
-        })
-        .collect::<Vec<_>>();
-    for id in &rule.required_integrations {
-        let connection = integrations.iter().find(|connection| connection.id == *id);
-        if let Some(run) = connection.and_then(|connection| connection.run.clone()) {
-            checks.push(RequiredCheck::run(&checks::check_run(run)?));
-            continue;
-        }
-        checks.push(RequiredCheck {
-            context: connection
-                .map_or_else(|| "GitHub Actions workflow".into(), |row| row.name.clone()),
-            state: None,
-            description: Some(
-                if connection.is_some() {
-                    "Waiting for GitHub Actions on this commit."
-                } else {
-                    "GitHub Actions connection is unavailable. Review the branch protection rule."
-                }
-                .into(),
-            ),
-            target_url: None,
-            author: None,
-            updated_at: None,
-            run_id: None,
-            provider: "github_actions",
-            integration: Some(*id),
-        });
-    }
-    Ok(checks)
 }
 
 pub(super) fn pull_list_view(

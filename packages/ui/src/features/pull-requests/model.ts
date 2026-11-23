@@ -33,6 +33,22 @@ export type PullListItem = Omit<PullSummary, "labels"> &
 
 export type MergeMethod = "merge_commit" | "squash" | "rebase" | "fast_forward";
 
+export interface RequiredCheckReport {
+  state: "error" | "failure" | "pending" | "success" | null;
+  description: string | null;
+  target_url: string | null;
+  author: string | null;
+  updated_at: number | null;
+  run_id: number | null;
+  run_status?: "queued" | "in_progress" | "completed" | null;
+  conclusion?: string | null;
+  provider?:
+    | "github_actions"
+    | "crab_check_run"
+    | "crab_status"
+    | "crab_status_or_check_run";
+}
+
 export interface PullRequest extends PullSummary {
   reactions: ReactionSummary;
   body: string;
@@ -91,18 +107,14 @@ export interface PullRequest extends PullSummary {
     unresolved_conversations?: number | null;
     head_up_to_date?: boolean | null;
     checks_satisfied: boolean;
-    checks: Array<{
-      context: string;
-      state: "error" | "failure" | "pending" | "success" | null;
-      description: string | null;
-      target_url: string | null;
-      author: string | null;
-      updated_at: number | null;
-      run_id: number | null;
-      provider?: "github_actions" | "crab_check_run" | "crab_status";
-      integration_id?: string | null;
-      head_sha?: string;
-    }>;
+    checks: Array<
+      RequiredCheckReport & {
+        context: string;
+        integration_id?: string | null;
+        head_sha?: string;
+        additional_report?: RequiredCheckReport;
+      }
+    >;
     satisfied: boolean;
   };
 }
