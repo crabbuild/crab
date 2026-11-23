@@ -44,6 +44,8 @@ pub(in crate::cells) fn dispatch_mutation(
         search::index::ensure_ready(context)?;
     }
     let result = match id {
+        #[cfg(test)]
+        SeedHistoricalMerges::ID => invoke_mutation::<SeedHistoricalMerges>(context, input),
         attachments::Reserve::ID => invoke_mutation::<attachments::Reserve>(context, input),
         attachments::Finish::ID => invoke_mutation::<attachments::Finish>(context, input),
         attachments::Expire::ID => invoke_mutation::<attachments::Expire>(context, input),

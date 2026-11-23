@@ -1154,9 +1154,9 @@ of the target. An empty string includes all history. An explicit tag must
 resolve to the target commit or an ancestor. The response returns the pinned
 `target_oid`, the selected `previous_tag` and `previous_oid` (both null for
 all history), the selected `configuration_file` or null, and the Markdown
-`body`. Generation supports up to 4,096
-merged pull requests in the repository and returns an error if the scan or
-64 KiB body limit is exceeded.
+`body`. Crab checks merged pull requests in pages against the pinned Git
+range. PRs outside the selected range do not count toward the 64 KiB body
+limit. Git operation limits still apply to the scan.
 
 To group release notes, commit a `.github/release.yml` or
 `.github/release.yaml` file. Crab reads it from the selected target commit

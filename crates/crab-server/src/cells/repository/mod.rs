@@ -29,6 +29,8 @@ pub(crate) mod integrations;
 pub(crate) mod webhooks;
 pub(crate) use issues::{ListComments, UpdateComment, UpdateIssue};
 pub(crate) use labels::{CreateLabel, DeleteLabel, ListLabels, UpdateLabel};
+#[cfg(test)]
+pub(crate) use pulls::SeedHistoricalMerges;
 pub(crate) use pulls::auto_merge as pull_auto_merge;
 pub(crate) use pulls::base as pull_base;
 pub(crate) use pulls::head as pull_head;

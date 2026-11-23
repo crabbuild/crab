@@ -1,7 +1,9 @@
 mod blame;
 mod history;
+mod membership;
 mod merge_base;
 pub use blame::SharedBlame;
+pub use membership::CommitMembership;
 
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
@@ -76,23 +78,9 @@ impl RemoteGitSnapshot {
         candidates: &[ObjectId],
         operation: &OperationContext,
     ) -> Result<Vec<bool>> {
-        self.ensure_operation(operation)?;
-        if candidates.is_empty() {
-            return Ok(Vec::new());
-        }
-        if let Some(graph) = self.commit_graph.as_deref() {
-            return graph
-                .reachable_from_roots(candidates, &[self.commit_oid], operation)
-                .await;
-        }
-        operation
-            .charge(BudgetDimension::Entries, candidates.len() as u64)
-            .await?;
-        let ancestors = commit_ancestors(self.commit_oid, operation, None).await?;
-        Ok(candidates
-            .iter()
-            .map(|oid| ancestors.contains(oid))
-            .collect())
+        self.commit_membership_reader(operation)?
+            .contains(candidates)
+            .await
     }
 
     /// Return commits reachable from this snapshot and not from the base snapshot.

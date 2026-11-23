@@ -292,9 +292,42 @@ async fn draft_notes_are_scoped_to_the_selected_commit_range_and_current_writer(
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires agent-browser and the built embedded UI; uses isolated real OIDC/native Cells"]
 async fn native_browser_previews_inserts_and_publishes_generated_release_notes() {
+    use crate::cells::repository::SeedHistoricalMerges;
+
+    crate::test_support::server::init_test_tracing();
     let h = Harness::new(false).await;
     let alice = h.login().await;
     let (target, _) = history(&h, &alice).await;
+    let repo = h.server.repositories.values().pop().unwrap();
+    let cell = app::repository_cell(&h.server, &repo).unwrap();
+    for first in (100..4196).step_by(SeedHistoricalMerges::BATCH) {
+        app::command_output(
+            cell.client
+                .command::<SeedHistoricalMerges>(
+                    cell.target,
+                    app::mutation_identity().unwrap(),
+                    first,
+                )
+                .await,
+        )
+        .unwrap();
+    }
+    let oversized = h
+        .http
+        .get(format!(
+            "{}{REPO}/releases/generate-notes?target_oid={target}&previous_tag=",
+            h.origin
+        ))
+        .header(header::COOKIE, &alice)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(oversized.status(), StatusCode::BAD_REQUEST);
+    let oversized: Value = oversized.json().await.unwrap();
+    assert_eq!(
+        oversized["error"]["message"],
+        "The generated notes exceed 64 KiB. Choose a more recent previous tag."
+    );
     let browser = Browser::new("generated-release-notes");
     browser
         .run(&["open", &format!("{}/team/private/releases/new", h.origin)])

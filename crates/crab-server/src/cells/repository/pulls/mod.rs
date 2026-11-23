@@ -441,6 +441,8 @@ mod release_notes;
 pub(crate) use operations::{
     CreatePull, GetPull, GetPullSubmission, ListPulls, RejectStalePullComparison, UpdatePull,
 };
+#[cfg(test)]
+pub(crate) use release_notes::SeedHistoricalMerges;
 pub(crate) use release_notes::{ListMergedPullsForRelease, MergedPullForRelease};
 
 pub(in crate::cells::repository) mod comments;

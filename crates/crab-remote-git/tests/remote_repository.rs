@@ -4533,6 +4533,46 @@ async fn semantic_changes_cover_modes_types_rename_like_paths_binary_and_pointer
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn commit_membership_batches_share_one_bounded_history_walk() {
+    let options = RepositoryOptions::new(
+        ObjectLimits::default(),
+        OperationLimits {
+            max_history_commits: 2,
+            ..OperationLimits::default()
+        },
+    )
+    .unwrap();
+    let fixture = publish(DeltaKind::Ref, false, options).await;
+    assert!(!fixture.repository.commit_graph_available());
+    let cancel = CancellationToken::new();
+    let operation = fixture
+        .repository
+        .operation(OperationKind::History, &cancel)
+        .await
+        .unwrap();
+    let result = async {
+        let snapshot = fixture
+            .repository
+            .snapshot(&Revision::Reference("semantic-head".into()), &operation)
+            .await?;
+        let mut membership = snapshot.commit_membership_reader(&operation)?;
+        assert_eq!(
+            membership
+                .contains(&[fixture.semantic_head_commit, fixture.side_commit])
+                .await?,
+            [true, false]
+        );
+        assert_eq!(
+            membership.contains(&[fixture.semantic_base_commit]).await?,
+            [true]
+        );
+        Ok(())
+    }
+    .await;
+    operation.finish(result).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn textual_diff_reports_too_large_without_partial_hunks() {
     let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
     let strict_options = RepositoryOptions::new(

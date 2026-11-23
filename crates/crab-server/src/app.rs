@@ -1120,8 +1120,13 @@ pub(crate) fn search_query(value: Option<&str>) -> Result<Option<String>> {
     Ok(Some(value.to_owned()))
 }
 
+pub(crate) const MAX_TEXT_BODY_BYTES: usize = 64 * 1024;
+
 pub(crate) fn body(value: &str, required: bool) -> Result<()> {
-    if value.len() > 65_536 || value.contains('\0') || (required && value.trim().is_empty()) {
+    if value.len() > MAX_TEXT_BODY_BYTES
+        || value.contains('\0')
+        || (required && value.trim().is_empty())
+    {
         return Err(Error::Invalid(
             "Content must be at most 64 KiB, without NUL characters; comments cannot be empty",
         ));
