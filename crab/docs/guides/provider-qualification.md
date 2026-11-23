@@ -927,11 +927,13 @@ transport buffer. Complete xorb hydration can use ranges when an xorb
 exceeds the full-GET limit. The verifier checks the candidate's compiled
 policy digest and compares its provider-correlated benchmark requests with
 the row's limits.
-On every release platform, the retained `warm_edge` samples must contain a
-provider-confirmed cache hit that completed at the exact byte limit for each
-enabled form. A ranged hit must reach both the object-size and single-range
-limits in the same request. The hit may come from either registered region.
-Both regions still need the full set of performance measurements.
+On every release platform, retain a provider-confirmed warm cache hit that
+completed at the exact byte limit for each enabled form. A ranged hit must
+reach both the object-size and single-range limits in the same request. A hit
+can come from a `warm_edge` benchmark sample in either registered region.
+An xorb's verified sparse warm read can also prove its ranged limit on the
+same approved object. Full-GET limits still require a full-GET benchmark hit.
+Both regions need the full set of performance measurements.
 Use the qualification build's request records to choose the candidate limits,
 then repeat the workload on the ordinary release build with that policy.
 

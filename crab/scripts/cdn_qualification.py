@@ -2262,7 +2262,7 @@ def verify_sparse_xorb_product(
     inputs: Path, row: dict[str, Any], registration: dict[str, Any], placement: dict[str, Any],
     full_spec: dict[str, Any], published: int, retired: int, cache_roots: set[str], viewer_ids: set[str],
     *, limits: ReleaseReadLimits | None,
-) -> dict[str, bytes]:
+) -> tuple[dict[str, bytes], tuple[int, int] | None]:
     edge = scope_parts(row["scope"])[0]
     mount = is_direct_mount_xorb_scope(row["scope"])
     records = {"sparse-workload.json": read_git_record(inputs / "sparse-workload.json")}
@@ -2272,6 +2272,8 @@ def verify_sparse_xorb_product(
     require("read_range" in spec and all(spec[key] == full_spec[key] for key in full_spec if key != "schema"),
             "sparse xorb read must use the complete hydration workload's publication and projection")
     sparse_registration = registration | {"hydration_workload_sha256": approval}
+    object_bytes = placement["views"]["target"]["bytes"]
+    range_witness = None
     previous_end = published
     for arm in ("origin", "cold-edge", "warm-edge"):
         name = f"sparse-{arm}"
@@ -2289,7 +2291,7 @@ def verify_sparse_xorb_product(
         cache_roots.add(root)
         if arm == "origin":
             continue
-        verify_sparse_xorb_traffic(read, placement["views"]["target"]["bytes"])
+        verify_sparse_xorb_traffic(read, object_bytes)
         requests = read["edge_responses"]
         if limits is not None:
             require(all(limits.admits(response) for response in requests.values() if response["family"] == "xorb"),
@@ -2306,7 +2308,9 @@ def verify_sparse_xorb_product(
             require(len(metrics.completed_cache) == read["edge_attempts"]
                     and all(result == "hit" for result in metrics.completed_cache.values()),
                     "warm sparse xorb read needs provider-confirmed hits for every xorb range")
-    return records
+            range_witness = (object_bytes, max(response["requested_bytes"] for response in requests.values()
+                                               if response["family"] == "xorb"))
+    return records, range_witness
 
 
 def collect_xorb_read_evidence(
@@ -2334,11 +2338,22 @@ def collect_xorb_read_evidence(
             "xorb read must use the approved Crab executable for the native publication and reads")
     read_name = "mount.json" if mount else "hydration.json"
     edge_raw = read_git_record(inputs / read_name, limit=GIT_FETCH_RECORD_LIMIT)
+    limits = release_read_limits(policy).get(row["scope"]) if policy is not None else None
+    object_bytes = placement["views"]["target"]["bytes"]
 
     def verify_read(raw: bytes, arm: str) -> dict[str, Any]:
-        return verify_xorb_read(raw, row, registration, arm, spec, placement)
+        read = verify_xorb_read(raw, row, registration, arm, spec, placement)
+        xorbs = [response for response in read["edge_responses"].values() if response["family"] == "xorb"]
+        require(arm != "edge" or any(response["complete"] and response["bytes"] for response in xorbs),
+                "complete xorb read has no completed xorb response")
+        require(all(response["object_bytes"] == object_bytes for response in xorbs),
+                "xorb read disagrees with the approved object size")
+        return read
 
     edge, native = verify_read(edge_raw, "edge"), verify_read(rollback_raw, "origin")
+    if limits is not None:
+        require(all(limits.admits(response) for response in edge["edge_responses"].values()
+                    if response["family"] == "xorb"), "complete xorb read exceeded its compiled CDN read limits")
     product_caches = {read["reader"]["cache_root_sha256"] for read in (edge, native)}
     require(len(product_caches) == 2
             and edge["finished_at_unix_ms"] <= native["started_at_unix_ms"],
@@ -2352,8 +2367,7 @@ def collect_xorb_read_evidence(
                                      retired, cleanup_at, native_origin_sha256)
     viewer_raw = read_git_record(inputs / PRODUCT_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
     product_request_ids = verify_product_viewer_requests(viewer_raw, edge, edge_raw, scope_parts(row["scope"])[0])
-    limits = release_read_limits(policy).get(row["scope"]) if policy is not None else None
-    sparse_records = verify_sparse_xorb_product(
+    sparse_records, range_witness = verify_sparse_xorb_product(
         inputs, row, registration, placement, spec, published, retired, product_caches, product_request_ids,
         limits=limits,
     )
@@ -2369,7 +2383,7 @@ def collect_xorb_read_evidence(
     performance = collect_git_performance(
         directory / GIT_BENCHMARK_DIR, registration, row["platform"], row["workflow_run_id"], row["workflow_run_attempt"],
         retain=retain / GIT_BENCHMARK_DIR if retain is not None else None, verify_xorb=verify_measurement,
-        product_request_ids=product_request_ids, policy=policy,
+        product_request_ids=product_request_ids, policy=policy, sparse_xorb_hit=range_witness,
     )
     if retain is not None:
         product = retain / XORB_PRODUCT_DIR
@@ -2722,7 +2736,7 @@ def collect_git_performance(
     verify_xorb: Callable[[bytes, str], dict[str, Any]] | None = None,
     service_row: Path | None = None, product_request_ids: set[str] | None = None,
     desktop_product: DesktopProductEvidence | None = None,
-    managed_row: Path | None = None, policy: Path | None = None,
+    managed_row: Path | None = None, policy: Path | None = None, sparse_xorb_hit: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
     spec = benchmark_registration(registration)
     scope = spec["scope"]
@@ -2731,11 +2745,14 @@ def collect_git_performance(
     if limits is not None:
         if limits.full_bytes:
             missing_boundaries["full GET"] = (limits.full_bytes, limits.full_bytes)
-        if limits.range_bytes:
+        # Whole hydration can prefer full GETs throughout the benchmark.
+        # Its separate sparse read can witness the same xorb's ranged limit.
+        if limits.range_bytes and sparse_xorb_hit != (limits.ranged_object_bytes, limits.range_bytes):
             missing_boundaries["ranged GET"] = (limits.ranged_object_bytes, limits.range_bytes)
     family = scope_parts(scope)[3]
     hydration = is_direct_xorb_read_scope(scope)
     require(hydration == (verify_xorb is not None), "xorb read benchmarks require verified publication and placement")
+    require(hydration or sparse_xorb_hit is None, "sparse size evidence requires an xorb read workload")
     sdk = is_direct_sdk_git_scope(scope)
     desktop = requires_desktop_workload(scope, spec["workload"])
     service = is_direct_service_scope(scope)

@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
+from unittest.mock import patch
 
 from test_verify_provider_qualification_report import SCRIPT, valid_report
 
@@ -299,6 +300,7 @@ class CdnQualificationTests(unittest.TestCase):
                   platform: str = "linux-x86_64", cli_payload_bytes: int | None = None) -> None:
         self.provider = provider
         self.scope = f"{CDN.PROVIDERS[provider][0]}/{access}/{consumer}/{family}/{profile}"
+        self.object_bytes = 16 if CDN.is_direct_xorb_read_scope(self.scope) else 8
         self.origin = valid_report(provider)
         self.origin["service"] = CDN.PROVIDERS[provider][1]
         origin_digest = json_file(self.directory / "report.json", self.origin)
@@ -811,6 +813,8 @@ class CdnQualificationTests(unittest.TestCase):
                 "payload": {"sha256": "c" * 64, "bytes": 1024}, "xorb_key_sha256": self.object_key, "reader": reader,
             } | (mounted | {"unmounted": True} if mount else {})
             if arm == "edge":
+                for response in evidence["edge_responses"].values():
+                    response.update(family="xorb", object_bytes=target["bytes"])
                 json_file(destination, evidence)
                 write_product_viewer_proof(destination, self.object_key)
                 write_git_measurements(self.directory / CDN.GIT_BENCHMARK_DIR, self.registration,
@@ -884,7 +888,7 @@ class CdnQualificationTests(unittest.TestCase):
                 for role, marker in (("primary", "a"), ("second", "b"))
             }
             authority = {"issuer_endpoint_sha256": "c" * 64, "approval_sha256": "d" * 64, "principals": principals,
-                         "object": {"key_sha256": self.object_key, "body_sha256": "e" * 64, "bytes": 8}}
+                         "object": {"key_sha256": self.object_key, "body_sha256": "e" * 64, "bytes": self.object_bytes}}
             self.registration["cache_reuse_sha256"] = CDN.deployment_component_digest(authority)
             evidence = {key: self.report[key] for key in CDN.CDN_PROVENANCE_FIELDS} | {
                 "schema": "crab.cdn-authenticated-cache-reuse/v1", "check": check, "authority": authority,
@@ -902,7 +906,7 @@ class CdnQualificationTests(unittest.TestCase):
         check = CDN.SCOPED_VIEW_CHECK
         if evidence is None:
             views = {
-                role: dict.fromkeys(CDN.SCOPED_VIEW_FIELDS - {"bytes"}, marker * 64) | {"bytes": 8}
+                role: dict.fromkeys(CDN.SCOPED_VIEW_FIELDS - {"bytes"}, marker * 64) | {"bytes": self.object_bytes}
                 for role, marker in (("target", "a"), ("sibling", "b"))
             }
             placement = {"fixture_sha256": CONFIGURATION, "origin_sha256": "c" * 64,
@@ -925,7 +929,7 @@ class CdnQualificationTests(unittest.TestCase):
         self.report["checks"][check] = {"passed": True, "trace_sha256": json_file(path, evidence)}
 
     def request(self, source: str, status: int, cache: str = "unknown") -> dict[str, Any]:
-        return {"source": source, "status": status, "bytes": 0 if status in (401, 403) else 8,
+        return {"source": source, "status": status, "bytes": 0 if status in (401, 403) else self.object_bytes,
                 "cache": cache, "elapsed_ms": 1,
                 "key_sha256": self.object_key}
 
@@ -1686,7 +1690,17 @@ class CdnQualificationTests(unittest.TestCase):
         edge = records / "hydration.json"
         native = self.directory / "traces/rollback.json"
         original = json.loads(native.read_bytes())
+        original_edge = edge.read_bytes()
         edge_read = json.loads(edge.read_bytes())
+        request, response = next(iter(edge_read["edge_responses"].items()))
+        for changes, reason in (
+            ({"object_bytes": 17}, "xorb read disagrees with the approved object size"),
+            ({"elapsed_ms": 5001}, "complete xorb read exceeded its compiled CDN read limits"),
+        ):
+            with self.subTest(changes=changes):
+                json_file(edge, edge_read | {"edge_responses": {request: response | changes}})
+                self.rejected(reason, "--cdn-release-policy", str(policy))
+        edge.write_bytes(original_edge)
         for changes, reason in (
             ({"reader": original["reader"] | {"cache_root_sha256": edge_read["reader"]["cache_root_sha256"]}}, "fresh cache"),
             ({"reader": original["reader"] | {"binding_sha256": "5" * 64}}, "required viewer approval"),
@@ -1767,6 +1781,42 @@ class CdnQualificationTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
             else:
                 self.rejected("provider-confirmed hits for every xorb range")
+
+    def test_release_uses_sparse_xorb_hit_for_the_exact_range_limit(self) -> None:
+        scope = "cloud-cdn/private/sdk/xorb/direct"
+        release_row = f"{scope} 16 16 9 5000\n"
+        with patch(f"{__name__}.release_policy_row", return_value=release_row):
+            self.configure("gcs", "private", "direct", consumer="sdk", family="xorb")
+        policy = self.directory / "qualified-scopes.txt"
+        policy.write_text(release_row, encoding="utf-8")
+        args = ("--cdn-release-policy", str(policy))
+
+        pair = self.directory / CDN.GIT_BENCHMARK_DIR / "near/0001"
+        client = pair / "warm_edge/client.json"
+        read = json.loads(client.read_bytes())
+        next(iter(read["edge_responses"].values())).update(status=200, range=False, requested_bytes=16, bytes=16)
+        digest = json_file(client, read | {"edge_bytes": 16})
+        log = client.parent / CDN.VIEWER_REQUEST_FILES["gcs"]
+        proof = json.loads(log.read_bytes())
+        next(iter(proof["records"].values()))["status"] = 200
+        json_file(log, proof | {"client_report_sha256": digest})
+        external = client.parent / "measurement.json"
+        json_file(external, json.loads(external.read_bytes()) | {"client_report_sha256": digest})
+        local = pair / "warm_local/client.json"
+        local_digest = json_file(local, json.loads(local.read_bytes()) | {"primer_sha256": digest})
+        external = local.parent / "measurement.json"
+        json_file(external, json.loads(external.read_bytes()) | {"client_report_sha256": local_digest})
+        self.report["performance"]["near"]["pairs"][0]["warm_edge"]["edge_bytes"] = 16
+        self.rejected("warm edge hit at its compiled ranged GET size limit", *args)
+
+        product = self.directory / CDN.XORB_PRODUCT_DIR
+        sparse = product / "sparse-warm-edge.json"
+        read = json.loads(sparse.read_bytes())
+        next(iter(read["edge_responses"].values())).update(requested_bytes=9, bytes=9)
+        json_file(sparse, read | {"edge_bytes": 9})
+        write_product_viewer_proof(sparse, self.object_key, filename="sparse-warm-edge-viewer-requests.json")
+        result = self.command(*args)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_sdk_hydration_benchmarks_require_their_own_cache_and_provider_requests(self) -> None:
         for provider in ("s3", "gcs", "azure"):
