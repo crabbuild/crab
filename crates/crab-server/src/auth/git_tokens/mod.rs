@@ -64,6 +64,15 @@ impl Authentication {
         else {
             return Principal::anonymous();
         };
+        if super::automation::recognizes(token) {
+            return if git_transport {
+                super::automation::verify(server, token)
+                    .await
+                    .unwrap_or_else(Principal::anonymous)
+            } else {
+                Principal::anonymous()
+            };
+        }
         if super::deploy_tokens::recognizes(token) {
             if git_transport {
                 return super::deploy_tokens::verify(server, token)

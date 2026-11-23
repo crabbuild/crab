@@ -3,6 +3,7 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::Instant;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use crab_metadata::capsule_protocol::CapsuleGitPack;
 
@@ -377,4 +378,36 @@ pub(crate) async fn push_review_branches(path: &Path, url: &str) -> String {
     let head = success(path, &["rev-parse", "HEAD"]).await;
     success(path, &["push", url, "feature"]).await;
     head
+}
+
+pub(crate) async fn with_http_token(
+    workspace: &std::path::Path,
+    credential: &str,
+    args: &[&str],
+) -> bool {
+    tokio::process::Command::new("git")
+        .current_dir(workspace)
+        .args(args)
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        )
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_CONFIG_COUNT", "2")
+        .env("GIT_CONFIG_KEY_0", "http.extraHeader")
+        .env(
+            "GIT_CONFIG_VALUE_0",
+            format!(
+                "Authorization: Basic {}",
+                STANDARD.encode(format!("crab:{credential}"))
+            ),
+        )
+        .env("GIT_CONFIG_KEY_1", "protocol.version")
+        .env("GIT_CONFIG_VALUE_1", "2")
+        .output()
+        .await
+        .unwrap()
+        .status
+        .success()
 }

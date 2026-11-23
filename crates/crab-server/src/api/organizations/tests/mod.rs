@@ -10,6 +10,7 @@ use axum::http::{StatusCode, header};
 use reqwest::Method;
 
 mod audit;
+mod automation;
 mod codeowners;
 mod repositories;
 mod repository_access;

@@ -57,6 +57,8 @@ pub struct CatalogRecord {
     pub name: String,
     pub prefix: String,
     pub placement_generation: u64,
+    #[serde(default, skip_serializing_if = "ownership_epoch_is_initial")]
+    pub(crate) ownership_epoch: u32,
     pub application: RepositoryApplicationState,
     pub description: String,
     pub members: Vec<RepositoryMember>,
@@ -154,6 +156,8 @@ pub struct MembershipSnapshot {
     pub revision: u64,
     #[serde(skip)]
     pub(crate) renamed: bool,
+    #[serde(skip)]
+    pub(crate) ownership_epoch: u32,
     pub members: Vec<RepositoryMember>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<RepositoryGroup>,
@@ -258,6 +262,7 @@ impl CatalogDocument {
         let mut prefixes = HashSet::new();
         for record in &self.repositories {
             if record.placement_generation == 0
+                || record.ownership_epoch > record.name_version()
                 || !names.insert((record.owner.to_lowercase(), record.name.to_lowercase()))
                 || !prefixes.insert(record.prefix.clone())
             {
@@ -297,6 +302,10 @@ impl CatalogDocument {
                 .cmp(&(right.owner.to_lowercase(), right.name.to_lowercase()))
         });
     }
+}
+
+fn ownership_epoch_is_initial(epoch: &u32) -> bool {
+    *epoch == 0
 }
 
 fn valid_digest(value: &str) -> bool {
@@ -435,6 +444,7 @@ impl CatalogRecord {
             repository_id: self.id,
             revision,
             renamed: self.name_version() > 0,
+            ownership_epoch: self.ownership_epoch,
             organization: source.organization.clone(),
             members: source.members.clone(),
             groups: source.groups.clone(),
@@ -534,6 +544,7 @@ impl CatalogStore {
             name,
             prefix,
             placement_generation: 1,
+            ownership_epoch: 0,
             application: RepositoryApplicationState::EmptyCellPending,
             description,
             members,
@@ -572,6 +583,7 @@ impl CatalogStore {
                 name,
                 prefix: format!("browser-repositories/{id}"),
                 placement_generation: 1,
+                ownership_epoch: 0,
                 application: RepositoryApplicationState::EmptyCellPending,
                 description,
                 members,
@@ -605,6 +617,7 @@ impl CatalogStore {
                 name,
                 prefix: format!("git-imports/{id}"),
                 placement_generation: 1,
+                ownership_epoch: 0,
                 application: RepositoryApplicationState::GitImportPending,
                 description,
                 members,
@@ -659,6 +672,7 @@ impl CatalogStore {
             name,
             prefix,
             placement_generation: 1,
+            ownership_epoch: 0,
             application: RepositoryApplicationState::EmptyCellPending,
             description,
             members,

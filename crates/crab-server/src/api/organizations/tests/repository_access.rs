@@ -15,7 +15,10 @@ pub(super) struct AccessFixture {
 
 impl AccessFixture {
     pub(super) async fn new() -> Self {
-        let h = Harness::new(false).await;
+        let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let h =
+            Harness::new_with_store_and_prefix(false, false, store, "organization-access").await;
+        h.initialize_directory().await;
         let (organization, owner_id, member) = bootstrap(&h).await;
         let alice = h.login().await;
         *h.provider.mode.lock().await = "member".into();

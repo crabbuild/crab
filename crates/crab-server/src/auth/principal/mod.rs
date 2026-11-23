@@ -21,6 +21,7 @@ enum Credential {
     Local,
     User(Arc<Session>),
     Git(Arc<GitToken>),
+    Automation(Arc<super::automation::Credential>),
     Deploy { expires_at: u64 },
     Import(Arc<crate::git_import::ReceiveGrant>),
     AutoMerge(Identity),
@@ -76,6 +77,37 @@ impl Principal {
             repository_scope: RepositoryScope::Unrestricted,
         }
     }
+    pub(super) fn automation(credential: super::automation::Credential) -> Self {
+        Self {
+            credential: Credential::Automation(Arc::new(credential)),
+            grant: None,
+            repository_scope: RepositoryScope::Unrestricted,
+        }
+    }
+
+    pub(crate) fn automation_credential(&self) -> Option<&super::automation::Credential> {
+        match &self.credential {
+            Credential::Automation(credential) => Some(credential),
+            _ => None,
+        }
+    }
+
+    pub(super) fn with_automation_access(
+        &self,
+        repository: Uuid,
+        access: RepositoryAccess,
+    ) -> Self {
+        Self {
+            credential: self.credential.clone(),
+            grant: Some(Grant {
+                repository,
+                access,
+                role: access,
+            }),
+            repository_scope: self.repository_scope,
+        }
+    }
+
     pub(super) fn deploy(repository: Uuid, expires_at: u64) -> Self {
         Self {
             credential: Credential::Deploy { expires_at },
@@ -157,7 +189,7 @@ impl Principal {
     pub(crate) fn is_git(&self) -> bool {
         matches!(
             self.credential,
-            Credential::Git(_) | Credential::Deploy { .. }
+            Credential::Git(_) | Credential::Deploy { .. } | Credential::Automation(_)
         )
     }
     pub(crate) fn is_anonymous(&self) -> bool {
@@ -175,6 +207,7 @@ impl Principal {
             Credential::Local | Credential::Import(_) | Credential::AutoMerge(_) => true,
             Credential::User(session) => session.active(),
             Credential::Git(token) => token.active(),
+            Credential::Automation(credential) => credential.active(),
             Credential::Deploy { expires_at } => {
                 super::now_epoch().is_ok_and(|now| now < *expires_at)
             }
@@ -184,6 +217,9 @@ impl Principal {
         match &self.credential {
             Credential::User(session) if session.active() => Some(session.identity.clone()),
             Credential::Git(token) if token.active() => Some(token.session.identity.clone()),
+            Credential::Automation(credential) if credential.active() => {
+                Some(credential.identity())
+            }
             Credential::AutoMerge(actor) => Some(actor.clone()),
             Credential::Import(_) => Some(Identity {
                 issuer: "urn:crab:git-import".into(),
@@ -289,7 +325,8 @@ impl Principal {
     pub(crate) fn write_role(&self, repository: Uuid) -> Option<RepositoryAccess> {
         // A write-scoped Git token preserves the account role for rulesets
         // without gaining access to repository administration endpoints.
-        if !self.can_write(repository) {
+        // Automation pushes participate in protection without human role bypass.
+        if !self.can_write(repository) || self.automation_credential().is_some() {
             return None;
         }
         if self.is_local() {
