@@ -132,10 +132,7 @@ export function RepositoryPage({
 }) {
   const route = repositoryRoute(url);
   const view = route?.view ?? "code";
-  const historyBase =
-    view === "commits" && !route?.path
-      ? (url.searchParams.get("base") ?? undefined)
-      : undefined;
+  const historyBase = route?.since;
   const canWrite = repo.access === "write" && !repo.archived;
   const forkSource = repo.forked_from;
   const refs = useRequest<Refs>(

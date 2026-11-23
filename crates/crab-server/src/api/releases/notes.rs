@@ -258,7 +258,7 @@ fn markdown(
     }
     if let Some(previous) = previous {
         body.push_str(&format!(
-            "\n[Full changelog](/{}/{}/commits/{target}?base={previous}&repository_id={})\n",
+            "\n[Full changelog](/{}/{}/commits/{target}?since={previous}&repository_id={})\n",
             repo.config.owner, repo.config.name, repo.id
         ));
     }

@@ -155,7 +155,7 @@ async fn draft_notes_are_scoped_to_the_selected_commit_range_and_current_writer(
         "{body}"
     );
     assert!(body.contains("## Contributors\n\n- Alice\n"), "{body}");
-    assert!(body.contains(&format!("/commits/{target}?base={previous}&")));
+    assert!(body.contains(&format!("/commits/{target}?since={previous}&")));
     assert!(!body.contains("Already released") && !body.contains("Maintenance only"));
     assert_eq!(
         h.json(&format!("{route}&previous_tag=release%2Fv1"), &alice)

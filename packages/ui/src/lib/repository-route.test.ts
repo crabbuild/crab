@@ -51,6 +51,11 @@ describe("GitHub repository addresses", () => {
       { view: "commits", rev: "main" },
     ],
     [
+      { view: "commits", rev: "a".repeat(40), since: "b".repeat(40) },
+      `/team/repo.name/commits/${"a".repeat(40)}?since=${"b".repeat(40)}`,
+      { view: "commits", rev: "a".repeat(40), since: "b".repeat(40) },
+    ],
+    [
       { view: "commit", rev: "a".repeat(40) },
       `/team/repo.name/commit/${"a".repeat(40)}`,
       { view: "commit" },

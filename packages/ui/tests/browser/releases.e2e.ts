@@ -129,7 +129,26 @@ test("publishes and browses GitHub-style releases and source tags", async ({
         json: {
           target_oid: main,
           previous_tag: "v0.9.0",
-          body: "## What's changed\n\n- A generated entry\n",
+          body: `## What's changed\n\n- A generated entry\n\n[Full changelog](/team/project/commits/${main}?since=${oldTag})\n`,
+        },
+      });
+    }
+    if (url.pathname.endsWith("/commits") && url.searchParams.has("base")) {
+      expect(url.searchParams.get("rev")).toBe(main);
+      expect(url.searchParams.get("base")).toBe(oldTag);
+      return route.fulfill({
+        json: {
+          items: [
+            {
+              oid: main,
+              tree: oldTag,
+              parents: [oldTag],
+              author: "Alice",
+              author_seconds: 1_710_000_000,
+              message: "Release range commit",
+            },
+          ],
+          next: null,
         },
       });
     }
@@ -271,7 +290,7 @@ test("publishes and browses GitHub-style releases and source tags", async ({
   await expect(
     page.getByRole("textbox", { name: "Release notes", exact: true }),
   ).toHaveValue(
-    "Updated release notes.\n\n## What's changed\n\n- A generated entry\n",
+    `Updated release notes.\n\n## What's changed\n\n- A generated entry\n\n[Full changelog](/team/project/commits/${main}?since=${oldTag})\n`,
   );
   await page.getByLabel("Set as a pre-release").uncheck();
   await page.getByRole("button", { name: "Save draft" }).click();
@@ -284,6 +303,12 @@ test("publishes and browses GitHub-style releases and source tags", async ({
   await expect(page.getByText("Pre-release")).toHaveCount(0);
   await expect(page.getByText("Draft", { exact: true })).toBeVisible();
 
+  await page.getByRole("link", { name: "Full changelog" }).click();
+  await expect(page.getByText("Commits since")).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Release range commit" }),
+  ).toBeVisible();
+  await page.goBack();
   await page.getByRole("button", { name: "Edit Crab 1.0 final" }).click();
   await page.getByRole("button", { name: "Publish release" }).click();
   await expect(page.getByText("Draft", { exact: true })).toHaveCount(0);
