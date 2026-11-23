@@ -2945,6 +2945,12 @@ Under **Never auto-assign**, select team members to skip in either assignment
 method. Excluded members can still receive a direct request, fulfill a team
 request, and count toward CODEOWNERS requirements if otherwise eligible.
 
+From **Your profile → Review availability**, a reviewer can set **Busy** for
+a fixed duration or until they clear it. The preference belongs to their
+private account and works without a public profile. Both assignment methods
+skip Busy reviewers until the saved expiry or a manual change to **Available**.
+Direct requests and review eligibility continue to use repository permissions.
+
 Crab considers current team members with durable repository Write or Admin
 access. It skips the PR author, the requester, and people who have already
 reviewed or received an individual request on that PR. Manual team requests

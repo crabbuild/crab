@@ -18,7 +18,7 @@ pub(crate) async fn serve(request: Request) -> Response {
     let account_route = match components.as_slice() {
         ["-", "profile" | "notifications" | "code-search"]
         | ["-", "notifications", "watched" | "subscriptions"]
-        | ["-", "settings", "saved-replies"] => true,
+        | ["-", "settings", "saved-replies" | "review-availability"] => true,
         ["-", "users" | "organizations" | "repository-transfers", id]
         | ["-", "organizations", id, "invitation" | "projects"] => {
             uuid::Uuid::parse_str(id).is_ok_and(|id| !id.is_nil())
@@ -143,6 +143,11 @@ mod tests {
             ),
             ("/-/code-search/unknown", StatusCode::NOT_FOUND),
             ("/-/settings/saved-replies", StatusCode::OK),
+            ("/-/settings/review-availability", StatusCode::OK),
+            (
+                "/-/settings/review-availability/unknown",
+                StatusCode::NOT_FOUND,
+            ),
             ("/-/notifications", StatusCode::OK),
             ("/-/notifications/watched", StatusCode::OK),
             ("/-/notifications/subscriptions", StatusCode::OK),

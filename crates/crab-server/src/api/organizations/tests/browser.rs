@@ -1096,11 +1096,85 @@ async fn native_browser_saves_repository_team_access_and_review_requests() {
         .run(&["wait", "--text", "Update review assignment completed."])
         .await;
     assert_eq!(h.json(&routing, &alice).await["excluded"], json!([]));
+
+    // Availability is self-managed in a separate signed-in browser.
+    let bob_browser = Browser::new("review-availability");
+    *h.provider.mode.lock().await = "member".into();
+    bob_browser
+        .run(&[
+            "open",
+            &format!("{}/-/settings/review-availability", h.origin),
+        ])
+        .await;
+    bob_browser
+        .run(&["wait", "--text", "Continue to sign in"])
+        .await;
+    bob_browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Continue to sign in",
+            "--exact",
+        ])
+        .await;
+    let status = "#review-availability-choice";
+    let save = [
+        "find",
+        "role",
+        "button",
+        "click",
+        "--name",
+        "Save availability",
+        "--exact",
+    ];
+    bob_browser.run(&["wait", status]).await;
+    *h.provider.mode.lock().await = "valid".into();
+    bob_browser.run(&["select", status, "one_hour"]).await;
+    bob_browser.run(&save).await;
+    bob_browser
+        .run(&["wait", "--text", "Review availability saved."])
+        .await;
+    let preference = "/api/profile/review-availability";
+    let busy = h.json(preference, &bob).await;
+    assert_eq!(busy["busy"], true);
+    assert!(busy["expires_at_ms"].is_number());
+    assert_eq!(h.json(preference, &alice).await["busy"], false);
+    bob_browser.run(&["reload"]).await;
+    bob_browser
+        .run(&["wait", "--text", "Current status Busy"])
+        .await;
+
     browser.run(&["open", &pull_url]).await;
-    for name in ["Request reviewers", "Request review from team Engineering"] {
-        let selector = format!("[aria-label='{name}']");
-        browser.run(&["wait", &selector]).await;
-        browser.run(&["click", &selector]).await;
+    for selector in [chooser, request_team] {
+        browser.run(&["wait", selector]).await;
+        browser.run(&["click", selector]).await;
+    }
+    browser.run(&["wait", cancel]).await;
+    let waiting = h.json(&format!("{pulls}/1/reviewers"), &alice).await;
+    assert_eq!(waiting["items"], json!([]));
+    h.deliver_notifications(owner, "library").await;
+    assert_eq!(h.json(&inbox, &bob).await["items"], json!([]));
+    browser.run(&["click", chooser]).await;
+    browser
+        .run(&["wait", "[aria-label='Request review from bob']"])
+        .await;
+    browser.run(&["press", "Escape"]).await;
+
+    bob_browser.run(&["select", status, "available"]).await;
+    bob_browser.run(&save).await;
+    bob_browser
+        .run(&["wait", "--text", "Review availability saved."])
+        .await;
+    assert_eq!(h.json(preference, &bob).await["busy"], false);
+    drop(bob_browser);
+    browser.run(&["click", cancel]).await;
+    browser.run(&["wait", "--text", "No reviews yet."]).await;
+    for selector in [chooser, request_team] {
+        browser.run(&["wait", selector]).await;
+        browser.run(&["click", selector]).await;
     }
     browser
         .run(&["wait", "[aria-label='Cancel review request for bob']"])

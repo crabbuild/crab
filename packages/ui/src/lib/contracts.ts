@@ -68,6 +68,12 @@ export type ActorSummary = { id: string, handle: string, name: string, };
 export type OwnProfile = { profile: ActorProfile | null, };
 
 // prettier-ignore
+export type ReviewAvailability = { version: number, busy: boolean, expires_at_ms: number | null, };
+
+// prettier-ignore
+export type ReviewAvailabilityChoice = "available" | "thirty_minutes" | "one_hour" | "four_hours" | "one_day" | "one_week" | "until_cleared";
+
+// prettier-ignore
 export type OrganizationRole = "member" | "owner";
 
 // prettier-ignore

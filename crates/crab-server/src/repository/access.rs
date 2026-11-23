@@ -10,7 +10,9 @@ use crate::{
     catalog::TeamGrant,
     cells::{
         Address,
-        directory::{IdentityKey, LookupAccounts, LookupIdentities},
+        directory::{
+            IdentityKey, LookupAccounts, LookupIdentities, LookupRoutingIdentities, RoutingLookup,
+        },
         organization::{
             Caller, GetOrganization, Role,
             teams::{
@@ -236,11 +238,19 @@ pub(crate) async fn team_review_plan(
             "Team review requests support up to 256 team members",
         ));
     }
+    let automatic = roster.settings.algorithm != Algorithm::Disabled;
     let mut members = Vec::with_capacity(roster.members.len());
     for chunk in roster.members.chunks(100) {
         let identities = app::query_output(
             cells
-                .query::<LookupIdentities>(Address::Directory, None, chunk.to_vec())
+                .query::<LookupRoutingIdentities>(
+                    Address::Directory,
+                    None,
+                    RoutingLookup {
+                        actors: chunk.to_vec(),
+                        check_availability: automatic,
+                    },
+                )
                 .await,
         )?;
         if identities.len() != chunk.len() || identities.iter().any(Option::is_none) {
@@ -253,10 +263,16 @@ pub(crate) async fn team_review_plan(
                 .iter()
                 .copied()
                 .zip(identities.into_iter().flatten())
-                .filter_map(|(actor, key)| (key.issuer == issuer).then_some((actor, key.subject))),
+                .filter_map(|(actor, account)| {
+                    (account.identity.issuer == issuer).then_some((
+                        actor,
+                        account.identity.subject,
+                        account.busy,
+                    ))
+                }),
         );
     }
-    let routing = if roster.settings.algorithm == Algorithm::Disabled {
+    let routing = if !automatic {
         None
     } else {
         let current;
@@ -269,11 +285,12 @@ pub(crate) async fn team_review_plan(
         };
         let candidates = members
             .iter()
-            .filter(|(actor, subject)| {
-                roster.settings.excluded.binary_search(actor).is_err()
+            .filter(|(actor, subject, busy)| {
+                !busy
+                    && roster.settings.excluded.binary_search(actor).is_err()
                     && eligibility.contains(issuer, subject)
             })
-            .map(|(_, subject)| RepositoryAuthor {
+            .map(|(_, subject, _)| RepositoryAuthor {
                 issuer: issuer.to_owned(),
                 subject: subject.clone(),
                 name: membership
@@ -295,7 +312,7 @@ pub(crate) async fn team_review_plan(
     };
     Ok(TeamRecipients {
         team,
-        recipients: members.into_iter().map(|(_, subject)| subject).collect(),
+        recipients: members.into_iter().map(|(_, subject, _)| subject).collect(),
         routing,
     })
 }

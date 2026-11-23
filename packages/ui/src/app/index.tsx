@@ -136,7 +136,9 @@ export function App() {
   const subscriptions = url.pathname === "/-/notifications/subscriptions";
   const notifications = inbox || watched || subscriptions;
   const savedReplies = url.pathname === "/-/settings/saved-replies";
-  const profileSettings = url.pathname === "/-/profile" || savedReplies;
+  const reviewAvailability = url.pathname === "/-/settings/review-availability";
+  const profileSettings =
+    url.pathname === "/-/profile" || savedReplies || reviewAvailability;
   const actorId =
     /^\/-\/users\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(
       url.pathname,
@@ -524,7 +526,13 @@ export function App() {
               <ProfileSettings
                 csrf={session.data.csrf ?? ""}
                 suggestedName={session.data.user?.name ?? ""}
-                section={savedReplies ? "saved-replies" : "profile"}
+                section={
+                  savedReplies
+                    ? "saved-replies"
+                    : reviewAvailability
+                      ? "review-availability"
+                      : "profile"
+                }
               />
             ) : actorId ? (
               <UserProfile id={actorId} />

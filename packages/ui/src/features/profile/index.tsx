@@ -1,11 +1,16 @@
 import { useState } from "react";
-import { CircleUserRoundIcon, MessageSquareTextIcon } from "lucide-react";
+import {
+  CircleUserRoundIcon,
+  ClockIcon,
+  MessageSquareTextIcon,
+} from "lucide-react";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { timestamp } from "@/components/discussion/time";
 import { useRequest } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { ProfileForm } from "./form";
+import { ReviewAvailabilitySettings } from "./review-availability";
 import { SavedReplies } from "./saved-replies";
 import type { ActorProfile, OwnProfile } from "@/lib/contracts";
 
@@ -16,7 +21,7 @@ export function ProfileSettings({
 }: {
   csrf: string;
   suggestedName: string;
-  section?: "profile" | "saved-replies";
+  section?: "profile" | "review-availability" | "saved-replies";
 }) {
   const settings = [
     {
@@ -24,6 +29,12 @@ export function ProfileSettings({
       href: "/-/profile",
       label: "Public profile",
       Icon: CircleUserRoundIcon,
+    },
+    {
+      id: "review-availability",
+      href: "/-/settings/review-availability",
+      label: "Review availability",
+      Icon: ClockIcon,
     },
     {
       id: "saved-replies",
@@ -52,6 +63,8 @@ export function ProfileSettings({
       </aside>
       {section === "saved-replies" ? (
         <SavedReplies csrf={csrf} />
+      ) : section === "review-availability" ? (
+        <ReviewAvailabilitySettings csrf={csrf} />
       ) : (
         <PublicProfileSettings csrf={csrf} suggestedName={suggestedName} />
       )}

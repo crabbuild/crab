@@ -37,6 +37,8 @@ fn typescript() -> String {
         directory::ActorProfile::decl(&config),
         directory::ActorSummary::decl(&config),
         profiles::OwnProfile::decl(&config),
+        directory::review_availability::ReviewAvailability::decl(&config),
+        directory::review_availability::ReviewAvailabilityChoice::decl(&config),
         organization::Role::decl(&config),
         organization::Organization::decl(&config),
         organization::InvitationState::decl(&config),
