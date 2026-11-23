@@ -700,7 +700,8 @@ and edge payload through redacted observations.
   and release verification match each direct CLI benchmark arm to the
   independently observed native origin and repository prefix. Assembly
   retains the direct CLI Git, capsule and LFS measurement inputs. The release
-  gate recomputes each summary and checks the complete platform matrix.
+  gate recomputes each summary, rejects viewer request IDs shared with the
+  product lifecycle, and checks the complete platform matrix.
   CloudFront, Cloud CDN and Front Door measurements match timed fetches to
   provider logs using hashed viewer request IDs and retain the verified
   status, cache result, and viewer response bytes. Cold-fill and warm-hit

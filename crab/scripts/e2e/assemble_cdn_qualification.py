@@ -201,7 +201,7 @@ def assemble_bundle(
                 registered_read["cli_payload_bytes"] = cli_payload_bytes(spec)
                 if managed_git:
                     registered_read["managed_issuer"] = spec["managed_issuer"]
-                product = collect_git_product_action(
+                product, product_request_ids = collect_git_product_action(
                     inputs / row / GIT_PRODUCT_DIR, measured | registered_read, rollback,
                     retain=destination / GIT_PRODUCT_DIR, cleanup_at=cleanup_at, native_origin_sha256=origin,
                     public_export_sha256=registration.get("publication_sha256", ""),

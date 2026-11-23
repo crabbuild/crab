@@ -45,6 +45,7 @@ def main() -> int:
         require(managed == (args.managed_row is not None) == (args.fixture is not None),
                 "managed Git performance requires the measured row and approved fixture")
         native_target = None
+        product_request_ids = None
         if managed:
             fixture = approved_fixture(args.fixture, registration["configuration_sha256"])
             require(fixture["scope"] == scope, "managed Git performance fixture differs from the approved row")
@@ -60,10 +61,13 @@ def main() -> int:
             require(native_target["origin_sha256"] == cleanup["targets"]["native"]["origin_sha256"],
                     "managed Git cleanup did not observe the approved native target")
             rollback = read_trace(args.managed_row / "traces/rollback.json", "rollback")
-            collect_git_product_action(args.managed_row / GIT_PRODUCT_DIR, row, rollback, cleanup_at=cleanup_at,
-                                       native_origin_sha256=native_target["origin_sha256"])
+            _, product_request_ids = collect_git_product_action(
+                args.managed_row / GIT_PRODUCT_DIR, row, rollback, cleanup_at=cleanup_at,
+                native_origin_sha256=native_target["origin_sha256"],
+            )
         performance = collect_git_performance(args.inputs, registration, platform, args.run_id, args.run_attempt,
-                                              service_row=args.service_row, managed_row=args.managed_row, native_target=native_target)
+                                              service_row=args.service_row, managed_row=args.managed_row,
+                                              native_target=native_target, product_request_ids=product_request_ids)
         verify_performance(performance, registration)
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f"error: {error}", file=sys.stderr)

@@ -1218,6 +1218,8 @@ Git object database. LFS repeats `crab lfs fetch` in the primed worktree for the
 same verified pointer. Keep separate runner measurements for the two recorded
 windows and join the warm edge fetch with provider logs. The verifier matches
 the repeat's primer fingerprint and cache root to that exact edge record.
+Use separate fetches for the product lifecycle and regional measurements. A
+provider viewer request can count toward only one of those results.
 The repeat requires a verified local hit and zero edge requests for the
 registered payload. Capsule records retain redacted fingerprints of the
 verified control ranges. Each local capsule hit must match a range verified

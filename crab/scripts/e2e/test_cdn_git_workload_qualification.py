@@ -226,11 +226,12 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
         viewer = WORKLOAD.viewer_binding_sha256(json.loads(self.fixture.read_bytes()))
         rollback_raw = json.dumps(rollback).encode()
         read = fetched | {"viewer_binding_sha256": viewer, "cli_payload_bytes": payload_bytes}
-        measured = collect_git_product_action(records, read, rollback_raw)
+        measured, requests = collect_git_product_action(records, read, rollback_raw)
         with self.assertRaisesRegex(ValueError, "product fetch did not use the registered viewer binding"):
             collect_git_product_action(records, read | {"viewer_binding_sha256": "0" * 64}, rollback_raw)
         self.assertEqual(measured["observed_sha256"], fetched["expected_sha256"])
         self.assertEqual(measured["verified_edge_payloads"], 1)
+        self.assertEqual(requests, set(fetched["edge_responses"]))
 
     def test_managed_fetch_observes_the_grant_for_each_product_arm(self) -> None:
         config = json.loads(self.fixture.read_bytes())
@@ -506,8 +507,8 @@ class CdnGitWorkloadQualificationTests(unittest.TestCase):
             write_product_viewer_proof(fetch_path, key)
             (records / "retirement.json").write_text(json.dumps(retired), encoding="utf-8")
             viewer = WORKLOAD.viewer_binding_sha256(sample)
-            product = collect_git_product_action(records, fetched | {"viewer_binding_sha256": viewer},
-                                                 json.dumps(rollback).encode(), public_export_sha256=current)
+            product, _ = collect_git_product_action(records, fetched | {"viewer_binding_sha256": viewer},
+                                                    json.dumps(rollback).encode(), public_export_sha256=current)
             self.assertEqual(product["name"], "lfs-fetch")
             export = self.root / "public-export"
             copytree(new, export)

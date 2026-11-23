@@ -509,9 +509,11 @@ class CdnQualificationTests(unittest.TestCase):
         sample = self.directory / CDN.GIT_BENCHMARK_DIR / "near/0001/warm_edge/client.json"
         fetch = json.loads(sample.read_bytes())
         managed = CDN.is_managed_cli_git_scope(self.scope)
+        fetch["edge_responses"] = {
+            hashlib.sha256(b"product-cli-viewer").hexdigest(): next(iter(fetch["edge_responses"].values())),
+        }
         if managed:
             fetch["publication_oid"] = "f" * 40
-            fetch["edge_responses"] = {"2" * 64: next(iter(fetch["edge_responses"].values()))}
             fetch["reader"]["cache_root_sha256"] = "c" * 64
         records = self.directory / CDN.GIT_PRODUCT_DIR
         records.mkdir(exist_ok=True)
@@ -1727,25 +1729,28 @@ class CdnQualificationTests(unittest.TestCase):
         result = self.command()
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_sdk_regional_pair_cannot_reuse_a_product_request(self) -> None:
-        for family, product, action in (
-            ("git", CDN.GIT_PRODUCT_DIR, "snapshot.json"),
-            ("xorb", CDN.XORB_PRODUCT_DIR, "hydration.json"),
+    def test_regional_pair_cannot_reuse_a_product_request(self) -> None:
+        for provider, consumer, family, product, action in (
+            ("s3", "cli", "git", CDN.GIT_PRODUCT_DIR, "fetch.json"),
+            ("gcs", "sdk", "git", CDN.GIT_PRODUCT_DIR, "snapshot.json"),
+            ("gcs", "sdk", "xorb", CDN.XORB_PRODUCT_DIR, "hydration.json"),
         ):
-            with self.subTest(family=family), TemporaryDirectory() as directory:
+            with self.subTest(consumer=consumer, family=family), TemporaryDirectory() as directory:
                 self.directory = Path(directory)
                 (self.directory / "traces").mkdir()
-                self.configure("gcs", "private", "direct", consumer="sdk", family=family)
+                self.configure(provider, "private", "direct", consumer=consumer, family=family)
                 path = self.directory / product / action
                 request = next(iter(json.loads(path.read_bytes())["edge_responses"]))
                 arm = self.directory / CDN.GIT_BENCHMARK_DIR / "near/0001/cold_edge"
                 client = json.loads((arm / "client.json").read_bytes())
                 response = next(iter(client["edge_responses"].values()))
                 digest = json_file(arm / "client.json", client | {"edge_responses": {request: response}})
-                log = arm / CDN.VIEWER_REQUEST_FILES["gcs"]
+                log = arm / CDN.VIEWER_REQUEST_FILES[provider]
                 proof = json.loads(log.read_bytes())
                 record = next(iter(proof["records"].values()))
                 json_file(log, proof | {"client_report_sha256": digest, "records": {request: record}})
+                measurement = arm / "measurement.json"
+                json_file(measurement, json.loads(measurement.read_bytes()) | {"client_report_sha256": digest})
                 self.rejected("CDN log requests were reused across arms")
 
     def test_sdk_hydration_product_proof_must_identify_the_approved_xorb(self) -> None:

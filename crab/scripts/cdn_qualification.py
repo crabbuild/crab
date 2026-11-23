@@ -2550,7 +2550,7 @@ def collect_git_product_action(
     inputs: Path, row: dict[str, Any], rollback_raw: bytes, *, retain: Path | None = None, cleanup_at: int | None = None,
     native_origin_sha256: str | None = None, public_export_sha256: str = "",
     policies: dict[str, ReleaseReadLimits] | None = None,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], set[str]]:
     publication_raw = read_git_record(inputs / "publication.json")
     publication = validate_git_publication(publication_raw, row)
     require(publication["published"], "Git product action requires a ref confirmed after native push")
@@ -2599,7 +2599,8 @@ def collect_git_product_action(
         verify_git_lifecycle(observations, row, publication, digest, fetch["started_at_unix_ms"], fetch["reader"],
                              retired_at, cleanup_at, native_origin_sha256)
     viewer_raw = read_git_record(inputs / PRODUCT_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
-    verify_product_viewer_requests(viewer_raw, fetch, fetch_raw, scope_parts(row["scope"])[0], policies=policies)
+    viewer_ids = verify_product_viewer_requests(viewer_raw, fetch, fetch_raw, scope_parts(row["scope"])[0],
+                                                 policies=policies)
     if retain is not None:
         retain.mkdir()
         retained = {"publication.json": publication_raw, "fetch.json": fetch_raw,
@@ -2610,10 +2611,11 @@ def collect_git_product_action(
             (retain / filename).write_bytes(raw)
         for phase, raw in observations.items():
             (retain / GIT_NATIVE_REF_FILES[phase]).write_bytes(raw)
-    return {key: fetch[key] for key in (
+    action = {key: fetch[key] for key in (
         "name", "expected_sha256", "observed_sha256", "expected_bytes", "observed_bytes",
         "native_writes", "observed_edge_gets", "visible_new_ref", "verified_edge_payloads",
     )}
+    return action, viewer_ids
 
 
 def collect_sdk_product_action(
@@ -2917,8 +2919,8 @@ def collect_git_performance(
     cli_workload = requires_cli_workload(scope)
     managed_git = is_managed_cli_git_scope(scope)
     require(managed_git == (managed_row is not None)
-            and (not managed_git or native_target is not None),
-            "managed Git benchmarks require the retained product lifecycle and native target")
+            and (not managed_git or (native_target is not None and bool(product_request_ids))),
+            "managed Git benchmarks require the verified product lifecycle and native target")
     require(service == (service_row is not None), "service benchmarks require the retained lifecycle row")
     require(sdk or desktop or hydration or service or (cli_workload and spec["workload"] == cli_action_name(scope)),
             "benchmark must register a supported CLI, SDK, desktop or service workload")
@@ -2956,9 +2958,6 @@ def collect_git_performance(
                                           "origin", "managed Git product rollback", managed_issuer=spec["managed_issuer"])
         managed_commits.add(edge_fetch["publication_oid"])
         cache_roots.update(fetch["reader"]["cache_root_sha256"] for fetch in (edge_fetch, origin_fetch))
-        viewer_raw = read_git_record(managed_product / PRODUCT_VIEWER_RECORD, limit=GIT_FETCH_RECORD_LIMIT)
-        provider_request_ids.update(verify_product_viewer_requests(viewer_raw, edge_fetch, edge_raw, PROVIDERS[provider][0],
-                                                                   policies=policies))
         publication_raw = read_git_record(managed_product / "publication.json")
         publication = validate_git_publication(publication_raw, provenance)
         observed = verify_git_native_ref(decode(read_git_record(managed_product / GIT_NATIVE_REF_FILES["published"])),
@@ -3352,7 +3351,7 @@ def verify_cdn_report(
         registered_read["cli_payload_bytes"] = cli_payload_bytes(registration)
         if is_managed_cli_git_scope(scope):
             registered_read["managed_issuer"] = registration["managed_issuer"]
-        product = collect_git_product_action(
+        product, request_ids = collect_git_product_action(
             directory / GIT_PRODUCT_DIR, row | registered_read, rollback, cleanup_at=cleanup_at,
             native_origin_sha256=native_origin_sha256, public_export_sha256=registration.get("publication_sha256", ""),
             policies=policies,
@@ -3360,7 +3359,7 @@ def verify_cdn_report(
         require(row["product_action"] == product | {"fixture_cleanup_verified": True},
                 "product action differs from the retained publication, fetch, and retirement evidence")
         measured = collect_git_performance(directory / GIT_BENCHMARK_DIR, registration, platform, run_id, run_attempt,
-                                          native_target=native_target,
+                                          native_target=native_target, product_request_ids=request_ids,
                                           managed_row=directory if is_managed_cli_git_scope(scope) else None,
                                           policy=policy)
         require(measured == row["performance"], "CLI performance summary differs from the retained measurements")
