@@ -5,7 +5,7 @@ use crate::{
 };
 
 #[tokio::test(flavor = "multi_thread")]
-async fn review_routing_balances_recent_requests_across_organization_repositories() {
+async fn team_review_routing_balances_and_rotates_across_organization_repositories() {
     let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
     let h =
         Harness::new_with_store_and_prefix(false, false, store, "organization-review-load").await;
@@ -237,5 +237,36 @@ async fn review_routing_balances_recent_requests_across_organization_repositorie
     assert_eq!(requests["items"][0]["candidate_id"], json!(first.0));
     assert_eq!(requests["items"][0]["request"]["code_owner"], true);
     assert_eq!(requests["teams"][0]["state"]["kind"], "requested");
+
+    command(
+        Uuid::now_v7(),
+        json!({"kind":"review_routing","team":team,"version":1,"algorithm":"round_robin","reviewers":1}),
+    )
+    .await;
+    let extra = create_pull(&source, source_id, false).await;
+    review(
+        &extra,
+        source_id,
+        json!({"kind":"request","actor_id":alternate.0}),
+    )
+    .await;
+    // Round robin favors the older team assignment even when that reviewer
+    // now has more open work and the destination has no local rotation.
+    let manual = create_pull(&source, source_id, false).await;
+    review(
+        &manual,
+        source_id,
+        json!({"kind":"request_team","team_id":team}),
+    )
+    .await;
+    let requests = h.json(&format!("{manual}/reviewers"), &alice).await;
+    assert_eq!(requests["items"][0]["candidate_id"], json!(alternate.0));
+
+    // The newly rotated member was last used on a different repository.
+    // CODEOWNERS must consider that assignment before the older local order.
+    let automatic = create_pull(&target, target_id, false).await;
+    let requests = h.json(&format!("{automatic}/reviewers"), &alice).await;
+    assert_eq!(requests["items"][0]["candidate_id"], json!(first.0));
+    assert_eq!(requests["items"][0]["request"]["code_owner"], true);
     h.close().await;
 }

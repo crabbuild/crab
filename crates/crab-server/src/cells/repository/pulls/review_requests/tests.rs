@@ -455,6 +455,7 @@ async fn team_assignment_rotates_once_and_balances_outstanding_open_reviews() {
             count_existing: None,
             keep_team: false,
             other_workload: Default::default(),
+            other_rotation: Default::default(),
         }),
     };
     seed(&cell).await;
@@ -544,6 +545,7 @@ async fn team_assignment_counts_pending_requests_and_retains_the_team() {
             count_existing: Some(vec!["Bob".into(), "Bob".into(), "Eve".into()]),
             keep_team: true,
             other_workload: Default::default(),
+            other_rotation: Default::default(),
         }),
     };
     assert!(matches!(
@@ -598,6 +600,7 @@ async fn routed_code_owner_requests_keep_the_team_and_deduplicate_people() {
                     count_existing: None,
                     keep_team: false,
                     other_workload: Default::default(),
+                    other_rotation: Default::default(),
                 }),
             }],
         },

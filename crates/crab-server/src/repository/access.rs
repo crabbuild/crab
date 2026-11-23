@@ -329,63 +329,88 @@ pub(crate) async fn team_review_plan(
             count_existing,
             keep_team: options.keep_team,
             other_workload: BTreeMap::new(),
+            other_rotation: BTreeMap::new(),
         }),
     })
 }
 
-pub(crate) async fn add_review_workload(
+pub(crate) async fn add_review_history(
     server: &Server,
     repo: &Repository,
     teams: &mut [TeamRecipients],
 ) {
-    let plans = teams.iter_mut().filter_map(|team| {
-        team.routing
-            .as_mut()
-            .filter(|plan| plan.algorithm == Algorithm::FewestOpen)
-    });
-    let mut plans: Vec<_> = plans.collect();
-    let subjects: BTreeSet<_> = plans
+    let plans: Vec<_> = teams
+        .iter_mut()
+        .filter_map(|team| {
+            team.routing
+                .as_mut()
+                .filter(|plan| !plan.candidates.is_empty())
+                .map(|plan| (team.team, plan))
+        })
+        .collect();
+    if plans.is_empty() {
+        return;
+    }
+    let workload: BTreeSet<_> = plans
         .iter()
-        .flat_map(|plan| {
+        .filter(|(_, plan)| plan.algorithm == Algorithm::FewestOpen)
+        .flat_map(|(_, plan)| {
             plan.candidates
                 .iter()
                 .map(|candidate| candidate.subject.clone())
         })
         .collect();
-    if subjects.is_empty() {
-        return;
-    }
+    let subjects_by_team = plans
+        .iter()
+        .map(|(team, plan)| {
+            let subjects = plan
+                .candidates
+                .iter()
+                .map(|candidate| candidate.subject.clone())
+                .collect();
+            (*team, subjects)
+        })
+        .collect();
     let result = tokio::time::timeout(
         Duration::from_secs(5),
-        other_review_workload(server, repo, subjects.into_iter().collect()),
+        other_review_history(
+            server,
+            repo,
+            workload.into_iter().collect(),
+            subjects_by_team,
+        ),
     )
     .await;
-    let totals = match result {
-        Ok(Ok(totals)) => totals,
+    let mut history = match result {
+        Ok(Ok(history)) => history,
         other => {
             // Ranking is advisory. A sibling outage must not prevent the PR
             // or team request from committing, or silently bias the choice.
-            tracing::warn!(repository = %repo.id, outcome = ?other, "team reviewer workload unavailable");
-            for plan in plans {
+            tracing::warn!(repository = %repo.id, outcome = ?other, "team review assignment history unavailable");
+            for (_, plan) in plans {
                 plan.candidates.clear();
             }
             return;
         }
     };
-    for plan in &mut plans {
-        for candidate in &plan.candidates {
-            if let Some(load) = totals.get(&candidate.subject) {
-                plan.other_workload.insert(candidate.subject.clone(), *load);
+    for (team, plan) in plans {
+        plan.other_rotation = history.teams.remove(&team).unwrap_or_default();
+        if plan.algorithm == Algorithm::FewestOpen {
+            for candidate in &plan.candidates {
+                if let Some(load) = history.workload.get(&candidate.subject) {
+                    plan.other_workload.insert(candidate.subject.clone(), *load);
+                }
             }
         }
     }
 }
 
-async fn other_review_workload(
+async fn other_review_history(
     server: &Server,
     repo: &Repository,
-    subjects: Vec<String>,
-) -> Result<BTreeMap<String, routing::Workload>> {
+    workload: Vec<String>,
+    teams: BTreeMap<Uuid, Vec<String>>,
+) -> Result<routing::History> {
     let organization = repo.organization.ok_or(Error::NotFound)?;
     let issuer = server.auth.as_ref().ok_or(Error::NotFound)?.issuer();
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
@@ -394,9 +419,10 @@ async fn other_review_workload(
         .load()
         .await
         .map_err(|error| Error::Membership(Box::new(error)))?;
-    let input = routing::WorkloadQuery {
+    let input = routing::HistoryQuery {
         issuer: issuer.to_owned(),
-        subjects,
+        workload,
+        teams,
     };
     // Catalog ownership scopes the private aggregate. Only the destination
     // repository may turn today's eligible candidates into actual requests.
@@ -412,25 +438,15 @@ async fn other_review_workload(
         async move {
             app::query_output(
                 cells
-                    .query::<routing::ReadWorkload>(Address::Repository(repository), None, input)
+                    .query::<routing::ReadHistory>(Address::Repository(repository), None, input)
                     .await,
             )
         }
     })
     .buffer_unordered(8)
-    .try_fold(BTreeMap::new(), |mut totals, loads| async {
-        if loads.len() != input.subjects.len() {
-            return Err(Error::CellContract("Invalid review workload count"));
-        }
-        for (subject, load) in input.subjects.iter().zip(loads) {
-            if load != routing::Workload::default() {
-                totals
-                    .entry(subject.clone())
-                    .or_insert_with(routing::Workload::default)
-                    .add(load);
-            }
-        }
-        Ok(totals)
+    .try_fold(routing::History::default(), |mut history, sibling| async {
+        history.add(sibling);
+        Ok(history)
     })
     .await
 }

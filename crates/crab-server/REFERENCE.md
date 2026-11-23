@@ -2954,13 +2954,19 @@ requests. List rollup counts cover individual requests.
 
 Organization owners and team maintainers can open **Teams → Settings →
 Automatic review assignment** and select an assignment method and up to ten
-reviewers per request. Round robin gives priority to members who were assigned
-least recently in the current repository. Load balance combines outstanding
-requests on open PRs with requests made in the past 30 days across the
-organization's ready, unarchived repositories. Cancelled requests are excluded.
-Outstanding requests count toward the score even when they are older than 30
-days. Ties prefer fewer outstanding requests, then follow the repository's
-rotation. If workload data is unavailable, the review stays with the team.
+reviewers per request. Both methods look across the organization's ready,
+unarchived repositories. Round robin gives priority to the members least
+recently assigned through that team, including CODEOWNERS assignments. Load
+balance combines outstanding requests on open PRs with requests made in the
+past 30 days. Cancelled requests are excluded. Outstanding requests count
+toward the score even when they are older than 30 days. Ties prefer fewer
+outstanding requests, then use the team's rotation.
+
+New assignments record their order within the team when the PR request commits.
+Earlier assignments without a comparable timestamp contribute to local
+tie-breaking. Each assignment reads committed sibling history. Two simultaneous
+requests in separate repositories can choose the same eligible reviewer. When
+the routing history is unavailable, the review stays with the team.
 
 Under **Never auto-assign**, select team members to skip in either assignment
 method. Excluded members can still receive a direct request, fulfill a team

@@ -22,32 +22,77 @@ impl Workload {
 }
 
 #[derive(Clone, Deserialize, Serialize)]
-pub(crate) struct WorkloadQuery {
+pub(crate) struct HistoryQuery {
     pub issuer: String,
-    pub subjects: Vec<String>,
+    pub workload: Vec<String>,
+    pub teams: BTreeMap<uuid::Uuid, Vec<String>>,
 }
 
-pub(crate) struct ReadWorkload;
-impl Read for ReadWorkload {
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub(crate) struct History {
+    pub workload: BTreeMap<String, Workload>,
+    pub teams: BTreeMap<uuid::Uuid, BTreeMap<String, u64>>,
+}
+
+impl History {
+    pub(crate) fn add(&mut self, other: Self) {
+        for (subject, load) in other.workload {
+            self.workload.entry(subject).or_default().add(load);
+        }
+        for (team, assignments) in other.teams {
+            let current = self.teams.entry(team).or_default();
+            for (subject, time) in assignments {
+                let latest = current.entry(subject).or_default();
+                *latest = (*latest).max(time);
+            }
+        }
+    }
+}
+
+pub(crate) struct ReadHistory;
+impl Read for ReadHistory {
     const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 259;
-    type Input = WorkloadQuery;
-    type Output = Vec<Workload>;
+    type Input = HistoryQuery;
+    type Output = History;
 
-    fn execute(context: &mut Transaction<'_>, query: WorkloadQuery) -> Result<Vec<Workload>> {
-        if query.subjects.len() > automatic::MAX_RECIPIENTS {
-            return Err(Error::Invalid("too many review workload subjects"));
+    fn execute(context: &mut Transaction<'_>, query: HistoryQuery) -> Result<History> {
+        if query.workload.len() > automatic::MAX_RECIPIENTS
+            || query.teams.len() > crate::catalog::MAX_TEAM_GRANTS
+            || query.teams.iter().any(|(team, subjects)| {
+                team.is_nil() || subjects.len() > teams::MAX_REVIEW_RECIPIENTS
+            })
+        {
+            return Err(Error::Invalid("invalid review assignment history query"));
         }
+        let mut history = History::default();
         if settings::archived(context)? {
-            return Ok(vec![Workload::default(); query.subjects.len()]);
+            return Ok(history);
         }
-        super::super::super::search::index::ensure_ready(context)?;
-        let since = timestamp(context.now_ms())?.saturating_sub(RECENT_WINDOW_MS);
-        query
-            .subjects
-            .iter()
-            .map(|subject| workload(context, &query.issuer, subject, since))
-            .collect()
+        if !query.workload.is_empty() {
+            super::super::super::search::index::ensure_ready(context)?;
+            let since = timestamp(context.now_ms())?.saturating_sub(RECENT_WINDOW_MS);
+            for subject in query.workload {
+                let load = workload(context, &query.issuer, &subject, since)?;
+                if load != Workload::default() {
+                    history.workload.insert(subject, load);
+                }
+            }
+        }
+        for (team, subjects) in query.teams {
+            let rotation = rotation_key(team);
+            let mut assignments = BTreeMap::new();
+            for subject in subjects {
+                let id = super::reviewer_identity_id(&query.issuer, &subject);
+                if let Some(time) = context.document::<u64>(&format!("{rotation}/last/{id}"))? {
+                    assignments.insert(subject, time);
+                }
+            }
+            if !assignments.is_empty() {
+                history.teams.insert(team, assignments);
+            }
+        }
+        Ok(history)
     }
 }
 
@@ -111,6 +156,12 @@ pub(crate) struct Plan {
     pub keep_team: bool,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub other_workload: BTreeMap<String, Workload>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub other_rotation: BTreeMap<String, u64>,
+}
+
+fn rotation_key(team: uuid::Uuid) -> String {
+    format!("collaboration/v1/team-review-rotation/{team}")
 }
 
 fn remaining_slots(
@@ -168,7 +219,7 @@ pub(super) fn assign(
     }
     let now = timestamp(context.now_ms())?;
     let since = now.saturating_sub(RECENT_WINDOW_MS);
-    let rotation = format!("collaboration/v1/team-review-rotation/{team}");
+    let rotation = rotation_key(team);
     let mut candidates = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for reviewer in plan.candidates {
@@ -203,19 +254,31 @@ pub(super) fn assign(
             (0, 0)
         };
         let key = format!("{rotation}/{id}");
-        let last = context.document::<u64>(&key)?.unwrap_or(0);
-        candidates.push((score, last, key, reviewer));
+        let stamp = format!("{rotation}/last/{id}");
+        let local_order = context.document::<u64>(&key)?.unwrap_or(0);
+        let local_time = context.document::<u64>(&stamp)?.unwrap_or(0);
+        let remote_time = plan
+            .other_rotation
+            .get(&reviewer.subject)
+            .copied()
+            .unwrap_or(0);
+        candidates.push((
+            (score, local_time.max(remote_time), local_order, key),
+            stamp,
+            reviewer,
+        ));
     }
-    candidates.sort_unstable_by(|a, b| (&a.0, &a.1, &a.2).cmp(&(&b.0, &b.1, &b.2)));
-    if candidates.is_empty() {
+    let Some(latest) = candidates.iter().map(|(rank, _, _)| rank.1).max() else {
         return Ok(Vec::new());
-    }
-    // Write the team's rotation ordinal with the requests so concurrent
-    // assignments share a single history and receipt replay cannot rotate it.
+    };
+    candidates.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    // The time is comparable across repositories. Local ordinals retain
+    // ordering for older entries and break ties within the same millisecond.
     let assigned_at = next_version(context.document::<u64>(&rotation)?.unwrap_or(0))?;
+    let rotation_time = now.max(next_version(latest)?);
     context.put_document(&rotation, &assigned_at)?;
     let mut selected = Vec::new();
-    for (_, _, key, reviewer) in candidates.into_iter().take(slots) {
+    for ((_, _, _, key), stamp, reviewer) in candidates.into_iter().take(slots) {
         selected.push(reviewer.subject.clone());
         project(
             context,
@@ -230,6 +293,7 @@ pub(super) fn assign(
             },
         )?;
         context.put_document(&key, &assigned_at)?;
+        context.put_document(&stamp, &rotation_time)?;
     }
     Ok(selected)
 }

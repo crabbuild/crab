@@ -34,9 +34,10 @@ export function TeamReviewRouting(props: RoutingProps) {
     <section className="flex flex-col gap-3">
       <h3 className="font-semibold">Automatic review assignment</h3>
       <p className="text-sm text-muted-foreground">
-        Assign team review requests to members with write access. Load balance
-        considers outstanding requests and reviews requested in the last 30 days
-        across the organization. Round robin rotates within each repository.
+        Assign team review requests to members with write access to the
+        repository. Round robin uses the team’s assignment history across the
+        organization. Load balance considers open requests and requests made in
+        the last 30 days.
       </p>
       <Result state={state} timingLabel="Review assignment settings">
         {(settings) => (

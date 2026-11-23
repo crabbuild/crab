@@ -15,7 +15,7 @@ use crate::{
     },
     repository::{
         Repository,
-        access::{add_review_workload, team_review_plan, visible_team_names},
+        access::{add_review_history, team_review_plan, visible_team_names},
     },
     server::Server,
 };
@@ -103,7 +103,7 @@ pub(super) async fn set(
     }
     let (recipients, routing) = if request {
         let mut plan = team_review_plan(server, &current, team, None).await?;
-        add_review_workload(server, repo, std::slice::from_mut(&mut plan)).await;
+        add_review_history(server, repo, std::slice::from_mut(&mut plan)).await;
         (Some(plan.recipients), plan.routing)
     } else {
         (None, None)

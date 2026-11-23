@@ -246,7 +246,7 @@ pub(super) async fn requests(
         plan.teams.push(plan_for_team);
     }
     if subjects.len() <= MAX_RECIPIENTS {
-        crate::repository::access::add_review_workload(server, repo, &mut plan.teams).await;
+        crate::repository::access::add_review_history(server, repo, &mut plan.teams).await;
     }
     if subjects.len() > MAX_RECIPIENTS || serde_json::to_vec(&plan)?.len() > 1024 * 1024 {
         return Err(Error::Invalid(
