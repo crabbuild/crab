@@ -485,6 +485,31 @@ state navigation. Definitions, assignments, counts and cursors continue to use
 the existing native transaction and revision contracts. Prepared format-2
 repositories need no additional rebuild for the label menu.
 
+## Cross-repository issue transfer
+
+An issue transfer spans two Repository Cells. The source capture reads the
+open issue, active label names, milestone title and due date, issue type,
+conversation lock, and bounded pages of original comments and activity. The
+capture binds the source UUID, issue number, issue version, repository
+revision, and issue type version. A change to the captured discussion stops
+the old continuation. The lock retains its stored deadline so a clock change
+alone does not change the captured bytes.
+
+The destination stages frames in private SQL, with the progress document
+updated in the same Cell transaction. The transfer UUID binds the source and
+qualified initiator. Progress carries an ordered digest of the staged frames
+bound to their destination. An identical retry returns the latest progress.
+Conflicting bytes and out-of-order frames cannot advance the transfer. Staging
+allocates no issue number and contributes no rows to the destination's issue
+lists, discussion index, or inbox.
+
+Publication still requires a source decision that rechecks both repositories'
+current Write grants and shared owner. That decision must fence the captured
+source, preserve remaining discussion state and attachments, recover the
+destination publication on retry, and enable an access-checked link from the
+original issue. Clean up abandoned staged frames after the source has
+recorded cancellation. The browser action follows that publication path.
+
 ## Reviewer search preparation
 
 Discussion index format 6 adds qualified reviewer projections. Each PR/identity

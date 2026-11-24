@@ -46,6 +46,9 @@ pub(in crate::cells) fn dispatch_mutation(
         search::index::ensure_ready(context)?;
     }
     let result = match id {
+        <issues::transfer::Stage as Mutation>::ID => {
+            invoke_mutation::<issues::transfer::Stage>(context, input)
+        }
         recent_pushes::Record::ID => invoke_mutation::<recent_pushes::Record>(context, input),
         #[cfg(test)]
         SeedHistoricalMerges::ID => invoke_mutation::<SeedHistoricalMerges>(context, input),
@@ -449,6 +452,9 @@ pub(in crate::cells) fn dispatch_read(
         <GetAssignment as Read>::ID => invoke_read::<GetAssignment>(context, input),
         <GetIssue as Read>::ID => invoke_read::<GetIssue>(context, input),
         <GetIssueDetail as Read>::ID => invoke_read::<GetIssueDetail>(context, input),
+        <issues::transfer::Capture as Read>::ID => {
+            invoke_read::<issues::transfer::Capture>(context, input)
+        }
         <GetComment as Read>::ID => invoke_read::<GetComment>(context, input),
         <ListDiscussions as Read>::ID => invoke_read::<ListDiscussions>(context, input),
         search::index::work::ListWorkspaceWork::ID => {

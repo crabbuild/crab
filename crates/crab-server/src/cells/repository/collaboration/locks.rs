@@ -115,7 +115,10 @@ pub(in crate::cells::repository) fn page(
         .collect()
 }
 
-fn load(context: &Transaction<'_>, subject: Subject) -> Result<Lock> {
+pub(in crate::cells::repository) fn load(
+    context: &Transaction<'_>,
+    subject: Subject,
+) -> Result<Lock> {
     Ok(context.document(&key(subject))?.unwrap_or_default())
 }
 

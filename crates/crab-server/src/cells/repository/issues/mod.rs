@@ -3,6 +3,7 @@ pub(crate) mod issue_type;
 pub(crate) mod lifecycle;
 pub(crate) mod pins;
 mod reads;
+pub(crate) mod transfer;
 use crate::cells::repository::collaboration::{
     Target,
     activity::{self, Action},
