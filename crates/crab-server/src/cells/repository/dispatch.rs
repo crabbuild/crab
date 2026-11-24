@@ -470,6 +470,7 @@ pub(in crate::cells) fn dispatch_read(
         }
         <GetPull as Read>::ID => invoke_read::<GetPull>(context, input),
         pull_reopen::ForReopen::ID => invoke_read::<pull_reopen::ForReopen>(context, input),
+        pull_branch::InUse::ID => invoke_read::<pull_branch::InUse>(context, input),
         viewed::GetViewedFiles::ID => invoke_read::<viewed::GetViewedFiles>(context, input),
         pending_reviews::Get::ID => invoke_read::<pending_reviews::Get>(context, input),
         deploy_tokens::List::ID => invoke_read::<deploy_tokens::List>(context, input),

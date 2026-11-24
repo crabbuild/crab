@@ -457,6 +457,7 @@ pub(crate) enum TransitionPullMergeOutcome {
     Conflict,
 }
 
+pub(crate) mod branch;
 mod operations;
 mod release_notes;
 pub(crate) mod reopen;
@@ -524,12 +525,10 @@ pub(in crate::cells::repository) fn review_source(
         "pull review source is missing",
     ))?;
     let merged: Option<PullMerge> = storage::decode_optional_record(&row[2])?;
-    let head = result_text(row, 1)?;
-    let head = storage::head_repository(context, pull)?.map_or(head.clone(), |fork| {
-        // Projection epochs describe only this repository. A fork branch
-        // must never join a same-named upstream ref in review search.
-        format!("{fork}:{head}")
-    });
+    let head = branch::qualified_head(
+        &result_text(row, 1)?,
+        storage::head_repository(context, pull)?,
+    );
     Ok((
         result_text(row, 0)?,
         head,

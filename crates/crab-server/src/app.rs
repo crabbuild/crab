@@ -96,12 +96,14 @@ pub(crate) enum Error {
     BranchUpdateChanged,
     #[error("The replacement branch name is already in use")]
     BranchUpdateDestination,
-    #[error("The branch name is already in use")]
-    BranchRestoreConflict,
+    #[error("The pull request or branch changed")]
+    PullBranchChanged,
+    #[error("An open pull request still uses the branch")]
+    PullBranchInUse,
     #[error("The pull request has a missing branch")]
     PullBranchesUnavailable,
-    #[error("Branch restoration failed")]
-    BranchRestore(#[source] Box<crate::git::receive::ReceiveError>),
+    #[error("Pull request branch edit failed")]
+    PullBranch(#[source] Box<crate::git::receive::ReceiveError>),
     #[error("The base changes do not merge cleanly into the head branch")]
     BranchUpdateConflict,
     #[error("The pull request cannot be safely rebased")]
@@ -290,7 +292,7 @@ impl IntoResponse for Error {
                     | Self::TransferPublication(_)
                     | Self::RepositoryNamePublication(_)
                     | Self::Merge(_)
-                    | Self::BranchRestore(_)
+                    | Self::PullBranch(_)
                     | Self::MergeObject(_)
                     | Self::Release(_)
                     | Self::ReleaseAssetIo(_)
@@ -303,7 +305,7 @@ impl IntoResponse for Error {
             tracing::error!(error = ?self, "collaboration request failed");
         }
         let staging = match &self {
-            Self::Merge(error) | Self::Release(error) | Self::BranchRestore(error) => {
+            Self::Merge(error) | Self::Release(error) | Self::PullBranch(error) => {
                 error.staging_status()
             }
             _ => None,
@@ -424,20 +426,25 @@ impl IntoResponse for Error {
                 "branch_update_destination",
                 "Choose an unused replacement branch name",
             ),
-            Self::BranchRestoreConflict => (
+            Self::PullBranchChanged => (
                 StatusCode::CONFLICT,
-                "branch_restore_conflict",
-                "The branch name is already in use. Reload the pull request.",
+                "pull_branch_changed",
+                "The pull request or branch changed. Reload the pull request.",
+            ),
+            Self::PullBranchInUse => (
+                StatusCode::CONFLICT,
+                "pull_branch_in_use",
+                "An open pull request still uses this branch.",
             ),
             Self::PullBranchesUnavailable => (
                 StatusCode::CONFLICT,
                 "pull_branches_unavailable",
                 "Restore the missing branch before reopening the pull request.",
             ),
-            Self::BranchRestore(_) => (
+            Self::PullBranch(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
-                "branch_restore_failed",
-                "Crab could not restore this branch. Retry shortly.",
+                "pull_branch_failed",
+                "Crab could not complete the branch action. Retry shortly.",
             ),
             Self::BranchUpdateConflict => (
                 StatusCode::CONFLICT,

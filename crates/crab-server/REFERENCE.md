@@ -4162,20 +4162,23 @@ the new head. The switch records an activity event, expires prior approvals,
 and starts a new review comparison. If the PR or a captured tip changes before
 the switch, Crab shows a link to the branch and leaves the PR on its current head.
 
-On a closed or merged pull request, **Restore branch** recreates a missing
-head branch in the source repository. The panel shows the commit that will
-be restored. Merged pull requests use the exact original head recorded at
-merge. Closed pull requests use the head saved in their comparison.
-Restore requires current Write access in the source repository and follows
-its branch protection and rulesets. It can recover only commits still present
-in storage. If the branch name has been reused, the request reports a conflict.
+On a closed or merged pull request, **Delete branch** removes the recorded
+head branch from the source repository. The current tip must match the saved
+head, and no open pull request can still use the branch as its base or head.
+**Restore branch** recreates a missing head at that same commit if its Git
+objects are still present. Merged pull requests use the original head recorded
+at merge. Closed pull requests use the head saved in their comparison. Both
+actions require current Write access and follow the source repository's branch
+protection and rulesets. The repository's default branch cannot be deleted.
 
-`GET /api/repos/{owner}/{name}/pulls/{number}/restore-branch` returns the
-available action as `branch`, including its pull version, repository UUID,
-and commit. `POST` to the same endpoint accepts
-`request_id`, `version`, `repository_id`, and `head_oid`. The published
-ref must still be absent. Retrying a recorded request recovers the original
-result without replaying the Git update.
+`GET /api/repos/{owner}/{name}/pulls/{number}/head-branch` returns the available
+`branch` action with its pull version, source repository UUID, and commit.
+`POST` accepts `action` (`delete` or `restore`), `request_id`, `version`,
+`repository_id`, and `head_oid`. Publication checks the exact tip or its absence
+under the Git ref lease. Retrying a recorded request recovers its result
+without repeating the ref edit.
+For a private fork, use the fork's repository route and include the PR's
+repository UUID as `upstream` in the query string.
 
 Reopening a closed pull request requires both branch names to exist, including
 the exact source repository for a fork head. Conversation, bulk, and direct

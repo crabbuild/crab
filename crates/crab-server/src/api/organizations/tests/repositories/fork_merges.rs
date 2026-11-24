@@ -206,6 +206,69 @@ pub(super) async fn exercise(
                     .await
                     .unwrap();
                 assert_eq!(copied.as_ref(), payload);
+                git(
+                    upstream_work,
+                    &["push", upstream_remote, "main:refs/heads/proposal"],
+                )
+                .await;
+                let source = h.server.repositories.by_id(fork).unwrap();
+                let branch_path = format!(
+                    "/api/repos/{}/{}/pulls/{number}/head-branch?upstream={id}",
+                    source.config.owner, source.config.name
+                );
+                let mut deletion = h.json(&branch_path, alice).await["branch"].clone();
+                assert_eq!(deletion["action"], "delete");
+                assert_eq!(deletion["repository_id"], json!(fork));
+                deletion["request_id"] = json!(Uuid::now_v7());
+                let dependent: Value = repository_write(h, Method::POST, &pulls, alice, id,
+                    json!({"request_id":Uuid::now_v7(),"title":"Review the same fork branch","body":"",
+                        "base_ref":"refs/heads/rebase-target","head_ref":"refs/heads/proposal",
+                        "head_repository":fork,"expected":{"base_oid":base,"head_oid":head}}))
+                    .await.error_for_status().unwrap().json().await.unwrap();
+                let blocked =
+                    repository_write(h, Method::POST, &branch_path, alice, fork, deletion.clone())
+                        .await;
+                assert_eq!(blocked.status(), StatusCode::CONFLICT);
+                assert_eq!(
+                    blocked.json::<Value>().await.unwrap()["error"]["code"],
+                    "pull_branch_in_use"
+                );
+                let dependent_path = format!("{pulls}/{}", dependent["number"]);
+                repository_write(
+                    h,
+                    Method::PATCH,
+                    &dependent_path,
+                    alice,
+                    id,
+                    json!({"version":dependent["version"],"state":"closed"}),
+                )
+                .await
+                .error_for_status()
+                .unwrap();
+                repository_write(h, Method::POST, &branch_path, alice, fork, deletion)
+                    .await
+                    .error_for_status()
+                    .unwrap();
+                assert!(
+                    git(fork_work, &["ls-remote", "origin", "refs/heads/proposal"])
+                        .await
+                        .is_empty()
+                );
+                assert_eq!(
+                    git(
+                        upstream_work,
+                        &["ls-remote", upstream_remote, "refs/heads/proposal"]
+                    )
+                    .await,
+                    format!("{base}\trefs/heads/proposal")
+                );
+                let mut restoration = h.json(&branch_path, alice).await["branch"].clone();
+                assert_eq!(restoration["action"], "restore");
+                restoration["request_id"] = json!(Uuid::now_v7());
+                repository_write(h, Method::POST, &branch_path, alice, fork, restoration)
+                    .await
+                    .error_for_status()
+                    .unwrap();
             }
             "rebase" => {
                 let range = format!("{base}..FETCH_HEAD");

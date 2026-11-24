@@ -794,7 +794,7 @@ pub(crate) async fn delete_branch(
     .await
 }
 
-pub(crate) struct BranchRestorePublication {
+pub(crate) struct PullBranchPublication {
     pub upstream: Arc<Repository>,
     pub source: Arc<Repository>,
     pub pull: u64,
@@ -802,28 +802,23 @@ pub(crate) struct BranchRestorePublication {
     pub plan_id: String,
 }
 
-pub(crate) async fn restore_pull_branch(
+pub(crate) async fn edit_pull_branch(
     server: Arc<Server>,
     principal: Principal,
-    branch: String,
-    commit: gix_hash::ObjectId,
-    restore: BranchRestorePublication,
+    update: crab_git::receive_plan::RefUpdate,
+    edit: PullBranchPublication,
 ) -> Result<()> {
     let key = (
-        restore.source.config.owner.clone(),
-        restore.source.config.name.clone(),
+        edit.source.config.owner.clone(),
+        edit.source.config.name.clone(),
     );
     publish_ref(
         server,
         principal,
         key,
         RefPublication::Update {
-            update: crab_git::receive_plan::RefUpdate {
-                name: branch,
-                old: None,
-                new: Some(commit),
-            },
-            publication: publish::Publication::BranchRestore(restore),
+            update,
+            publication: publish::Publication::PullBranch(edit),
         },
     )
     .await

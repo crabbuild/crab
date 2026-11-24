@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 const PULL: &str = "/api/repos/team/private/pulls/1";
-const RESTORE: &str = "/api/repos/team/private/pulls/1/restore-branch";
+const HEAD_BRANCH: &str = "/api/repos/team/private/pulls/1/head-branch";
 
 async fn open_pull(
     h: &Harness,
@@ -43,21 +43,26 @@ async fn closed_pull(
     path: &std::path::Path,
 ) -> (String, Value) {
     let (head, opened) = open_pull(h, writer, remote, path).await;
-    assert!(h.json(RESTORE, writer).await["branch"].is_null());
+    assert!(h.json(HEAD_BRANCH, writer).await["branch"].is_null());
+    close(h, writer, PULL, &opened["version"]).await;
+    git::success(path, &["push", remote, "--delete", "feature"]).await;
+    let mut input = h.json(HEAD_BRANCH, writer).await["branch"].clone();
+    assert_eq!(input["head_oid"], head);
+    assert_eq!(input["action"], "restore");
+    input["request_id"] = json!(Uuid::now_v7());
+    (head, input)
+}
+
+async fn close(h: &Harness, writer: &str, pull: &str, version: &Value) {
     h.write(
         Method::PATCH,
-        PULL,
+        pull,
         writer,
-        json!({"version":opened["version"],"state":"closed"}),
+        json!({"version":version,"state":"closed"}),
     )
     .await
     .error_for_status()
     .unwrap();
-    git::success(path, &["push", remote, "--delete", "feature"]).await;
-    let mut input = h.json(RESTORE, writer).await["branch"].clone();
-    assert_eq!(input["head_oid"], head);
-    input["request_id"] = json!(Uuid::now_v7());
-    (head, input)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -103,8 +108,14 @@ async fn squash_merge_restores_the_original_head_under_current_branch_policy() {
         .unwrap();
     assert_eq!(merged["state"], "merged");
     assert_ne!(merged["merge"]["commit_oid"], head);
-    git::success(path, &["push", remote.as_str(), "--delete", "feature"]).await;
-    let mut input = h.json(RESTORE, &writer).await["branch"].clone();
+    let mut deletion = h.json(HEAD_BRANCH, &writer).await["branch"].clone();
+    assert_eq!(deletion["action"], "delete");
+    deletion["request_id"] = json!(Uuid::now_v7());
+    h.write(Method::POST, HEAD_BRANCH, &writer, deletion)
+        .await
+        .error_for_status()
+        .unwrap();
+    let mut input = h.json(HEAD_BRANCH, &writer).await["branch"].clone();
     assert_eq!(input["head_oid"], head);
     input["request_id"] = json!(Uuid::now_v7());
 
@@ -112,7 +123,7 @@ async fn squash_merge_restores_the_original_head_under_current_branch_policy() {
         json!({"expected_version":1,"rules":[{"branch":"feature","required_approvals":1,"required_checks":[]}]}))
         .await.error_for_status().unwrap();
     assert_eq!(
-        h.write(Method::POST, RESTORE, &writer, input.clone())
+        h.write(Method::POST, HEAD_BRANCH, &writer, input.clone())
             .await
             .status(),
         StatusCode::FORBIDDEN
@@ -126,7 +137,7 @@ async fn squash_merge_restores_the_original_head_under_current_branch_policy() {
     .await
     .error_for_status()
     .unwrap();
-    h.write(Method::POST, RESTORE, &writer, input)
+    h.write(Method::POST, HEAD_BRANCH, &writer, input)
         .await
         .error_for_status()
         .unwrap();
@@ -165,7 +176,7 @@ async fn completed_pull_restores_the_saved_head_once_without_overwriting_a_branc
     let checkout = tempfile::tempdir().unwrap();
     let (head, input) = closed_pull(&h, &writer, remote.as_str(), checkout.path()).await;
     let git = async |args: &[&str]| git::success(checkout.path(), args).await;
-    let restore = async |body: Value| h.write(Method::POST, RESTORE, &writer, body).await;
+    let restore = async |body: Value| h.write(Method::POST, HEAD_BRANCH, &writer, body).await;
 
     let mut stale = input.clone();
     stale["version"] = json!(0);
@@ -193,7 +204,10 @@ async fn completed_pull_restores_the_saved_head_once_without_overwriting_a_branc
     );
     git(&["fetch", remote.as_str(), "feature"]).await;
     assert_eq!(git(&["rev-parse", "FETCH_HEAD"]).await, head);
-    assert!(h.json(RESTORE, &writer).await["branch"].is_null());
+    assert_eq!(
+        h.json(HEAD_BRANCH, &writer).await["branch"]["action"],
+        "delete"
+    );
 
     // The browser issues a new ref mutation even when the previous native Git
     // delete had the same ref name and object ID on the wire.
@@ -206,7 +220,10 @@ async fn completed_pull_restores_the_saved_head_once_without_overwriting_a_branc
     .await
     .error_for_status()
     .unwrap();
-    assert_eq!(h.json(RESTORE, &writer).await["branch"]["head_oid"], head);
+    assert_eq!(
+        h.json(HEAD_BRANCH, &writer).await["branch"]["head_oid"],
+        head
+    );
     let replayed: Value = restore(input)
         .await
         .error_for_status()
@@ -295,7 +312,7 @@ async fn reopen_checks_live_refs_and_recovers_its_original_decision() {
         "closed"
     );
 
-    h.write(Method::POST, RESTORE, &writer, restore)
+    h.write(Method::POST, HEAD_BRANCH, &writer, restore)
         .await
         .error_for_status()
         .unwrap();
@@ -349,18 +366,173 @@ async fn reopen_checks_live_refs_and_recovers_its_original_decision() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires agent-browser and the built embedded UI"]
-async fn native_browser_restores_the_closed_pull_branch_and_stock_git_fetches_it() {
+async fn pull_branch_deletion_rechecks_both_dependency_roles_and_never_replays_the_edit() {
     let h = Harness::new(false).await;
     let writer = h.login().await;
     let remote = remote(&h, &writer).await;
     let checkout = tempfile::tempdir().unwrap();
-    let (head, _) = closed_pull(&h, &writer, remote.as_str(), checkout.path()).await;
+    let (head, opened) = open_pull(&h, &writer, remote.as_str(), checkout.path()).await;
+    close(&h, &writer, PULL, &opened["version"]).await;
+    let git = async |args: &[&str]| git::success(checkout.path(), args).await;
+    let edit = async |body: Value| h.write(Method::POST, HEAD_BRANCH, &writer, body).await;
+    let mut deletion = h.json(HEAD_BRANCH, &writer).await["branch"].clone();
+    assert_eq!(deletion["action"], "delete");
+    assert_eq!(deletion["head_oid"], head);
+    deletion["request_id"] = json!(Uuid::now_v7());
+
+    git(&["switch", "-c", "dependent"]).await;
+    git(&["commit", "--allow-empty", "-m", "Stacked change"]).await;
+    git(&[
+        "push",
+        remote.as_str(),
+        "dependent",
+        "main:refs/heads/other-base",
+    ])
+    .await;
+    for (base, source) in [("feature", "dependent"), ("other-base", "feature")] {
+        let pull: Value = h
+            .write(
+                Method::POST,
+                "/api/repos/team/private/pulls",
+                &writer,
+                json!({"request_id":Uuid::now_v7(),"title":"Uses the source branch","body":"",
+                "base_ref":format!("refs/heads/{base}"),"head_ref":format!("refs/heads/{source}")}),
+            )
+            .await
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(h.json(HEAD_BRANCH, &writer).await["branch"].is_null());
+        let blocked = edit(deletion.clone()).await;
+        assert_eq!(blocked.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            blocked.json::<Value>().await.unwrap()["error"]["code"],
+            "pull_branch_in_use"
+        );
+        let endpoint = format!("/api/repos/team/private/pulls/{}", pull["number"]);
+        close(&h, &writer, &endpoint, &pull["version"]).await;
+    }
+
+    let protection = "/api/repos/team/private/settings/branch-protections";
+    h.write(
+        Method::PUT,
+        protection,
+        &writer,
+        json!({"expected_version":0,"rules":[{"branch":"feature","required_approvals":1}]}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert!(h.json(HEAD_BRANCH, &writer).await["branch"].is_null());
+    assert_eq!(edit(deletion.clone()).await.status(), StatusCode::FORBIDDEN);
+    h.write(
+        Method::PUT,
+        protection,
+        &writer,
+        json!({"expected_version":1,"rules":[]}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+
+    git(&["push", remote.as_str(), "dependent:refs/heads/feature"]).await;
+    assert!(h.json(HEAD_BRANCH, &writer).await["branch"].is_null());
+    assert_eq!(edit(deletion.clone()).await.status(), StatusCode::CONFLICT);
+    let advanced = git(&["rev-parse", "dependent"]).await;
+    assert_eq!(
+        git(&["ls-remote", remote.as_str(), "refs/heads/feature"]).await,
+        format!("{advanced}\trefs/heads/feature")
+    );
+    let branches = "/api/repos/team/private/branches";
+    h.write(
+        Method::DELETE,
+        branches,
+        &writer,
+        json!({"name":"feature","expected_oid":advanced}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    h.write(
+        Method::POST,
+        branches,
+        &writer,
+        json!({"name":"feature","source_oid":head}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+
+    let deleted: Value = edit(deletion.clone())
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(deleted["commit"], head);
+    assert!(
+        git(&["ls-remote", remote.as_str(), "refs/heads/feature"])
+            .await
+            .is_empty()
+    );
+    let mut restore = h.json(HEAD_BRANCH, &writer).await["branch"].clone();
+    assert_eq!(restore["action"], "restore");
+    restore["request_id"] = json!(Uuid::now_v7());
+    edit(restore).await.error_for_status().unwrap();
+    let replay: Value = edit(deletion)
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(replay, deleted);
+    assert_eq!(
+        git(&["ls-remote", remote.as_str(), "refs/heads/feature"]).await,
+        format!("{head}\trefs/heads/feature")
+    );
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires agent-browser and the built embedded UI"]
+async fn native_browser_deletes_restores_and_reopens_the_pull_branch() {
+    let h = Harness::new(false).await;
+    let writer = h.login().await;
+    let remote = remote(&h, &writer).await;
+    let checkout = tempfile::tempdir().unwrap();
+    let (head, opened) = open_pull(&h, &writer, remote.as_str(), checkout.path()).await;
+    close(&h, &writer, PULL, &opened["version"]).await;
     let browser = Browser::new("restore-branch");
     browser
         .run(&["open", &format!("{}/team/private/pull/1", h.origin)])
         .await;
     browser.sign_in().await;
+    let delete = [
+        "find",
+        "role",
+        "button",
+        "click",
+        "--name",
+        "Delete branch",
+        "--exact",
+    ];
+    browser.run(&["wait", "--text", "Delete branch"]).await;
+    browser.run(&delete).await;
+    browser.run(&["wait", "--text", "Delete branch?"]).await;
+    browser.run(&delete).await;
+    browser.run(&["wait", "--text", "Deleted feature"]).await;
+    assert!(
+        git::success(
+            checkout.path(),
+            &["ls-remote", remote.as_str(), "refs/heads/feature"]
+        )
+        .await
+        .is_empty()
+    );
     browser.run(&["wait", "--text", "Restore branch"]).await;
     browser.run(&["wait", "--fn", "Array.from(document.querySelectorAll('button')).some(button => button.textContent.trim() === 'Reopen pull request' && button.disabled)"]).await;
     browser

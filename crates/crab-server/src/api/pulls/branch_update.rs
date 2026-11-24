@@ -125,7 +125,7 @@ impl Destination {
     }
 }
 
-async fn associated_pull(
+pub(super) async fn associated_pull(
     server: &Server,
     discussion: &Repository,
     head: &Repository,

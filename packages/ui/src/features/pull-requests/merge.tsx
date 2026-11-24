@@ -34,7 +34,7 @@ import { branch } from "./presentation";
 import { AutoMerge } from "./auto-merge";
 import { RequiredChecks } from "./required-checks";
 import { CodeOwnersSummary } from "./codeowners";
-import { RestoreBranch } from "./restore-branch";
+import { HeadBranch } from "./head-branch";
 
 export function MergePanel({
   repo,
@@ -96,8 +96,8 @@ export function MergePanel({
     (requirements.required_approvals === 0 && !requirements.code_owners) ||
     (requirements.changes_requested === 0 &&
       requirements.approvals >= requirements.required_approvals);
-  const restoreBranch = pull.state !== "open" && (
-    <RestoreBranch repo={repo} pull={pull} csrf={csrf} onRestored={refresh} />
+  const headBranch = pull.state !== "open" && (
+    <HeadBranch repo={repo} pull={pull} csrf={csrf} onChanged={refresh} />
   );
 
   async function merge() {
@@ -151,7 +151,7 @@ export function MergePanel({
             )}
           </div>
         </div>
-        {restoreBranch}
+        {headBranch}
       </section>
     );
   if (pull.state === "closed")
@@ -168,7 +168,7 @@ export function MergePanel({
             </p>
           </div>
         </div>
-        {restoreBranch}
+        {headBranch}
       </section>
     );
   if (pull.draft)

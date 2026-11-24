@@ -55,7 +55,7 @@ pub(crate) use integrations::{GitHubActions, ci_git_path, webhook_path};
 pub(crate) use pulls::authorize_merge_publication;
 pub(crate) use pulls::authorize_suggestion_publication;
 pub(crate) use pulls::{
-    authorize_branch_restore, authorize_branch_update, authorize_merge_candidate, auto_merge,
+    authorize_branch_update, authorize_merge_candidate, authorize_pull_branch, auto_merge,
 };
 pub(crate) use query::comparison_blobs;
 use query::execute;

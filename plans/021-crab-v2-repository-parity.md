@@ -18,8 +18,10 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
 - Writers can restore a missing head branch from a completed pull request.
   The panel shows the saved commit. Publication checks the current source
   repository, write grant and ref rules, and requires the branch name to be
-  unused. Git objects must still be retained. Deleting from the PR, automatic
-  cleanup after merge, and retargeting dependent PRs remain open.
+  unused. Git objects must still be retained. Completed PRs can also delete
+  a head that still matches the recorded commit. Current protection and open
+  base or head dependencies can prevent deletion. Automatic cleanup after
+  merge and retargeting dependent PRs remain open.
 - Reopening a closed PR checks both branch names under publication leases,
   including through the bulk and direct update paths. A rejected reopen rolls
   back its comment or other bulk edits in the same native transaction.
