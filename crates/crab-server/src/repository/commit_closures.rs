@@ -1,6 +1,7 @@
 use crab_metadata::capsule_protocol::resolve_capsule_plan_receipt;
 use std::collections::BTreeSet;
 
+use super::development_references;
 use crate::{
     app::{self, Error, Result},
     auth::Principal,
@@ -11,7 +12,8 @@ use crate::{
             RepositoryAuthor,
             collaboration::links::commits::{
                 CapturedIssue, CloseCross, Cross, CrossClosure, DeliverCross, Next,
-                OpenStateVersion, Publication, Reservation, Reserve, Resolution, Resolve,
+                OpenStateVersion, Publication, PublishedDescription, Reservation, Reserve,
+                Resolution, Resolve,
             },
             issues::transfer::publication::{Destination, GetLocation, Location},
         },
@@ -68,9 +70,23 @@ pub(crate) async fn capture(
         )
         .await,
     )?;
+    let described = match development_references::snapshot(server, repo, pull).await? {
+        Some(view) => development_references::targets(server, repo, view.references, true).await?,
+        None => Vec::new(),
+    };
     let mut issues = Vec::new();
-    for link in links.into_iter().filter(|link| link.closes_on_merge) {
-        let Some(target) = current_issue(server, link.pair.issue).await? else {
+    let mut history = Vec::new();
+    let mut seen = BTreeSet::new();
+    for origin in links
+        .into_iter()
+        .filter(|link| link.closes_on_merge)
+        .map(|link| link.pair.issue)
+        .chain(described.iter().copied())
+    {
+        if !seen.insert((origin.repository, origin.number)) {
+            continue;
+        }
+        let Some(target) = current_issue(server, origin).await? else {
             continue;
         };
         let Some(issue_repository) = server
@@ -80,6 +96,9 @@ pub(crate) async fn capture(
         else {
             continue;
         };
+        if described.contains(&origin) {
+            history.push(origin);
+        }
         let writer = if principal.is_auto_merge() {
             // Apply the background merge's same live account checks to the
             // linked issue. The worker's pull grant alone carries no access.
@@ -105,14 +124,21 @@ pub(crate) async fn capture(
             continue;
         };
         issues.push(CapturedIssue {
-            origin: link.pair.issue,
+            origin,
             state_version,
         });
     }
-    Ok((!issues.is_empty()).then_some(CrossClosure {
-        organization,
-        issues,
-    }))
+    let description = (!history.is_empty()).then_some(PublishedDescription {
+        pull,
+        issues: history,
+    });
+    Ok(
+        (!issues.is_empty() || description.is_some()).then_some(CrossClosure {
+            organization,
+            issues,
+            description,
+        }),
+    )
 }
 
 pub(crate) async fn reserve(
@@ -140,6 +166,7 @@ async fn reconcile(
             source: Box::new(source),
         })?;
     let cell = app::repository_cell(server, repo)?;
+    let mut described_pull = None;
     let resolution = if let Some(receipt) = receipt {
         if !receipt.transaction().edits().iter().any(|edit| {
             edit.ref_name() == publication.reference
@@ -155,6 +182,10 @@ async fn reconcile(
                 .query::<Cross>(cell.target, None, publication.plan.clone())
                 .await,
         )? {
+            described_pull = cross
+                .description
+                .as_ref()
+                .map(|description| description.pull);
             if due.is_some() {
                 // Live publication already holds this policy lease. A worker
                 // recovering an older job must also fence ownership changes.
@@ -182,7 +213,11 @@ async fn reconcile(
         cell.client
             .command::<Resolve>(cell.target, app::mutation_identity()?, resolution)
             .await,
-    )
+    )?;
+    if let Some(pull) = described_pull {
+        development_references::refresh(server, repo, pull).await;
+    }
+    Ok(())
 }
 
 async fn current_scope(server: &Server, repo: &Repository, organization: Uuid) -> Result<bool> {

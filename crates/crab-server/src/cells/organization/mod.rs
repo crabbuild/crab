@@ -354,7 +354,11 @@ pub(in crate::cells) fn authorize(
         ) => return Ok(()),
         // Linked work is governed by the two repository grants. The trusted
         // HTTP caller checks both before using this organization-owned index.
-        (development::List::ID | development::Get::ID, false) | (development::Set::ID, true) => {
+        (
+            development::List::ID | development::Get::ID | development::descriptions::Pulls::ID,
+            false,
+        )
+        | (development::Set::ID | development::descriptions::Replace::ID, true) => {
             return Ok(());
         }
         (discovery::GetLanding::ID, false) => return Ok(()),
@@ -454,6 +458,9 @@ pub(in crate::cells) fn dispatch_read(
         projects::List::ID => invoke_read::<projects::List>(context, input),
         development::List::ID => invoke_read::<development::List>(context, input),
         development::Get::ID => invoke_read::<development::Get>(context, input),
+        development::descriptions::Pulls::ID => {
+            invoke_read::<development::descriptions::Pulls>(context, input)
+        }
         projects::Get::ID => invoke_read::<projects::Get>(context, input),
         projects::Items::ID => invoke_read::<projects::Items>(context, input),
         projects::Sources::ID => invoke_read::<projects::Sources>(context, input),
@@ -524,6 +531,9 @@ pub(in crate::cells) fn dispatch_mutation(
         projects::Prepare::ID => invoke_mutation::<projects::Prepare>(context, input),
         projects::Change::ID => invoke_mutation::<projects::Change>(context, input),
         development::Set::ID => invoke_mutation::<development::Set>(context, input),
+        development::descriptions::Replace::ID => {
+            invoke_mutation::<development::descriptions::Replace>(context, input)
+        }
         projects::ResolveIssue::ID => invoke_mutation::<projects::ResolveIssue>(context, input),
         #[cfg(test)]
         teams::tests::WithoutTeams::ID => {

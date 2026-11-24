@@ -583,6 +583,14 @@ check before closing the issue. A late retry therefore preserves a newer
 close or reopen. Recovery verifies the same Git receipt and reacquires the
 owning organization's policy lease before applying the saved closure.
 
+Qualified description references enqueue their reverse-index update in the
+pull write transaction. The Organization Cell replaces the previous targets
+under the pull version and the Repository Cell acknowledges only that
+observed version. Maintenance backfills older descriptions in bounded
+batches and retries interrupted updates. An issue-side read treats the
+reverse index as candidates and verifies each source pull against its live
+description and default branch or its exact published reference set.
+
 Repository ownership acceptance and the operator's initial organization
 assignment check for incoming issue reservations under the existing policy
 lease. Publication clears the reservation in the same transaction that

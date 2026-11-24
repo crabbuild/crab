@@ -2609,6 +2609,22 @@ The exact Git publication receipt lets the job recover if the response is
 lost or the default branch moves. An intervening closure or reopen takes
 precedence over a delayed cross-repository update.
 
+### Link an issue from a pull request description
+
+Use `Fixes owner/repository#123`, `Closes owner/repository#123`, or
+`Resolves owner/repository#123` to reference an issue in another repository
+in the same organization. The pull request must target its default branch.
+Crab reads up to ten distinct qualified references in Markdown prose.
+Both sidebars show **From PR description** to readers with access to both
+repositories. Editing the description or retargeting the pull request
+updates active references. A manual link and a description reference to
+the same issue share one row.
+
+Qualified references use the same merge authorization and receipt as
+manual cross-repository closure. After publication, the saved references
+remain visible even if the description changes. Description-only entries
+in `cross_repository` include `from_description: true` and omit `version`.
+
 ### Close a linked issue when its pull request merges
 
 In the pull request’s **Linked issues** section, enter an issue number and leave

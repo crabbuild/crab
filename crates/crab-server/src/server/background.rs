@@ -156,6 +156,12 @@ pub(super) async fn sweep_projections(server: Arc<Server>) -> Result<()> {
             {
                 tracing::warn!(repository = %repository.id, %error, "development branch creation recovery will retry");
             }
+            if server.cells().is_some()
+                && let Err(error) =
+                    crate::repository::development_references::recover(&server, &repository).await
+            {
+                tracing::warn!(repository = %repository.id, %error, "qualified issue reference recovery will retry");
+            }
             let now = Instant::now();
             let probe_started = now;
             let source = match crate::repository::projection::current_source(

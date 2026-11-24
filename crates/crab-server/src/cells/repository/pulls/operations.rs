@@ -152,6 +152,7 @@ fn write_pull(
     };
     let source = activity::append(context, target, &record.author, Action::Created)?;
     collaboration::links::branches::promotion::create(context, &record)?;
+    collaboration::links::keywords::projection::changed(context, record.number, "", &record.body)?;
     webhooks::pull(context, &record, webhooks::PullAction::Opened)?;
     crate::cells::repository::collaboration::body_written(context, &source, None, &record.body)?;
     collaboration::mentions::assigned(context, &source, &[], &record.assignees)?;
@@ -315,6 +316,12 @@ impl Mutation for UpdatePull {
                 collaboration::mentions::assigned(context, &source, &previous, &pull.assignees)?;
             }
             if let Some(previous) = previous_body.as_deref() {
+                collaboration::links::keywords::projection::changed(
+                    context,
+                    pull.number,
+                    previous,
+                    &pull.body,
+                )?;
                 crate::cells::repository::collaboration::body_written(
                     context,
                     &source,

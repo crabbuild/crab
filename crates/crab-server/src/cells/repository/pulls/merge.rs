@@ -198,6 +198,7 @@ impl Mutation for TransitionPullMerge {
                     ));
                 }
                 pull.state = PullState::Merged;
+                links::keywords::projection::changed(context, pull.number, &pull.body, "")?;
                 pull.merge_pending = None;
                 branch::finalize(context, pull.number, input.merge.request_id, true)?;
                 pull.merge = Some(input.merge);

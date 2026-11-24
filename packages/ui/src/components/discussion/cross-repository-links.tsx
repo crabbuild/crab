@@ -34,9 +34,10 @@ type LinkState = {
 export type RelatedWork = {
   work: Work;
   repository: RepositoryAddress;
-  version: number;
+  version?: number;
   closes_on_merge: boolean;
   can_unlink: boolean;
+  from_description?: boolean;
 };
 
 function linkEndpoint(
@@ -68,6 +69,7 @@ export function CrossRepositoryLinks({
   const [open, setOpen] = useState(false);
   const mutation = useMutation(csrf, repo);
   async function update(row: RelatedWork, active: boolean, closes?: boolean) {
+    if (row.version === undefined) return;
     const source = issue ? repo : row.repository;
     const target = issue ? row.repository : repo;
     const issueNumber = issue ?? row.work.subject.number;
@@ -100,35 +102,41 @@ export function CrossRepositoryLinks({
                   {title} {work.title}
                 </Link>
                 <span className="muted">{work.state}</span>
+                {row.from_description && (
+                  <span className="muted">From PR description</span>
+                )}
                 {row.closes_on_merge && (
                   <span className="muted">Closes on default-branch merge</span>
                 )}
-                {(issue ? canManage : row.can_unlink) && (
-                  <>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      aria-label={`${row.closes_on_merge ? "Keep open on merge" : "Close on merge"} ${title}`}
-                      disabled={mutation.pending}
-                      onClick={() =>
-                        void update(row, true, !row.closes_on_merge)
-                      }
-                    >
-                      {row.closes_on_merge ? "Keep open" : "Close on merge"}
-                    </Button>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      aria-label={`Unlink ${title}`}
-                      disabled={mutation.pending}
-                      onClick={() => void update(row, false)}
-                    >
-                      Unlink
-                    </Button>
-                  </>
-                )}
+                {row.version !== undefined &&
+                  (issue ? canManage : row.can_unlink) && (
+                    <>
+                      {!row.from_description && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          aria-label={`${row.closes_on_merge ? "Keep open on merge" : "Close on merge"} ${title}`}
+                          disabled={mutation.pending}
+                          onClick={() =>
+                            void update(row, true, !row.closes_on_merge)
+                          }
+                        >
+                          {row.closes_on_merge ? "Keep open" : "Close on merge"}
+                        </Button>
+                      )}
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        aria-label={`Unlink ${title}`}
+                        disabled={mutation.pending}
+                        onClick={() => void update(row, false)}
+                      >
+                        Unlink
+                      </Button>
+                    </>
+                  )}
               </li>
             );
           })}

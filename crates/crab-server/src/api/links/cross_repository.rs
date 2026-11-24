@@ -8,8 +8,9 @@ use crate::{
             issues::transfer::publication::Destination,
         },
     },
-    repository::{Repository, commit_closures::current_issue, settings},
+    repository::{Repository, commit_closures::current_issue, development_references, settings},
 };
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -212,33 +213,58 @@ pub(super) async fn list(
     organization: Uuid,
 ) -> Result<Vec<Value>> {
     let current = address(repository, subject.number);
-    let (side, other_kind) = match subject.kind {
+    let (side, other_kind, anchor) = match subject.kind {
         SubjectKind::Issue => {
             let here = endpoint(server, repository, subject)
                 .await?
                 .ok_or(Error::NotFound)?;
-            (
-                graph::Side::Issue(here.issue_origin.unwrap_or(current)),
-                SubjectKind::Pull,
-            )
+            let anchor = here.issue_origin.unwrap_or(current);
+            (graph::Side::Issue(anchor), SubjectKind::Pull, anchor)
         }
-        SubjectKind::Pull => (graph::Side::Pull(current), SubjectKind::Issue),
+        SubjectKind::Pull => (graph::Side::Pull(current), SubjectKind::Issue, current),
     };
     let cell = server.cells().ok_or(Error::CellUnavailable)?;
     let links = app::query_output(
         cell.query::<graph::List>(Address::Organization(organization), None, side)
             .await,
     )?;
-    let mut items = Vec::new();
+    let mut rows = BTreeMap::new();
     for link in links {
         let other = match other_kind {
             SubjectKind::Pull => link.pair.pull,
+            SubjectKind::Issue => link.pair.issue,
+        };
+        rows.insert((other.repository, other.number), (Some(link), false));
+    }
+    let described = match subject.kind {
+        SubjectKind::Issue => app::query_output(
+            cell.query::<graph::descriptions::Pulls>(
+                Address::Organization(organization),
+                None,
+                anchor,
+            )
+            .await,
+        )?,
+        SubjectKind::Pull => described_issues(server, repository, subject.number).await?,
+    };
+    for other in described {
+        rows.entry((other.repository, other.number)).or_default().1 = true;
+    }
+
+    let mut items = Vec::new();
+    for ((id, number), (manual, mut described)) in rows {
+        let other_anchor = Destination {
+            repository: id,
+            number,
+        };
+        let other = match other_kind {
             SubjectKind::Issue => {
-                let Some(current) = current_issue(server, link.pair.issue).await? else {
+                let Some(current) = current_issue(server, other_anchor).await? else {
                     continue;
                 };
                 current
             }
+            SubjectKind::Pull => other_anchor,
         };
         let Some(repo) = server
             .repositories
@@ -253,6 +279,16 @@ pub(super) async fn list(
         if membership(server, &reader, &repo).await?.is_none() {
             continue;
         }
+        if described && other_kind == SubjectKind::Pull {
+            // The organization lookup is a candidate index. The live PR or
+            // publication snapshot rejects stale edits and retargets.
+            described = described_issues(server, &repo, other.number)
+                .await?
+                .contains(&anchor);
+            if !described && manual.is_none() {
+                continue;
+            }
+        }
         let Some(view) = endpoint(
             server,
             &repo,
@@ -265,25 +301,44 @@ pub(super) async fn list(
         else {
             continue;
         };
-        if other_kind == SubjectKind::Issue && view.issue_origin.unwrap_or(other) != link.pair.issue
-        {
+        if other_kind == SubjectKind::Issue && view.issue_origin.unwrap_or(other) != other_anchor {
             continue;
         }
-        let can_unlink = subject.kind == SubjectKind::Pull
+        let can_unlink = manual.is_some()
+            && subject.kind == SubjectKind::Pull
             && !settings::load_lifecycle(server, &repo).await?.archived;
         let Some(grant) = membership(server, &reader, &repo).await? else {
             continue;
         };
-        items.push(json!({
+        let mut item = json!({
             "work":view.work,
             "repository":{"id":repo.id,"owner":repo.config.owner,"name":repo.config.name},
-            "version":link.version,
-            "closes_on_merge":link.closes_on_merge,
+            "closes_on_merge":described || manual.as_ref().is_some_and(|link| link.closes_on_merge),
             "can_unlink":can_unlink && grant.principal.can_write(repo.id),
-        }));
+        });
+        if let Some(manual) = manual {
+            item["version"] = json!(manual.version);
+        }
+        if described {
+            item["from_description"] = json!(true);
+        }
+        items.push(item);
     }
     app::membership(server, principal, repository).await?;
     Ok(items)
+}
+
+async fn described_issues(
+    server: &Server,
+    repository: &Repository,
+    pull: u64,
+) -> Result<Vec<Destination>> {
+    match development_references::snapshot(server, repository, pull).await? {
+        Some(view) => {
+            development_references::targets(server, repository, view.references, true).await
+        }
+        None => Ok(Vec::new()),
+    }
 }
 
 async fn membership(

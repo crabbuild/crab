@@ -3,6 +3,7 @@
 pub(crate) mod code_index;
 pub(crate) mod commit_closures;
 pub(crate) mod development_branches;
+pub(crate) mod development_references;
 pub(crate) mod maintenance;
 pub(crate) mod projection;
 pub(crate) mod settings;

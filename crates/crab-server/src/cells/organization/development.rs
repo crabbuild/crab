@@ -4,6 +4,8 @@ use crate::cells::repository::issues::transfer::publication::Destination;
 const PREFIX: &str = "organization/v1/development-links";
 const LIMIT: usize = 10;
 
+pub(crate) mod descriptions;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Pair {

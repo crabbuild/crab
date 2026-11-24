@@ -39,6 +39,14 @@ pub(crate) struct Reservation {
 pub(crate) struct CrossClosure {
     pub organization: Uuid,
     pub issues: Vec<CapturedIssue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<PublishedDescription>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct PublishedDescription {
+    pub pull: u64,
+    pub issues: Vec<Destination>,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -94,12 +102,26 @@ impl Mutation for Reserve {
         }
         if let Some(cross) = &input.cross {
             if cross.organization.is_nil()
-                || cross.issues.is_empty()
-                || cross.issues.len() > MAX_CLOSING_ISSUES
+                || (cross.issues.is_empty() && cross.description.is_none())
+                || cross.issues.len() > 2 * MAX_CLOSING_ISSUES
             {
                 return Err(crate::cells::Error::Invalid(
                     "invalid cross-repository issue closure",
                 ));
+            }
+            if let Some(description) = &cross.description {
+                validate_number(description.pull)?;
+                if description.issues.len() > MAX_CLOSING_ISSUES {
+                    return Err(crate::cells::Error::Invalid("Too many described issues"));
+                }
+                for issue in &description.issues {
+                    validate_number(issue.number)?;
+                    if issue.repository.is_nil() {
+                        return Err(crate::cells::Error::Invalid(
+                            "Invalid described issue repository",
+                        ));
+                    }
+                }
             }
             for issue in &cross.issues {
                 if issue.origin.repository.is_nil() {
@@ -278,6 +300,14 @@ impl Mutation for Resolve {
         match input {
             Resolution::Committed(_) => {
                 context.delete_document(&due_key(plan, job.due))?;
+                if let Some(description) = job.reservation.cross.and_then(|cross| cross.description)
+                {
+                    keywords::projection::record_publication(
+                        context,
+                        description.pull,
+                        &description.issues,
+                    )?;
+                }
                 // Receipt recovery and live completion share this transaction.
                 // Removing the job with the transitions prevents a retry closing a reopened issue.
                 for (number, oid) in job.reservation.issues {

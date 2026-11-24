@@ -9,6 +9,8 @@ use crate::{
 };
 use reqwest::{Method, StatusCode, header};
 
+mod keywords;
+
 struct Repo {
     id: Uuid,
     owner: String,
@@ -185,6 +187,7 @@ async fn git_pull(
     actor: &str,
     repo: &Repo,
     checkout: &std::path::Path,
+    description: &str,
 ) -> (Value, url::Url) {
     let token: Value = h
         .write(
@@ -211,7 +214,7 @@ async fn git_pull(
             "/pulls",
             actor,
             json!({
-                "request_id":Uuid::now_v7(),"title":"Ship the service","body":"",
+                "request_id":Uuid::now_v7(),"title":"Ship the service","body":description,
                 "base_ref":"refs/heads/main","head_ref":"refs/heads/feature",
                 "expected":{"base_oid":base,"head_oid":head},
             }),
@@ -242,7 +245,7 @@ async fn a_default_branch_merge_closes_an_authorized_cross_repository_issue_once
         .error_for_status()
         .unwrap();
     let checkout = tempfile::tempdir().unwrap();
-    let (opened, remote) = git_pull(&h, &alice, &pull, checkout.path()).await;
+    let (opened, remote) = git_pull(&h, &alice, &pull, checkout.path(), "").await;
     let selection = format!("/issues/1/linked-pulls/{}/1", pull.id);
     let selected = json!({"active":true,"version":0,"closes_on_merge":true});
     for _ in 0..2 {
@@ -341,7 +344,7 @@ async fn cross_repository_closure_recovers_after_issue_transfer_and_branch_movem
         json!({"request_id":Uuid::now_v7(),"title":"Keep open after reconsideration","body":""}))
         .await.error_for_status().unwrap();
     let checkout = tempfile::tempdir().unwrap();
-    let (opened, remote) = git_pull(&h, &alice, &pull, checkout.path()).await;
+    let (opened, remote) = git_pull(&h, &alice, &pull, checkout.path(), "").await;
     for number in [1, 2] {
         let selection = format!("/issues/{number}/linked-pulls/{}/1", pull.id);
         issue

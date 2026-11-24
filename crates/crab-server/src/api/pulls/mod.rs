@@ -55,7 +55,7 @@ pub(super) mod rollups;
 pub(super) mod storage;
 mod templates;
 mod viewed;
-use crate::cells::repository::{ListPulls, PullSummary};
+use crate::cells::repository::{ListPulls, PullSummary, collaboration::links::keywords::qualified};
 use required_checks::RequiredCheck;
 use storage::{NewPullRequest, PullRequest, PullState};
 
@@ -1008,6 +1008,9 @@ async fn create(
         }
         other => other?,
     };
+    if repo.organization.is_some() && !qualified(&pull.body).is_empty() {
+        crate::repository::development_references::refresh(&server, &repo, pull.number).await;
+    }
     let current = repository
         .as_ref()
         .and_then(|repository| repository.tips(&pull.base_ref, &pull.head_ref));
@@ -1167,6 +1170,11 @@ async fn edit(
     let pull = storage::pull(&server, &repo, number)
         .await?
         .ok_or(Error::NotFound)?;
+    let references_changed = repo.organization.is_some()
+        && input
+            .body
+            .as_ref()
+            .is_some_and(|body| qualified(body) != qualified(&pull.body));
     let label_change = input.label_ids.is_some();
     let needs_label_catalog = input
         .label_ids
@@ -1277,6 +1285,9 @@ async fn edit(
     } else {
         storage::update_pull(&server, &repo, number, change, false).await?
     };
+    if references_changed {
+        crate::repository::development_references::refresh(&server, &repo, number).await;
+    }
     let repository = git::PullGit::open(&server, &repo, pull.head_repository)
         .await
         .ok();

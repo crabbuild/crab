@@ -5,7 +5,10 @@ use super::collaboration::milestones::{
 use super::collaboration::reactions::{GetReactions, SetReaction};
 use super::collaboration::{
     attachments,
-    links::{GetLink, ListLinks, SetLink, commits as commit_closures},
+    links::{
+        GetLink, ListLinks, SetLink, commits as commit_closures,
+        keywords::projection as descriptions,
+    },
     mention_settings, mentions, watches,
 };
 use super::*;
@@ -227,6 +230,10 @@ pub(in crate::cells) fn dispatch_mutation(
         }
         commit_closures::Reserve::ID => invoke_mutation::<commit_closures::Reserve>(context, input),
         commit_closures::Resolve::ID => invoke_mutation::<commit_closures::Resolve>(context, input),
+        descriptions::Acknowledge::ID => {
+            invoke_mutation::<descriptions::Acknowledge>(context, input)
+        }
+        descriptions::Backfill::ID => invoke_mutation::<descriptions::Backfill>(context, input),
         commit_closures::CloseCross::ID => {
             invoke_mutation::<commit_closures::CloseCross>(context, input)
         }
@@ -571,6 +578,8 @@ pub(in crate::cells) fn dispatch_read(
         webhooks::sync::Next::ID => invoke_read::<webhooks::sync::Next>(context, input),
         commit_closures::Next::ID => invoke_read::<commit_closures::Next>(context, input),
         commit_closures::Cross::ID => invoke_read::<commit_closures::Cross>(context, input),
+        descriptions::View::ID => invoke_read::<descriptions::View>(context, input),
+        descriptions::Pending::ID => invoke_read::<descriptions::Pending>(context, input),
         commit_closures::OpenStateVersion::ID => {
             invoke_read::<commit_closures::OpenStateVersion>(context, input)
         }

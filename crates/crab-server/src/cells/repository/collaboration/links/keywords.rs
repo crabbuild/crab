@@ -5,15 +5,54 @@ use crate::cells::repository::{
 
 const MAX_REFERENCES: usize = 32;
 
+pub(crate) mod projection;
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct Qualified {
+    pub owner: String,
+    pub repository: String,
+    pub issue: u64,
+}
+
 pub(crate) fn numbers(body: &str) -> Vec<u64> {
+    references(body, MAX_REFERENCES, |address, issue| {
+        address.is_empty().then_some(issue)
+    })
+}
+
+pub(crate) fn qualified(body: &str) -> Vec<Qualified> {
+    references(body, MAX_CLOSING_ISSUES, |address, issue| {
+        let (owner, repository) = address.split_once('/')?;
+        if !crate::config::valid_repository_component(owner)
+            || !crate::config::valid_repository_component(repository)
+        {
+            return None;
+        }
+        Some(Qualified {
+            owner: owner.to_ascii_lowercase(),
+            repository: repository.to_ascii_lowercase(),
+            issue,
+        })
+    })
+}
+
+fn references<T: PartialEq>(
+    body: &str,
+    limit: usize,
+    parse: impl Fn(&str, u64) -> Option<T>,
+) -> Vec<T> {
     if !body.contains('#') {
         return Vec::new();
     }
-    let mut numbers = Vec::new();
+    let mut references = Vec::new();
     for range in crate::markdown::prose_ranges(body) {
         let prose = &body[range.clone()];
         for (offset, _) in prose.match_indices('#') {
-            let before = &prose[..offset];
+            let address_start = prose[..offset]
+                .trim_end_matches(|ch: char| ch.is_ascii_alphanumeric() || "-_./".contains(ch))
+                .len();
+            let address = &prose[address_start..offset];
+            let before = &prose[..address_start];
             let word = before.trim_end_matches([' ', '\t']);
             if word.len() == before.len() {
                 continue;
@@ -47,16 +86,17 @@ pub(crate) fn numbers(body: &str) -> Vec<u64> {
             }
             if let Ok(number) = tail[..end].parse::<u64>()
                 && (1..=MAX_NUMBER).contains(&number)
-                && !numbers.contains(&number)
+                && let Some(reference) = parse(address, number)
+                && !references.contains(&reference)
             {
-                numbers.push(number);
-                if numbers.len() == MAX_REFERENCES {
-                    return numbers;
+                references.push(reference);
+                if references.len() == limit {
+                    return references;
                 }
             }
         }
     }
-    numbers
+    references
 }
 
 pub(super) fn page(context: &Transaction<'_>, input: &Query) -> crate::cells::Result<Vec<u64>> {
@@ -122,5 +162,25 @@ mod tests {
                     Fixes elsewhere/project#108 Fixes #0 Fixes #9007199254740992.\n\n\
                     > Resolves #109\n\n```md\nCloses #110\n```\n\n<!-- Fixes #111 -->";
         assert_eq!(numbers(body), vec![3, 2, 4, 5]);
+    }
+
+    #[test]
+    fn qualified_closures_only_accept_repository_addresses_in_prose() {
+        let body = "Closes: Team/Project#123 and **fixes team/project#123**. Resolves other/tool#9.\n\n\
+                    `Fixes team/project#4` [Closes team/project#5](https://example.test) \\Fixes team/project#6\n\
+                    Fixes a/b/c#7. Fixes https://team/project#8. Fixes team/project#10/topic.\n\n\
+                    > Resolves team/project#11";
+        let references = qualified(body);
+        assert_eq!(
+            references
+                .iter()
+                .map(|target| (
+                    target.owner.as_str(),
+                    target.repository.as_str(),
+                    target.issue
+                ))
+                .collect::<Vec<_>>(),
+            [("team", "project", 123), ("other", "tool", 9)]
+        );
     }
 }
