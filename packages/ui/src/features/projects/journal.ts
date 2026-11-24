@@ -85,6 +85,7 @@ export function readProjectIntent(account: string): ProjectIntent | null {
       "remove",
       "parent",
       "sub_issue",
+      "reorder_sub_issue",
       "create_issue",
     ].includes(String(intent.body.command.kind))
   )

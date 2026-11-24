@@ -121,6 +121,14 @@ export interface Template {
 }
 export type Command =
   | { kind: "sub_issue"; parent: number; title: string; body: string }
+  | {
+      kind: "reorder_sub_issue";
+      parent: number;
+      child: number;
+      sibling: number;
+      position: "before" | "after";
+      order_token: string;
+    }
   | { kind: "create"; id: string; name: string; template: string }
   | { kind: "copy"; id: string; source: string; version: number; name: string }
   | {

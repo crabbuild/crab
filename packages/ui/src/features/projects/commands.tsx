@@ -185,7 +185,9 @@ export function ProjectCommandsProvider({
       if (applied) {
         const command = captured.body.command;
         const expected =
-          command.kind === "parent" || command.kind === "sub_issue"
+          command.kind === "parent" ||
+          command.kind === "sub_issue" ||
+          command.kind === "reorder_sub_issue"
             ? null
             : command.kind === "create" || command.kind === "copy"
               ? command.id

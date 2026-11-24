@@ -247,6 +247,7 @@ async fn items(
 #[serde(default, deny_unknown_fields)]
 struct Children {
     after: Option<u64>,
+    limit: Option<u8>,
 }
 async fn hierarchy(
     State(server): State<Arc<Server>>,
@@ -256,6 +257,14 @@ async fn hierarchy(
 ) -> Result<Json<Value>> {
     let key = (owner, name);
     let repo = app::repository(&server, &principal, &key)?;
+    if input
+        .limit
+        .is_some_and(|limit| !(1..=projects::hierarchy::MAX_CHILDREN).contains(&limit))
+    {
+        return Err(Error::Invalid(
+            "Sub-issue page limit must be between 1 and 100",
+        ));
+    }
     let cell = app::repository_cell(&server, &repo)?;
     let tree = app::query_output(
         cell.client
@@ -265,6 +274,7 @@ async fn hierarchy(
                 projects::hierarchy::Query {
                     issue: app::number(number)?,
                     after: input.after,
+                    limit: input.limit,
                 },
             )
             .await,
@@ -272,7 +282,7 @@ async fn hierarchy(
     .ok_or(Error::NotFound)?;
     let current = app::membership(&server, &principal, &repo).await?;
     Ok(Json(
-        json!({"hierarchy":tree,"can_manage":current.principal.can_write(repo.id)}),
+        json!({"hierarchy":tree,"can_manage":current.principal.can_triage(repo.id)}),
     ))
 }
 async fn memberships(
@@ -317,8 +327,14 @@ async fn submit(
 ) -> Result<Json<Outcome>> {
     let repo = app::repository(&server, &principal, &key)?;
     let current = app::membership(&server, &principal, &repo).await?;
-    if !current.principal.can_write(repo.id) {
-        return Err(Error::ProjectPermission);
+    let can_write = current.principal.can_write(repo.id);
+    let can_triage = current.principal.can_triage(repo.id);
+    if !input.command.permitted(can_write, can_triage) {
+        return Err(if input.command.is_hierarchy() {
+            Error::SubIssuePermission
+        } else {
+            Error::ProjectPermission
+        });
     }
     let actor = app::actor(&principal)?;
     let type_id = match &input.command {
@@ -329,7 +345,8 @@ async fn submit(
         request_id: input.request_id,
         command: input.command,
         actor: (&actor).into(),
-        can_write: true,
+        can_write,
+        can_triage: !can_write && can_triage,
         issue_type: None,
         cancel,
     };
@@ -399,6 +416,8 @@ async fn cancel(
         .await
         .map_err(|error| error.into_response().into())
 }
+#[cfg(test)]
+mod hierarchy_tests;
 #[cfg(test)]
 mod tests;
 

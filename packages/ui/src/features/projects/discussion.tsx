@@ -1,5 +1,11 @@
-import { useEffect, useState } from "react";
-import { FolderKanbanIcon, PlusIcon, ListTreeIcon } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import {
+  ArrowDownIcon,
+  ArrowUpIcon,
+  FolderKanbanIcon,
+  PlusIcon,
+  ListTreeIcon,
+} from "lucide-react";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
 import { Result } from "@/components/request/result";
 import { Link } from "@/components/navigation/link";
@@ -220,7 +226,7 @@ interface Tree {
   version: number;
   progress: { total: number; closed: number };
   children: Work[];
-  next: number | null;
+  order_token?: string;
 }
 export function SubIssues({
   repo,
@@ -229,18 +235,50 @@ export function SubIssues({
   repo: Repository;
   number: number;
 }) {
-  const [after, setAfter] = useState<string>();
   const resource = useRequest<{ hierarchy: Tree; can_manage: boolean }>(
-    endpoint(repo, `issues/${number}/hierarchy`, { after }),
+    endpoint(repo, `issues/${number}/hierarchy`, { limit: "100" }),
   );
   const [mode, setMode] = useState<"parent" | "child">();
   const commands = useProjectCommands();
+  const list = useRef<HTMLUListElement>(null);
+  const restoreFocus = useRef<{
+    child: number;
+    position: "before" | "after";
+  } | null>(null);
   useEffect(() => {
-    if (commands.generation) {
-      setAfter(undefined);
-      resource.retry();
-    }
+    if (commands.generation) resource.retry();
   }, [commands.generation, resource.retry]);
+  useEffect(() => {
+    const previous = restoreFocus.current;
+    if (!resource.data || !previous) return;
+    restoreFocus.current = null;
+    if (document.activeElement !== document.body) return;
+    const row = list.current?.querySelector(
+      `[data-sub-issue="${previous.child}"]`,
+    );
+    const target =
+      row?.querySelector<HTMLButtonElement>(
+        `button[data-position="${previous.position}"]:enabled`,
+      ) ?? row?.querySelector<HTMLAnchorElement>("a");
+    target?.focus();
+  }, [resource.data]);
+  async function move(
+    child: number,
+    sibling: number,
+    position: "before" | "after",
+    orderToken: string,
+  ) {
+    restoreFocus.current = { child, position };
+    const outcome = await commands.submit(repo, {
+      kind: "reorder_sub_issue",
+      parent: number,
+      child,
+      sibling,
+      position,
+      order_token: orderToken,
+    });
+    if (outcome?.outcome === "rejected") resource.retry();
+  }
   return (
     <Result state={resource} timingLabel="Sub-issues">
       {({ hierarchy: tree, can_manage }) => (
@@ -313,34 +351,54 @@ export function SubIssues({
               </div>
             )}
           </div>
-          <ul>
-            {tree.children.map((work) => (
-              <li key={work.subject.number}>
-                <Link href={workHref(repo, work.subject)}>
-                  #{work.subject.number} {work.title}
-                </Link>
-                <Badge variant="outline">{work.state}</Badge>
-              </li>
-            ))}
+          <ul ref={list} aria-label="Sub-issues">
+            {tree.children.map((work, index) => {
+              const child = work.subject.number;
+              const order = tree.order_token;
+              return (
+                <li key={child} data-sub-issue={child}>
+                  <Link href={workHref(repo, work.subject)}>
+                    #{child} {work.title}
+                  </Link>
+                  <div className="flex shrink-0 items-center gap-1">
+                    <Badge variant="outline">{work.state}</Badge>
+                    {can_manage &&
+                      !repo.archived &&
+                      order &&
+                      tree.children.length > 1 &&
+                      (["before", "after"] as const).map((position) => {
+                        const before = position === "before";
+                        const sibling =
+                          tree.children[index + (before ? -1 : 1)];
+                        return (
+                          <Button
+                            key={position}
+                            type="button"
+                            size="icon-sm"
+                            variant="ghost"
+                            data-position={position}
+                            aria-label={`Move #${child} ${before ? "up" : "down"}`}
+                            disabled={!sibling}
+                            aria-disabled={commands.locked || !sibling}
+                            onClick={() => {
+                              if (sibling && !commands.locked)
+                                void move(
+                                  child,
+                                  sibling.subject.number,
+                                  position,
+                                  order,
+                                );
+                            }}
+                          >
+                            {before ? <ArrowUpIcon /> : <ArrowDownIcon />}
+                          </Button>
+                        );
+                      })}
+                  </div>
+                </li>
+              );
+            })}
           </ul>
-          {after && (
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => setAfter(undefined)}
-            >
-              First sub-issues
-            </Button>
-          )}
-          {tree.next !== null && (
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => setAfter(String(tree.next))}
-            >
-              More sub-issues
-            </Button>
-          )}
           {mode && (
             <HierarchyEditor
               repo={repo}

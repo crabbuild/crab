@@ -28,6 +28,14 @@ pub(crate) use reads::{
 };
 pub(crate) use templates::templates;
 
+fn revision(context: &Transaction<'_>) -> Result<u64> {
+    let rows = context.query(
+        "SELECT app_revision FROM repository_identity WHERE singleton=1",
+        &[],
+    )?;
+    result_u64_from_row(&rows.rows[0], 0)
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Layout {

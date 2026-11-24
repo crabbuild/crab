@@ -126,7 +126,14 @@ impl Subject {
         let Some(row) = rows[0].rows.first() else {
             return Ok(None);
         };
-        let [SqlValue::Text(title), SqlValue::Integer(code)] = row.as_slice() else {
+        Ok(Some(self.summary_from_row(row)?))
+    }
+
+    pub(in crate::cells::repository) fn summary_from_row(
+        self,
+        row: &[SqlValue],
+    ) -> crate::cells::Result<SubjectSummary> {
+        let [SqlValue::Text(title), SqlValue::Integer(code)] = row else {
             return Err(crate::cells::Error::Invalid(
                 "collaboration subject summary is invalid",
             ));
@@ -141,11 +148,11 @@ impl Subject {
                 ));
             }
         };
-        Ok(Some(SubjectSummary {
+        Ok(SubjectSummary {
             subject: self,
             title: title.clone(),
             state,
-        }))
+        })
     }
 }
 

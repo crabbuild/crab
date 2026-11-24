@@ -23,6 +23,7 @@ async fn command(cell: &RepositoryCell, command: Command) -> Outcome {
                 request_id: Uuid::now_v7(),
                 actor: actor(),
                 can_write: true,
+                can_triage: false,
                 issue_type: None,
                 command,
                 cancel: false,
@@ -164,6 +165,7 @@ async fn project_retries_cancel_conflicts_and_field_validation_preserve_canonica
         request_id: Uuid::now_v7(),
         actor: actor(),
         can_write: true,
+        can_triage: false,
         issue_type: None,
         command: created(id),
         cancel: false,
@@ -328,6 +330,7 @@ async fn hierarchy_reparents_atomically_rejects_cycles_and_counts_live_child_sta
             hierarchy::Query {
                 issue: 1,
                 after: None,
+                limit: None,
             },
         )
         .await
@@ -385,6 +388,7 @@ async fn hierarchy_reparents_atomically_rejects_cycles_and_counts_live_child_sta
             hierarchy::Query {
                 issue: 1,
                 after: None,
+                limit: None,
             },
         )
         .await

@@ -702,8 +702,10 @@ apply: Read to view, Write to manage. Projects use native Cellar persistence.
 
 Projects support saved table/board/roadmap views, validated custom fields,
 workflow status/priority/dates, draft notes, current issue/PR references and links,
-settings/README, archival and reusable repository templates. Issue details support
-creating/linking sub-issues, moving/removing parents and live completion progress.
+settings/README, archival and reusable repository templates. Repository Triage
+access allows creating and linking sub-issues, changing or removing their parent,
+and reordering siblings with the issue page's move buttons. Completion progress
+updates as children close or reopen.
 Creating/converting a project draft into an issue and assigning a parent are
 atomic. Workflow status does not close issues or merge PRs automatically.
 

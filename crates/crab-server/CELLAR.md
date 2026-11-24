@@ -1559,6 +1559,19 @@ Removing a parent keeps its version tombstone, preventing delayed edits from
 replacing a newer relationship. Parent activity appears in both issue timelines.
 Creating a sub-issue from its parent is one native transaction. Child progress
 reads canonical issue states and updates immediately when children close/reopen.
+Triage can manage these relationships in the repository. Project mutations
+require Write access.
+
+The parent retains its explicit sibling priorities in a bounded native document.
+Reads join the live parent edges with issue titles and states in one query.
+Reparenting removes the old priority and appends to the new parent's saved
+order in the same transaction. The hierarchy route accepts `limit=1…100` and
+includes an opaque `order_token` when a limit is supplied. The existing
+`after` cursor continues from the named child in the current order. Reordering
+binds the exact sibling list and the two direct children to a permanent command
+receipt. A stale order is rejected and replay returns the saved decision.
+Existing hierarchy records use issue-number order until the parent is customized.
+This change needs coordinated peers and UI, with no new schema preparation.
 
 This is repository project management. Organization projects have the independent
 authority described above; project-specific ACLs, workflow automation and

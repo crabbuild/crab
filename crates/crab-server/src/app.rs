@@ -170,7 +170,9 @@ pub(crate) enum Error {
     LinkPermission,
     #[error("Triage access is required to manage issue dependencies")]
     DependencyPermission,
-    #[error("Write access is required to manage projects and sub-issues")]
+    #[error("Triage access is required to manage sub-issues")]
+    SubIssuePermission,
+    #[error("Write access is required to manage projects")]
     ProjectPermission,
     #[error("A milestone with this title already exists")]
     MilestoneConflict,
@@ -603,7 +605,12 @@ impl IntoResponse for Error {
             Self::ProjectPermission => (
                 StatusCode::FORBIDDEN,
                 "project_permission",
-                "Write access is required to manage projects and sub-issues",
+                "Write access is required to manage projects",
+            ),
+            Self::SubIssuePermission => (
+                StatusCode::FORBIDDEN,
+                "sub_issue_permission",
+                "Triage access is required to manage sub-issues",
             ),
             Self::LinkPermission => (
                 StatusCode::FORBIDDEN,

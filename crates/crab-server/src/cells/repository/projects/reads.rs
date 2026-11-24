@@ -268,11 +268,7 @@ impl Read for Items {
         {
             return Err(Error::Invalid("unknown project workflow status"));
         }
-        let revision = context.query(
-            "SELECT app_revision FROM repository_identity WHERE singleton=1",
-            &[],
-        )?;
-        let revision = result_u64_from_row(&revision.rows[0], 0)?;
+        let revision = revision(context)?;
         if input.after.is_some() && input.revision != Some(revision) {
             return Err(Error::StaleSearch);
         }
