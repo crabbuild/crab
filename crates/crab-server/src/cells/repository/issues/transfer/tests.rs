@@ -529,10 +529,14 @@ async fn publication_replays_a_retired_issue_with_its_comments_and_moderation() 
         Some(decision.clone())
     );
     assert_eq!(
-        mutate::<Retire>(&origin, reservation).await,
+        mutate::<Retire>(&origin, reservation.clone()).await,
         RetireOutcome::Committed {
             decision: decision.clone()
         }
+    );
+    assert_eq!(
+        mutate::<Fence>(&origin, reservation).await,
+        FenceOutcome::Committed
     );
     assert_eq!(
         mutate::<CreateIssue>(&origin, submission).await,

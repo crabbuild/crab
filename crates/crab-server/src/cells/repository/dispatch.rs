@@ -58,6 +58,9 @@ pub(in crate::cells) fn dispatch_mutation(
         issues::transfer::publication::Publish::ID => {
             invoke_mutation::<issues::transfer::publication::Publish>(context, input)
         }
+        issues::transfer::publication::Fence::ID => {
+            invoke_mutation::<issues::transfer::publication::Fence>(context, input)
+        }
         recent_pushes::Record::ID => invoke_mutation::<recent_pushes::Record>(context, input),
         #[cfg(test)]
         SeedHistoricalMerges::ID => invoke_mutation::<SeedHistoricalMerges>(context, input),

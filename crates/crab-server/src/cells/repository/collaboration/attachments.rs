@@ -468,6 +468,33 @@ pub(in crate::cells::repository) fn stage_transfer(
     }
 }
 
+pub(in crate::cells::repository) fn discard_transfer(
+    context: &Transaction<'_>,
+    request: Uuid,
+    original: Uuid,
+) -> Result<()> {
+    let id = transferred_id(request, original);
+    let key = record_key(id);
+    match context.document::<Record>(&key)? {
+        Some(Record::Live {
+            state: State::Transferring { request: recorded },
+            ..
+        }) if recorded == request => {
+            // Seal the attachment immediately. Give any already admitted
+            // storage copy time to drain before the sweeper deletes its bytes.
+            #[cfg(not(test))]
+            let grace = TRANSFER_WINDOW_MS;
+            #[cfg(test)]
+            let grace = 1_000;
+            let expires = context.now_ms().saturating_add(grace);
+            context.put_document(&key, &Record::Expired { expires })?;
+            context.put_document(&expiry_key(expires, id), &id)
+        }
+        Some(Record::Expired { .. } | Record::Collected) => Ok(()),
+        _ => Err(Error::AttachmentUnavailable),
+    }
+}
+
 pub(in crate::cells::repository) fn publish_transfer(
     context: &Transaction<'_>,
     request: Uuid,

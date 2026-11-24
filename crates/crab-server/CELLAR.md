@@ -531,14 +531,22 @@ lease. Publication clears the reservation in the same transaction that
 installs the issue. This keeps a reserved issue from crossing an ownership
 change while recovery is pending.
 
+The destination gives staged work a rolling idle deadline. When a prepared
+transfer expires, it asks the source to record a cancellation for that exact
+reservation. A source that already committed instead reports its publication
+decision and retains its recovery obligation. A cancelled transfer releases
+the ownership fence, keeps a compact replay decision, and prunes one private
+frame at a time. The attachment sweeper removes only destination objects sealed
+by that cancellation, after the active-copy grace period.
+
 The issue detail route resolves the move through independent, current grants
 on the original and destination repositories. It exposes the destination only
 after publication, and the browser retains the original comment anchor.
 
 The HTTP write workflow must check both current grants and the shared owner,
 then prepare under the same policy lease used for ownership changes. It also
-owns the verified object copy, remaining discussion state and relationship
-placement, and cleanup of abandoned staging and reservations.
+owns the verified object copy and remaining discussion state and relationship
+placement.
 The native write commands stay private while those paths are under construction.
 
 ## Reviewer search preparation

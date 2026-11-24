@@ -1,12 +1,12 @@
+use super::recovery::Work;
 use super::*;
 use crate::cells::repository::collaboration::milestones;
 
 const MOVED: &str = "collaboration/v1/issue-transfers/moved/";
 const RESERVED: &str = "collaboration/v1/issue-transfers/reserved/";
-const PENDING: &str = "collaboration/v1/issue-transfers/pending/";
-const WAKE: &str = "collaboration/v1/issue-transfers/wake/";
+const CANCELLED: &str = "collaboration/v1/issue-transfers/cancelled/";
 const PUBLICATION_GRACE_MS: i64 = 5_000;
-const PUBLICATION_RETRY_MS: i64 = 30_000;
+const CLEANUP_INTERVAL_MS: i64 = 100;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -37,12 +37,14 @@ pub(super) struct Prepared {
 pub(super) enum DestinationState {
     Prepared(Prepared),
     Published(Prepared),
+    Cancelled,
 }
 
 impl DestinationState {
-    fn prepared(&self) -> &Prepared {
+    fn prepared(&self) -> Option<&Prepared> {
         match self {
-            Self::Prepared(value) | Self::Published(value) => value,
+            Self::Prepared(value) | Self::Published(value) => Some(value),
+            Self::Cancelled => None,
         }
     }
 }
@@ -59,12 +61,8 @@ fn reservation_key(request: Uuid) -> String {
     format!("{RESERVED}{request}")
 }
 
-fn pending_key(number: u64) -> String {
-    format!("{PENDING}{number:016x}")
-}
-
-fn wake_key(at: i64, number: u64) -> String {
-    format!("{WAKE}{at:016x}/{number:016x}")
+fn cancellation_key(request: Uuid) -> String {
+    format!("{CANCELLED}{request}")
 }
 
 #[derive(Deserialize, Serialize)]
@@ -85,6 +83,7 @@ pub(crate) enum PrepareOutcome {
     Conflict,
     Incomplete,
     Archived,
+    Expired,
 }
 
 pub(crate) struct Prepare;
@@ -106,14 +105,20 @@ impl Mutation for Prepare {
         if job.actor != input.actor || job.source != input.source {
             return Ok(MutationResult::Rejected(PrepareOutcome::Conflict));
         }
+        if matches!(job.publication, Some(DestinationState::Cancelled)) {
+            return Ok(MutationResult::Rejected(PrepareOutcome::Expired));
+        }
         if job.progress.frames == 0 || job.progress.next.is_some() {
             return Ok(MutationResult::Rejected(PrepareOutcome::Incomplete));
         }
         if job.progress.commitment != input.commitment {
             return Ok(MutationResult::Rejected(PrepareOutcome::Conflict));
         }
-        let number = if let Some(state) = &job.publication {
-            let prepared = state.prepared();
+        let number = if let Some(prepared) = job
+            .publication
+            .as_ref()
+            .and_then(DestinationState::prepared)
+        {
             if prepared.ownership_epoch != input.ownership_epoch {
                 return Ok(MutationResult::Rejected(PrepareOutcome::Conflict));
             }
@@ -132,6 +137,7 @@ impl Mutation for Prepare {
             // The ownership route checks this fence under the same policy
             // lease the ingress coordinator must hold when it prepares.
             context.put_document(&reservation_key(input.request), &input.request)?;
+            recovery::arm(context, Work::Expire(input.request), recovery::IDLE_MS)?;
             number
         };
         let (repository, _) = identity(context)?;
@@ -169,9 +175,27 @@ pub(crate) enum RetireOutcome {
     Conflict,
     Changed,
     Archived,
+    Expired,
 }
 
 pub(crate) struct Retire;
+
+fn validate_source_reservation(context: &Transaction<'_>, reservation: &Reservation) -> Result<()> {
+    let (repository, _) = identity(context)?;
+    validate_number(reservation.source.issue)?;
+    validate_number(reservation.destination.number)?;
+    reservation.actor.validate()?;
+    if reservation.source.repository != repository
+        || reservation.destination.repository.is_nil()
+        || reservation.destination.repository == repository
+        || reservation.request.is_nil()
+    {
+        return Err(Error::Invalid(
+            "Issue transfer source does not match this repository",
+        ));
+    }
+    Ok(())
+}
 
 // Ingress orchestration must prove the reservation with the destination owner
 // and both current grants before sending this private command.
@@ -185,25 +209,19 @@ impl Mutation for Retire {
         context: &mut Transaction<'_>,
         reservation: Reservation,
     ) -> Result<MutationResult<RetireOutcome>> {
-        let (repository, _) = identity(context)?;
-        validate_number(reservation.source.issue)?;
-        validate_number(reservation.destination.number)?;
-        reservation.actor.validate()?;
-        if reservation.source.repository != repository
-            || reservation.destination.repository.is_nil()
-            || reservation.destination.repository == repository
-            || reservation.request.is_nil()
-        {
-            return Err(Error::Invalid(
-                "Issue transfer source does not match this repository",
-            ));
-        }
+        validate_source_reservation(context, &reservation)?;
         if let Some(decision) = moved(context, reservation.source.issue)? {
             return Ok(if decision.reservation == reservation {
                 MutationResult::Success(RetireOutcome::Committed { decision })
             } else {
                 MutationResult::Rejected(RetireOutcome::Conflict)
             });
+        }
+        if context
+            .document::<Reservation>(&cancellation_key(reservation.request))?
+            .is_some()
+        {
+            return Ok(MutationResult::Rejected(RetireOutcome::Expired));
         }
         if settings::archived(context)? {
             return Ok(MutationResult::Rejected(RetireOutcome::Archived));
@@ -237,11 +255,7 @@ impl Mutation for Retire {
             source_revision,
         };
         context.put_document(&move_key(issue.number), &decision)?;
-        enqueue(
-            context,
-            issue.number,
-            context.now_ms().saturating_add(PUBLICATION_GRACE_MS),
-        )?;
+        recovery::arm(context, Work::Publish(issue.number), PUBLICATION_GRACE_MS)?;
         Ok(MutationResult::Success(RetireOutcome::Committed {
             decision,
         }))
@@ -282,46 +296,97 @@ impl Read for HasReservations {
     }
 }
 
-fn next_wake(context: &Transaction<'_>) -> Result<Option<(i64, u64)>> {
-    let rows = context.documents_after(WAKE, None, 1)?;
-    Ok(rows.into_iter().next().map(|(_, wake)| wake))
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FenceOutcome {
+    Cancelled,
+    Committed,
+    Conflict,
 }
 
-fn schedule(context: &Transaction<'_>) -> Result<()> {
-    context.set_alarm(next_wake(context)?.map(|(at, _)| at))
-}
+pub(crate) struct Fence;
 
-fn enqueue(context: &Transaction<'_>, number: u64, at: i64) -> Result<()> {
-    context.put_document(&pending_key(number), &at)?;
-    context.put_document(&wake_key(at, number), &(at, number))?;
-    schedule(context)
-}
+impl Mutation for Fence {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
+    const ID: u32 = 460;
+    type Input = Reservation;
+    type Output = FenceOutcome;
 
-pub(in crate::cells) fn due(context: &Transaction<'_>) -> Result<Option<Decision>> {
-    let Some((at, number)) = next_wake(context)? else {
-        context.set_alarm(None)?;
-        return Ok(None);
-    };
-    if at > context.now_ms() {
-        context.set_alarm(Some(at))?;
-        return Ok(None);
+    fn execute(
+        context: &mut Transaction<'_>,
+        reservation: Reservation,
+    ) -> Result<MutationResult<FenceOutcome>> {
+        validate_source_reservation(context, &reservation)?;
+        if moved(context, reservation.source.issue)?
+            .is_some_and(|decision| decision.reservation == reservation)
+        {
+            return Ok(MutationResult::Success(FenceOutcome::Committed));
+        }
+        let key = cancellation_key(reservation.request);
+        if let Some(previous) = context.document::<Reservation>(&key)? {
+            return Ok(if previous == reservation {
+                MutationResult::Success(FenceOutcome::Cancelled)
+            } else {
+                MutationResult::Rejected(FenceOutcome::Conflict)
+            });
+        }
+        // Fence and Retire serialize at the source even if the destination
+        // stopped waiting for the original retirement reply.
+        context.put_document(&key, &reservation)?;
+        Ok(MutationResult::Success(FenceOutcome::Cancelled))
     }
-    if context.document::<i64>(&pending_key(number))? != Some(at) {
-        return Err(Error::Invalid(
-            "Issue transfer wake does not match pending work",
-        ));
+}
+
+pub(in crate::cells) enum Recovery {
+    Publish(Decision),
+    Fence(Reservation),
+}
+
+pub(in crate::cells) fn due(context: &Transaction<'_>) -> Result<Option<Recovery>> {
+    match recovery::due(context)? {
+        None => Ok(None),
+        Some(Work::Publish(number)) => {
+            let decision = moved(context, number)?
+                .ok_or(Error::Invalid("Issue transfer wake has no source decision"))?;
+            Ok(Some(Recovery::Publish(decision)))
+        }
+        Some(Work::Expire(request)) => {
+            let key = job_key(request);
+            let Some(job) = context.document::<Job>(&key)? else {
+                return Err(Error::Invalid(
+                    "Issue transfer expiration has no staging job",
+                ));
+            };
+            match &job.publication {
+                Some(DestinationState::Prepared(prepared)) => {
+                    let (repository, _) = identity(context)?;
+                    Ok(Some(Recovery::Fence(Reservation {
+                        request,
+                        source: job.source,
+                        destination: Destination {
+                            repository,
+                            number: prepared.number,
+                        },
+                        ownership_epoch: prepared.ownership_epoch,
+                        actor: job.actor,
+                        commitment: job.progress.commitment,
+                    })))
+                }
+                None => {
+                    cancel(context, request, job)?;
+                    Ok(None)
+                }
+                Some(DestinationState::Cancelled) => {
+                    prune_frame(context, request, job.source)?;
+                    Ok(None)
+                }
+                Some(DestinationState::Published(_)) => {
+                    recovery::finish(context, Work::Expire(request))?;
+                    Ok(None)
+                }
+            }
+        }
     }
-    let decision = moved(context, number)?
-        .ok_or(Error::Invalid("Issue transfer wake has no source decision"))?;
-    // A retry is durable before the cross-Cell call starts. Moving this job to
-    // its next wake gives other committed moves a chance if its target is down.
-    context.delete_document(&wake_key(at, number))?;
-    enqueue(
-        context,
-        number,
-        context.now_ms().saturating_add(PUBLICATION_RETRY_MS),
-    )?;
-    Ok(Some(decision))
 }
 
 pub(in crate::cells) fn acknowledged(context: &Transaction<'_>, decision: &Decision) -> Result<()> {
@@ -331,12 +396,74 @@ pub(in crate::cells) fn acknowledged(context: &Transaction<'_>, decision: &Decis
             "Issue transfer acknowledgement does not match its decision",
         ));
     }
-    if let Some(at) = context.document::<i64>(&pending_key(number))? {
-        context.delete_document(&wake_key(at, number))?;
-        context.delete_document(&pending_key(number))?;
-        schedule(context)?;
+    recovery::finish(context, Work::Publish(number))
+}
+
+pub(in crate::cells) fn fenced(
+    context: &Transaction<'_>,
+    reservation: &Reservation,
+    outcome: FenceOutcome,
+) -> Result<()> {
+    let request = reservation.request;
+    let (repository, _) = identity(context)?;
+    let job = context
+        .document::<Job>(&job_key(request))?
+        .ok_or(Error::Invalid(
+            "Issue transfer expiration has no staging job",
+        ))?;
+    let prepared = job
+        .publication
+        .as_ref()
+        .and_then(DestinationState::prepared)
+        .ok_or(Error::Invalid("Issue transfer no longer has a reservation"))?;
+    if repository != reservation.destination.repository
+        || prepared.number != reservation.destination.number
+        || prepared.ownership_epoch != reservation.ownership_epoch
+        || job.source != reservation.source
+        || job.actor != reservation.actor
+        || job.progress.commitment != reservation.commitment
+    {
+        return Err(Error::Invalid(
+            "Issue transfer fence does not match its reservation",
+        ));
     }
-    Ok(())
+    match outcome {
+        FenceOutcome::Cancelled
+            if matches!(job.publication, Some(DestinationState::Prepared(_))) =>
+        {
+            cancel(context, request, job)
+        }
+        // The source already owns a durable publication retry. Keep its
+        // reservation and let publication close the ownership fence.
+        FenceOutcome::Committed => recovery::finish(context, Work::Expire(request)),
+        _ => Err(Error::Invalid("Issue transfer could not fence its source")),
+    }
+}
+
+fn cancel(context: &Transaction<'_>, request: Uuid, mut job: Job) -> Result<()> {
+    job.publication = Some(DestinationState::Cancelled);
+    context.put_document(&job_key(request), &job)?;
+    context.delete_document(&reservation_key(request))?;
+    prune_frame(context, request, job.source)
+}
+
+fn prune_frame(context: &Transaction<'_>, request: Uuid, source: Source) -> Result<()> {
+    let key = SqlValue::Blob(request.as_bytes().to_vec());
+    let result = context.query(
+        "SELECT digest, payload, ordinal FROM repository_issue_transfer_frames WHERE transfer = ? ORDER BY ordinal LIMIT 1",
+        std::slice::from_ref(&key),
+    )?;
+    let Some(row) = result.rows.first() else {
+        return recovery::finish(context, Work::Expire(request));
+    };
+    for upload in decode_frame(row, source)?.uploads() {
+        attachments::discard_transfer(context, request, upload.id)?;
+    }
+    context.query(
+        "DELETE FROM repository_issue_transfer_frames WHERE transfer = ? AND ordinal = ?",
+        &[key, integer(result_u64_from_row(row, 2)?)?],
+    )?;
+    recovery::arm(context, Work::Expire(request), CLEANUP_INTERVAL_MS)
 }
 
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -367,7 +494,9 @@ impl Mutation for Publish {
         let Some(state) = &job.publication else {
             return Ok(MutationResult::Rejected(PublishOutcome::Conflict));
         };
-        let prepared = state.prepared();
+        let Some(prepared) = state.prepared() else {
+            return Ok(MutationResult::Rejected(PublishOutcome::Conflict));
+        };
         if reservation.destination.repository != repository
             || reservation.destination.number != prepared.number
             || reservation.ownership_epoch != prepared.ownership_epoch
@@ -388,6 +517,7 @@ impl Mutation for Publish {
             }));
             context.put_document(&key, &job)?;
             context.delete_document(&reservation_key(reservation.request))?;
+            recovery::finish(context, Work::Expire(reservation.request))?;
             advance_revision(context)?;
         }
         Ok(MutationResult::Success(PublishOutcome::Published {
@@ -405,12 +535,16 @@ fn frame(context: &Transaction<'_>, reservation: &Reservation, ordinal: u64) -> 
         .rows
         .first()
         .ok_or(Error::Invalid("Reserved issue frame is missing"))?;
+    decode_frame(row, reservation.source)
+}
+
+fn decode_frame(row: &[SqlValue], source: Source) -> Result<Records> {
     let bytes = result_blob(row, 1)?;
     if blake3::hash(bytes).as_bytes() != result_blob(row, 0)? {
         return Err(Error::Invalid("Reserved issue frame digest does not match"));
     }
     let frame: Frame = serde_json::from_slice(bytes)?;
-    if frame.source != reservation.source {
+    if frame.source != source {
         return Err(Error::Invalid(
             "Reserved issue frame belongs to another source",
         ));

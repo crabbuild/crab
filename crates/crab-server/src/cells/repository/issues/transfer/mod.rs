@@ -20,6 +20,7 @@ const ACTIVITY_PAGE: u8 = 16;
 const PREFIX: &str = "collaboration/v1/issue-transfers/staged/";
 
 pub(crate) mod publication;
+mod recovery;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -429,6 +430,7 @@ pub(crate) enum StageOutcome {
     Conflict,
     OutOfOrder,
     Archived,
+    Expired,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -502,6 +504,12 @@ impl Mutation for Stage {
             if job.source != source || job.actor != input.actor {
                 return Ok(MutationResult::Rejected(StageOutcome::Conflict));
             }
+            if matches!(
+                job.publication,
+                Some(publication::DestinationState::Cancelled)
+            ) {
+                return Ok(MutationResult::Rejected(StageOutcome::Expired));
+            }
             let stored = context.query(
                 "SELECT ordinal, digest FROM repository_issue_transfer_frames WHERE transfer = ? AND position = ?",
                 &[SqlValue::Blob(input.request.as_bytes().to_vec()), SqlValue::Text(position.clone())],
@@ -573,6 +581,11 @@ impl Mutation for Stage {
         }
         if needs_copy && !confirmed {
             context.put_document(&key, &job)?;
+            recovery::arm(
+                context,
+                recovery::Work::Expire(input.request),
+                recovery::IDLE_MS,
+            )?;
             return Ok(MutationResult::Success(StageOutcome::AwaitingCopies));
         }
         let mut hasher = blake3::Hasher::new_derive_key("crab issue transfer frame v1");
@@ -584,6 +597,11 @@ impl Mutation for Stage {
             commitment: *hasher.finalize().as_bytes(),
         };
         context.put_document(&key, &job)?;
+        recovery::arm(
+            context,
+            recovery::Work::Expire(input.request),
+            recovery::IDLE_MS,
+        )?;
         Ok(MutationResult::Success(StageOutcome::Saved {
             progress: job.progress,
         }))

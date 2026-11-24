@@ -236,7 +236,7 @@ async fn issue_transfer_publishes_verified_attachments_with_destination_access()
 
     use sha2::{Digest, Sha256};
 
-    use super::object_path;
+    use super::{collect_repository, object_path};
     use crate::{
         app,
         cells::{
@@ -306,138 +306,222 @@ async fn issue_transfer_publishes_verified_attachments_with_destination_access()
     let target = repositories("library");
     let origin_cell = app::repository_cell(&h.server, &source).unwrap();
     let target_cell = app::repository_cell(&h.server, &target).unwrap();
-    let request = Uuid::now_v7();
     let actor = IdentityKey {
         issuer: h.provider.issuer.clone(),
         subject: "alice-id".into(),
     };
-    let moved_id = transferred_id(request, id);
-    let new = format!("/api/discussion-attachments/{}/{moved_id}", target.id);
-    let mut capture = CaptureInput::Start {
-        number: issue_number,
-        expected_version: issue["version"].as_u64().unwrap(),
-    };
-    let mut first = true;
-    let prepared = loop {
-        let output = origin_cell
-            .client
-            .query::<Capture>(origin_cell.target, None, capture)
-            .await
-            .unwrap()
-            .output;
-        let CaptureOutcome::Ready { frame } = output else {
-            panic!("{output:?}");
+    let reserve = async |request: Uuid| {
+        let moved_id = transferred_id(request, id);
+        let new = format!("/api/discussion-attachments/{}/{moved_id}", target.id);
+        let mut capture = CaptureInput::Start {
+            number: issue_number,
+            expected_version: issue["version"].as_u64().unwrap(),
         };
-        let observed = frame.source;
-        let mut input = StageInput {
-            request,
-            destination: target.id,
-            actor: actor.clone(),
-            frame: *frame,
-            copied: BTreeMap::new(),
-        };
-        if input.frame.records.uploads().next().is_some() {
-            let replay = serde_json::from_value(serde_json::to_value(&input).unwrap()).unwrap();
-            assert_eq!(
-                target_cell
-                    .client
-                    .command::<Stage>(
-                        target_cell.target,
-                        app::mutation_identity().unwrap(),
-                        replay
-                    )
-                    .await
-                    .unwrap()
-                    .output,
-                StageOutcome::AwaitingCopies
-            );
-        }
-        if first {
-            assert_eq!(
-                target_cell
-                    .client
-                    .command::<Prepare>(
-                        target_cell.target,
-                        app::mutation_identity().unwrap(),
-                        PrepareInput {
-                            request,
-                            source: observed,
-                            actor: actor.clone(),
-                            commitment: [0; 32],
-                            ownership_epoch: 1,
-                        },
-                    )
-                    .await
-                    .unwrap()
-                    .output,
-                PrepareOutcome::Incomplete
-            );
-        }
-        for upload in input.frame.records.uploads() {
-            let (data, _) = source
-                .store
-                .get_with_etag_bounded(&object_path(&source, upload.id), upload.size)
+        let mut first = true;
+        let prepared = loop {
+            let output = origin_cell
+                .client
+                .query::<Capture>(origin_cell.target, None, capture)
                 .await
-                .unwrap();
-            assert_eq!(data.len() as u64, upload.size);
-            assert_eq!(format!("{:x}", Sha256::digest(&data)), upload.digest);
-            let created = target
-                .store
-                .put_if_absent_verified(&object_path(&target, moved_id), data)
-                .await
-                .unwrap();
-            assert_eq!(created, first);
-            input.copied.insert(moved_id, upload.digest.clone());
-        }
-        let progress = target_cell
-            .client
-            .command::<Stage>(target_cell.target, app::mutation_identity().unwrap(), input)
-            .await
-            .unwrap()
-            .output;
-        let StageOutcome::Saved { progress } = progress else {
-            panic!("{progress:?}");
-        };
-        let Some(cursor) = progress.next else {
-            break PrepareInput {
+                .unwrap()
+                .output;
+            let CaptureOutcome::Ready { frame } = output else {
+                panic!("{output:?}");
+            };
+            let observed = frame.source;
+            let mut input = StageInput {
                 request,
-                source: observed,
+                destination: target.id,
                 actor: actor.clone(),
-                commitment: progress.commitment,
-                ownership_epoch: 1,
+                frame: *frame,
+                copied: BTreeMap::new(),
+            };
+            if input.frame.records.uploads().next().is_some() {
+                let replay = serde_json::from_value(serde_json::to_value(&input).unwrap()).unwrap();
+                assert_eq!(
+                    target_cell
+                        .client
+                        .command::<Stage>(
+                            target_cell.target,
+                            app::mutation_identity().unwrap(),
+                            replay
+                        )
+                        .await
+                        .unwrap()
+                        .output,
+                    StageOutcome::AwaitingCopies
+                );
+            }
+            if first {
+                assert_eq!(
+                    target_cell
+                        .client
+                        .command::<Prepare>(
+                            target_cell.target,
+                            app::mutation_identity().unwrap(),
+                            PrepareInput {
+                                request,
+                                source: observed,
+                                actor: actor.clone(),
+                                commitment: [0; 32],
+                                ownership_epoch: 1,
+                            },
+                        )
+                        .await
+                        .unwrap()
+                        .output,
+                    PrepareOutcome::Incomplete
+                );
+            }
+            for upload in input.frame.records.uploads() {
+                let (data, _) = source
+                    .store
+                    .get_with_etag_bounded(&object_path(&source, upload.id), upload.size)
+                    .await
+                    .unwrap();
+                assert_eq!(data.len() as u64, upload.size);
+                assert_eq!(format!("{:x}", Sha256::digest(&data)), upload.digest);
+                let created = target
+                    .store
+                    .put_if_absent_verified(&object_path(&target, moved_id), data)
+                    .await
+                    .unwrap();
+                assert_eq!(created, first);
+                input.copied.insert(moved_id, upload.digest.clone());
+            }
+            let progress = target_cell
+                .client
+                .command::<Stage>(target_cell.target, app::mutation_identity().unwrap(), input)
+                .await
+                .unwrap()
+                .output;
+            let StageOutcome::Saved { progress } = progress else {
+                panic!("{progress:?}");
+            };
+            let Some(cursor) = progress.next else {
+                break PrepareInput {
+                    request,
+                    source: observed,
+                    actor: actor.clone(),
+                    commitment: progress.commitment,
+                    ownership_epoch: 1,
+                };
+            };
+            first = false;
+            capture = CaptureInput::Continue {
+                source: observed,
+                cursor,
             };
         };
-        first = false;
-        capture = CaptureInput::Continue {
-            source: observed,
-            cursor,
+        assert_eq!(
+            download(&h, &alice, &new).await.status(),
+            StatusCode::NOT_FOUND
+        );
+        let reserved = target_cell
+            .client
+            .command::<Prepare>(
+                target_cell.target,
+                app::mutation_identity().unwrap(),
+                prepared,
+            )
+            .await
+            .unwrap()
+            .output;
+        let PrepareOutcome::Reserved { reservation } = reserved else {
+            panic!("{reserved:?}");
         };
+        assert!(
+            target_cell
+                .client
+                .query::<HasReservations>(target_cell.target, None, ())
+                .await
+                .unwrap()
+                .output
+        );
+        reservation
     };
+
+    let abandoned = reserve(Uuid::now_v7()).await;
+    let abandoned_blob = object_path(&target, transferred_id(abandoned.request, id));
     assert_eq!(
-        download(&h, &alice, &new).await.status(),
-        StatusCode::NOT_FOUND
+        target
+            .store
+            .get_with_etag_bounded(&abandoned_blob, bytes.len() as u64)
+            .await
+            .unwrap()
+            .0
+            .as_ref(),
+        bytes
     );
-    let reserved = target_cell
-        .client
-        .command::<Prepare>(
-            target_cell.target,
-            app::mutation_identity().unwrap(),
-            prepared,
-        )
-        .await
-        .unwrap()
-        .output;
-    let PrepareOutcome::Reserved { reservation } = reserved else {
-        panic!("{reserved:?}");
-    };
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            collect_repository(&h.server, &target).await.unwrap();
+            match target
+                .store
+                .get_with_etag_bounded(&abandoned_blob, bytes.len() as u64)
+                .await
+            {
+                Err(crab_storage::StorageError::NotFound { .. }) => break,
+                result => assert!(result.is_ok(), "{result:?}"),
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .expect("the abandoned transfer should free its copied attachment");
     assert!(
-        target_cell
+        !target_cell
             .client
             .query::<HasReservations>(target_cell.target, None, ())
             .await
             .unwrap()
             .output
     );
+    assert_eq!(
+        origin_cell
+            .client
+            .command::<Retire>(
+                origin_cell.target,
+                app::mutation_identity().unwrap(),
+                abandoned.clone(),
+            )
+            .await
+            .unwrap()
+            .output,
+        RetireOutcome::Expired
+    );
+    assert_eq!(
+        target_cell
+            .client
+            .command::<Prepare>(
+                target_cell.target,
+                app::mutation_identity().unwrap(),
+                PrepareInput {
+                    request: abandoned.request,
+                    source: abandoned.source,
+                    actor: abandoned.actor,
+                    commitment: abandoned.commitment,
+                    ownership_epoch: abandoned.ownership_epoch,
+                },
+            )
+            .await
+            .unwrap()
+            .output,
+        PrepareOutcome::Expired
+    );
+    assert_eq!(
+        download(&h, &alice, old)
+            .await
+            .bytes()
+            .await
+            .unwrap()
+            .as_ref(),
+        bytes
+    );
+
+    let reservation = reserve(Uuid::now_v7()).await;
+    let moved_id = transferred_id(reservation.request, id);
+    let new = format!("/api/discussion-attachments/{}/{moved_id}", target.id);
     let retired = origin_cell
         .client
         .command::<Retire>(
