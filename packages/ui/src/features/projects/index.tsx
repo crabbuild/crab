@@ -46,6 +46,7 @@ import { ProjectTable, ProjectRoadmap } from "./views";
 import { useProjectCommands } from "./commands";
 import { ProjectHistory } from "./history";
 import { ProjectViewTabs } from "./view-tabs";
+import { ProjectLibrary as OrganizationProjectLibrary } from "./workspace/library";
 import { DraftRecovery } from "./drafts";
 import { checkpointDraft, itemDraft, readDraft } from "./draft-storage";
 import {
@@ -67,10 +68,46 @@ export default function Projects({
   url: URL;
   project?: string;
 }) {
-  return project ? (
-    <ProjectDetail key={project} repo={repo} url={url} id={project} />
-  ) : (
-    <ProjectLibrary repo={repo} url={url} />
+  if (project)
+    return <ProjectDetail key={project} repo={repo} url={url} id={project} />;
+  const organization = repo.organization_id;
+  const linked =
+    organization && url.searchParams.get("collection") === "linked";
+  return (
+    <section className="projects-page">
+      {organization && (
+        <nav
+          aria-label="Project collections"
+          className="mb-5 flex flex-wrap gap-2"
+        >
+          <Button asChild variant={linked ? "ghost" : "secondary"}>
+            <Link
+              href={projectHref(repo)}
+              aria-current={linked ? undefined : "page"}
+            >
+              Repository projects
+            </Link>
+          </Button>
+          <Button asChild variant={linked ? "secondary" : "ghost"}>
+            <Link
+              href={`${projectHref(repo)}?collection=linked`}
+              aria-current={linked ? "page" : undefined}
+            >
+              Linked projects
+            </Link>
+          </Button>
+        </nav>
+      )}
+      {linked ? (
+        <OrganizationProjectLibrary
+          organization={organization}
+          url={url}
+          scope={{ target: { repository: repo.id }, canLink: true }}
+        />
+      ) : (
+        <ProjectLibrary repo={repo} url={url} />
+      )}
+    </section>
   );
 }
 function ProjectLibrary({ repo, url }: { repo: Repository; url: URL }) {
@@ -89,7 +126,7 @@ function ProjectLibrary({ repo, url }: { repo: Repository; url: URL }) {
     }
   }, [commands.generation, resource.retry]);
   return (
-    <section className="projects-page">
+    <>
       <header className="project-page-header">
         <div>
           <h1>Projects</h1>
@@ -186,7 +223,7 @@ function ProjectLibrary({ repo, url }: { repo: Repository; url: URL }) {
           )
         }
       </Result>
-    </section>
+    </>
   );
 }
 function ProjectDetail({

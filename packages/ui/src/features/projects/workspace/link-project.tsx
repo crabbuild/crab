@@ -13,16 +13,18 @@ import { Result } from "@/components/request/result";
 import { useRequest } from "@/lib/api";
 import { CommandError, useProjectCommands } from "../commands";
 import { projectEndpoint } from "../model";
-import type { WorkspaceListing } from "./model";
+import type { ProjectAssociation, WorkspaceListing } from "./model";
 
-export function LinkTeamProject({
+export function LinkProject({
   organization,
-  team,
+  target,
   onClose,
+  onLinked,
 }: {
   organization: string;
-  team: string;
+  target: ProjectAssociation;
   onClose: () => void;
+  onLinked: () => void;
 }) {
   const commands = useProjectCommands();
   const [input, setInput] = useState("");
@@ -32,7 +34,7 @@ export function LinkTeamProject({
     search
       ? projectEndpoint({ organization }, "", {
           search,
-          team,
+          ...target,
           linkable: "true",
         })
       : null,
@@ -43,8 +45,9 @@ export function LinkTeamProject({
         <DialogHeader>
           <DialogTitle>Link a project</DialogTitle>
           <DialogDescription>
-            Linking grants the team Read access. Members keep any higher access
-            they already have.
+            {"team" in target
+              ? "Linking grants the team Read access. Members keep any higher access they already have."
+              : "People with access to both the repository and the Project can find it here."}
           </DialogDescription>
         </DialogHeader>
         <CommandError />
@@ -85,13 +88,17 @@ export function LinkTeamProject({
                     const result = await commands.submitOrganization(
                       organization,
                       {
-                        kind: "link_team",
+                        ...("team" in target
+                          ? { kind: "link_team", team: target.team }
+                          : {
+                              kind: "link_repository",
+                              repository: target.repository,
+                            }),
                         project: project.id,
                         version: project.version,
-                        team,
                       },
                     );
-                    if (result?.outcome === "applied") onClose();
+                    if (result?.outcome === "applied") onLinked();
                     if (result?.outcome === "rejected") {
                       setSelection("");
                       projects.retry();

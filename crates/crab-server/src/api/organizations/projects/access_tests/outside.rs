@@ -67,7 +67,7 @@ impl Fixture {
     }
 }
 
-async fn create_repository(h: &Harness, root: &str, alice: &str, name: &str) -> Value {
+pub(super) async fn create_repository(h: &Harness, root: &str, alice: &str, name: &str) -> Value {
     h.write(
         Method::POST,
         &format!("{root}/repositories/creation"),
@@ -82,7 +82,7 @@ async fn create_repository(h: &Harness, root: &str, alice: &str, name: &str) -> 
     .unwrap()
 }
 
-fn repository_path(repository: &Value) -> String {
+pub(super) fn repository_path(repository: &Value) -> String {
     format!(
         "/api/repos/{}/{}",
         repository["owner"].as_str().unwrap(),
@@ -90,7 +90,7 @@ fn repository_path(repository: &Value) -> String {
     )
 }
 
-async fn repository_write(
+pub(super) async fn repository_write(
     h: &Harness,
     alice: &str,
     repository: &Value,

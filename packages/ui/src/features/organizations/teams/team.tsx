@@ -199,7 +199,7 @@ export function TeamDetail({
               <ProjectLibrary
                 organization={organization}
                 url={url}
-                team={{ id: team, canManage: view.can_manage }}
+                scope={{ target: { team }, canLink: view.can_manage }}
               />
             ) : members ? (
               <TeamMembers

@@ -33,6 +33,7 @@ export interface WorkspaceListing {
   revision: number;
   can_create: boolean;
 }
+export type ProjectAssociation = { team: string } | { repository: string };
 export interface Detail {
   project: WorkspaceProject;
   can_manage: boolean;
@@ -91,6 +92,12 @@ export type WorkspaceCommand =
       project: string;
       version: number;
       team: string;
+    }
+  | {
+      kind: "link_repository";
+      project: string;
+      version: number;
+      repository: string;
     }
   | {
       kind: "set_default_access";

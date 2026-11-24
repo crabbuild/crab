@@ -3,6 +3,7 @@ use crate::test_support::http::{Harness, organizations::bootstrap};
 use reqwest::{Method, StatusCode};
 
 mod outside;
+mod repository_projects;
 mod team_projects;
 
 async fn join(h: &Harness, root: &str, alice: &str, bob: &str, member: Uuid, version: u64) {

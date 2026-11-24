@@ -3075,6 +3075,21 @@ the caller can administer. Submit `link_team` to the standard Project command
 endpoint with `project`, `version`, and `team`. Current team and Project roles
 are checked in the same native transaction as the grant and its receipt.
 
+In an organization-owned repository, open **Projects** → **Linked projects**
+to search active and archived shared Projects owned by that organization.
+The list requires current Read access to both the repository and the Project.
+On the **Active** tab, choose **Link a project** to list an active Project you
+can edit. The same link appears in the Project's **Repositories** panel and lets Project editors
+add issues and pull requests from the repository according to source access.
+Use that panel to remove the link.
+
+`GET /api/organizations/{id}/projects?repository={repository}` scopes the
+collection to links for the repository UUID. Add `linkable=true` to search
+unlinked active Projects you can edit. Submit `link_repository` with
+`project`, `version`, and `repository` to the organization Project command
+endpoint. Publication rechecks access and ownership under the organization
+policy lease.
+
 With source repository triage access, drag an issue to another type group in
 a table or board, or use the **Change issue type** control in any layout.
 Moving to **No type** clears the assignment. The item retains its Project

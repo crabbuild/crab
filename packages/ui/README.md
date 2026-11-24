@@ -426,6 +426,10 @@ current Project revision and the standard submission journal to grant team
 Read access. Organization owners and team maintainers with Project Admin
 access can use the picker.
 
+Organization-owned repositories show a **Linked projects** collection in
+**Projects**. It lists shared Projects the viewer can read. Project editors
+can search for and link an active Project from the same organization.
+
 When a linked issue moves, its row opens the current issue while planning edits
 retain the stored project item and its history. A reader needs access to the
 repositories along the transfer path to see the work. Filter by repository

@@ -183,6 +183,7 @@ struct Collection {
     after: Option<Uuid>,
     revision: Option<u64>,
     team: Option<Uuid>,
+    repository: Option<Uuid>,
     linkable: bool,
 }
 fn public_project(project: &projects::Project) -> Value {
@@ -197,6 +198,9 @@ async fn list(
     Query(input): Query<Collection>,
 ) -> Result<Json<Value>> {
     let actor = authority::caller(&server, &principal, id).await?;
+    if let Some(repository) = input.repository {
+        discoverable_repository(&server, &principal, id, repository).await?;
+    }
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     let page = cells
         .query::<projects::List>(
@@ -209,12 +213,16 @@ async fn list(
                 after: input.after,
                 revision: input.revision,
                 team: input.team,
+                repository: input.repository,
                 linkable: input.linkable,
             },
         )
         .await
         .map_err(read_error)?
         .output;
+    if let Some(repository) = input.repository {
+        discoverable_repository(&server, &principal, id, repository).await?;
+    }
     app::account(&principal)?;
     if actor.guest()
         && !authority::viewer(&server, &principal, id, actor.id())
@@ -263,6 +271,39 @@ async fn accessible(
         Err(Error::NotFound) => Ok(None),
         Err(error) => Err(error),
     }
+}
+async fn discoverable_repository(
+    server: &Server,
+    principal: &Principal,
+    organization: Uuid,
+    repository: Uuid,
+) -> Result<()> {
+    let repo = server
+        .repositories
+        .by_id(repository)
+        .filter(|repo| repo.organization == Some(organization))
+        .ok_or(Error::NotFound)?;
+    let current = if principal.is_local() {
+        // Local operators bypass repository grant lookup, but a discovery
+        // link still needs the current Catalog identity and ownership epoch.
+        let snapshot = server
+            .catalog()
+            .ok_or(Error::NotFound)?
+            .membership(&repo.config.owner, &repo.config.name)
+            .await
+            .map_err(app::repository_access_error)?;
+        if snapshot.name != repo.config.name {
+            return Err(Error::NotFound);
+        }
+        app::membership_snapshot(server, principal, &repo, snapshot).await?
+    } else {
+        app::membership(server, principal, &repo).await?
+    };
+    current
+        .principal
+        .can_read(repository)
+        .then_some(())
+        .ok_or(Error::NotFound)
 }
 fn repository(repo: &Repository) -> Value {
     json!({"id":repo.id,"owner":repo.config.owner,"name":repo.config.name})
@@ -595,6 +636,7 @@ async fn submit(
                         target: projects::AccessTarget::Outside { .. },
                         ..
                     }
+                    | Command::LinkRepository { .. }
             ))
     {
         // Direct grants and repository transfers can invalidate guest evidence.
@@ -690,6 +732,15 @@ async fn submit_change(
                 accessible(server, principal, *repository).await?.is_some(),
                 None,
             ),
+            Command::LinkRepository { repository, .. } => {
+                let allowed =
+                    match discoverable_repository(server, principal, id, *repository).await {
+                        Ok(()) => true,
+                        Err(Error::NotFound) => false,
+                        Err(error) => return Err(error),
+                    };
+                (allowed, None)
+            }
             Command::BulkFields { project, items } => (
                 bulk_sources_allowed(server, principal, id, actor, *project, items).await?,
                 None,

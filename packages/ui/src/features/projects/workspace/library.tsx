@@ -30,22 +30,23 @@ import { useProjectCommands } from "../commands";
 import { projectEndpoint } from "../model";
 import { NewProject } from "./forms";
 import { DraftRecovery } from "../drafts";
-import { LinkTeamProject } from "./link-team";
+import { LinkProject } from "./link-project";
 import {
   statuses,
   health,
   workspaceHref,
+  type ProjectAssociation,
   type WorkspaceListing,
 } from "./model";
 
 export function ProjectLibrary({
   organization,
   url,
-  team,
+  scope,
 }: {
   organization: string;
   url: URL;
-  team?: { id: string; canManage: boolean };
+  scope?: { target: ProjectAssociation; canLink: boolean };
 }) {
   const [creating, setCreating] = useState(false);
   const [linking, setLinking] = useState(false);
@@ -60,7 +61,7 @@ export function ProjectLibrary({
       search: query,
       after,
       revision,
-      team: team?.id,
+      ...scope?.target,
     }),
   );
   const commands = useProjectCommands();
@@ -84,8 +85,12 @@ export function ProjectLibrary({
     <section className="workspace-project-library">
       <header className="workspace-project-header">
         <div>
-          {team ? (
-            <h3 className="text-lg font-semibold">Team projects</h3>
+          {scope ? (
+            "team" in scope.target ? (
+              <h3 className="text-lg font-semibold">Team projects</h3>
+            ) : (
+              <h1>Linked projects</h1>
+            )
           ) : (
             <>
               <h1>Projects</h1>
@@ -93,20 +98,20 @@ export function ProjectLibrary({
             </>
           )}
         </div>
-        {team?.canManage && (
+        {scope?.canLink && !archived && (
           <Button onClick={() => setLinking(true)} disabled={commands.locked}>
             <PlusIcon data-icon="inline-start" />
             Link a project
           </Button>
         )}
-        {!team && resource.data?.can_create && (
+        {!scope && resource.data?.can_create && (
           <Button onClick={() => setCreating(true)} disabled={commands.locked}>
             <PlusIcon data-icon="inline-start" />
             New project
           </Button>
         )}
       </header>
-      {!team && (
+      {!scope && (
         <DraftRecovery
           scope={{ target: { organization }, project: null }}
           disabled={!resource.data?.can_create}
@@ -249,11 +254,11 @@ export function ProjectLibrary({
                     ? "No archived projects"
                     : query
                       ? "No matching projects"
-                      : team
+                      : scope
                         ? "No linked projects"
                         : "Plan your next project"}
                 </EmptyTitle>
-                {(query || !team) && (
+                {(query || !scope) && (
                   <EmptyDescription>
                     {query
                       ? "Try another project name."
@@ -271,11 +276,16 @@ export function ProjectLibrary({
           onClose={() => setCreating(false)}
         />
       )}
-      {team && linking && (
-        <LinkTeamProject
+      {scope && linking && (
+        <LinkProject
           organization={organization}
-          team={team.id}
+          target={scope.target}
           onClose={() => setLinking(false)}
+          onLinked={() => {
+            setLinking(false);
+            setSearch("");
+            setQuery("");
+          }}
         />
       )}
     </section>

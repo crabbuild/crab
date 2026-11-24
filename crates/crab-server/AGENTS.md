@@ -557,6 +557,9 @@ organization policy lease used by repository access updates and transfers.
 the exact set of inheriting Projects.
 Team Project listings and linking use the same Project policy and call the
 team owner for visibility and current maintainer authority.
+Repository Project discovery uses the existing link relation and rechecks
+current repository access and ownership. Linking from a repository shares the
+organization policy lease with ownership and repository grant changes.
 Project access cannot authorize a linked repository. Both project scopes share
 canonical source metadata in `cells/repository/projects/reads.rs`; never copy
 source titles/states into organization records or treat project access as a

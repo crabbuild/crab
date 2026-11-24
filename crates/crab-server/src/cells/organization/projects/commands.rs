@@ -38,6 +38,11 @@ pub(crate) enum Command {
         version: u64,
         team: Uuid,
     },
+    LinkRepository {
+        project: Uuid,
+        version: u64,
+        repository: Uuid,
+    },
     SetDefaultAccess {
         version: u64,
         role: AccessRole,
@@ -85,6 +90,7 @@ impl Command {
             | Self::ReorderViews { project, .. }
             | Self::SetAccess { project, .. }
             | Self::LinkTeam { project, .. }
+            | Self::LinkRepository { project, .. }
             | Self::Planning { project, .. }
             | Self::Repository { project, .. }
             | Self::Item { project, .. }
@@ -101,6 +107,7 @@ impl Command {
             | Self::ReorderViews { version, .. }
             | Self::SetAccess { version, .. }
             | Self::LinkTeam { version, .. }
+            | Self::LinkRepository { version, .. }
             | Self::SetDefaultAccess { version, .. }
             | Self::Planning { version, .. }
             | Self::Repository { version, .. }
@@ -448,19 +455,26 @@ fn apply_command(
             after = Some(serde_json::to_value(properties)?);
             project.properties = properties.clone();
         }
-        Command::Repository {
-            repository, linked, ..
-        } => {
+        Command::Repository { repository, .. } | Command::LinkRepository { repository, .. } => {
             if repository.is_nil() || !input.source_allowed {
                 return Ok(rejected(
                     "Repository access is required to change this link",
                 ));
             }
+            let linked = !matches!(command, Command::Repository { linked: false, .. });
             let linked_repositories = repositories(context, project_id)?;
+            if matches!(command, Command::LinkRepository { .. })
+                && linked_repositories.contains(repository)
+            {
+                return Ok(MutationResult::Success(Outcome::Applied {
+                    project: Some(project_id),
+                    version: project.version,
+                }));
+            }
             event_target = ledger::Target::Repository { id: *repository };
             before = Some(serde_json::json!({"linked":linked_repositories.contains(repository)}));
             after = Some(serde_json::json!({"linked":linked}));
-            if *linked {
+            if linked {
                 if !linked_repositories.contains(repository)
                     && linked_repositories.len() >= MAX_REPOSITORIES
                 {
