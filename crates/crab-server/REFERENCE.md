@@ -4971,7 +4971,7 @@ url = "https://audit.example.test/events"
 ```
 
 A repository administrator opens **Settings → Webhooks**, selects a destination,
-chooses **Git pushes** and/or **Pull requests**, and copies the signing secret
+chooses events, and copies the signing secret
 to that receiver. Each endpoint has its own subscriptions, secret, and
 delivery history. Saving creates a new secret for that endpoint and cancels
 its outstanding deliveries. Removing an approved endpoint stops delivery to
@@ -4984,8 +4984,8 @@ with reads and mutations. A mutation can omit the selector when the repository
 has exactly one approved receiver.
 
 Crab POSTs a JSON object with `repository` (the stable UUID), `delivery` (the
-delivery UUID), `occurred_at_ms`, and `data`. `X-Crab-Event` is `push` or
-`pull_request`. `X-Crab-Delivery` is the delivery UUID. Verify the raw bytes
+delivery UUID), `occurred_at_ms`, and `data`. `X-Crab-Event` is `push`,
+`pull_request`, `issues`, or `issue_comment`. `X-Crab-Delivery` is the delivery UUID. Verify the raw bytes
 with the configured secret and `X-Hub-Signature-256` (`sha256=` plus the
 hex-encoded HMAC-SHA256), then deduplicate by delivery UUID before processing.
 [Webhook signature guidance](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries)
@@ -5006,6 +5006,20 @@ hex-encoded HMAC-SHA256), then deduplicate by delivery UUID before processing.
   check. A recreated branch has a null `before`. The `base_sha` describes
   the PR's recorded comparison. A browser head-branch switch emits the
   recorded new comparison without `head_change`.
+- `issues` contains `data.action`, `number`, `title`, `state`, `state_reason`,
+  and `version`. Actions are `opened`, `edited` for title or description
+  changes, `closed`, and `reopened`. Closures from merges and commits use the
+  same `closed` event as an interactive change.
+- `issue_comment` contains `data.action` (`created` or `edited`),
+  `subject` (`kind` of `issue` or `pull` and its `number`), `comment` (the
+  comment number), and its `version`. This covers ordinary conversation
+  comments and comments submitted with a close or reopen. Use the subject and
+  comment revision to reconcile current state through the authorized API.
+  Discussion bodies and private account identifiers are excluded from payloads.
+
+Existing subscriptions keep their event selection. The settings command
+accepts the optional booleans `issues` and `issue_comment` (both default to
+`false`). Upgrade all server replicas before enabling either new event.
 
 A branch update emits one synchronization event per subscribed receiver for
 each open PR already tracking that repository and branch when publication

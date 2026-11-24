@@ -19,17 +19,22 @@ import { endpoint, useRequest, type Repository } from "@/lib/api";
 import { short } from "@/lib/format";
 import { repoHref } from "@/lib/repository-route";
 
-type Subscription = {
-  id: string;
-  push: boolean;
-  pull_request: boolean;
-};
+const eventOptions = [
+  ["push", "Git pushes"],
+  ["pull_request", "Pull requests"],
+  ["issues", "Issues"],
+  ["issue_comment", "Issue and pull request comments"],
+] as const;
+type WebhookEvent = (typeof eventOptions)[number][0];
+type Subscription = { id: string } & Record<WebhookEvent, boolean>;
 
 type Delivery = {
   id: string;
-  event: "push" | "pull_request";
+  event: WebhookEvent;
   action: string | null;
+  issue: number | null;
   pull: number | null;
+  comment: number | null;
   head_change: { before: string | null; after: string } | null;
   queued_at: number;
   status: "queued" | "sending" | "delivered" | "failed" | "cancelled";
@@ -221,87 +226,102 @@ export function OutboundWebhooks({
               </header>
               {deliveries.length ? (
                 <ul className="divide-y">
-                  {deliveries.map((delivery) => (
-                    <li className="grid min-w-0 gap-3 p-4" key={delivery.id}>
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="grid gap-1">
-                          <strong className="text-sm capitalize">
-                            {delivery.event === "push"
-                              ? "Push"
-                              : delivery.action === "synchronize"
-                                ? "Pull request head updated"
-                                : `Pull request ${delivery.action?.replaceAll("_", " ") ?? ""}`}
-                          </strong>
-                          <span className="text-sm text-muted-foreground">
-                            <span className="capitalize">
-                              {delivery.status}
-                            </span>{" "}
-                            · {timeFormat.format(delivery.queued_at)}
-                          </span>
-                        </div>
-                        {selected && active && delivery.can_redeliver && (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={mutation.pending}
-                            onClick={() =>
-                              void change(selected, {
-                                kind: "redeliver",
-                                id: delivery.id,
-                                version: delivery.version,
-                              })
-                            }
-                          >
-                            Redeliver
-                          </Button>
-                        )}
-                      </div>
-                      {delivery.pull !== null && (
-                        <Link
-                          href={repoHref(repo, {
-                            view: "pulls",
-                            pull: String(delivery.pull),
+                  {deliveries.map((delivery) => {
+                    const number = delivery.pull ?? delivery.issue;
+                    const issue = delivery.pull === null;
+                    const href =
+                      number == null
+                        ? null
+                        : repoHref(repo, {
+                            view: issue ? "issues" : "pulls",
+                            issue: issue ? String(number) : undefined,
+                            pull: issue ? undefined : String(number),
                             repository_id: repo.id,
-                          })}
-                          className="w-fit text-sm underline underline-offset-2"
+                          });
+                    return (
+                      <li className="grid min-w-0 gap-3 p-4" key={delivery.id}>
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="grid gap-1">
+                            <strong className="text-sm capitalize">
+                              {delivery.event === "push"
+                                ? "Push"
+                                : delivery.action === "synchronize"
+                                  ? "Pull request head updated"
+                                  : `${delivery.event === "issues" ? "Issue" : delivery.event === "issue_comment" ? "Comment" : "Pull request"} ${delivery.action?.replaceAll("_", " ") ?? ""}`}
+                            </strong>
+                            <span className="text-sm text-muted-foreground">
+                              <span className="capitalize">
+                                {delivery.status}
+                              </span>{" "}
+                              · {timeFormat.format(delivery.queued_at)}
+                            </span>
+                          </div>
+                          {selected && active && delivery.can_redeliver && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={mutation.pending}
+                              onClick={() =>
+                                void change(selected, {
+                                  kind: "redeliver",
+                                  id: delivery.id,
+                                  version: delivery.version,
+                                })
+                              }
+                            >
+                              Redeliver
+                            </Button>
+                          )}
+                        </div>
+                        {href && (
+                          <Link
+                            href={
+                              delivery.comment == null
+                                ? href
+                                : `${href}#issuecomment-${delivery.comment}`
+                            }
+                            className="w-fit text-sm underline underline-offset-2"
+                          >
+                            {issue ? "Issue" : "Pull request"} #{number}
+                            {delivery.comment != null &&
+                              ` · Comment #${delivery.comment}`}
+                          </Link>
+                        )}
+                        {delivery.head_change && (
+                          <p className="text-sm">
+                            Head commit{" "}
+                            <code title={delivery.head_change.after}>
+                              {short(delivery.head_change.after)}
+                            </code>
+                          </p>
+                        )}
+                        <Disclosure
+                          className="text-sm"
+                          summaryClassName="w-fit cursor-pointer font-medium"
+                          summary={
+                            <>
+                              Delivery details · {delivery.attempts}{" "}
+                              {delivery.attempts === 1 ? "attempt" : "attempts"}
+                            </>
+                          }
                         >
-                          Pull request #{delivery.pull}
-                        </Link>
-                      )}
-                      {delivery.head_change && (
-                        <p className="text-sm">
-                          Head commit{" "}
-                          <code title={delivery.head_change.after}>
-                            {short(delivery.head_change.after)}
-                          </code>
-                        </p>
-                      )}
-                      <Disclosure
-                        className="text-sm"
-                        summaryClassName="w-fit cursor-pointer font-medium"
-                        summary={
-                          <>
-                            Delivery details · {delivery.attempts}{" "}
-                            {delivery.attempts === 1 ? "attempt" : "attempts"}
-                          </>
-                        }
-                      >
-                        <p className="mt-2 wrap-anywhere font-mono text-xs">
-                          {delivery.id}
-                        </p>
-                        <ul className="mt-2 grid gap-1 text-xs text-muted-foreground">
-                          {delivery.recent_attempts.map((attempt, index) => (
-                            <li key={`${attempt.at}-${index}`}>
-                              {timeFormat.format(attempt.at)} ·{" "}
-                              {attempt.http_status === null
-                                ? "No HTTP response"
-                                : `HTTP ${attempt.http_status}`}
-                            </li>
-                          ))}
-                        </ul>
-                      </Disclosure>
-                    </li>
-                  ))}
+                          <p className="mt-2 wrap-anywhere font-mono text-xs">
+                            {delivery.id}
+                          </p>
+                          <ul className="mt-2 grid gap-1 text-xs text-muted-foreground">
+                            {delivery.recent_attempts.map((attempt, index) => (
+                              <li key={`${attempt.at}-${index}`}>
+                                {timeFormat.format(attempt.at)} ·{" "}
+                                {attempt.http_status === null
+                                  ? "No HTTP response"
+                                  : `HTTP ${attempt.http_status}`}
+                              </li>
+                            ))}
+                          </ul>
+                        </Disclosure>
+                      </li>
+                    );
+                  })}
                 </ul>
               ) : (
                 <p className="p-4 text-sm text-muted-foreground">
@@ -326,15 +346,18 @@ function EventsForm({
   change: (payload: object) => Promise<void>;
 }) {
   const requestId = useSubmission();
-  const [push, setPush] = useState(subscription?.push ?? true);
-  const [pull, setPull] = useState(subscription?.pull_request ?? true);
+  const [events, setEvents] = useState({
+    push: subscription?.push ?? true,
+    pull_request: subscription?.pull_request ?? true,
+    issues: subscription?.issues ?? false,
+    issue_comment: subscription?.issue_comment ?? false,
+  });
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const intent = {
       kind: "configure",
       expected: subscription?.id ?? null,
-      push,
-      pull_request: pull,
+      ...events,
     };
     void change({ ...intent, id: requestId(intent) });
   }
@@ -342,25 +365,27 @@ function EventsForm({
     <form className="grid gap-4 p-4" onSubmit={submit}>
       <FieldSet className="gap-3">
         <FieldLegend variant="label">Events</FieldLegend>
-        <div className="grid gap-1">
-          <label className="flex items-center gap-2 text-sm">
-            <Checkbox
-              checked={push}
-              onCheckedChange={(checked) => setPush(checked === true)}
-            />{" "}
-            Git pushes
-          </label>
-          <FieldDescription className="ps-5">
-            Includes branch and tag changes made in Crab.
-          </FieldDescription>
-        </div>
-        <label className="flex items-center gap-2 text-sm">
-          <Checkbox
-            checked={pull}
-            onCheckedChange={(checked) => setPull(checked === true)}
-          />{" "}
-          Pull requests
-        </label>
+        {eventOptions.map(([event, label]) => (
+          <div key={event} className="grid gap-1">
+            <label className="flex items-center gap-2 text-sm">
+              <Checkbox
+                checked={events[event]}
+                onCheckedChange={(checked) =>
+                  setEvents((previous) => ({
+                    ...previous,
+                    [event]: checked === true,
+                  }))
+                }
+              />{" "}
+              {label}
+            </label>
+            {event === "push" && (
+              <FieldDescription className="ps-5">
+                Includes branch and tag changes made in Crab.
+              </FieldDescription>
+            )}
+          </div>
+        ))}
       </FieldSet>
       {subscription && (
         <p className="text-sm text-muted-foreground">
@@ -371,7 +396,7 @@ function EventsForm({
       <Button
         className="w-fit"
         type="submit"
-        disabled={pending || (!push && !pull)}
+        disabled={pending || !Object.values(events).some(Boolean)}
       >
         {subscription ? "Save with new secret" : "Enable webhook"}
       </Button>

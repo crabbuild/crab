@@ -1,4 +1,9 @@
-use super::{collaboration::next_version, pulls::PullRecord, *};
+use super::{
+    collaboration::{Subject, next_version, state::State},
+    issues::lifecycle::Reason,
+    pulls::PullRecord,
+    *,
+};
 use crate::config::MAX_OUTBOUND_WEBHOOKS;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -19,6 +24,10 @@ pub(crate) struct Subscription {
     pub destination: String,
     pub push: bool,
     pub pull_request: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub issues: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub issue_comment: bool,
 }
 
 fn subscriptions(context: &Transaction<'_>) -> crate::cells::Result<Vec<(String, Subscription)>> {
@@ -49,6 +58,22 @@ pub(crate) enum PullAction {
     Synchronize,
 }
 
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum IssueAction {
+    Opened,
+    Edited,
+    Closed,
+    Reopened,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CommentAction {
+    Created,
+    Edited,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub(crate) enum Event {
@@ -70,6 +95,40 @@ pub(crate) enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         head_change: Option<HeadChange>,
     },
+    Issues {
+        action: IssueAction,
+        number: u64,
+        title: String,
+        state: State,
+        state_reason: Option<Reason>,
+        version: u64,
+    },
+    IssueComment {
+        action: CommentAction,
+        subject: Subject,
+        comment: u64,
+        version: u64,
+    },
+}
+
+impl Event {
+    pub(crate) const fn name(&self) -> &'static str {
+        match self {
+            Self::Push { .. } => "push",
+            Self::PullRequest { .. } => "pull_request",
+            Self::Issues { .. } => "issues",
+            Self::IssueComment { .. } => "issue_comment",
+        }
+    }
+
+    fn enabled(&self, hook: &Subscription) -> bool {
+        match self {
+            Self::Push { .. } => hook.push,
+            Self::PullRequest { .. } => hook.pull_request,
+            Self::Issues { .. } => hook.issues,
+            Self::IssueComment { .. } => hook.issue_comment,
+        }
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -168,11 +227,56 @@ pub(super) fn pull(
     if matches!(action, PullAction::Reopened | PullAction::Synchronize) {
         sync::route_changed(context, record.number)?;
     }
+    enqueue_event(context, pull_event(record, action, None))
+}
+
+pub(super) fn issue(
+    context: &Transaction<'_>,
+    issue: &IssueRecord,
+    action: IssueAction,
+    reason: Option<Reason>,
+) -> crate::cells::Result<()> {
+    enqueue_event(
+        context,
+        Event::Issues {
+            action,
+            number: issue.number,
+            title: issue.title.clone(),
+            state: if issue.state == 0 {
+                State::Open
+            } else {
+                State::Closed
+            },
+            state_reason: reason,
+            version: issue.version,
+        },
+    )
+}
+
+pub(super) fn comment(
+    context: &Transaction<'_>,
+    subject: Subject,
+    comment: u64,
+    version: u64,
+    action: CommentAction,
+) -> crate::cells::Result<()> {
+    enqueue_event(
+        context,
+        Event::IssueComment {
+            action,
+            subject,
+            comment,
+            version,
+        },
+    )
+}
+
+fn enqueue_event(context: &Transaction<'_>, event: Event) -> crate::cells::Result<()> {
     for (_, hook) in subscriptions(context)?
         .into_iter()
-        .filter(|(_, hook)| hook.pull_request)
+        .filter(|(_, hook)| event.enabled(hook))
     {
-        enqueue(context, hook, pull_event(record, action, None))?;
+        enqueue(context, hook, event.clone())?;
     }
     Ok(())
 }
@@ -271,7 +375,7 @@ impl Mutation for Configure {
                 || next.id.is_nil()
                 || active.iter().any(|(_, hook)| hook.id == next.id)
                 || (current.is_none() && active.len() >= MAX_OUTBOUND_WEBHOOKS)
-                || !(next.push || next.pull_request)
+                || !(next.push || next.pull_request || next.issues || next.issue_comment)
                 || next.destination != input.destination
                 || next.destination.len() != 64
                 || blake3::Hash::from_hex(&next.destination).is_err()

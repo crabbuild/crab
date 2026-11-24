@@ -129,8 +129,8 @@ approved destination before signing and sending. Public Git ref writes from HTTP
 reserve before publication and recover through the immutable plan receipt.
 `webhooks/sync.rs` expands committed branch updates into signed PR deliveries
 using bounded open-pull pages. A private fork reserves this work in its upstream
-Cell. Page advancement and delivery records commit together. PR mutations queue
-lifecycle events in their Cell transaction.
+Cell. Page advancement and delivery records commit together. PR, issue lifecycle,
+and top-level comment mutations queue events in their own Cell transaction.
 Private `cells prepare-review-state` installs the empty feature relation on
 existing repositories, without rewriting reviews or receipts. `reviews/pending.rs`
 owns private drafts and atomic review publication through the existing review

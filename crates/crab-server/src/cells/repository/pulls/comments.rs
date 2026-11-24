@@ -1,6 +1,6 @@
 use super::*;
 use crate::cells::repository::collaboration::{
-    Target,
+    Subject, SubjectKind, Target,
     activity::{self, Action},
     locks,
 };
@@ -112,6 +112,16 @@ pub(in crate::cells::repository) fn append_comment(
     if can_mark_duplicate {
         crate::cells::repository::collaboration::duplicates::from_comment(context, &source, body)?;
     }
+    webhooks::comment(
+        context,
+        Subject {
+            kind: SubjectKind::Pull,
+            number: record.pull,
+        },
+        record.number,
+        record.version,
+        webhooks::CommentAction::Created,
+    )?;
     Ok(record)
 }
 
@@ -173,6 +183,16 @@ impl Mutation for UpdatePullComment {
                 &source,
                 Some(&previous_comment),
                 &record.body,
+            )?;
+            webhooks::comment(
+                context,
+                Subject {
+                    kind: SubjectKind::Pull,
+                    number: record.pull,
+                },
+                record.number,
+                record.version,
+                webhooks::CommentAction::Edited,
             )?;
         }
         Ok(MutationResult::Success(UpdatePullCommentOutcome::Updated(

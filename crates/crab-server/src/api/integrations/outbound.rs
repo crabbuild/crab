@@ -4,7 +4,13 @@ use axum::extract::Query;
 use serde::Deserialize;
 
 use super::*;
-use crate::{cells::repository::webhooks as hooks, server::webhooks};
+use crate::{
+    cells::repository::{
+        collaboration::{Subject, SubjectKind},
+        webhooks as hooks,
+    },
+    server::webhooks,
+};
 
 pub(super) fn routes() -> Router<Arc<Server>> {
     Router::new().route(
@@ -78,21 +84,34 @@ async fn settings(
         .filter(|delivery| Some(&delivery.subscription.destination) == selected.as_ref())
         .map(|delivery| {
         use hooks::Event;
-        let (event, action, pull, head_change) = match delivery.event {
-            Event::Push { .. } => ("push", None, None, None),
+        let event = delivery.event.name();
+        let (action, subject, comment, head_change) = match delivery.event {
+            Event::Push { .. } => (Value::Null, None, None, None),
             Event::PullRequest { action, number, head_change, .. } => {
-                ("pull_request", Some(action), Some(number), head_change)
+                (json!(action), Some(Subject {kind: SubjectKind::Pull, number}), None, head_change)
             }
+            Event::Issues { action, number, .. } => (
+                json!(action), Some(Subject {kind: SubjectKind::Issue, number}), None, None,
+            ),
+            Event::IssueComment { action, subject, comment, .. } => (
+                json!(action), Some(subject), Some(comment), None,
+            ),
         };
+        let issue = subject.filter(|value| value.kind == SubjectKind::Issue).map(|value| value.number);
+        let pull = subject.filter(|value| value.kind == SubjectKind::Pull).map(|value| value.number);
         json!({
-            "id":delivery.id,"event":event,"action":action,"pull":pull,"head_change":head_change,"queued_at":delivery.queued_at,
+            "id":delivery.id,"event":event,"action":action,"issue":issue,"pull":pull,"comment":comment,"head_change":head_change,"queued_at":delivery.queued_at,
             "status":delivery.status,"attempts":delivery.attempts,"http_status":delivery.http_status,
             "version":delivery.version,"recent_attempts":delivery.recent_attempts,
             "can_redeliver":active && current == Some(&delivery.subscription) && matches!(delivery.status, hooks::Status::Failed | hooks::Status::Delivered),
         })
     }).collect::<Vec<_>>();
-    let subscription =
-        current.map(|hook| json!({"id":hook.id,"push":hook.push,"pull_request":hook.pull_request}));
+    let subscription = current.map(|hook| {
+        json!({
+            "id":hook.id,"push":hook.push,"pull_request":hook.pull_request,
+            "issues":hook.issues,"issue_comment":hook.issue_comment,
+        })
+    });
     let receivers: Vec<_> = receivers
         .into_iter()
         .map(|(id, url)| json!({"id":id,"url":url}))
@@ -110,6 +129,10 @@ enum Change {
         id: Uuid,
         push: bool,
         pull_request: bool,
+        #[serde(default)]
+        issues: bool,
+        #[serde(default)]
+        issue_comment: bool,
     },
     Disable {
         expected: Uuid,
@@ -178,11 +201,13 @@ async fn change(
             id,
             push,
             pull_request,
+            issues,
+            issue_comment,
         } => {
             if !approved.is_some_and(|map| map.contains_key(&destination)) {
                 return Err(Error::NotFound);
             }
-            if !(push || pull_request) || id.is_nil() {
+            if !(push || pull_request || issues || issue_comment) || id.is_nil() {
                 return Err(Error::Invalid("Choose at least one webhook event"));
             }
             let secret = webhooks::secret(&server, repo.id, id).ok_or(Error::NotFound)?;
@@ -193,6 +218,8 @@ async fn change(
                     destination: destination.clone(),
                     push,
                     pull_request,
+                    issues,
+                    issue_comment,
                 }),
                 Some(secret),
             )
