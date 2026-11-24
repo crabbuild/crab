@@ -359,4 +359,83 @@ pub(super) async fn exercise(
         git(fork_work, &["ls-remote", "origin", "refs/heads/proposal"]).await,
         format!("{head}\trefs/heads/proposal")
     );
+
+    let layer = git(upstream_work, &["rev-parse", "feature"]).await;
+    git(
+        upstream_work,
+        &[
+            "push",
+            "--atomic",
+            upstream_remote,
+            &format!("{layer}:refs/heads/stack-base"),
+            &format!("{base}:refs/heads/stack-target"),
+        ],
+    )
+    .await;
+    let open = async |body| {
+        let response = repository_write(h, Method::POST, &pulls, alice, id, body).await;
+        let status = response.status();
+        let pull = response.json::<Value>().await.unwrap();
+        assert_eq!(status, StatusCode::CREATED, "{pull}");
+        pull
+    };
+    let parent = open(json!({
+        "request_id":Uuid::now_v7(),"title":"Upstream layer","body":"",
+        "base_ref":"refs/heads/stack-target","head_ref":"refs/heads/stack-base",
+        "expected":{"base_oid":base,"head_oid":layer},
+    }))
+    .await;
+    let child = open(json!({
+        "request_id":Uuid::now_v7(),"title":"Fork layer","body":"",
+        "base_ref":"refs/heads/stack-base","head_ref":"refs/heads/proposal","head_repository":fork,
+        "expected":{"base_oid":layer,"head_oid":head},
+    }))
+    .await;
+    let parent_path = format!("{pulls}/{}", parent["number"]);
+    repository_write(
+        h,
+        Method::POST,
+        &format!("{parent_path}/merge"),
+        alice,
+        id,
+        json!({
+            "request_id":Uuid::now_v7(),"version":parent["version"],"method":"merge_commit",
+            "base_oid":base,"head_oid":layer,
+        }),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let branch_path = format!("{parent_path}/head-branch");
+    let preview = h.json(&branch_path, alice).await["branch"].clone();
+    assert_eq!(preview["retarget"]["pulls"], json!([child["number"]]));
+    let input = json!({"request_id":Uuid::now_v7(),"action":"delete","version":preview["version"],
+        "head_oid":layer,"repository_id":id,"retarget_token":preview["retarget"]["token"]});
+    let fork_repo = h.server.repositories.by_id(fork).unwrap();
+    let blocked =
+        crab_remote::publication::with_leases::<_, crab_remote::publication::Error, _, _>(
+            &fork_repo.store,
+            &fork_repo.layout,
+            ["refs/heads/proposal".into()],
+            std::time::Duration::from_secs(30),
+            &h.server.cancellation,
+            |_, _| async {
+                Ok(
+                    repository_write(h, Method::POST, &branch_path, alice, id, input.clone())
+                        .await
+                        .status(),
+                )
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(blocked, StatusCode::TOO_MANY_REQUESTS);
+    repository_write(h, Method::POST, &branch_path, alice, id, input)
+        .await
+        .error_for_status()
+        .unwrap();
+    let retargeted = h.json(&format!("{pulls}/{}", child["number"]), alice).await;
+    assert_eq!(retargeted["base_ref"], "refs/heads/stack-target");
+    assert_eq!(retargeted["head_oid"], head);
+    assert_eq!(repo.ref_oid("refs/heads/stack-base").await.unwrap(), None);
 }

@@ -22,6 +22,7 @@ type Action = {
   version: number;
   repository_id: string;
   head_oid: string;
+  retarget?: { base_ref: string; pulls: number[]; token: string };
 };
 
 export function HeadBranch({
@@ -65,10 +66,15 @@ export function HeadBranch({
   }, [cleanupPending, retry]);
 
   async function submit(input: Action) {
+    const { retarget, ...branch } = input;
     const result = await mutation.run<{ branch: string; commit: string }>(
       endpoint(source, route, { upstream }),
       "POST",
-      { ...input, request_id: submission(input) },
+      {
+        ...branch,
+        request_id: submission(input),
+        ...(retarget ? { retarget_token: retarget.token } : {}),
+      },
     );
     if (result) {
       setSaved({ ...result, action: input.action });
@@ -144,8 +150,22 @@ export function HeadBranch({
               <DialogTitle>Delete branch?</DialogTitle>
               <DialogDescription>
                 Delete <code>{name}</code> at{" "}
-                <code>{short(confirm.head_oid)}</code>. You can restore it from
-                this pull request while its Git objects are retained.
+                <code>{short(confirm.head_oid)}</code>.
+                {confirm.retarget && (
+                  <>
+                    {" "}
+                    Pull{" "}
+                    {confirm.retarget.pulls.length === 1
+                      ? "request"
+                      : "requests"}{" "}
+                    {confirm.retarget.pulls
+                      .map((pull) => `#${pull}`)
+                      .join(", ")}{" "}
+                    will move to{" "}
+                    <code>{branchName(confirm.retarget.base_ref)}</code>.
+                  </>
+                )}{" "}
+                You can restore this branch while its Git objects are retained.
               </DialogDescription>
             </DialogHeader>
             <Failure message={mutation.error} />

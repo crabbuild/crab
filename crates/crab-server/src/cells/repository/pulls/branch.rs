@@ -119,6 +119,8 @@ impl Mutation for FinishCleanup {
 pub(crate) struct Reference {
     pub name: String,
     pub fork: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub head_only: bool,
 }
 
 pub(crate) struct HasCleanup;
@@ -151,7 +153,7 @@ impl Read for InUse {
         // transaction as creation, retargeting, and reopening.
         search::index::ensure_ready(context)?;
         let head = qualified_head(&input.name, input.fork);
-        let base = input.fork.is_none().then_some(input.name);
+        let base = (!input.head_only && input.fork.is_none()).then_some(input.name);
         let rows = context.query(
             "SELECT 1 FROM discussion_index d JOIN discussion_index_pull_sources s ON s.document=d.rowid
                 WHERE d.kind=1 AND d.state=? AND (s.head_ref=? OR s.base_ref=?) LIMIT 1",

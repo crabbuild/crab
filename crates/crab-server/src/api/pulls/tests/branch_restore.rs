@@ -11,7 +11,7 @@ const PULL: &str = "/api/repos/team/private/pulls/1";
 const HEAD_BRANCH: &str = "/api/repos/team/private/pulls/1/head-branch";
 const MERGE_SETTINGS: &str = "/api/repos/team/private/settings/merge-methods";
 
-async fn open_pull(
+pub(super) async fn open_pull(
     h: &Harness,
     writer: &str,
     remote: &str,
@@ -147,7 +147,7 @@ async fn squash_merge_restores_the_original_head_under_current_branch_policy() {
     h.close().await;
 }
 
-async fn remote(h: &Harness, writer: &str) -> url::Url {
+pub(super) async fn remote(h: &Harness, writer: &str) -> url::Url {
     let token: Value = h
         .write(
             Method::POST,

@@ -9,6 +9,7 @@ use crab_coordination::LFS_LOCKS_RESOURCE;
 use crab_git::receive_wire;
 use crab_lfs::LfsLockManager;
 use crab_read::{dependency_proof::DependencyProofLimits, pointer_proof::PointerProofLimits};
+use crab_remote::publication::LeaseOptions;
 use crab_remote_git::RepositoryOptions;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -126,6 +127,7 @@ struct ReceiveInput {
 struct PublishAttempt {
     directory: Arc<crate::local_disk::StagingDirectory>,
     plan_id: Option<String>,
+    stack: Option<crate::api::stacked_pulls::Stack>,
 }
 
 pub(super) async fn run(
@@ -355,10 +357,27 @@ async fn run_request(
     if !current.principal.can_write(entry.id) {
         return Err(ReceiveError::Forbidden);
     }
+    let stack = if let (Publication::PullBranch(edit), [update]) =
+        (&input.publication, request.updates.as_slice())
+        && update.new.is_none()
+        && edit.upstream.id == entry.id
+    {
+        if committed_pull_branch(server, &entry, &request.updates, edit).await? {
+            return Ok(vec![]);
+        }
+        crate::api::stacked_pulls::plan(server, &entry, edit).await?
+    } else {
+        None
+    };
     let names: Vec<_> = request
         .updates
         .iter()
         .map(|update| update.name.clone())
+        .chain(
+            stack
+                .iter()
+                .flat_map(crate::api::stacked_pulls::Stack::local_refs),
+        )
         .chain(match &input.publication {
             Publication::NativePush
             | Publication::PullBranch(_)
@@ -442,6 +461,7 @@ async fn run_request(
     let attempt = PublishAttempt {
         directory: Arc::new(directory),
         plan_id: plan_id.clone(),
+        stack,
     };
     let publish_destination = |cancel: CancellationToken| async move {
         crab_remote::publication::with_leases(
@@ -452,11 +472,24 @@ async fn run_request(
             &cancel,
             move |_holders, cancel| async move {
                 let run = |cancel| async move {
-                    // The prepared capsule future is large on debug Tokio workers.
-                    Box::pin(publish_attempt(
-                        server, principal, entry, request, input, attempt, &cancel,
-                    ))
-                    .await
+                    let mut fork_leases = Vec::new();
+                    let result = async {
+                        if let Some(stack) = &attempt.stack {
+                            stack
+                                .lease_forks(LeaseOptions::renewing(TTL), &cancel, &mut fork_leases)
+                                .await?;
+                        }
+                        // The prepared capsule future is large on debug Tokio workers.
+                        Box::pin(publish_attempt(
+                            server, principal, entry, request, input, attempt, &cancel,
+                        ))
+                        .await
+                    }
+                    .await;
+                    while let Some(lease) = fork_leases.pop() {
+                        lease.release().await;
+                    }
+                    result
                 };
                 if let Some((fork, branch)) = fork {
                     // Fork sync also locks upstream before fork. Hold both
@@ -560,6 +593,7 @@ fn sends_publication_webhook(
 struct RefMutation<'a> {
     updates: &'a [crab_git::receive_plan::RefUpdate],
     publication: &'a Publication,
+    stack: Option<&'a crate::api::stacked_pulls::Stack>,
     has_branch: bool,
     initial_head: Option<(crab_write::capsule_protocol::RootSnapshot, String, String)>,
     closing_ref: Option<&'a crab_git::receive_plan::RefUpdate>,
@@ -695,7 +729,7 @@ async fn publish_attempt(
         return Err(ReceiveError::Forbidden);
     }
     if let Publication::PullBranch(edit) = &input.publication
-        && committed_plan(entry, &request.updates, &edit.plan_id).await?
+        && committed_pull_branch(server, entry, &request.updates, edit).await?
     {
         // A later deletion or restoration does not reopen this action.
         return Ok(vec![]);
@@ -823,7 +857,8 @@ async fn publish_attempt(
         (&input.publication, request.updates.as_slice())
         && let Some(commit) = update.new
     {
-        crate::api::authorize_pull_branch(server, entry, edit, update).await?;
+        crate::api::authorize_pull_branch(server, entry, edit, update, principal, None, cancel)
+            .await?;
         if refs.contains_key(&update.name) {
             return Err(ReceiveError::BranchChanged);
         }
@@ -862,6 +897,7 @@ async fn publish_attempt(
     let mut mutation = RefMutation {
         updates: &request.updates,
         publication: &input.publication,
+        stack: attempt.stack.as_ref(),
         has_branch,
         initial_head,
         closing_ref,
@@ -1199,6 +1235,24 @@ pub(super) async fn committed_plan(
     Ok(true)
 }
 
+async fn committed_pull_branch(
+    server: &Server,
+    entry: &Repository,
+    updates: &[crab_git::receive_plan::RefUpdate],
+    edit: &super::PullBranchPublication,
+) -> Result<bool> {
+    if !committed_plan(entry, updates, &edit.plan_id).await? {
+        return Ok(false);
+    }
+    if let [update] = updates
+        && update.new.is_none()
+        && edit.upstream.id == entry.id
+    {
+        crate::api::stacked_pulls::validate_replay(server, entry, &update.name, edit).await?;
+    }
+    Ok(true)
+}
+
 async fn commit_prepared(
     server: &Server,
     principal: &Principal,
@@ -1336,7 +1390,16 @@ async fn commit_authorized(
                 "Pull request branch actions require one ref edit",
             ));
         };
-        crate::api::authorize_pull_branch(server, entry, edit, update).await?;
+        crate::api::authorize_pull_branch(
+            server,
+            entry,
+            edit,
+            update,
+            &current.principal,
+            mutation.stack,
+            cancel,
+        )
+        .await?;
     }
     if let Some(plan) = plan_id
         && sends_publication_webhook(server, principal, entry, mutation.updates)

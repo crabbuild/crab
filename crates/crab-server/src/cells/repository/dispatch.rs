@@ -252,6 +252,9 @@ pub(in crate::cells) fn dispatch_mutation(
         }
         <UpdatePull as Mutation>::ID => invoke_mutation::<UpdatePull>(context, input),
         pull_base::Retarget::ID => invoke_mutation::<pull_base::Retarget>(context, input),
+        pull_base::stacked::Apply::ID => {
+            invoke_mutation::<pull_base::stacked::Apply>(context, input)
+        }
         pull_head::Switch::ID => invoke_mutation::<pull_head::Switch>(context, input),
         pull_auto_merge::Edit::ID => invoke_mutation::<pull_auto_merge::Edit>(context, input),
         <CreatePullComment as Mutation>::ID => invoke_mutation::<CreatePullComment>(context, input),
@@ -478,6 +481,9 @@ pub(in crate::cells) fn dispatch_read(
             invoke_read::<pull_branch::PendingCleanup>(context, input)
         }
         pull_branch::HasCleanup::ID => invoke_read::<pull_branch::HasCleanup>(context, input),
+        pull_base::stacked::Inspect::ID => {
+            invoke_read::<pull_base::stacked::Inspect>(context, input)
+        }
         viewed::GetViewedFiles::ID => invoke_read::<viewed::GetViewedFiles>(context, input),
         pending_reviews::Get::ID => invoke_read::<pending_reviews::Get>(context, input),
         deploy_tokens::List::ID => invoke_read::<deploy_tokens::List>(context, input),

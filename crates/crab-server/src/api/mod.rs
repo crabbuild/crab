@@ -56,6 +56,7 @@ pub(crate) use pulls::authorize_merge_publication;
 pub(crate) use pulls::authorize_suggestion_publication;
 pub(crate) use pulls::{
     authorize_branch_update, authorize_merge_candidate, authorize_pull_branch, auto_merge,
+    stacked_pulls,
 };
 pub(crate) use query::comparison_blobs;
 use query::execute;

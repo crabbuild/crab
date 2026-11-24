@@ -24,6 +24,7 @@ use tower::ServiceExt;
 #[derive(Clone, Copy, Debug)]
 enum Fault {
     PlanReceiptRead,
+    PlanIntentWrite,
     LostMarkerReply,
     LostMarkerReadback,
     RejectedMarker,
@@ -38,7 +39,7 @@ struct FaultStore {
     marker_prefix: String,
     root_path: String,
     committed: AtomicBool,
-    fail_plan_receipt: AtomicBool,
+    fail_plan_io: AtomicBool,
     head_path: String,
     cancel: CancellationToken,
     fault: Fault,
@@ -60,6 +61,30 @@ fn disconnected() -> object_store::Error {
     }
 }
 
+pub(crate) fn fault_plan_intent() -> (Store, impl Fn(bool)) {
+    let backing = Arc::new(FaultStore {
+        inner: Arc::new(object_store::memory::InMemory::new()),
+        marker_prefix: "test/v2/transactions/committed/".into(),
+        root_path: String::new(),
+        head_path: String::new(),
+        committed: AtomicBool::new(false),
+        fail_plan_io: AtomicBool::new(false),
+        cancel: CancellationToken::new(),
+        fault: Fault::PlanIntentWrite,
+    });
+    let store = Store::with_retry(
+        backing.clone(),
+        crab_storage::RetryPolicy {
+            max_attempts: 1,
+            base: Duration::ZERO,
+            cap: Duration::ZERO,
+        },
+    );
+    (store, move |active| {
+        backing.fail_plan_io.store(active, Ordering::SeqCst)
+    })
+}
+
 #[async_trait::async_trait]
 impl ObjectStore for FaultStore {
     async fn put_opts(
@@ -68,6 +93,13 @@ impl ObjectStore for FaultStore {
         payload: PutPayload,
         options: PutOptions,
     ) -> object_store::Result<PutResult> {
+        if matches!(self.fault, Fault::PlanIntentWrite)
+            && self.fail_plan_io.load(Ordering::SeqCst)
+            && location.as_ref().contains("/v2/plans/")
+            && location.as_ref().ends_with("/intent.json")
+        {
+            return Err(disconnected());
+        }
         let marker = location.as_ref().starts_with(&self.marker_prefix);
         if marker && matches!(self.fault, Fault::RejectedMarker) {
             return Err(disconnected());
@@ -99,7 +131,7 @@ impl ObjectStore for FaultStore {
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
         if matches!(self.fault, Fault::PlanReceiptRead)
-            && self.fail_plan_receipt.load(Ordering::SeqCst)
+            && self.fail_plan_io.load(Ordering::SeqCst)
             && self.committed.load(Ordering::SeqCst)
             && location.as_ref().contains("/v2/plans/")
             && location.as_ref().ends_with("/terminal.json")
@@ -438,7 +470,7 @@ async fn commit_issue_closure_recovers_from_a_committed_default_ref_receipt() {
         root_path: String::new(),
         head_path: String::new(),
         committed: AtomicBool::new(false),
-        fail_plan_receipt: AtomicBool::new(false),
+        fail_plan_io: AtomicBool::new(false),
         cancel: CancellationToken::new(),
         fault: Fault::PlanReceiptRead,
     });
@@ -507,7 +539,7 @@ async fn commit_issue_closure_recovers_from_a_committed_default_ref_receipt() {
     assert_eq!(h.json(&issue, &alice).await["state"], "open");
 
     backing.committed.store(false, Ordering::SeqCst);
-    backing.fail_plan_receipt.store(true, Ordering::SeqCst);
+    backing.fail_plan_io.store(true, Ordering::SeqCst);
     let _acknowledged = with_http_token(path, token, &["push", &remote, "topic:main"]).await;
     let repo = h
         .server
@@ -519,7 +551,7 @@ async fn commit_issue_closure_recovers_from_a_committed_default_ref_receipt() {
         Some(tip.as_str())
     );
     assert_eq!(h.json(&issue, &alice).await["state"], "open");
-    backing.fail_plan_receipt.store(false, Ordering::SeqCst);
+    backing.fail_plan_io.store(false, Ordering::SeqCst);
 
     let issue_two = format!("{ROOT}/issues/2");
     assert_eq!(h.json(&issue_two, &alice).await["state"], "open");
@@ -673,7 +705,7 @@ async fn exercise(mut server: Arc<Server>, fault: Fault, body: &[u8], oid: &str)
             marker_prefix: format!("{}/", repo.layout.capsule_committed_transactions_prefix()),
             root_path: repo.layout.capsule_root_path().to_string(),
             committed: AtomicBool::new(false),
-            fail_plan_receipt: AtomicBool::new(false),
+            fail_plan_io: AtomicBool::new(false),
             head_path: repo
                 .layout
                 .capsule_ref_head_path(&crab_metadata::capsule_protocol::capsule_ref_name_key(

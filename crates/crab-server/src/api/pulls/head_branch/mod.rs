@@ -5,8 +5,10 @@ use crate::repository::settings;
 use crab_git::receive_plan::{ReceivePlanError, RefUpdate};
 use gix_hash::ObjectId;
 use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 
 pub(super) mod automatic;
+pub(crate) mod stacked;
 
 pub(super) fn routes() -> Router<Arc<Server>> {
     Router::new().route(
@@ -23,6 +25,7 @@ struct Input {
     version: u64,
     repository_id: Uuid,
     head_oid: String,
+    retarget_token: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -31,6 +34,8 @@ struct Branch {
     version: u64,
     repository_id: Uuid,
     head_oid: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retarget: Option<stacked::Preview>,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -119,17 +124,27 @@ async fn check_availability(
     if settings::load_lifecycle(server, source).await?.archived {
         return Ok(None);
     }
-    let action = match source.ref_oid(&pull.head_ref).await? {
-        None => Action::Restore,
+    let (action, retarget) = match source.ref_oid(&pull.head_ref).await? {
+        None => (Action::Restore, None),
         Some(ref current_head) if current_head == head => {
+            let stack = stacked::can_retarget(pull);
             let (allowed, used) = tokio::try_join!(
                 may_delete(server, source, grant, &pull.head_ref, head),
-                in_use(server, source, &pull.head_ref),
+                in_use(server, source, &pull.head_ref, stack),
             )?;
             if !allowed || used {
                 return Ok(None);
             }
-            Action::Delete
+            let retarget = if stack {
+                match stacked::preview(server, source, pull).await {
+                    Ok(preview) => preview,
+                    Err(Error::PullBranchInUse) => return Ok(None),
+                    Err(error) => return Err(error),
+                }
+            } else {
+                None
+            };
+            (Action::Delete, retarget)
         }
         Some(_) => return Ok(None),
     };
@@ -138,6 +153,7 @@ async fn check_availability(
         version: pull.version,
         repository_id: source.id,
         head_oid: head.to_owned(),
+        retarget,
     }))
 }
 
@@ -171,12 +187,18 @@ async fn may_delete(
         }))
 }
 
-async fn in_use(server: &Server, source: &Repository, reference: &str) -> Result<bool> {
+async fn in_use(
+    server: &Server,
+    source: &Repository,
+    reference: &str,
+    head_only: bool,
+) -> Result<bool> {
     async fn used(
         server: &Server,
         repository: &Repository,
         reference: &str,
         fork: Option<Uuid>,
+        head_only: bool,
     ) -> Result<bool> {
         let cell = app::repository_cell(server, repository)?;
         app::query_output(
@@ -187,16 +209,17 @@ async fn in_use(server: &Server, source: &Repository, reference: &str) -> Result
                     Reference {
                         name: reference.to_owned(),
                         fork,
+                        head_only,
                     },
                 )
                 .await,
         )
     }
-    if used(server, source, reference, None).await? {
+    if used(server, source, reference, None, head_only).await? {
         return Ok(true);
     }
     if let Some(upstream) = source.fork_source(server) {
-        return used(server, &upstream, reference, Some(source.id)).await;
+        return used(server, &upstream, reference, Some(source.id), true).await;
     }
     Ok(false)
 }
@@ -224,6 +247,12 @@ async fn edit(
         || input.version != pull.version
         || input.head_oid != head
         || input.repository_id != source.id
+        || input.retarget_token.as_ref().is_some_and(|token| {
+            !matches!(input.action, Action::Delete)
+                || !stacked::can_retarget(&pull)
+                || token.len() != 64
+                || !token.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
     {
         return Err(Error::PullBranchChanged);
     }
@@ -259,6 +288,7 @@ async fn edit(
             pull: number,
             binding: PullBranchBinding::Manual {
                 version: input.version,
+                retarget_token: input.retarget_token,
             },
             plan_id,
         },
@@ -303,6 +333,9 @@ pub(crate) async fn authorize_pull_branch(
     source: &Repository,
     edit: &PullBranchPublication,
     update: &RefUpdate,
+    principal: &Principal,
+    stack: Option<&stacked::Stack>,
+    cancel: &CancellationToken,
 ) -> std::result::Result<(), ReceiveError> {
     if (edit.upstream.id != source.id
         && source.fork_source(server).is_none_or(|current| {
@@ -316,7 +349,7 @@ pub(crate) async fn authorize_pull_branch(
     }
     let pull = associated_pull(server, &edit.upstream, source, edit.pull).await?;
     let bound = match &edit.binding {
-        PullBranchBinding::Manual { version } => pull.version == *version,
+        PullBranchBinding::Manual { version, .. } => pull.version == *version,
         PullBranchBinding::Automatic {
             merge,
             setting_generation,
@@ -349,8 +382,16 @@ pub(crate) async fn authorize_pull_branch(
     }
     // New dependencies on this branch take the same ref lease at creation,
     // retargeting, or reopening. Hold it through the deletion marker.
-    if update.new.is_none() && in_use(server, source, &update.name).await? {
-        return Err(Error::PullBranchInUse.into());
+    if update.new.is_none() {
+        if in_use(server, source, &update.name, stack.is_some()).await? {
+            return Err(Error::PullBranchInUse.into());
+        }
+        if let Some(stack) = stack {
+            Box::pin(stack.apply(server, source, principal, &pull, edit, cancel)).await?;
+            if in_use(server, source, &update.name, false).await? {
+                return Err(Error::PullBranchInUse.into());
+            }
+        }
     }
     Ok(())
 }

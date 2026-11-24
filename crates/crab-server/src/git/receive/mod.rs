@@ -805,6 +805,7 @@ pub(crate) struct PullBranchPublication {
 pub(crate) enum PullBranchBinding {
     Manual {
         version: u64,
+        retarget_token: Option<String>,
     },
     Automatic {
         merge: uuid::Uuid,
@@ -994,3 +995,5 @@ async fn publish_ref(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::fault_plan_intent;

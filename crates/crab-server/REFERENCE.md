@@ -4164,12 +4164,23 @@ the switch, Crab shows a link to the branch and leaves the PR on its current hea
 
 On a closed or merged pull request, **Delete branch** removes the recorded
 head branch from the source repository. The current tip must match the saved
-head, and no open pull request can still use the branch as its base or head.
+head, and no open pull request can still use the branch as its head.
 **Restore branch** recreates a missing head at that same commit if its Git
 objects are still present. Merged pull requests use the original head recorded
 at merge. Closed pull requests use the head saved in their comparison. Both
 actions require current Write access and follow the source repository's branch
 protection and rulesets. The repository's default branch cannot be deleted.
+
+When the merged pull request's head and base are in the same repository,
+**Delete branch** on the pull request and automatic deletion move eligible open
+pull requests from that branch to the merged pull request's base. The confirmation lists the affected pull
+requests and the new base. Manual and automatic deletion lease the relevant
+refs, including any dependent fork heads, and save the new comparisons as one
+repository transaction before publishing the deletion. Base changes use the
+same review invalidation and CODEOWNERS behavior as a manual base change.
+The branch is kept if the batch would leave an invalid comparison or contains
+more than 16 dependent pull requests. For a closed unmerged pull request or
+a merged pull request from a fork, a branch used as a base is kept.
 
 Repository administrators can enable **Automatically delete head branches**
 in **Settings** under **Pull request merge methods**. Use the setting in the
@@ -4178,8 +4189,8 @@ branch's Git transaction during publication, then queues deletion when the
 merge completes. Direct merges, auto-merge, and the merge queue use the same
 cleanup. The actor who publishes the merge needs current Write access in the
 source repository. Cleanup skips archived repositories, the default branch,
-protected branches, ruleset violations, branches used by another open pull
-request, and branches that moved or were recreated. Changing the setting
+protected branches, ruleset violations, branches with open pull requests that
+cannot be moved, and branches that moved or were recreated. Changing the setting
 invalidates pending cleanup from the previous setting. Restore an automatically
 deleted branch the same way as a manually deleted branch.
 
@@ -4188,12 +4199,15 @@ deleted branch the same way as a manually deleted branch.
 
 `GET /api/repos/{owner}/{name}/pulls/{number}/head-branch` returns the available
 `branch` action with its pull version, source repository UUID, and commit.
+When dependent pull requests can move, `branch.retarget` lists their numbers
+in `pulls`, their new `base_ref`, and a `token` for confirming that exact set.
 `cleanup_pending: true` indicates that automatic deletion is queued for a
 branch that still offers the delete action.
 `POST` accepts `action` (`delete` or `restore`), `request_id`, `version`,
-`repository_id`, and `head_oid`. Publication checks the exact tip or its absence
+`repository_id`, and `head_oid`. Include `retarget_token` when confirming a
+delete action with dependent pull requests. Publication checks the exact tip or its absence
 under the Git ref lease. Retrying a recorded request recovers its result
-without repeating the ref edit.
+without repeating the ref edit or retargeting the same pull requests again.
 For a private fork, use the fork's repository route and include the PR's
 repository UUID as `upstream` in the query string.
 

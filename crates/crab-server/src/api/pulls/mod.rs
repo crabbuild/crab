@@ -30,6 +30,7 @@ pub(crate) mod auto_merge;
 mod base;
 mod head_branch;
 pub(crate) use head_branch::authorize_pull_branch;
+pub(crate) use head_branch::stacked as stacked_pulls;
 mod branch_update;
 pub(super) mod candidate;
 pub(crate) use candidate::authorize_merge_candidate;

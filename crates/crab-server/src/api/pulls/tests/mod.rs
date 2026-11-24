@@ -14,6 +14,7 @@ mod branch_restore;
 mod branch_update;
 mod candidate;
 mod retarget;
+mod stacked;
 mod strict_head;
 
 async fn json_request(
