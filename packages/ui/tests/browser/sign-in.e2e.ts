@@ -20,6 +20,9 @@ test("OIDC sign-in explains registration and preserves the requested destination
   await expect(
     page.getByRole("heading", { name: "Sign in to Crab" }),
   ).toBeVisible();
+  await expect(page).toHaveTitle("Sign in to Crab");
+  await expect(page.getByRole("banner")).toHaveCount(0);
+  await expect(page.locator(".sign-in-logo img")).toBeVisible();
   await expect(page.getByRole("alert")).toContainText("Try again");
   await expect(
     page.getByText(/if your provider offers registration/i),

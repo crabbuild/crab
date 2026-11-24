@@ -70,31 +70,22 @@
 }
 
 :root {
-  --sign-in-max-width: 71rem;
-  --sign-in-form-width: 28rem;
-  --sign-in-columns: minmax(0, 1.15fr) minmax(0, 1fr);
-  --sign-in-column-gap: clamp(2.25rem, 6vw, 6.5rem);
-  --sign-in-top-gap: clamp(1.75rem, 6vh, 4.5rem);
+  --sign-in-form-width: 24rem;
+  --sign-in-top-gap: clamp(2rem, 8vh, 4.5rem);
+  --sign-in-brand-size: 3.5rem;
+  --sign-in-mark-size: 2.5rem;
   --sign-in-action-height: 2.875rem;
   --sign-in-field-height: 2rem;
   --sign-in-reveal-size: 1.5rem;
   --sign-in-panel-padding: clamp(1.25rem, 3vw, 1.75rem);
   --sign-in-section-gap: 1.25rem;
-  --sign-in-art-ratio: 6 / 5;
-  --sign-in-heading:
-    650 clamp(2.125rem, 4vw, 3.125rem) / 1.08 "Geist Variable", sans-serif;
-  --sign-in-heading-tracking: -0.035em;
+  --sign-in-heading: 650 1.75rem/1.2 "Geist Variable", sans-serif;
+  --sign-in-heading-tracking: -0.025em;
 }
 
 @media (pointer: coarse) {
   :root {
     --sign-in-field-height: 2.875rem;
     --sign-in-reveal-size: 2.75rem;
-  }
-}
-
-@media (max-width: 740px) {
-  :root {
-    --sign-in-art-ratio: 2 / 1;
   }
 }

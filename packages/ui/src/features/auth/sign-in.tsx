@@ -1,19 +1,9 @@
-import {
-  ArrowRightIcon,
-  CircleAlertIcon,
-  LogInIcon,
-  UserRoundPlusIcon,
-} from "lucide-react";
+import { CircleAlertIcon, LogInIcon, UserRoundPlusIcon } from "lucide-react";
 import { MarkGithubIcon } from "@primer/octicons-react";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import type { Session } from "@/lib/contracts";
-import artwork from "./sign-in-art.svg";
+import crabMark from "../../../../web/crab.optimized.svg";
 import "./sign-in.css";
 
 export function SignIn({
@@ -36,14 +26,12 @@ export function SignIn({
 
   return (
     <section className="sign-in" aria-labelledby="sign-in-title">
+      <div className="sign-in-logo" aria-hidden="true">
+        <img className="brand-mark" src={crabMark} alt="" />
+      </div>
       <Card className="sign-in-content">
         <CardHeader className="sign-in-header">
           <h1 id="sign-in-title">Sign in to Crab</h1>
-          <CardDescription>
-            {github
-              ? "Use your GitHub account to access Crab."
-              : "Access your repositories, issues, and pull requests."}
-          </CardDescription>
         </CardHeader>
         <CardContent>
           {failed && (
@@ -64,7 +52,6 @@ export function SignIn({
                   <LogInIcon aria-hidden="true" />
                 )}
                 {github ? "Continue with GitHub" : "Continue to sign in"}
-                <ArrowRightIcon className="ml-auto" aria-hidden="true" />
               </a>
             </Button>
             {github || canSignUp ? (
@@ -76,16 +63,14 @@ export function SignIn({
               </Button>
             ) : null}
           </div>
-          <p className="sign-in-help">
-            {github || canSignUp
-              ? "For access to a team repository, ask its administrator."
-              : "If your provider offers registration, you can sign up on its sign-in page."}
-          </p>
+          {!github && !canSignUp && (
+            <p className="sign-in-help">
+              If your provider offers registration, you can sign up on its
+              sign-in page.
+            </p>
+          )}
         </CardContent>
       </Card>
-      <div className="sign-in-visual" aria-hidden="true">
-        <img src={artwork} width={720} height={600} alt="" />
-      </div>
     </section>
   );
 }

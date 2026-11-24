@@ -25,62 +25,49 @@
 
 #keycloak-bg .pf-v5-c-login__container {
   display: grid;
-  grid-template-columns: var(--sign-in-columns);
-  grid-template-areas: "brand brand" "art form";
-  align-items: center;
-  gap: var(--sign-in-top-gap) var(--sign-in-column-gap);
-  width: min(var(--sign-in-max-width), calc(100% - 3rem));
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "brand" "form";
+  align-content: start;
+  gap: var(--sign-in-section-gap);
+  width: min(var(--sign-in-form-width), calc(100% - 2rem));
   margin-inline: auto;
-  padding: 0 0 3rem;
-}
-
-#keycloak-bg .pf-v5-c-login__container::before {
-  grid-area: art;
-  align-self: start;
-  width: 100%;
-  aspect-ratio: var(--sign-in-art-ratio);
-  border-radius: calc(var(--radius) + 0.25rem);
-  background: url("../img/sign-in-art.svg") center / cover no-repeat;
-  content: "";
+  padding-block: var(--sign-in-top-gap) 2rem;
+  padding-inline: 0;
 }
 
 #keycloak-bg #kc-header {
   grid-area: brand;
-  display: flex;
-  align-items: center;
-  min-height: 4rem;
+  justify-self: center;
   margin: 0;
   padding: 0;
 }
 
 #keycloak-bg #kc-header-wrapper {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
+  display: grid;
+  place-items: center;
+  width: var(--sign-in-brand-size);
+  height: var(--sign-in-brand-size);
   margin: 0;
   padding: 0;
-  /* Keycloak marks its desktop brand color important for its dark backdrop. */
-  color: var(--foreground) !important;
-  font:
-    650 1rem/1.5 "Geist Variable",
-    sans-serif;
-  letter-spacing: 0;
-  text-transform: none;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 0.5rem);
+  background: var(--muted);
+  font-size: 0;
+  line-height: 0;
 }
 
 #kc-header-wrapper::before {
-  flex: none;
-  width: 2rem;
-  height: 2rem;
-  background: currentColor;
+  grid-area: 1 / 1;
+  width: var(--sign-in-mark-size);
+  height: var(--sign-in-mark-size);
+  background: var(--foreground);
   mask: url("../img/crab-mark.svg") center / contain no-repeat;
   content: "";
 }
 
 #keycloak-bg .pf-v5-c-login__main {
   grid-area: form;
-  align-self: center;
-  width: min(100%, var(--sign-in-form-width));
+  width: 100%;
   border: 0;
   border-radius: calc(var(--radius) + 0.25rem);
   padding: var(--sign-in-panel-padding);
@@ -98,6 +85,9 @@
 }
 
 #keycloak-bg .pf-v5-c-login__main-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
   padding-block: 0 var(--sign-in-section-gap);
 }
 
@@ -105,6 +95,7 @@
   color: var(--foreground);
   font: var(--sign-in-heading);
   letter-spacing: var(--sign-in-heading-tracking);
+  text-align: center;
   text-wrap: balance;
 }
 
@@ -300,25 +291,15 @@
 }
 
 @media (forced-colors: active) {
+  #kc-header-wrapper::before {
+    background: CanvasText;
+    forced-color-adjust: none;
+  }
+
   #keycloak-bg
     :is(.pf-v5-c-form-control, .pf-v5-c-input-group):has(input:focus-visible),
   #keycloak-bg .pf-v5-c-button:focus-visible {
     outline: 2px solid Highlight;
     outline-offset: 2px;
-  }
-}
-
-@media (max-width: 740px) {
-  #keycloak-bg .pf-v5-c-login__container {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: "brand" "form" "art";
-    justify-items: center;
-    width: min(100% - 2rem, var(--sign-in-form-width));
-    row-gap: 1.5rem;
-    padding-bottom: 1.75rem;
-  }
-
-  #keycloak-bg #kc-header {
-    justify-self: start;
   }
 }
