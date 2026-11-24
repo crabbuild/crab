@@ -352,7 +352,10 @@ pub(super) fn reply_from_row(row: &[SqlValue]) -> crate::cells::Result<PullRevie
     Ok(record)
 }
 
-fn author_from_row(row: &[SqlValue], start: usize) -> crate::cells::Result<RepositoryAuthor> {
+pub(super) fn author_from_row(
+    row: &[SqlValue],
+    start: usize,
+) -> crate::cells::Result<RepositoryAuthor> {
     Ok(RepositoryAuthor {
         issuer: result_text(row, start)?,
         subject: result_text(row, start + 1)?,
@@ -380,7 +383,10 @@ fn optional_author(
     }
 }
 
-fn result_optional_u64(row: &[SqlValue], column: usize) -> crate::cells::Result<Option<u64>> {
+pub(super) fn result_optional_u64(
+    row: &[SqlValue],
+    column: usize,
+) -> crate::cells::Result<Option<u64>> {
     match row.get(column) {
         Some(SqlValue::Null) => Ok(None),
         Some(SqlValue::Integer(value)) => u64::try_from(*value)

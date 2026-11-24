@@ -118,6 +118,45 @@ async fn public_team_routes_preserve_secret_visibility_and_current_maintainer_au
     let denied=change(&h,id,&alice,json!({"kind":"edit","team":team,"version":1,"name":"Stale","description":"","visibility":"closed"})).await;
     assert_eq!(denied.status(), StatusCode::CONFLICT);
     assert_eq!(denied.headers()["x-crab-write-outcome"], "rejected");
+
+    let routing = format!("{path}/review-routing");
+    let invalid = change(
+        &h,
+        id,
+        &bob,
+        json!({"kind":"review_routing","team":team,"version":0,"algorithm":"round_robin","reviewers":1,"excluded":[Uuid::now_v7()]}),
+    )
+    .await;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(invalid.headers()["x-crab-write-outcome"], "rejected");
+    change(
+        &h,
+        id,
+        &bob,
+        json!({"kind":"review_routing","team":team,"version":0,"algorithm":"round_robin","reviewers":1,"excluded":[bob_id],"options":{"count_existing":true,"keep_team":true}}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let request = json!({
+        "request_id":Uuid::now_v7(),
+        "command":{"kind":"review_routing","team":team,"version":1,"algorithm":"fewest_open","reviewers":2}
+    });
+    for _ in 0..2 {
+        h.write(
+            Method::POST,
+            &format!("{root}/commands"),
+            &bob,
+            request.clone(),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    }
+    assert_eq!(
+        h.json(&routing, &bob).await,
+        json!({"version":2,"algorithm":"fewest_open","reviewers":2,"excluded":[bob_id],"options":{"count_existing":true,"keep_team":true}})
+    );
     h.close().await;
 }
 #[tokio::test]

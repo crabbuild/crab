@@ -107,6 +107,7 @@ async fn reviewer_filters_resolve_public_handles_and_current_accounts() {
             repo,
             crate::app::mutation_identity().unwrap(),
             CreatePullReviewInput {
+                can_post_locked: false,
                 base_revision: None,
                 review_teams: Vec::new(),
                 submission_id: *uuid::Uuid::now_v7().as_bytes(),
@@ -344,6 +345,7 @@ async fn real_git_review_transitions_filter_both_list_kinds_with_consistent_roll
             &carol.target,
             crate::app::mutation_identity().unwrap(),
             CreatePullReviewInput {
+                can_post_locked: false,
                 base_revision: None,
                 review_teams: Vec::new(),
                 pull: 1,

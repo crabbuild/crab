@@ -256,6 +256,8 @@ test("viewed files survive reload and clear when the file changes", async ({
   const path = "1".repeat(64);
   let revision = "2".repeat(64);
   let saved = { version: 0, files: {} as Record<string, string> };
+  const after = "0".repeat(64);
+  let expirePage = false;
   await page.route("**/api/repos/team/project/changes?**", (route) => {
     const { base_oid, head_oid } = fixture.pull();
     return route.fulfill({
@@ -286,8 +288,30 @@ test("viewed files survive reload and clear when the file changes", async ({
           viewed: true,
         });
         saved = { version: saved.version + 1, files: { [path]: revision } };
+        return route.fulfill({ json: { version: saved.version } });
       }
-      return route.fulfill({ json: saved });
+      const query = new URL(route.request().url()).searchParams;
+      if (saved.version && !query.has("after")) {
+        return route.fulfill({
+          json: { version: saved.version, files: {}, next: after },
+        });
+      }
+      if (query.has("after")) {
+        expect(query.get("after")).toBe(after);
+        expect(query.get("version")).toBe(String(saved.version));
+        if (expirePage) {
+          expirePage = false;
+          return route.fulfill({
+            status: 409,
+            json: {
+              error: {
+                message: "This list changed; reload from the first page",
+              },
+            },
+          });
+        }
+      }
+      return route.fulfill({ json: { ...saved, next: null } });
     },
   );
   await page.goto("/team/project/pull/1/files");
@@ -296,7 +320,31 @@ test("viewed files survive reload and clear when the file changes", async ({
   await expect(viewed).not.toBeChecked();
   await viewed.check();
   await expect(page.getByText("1 of 1 files viewed")).toBeVisible();
+  const filter = page.getByRole("searchbox", { name: "Filter changed files" });
+  const hideViewed = page.getByRole("checkbox", { name: "Hide viewed" });
+  await filter.fill("README");
+  await hideViewed.check();
+  await expect(
+    page.getByText("No changed files match these filters."),
+  ).toBeVisible();
+  await expect(page.locator(".diff-panel")).toHaveCount(0);
+  await page.getByRole("button", { name: "Jump to diff", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Open review thread #1" }),
+  ).toBeFocused();
+  await expect(hideViewed).toBeChecked();
+  await expect(filter).toHaveValue("README");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await filter.fill("missing");
+  await expect(page.getByText("0 of 1 files shown")).toBeVisible();
+  await page.getByRole("button", { name: "Clear filters" }).click();
+  await expect(hideViewed).not.toBeChecked();
+  await expect(viewed).toBeChecked();
+  expirePage = true;
   await page.reload();
+  await expect(page.getByRole("alert")).toHaveText(/This list changed/);
+  await expect(viewed).toHaveCount(0);
+  await page.getByRole("button", { name: "Reload viewed files" }).click();
   await expect(viewed).toBeChecked();
   revision = "3".repeat(64);
   fixture.lifecycle.head = "e".repeat(40);
@@ -403,6 +451,86 @@ test("pending review comments survive reload and retry the same submission", asy
   await page.getByRole("link", { name: "Files changed" }).click();
   await expect(pending).toHaveCount(0);
   expect(submissions).toHaveLength(2);
+});
+
+test("hide whitespace remembers the pull and can reveal a suppressed review anchor", async ({
+  page,
+}) => {
+  const fixture = await mockPullRequest(page);
+  const middle = Array.from(
+    { length: 7 },
+    (_, index) => `stable line ${index}\n`,
+  ).join("");
+  const content = (oid: string, text: string) => ({
+    oid,
+    text,
+    size: text.length,
+    mode: "100644",
+    classification: "OrdinaryGit",
+    text_truncated: false,
+  });
+  await page.route("**/api/repos/team/project/diff?**", (route) =>
+    route.fulfill({
+      json: {
+        base: fixture.mergeBase,
+        commit: fixture.pull().head_oid,
+        path: "README.md",
+        old: content("c".repeat(40), `let value = 1;\n${middle}old result\n`),
+        new: content("d".repeat(40), `let value=1;\n${middle}new result\n`),
+      },
+    }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/repos/team/project/pulls/2",
+    (route) =>
+      route.fulfill({
+        json: {
+          ...fixture.pull(),
+          number: 2,
+          title: "Another pull with the same commits",
+        },
+      }),
+  );
+  await page.goto("/team/project/pull/1/files");
+  const whitespace = page.getByRole("checkbox", {
+    name: "Hide whitespace",
+    exact: true,
+  });
+  const formattingLine = page.locator(
+    '.diff-panel [data-column-number="1"][data-line-type="change-addition"]',
+  );
+  const substantiveLine = page.locator(
+    '.diff-panel [data-column-number="9"][data-line-type="change-addition"]',
+  );
+  await expect(formattingLine).toBeVisible();
+  await whitespace.check();
+  await expect(formattingLine).toHaveCount(0);
+  await expect(substantiveLine).toBeVisible();
+  await substantiveLine.click();
+  const composer = page.getByRole("form", {
+    name: "Comment on selected lines",
+  });
+  await expect(composer).toContainText("README.md");
+  await expect(composer).toContainText("9");
+  await page.reload();
+  await expect(whitespace).toBeChecked();
+  await expect(substantiveLine).toBeVisible();
+  await expect(formattingLine).toHaveCount(0);
+  await page.getByRole("button", { name: "Jump to diff", exact: true }).click();
+  await expect(
+    page.getByText("Showing whitespace for the selected review comment."),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Open review thread #1" }),
+  ).toBeFocused();
+  await expect(formattingLine).toBeVisible();
+  await expect(whitespace).toBeChecked();
+  await page.goto("/team/project/pull/2/files");
+  await expect(
+    page.getByRole("heading", { name: /Another pull with the same commits/ }),
+  ).toBeVisible();
+  await expect(whitespace).not.toBeChecked();
+  await expect(formattingLine).toBeVisible();
 });
 
 test("selected suggestions commit together on the inspected head", async ({

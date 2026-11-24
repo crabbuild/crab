@@ -213,10 +213,62 @@ pub(crate) async fn inherited_rulesets(server: &Server, repo: &Repository) -> Re
                 Selector {
                     id: repo.id,
                     name: repo.config.name.clone(),
+                    ownership_epoch: repo.ownership_epoch,
+                    fork: repo.forked_from.is_some(),
                 },
             )
             .await,
     )
+}
+
+pub(crate) async fn check_rename(
+    server: &Server,
+    record: &crate::catalog::CatalogRecord,
+    administrator: crate::cells::directory::IdentityKey,
+) -> Result<()> {
+    use crate::cells::{Address, organization::rulesets::NameProtection};
+
+    let Some(organization) = record.organization_id() else {
+        return Ok(());
+    };
+    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    let protections = crate::app::query_output(
+        cells
+            .query::<NameProtection>(
+                Address::Organization(organization),
+                None,
+                record.name.clone(),
+            )
+            .await,
+    )?;
+    if protections.is_empty() {
+        return Ok(());
+    }
+    if protections.iter().any(Vec::is_empty) {
+        return Err(Error::RepositoryNameProtected);
+    }
+    let grant = super::access::organization_grants_for_identity(
+        server,
+        administrator,
+        [(organization, true)].into(),
+    )
+    .await?
+    .remove(&organization)
+    .unwrap_or_default();
+    let context = BypassContext {
+        role: Some(crate::RepositoryAccess::Admin),
+        organization_owner: grant.owner,
+        teams: &grant.bypass_teams,
+        organization_teams: &grant.bypass_teams,
+    };
+    if protections
+        .iter()
+        .all(|grants| context.allows(grants, false))
+    {
+        Ok(())
+    } else {
+        Err(Error::RepositoryNameProtected)
+    }
 }
 
 pub(crate) async fn load_ref_policy(server: &Server, repo: &Repository) -> Result<RefPolicy> {
@@ -294,6 +346,8 @@ pub(crate) struct BypassOption {
 
 pub(crate) struct MergePolicy {
     pub protection: Option<BranchProtection>,
+    pub updates_restricted: bool,
+    pub linear_history_required: bool,
     pub rulesets: Vec<String>,
     pub bypass_options: Vec<BypassOption>,
 }
@@ -363,6 +417,9 @@ impl RefPolicy {
         bypass: &[RulesetId],
     ) -> Result<MergePolicy> {
         let mut protection = self.protections.protection(reference).cloned();
+        let mut linear_history_required = protection
+            .as_ref()
+            .is_some_and(|rule| rule.require_linear_history);
         let mut checks: HashSet<_> = protection
             .iter()
             .flat_map(|rule| rule.required_checks.iter().map(|name| name.to_lowercase()))
@@ -374,6 +431,7 @@ impl RefPolicy {
         let mut names = Vec::new();
         let mut bypass_options = Vec::new();
         let mut accepted = 0;
+        let mut updates_restricted = false;
         let rules = self.active()?;
         for (id, ruleset) in rules.matches(reference, default_ref) {
             let name = match id {
@@ -381,7 +439,10 @@ impl RefPolicy {
                 RulesetId::Organization { .. } => format!("{} (organization)", ruleset.name),
             };
             names.push(name.clone());
-            if !ruleset.requires_pull() {
+            if !ruleset.requires_pull()
+                && !ruleset.restrict_updates
+                && !ruleset.require_linear_history
+            {
                 continue;
             }
             if ruleset.allows_bypass(actor.for_rule(id), true) {
@@ -390,6 +451,11 @@ impl RefPolicy {
                     continue;
                 }
                 bypass_options.push(BypassOption { id, name });
+            }
+            updates_restricted |= ruleset.restrict_updates;
+            linear_history_required |= ruleset.require_linear_history;
+            if !ruleset.requires_pull() {
+                continue;
             }
             let rule = protection.get_or_insert_with(|| BranchProtection {
                 branch: reference
@@ -401,6 +467,7 @@ impl RefPolicy {
                 require_conversation_resolution: false,
                 require_up_to_date: false,
                 require_merge_queue: false,
+                require_linear_history: false,
                 required_checks: Vec::new(),
                 required_integrations: Vec::new(),
             });
@@ -430,6 +497,8 @@ impl RefPolicy {
         bypass_options.sort_unstable_by_key(|option| option.id);
         Ok(MergePolicy {
             protection,
+            updates_restricted,
+            linear_history_required,
             rulesets: names,
             bypass_options,
         })
@@ -576,6 +645,7 @@ pub(crate) fn protection_record(rule: BranchProtection) -> BranchProtectionRecor
         require_conversation_resolution: rule.require_conversation_resolution,
         require_up_to_date: rule.require_up_to_date,
         require_merge_queue: rule.require_merge_queue,
+        require_linear_history: rule.require_linear_history,
         required_checks: rule.required_checks,
         required_integrations: rule.required_integrations,
     }
@@ -594,6 +664,7 @@ fn branch_protections(settings: BranchProtectionSettings) -> Result<BranchProtec
                 require_conversation_resolution: rule.require_conversation_resolution,
                 require_up_to_date: rule.require_up_to_date,
                 require_merge_queue: rule.require_merge_queue,
+                require_linear_history: rule.require_linear_history,
                 required_checks: rule.required_checks,
                 required_integrations: rule.required_integrations,
             })

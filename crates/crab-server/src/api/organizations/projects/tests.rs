@@ -189,6 +189,24 @@ async fn shared_work_is_live_for_repository_readers_and_redacted_for_other_organ
         )
         .await;
     assert_eq!(candidates["items"][0]["title"], "Confidential source title");
+    h.write(
+        Method::POST,
+        "/api/repos/team/private/issues",
+        &alice,
+        json!({"request_id":Uuid::now_v7(),"title":"Confidential blocker","body":""}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    h.write(
+        Method::PUT,
+        "/api/repos/team/private/issues/1/dependencies/blocked_by/2",
+        &alice,
+        json!({"active":true,"version":0}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
     let command = json!({"kind":"item","project":project,"version":0,"repository":repository,"item":{"id":Uuid::now_v7(),"subject":{"kind":"issue","number":1},"title":"","body":"","status":"Todo","priority":0,"start":null,"end":null,"values":{}}});
     let saved = h
         .write(
@@ -207,6 +225,7 @@ async fn shared_work_is_live_for_repository_readers_and_redacted_for_other_organ
         visible["page"]["items"][0]["work"]["title"],
         "Confidential source title"
     );
+    assert_eq!(visible["page"]["items"][0]["blocked"], true);
     let cells = h.server.cells().unwrap();
     let guest = app::command_output(
         cells
@@ -257,6 +276,7 @@ async fn shared_work_is_live_for_repository_readers_and_redacted_for_other_organ
         .json(&format!("{root}/{project}/items"), &guest_session)
         .await;
     let row = &hidden["page"]["items"][0];
+    assert_eq!(row["blocked"], false);
     assert_eq!(
         (
             row["restricted"].clone(),
@@ -268,6 +288,7 @@ async fn shared_work_is_live_for_repository_readers_and_redacted_for_other_organ
     );
     for private in [
         "Confidential source title",
+        "Confidential blocker",
         "Private source body",
         "team/private",
         "alice-id",

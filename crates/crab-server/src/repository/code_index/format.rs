@@ -3,61 +3,100 @@ use bytes::{Buf, BufMut, Bytes};
 use crab_remote_git::GitPath;
 use gix_hash::ObjectId;
 
-const MAGIC: &[u8; 8] = b"CRABIDX2";
+mod regex_mask;
+
+const MAGIC: &[u8; 8] = b"CRABIDX3";
 const OID_BYTES: usize = 20;
 const CHECKSUM: usize = 32;
-const MASK_BYTES: usize = 256;
+const MASK_BYTES: [usize; 4] = [128, 512, 2048, 8192];
 const HEADER: usize = MAGIC.len() + OID_BYTES + 1;
 pub(super) const OVERHEAD: usize = HEADER + CHECKSUM;
 const ROW_HEADER: usize = 4 + OID_BYTES + 1;
 
 #[derive(Clone)]
 pub(crate) struct Mask {
-    bits: [u8; MASK_BYTES],
-    ascii: bool,
+    bits: Bytes,
 }
 
 impl Mask {
     pub(super) fn from_text(text: &str) -> Self {
-        let mut mask = Self {
-            bits: [0; MASK_BYTES],
-            ascii: true,
+        // Keep small files cheap while giving larger files enough bits to
+        // avoid saturating their filter and reading many unrelated blobs.
+        let tier = match text.len() {
+            0..=1024 => 0,
+            1025..=4096 => 1,
+            4097..=16384 => 2,
+            _ => 3,
         };
-        mask.insert(text);
-        mask
+        Self::from_runs(tier, [text])
     }
 
-    pub(super) fn insert(&mut self, text: &str) {
-        self.ascii &= text.is_ascii();
-        for window in text.as_bytes().windows(3) {
-            let gram = u32::from_le_bytes([
-                window[0].to_ascii_lowercase(),
-                window[1].to_ascii_lowercase(),
-                window[2].to_ascii_lowercase(),
-                0,
-            ]);
-            let mixed = gram.wrapping_mul(0x9e3779b1);
-            let hash = (mixed ^ (mixed >> 16)).wrapping_mul(0x85ebca6b);
-            for hash in [hash, hash.rotate_left(11)] {
-                let bit = hash as usize % (MASK_BYTES * 8);
-                self.bits[bit / 8] |= 1 << (bit % 8);
-            }
+    pub(super) fn from_symbols<'a>(symbols: impl IntoIterator<Item = &'a str>) -> Self {
+        Self::from_runs(1, symbols)
+    }
+
+    fn from_runs<'a>(tier: usize, runs: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut bits = vec![0; MASK_BYTES[tier]];
+        for run in runs {
+            insert(&mut bits, run);
+        }
+        Self {
+            bits: Bytes::from(bits),
         }
     }
 
-    pub(crate) fn query(text: &str, case_sensitive: bool) -> Option<Self> {
-        (text.len() >= 3 && (case_sensitive || text.is_ascii())).then(|| Self::from_text(text))
+    fn tier(&self) -> usize {
+        // Mask widths are consecutive powers of four, starting at 128 bytes.
+        (self.bits.len().ilog2() as usize - 7) / 2
     }
 
-    pub(crate) fn may_contain(&self, query: &Self, case_sensitive: bool) -> bool {
-        // Regex case folding can match an ASCII query to non-ASCII text.
-        // Those files remain candidates unless the search is case-sensitive.
-        (!case_sensitive && !self.ascii)
-            || query
-                .bits
-                .iter()
-                .zip(self.bits)
-                .all(|(needed, found)| needed & found == *needed)
+    pub(crate) fn may_contain(&self, query: &QueryMask) -> bool {
+        query.0[self.tier()]
+            .iter()
+            .all(|&(byte, needed)| self.bits[byte] & needed == needed)
+    }
+}
+
+pub(crate) struct QueryMask([Vec<(usize, u8)>; MASK_BYTES.len()]);
+
+impl QueryMask {
+    fn empty_bits() -> Box<[u8]> {
+        vec![0; MASK_BYTES[MASK_BYTES.len() - 1]].into_boxed_slice()
+    }
+
+    fn from_bits(bits: &[u8]) -> Self {
+        Self(MASK_BYTES.map(|size| {
+            let mut folded = vec![0; size];
+            // Shorter filters take the same hash modulo a smaller size.
+            // Fold once per query, retaining only the bytes it must check.
+            for chunk in bits.chunks_exact(size) {
+                for (target, source) in folded.iter_mut().zip(chunk) {
+                    *target |= source;
+                }
+            }
+            folded
+                .into_iter()
+                .enumerate()
+                .filter(|&(_, byte)| byte != 0)
+                .collect()
+        }))
+    }
+}
+
+fn insert(bits: &mut [u8], text: &str) {
+    for window in text.as_bytes().windows(3) {
+        let gram = u32::from_le_bytes([
+            window[0].to_ascii_lowercase(),
+            window[1].to_ascii_lowercase(),
+            window[2].to_ascii_lowercase(),
+            0,
+        ]);
+        let mixed = gram.wrapping_mul(0x9e3779b1);
+        let hash = (mixed ^ (mixed >> 16)).wrapping_mul(0x85ebca6b);
+        for hash in [hash, hash.rotate_left(11)] {
+            let bit = hash as usize & (bits.len() * 8 - 1);
+            bits[bit / 8] |= 1 << (bit % 8);
+        }
     }
 }
 
@@ -65,15 +104,18 @@ pub(crate) struct Row {
     pub(crate) path: GitPath,
     pub(crate) oid: ObjectId,
     pub(crate) filter: Option<Mask>,
-    pub(crate) symbols: Option<Box<Mask>>,
+    pub(crate) symbols: Option<Mask>,
 }
 
 impl Row {
     pub(super) fn encoded_size(&self) -> usize {
         ROW_HEADER
             + self.path.as_bytes().len()
-            + MASK_BYTES
-                * (usize::from(self.filter.is_some()) + usize::from(self.symbols.is_some()))
+            + [&self.filter, &self.symbols]
+                .into_iter()
+                .flatten()
+                .map(|mask| mask.bits.len())
+                .sum::<usize>()
     }
 }
 
@@ -90,10 +132,9 @@ impl Index {
             rows.shrink_to_fit();
         }
         let weight = size
-            + rows.as_ref().map_or(0, |rows| {
-                rows.capacity() * size_of::<Row>()
-                    + rows.iter().filter(|row| row.symbols.is_some()).count() * size_of::<Mask>()
-            });
+            + rows
+                .as_ref()
+                .map_or(0, |rows| rows.capacity() * size_of::<Row>());
         Self {
             tree,
             rows,
@@ -112,12 +153,9 @@ impl Index {
                 let path = row.path.as_bytes();
                 out.put_u32_le(u32::try_from(path.len()).map_err(|_| Error::Invalid)?);
                 out.extend(row.oid.as_bytes());
-                out.put_u8(flag(row.filter.as_ref()) | (flag(row.symbols.as_deref()) << 2));
+                out.put_u8(flag(row.filter.as_ref()) | (flag(row.symbols.as_ref()) << 4));
                 out.extend(path);
-                for mask in [row.filter.as_ref(), row.symbols.as_deref()]
-                    .into_iter()
-                    .flatten()
-                {
+                for mask in [&row.filter, &row.symbols].into_iter().flatten() {
                     out.extend_from_slice(&mask.bits);
                 }
             }
@@ -151,7 +189,7 @@ impl Index {
             let len = data.get_u32_le() as usize;
             let oid = oid(&data.split_to(OID_BYTES))?;
             let flags = data.get_u8();
-            if len == 0 || len > data.len() || flags > 0b1010 {
+            if len == 0 || len > data.len() {
                 return Err(Error::Invalid);
             }
             let path = GitPath::new(data.split_to(len))?;
@@ -161,12 +199,12 @@ impl Index {
             {
                 return Err(Error::Invalid);
             }
-            let filter = read_mask(&mut data, flags & 0b11)?;
-            let symbols = read_mask(&mut data, flags >> 2)?;
+            let filter = read_mask(&mut data, flags & 0b1111)?;
+            let symbols = read_mask(&mut data, flags >> 4)?;
             if symbols.is_some() && filter.is_none() {
                 return Err(Error::Invalid);
             }
-            weight += size_of::<Row>() + symbols.as_ref().map_or(0, |_| size_of::<Mask>());
+            weight += size_of::<Row>();
             if weight > super::CACHE_BYTES {
                 return Err(Error::Invalid);
             }
@@ -174,7 +212,7 @@ impl Index {
                 path,
                 oid,
                 filter,
-                symbols: symbols.map(Box::new),
+                symbols,
             });
         }
         Ok(Self::new(tree, Some(rows), size))
@@ -182,24 +220,21 @@ impl Index {
 }
 
 fn flag(mask: Option<&Mask>) -> u8 {
-    mask.map_or(0, |mask| if mask.ascii { 1 } else { 2 })
+    mask.map_or(0, |mask| 1 + mask.tier() as u8)
 }
 
 fn read_mask(data: &mut Bytes, flag: u8) -> Result<Option<Mask>, Error> {
     if flag == 0 {
         return Ok(None);
     }
-    if flag > 2 || data.len() < MASK_BYTES {
+    let Some(&size) = MASK_BYTES.get(usize::from(flag - 1)) else {
+        return Err(Error::Invalid);
+    };
+    if data.len() < size {
         return Err(Error::Invalid);
     }
-    let bits = data
-        .split_to(MASK_BYTES)
-        .as_ref()
-        .try_into()
-        .map_err(|_| Error::Invalid)?;
     Ok(Some(Mask {
-        bits,
-        ascii: flag == 1,
+        bits: data.split_to(size),
     }))
 }
 
@@ -221,29 +256,34 @@ mod tests {
 
     #[test]
     fn persistent_format_rejects_corruption_before_using_a_filter() {
-        let path = GitPath::new(b"src/main.rs".as_slice()).unwrap();
-        let index = Index::new(
-            ObjectId::from([1; OID_BYTES]),
-            Some(vec![Row {
-                path,
+        let rows: Vec<_> = [0, 1024, 4096, 16384]
+            .into_iter()
+            .enumerate()
+            .map(|(i, padding)| Row {
+                path: GitPath::new(format!("src/main{i}.rs").into_bytes()).unwrap(),
                 oid: ObjectId::from([2; OID_BYTES]),
-                filter: Some(Mask::from_text("fn main() {}")),
-                symbols: Some(Box::new(Mask::from_text("main"))),
-            }]),
-            OVERHEAD + ROW_HEADER + 11 + 2 * MASK_BYTES,
-        );
+                filter: Some(Mask::from_text(&format!(
+                    "{}fn main() {{}}",
+                    " ".repeat(padding)
+                ))),
+                symbols: Some(Mask::from_symbols(["main"])),
+            })
+            .collect();
+        let size = OVERHEAD + rows.iter().map(Row::encoded_size).sum::<usize>();
+        let index = Index::new(ObjectId::from([1; OID_BYTES]), Some(rows), size);
         let encoded = index.encode().unwrap();
+        assert_eq!(encoded.len(), size);
         let loaded = Index::decode(encoded.clone()).unwrap();
         assert_eq!(loaded.tree, index.tree);
         let rows = loaded.rows.unwrap();
-        assert_eq!(rows[0].path.as_bytes(), b"src/main.rs");
-        assert!(
-            rows[0]
-                .symbols
-                .as_ref()
-                .unwrap()
-                .may_contain(&Mask::query("main", true).unwrap(), true)
-        );
+        let query = QueryMask::from_regex(&regex_syntax::parse("main").unwrap()).unwrap();
+        for (i, (row, width)) in rows.iter().zip(MASK_BYTES).enumerate() {
+            assert_eq!(row.path.as_bytes(), format!("src/main{i}.rs").as_bytes());
+            let filter = row.filter.as_ref().unwrap();
+            assert_eq!(filter.bits.len(), width);
+            assert!(filter.may_contain(&query));
+            assert!(row.symbols.as_ref().unwrap().may_contain(&query));
+        }
 
         let mut damaged = encoded.to_vec();
         damaged[HEADER + ROW_HEADER] ^= 1;

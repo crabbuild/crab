@@ -38,6 +38,7 @@ crab-storage = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["pkcs8"] }
 rand = "0.9"
 regex = "1.12.3"
+regex-syntax = "0.8.10"
 pulldown-cmark = { version = "0.13.6", default-features = false }
 openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest", "rustls-tls"] }
 object_store = { workspace = true }

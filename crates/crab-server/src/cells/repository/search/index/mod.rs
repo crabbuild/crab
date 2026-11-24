@@ -8,10 +8,11 @@ use crate::cells::repository::collaboration::{Subject, SubjectKind};
 use crate::cells::repository::{MAX_NUMBER, SqlBatch, integer, result_u64, statement};
 
 const STATE_KEY: &str = "discussion-search/v1/state";
-const FORMAT: u16 = 14;
+const FORMAT: u16 = 16;
 const BATCH: usize = 8;
 pub(super) const MAX_DIRTY: usize = 128;
 
+pub(in crate::cells::repository) mod locks;
 mod projection;
 mod query;
 pub(crate) mod references;
@@ -38,6 +39,9 @@ pub enum SearchIndexPhase {
     ReviewRequests,
     Commenters,
     Conversation,
+    IssueLocks,
+    PullLocks,
+    IssueTypes,
 }
 
 /// The bounded preparation cursor and compare-and-swap version.
@@ -112,6 +116,8 @@ fn revision(context: &Transaction<'_>) -> crate::cells::Result<u64> {
 
 pub(crate) fn initialize(context: &Transaction<'_>, generation: Uuid) -> crate::cells::Result<()> {
     context.install_schema(include_str!("schema.sql"))?;
+    locks::install(context)?;
+    super::super::issues::issue_type::search::install(context)?;
     super::contributions::install(context)?;
     crate::cells::repository::collaboration::conversation::install(context)?;
     context.put_document(
@@ -195,11 +201,19 @@ pub(crate) fn flush(context: &Transaction<'_>) -> crate::cells::Result<()> {
         projection::refresh(context, subject)?;
     }
     if !rows[0].rows.is_empty() {
-        context.sql(&SqlBatch { statements: vec![
-            statement("DELETE FROM discussion_index_dirty", vec![]),
-            statement("UPDATE discussion_index_revision SET revision = revision + 1 WHERE singleton = 1", vec![]),
-        ] })?;
+        context.query("DELETE FROM discussion_index_dirty", &[])?;
+        invalidate_cursors(context)?;
     }
+    Ok(())
+}
+
+pub(in crate::cells::repository) fn invalidate_cursors(
+    context: &Transaction<'_>,
+) -> crate::cells::Result<()> {
+    context.query(
+        "UPDATE discussion_index_revision SET revision = revision + 1 WHERE singleton = 1",
+        &[],
+    )?;
     Ok(())
 }
 
@@ -235,4 +249,4 @@ pub(in crate::cells::repository) fn rowid(subject: Subject) -> u64 {
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::cells::repository) mod tests;

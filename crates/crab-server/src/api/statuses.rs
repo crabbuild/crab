@@ -184,13 +184,9 @@ fn same_status(left: &CommitStatus, right: &CommitStatus) -> bool {
         && left.target_url == right.target_url
 }
 
-pub(crate) async fn latest(
-    server: &Server,
-    repo: &Repository,
-    oid: &str,
-) -> Result<Vec<CommitStatus>> {
-    let routed = crate::app::repository_cell(server, repo)?;
-    let catalog = crate::app::query_output(
+async fn latest(server: &Server, repo: &Repository, oid: &str) -> Result<Vec<CommitStatus>> {
+    let routed = app::repository_cell(server, repo)?;
+    let catalog = app::query_output(
         routed
             .client
             .query::<ListCommitStatuses>(&routed.target, None, oid.to_owned())
@@ -358,7 +354,7 @@ fn status_state_code(state: StatusState) -> u8 {
     }
 }
 
-fn status_state(code: u8) -> Result<StatusState> {
+pub(super) fn status_state(code: u8) -> Result<StatusState> {
     match code {
         0 => Ok(StatusState::Error),
         1 => Ok(StatusState::Failure),

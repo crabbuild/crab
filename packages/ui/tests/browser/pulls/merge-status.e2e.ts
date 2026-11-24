@@ -1,9 +1,105 @@
 import { expect, test } from "@playwright/test";
 import { mockPullRequest } from "./fixture";
+import type { PullRequest } from "../../../src/features/pull-requests/model";
 import {
   expectNoAccessibilityViolations,
   selectDarkTheme,
 } from "../accessibility";
+
+test("required checks show each same-name report and the commit they must pass on", async ({
+  page,
+}) => {
+  const fixture = await mockPullRequest(page);
+  const pull = fixture.pull();
+  const waiting = {
+    context: "ci/test",
+    head_sha: pull.head_oid,
+    state: null,
+    description: null,
+    target_url: null,
+    author: null,
+    updated_at: null,
+    run_id: null,
+    provider: "crab_status_or_check_run",
+  } as const;
+  let check: PullRequest["merge_requirements"]["checks"][number] = waiting;
+  await page.route(
+    (url) => url.pathname === "/api/repos/team/project/pulls/1",
+    (route) => {
+      const passed = check.state === "success";
+      return route.fulfill({
+        json: {
+          ...pull,
+          can_merge: passed,
+          merge_requirements: {
+            ...pull.merge_requirements,
+            required_approvals: 0,
+            checks: [check],
+            checks_satisfied: passed,
+            satisfied: passed,
+          },
+        },
+      });
+    },
+  );
+
+  await page.goto("/team/project/pull/1");
+  const panel = page.getByRole("region", { name: "Merge status" });
+  const checks = panel.locator(".required-checks");
+  const refresh = panel.getByRole("button", { name: "Refresh checks" });
+  await expect(checks).toContainText("Crab commit status or check run");
+  await expect(
+    checks.getByRole("link", { name: pull.head_oid.slice(0, 7) }),
+  ).toHaveAttribute("href", `/team/project/commit/${pull.head_oid}`);
+
+  check = {
+    ...waiting,
+    state: "failure",
+    provider: "crab_status",
+    author: "CI gateway",
+    description: "Integration environment failed",
+    target_url: "https://ci.example.test/status/42",
+    additional_report: {
+      ...waiting,
+      state: "success",
+      provider: "crab_check_run",
+      author: "Test runner",
+      conclusion: "neutral",
+      run_id: 7,
+    },
+  };
+  await refresh.click();
+  const status = checks
+    .getByRole("listitem")
+    .filter({ hasText: "Crab commit status" });
+  const run = checks
+    .getByRole("listitem")
+    .filter({ hasText: "Crab check run" });
+  await expect(status).toContainText("Failed");
+  await expect(status.getByRole("link", { name: "Details" })).toHaveAttribute(
+    "href",
+    "https://ci.example.test/status/42",
+  );
+  await expect(run).toContainText("Passed · neutral");
+  await expect(run.getByRole("link", { name: "Details" })).toHaveAttribute(
+    "href",
+    "/team/project/pull/1/checks?check=7",
+  );
+  await expect(
+    panel.getByRole("button", { name: "Merge pull request" }),
+  ).toHaveCount(0);
+
+  check = {
+    ...check,
+    state: "success",
+    description: "Integration environment passed",
+  };
+  await refresh.click();
+  await expect(checks).toContainText("All required checks have passed");
+  await expect(
+    panel.getByRole("button", { name: "Merge pull request" }),
+  ).toBeVisible();
+});
 
 test("merge guidance follows current eligibility and protection despite a stale repository catalog", async ({
   page,

@@ -5,15 +5,17 @@ import { short } from "@/lib/format";
 import { AlertIcon, GitBranchIcon, PencilIcon } from "@primer/octicons-react";
 import { useMemo, useState } from "react";
 import { ArchiveSettings } from "./archive";
+import { DescriptionSettings } from "./description";
 import { MergeMethodSettings } from "./merge-methods";
 import { RenameSettings } from "./rename";
+import { TopicSettings } from "./topics";
 import { TransferSettings } from "./transfer";
 
 const names = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
 
 const branchName = (ref: Ref) => ref.name.replace(/^refs\/heads\//, "");
 
-export function DefaultBranchSettings({
+export function GeneralSettings({
   repo,
   refs,
   csrf,
@@ -25,6 +27,60 @@ export function DefaultBranchSettings({
   csrf: string;
   onChanged: () => void;
   onRepositoryChanged: () => void;
+}) {
+  return (
+    <section className="settings-content" aria-labelledby="general-settings">
+      <h2 id="general-settings">General</h2>
+      {repo.can_admin && (
+        <RenameSettings
+          repo={repo}
+          csrf={csrf}
+          onRepositoryChanged={onRepositoryChanged}
+        />
+      )}
+      <DescriptionSettings
+        repo={repo}
+        csrf={csrf}
+        onRepositoryChanged={onRepositoryChanged}
+      />
+      <TopicSettings
+        repo={repo}
+        csrf={csrf}
+        onRepositoryChanged={onRepositoryChanged}
+      />
+      {repo.can_admin && (
+        <DefaultBranchSettings
+          repo={repo}
+          refs={refs}
+          csrf={csrf}
+          onChanged={onChanged}
+        />
+      )}
+      <MergeMethodSettings repo={repo} csrf={csrf} />
+      {repo.can_admin && (
+        <>
+          <TransferSettings repo={repo} csrf={csrf} />
+          <ArchiveSettings
+            repo={repo}
+            csrf={csrf}
+            onChanged={onRepositoryChanged}
+          />
+        </>
+      )}
+    </section>
+  );
+}
+
+function DefaultBranchSettings({
+  repo,
+  refs,
+  csrf,
+  onChanged,
+}: {
+  repo: Repository;
+  refs: Refs;
+  csrf: string;
+  onChanged: () => void;
 }) {
   const branches = useMemo(
     () =>
@@ -93,125 +149,105 @@ export function DefaultBranchSettings({
   }
 
   return (
-    <section className="settings-content" aria-labelledby="general-settings">
-      <h2 id="general-settings">General</h2>
-      <RenameSettings
-        repo={repo}
-        csrf={csrf}
-        onRepositoryChanged={onRepositoryChanged}
-      />
-      <section
-        className="settings-section"
-        aria-labelledby="default-branch-heading"
-      >
-        <header>
-          <div>
-            <h3 id="default-branch-heading">Default branch</h3>
-            <p>
-              The default branch is the base branch for pull requests and code
-              commits.
-            </p>
-          </div>
-          {!repo.archived && !editing && choices.length > 0 && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setEditing(true)}
-            >
-              <PencilIcon data-icon="inline-start" />
-              Change
-            </Button>
-          )}
-        </header>
-        <div className="default-branch-current">
-          <GitBranchIcon />
-          <strong>
-            {refs.head ? branchName(refs.head) : "No default branch"}
-          </strong>
-          {refs.head && <code>{short(refs.head.oid)}</code>}
-          <Badge variant="outline">default</Badge>
-        </div>
-        {choices.length === 0 && (
-          <p className="settings-help">
-            Create another branch before changing the default branch.
+    <section
+      className="settings-section"
+      aria-labelledby="default-branch-heading"
+    >
+      <header>
+        <div>
+          <h3 id="default-branch-heading">Default branch</h3>
+          <p>
+            The default branch is the base branch for pull requests and code
+            commits.
           </p>
+        </div>
+        {!repo.archived && !editing && choices.length > 0 && (
+          <Button variant="outline" size="sm" onClick={() => setEditing(true)}>
+            <PencilIcon data-icon="inline-start" />
+            Change
+          </Button>
         )}
-        {editing && !confirming && (
-          <div className="default-branch-form">
-            <label htmlFor="default-branch-select">Choose a branch</label>
-            <select
-              id="default-branch-select"
-              value={selectedName}
-              onChange={(event) => setSelectedName(event.target.value)}
+      </header>
+      <div className="default-branch-current">
+        <GitBranchIcon />
+        <strong>
+          {refs.head ? branchName(refs.head) : "No default branch"}
+        </strong>
+        {refs.head && <code>{short(refs.head.oid)}</code>}
+        <Badge variant="outline">default</Badge>
+      </div>
+      {choices.length === 0 && (
+        <p className="settings-help">
+          Create another branch before changing the default branch.
+        </p>
+      )}
+      {editing && !confirming && (
+        <div className="default-branch-form">
+          <label htmlFor="default-branch-select">Choose a branch</label>
+          <select
+            id="default-branch-select"
+            value={selectedName}
+            onChange={(event) => setSelectedName(event.target.value)}
+          >
+            {choices.map((ref) => (
+              <option key={ref.name} value={ref.name}>
+                {branchName(ref)}
+              </option>
+            ))}
+          </select>
+          <div>
+            <Button variant="outline" size="sm" onClick={cancel}>
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              variant="default"
+              disabled={!selected}
+              onClick={() => setConfirming(true)}
             >
-              {choices.map((ref) => (
-                <option key={ref.name} value={ref.name}>
-                  {branchName(ref)}
-                </option>
-              ))}
-            </select>
+              Update
+            </Button>
+          </div>
+        </div>
+      )}
+      {confirming && selected && (
+        <div className="default-branch-confirm">
+          <AlertIcon size={20} />
+          <div>
+            <strong>
+              Change the default branch to {branchName(selected)}?
+            </strong>
+            <p>
+              New pull requests and code views will use this branch by default.
+            </p>
+            {error && (
+              <p className="error" role="alert">
+                {error}
+              </p>
+            )}
             <div>
-              <Button variant="outline" size="sm" onClick={cancel}>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={saving}
+                onClick={cancel}
+              >
                 Cancel
               </Button>
               <Button
                 size="sm"
-                variant="default"
-                disabled={!selected}
-                onClick={() => setConfirming(true)}
+                variant="destructive"
+                disabled={saving}
+                onClick={updateDefaultBranch}
               >
-                Update
+                {saving
+                  ? "Updating…"
+                  : "I understand, update the default branch"}
               </Button>
             </div>
           </div>
-        )}
-        {confirming && selected && (
-          <div className="default-branch-confirm">
-            <AlertIcon size={20} />
-            <div>
-              <strong>
-                Change the default branch to {branchName(selected)}?
-              </strong>
-              <p>
-                New pull requests and code views will use this branch by
-                default.
-              </p>
-              {error && (
-                <p className="error" role="alert">
-                  {error}
-                </p>
-              )}
-              <div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={saving}
-                  onClick={cancel}
-                >
-                  Cancel
-                </Button>
-                <Button
-                  size="sm"
-                  variant="destructive"
-                  disabled={saving}
-                  onClick={updateDefaultBranch}
-                >
-                  {saving
-                    ? "Updating…"
-                    : "I understand, update the default branch"}
-                </Button>
-              </div>
-            </div>
-          </div>
-        )}
-      </section>
-      <MergeMethodSettings repo={repo} csrf={csrf} />
-      <TransferSettings repo={repo} csrf={csrf} />
-      <ArchiveSettings
-        repo={repo}
-        csrf={csrf}
-        onChanged={onRepositoryChanged}
-      />
+        </div>
+      )}
     </section>
   );
 }

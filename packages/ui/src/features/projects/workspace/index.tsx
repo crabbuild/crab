@@ -28,8 +28,10 @@ import { useProjectCommands } from "../commands";
 import { ProjectHistory } from "../history";
 import { DraftRecovery } from "../drafts";
 import { checkpointDraft, itemDraft, readDraft } from "../draft-storage";
-import { projectEndpoint, type ItemPage, type Row } from "../model";
+import { projectEndpoint, type Item, type ItemPage, type Row } from "../model";
 import { ProjectSettings } from "../settings";
+import { ProjectTypeFilter } from "../issue-type";
+import { ProjectGrouping, selectedGrouping } from "../grouping";
 import { ProjectBoard, ProjectTable, ProjectRoadmap } from "../views";
 import { FieldSelect } from "@/components/ui/field-select";
 import { ProjectProperties } from "./forms";
@@ -154,14 +156,35 @@ function PlanningWorkspace({
     project.definition.views.find(
       (view) => view.id === url.searchParams.get("pv"),
     ) ?? project.definition.views[0];
+  const requestedLayout = url.searchParams.get("layout");
+  const layout =
+    requestedLayout === "table" ||
+    requestedLayout === "board" ||
+    requestedLayout === "roadmap"
+      ? requestedLayout
+      : selected.layout;
+  const groupBy = selectedGrouping(
+    layout,
+    project.definition.fields,
+    true,
+    url.searchParams.get("group_by") ?? selected.group_by,
+  );
   const status = url.searchParams.get("status") ?? selected.status ?? "";
+  const issueType =
+    url.searchParams.get("issue_type") ?? selected.issue_type_filter ?? "";
   const repository = url.searchParams.get("repository") ?? "";
   const after = url.searchParams.get("after") ?? undefined;
   const resource = useRequest<{ page: ItemPage; can_manage: boolean }>(
     projectEndpoint({ organization }, `${project.id}/items`, {
       status: !overview && status ? status : undefined,
       repository: !overview && repository ? repository : undefined,
+      issue_type: !overview && issueType ? issueType : undefined,
+      group_by: overview ? undefined : groupBy,
       after: overview ? undefined : after,
+      type_cursor:
+        !overview && after
+          ? (url.searchParams.get("type_cursor") ?? undefined)
+          : undefined,
       version: after
         ? (url.searchParams.get("version") ?? undefined)
         : undefined,
@@ -175,6 +198,7 @@ function PlanningWorkspace({
     }
     next.searchParams.delete("after");
     next.searchParams.delete("version");
+    next.searchParams.delete("type_cursor");
     navigate(next.pathname + next.search);
   }
   useEffect(() => {
@@ -186,7 +210,7 @@ function PlanningWorkspace({
   }, [commands.generation, resource.retry]);
   const editable =
     detail.can_manage && !project.archived && !commands.locked && !refreshing;
-  async function changeStatus(row: Row, status: string) {
+  async function changeItem(row: Row, edit: (item: Item) => Item) {
     if (row.restricted) return;
     if (!commands.account) return;
     const scope = {
@@ -198,14 +222,15 @@ function PlanningWorkspace({
     if (previous?.kind === "item") {
       checkpointDraft(commands.account, scope, {
         ...previous,
-        item: { ...previous.item, status },
+        item: edit(previous.item),
       });
       setEditing(row);
       return;
     }
+    const item = edit(row.item);
     const checkpoint = checkpointDraft(commands.account, scope, {
       ...itemDraft(project, row, row.repository?.id ?? ""),
-      item: { ...row.item, status },
+      item,
     });
     await commands.submitOrganization(
       organization,
@@ -214,7 +239,7 @@ function PlanningWorkspace({
         project: project.id,
         version: row.version,
         repository: row.repository?.id ?? null,
-        item: { ...row.item, status },
+        item,
       },
       checkpoint,
     );
@@ -225,13 +250,6 @@ function PlanningWorkspace({
     typeof editing === "object" && "draft" in editing
       ? editing.draft
       : undefined;
-  const requestedLayout = url.searchParams.get("layout");
-  const layout =
-    requestedLayout === "table" ||
-    requestedLayout === "board" ||
-    requestedLayout === "roadmap"
-      ? requestedLayout
-      : selected.layout;
   const View =
     layout === "board"
       ? ProjectBoard
@@ -302,6 +320,8 @@ function PlanningWorkspace({
             status: undefined,
             repository: undefined,
             layout: undefined,
+            issue_type: undefined,
+            group_by: undefined,
           })
         }
       >
@@ -337,16 +357,22 @@ function PlanningWorkspace({
         <TabsContent value={overview ? "overview" : selected.id}>
           <div className="workspace-project-content">
             <div className="workspace-project-work">
-              {resource.error && (after || status || repository) && (
-                <Button
-                  variant="outline"
-                  onClick={() =>
-                    filters({ status: undefined, repository: undefined })
-                  }
-                >
-                  Reset filters
-                </Button>
-              )}
+              {resource.error &&
+                (after || status || repository || issueType || groupBy) && (
+                  <Button
+                    variant="outline"
+                    onClick={() =>
+                      filters({
+                        status: "",
+                        repository: undefined,
+                        issue_type: "",
+                        group_by: "none",
+                      })
+                    }
+                  >
+                    Reset filters
+                  </Button>
+                )}
               <Result state={resource}>
                 {({ page }) =>
                   overview ? (
@@ -449,6 +475,18 @@ function PlanningWorkspace({
                             })
                           }
                         />
+                        <ProjectTypeFilter
+                          types={detail.issue_types ?? []}
+                          value={issueType}
+                          onChange={(value) => filters({ issue_type: value })}
+                        />
+                        <ProjectGrouping
+                          layout={layout}
+                          fields={project.definition.fields}
+                          issueTypes
+                          groupBy={groupBy}
+                          onChange={(value) => filters({ group_by: value })}
+                        />
                         <span className="text-sm text-muted-foreground">
                           {page.total.toLocaleString()}{" "}
                           {page.total === 1 ? "item" : "items"}
@@ -459,9 +497,14 @@ function PlanningWorkspace({
                           page={page}
                           editable={editable}
                           onEdit={setEditing}
-                          onStatus={(row, status) =>
-                            void changeStatus(row, status)
+                          showIssueType={selected.show_issue_type}
+                          onIssueTypeChange={
+                            project.archived
+                              ? undefined
+                              : () => (after ? filters({}) : resource.retry())
                           }
+                          groupBy={groupBy}
+                          onChangeItem={changeItem}
                         />
                       ) : (
                         <Empty>
@@ -470,9 +513,11 @@ function PlanningWorkspace({
                               <FolderKanbanIcon />
                             </EmptyMedia>
                             <EmptyTitle>
-                              {page.total
-                                ? "No items on this page"
-                                : "Bring your work together"}
+                              {issueType && !page.total
+                                ? "No work matches this view"
+                                : page.total
+                                  ? "No items on this page"
+                                  : "Bring your work together"}
                             </EmptyTitle>
                             <EmptyDescription>
                               Link repositories, then add existing issues, pull
@@ -503,6 +548,11 @@ function PlanningWorkspace({
                                 "version",
                                 String(page.project.version),
                               );
+                              if (page.type_cursor)
+                                next.searchParams.set(
+                                  "type_cursor",
+                                  page.type_cursor,
+                                );
                               navigate(next.pathname + next.search);
                             }}
                           >
@@ -604,6 +654,8 @@ function PlanningWorkspace({
         <ProjectSettings
           target={{ organization }}
           project={project}
+          issueTypes
+          typeChoices={detail.issue_types ?? []}
           onClose={() => setSettings(false)}
         />
       )}

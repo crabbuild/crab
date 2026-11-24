@@ -363,19 +363,7 @@ async fn native_browser_accepts_a_repository_transfer_from_another_account() {
     let browser = Browser::new("repository-transfer");
     let link = format!("{}/-/notifications", h.origin);
     browser.run(&["open", &link]).await;
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    browser
-        .run(&[
-            "find",
-            "role",
-            "button",
-            "click",
-            "--name",
-            "Continue to sign in",
-        ])
-        .await;
+    browser.sign_in().await;
     browser
         .run(&[
             "wait",

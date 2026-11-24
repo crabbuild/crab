@@ -1,4 +1,5 @@
 use super::*;
+pub(crate) mod issue_type;
 pub(crate) mod lifecycle;
 pub(crate) mod pins;
 mod reads;
@@ -6,7 +7,7 @@ use crate::cells::repository::collaboration::{
     Target,
     activity::{self, Action},
 };
-pub(crate) use reads::{GetComment, GetIssue, GetIssueDetail, ListComments};
+pub(crate) use reads::{GetComment, GetIssue, GetIssueDetail, IssueDetail, ListComments};
 
 pub(crate) struct CreateIssue;
 
@@ -203,7 +204,22 @@ impl Mutation for CreateComment {
                 comment_from_row(comment)?,
             )));
         }
-        let record = append_comment(context, input.issue, &input.author, &input.body)?;
+        if collaboration::locks::blocked(
+            context,
+            Target::Issue {
+                number: input.issue,
+            },
+            input.can_post_locked,
+        )? {
+            return Ok(MutationResult::Rejected(CreateCommentOutcome::Locked));
+        }
+        let record = append_comment(
+            context,
+            input.issue,
+            &input.author,
+            &input.body,
+            input.can_mark_duplicate,
+        )?;
         context.sql(&SqlBatch {
             statements: vec![statement(
                 "INSERT INTO repository_comment_submissions(issue_number, request_id, payload_digest, comment_number) VALUES (?, ?, ?, ?)",
@@ -229,6 +245,7 @@ pub(in crate::cells::repository) fn append_comment(
     issue: u64,
     author: &RepositoryAuthor,
     body: &str,
+    can_mark_duplicate: bool,
 ) -> crate::cells::Result<CommentRecord> {
     let now = timestamp(context.now_ms())?;
     let sequence = context.sql(&SqlBatch {
@@ -267,6 +284,9 @@ pub(in crate::cells::repository) fn append_comment(
     search::contributions::project(context, target, &record.author, &record.body)?;
     let source = activity::append(context, target, &record.author, Action::Created)?;
     crate::cells::repository::collaboration::body_written(context, &source, None, &record.body)?;
+    if can_mark_duplicate {
+        collaboration::duplicates::from_comment(context, &source, body)?;
+    }
     Ok(record)
 }
 
@@ -345,7 +365,7 @@ impl UpdateIssue {
         context: &Transaction<'_>,
         mut issue: IssueRecord,
         input: UpdateIssueInput,
-        closing_pull: Option<u64>,
+        closing_source: Option<ClosingSource<'_>>,
     ) -> crate::cells::Result<MutationResult<UpdateIssueOutcome>> {
         let was_closed = issue.state != 0;
         let edited = input
@@ -365,7 +385,7 @@ impl UpdateIssue {
                 .as_ref()
                 .is_some_and(|value| value != &issue.assignees);
         let author = same_author(&issue.author, &input.actor);
-        if (input.title.is_some() || input.body.is_some()) && !author
+        if (input.title.is_some() || input.body.is_some()) && !(author || input.can_moderate)
             || (input.state.is_some() || input.state_reason.is_some())
                 && !(author || input.can_triage)
         {
@@ -470,7 +490,14 @@ impl UpdateIssue {
                     reason: lifecycle
                         .state_reason
                         .ok_or(crate::cells::Error::Invalid("new closure has no reason"))?,
-                    pull: closing_pull,
+                    pull: closing_source.and_then(|source| match source {
+                        ClosingSource::Pull(number) => Some(number),
+                        ClosingSource::Commit(_) => None,
+                    }),
+                    commit: closing_source.and_then(|source| match source {
+                        ClosingSource::Commit(oid) => Some(oid.to_owned()),
+                        ClosingSource::Pull(_) => None,
+                    }),
                 }
             };
             activity::append(context, target, &input.actor, action)?;
@@ -497,10 +524,16 @@ impl UpdateIssue {
     }
 }
 
-pub(in crate::cells::repository) fn close_by_pull(
+#[derive(Clone, Copy)]
+pub(in crate::cells::repository) enum ClosingSource<'a> {
+    Pull(u64),
+    Commit(&'a str),
+}
+
+pub(in crate::cells::repository) fn close_linked_issue(
     context: &mut Transaction<'_>,
     number: u64,
-    pull: u64,
+    source: ClosingSource<'_>,
     actor: &RepositoryAuthor,
 ) -> crate::cells::Result<()> {
     let Some(issue) = GetIssue::execute(context, number)?.filter(|issue| issue.state == 0) else {
@@ -510,6 +543,7 @@ pub(in crate::cells::repository) fn close_by_pull(
         number,
         actor: actor.clone(),
         can_triage: true,
+        can_moderate: false,
         version: issue.version,
         title: None,
         body: None,
@@ -519,7 +553,7 @@ pub(in crate::cells::repository) fn close_by_pull(
         assignees: None,
     };
     if matches!(
-        UpdateIssue::apply_update(context, issue, input, Some(pull))?,
+        UpdateIssue::apply_update(context, issue, input, Some(source))?,
         MutationResult::Rejected(_)
     ) {
         return Err(crate::cells::Error::Invalid(
@@ -559,7 +593,16 @@ impl Mutation for UpdateComment {
             return Ok(MutationResult::Rejected(UpdateCommentOutcome::NotFound));
         };
         let mut comment = comment_from_row(row)?;
-        if !same_author(&comment.author, &input.actor) {
+        if collaboration::locks::blocked(
+            context,
+            Target::Issue {
+                number: input.key.issue,
+            },
+            input.can_moderate,
+        )? {
+            return Ok(MutationResult::Rejected(UpdateCommentOutcome::Locked));
+        }
+        if !(same_author(&comment.author, &input.actor) || input.can_moderate) {
             return Ok(MutationResult::Rejected(UpdateCommentOutcome::Forbidden));
         }
         if comment.version != input.version {

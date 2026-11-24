@@ -448,6 +448,11 @@ async fn accept(
             {
                 return Err(Error::PageChanged.into());
             }
+            if offer.name != record.name {
+                // The source administrator requested the name change. A
+                // destination owner cannot lend them a ruleset bypass.
+                settings::check_rename(server, record, key(&offer.requester)).await?;
+            }
             if cancel.is_cancelled() {
                 return Err(crab_remote::publication::Error::Cancelled.into());
             }

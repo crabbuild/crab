@@ -6,10 +6,18 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
 
 - Compare and create now share merge-base reads and submit the inspected tips.
   Native submission decisions preserve both successful and stale attempts.
+  Per-file diffs and inline review anchors now resolve one path at the pinned
+  commits. A native 516-file fixture with diverged branches verified diff reads
+  and review anchors under an entry budget the full comparison exceeds.
+  Chromium opened the selected diff and rendered the persisted annotation.
 - Protected merge checks direct reviewer grants, evaluates same-name statuses
   and check runs together, leases both refs and reconciles with a durable receipt.
   The prior tag's pending records still use their tagged retry contract.
 - Viewed progress now persists per account and PR, keyed to file diff identity.
+- Release notes process merged pull requests in pages using the pinned Git
+  range. A native fixture added 4,096 historical merge records, then published
+  the selected release in Chromium. The same fixture verified that a draft
+  covering all history reaches the 64 KiB output guard.
 - Writers can mark repository issues to close when their linked PR merges into
   the default branch. Merge completion and the issue lifecycle update share the
   same transaction, and the issue timeline links back to the PR.
@@ -62,8 +70,14 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
   repository, organization, language, and path filters, plus explicit content
   and symbol terms. Regular expressions work across content, paths, and
   definitions. Both searches support Boolean expressions with grouped,
-  quoted, and scoped terms. Representative large-catalog qualification
-  remains open.
+  quoted, and scoped terms. The index rejects candidates using trigrams
+  required by the parsed query, including Unicode-aware case folding. Larger
+  files have larger filters to keep selective queries from opening unrelated
+  blobs. A native fixture covers a 4,097-path regex search across an empty page,
+  and a mixed-case fixture verifies Unicode results against Git. The pinned
+  Next.js, Neovim, and ripgrep fixture measures search over 38,135 indexed
+  paths. The same selective literal dropped from 1,235 Git content
+  verifications across 38 pages to 110 across four.
 - The account-wide in-app inbox delivers assignments, individual and team
   review requests, individual mentions, and configured closed-team mentions.
   Read state is durable, the inbox can filter by reason, and links target the
@@ -172,8 +186,12 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
   commit. Verified email owner lookup remains open.
 
 - Team maintainers can distribute review requests by repository-scoped
-  rotation or fewest open requests. Organization-wide reviewer balancing and
-  availability remain open.
+  rotation or fewest open requests and exclude selected members from both
+  methods. Reviewers can set an expiring or indefinite Busy status for
+  automatic assignment. Team routing can count eligible pending requests and
+  keep the team on a pull request after individual assignment.
+  Organization-wide reviewer balancing remains open.
+  [Team review settings](https://docs.github.com/en/organizations/organizing-members-into-teams/managing-code-review-settings-for-your-team)
 
 ## Platform investments
 
@@ -197,17 +215,17 @@ Effort is relative to the existing architecture. M is a bounded server and UI sl
 
 | Priority | Workflow | Current behavior and gap | Delivery target | Effort / risk |
 | --- | --- | --- | --- | --- |
-| P0 | Compare and open a PR | Compare and PR file views use the merge base. Opening a PR from the browser binds submission to the reviewed base and head. `packages/ui/src/features/pull-requests/create.tsx`, `crates/crab-server/src/api/query.rs`, `crates/crab-server/src/api/pulls/mod.rs` | Qualify the embedded UI and comparison performance across representative histories and large diffs. | M–L / high |
-| P0 | Review and merge with confidence | Protected merge evaluates current eligible reviewers, all required check sources, and exact commit identity. Ref leases and publication receipts support recovery. `crates/crab-server/src/api/pulls/merge/mod.rs`, `crates/crab-server/src/api/pulls/tests/http.rs`, `crates/crab-server/src/app.rs` | Extend fault and live external CI qualification. Track additional protection policy in P2. | L / high |
-| P1 | Review a substantial change | Private pending review, atomic submission, revision-aware viewed progress and multi-file suggestion batches are available. `crates/crab-server/src/api/pulls/review_threads`, `packages/ui/src/features/pull-requests/reviews` | Qualify review and batch application on representative large changes using the embedded UI. | L / medium–high |
-| P1 | Create, import and find a repository | Personal and organization browser creation share durable setup. The home page and organization tabs search readable repositories by name, owner, or description and page the results on the server. Repository administrators can rename or transfer a standalone repository while retaining its UUID, Git placement, and old addresses. Transfers require acceptance from the named account or a destination organization owner. Eligible recipients can open pending transfers from Notifications. Personal recipients can also receive an opt-in email alert. Git imports resume by job ID, verify the pinned refs before exposing a destination and exclude LFS object bytes. `crates/crab-server/src/api/catalog.rs`, `packages/ui/src/features/organizations/repositories.tsx`, `crates/crab-server/src/git_import/jobs.rs` | Qualify transfer email with a deployed provider and scope private fork-network transfers. | L / high |
+| P0 | Compare and open a PR | Compare and PR file views use the merge base. Opening a PR from the browser binds submission to the reviewed base and head. The isolated RustFS corpus compares exact Next.js and Neovim trees against stock Git and exercises browser reconfirmation after a head push. The deep-history fixture checks comparison and PR creation with 10,050 shared commits and verifies that new commit cursors preserve topic lane order when the ancestry index becomes ready. `packages/ui/src/features/pull-requests/create.tsx`, `crates/crab-server/src/api/query.rs`, `crates/crab-server/src/api/pulls/tests/real_comparison/deep_history.rs` | Qualify more complex histories and the target deployment. Unindexed ranges without a bounded ancestry proof use the full base walk within the existing limits. | M–L / high |
+| P0 | Review and merge with confidence | Protected merge evaluates current eligible reviewers and reads required reports for the exact head and tested candidate in one Repository Cell transaction. The merge panel shows both reports for a shared context and the commit that must pass. Review views follow the fork's source ref and the sidebar shows decision eligibility. Ref leases and publication receipts support recovery. `crates/crab-server/src/api/pulls/required_checks.rs`, `crates/crab-server/src/api/pulls/reviewers/mod.rs`, `crates/crab-server/src/api/pulls/merge/mod.rs` | Extend fault and live external CI qualification. Track additional protection policy in P2. | L / high |
+| P1 | Review a substantial change | Private pending review, atomic submission, revision-aware viewed progress and multi-file suggestion batches are available. Reviewers can filter file paths, hide viewed files or whitespace, and jump to a thread annotation hidden by these choices. Exact conversation totals and previous and next unresolved controls cover threads past the loaded page and across revisions. Cross-page batches retain selected versions and show affected paths and lines. A 20-suggestion private fork batch uses one selection read for preparation and one for publication verification, and the native Chromium fixture recovers its original commit after a lost reply. Viewed progress loads a consistent snapshot across pages and retains existing marks. The native Chromium corpus covers the complete 1,179-file Next.js review and inline review on the 536-file Neovim change. `crates/crab-server/src/api/pulls/review_threads`, `packages/ui/src/features/pull-requests/reviews` | Measure cross-page review and publication latency on the target deployment. | L / medium–high |
+| P1 | Create, import and find a repository | Personal and organization browser creation share durable setup. The home page and organization tabs search readable repositories by name, owner, or description and page the results on the server. The home and organization catalogs filter by archive and fork state. Organization search combines those filters with typed custom-property qualifiers. Filtered continuation tracks readable candidates, the property revision, and the archive revision at the page boundary. Repository administrators can rename or transfer a standalone repository while retaining its UUID, Git placement, and old addresses. Transfers require acceptance from the named account or a destination organization owner. Eligible recipients can open pending transfers from Notifications. Personal recipients can also receive an opt-in email alert. Git imports resume by job ID, verify the pinned refs before exposing a destination and exclude LFS object bytes. `crates/crab-server/src/api/catalog.rs`, `packages/ui/src/features/organizations/repositories.tsx`, `crates/crab-server/src/git_import/jobs.rs` | Qualify transfer email with a deployed provider and scope private fork-network transfers. | L / high |
 | P1 | Get back to requested work | The inbox groups assignments, review requests, mentions, discussion watch activity, and release publications. Rows offer reason filters, private read and filing state, latest contribution links, versioned bulk triage, and inbox unsubscribe. Dedicated views manage repository watches, bulk unwatch by owner, and discussion follows with bulk unsubscribe. Opt-in email delivers generic inbox links to a verified sign-in address. `crates/crab-server/src/api/notifications/mod.rs`, `crates/crab-server/src/server/email.rs`, `packages/ui/src/features/notifications/index.tsx` | Qualify delivery against an operator-provisioned Resend tenant. Evaluate digests and email replies separately. | L / medium–high |
-| P1 | Find code and symbols | Repository code search reads a pinned branch, tag, or commit. Workspace search uses a persistent path and trigram-filter index for readable default branches, verifies matches against Git, and shows index use and scan status. Continuations bind the query and readable repository set. Go to file and current-file Symbols are available. Both search views find definitions for eight languages. `crates/crab-server/src/api/code_search/`, `crates/crab-server/src/repository/code_index/` | Qualify Boolean, regex, and literal search on a representative large catalog. | L / high |
+| P1 | Find code and symbols | Repository code search reads a pinned branch, tag, or commit. Workspace search uses a persistent path and trigram-filter index for readable default branches, verifies matches against Git, and shows index use and scan status. Continuations bind the query and readable repository set. Go to file and current-file Symbols are available. Both search views find definitions for eight languages. Cold indexing and a four-client mixed search are measured on five pinned repositories. `crates/crab-server/src/api/code_search/`, `crates/crab-server/src/repository/code_index/` | Reduce the cold build cost and qualify latency and index readiness on a larger multi-tenant deployment. | L / high |
 | P1 | Connect external CI | GitHub Actions workflow results use repository-scoped credentials, signature verification, durable redelivery receipts and provider-bound merge requirements. PR checks link to the GitHub run. Required workflows can dispatch from the queue with a candidate-scoped Git checkout. Repository admins can inspect recent accepted deliveries, their exact commit and attempt, and whether the check changed. Up to 20 operator-approved outbound receivers per repository receive signed stock Git and browser ref updates and PR lifecycle events with independent subscriptions, signing secrets, retries, and redelivery. Repository admins can issue and individually revoke named, expiring deploy tokens for private Git and LFS checkout. `crates/crab-server/src/api/integrations/mod.rs`, `packages/ui/src/features/settings/integrations.tsx`, `crates/crab-server/src/server/webhooks.rs`, `packages/ui/src/features/settings/webhooks.tsx` | Qualify a deployed GitHub App with live deliveries. | L / high |
-| P2 | Govern and integrate changes | Merge methods are configurable and include squash and rebase. PR writers can merge the current base into the head branch, rebase onto it, or resolve simple text conflicts in the browser, including on a replacement branch for protected heads. Team grants and PR team review requests use current membership. Teams can route requests by rotation or fewest open requests within the repository. CODEOWNERS requests owners, can require eligible approvals by changed path, and appears on repository files. Repository rulesets layer active branch and tag patterns with classic protection in Git HTTP and browser publication. Either branch policy can require all published inline review conversations to be resolved. Repository and organization rulesets support current role and visible team bypass. Organization rulesets target all, selected, or name-matched repositories and layer with local policy. `crates/crab-server/REFERENCE.md`, `crates/crab-server/src/api/pulls/branch_update.rs`, `crates/crab-server/src/api/pulls/codeowners/mod.rs` | Add organization-wide reviewer balancing and availability, repository property targeting, and integration bypass authority. Add push attribution for retaining eligible auto-merge requests after a writer changes the head. Add batched publication and qualify wider build concurrency under production load. | XL / high |
-| P2 | Triage, plan and release | Issues, labels, milestones, pins, bulk edits, linked work, default-branch issue closure through manual links and PR descriptions, Markdown and YAML issue templates with inherited account defaults, sub-issues, discussion attachments, shared Projects, release assets and Git-range-based editable release notes are available. `crates/crab-server/README.md:649`, `crates/crab-server/REFERENCE.md`, `crates/crab-server/src/api/issues/templates/mod.rs` | Closing keywords in commit messages, cross-repository issue links, issue types and dependencies, moderation and edit history, Projects automation and configurable release-note categories and exclusions. Prioritize the remaining closure paths before adding more planning surfaces. | L / medium–high |
+| P2 | Govern and integrate changes | Merge methods are configurable and include squash and rebase. PR writers can merge the current base into the head branch, rebase onto it, or resolve simple text conflicts in the browser, including on a replacement branch for protected heads. Team grants support Read, Triage, Moderate, Write, Maintain, and Admin. Moderate can edit issues and issue comments with editor attribution and manage label and milestone definitions without code write access. Moderate can lock issue conversations and PR locks require Write. Locks cover public contributions and reactions, preserve private review drafts, and record activity. Moderators can set a deadline, and readers can filter issues and PRs by effective lock state. Moderators can hide or restore published comments, reviews, and inline replies with reasons. Readers can expand hidden contributions. Edit history compares retained descriptions and contributions, including inline suggestions, and authors or writers can remove historical text with attribution. Maintain covers repository descriptions, topics, and ordinary merge settings across direct, team, and signed group grants. Repository topics appear on repository pages and support permission-aware name and count filters in the home and organization catalogs. Repository settings, delegated properties, and PR team review requests use current membership. Teams can rotate assignments or balance open and recent review requests across the organization. Both algorithms skip excluded or Busy members. CODEOWNERS requests owners, can require eligible approvals by changed path, and appears on repository files. Repository and inherited rulesets layer active branch and tag patterns with classic protection, including ref update restrictions at Git HTTP and browser publication. Either branch policy can require all published inline review conversations to be resolved and commits to follow a linear history. Repository and organization rulesets support current role and visible team bypass. Organization rulesets target all, selected, name-matched, or property-matched repositories and layer with local policy. Property targets combine custom values with current catalog names and source or fork type. Name targets can protect the current repository name during renames and name-changing transfers. Owners can define typed repository properties and defaults, delegate individual values to current repository administrators, and atomically edit overrides for up to 50 repositories under the publication policy lease. `crates/crab-server/REFERENCE.md`, `crates/crab-server/src/api/pulls/branch_update.rs`, `crates/crab-server/src/api/pulls/codeowners/mod.rs` | Qualify review routing on large organizations, including simultaneous requests. Add cross-repository issue transfer, delegated team-grant management, language and deployment-context ruleset targeting, required property values at creation and transfer, app-scoped property editing, and integration bypass authority. Add push attribution for retaining eligible auto-merge requests after a writer changes the head. Add batched publication and qualify wider build concurrency under production load. | XL / high |
+| P2 | Triage, plan and release | Issues, labels, milestones, pins, bulk edits, linked work, default-branch issue closure through manual links, PR descriptions, and published commit messages, Markdown and YAML issue templates with inherited account defaults, sub-issues, same-repository issue dependencies with live blocked indicators on issues and Projects, duplicate issue and PR marking with timeline undo, discussion attachments, shared Projects, release assets and Git-range-based editable release notes with configurable categories and exclusions are available. `crates/crab-server/README.md:649`, `crates/crab-server/REFERENCE.md`, `crates/crab-server/src/api/issues/templates/mod.rs` | Cross-repository issue links and dependencies, issue types, remaining moderation controls, and Projects automation. Prioritize the remaining closure paths before adding more planning surfaces. | L / medium–high |
 | P2 | Contribute across repository boundaries | Private organization forks use stable source UUIDs, independent refs, current source ACLs, verified Git LFS copies, and verified native Xet bindings. The browser compares fork and upstream branches from their common ancestor, opens upstream PRs, applies review suggestions and text conflict resolutions to the fork, and supports the upstream's enabled merge methods. A GitHub Actions mirror branch lets the upstream require results for commits present only in the fork. `crates/crab-server/src/api/pulls/git.rs`, `crates/crab-server/src/api/integrations/mod.rs`, `crates/crab-server/src/git/receive/fork_merge.rs` | Add review-state search across forks and policy for wider fork networks. Public visibility introduces a separate policy for anonymous browse, clone, search, fork access and abuse controls. | XL / high |
-| P2 | Review large assets | The UI previews many formats and supports range-backed Parquet analysis. Browser downloads of Crab/LFS pointers return pointer bytes. `crates/crab-server/REFERENCE.md:590`, `crates/crab-server/REFERENCE.md:598` | Authorized artifact download and size-appropriate preview at a pinned commit. Start with metadata and ranged download for an actually stored artifact, then add representative dataset or model comparisons. | L / high |
+| P2 | Review large assets | Native Crab and Git LFS files show their stored size, stream authorized downloads, and preview recognized formats on request at the displayed commit. The Parquet workbench uses byte ranges. Whole-file previews enforce format size limits, and raw Git pointer bytes remain available. `crates/crab-server/src/api/artifact_content.rs`, `packages/ui/src/features/repository/files/index.tsx` | Add representative dataset or model comparisons. | L / high |
 | P3 | Extend the platform | The enterprise inventory identifies gaps in hosted workflow execution, package hosting, and other platform areas. `crab/docs/architecture/enterprise-server-ui.md` | Scope hosted runners, Packages, Pages, Discussions, Wiki, Insights, public discovery, SSH, and broader API compatibility as independent programs. See the delivery order below for enterprise access, audit, and security priorities. | XL / high |
 
 Crab v2 uses separate issue and PR sequences, including at the alpha tag. A repository can therefore contain both issue `#123` and PR `#123`. Closing keywords resolve the issue number in the target repository. Future Markdown autolinks and cross-repository references need to preserve typed link destinations. `crates/crab-server/src/cells/schema.sql:8`, `crates/crab-server/src/cells/repository/collaboration/links/mod.rs`, `crates/crab-server/src/cells/repository/pulls/merge.rs`. [GitHub work numbering](https://docs.github.com/en/rest/using-the-rest-api/issue-event-types), [closing linked issues](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/linking-a-pull-request-to-an-issue)
@@ -220,10 +238,10 @@ criticality and adoption dependencies.
 
 | Priority | Remaining delivery | Acceptance evidence |
 | --- | --- | --- |
-| P0 | Qualify the protected PR path with one live GitHub App. Exercise stock Git and the browser from branch update through review, exact-commit CI and protected merge. | With a deployed App and object store, prove that a revoked reviewer, an old head, and a wrong check provider cannot satisfy policy. Force a lost publication reply and peer handoff, then fetch the intended merge with stock Git. [Required check behavior](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks) |
-| P0 | Qualify enterprise operations on the first supported deployment. Cover authenticated ingress, least-privilege storage access, revocation, backup and restore, and rollback. | Restore an isolated repository and its access records on a fresh deployment. Prove the old browser and Git credentials are denied across replicas after deprovisioning, and measure recovery time and data loss against the operator's targets. [Enterprise qualification](../crates/crab-server/CELLAR.md) |
-| P1 | Qualify SCIM user provisioning and group-to-team synchronization with one live IdP. Verify managed automation identity revocation against the deployed Git service. Extend organization audit coverage to security events, streaming, and enterprise-wide views. | An administrator provisions or disables a user via one IdP and sees effective repository access and the audit decision. Prove exact subject mapping, cross-replica revocation, group reconciliation, service credential revocation, and administrator-only export. [SCIM provisioning](https://docs.github.com/en/enterprise-cloud@latest/admin/managing-iam/provisioning-user-accounts-with-scim) · [Enterprise audit](https://docs.github.com/en/enterprise-cloud@latest/admin/concepts/security-and-compliance/audit-log-for-an-enterprise) |
-| P1 | Scale the daily review and discovery paths. Qualify indexed Boolean, symbol, content and path search and large-diff review on a representative corpus. | A contributor can find a symbol across readable repositories and navigate to a pinned line. Revoking access removes hits immediately, including from continuations. Measure search and diff latency on a representative corpus. [Code search syntax](https://docs.github.com/en/search-github/github-code-search/understanding-github-code-search-syntax) |
+| P0 | The two-process RustFS gate exercises signed workflow reports, current reviewer eligibility, protected Git writes, stale merge attempts, and retry on a surviving replica. Repeat the protected PR path with the browser and one live GitHub App. | With a deployed App and object store, prove that a revoked reviewer, an old head, and a wrong check provider cannot satisfy policy. Force a lost publication reply and peer handoff, then fetch the intended merge with stock Git. [Required check behavior](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks) |
+| P0 | Qualify enterprise operations on the first supported deployment. RustFS fixtures restore exact live object versions and prove SCIM revocation of existing browser and Git credentials across two server processes and a restart. Cover authenticated ingress, least-privilege storage access, revocation, and rollback on the target deployment. | Restore an isolated repository and its access records on a fresh deployment. Prove the old browser and Git credentials are denied across replicas after deprovisioning, and measure recovery time and data loss against the operator's targets. [Enterprise qualification](../crates/crab-server/CELLAR.md) |
+| P1 | Organization owners can filter and export committed SCIM team links, roster updates, and unlinks. The RustFS gate verifies automation token revocation across two Git-serving processes, including a push admitted before revocation and denial after restart. Qualify provisioning and group synchronization with one live IdP and repeat Git revocation qualification on the target deployment. Extend audit coverage to additional security events, streaming, and enterprise-wide views. | An administrator provisions or disables a user via one IdP and sees effective repository access and the audit decision. Prove exact subject mapping, cross-replica revocation, group reconciliation, service credential revocation, and administrator-only export. [SCIM provisioning](https://docs.github.com/en/enterprise-cloud@latest/admin/managing-iam/provisioning-user-accounts-with-scim) · [Enterprise audit](https://docs.github.com/en/enterprise-cloud@latest/admin/concepts/security-and-compliance/audit-log-for-an-enterprise) |
+| P1 | Scale the daily review and discovery paths. The isolated RustFS qualification measures cold indexing and four concurrent search modes on five pinned repositories. It also measures comparison and individual file reads over two large divergent changes. Repeat these workflows on a larger multi-tenant deployment and qualify large fork review batches. | Track cold and concurrent latency, object-store reads, and index readiness. Preserve commit-pinned results and current access across browser navigation and continuation. [Code search syntax](https://docs.github.com/en/search-github/github-code-search/understanding-github-code-search-syntax) |
 | P2 | Add enterprise security findings and stronger governance. Start with SARIF ingestion tied to exact commits, then add secret push protection, required commit signatures, and policy-managed exceptions. | An authorized scanner publishes a bounded result for an exact commit. The PR shows new findings, the configured protection gates publication, and an allowed exception appears in audit. [SARIF ingestion](https://docs.github.com/en/code-security/how-tos/find-and-fix-code-vulnerabilities/integrate-with-existing-tools/upload-sarif-file) |
 | P3 | Scope hosted runners, package registries, Pages, Wikis, and broader API compatibility separately. | Each program has an explicit isolation, authorization, retention, and availability contract. |
 
@@ -264,14 +282,45 @@ Prove one private repository from an author’s browser and stock Git through a 
 
 ## Verification and release claims
 
+- The concurrent workspace search fixture published five pinned Git snapshots to
+  isolated RustFS and checked searches before and during index builds. Warm
+  path, literal, regex, and Boolean content-and-symbol queries covered 42,479
+  paths across 81 successful HTTP pages. Per-mode p95 page latency was 87–168 ms
+  on the local test server. The largest cold index took 152 seconds to build.
+  Embedded Chromium reopened a pinned source line, and revoking access
+  invalidated the prior continuation.
+  Reusing the packed bytes from the size check reduced backend reads during
+  the same build workload by 10.5%. The largest build took 153 seconds in
+  the follow-up run. Warm p95 page latency was 60–110 ms across all four modes.
+  Parsing pages in parallel under the shared CPU limit reduced the largest
+  build from 154 to 127 seconds in the next paired run. All 81 warm pages
+  returned the expected results, and eight concurrent pages during indexing
+  completed at 56 ms p95.
+
+- Embedded Chromium previewed and downloaded a native Crab file through the
+  same server API. Native HTTP tests exercised authorized full reads, ranges,
+  and `If-Range` against real shard and xorb fixtures. They checked that
+  a shard hint could not authorize an unlisted artifact, a range could not
+  hide a pointer size mismatch, and transfer of corrupt stored bytes failed.
+
+- Embedded Chromium queried a Git LFS Parquet file and downloaded its original
+  bytes after the branch advanced. Playwright verified that oversized or
+  unknown-size artifacts make no preview request. Native HTTP tests verified
+  pinned ranges, `If-Range`, and denial after read access was revoked. The
+  standalone RustFS qualifier checked a file-view range against a real 8 MiB
+  object uploaded with stock Git LFS.
+
 - Organization automation passed the standalone server and production UI
   builds, generated contract check, 36 focused native tests, 120 UI unit
   tests, and four organization Playwright cases. The browser issued a
   credential that stock Git accepted and then disabled it. Native coverage
   exercised Git push and clone, Git LFS upload and download, protected
   branches, repository rename and transfer, grant downgrades, individual
-  revocation, and disable across two native replicas. The standalone RustFS
-  gate also verified ordinary Git publication and process restart.
+  revocation, and disable across two native replicas. The RustFS process
+  gate pauses an admitted receive on one replica, revokes the credential
+  on the other and verifies the branch is unchanged. It checks that Git
+  fetch and push reject the revoked token, including after restart, then
+  publishes the same commit with a replacement token.
 
 - Organization audit history passed the server and production UI builds,
   generated contract check, 31 focused native tests, 120 UI unit tests,
@@ -304,6 +353,13 @@ Prove one private repository from an author’s browser and stock Git through a 
   matching and index refresh after a push. Embedded Chromium opened a
   match at the exact commit and line. A standalone RustFS process built
   the index from a stock Git push and reused it immediately after restart.
+
+- An offline check used one selective case-insensitive expression per pinned
+  snapshot. Across 13,199 eligible text paths, the filter admitted 3,376
+  candidates and retained all five exact matches. The snapshots were
+  TanStack Query `ee47993724e5`, MinIO `07c3a429bfed`, Eclipse Platform UI
+  `e3bbb556534a`, and Zod `d2b135cfb7a3`. This measures candidate reduction.
+  Large-catalog HTTP latency and concurrent load still need qualification.
 
 - Workspace code and path search passed the standalone server and production
   UI builds, four native search and catalog tests, 120 UI unit tests, and
@@ -351,6 +407,13 @@ Prove one private repository from an author’s browser and stock Git through a 
   that leave the selected check unchanged. Embedded Chromium refreshed
   Integrations after a signed report and showed the exact commit. The native
   lost-merge-reply and ordered-queue browser regressions also passed.
+
+- The RustFS process gate verifies protected merges across two standalone
+  servers with a signed App fixture. A same-name manual check, an unbound
+  installation, and a previously passing result for an older commit cannot
+  authorize publication. A downgraded reviewer no longer counts. After a
+  fresh approval and workflow result, the original merge request recovers
+  through the surviving replica with the same commit and timestamp.
 
 - Repository transfer passed the production UI build, 76 focused native
   tests, 120 UI unit tests, nine Playwright cases, and three embedded

@@ -41,7 +41,7 @@ is buffered before owner dispatch so Cellar can safely retry stale routes; it is
 not forwarded as a non-replayable upload stream. Successful HTTP output
 uses the SDK output gate, including its ownership and durability checks.
 
-Repository assignment format 2 and discussion index format 14 require the explicit
+Repository assignment format 2 and discussion index format 15 require the explicit
 preparation described below. Issue lifecycle metadata also requires explicit
 `cells prepare-issue-state` on existing repositories. Pull lifecycle metadata
 requires `cells prepare-pull-state`. Other canonical records
@@ -501,13 +501,81 @@ review key or exclusive KV bound. Both phases process at most eight source recor
 per transaction; unrelated pull metadata also advances the request cursor. Reads
 remain unavailable until all sources complete. Domain records, versions, request
 history, receipts and public submission mappings are unchanged. Older indexes
-require `cells rebuild-search`. Fresh repositories initialize format 14.
+require `cells rebuild-search`. Fresh repositories initialize the current index format.
 
 Native list output adds `review_requested_from_me`. Author, reviewer and commenter
 names now share one ordered `people` binding collection, one Directory snapshot,
 digest encoding and validation. Public HTTP cannot supply bindings.
 Update peers together; there is no old list-shape reader or source-scan fallback.
 Review-status predicates are described below.
+
+## Duplicate discussion marks
+
+A new top-level comment can install a typed duplicate mark with its
+contribution and activity in one Repository transaction. The mark binds
+the original event number. Undo retains its tombstone, and submitting a
+recorded comment again replays its receipt before looking at its text or
+current Write authority. Both issue and PR writers share the same parser
+and bounded chain check. Update serving peers together before recording
+the new activity variants. Existing discussions need no preparation.
+
+## Issue dependencies
+
+The Repository Cell records the issue pair, version tombstone, and both active
+direction indexes under `collaboration/v1/issue-dependencies/`. Validation and
+both indexes commit with one activity event indexed into both conversations.
+Each mutation walks a bounded set of existing edges before adding a blocker.
+List reads join current issue state and titles. Issue and Project reads derive
+blocked state from the active blocker prefix and current issue rows in the same
+snapshot. A close or reopen requires no updates to dependent issues or project
+items. Existing repositories need no dependency preparation. Update serving
+peers together before enabling the new reads and writes.
+
+## Discussion edit history
+
+Edit history records the previous body with the native edit event. Inline
+thread edits also capture the previous suggestion. This write, the canonical
+edit, and its receipt share the Repository Cell transaction. Metadata and text
+live in separate bounded documents, so listing headers does not read the
+text and control-heavy Markdown fits the document budget. The original
+captured version and the last 99 intermediate versions are retained.
+
+Revision removal deletes its text keys while keeping an attributed tombstone.
+The next retained revision supplies the after panel only when its predecessor
+matches the selected edit. Removed and pruned versions therefore remain
+unavailable through adjacent comparisons. This change requires no schema
+preparation or backfill. Upgrade serving peers together before processing
+edits so every writer records history.
+
+## Conversation lock search preparation
+
+Discussion index format 15 adds a sparse projection of the canonical issue and
+PR lock records. Update serving peers together and run the existing
+`cells rebuild-search --owner OWNER --name REPO` command. Ready format-14
+indexes install the new table and copy lock records in bounded issue and pull
+frames, retaining their other projections and revision. Repositories on
+earlier formats use the full existing rebuild before the lock frames. A new
+generation invalidates old cursors and interrupted preparation resumes against
+the recorded phase and position.
+
+Lock writes publish their state, index row, and activity in one Repository
+Cell transaction. Posting and search evaluate expiry from the Cell clock. There
+is no background expiry write. Lock-filtered cursors expire at the earliest
+future lock deadline and bind the repository archive state.
+
+### Issue type search preparation
+
+Discussion index format 16 adds a sparse index of issue type assignments.
+Update serving peers together and run
+`cells rebuild-search --owner OWNER --name REPO` on existing repositories.
+For ready format-15 indexes, this copies only existing assignments in bounded
+batches and retains the text and other metadata indexes. Older indexes follow
+their existing preparation paths. The server serves indexed traffic after
+preparation reaches the ready state. A new generation invalidates old cursors.
+
+Assignment writes update the filter index and the search revision in the same
+Repository Cell transaction. Filtered requests bind enabled type IDs from the
+organization, the definition version, and the repository's ownership epoch.
 
 ## Team review search preparation
 
@@ -848,6 +916,16 @@ python3 crates/crab-server/tests/qualify_cellar_process.py \
   --binary "$CARGO_TARGET_DIR/debug/crab-server" \
   --artifacts "$CARGO_TARGET_DIR/cellar-process-proof"
 ```
+
+Add `--recovery` to exercise SIGKILL followed by a full-root restore to a new
+RustFS bucket. This mode enables versioning before the fixture's first write.
+With all writers stopped, it records the latest live version of each key and
+uses that version ID for object contents and tags. It compares SHA-256, sizes,
+headers and tags before starting a new server with an empty Cell cache. The
+receipt requires exact Git refs, a stock Git clone with `git fsck --strict`,
+application records including organization audit history, and a published
+release whose asset bytes download unchanged.
+Use `--large-file-bytes N` to qualify Git LFS recovery in the same run.
 
 `tests/qualify_project_process.py` exercises clean restart, SIGKILL, native handoff
 and full-root backup/restore against an existing ten-repository preview. Stop only its Crab process first; keep its

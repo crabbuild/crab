@@ -25,9 +25,11 @@ pub(crate) use search::{
 };
 pub(crate) mod notifications;
 mod profiles;
+pub(crate) mod review_availability;
 pub(crate) mod saved_replies;
 pub(crate) use lookup::{
     AccountsExist, ActorSummary, LookupAccounts, LookupActors, LookupIdentities, LookupProfiles,
+    LookupRoutingIdentities, RoutingLookup,
 };
 pub(crate) use profiles::{
     CreateProfile, CreateProfileInput, EditProfile, EditProfileInput, ProfileOutcome,
@@ -226,6 +228,10 @@ pub(in crate::cells) fn dispatch_read(
         <LookupAccounts as Read>::ID => invoke_read::<LookupAccounts>(context, input),
         <LookupProfiles as Read>::ID => invoke_read::<LookupProfiles>(context, input),
         <LookupIdentities as Read>::ID => invoke_read::<LookupIdentities>(context, input),
+        LookupRoutingIdentities::ID => invoke_read::<LookupRoutingIdentities>(context, input),
+        review_availability::GetAvailability::ID => {
+            invoke_read::<review_availability::GetAvailability>(context, input)
+        }
         #[cfg(test)]
         migration::tests::InspectSource::ID => {
             invoke_read::<migration::tests::InspectSource>(context, input)
@@ -278,6 +284,9 @@ pub(in crate::cells) fn dispatch_mutation(
         RegisterAccounts::ID => invoke_mutation::<RegisterAccounts>(context, input),
         CreateProfile::ID => invoke_mutation::<CreateProfile>(context, input),
         EditProfile::ID => invoke_mutation::<EditProfile>(context, input),
+        review_availability::SetAvailability::ID => {
+            invoke_mutation::<review_availability::SetAvailability>(context, input)
+        }
         notifications::Deliver::ID => invoke_mutation::<notifications::Deliver>(context, input),
         notifications::email::BindEmail::ID => {
             invoke_mutation::<notifications::email::BindEmail>(context, input)

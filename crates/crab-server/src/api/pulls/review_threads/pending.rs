@@ -190,6 +190,7 @@ async fn submit(
                 &cell.target,
                 app::mutation_identity()?,
                 pending::SubmitInput {
+                    can_post_locked: membership.principal.can_write(repo.id),
                     review_teams: membership.review_teams,
                     key,
                     expected: input.expected,

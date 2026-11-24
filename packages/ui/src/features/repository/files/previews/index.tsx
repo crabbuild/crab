@@ -39,6 +39,7 @@ type Props = {
   text: string | null;
   size: number;
   blobUrl: string;
+  stored?: boolean;
   theme: "light" | "dark";
   codeThemes: CodeThemes;
 };
@@ -517,16 +518,26 @@ function BinaryPreview({ descriptor, blobUrl, name, size, ...props }: Props) {
 }
 
 export function FilePreview(props: Props) {
-  if (
-    props.text === null &&
-    ["markdown", "notebook"].includes(props.descriptor.kind)
-  )
+  const textPreview = ["markdown", "notebook"].includes(props.descriptor.kind);
+  if (props.stored && props.descriptor.kind !== "parquet") {
+    const limit = textPreview ? 1024 * 1024 : MAX_PREVIEW_BYTES;
+    if (props.size > limit)
+      return (
+        <PreviewNotice>
+          Preview is limited to {formatBytes(limit)} for this format. Download
+          this {formatBytes(props.size)} file to inspect it locally.
+        </PreviewNotice>
+      );
+  }
+  if (props.text === null && textPreview) {
+    if (props.stored) return <BinaryPreview {...props} />;
     return (
       <PreviewNotice>
         Inline text is unavailable for this preview. Download the exact stored
         bytes to inspect this file.
       </PreviewNotice>
     );
+  }
   if (props.descriptor.kind === "markdown")
     return (
       <RepositoryMarkdown

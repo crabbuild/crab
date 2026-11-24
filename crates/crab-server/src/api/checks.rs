@@ -23,7 +23,6 @@ use crate::{
         ListCheckRuns, ListCheckRunsInput, UpdateCheckRun, UpdateCheckRunInput,
         UpdateCheckRunOutcome,
     },
-    repository::Repository,
     server::Server,
 };
 
@@ -513,37 +512,6 @@ async fn edit(
     Ok(Json(detail_view(&run, &output)?))
 }
 
-pub(crate) async fn latest(server: &Server, repo: &Repository, oid: &str) -> Result<Vec<CheckRun>> {
-    let routed = crate::app::repository_cell(server, repo)?;
-    let page = crate::app::query_output(
-        routed
-            .client
-            .query::<ListCheckRuns>(
-                &routed.target,
-                None,
-                ListCheckRunsInput {
-                    oid: oid.to_owned(),
-                    before: None,
-                    limit: 100,
-                },
-            )
-            .await,
-    )?;
-    let mut latest = Vec::new();
-    for record in page.runs {
-        let run = check_run(record)?;
-        if run.integration_id().is_none()
-            && latest
-                .iter()
-                .all(|current: &CheckRun| !statuses::same_context(&current.name, &run.name))
-        {
-            latest.push(run);
-        }
-    }
-    latest.sort_by_cached_key(|run| run.name.to_lowercase());
-    Ok(latest)
-}
-
 impl CheckRun {
     pub(crate) fn integration_id(&self) -> Option<Uuid> {
         crate::cells::repository::integrations::github_connection(
@@ -551,25 +519,22 @@ impl CheckRun {
             &self.author.subject,
         )
     }
+}
 
-    pub(crate) fn requirement_state(&self) -> statuses::StatusState {
-        if self.integration_id().is_some() && self.status == CheckStatus::Completed {
-            return if self.conclusion == Some(CheckConclusion::Success) {
-                statuses::StatusState::Success
-            } else {
-                statuses::StatusState::Failure
-            };
+pub(super) fn requirement_state(
+    integration: bool,
+    status: CheckStatus,
+    conclusion: Option<CheckConclusion>,
+) -> statuses::StatusState {
+    match (status, conclusion) {
+        (CheckStatus::Queued | CheckStatus::InProgress, _) => statuses::StatusState::Pending,
+        (CheckStatus::Completed, Some(CheckConclusion::Success)) => statuses::StatusState::Success,
+        (CheckStatus::Completed, Some(CheckConclusion::Neutral | CheckConclusion::Skipped))
+            if !integration =>
+        {
+            statuses::StatusState::Success
         }
-        match (self.status, self.conclusion) {
-            (CheckStatus::Queued | CheckStatus::InProgress, _) => statuses::StatusState::Pending,
-            (
-                CheckStatus::Completed,
-                Some(
-                    CheckConclusion::Success | CheckConclusion::Neutral | CheckConclusion::Skipped,
-                ),
-            ) => statuses::StatusState::Success,
-            (CheckStatus::Completed, _) => statuses::StatusState::Failure,
-        }
+        (CheckStatus::Completed, _) => statuses::StatusState::Failure,
     }
 }
 

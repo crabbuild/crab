@@ -159,6 +159,7 @@ test("a workflow can be connected, required by a branch, rotated, and disconnect
             branch: "main",
             required_approvals: 0,
             require_conversation_resolution: true,
+            require_linear_history: true,
             required_checks: [],
             required_integrations: [connection!.id],
           },
@@ -308,6 +309,7 @@ test("a workflow can be connected, required by a branch, rotated, and disconnect
   await page
     .getByRole("checkbox", { name: "Require conversation resolution" })
     .check();
+  await page.getByRole("checkbox", { name: "Require linear history" }).check();
   await page
     .getByRole("button", { name: "Require a GitHub Actions workflow" })
     .click();
@@ -318,6 +320,9 @@ test("a workflow can be connected, required by a branch, rotated, and disconnect
   ).toBeVisible();
   await expect(
     page.getByText("Conversation resolution required", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Linear history required", { exact: true }),
   ).toBeVisible();
   await page.goto("/team/project/pull/1");
   await expect(

@@ -57,7 +57,11 @@ pub(crate) struct Group {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Summary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimization: Option<super::minimization::State>,
     pub groups: BTreeMap<Kind, Group>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_edit_history: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -143,11 +147,16 @@ fn summary(
             Ok((kind, Group { count, reacted }))
         })
         .collect::<crate::cells::Result<BTreeMap<_, _>>>()?;
-    Ok(Summary { groups })
+    Ok(Summary {
+        groups,
+        minimization: None,
+        has_edit_history: false,
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum Outcome {
+    Locked,
     Applied(Summary),
     Archived,
     NotFound,
@@ -179,6 +188,9 @@ impl Mutation for SetReaction {
                 input.target,
                 &input.actor,
             )?)));
+        }
+        if super::locks::blocked(context, input.target, false)? {
+            return Ok(MutationResult::Rejected(Outcome::Locked));
         }
         let mut counts = counts(context, input.target)?;
         let current = counts.get(&input.kind).copied().unwrap_or(0);
@@ -245,7 +257,10 @@ impl Read for GetReactions {
                 if !target.exists(context)? {
                     return Ok(None);
                 }
-                summary(context, target, &input.actor).map(Some)
+                let mut card = summary(context, target, &input.actor)?;
+                card.minimization = super::minimization::load(context, target)?;
+                card.has_edit_history = super::edit_history::exists(context, target)?;
+                Ok(Some(card))
             })
             .collect()
     }

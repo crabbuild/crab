@@ -92,6 +92,8 @@ test("repository admins manage rulesets and readers see active rules", async ({
   await page.getByLabel("Include patterns").fill("release/**/*");
   await page.getByLabel("Exclude patterns").fill("release/sandbox");
   await page.getByLabel("Required approving reviews").fill("2");
+  await page.getByLabel("Restrict updates", { exact: true }).check();
+  await page.getByLabel("Require linear history", { exact: true }).check();
   await page.getByLabel("Restrict deletions").check();
   await page.getByLabel("Require conversation resolution").check();
   const strict = page.getByLabel(
@@ -120,6 +122,8 @@ test("repository admins manage rulesets and readers see active rules", async ({
     include: ["release/**/*"],
     exclude: ["release/sandbox"],
     restrict_deletions: true,
+    restrict_updates: true,
+    require_linear_history: true,
     require_conversation_resolution: true,
     require_up_to_date: true,
     require_merge_queue: true,
@@ -139,6 +143,12 @@ test("repository admins manage rulesets and readers see active rules", async ({
     page.getByRole("heading", { name: "Release branches" }),
   ).toBeVisible();
   await expect(page.getByText("Require 2 approving reviews")).toBeVisible();
+  await expect(
+    page.getByText("Require linear history", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Restrict updates", { exact: true }),
+  ).toBeVisible();
   await expect(
     page.getByText("Require merge queue", { exact: true }),
   ).toBeVisible();

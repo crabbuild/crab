@@ -160,6 +160,29 @@ async fn private_fork_recovers_git_publication_and_uses_live_source_permissions(
         json!({"id":id,"owner":owner,"name":"library"})
     );
     let fork_id = Uuid::parse_str(repo["id"].as_str().unwrap()).unwrap();
+    for (filter, names, fork_marker) in [
+        (
+            "fork:only%20archived:false",
+            vec!["library-fork"],
+            Some(true),
+        ),
+        ("fork:false", vec!["library"], Some(false)),
+        ("fork:true", vec!["library", "library-fork"], None),
+    ] {
+        let result = h
+            .json(&format!("{listed}&q=library%20{filter}"), &bob)
+            .await;
+        let rows = result["repositories"].as_array().unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|repo| repo["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            names
+        );
+        if let Some(marker) = fork_marker {
+            assert_eq!(rows[0]["fork"], marker);
+        }
+    }
     let fork_token = token("library-fork", &bob).await;
     let secret = fork_token["token"].as_str().unwrap();
     let mut remote = git_url("library-fork");
@@ -209,6 +232,50 @@ async fn private_fork_recovers_git_publication_and_uses_live_source_permissions(
         clone.path(),
     )
     .await;
+    let rule_id = Uuid::now_v7();
+    let rulesets = format!("{org}/rulesets");
+    let mut entry = json!({
+        "ruleset": {"id":rule_id,"name":"Fork branch policy","target":"branch","enforcement":"active",
+            "include":["policy/*"],"exclude":[],"restrict_creations":true,"restrict_deletions":false,
+            "require_pull_request":false,"required_approvals":0,"required_code_owner_reviews":false,
+            "required_checks":[],"required_integrations":[]},
+        "repositories":{"kind":"properties","conditions":[
+            {"system":"fork","value":true},{"system":"name","value":"*-fork"}
+        ]}
+    });
+    let save = async |version, entry| {
+        h.write(
+            Method::PUT,
+            &rulesets,
+            &alice,
+            json!({"expected_version":version,"rulesets":[entry]}),
+        )
+        .await
+    };
+    let mut invalid = entry.clone();
+    invalid["repositories"]["conditions"][0]["value"] = json!("true");
+    assert_eq!(save(0, invalid).await.status(), StatusCode::BAD_REQUEST);
+    save(0, entry.clone()).await.error_for_status().unwrap();
+    assert_eq!(
+        h.json(&format!("{fork}/rulesets"), &bob).await["inherited"]["rulesets"][0]["id"],
+        json!(rule_id)
+    );
+    assert_eq!(
+        h.json(&format!("{source}/rulesets"), &bob).await["inherited"]["rulesets"],
+        json!([])
+    );
+    let restricted = "HEAD:refs/heads/policy/candidate";
+    let blocked = git::git(local.path(), &["push", remote.as_str(), restricted]).await;
+    assert!(!blocked.status.success());
+    assert!(String::from_utf8_lossy(&blocked.stderr).contains("restricts ref creation"));
+    git::success(
+        local.path(),
+        &["push", upstream_remote.as_str(), restricted],
+    )
+    .await;
+    entry["repositories"]["conditions"][1]["value"] = json!("other-*");
+    save(1, entry).await.error_for_status().unwrap();
+    git::success(local.path(), &["push", remote.as_str(), restricted]).await;
     let compare = format!(
         "{fork}/changes?rev=refs/heads/fork-only&base=refs/heads/main&merge_base=true&upstream={id}"
     );
@@ -267,6 +334,10 @@ async fn private_fork_recovers_git_publication_and_uses_live_source_permissions(
     .error_for_status()
     .unwrap();
     assert_eq!(h.json(&listed, &bob).await["repositories"], json!([]));
+    assert_eq!(
+        h.json(&format!("{listed}&q=fork:only"), &bob).await["repositories"],
+        json!([])
+    );
     let compare_denied = h
         .http
         .get(format!("{}{compare}", h.origin))
@@ -624,7 +695,7 @@ async fn repository_team_access_follows_current_membership_and_private_team_visi
         &endpoint,
         &alice,
         repo_id,
-        json!({"expected_revision":revision,"teams":[{"team":team,"access":"write"}]}),
+        json!({"expected_revision":revision,"teams":[{"team":team,"access":"maintain"}]}),
     )
     .await
     .error_for_status()
@@ -642,7 +713,7 @@ async fn repository_team_access_follows_current_membership_and_private_team_visi
     let granted = h.json(&endpoint, &alice).await;
     assert_eq!(
         granted["organization"]["teams"],
-        json!([{"team":team,"access":"write"}])
+        json!([{"team":team,"access":"maintain"}])
     );
     let last_revision = granted["revision"].as_u64().unwrap().to_string();
     let (document, _) = catalog.load().await.unwrap();
@@ -656,9 +727,82 @@ async fn repository_team_access_follows_current_membership_and_private_team_visi
     assert_eq!(visible["repositories"][0]["id"], json!(repo_id));
     assert_eq!(visible["repositories"][0]["access"], "write");
     assert_eq!(visible["repositories"][0]["can_admin"], false);
+    assert_eq!(visible["repositories"][0]["can_maintain"], true);
     let matching = h.json(&searched, &bob).await;
     assert_eq!(matching["repositories"][0]["id"], json!(repo_id));
     assert_eq!(matching["next"], Value::Null);
+
+    let methods = format!("{repo}/settings/merge-methods");
+    repository_write(
+        &h,
+        Method::PUT,
+        &methods,
+        &bob,
+        repo_id,
+        json!({"expected_version":0,"enabled":["squash"],"auto_merge":true}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert_eq!(h.json(&methods, &bob).await["enabled"], json!(["squash"]));
+    let blocked = repository_write(
+        &h,
+        Method::PUT,
+        &methods,
+        &bob,
+        repo_id,
+        json!({"expected_version":1,"enabled":["rebase"],"merge_queue_builds":2}),
+    )
+    .await;
+    assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        blocked.json::<Value>().await.unwrap()["error"]["code"],
+        "merge_queue_settings_permission"
+    );
+    assert_eq!(h.json(&methods, &alice).await["version"], 1);
+
+    let description = format!("/api/repositories/{repo_id}/description");
+    let change = json!({"description":"Published by a maintainer","version":0});
+    for _ in 0..2 {
+        let saved = h
+            .write(Method::PUT, &description, &bob, change.clone())
+            .await
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(
+            saved,
+            json!({"description":"Published by a maintainer","version":1})
+        );
+    }
+    assert_eq!(
+        h.write(
+            Method::PUT,
+            &description,
+            &alice,
+            json!({"version":0,"description":"Stale"})
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        h.json(&listed, &alice).await["repositories"][0]["description"],
+        "Published by a maintainer"
+    );
+    assert_eq!(
+        h.write(
+            Method::PUT,
+            &format!("/api/repositories/{repo_id}/name"),
+            &bob,
+            json!({"name":"unexpected","version":0,"request_id":Uuid::now_v7()})
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
 
     let token: Value = h
         .write(
@@ -960,7 +1104,7 @@ async fn repository_team_access_follows_current_membership_and_private_team_visi
     assert_eq!(denied.status(), StatusCode::NOT_FOUND);
     assert_eq!(
         h.json(&endpoint, &alice).await["organization"]["teams"][0]["access"],
-        "write"
+        "maintain"
     );
 
     let current_team = h.json(&format!("{org}/teams/{team}"), &alice).await;
@@ -979,7 +1123,7 @@ async fn repository_team_access_follows_current_membership_and_private_team_visi
     assert!(deleted["team_names"].get(team.to_string()).is_none());
     assert_eq!(
         deleted["organization"]["teams"],
-        json!([{"team":team,"access":"write"}])
+        json!([{"team":team,"access":"maintain"}])
     );
     repository_write(
         &h,

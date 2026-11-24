@@ -25,20 +25,20 @@ impl Pattern {
             }
             let Predicate::Text {
                 kind,
-                mask: Some(mask),
+                filter: Some(query),
                 ..
             } = term
             else {
                 continue;
             };
             let filter = if *kind == Kind::Symbol {
-                row.symbols.as_deref().or(row.filter.as_ref())
+                row.symbols.as_ref().or(row.filter.as_ref())
             } else {
                 row.filter.as_ref()
             };
             // The filter proves absence only. A positive filter must still
             // reach Git, including when the term appears under NOT.
-            if filter.is_some_and(|filter| !filter.may_contain(mask, self.case_sensitive)) {
+            if filter.is_some_and(|filter| !filter.may_contain(query)) {
                 *fact = Truth::No;
             }
         }
@@ -46,7 +46,6 @@ impl Pattern {
 
     pub(super) async fn inspect_entry(
         &self,
-        snapshot: &RemoteGitSnapshot,
         entry: &TreeEntry,
         scope: &Facts,
         operation: &OperationContext,
@@ -66,8 +65,7 @@ impl Pattern {
             Truth::Yes => return Ok((matched(Vec::new(), false), false)),
             Truth::Unknown => (),
         }
-        let Some(text) = code_index::text(snapshot, &entry.path, entry.oid, operation).await?
-        else {
+        let Some(text) = code_index::text(entry.oid, operation).await? else {
             // An unreadable body supplies no evidence either way for NOT.
             return Ok((Inspection::Skipped, true));
         };

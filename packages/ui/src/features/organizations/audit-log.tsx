@@ -25,6 +25,8 @@ import { teamHref } from "./teams/model";
 const actions: Record<AuditAction, string> = {
   organization_created: "Organization created",
   automation_changed: "Automation identity changed",
+  repository_properties_changed: "Repository properties changed",
+  issue_types_changed: "Issue types changed",
   organization_edited: "Organization updated",
   organization_membership: "Organization membership changed",
   organization_invitation: "Organization invitation",
@@ -32,6 +34,7 @@ const actions: Record<AuditAction, string> = {
   project_changed: "Project changed",
   team_created: "Team created",
   team_edited: "Team updated",
+  team_group_sync: "Identity provider group sync",
   team_deleted: "Team deleted",
   team_membership: "Team membership changed",
   team_creation_policy: "Team creation policy changed",
@@ -255,7 +258,11 @@ function AuditRow({
               : event.actor}
           </Link>
         ) : event.operator ? (
-          "Operator"
+          event.action === "team_group_sync" ? (
+            "SCIM"
+          ) : (
+            "Operator"
+          )
         ) : (
           "Account unavailable"
         )}

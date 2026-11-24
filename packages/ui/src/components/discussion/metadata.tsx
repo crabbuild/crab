@@ -274,6 +274,7 @@ export function DiscussionMetadata({
   onSaved,
   children,
   allowIssueClosure,
+  reviewerRefresh,
 }: {
   repo: Repository;
   assignees?: RepositoryAssignee[];
@@ -286,12 +287,13 @@ export function DiscussionMetadata({
   onSaved: () => void;
   children?: ReactNode;
   allowIssueClosure?: boolean;
+  reviewerRefresh?: number;
 }) {
   return (
     <aside className="discussion-metadata" aria-label="Metadata">
       {path.startsWith("pulls/") && (
         <Reviewers
-          key={`reviewers:${version}`}
+          key={`${path}:${reviewerRefresh}`}
           repo={repo}
           pull={Number(path.split("/")[1])}
           csrf={csrf}

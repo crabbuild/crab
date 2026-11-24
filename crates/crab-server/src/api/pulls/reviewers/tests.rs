@@ -39,6 +39,7 @@ async fn unrequested_reviews_keep_decisions_and_use_the_live_head_without_privat
     assert_eq!(item["decision"]["number"], 1);
     assert_eq!(item["decision"]["state"], "approved");
     assert_eq!(item["decision"]["current"], true);
+    assert_eq!(item["merge_eligible"], false);
     assert!(item["request"].is_null());
     assert!(item["candidate_id"].is_string());
     for private in ["alice-id", "bob-id", h.provider.issuer.as_str()] {

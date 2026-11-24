@@ -24,7 +24,8 @@ use crate::{
     auth::{Identity, Principal},
     cells::repository::collaboration::Target,
     cells::repository::{
-        CreatePullReviewThreadInput, PullReviewThreadListInput, PullReviewThreadSide,
+        CreatePullReviewThreadInput, GetReviewNavigation, PullReviewThreadListInput,
+        PullReviewThreadSide, ReviewNavigationInput,
     },
     repository::Repository,
     server::Server,
@@ -42,6 +43,10 @@ pub(super) fn routes() -> Router<Arc<Server>> {
         .route(
             "/api/repos/{owner}/{name}/pulls/{number}/threads/{thread}",
             get(detail).patch(edit),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/pulls/{number}/threads/navigation",
+            get(navigation),
         )
         .merge(replies::routes())
         .merge(pending::routes())
@@ -63,6 +68,12 @@ struct ListParameters {
     path_hex: Option<String>,
     resolved: Option<bool>,
     outdated: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NavigationParameters {
+    around: Option<u64>,
 }
 
 impl ListParameters {
@@ -267,6 +278,8 @@ fn thread_view(
         "author": authors.view(&thread.author),
         "body": thread.body,
         "reactions": reactions,
+        "has_edit_history": reactions.has_edit_history,
+        "minimization": reactions.minimization,
         "suggested_text": thread.suggested_text,
         "base_oid": thread.base_oid,
         "head_oid": thread.head_oid,
@@ -389,6 +402,41 @@ async fn list(
     Ok(Json(json!({"items": items, "next": page.1})))
 }
 
+async fn navigation(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name, id)): Path<(String, String, u64)>,
+    Query(params): Query<NavigationParameters>,
+) -> Result<Json<Value>> {
+    let around = params.around.map(app::number).transpose()?;
+    let repo = app::repository(&server, &principal, &(owner, name))?;
+    let pull = load_pull(&server, &repo, app::number(id)?).await?;
+    let comparison = comparison(&server, &repo, &pull).await?;
+    let routed = app::repository_cell(&server, &repo)?;
+    let summary = app::query_output(
+        routed
+            .client
+            .query::<GetReviewNavigation>(
+                &routed.target,
+                None,
+                ReviewNavigationInput {
+                    pull: pull.number,
+                    base_oid: comparison.base_oid.clone(),
+                    head_oid: comparison.head_oid.clone(),
+                    around,
+                },
+            )
+            .await,
+    )?
+    .ok_or(Error::NotFound)?;
+    app::membership(&server, &principal, &repo).await?;
+    Ok(Json(json!({
+        "base_oid": comparison.base_oid,
+        "head_oid": comparison.head_oid,
+        "summary": summary,
+    })))
+}
+
 async fn detail(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
@@ -484,6 +532,7 @@ async fn prepare_thread(
         return Err(Error::Invalid("Suggestions can only target added lines"));
     }
     Ok(CreatePullReviewThreadInput {
+        can_post_locked: false,
         pull,
         author: actor.into(),
         submission_id: pull_storage::submission_id(&input.request_id)?,
@@ -567,7 +616,11 @@ async fn create(
         ));
     }
     let comparison = comparison(&server, repo, &pull).await?;
-    let prepared = prepare_thread(&server, pull.number, &actor, &comparison, input).await?;
+    let mut prepared = prepare_thread(&server, pull.number, &actor, &comparison, input).await?;
+    prepared.can_post_locked = app::membership(&server, &principal, repo)
+        .await?
+        .principal
+        .can_write(repo.id);
     let old_blob = prepared.old_blob_oid.clone();
     let new_blob = prepared.new_blob_oid.clone();
     let thread = storage::create_thread(&server, repo, prepared).await?;
@@ -633,6 +686,7 @@ async fn edit(
     let updated = storage::update_thread(
         &server,
         repo,
+        &principal,
         pull.number,
         number,
         storage::PullReviewThreadEdit {

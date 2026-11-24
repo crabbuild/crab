@@ -48,7 +48,7 @@ export function Comments({
               busy={busy}
               readOnly={repo.archived}
               onStateChanged={onChanged}
-              actions={(change) =>
+              actions={(change, withComment) =>
                 issue.can_close &&
                 !repo.archived && (
                   <IssueStateControls
@@ -62,7 +62,7 @@ export function Comments({
                     pending={comment.pending && comment.intent === "state"}
                     refreshing={refreshing}
                     conflict={comment.conflict}
-                    withComment={Boolean(comment.body.trim())}
+                    withComment={withComment}
                     onChange={change}
                     onRefresh={() => {
                       comment.review();

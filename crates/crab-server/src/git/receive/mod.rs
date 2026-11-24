@@ -16,7 +16,10 @@ use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use crate::{auth::Principal, repository::Repository, server::Server};
+use crate::{
+    auth::Principal, cells::repository::suggestions::SuggestionVersion, repository::Repository,
+    server::Server,
+};
 
 mod fork_lfs;
 mod fork_merge;
@@ -250,7 +253,8 @@ pub(crate) async fn publish_pull_request_objects(
 pub(crate) struct SuggestionPublication {
     pub upstream: Option<uuid::Uuid>,
     pub number: u64,
-    pub threads: Vec<(u64, u64)>,
+    pub threads: Vec<SuggestionVersion>,
+    pub plan_id: String,
 }
 
 pub(crate) struct BranchUpdatePublication {

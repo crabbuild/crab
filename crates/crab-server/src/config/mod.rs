@@ -168,6 +168,9 @@ pub struct BranchProtection {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     #[cfg_attr(test, ts(optional = nullable))]
     pub require_merge_queue: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub require_linear_history: bool,
     #[serde(default)]
     pub required_checks: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -210,7 +213,9 @@ pub struct RepositoryGroup {
 pub enum RepositoryAccess {
     Read,
     Triage,
+    Moderate,
     Write,
+    Maintain,
     Admin,
 }
 
@@ -560,6 +565,10 @@ pub(crate) fn validate_repository(repository: &RepositoryConfig) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+pub(crate) fn valid_repository_description(value: &str) -> bool {
+    value.chars().count() <= 350 && !value.chars().any(char::is_control)
 }
 
 pub(crate) fn valid_repository_component(value: &str) -> bool {

@@ -8,6 +8,8 @@ import {
   BookMarkedIcon,
   FileClockIcon,
   BotIcon,
+  ListFilterIcon,
+  TagIcon,
 } from "lucide-react";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
@@ -36,6 +38,8 @@ import { MemberAccess } from "./repository-access";
 import { OrganizationAuditLog } from "./audit-log";
 import { OrganizationAutomation } from "./automation";
 import { OrganizationRulesets } from "@/features/settings/rulesets";
+import { OrganizationRepositoryProperties } from "./repository-properties";
+import { OrganizationIssueTypes } from "./issue-types";
 export { OrganizationInvitation } from "./invitations";
 
 export function OrganizationPage({
@@ -101,6 +105,16 @@ export function OrganizationPage({
                         key: "rulesets",
                         label: "Rulesets",
                         icon: ShieldCheckIcon,
+                      },
+                      {
+                        key: "properties",
+                        label: "Properties",
+                        icon: ListFilterIcon,
+                      },
+                      {
+                        key: "issue-types",
+                        label: "Issue types",
+                        icon: TagIcon,
                       },
                       {
                         key: "automation",
@@ -175,6 +189,14 @@ export function OrganizationPage({
               <Invitations endpoint={endpoint} id={id} csrf={csrf} />
             ) : role === "owner" && tab === "rulesets" ? (
               <OrganizationRulesets key={id} organization={id} csrf={csrf} />
+            ) : role === "owner" && tab === "properties" ? (
+              <OrganizationRepositoryProperties
+                key={id}
+                organization={id}
+                csrf={csrf}
+              />
+            ) : role === "owner" && tab === "issue-types" ? (
+              <OrganizationIssueTypes key={id} organization={id} csrf={csrf} />
             ) : role === "owner" && tab === "automation" ? (
               <OrganizationAutomation organization={id} csrf={csrf} />
             ) : role === "owner" && tab === "audit" ? (

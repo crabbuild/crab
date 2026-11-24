@@ -28,7 +28,9 @@ use crate::{
 pub(super) mod audit;
 pub(super) mod automation;
 pub(super) mod invitations;
+pub(super) mod issue_types;
 mod projects;
+pub(super) mod properties;
 pub(super) mod repository_access;
 mod rulesets;
 pub(super) mod teams;
@@ -85,6 +87,8 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .layer(axum::extract::DefaultBodyLimit::max(8192))
         .merge(projects::routes())
         .merge(rulesets::routes())
+        .merge(properties::organization_routes())
+        .merge(issue_types::routes().layer(axum::extract::DefaultBodyLimit::max(32 * 1024)))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
 pub(in crate::api) async fn actor(server: &Server, principal: &Principal) -> Result<Uuid> {

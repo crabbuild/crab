@@ -54,7 +54,7 @@ pub use repository::{ObjectLimits, OperationLimits, RepositoryIdentity, Reposito
 pub use resident::ReadReservation;
 pub use revision::{ResolvedRevision, Revision};
 pub use runtime::{RemoteGitRuntime, RuntimeOptions, RuntimeSnapshot};
-pub use snapshot::{ArchiveReader, RemoteGitSnapshot, SharedBlame};
+pub use snapshot::{ArchiveReader, CommitMembership, RemoteGitSnapshot, SharedBlame};
 pub use traversal::{
     ArchiveEntry, ArchiveStream, Blame, BlameRange, ChangeKind, Comparison, Diff,
     DiffClassification, DiffHunk, DirectoryMetadata, HistoryTraversal, Page, PageCursor,

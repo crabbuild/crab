@@ -171,10 +171,7 @@ async fn native_browser_manages_quiet_discussion_subscriptions() {
             .run(&["find", "role", role, "click", "--name", name, "--exact"])
             .await;
     };
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    click("button", "Continue to sign in").await;
+    browser.sign_in().await;
     browser.run(&["wait", "--text", "Subscriptions"]).await;
     click("link", "Subscriptions").await;
     browser
@@ -458,7 +455,7 @@ async fn native_browser_unsubscribes_selected_quiet_discussions() {
             .run(&["find", "role", role, "click", "--name", name, "--exact"])
             .await;
     };
-    click("button", "Continue to sign in").await;
+    browser.sign_in().await;
     click("checkbox", "Select all loaded subscriptions").await;
     click("button", "Unsubscribe selected").await;
     browser

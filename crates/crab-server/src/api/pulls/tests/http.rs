@@ -201,6 +201,10 @@ async fn viewed_files_are_private_and_track_the_diff_identity() {
     assert_eq!(marked["version"], 1);
     assert_eq!(h.json(&reviewed, &bob).await["files"][path], revision);
     assert_eq!(h.json(&reviewed, &alice).await["files"], json!({}));
+    let stale_noop = h
+        .write(reqwest::Method::PUT, &reviewed, &bob, mark(first, 0))
+        .await;
+    assert_eq!(stale_noop.status(), StatusCode::CONFLICT);
 
     git::success(
         source.path(),
@@ -233,7 +237,11 @@ async fn viewed_files_are_private_and_track_the_diff_identity() {
         .json()
         .await
         .unwrap();
-    assert_eq!(updated["files"], json!({(path):second_revision}));
+    assert_eq!(updated, json!({"version": 2}));
+    assert_eq!(
+        h.json(&reviewed, &bob).await["files"],
+        json!({(path):second_revision}),
+    );
     h.close().await;
 }
 
@@ -538,7 +546,7 @@ async fn suggestion_batches_publish_one_git_commit_or_leave_the_head_unchanged()
             Method::POST,
             &endpoint,
             &alice,
-            json!({"expected_head":head,"threads":[
+            json!({"request_id":uuid::Uuid::now_v7(),"expected_head":head,"threads":[
                 {"number":1,"version":1},{"number":2,"version":1},{"number":3,"version":1}
             ]}),
         )
@@ -546,8 +554,11 @@ async fn suggestion_batches_publish_one_git_commit_or_leave_the_head_unchanged()
     assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
     let unchanged = git::success(path, &["ls-remote", remote.as_str(), "refs/heads/feature"]).await;
     assert_eq!(unchanged, format!("{head}\trefs/heads/feature"));
-    let input =
-        json!({"expected_head":head,"threads":[{"number":1,"version":1},{"number":2,"version":1}]});
+    let input = json!({
+        "request_id":uuid::Uuid::now_v7(),
+        "expected_head":head,
+        "threads":[{"number":1,"version":1},{"number":2,"version":1}],
+    });
     let mut stale = input.clone();
     stale["threads"][1]["version"] = json!(2);
     assert_eq!(
@@ -564,14 +575,17 @@ async fn suggestion_batches_publish_one_git_commit_or_leave_the_head_unchanged()
             .status(),
         StatusCode::FORBIDDEN
     );
-    let applied: Value = h
-        .write(Method::POST, &endpoint, &alice, input.clone())
-        .await
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let submit = || h.write(Method::POST, &endpoint, &alice, input.clone());
+    let (first, second) = tokio::join!(submit(), submit());
+    let mut outcomes = Vec::<Value>::new();
+    for response in [first, second] {
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            continue;
+        }
+        outcomes.push(response.error_for_status().unwrap().json().await.unwrap());
+    }
+    let applied = outcomes.first().unwrap();
+    assert!(outcomes.iter().all(|value| value == applied));
     git::success(path, &["fetch", remote.as_str(), "feature"]).await;
     assert_eq!(
         git::success(path, &["rev-parse", "FETCH_HEAD"]).await,
@@ -589,8 +603,21 @@ async fn suggestion_batches_publish_one_git_commit_or_leave_the_head_unchanged()
         git::success(path, &["show", "FETCH_HEAD:second.txt"]).await,
         "alpha\r\nnew beta"
     );
+    let mut reordered = input.clone();
+    reordered["threads"].as_array_mut().unwrap().reverse();
+    let replayed: Value = h
+        .write(Method::POST, &endpoint, &alice, reordered)
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(&replayed, applied);
+    let mut changed = input;
+    changed["message"] = json!("A different commit message");
     assert_eq!(
-        h.write(Method::POST, &endpoint, &alice, input)
+        h.write(Method::POST, &endpoint, &alice, changed)
             .await
             .status(),
         StatusCode::CONFLICT
@@ -1168,10 +1195,14 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     .await;
     assert_eq!(invalid_annotation.0, StatusCode::BAD_REQUEST);
     let blocked = h.json(&format!("{ROOT}/1"), &alice).await;
-    assert_eq!(
-        blocked["merge_requirements"]["checks"][0]["state"],
-        "failure"
-    );
+    let check = &blocked["merge_requirements"]["checks"][0];
+    assert_eq!(check["state"], "failure");
+    assert_eq!(check["provider"], "crab_status");
+    assert_eq!(check["head_sha"], first_head);
+    assert_eq!(check["additional_report"]["provider"], "crab_check_run");
+    assert_eq!(check["additional_report"]["state"], "success");
+    assert_eq!(check["additional_report"]["conclusion"], "success");
+    assert_eq!(check["additional_report"]["run_id"], run_id);
     assert_eq!(blocked["can_merge"], false);
     let pass_status = report_status(
         &h,
@@ -1183,6 +1214,10 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     assert_eq!(pass_status.0, StatusCode::CREATED);
     let ready = h.json(&format!("{ROOT}/1"), &alice).await;
     assert_eq!(ready["merge_requirements"]["checks"][0]["state"], "success");
+    assert_eq!(
+        ready["merge_requirements"]["checks"][0]["additional_report"]["state"],
+        "success"
+    );
     assert_eq!(ready["merge_requirements"]["checks_satisfied"], true);
     assert_eq!(ready["merge_requirements"]["satisfied"], true);
     assert_eq!(ready["can_merge"], true);
@@ -1241,10 +1276,11 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     );
     let stale = h.json(&format!("{ROOT}/1"), &alice).await;
     assert_eq!(stale["merge_requirements"]["approvals"], 0);
-    assert_eq!(
-        stale["merge_requirements"]["checks"][0]["state"],
-        Value::Null
-    );
+    let check = &stale["merge_requirements"]["checks"][0];
+    assert_eq!(check["state"], Value::Null);
+    assert_eq!(check["head_sha"], second_head);
+    assert_eq!(check["provider"], "crab_status_or_check_run");
+    assert!(check.get("additional_report").is_none());
     assert_eq!(stale["merge_requirements"]["satisfied"], false);
     assert_eq!(stale["can_merge"], false);
     let reviews = h.json(&format!("{ROOT}/1/reviews"), &bob).await;

@@ -1,3 +1,5 @@
+import { CommentVisibilityProvider } from "@/components/discussion/conversation/comment-visibility";
+import { ConversationLockProvider } from "@/components/discussion/conversation/lock";
 import { type Refs, type Repository } from "@/lib/api";
 import type { CodeThemes } from "@/lib/code-theme";
 import { repoHref, repositoryRoute } from "@/lib/repository-route";
@@ -55,15 +57,22 @@ export function PullRequests({
         </div>
       );
     return (
-      <PullDetail
-        key={number}
+      <ConversationLockProvider
+        key={`${repo.id}:${number}`}
         repo={repo}
-        number={number}
-        url={url}
-        csrf={csrf}
-        theme={theme}
-        codeThemes={codeThemes}
-      />
+        target={`pulls/${number}`}
+      >
+        <CommentVisibilityProvider>
+          <PullDetail
+            repo={repo}
+            number={number}
+            url={url}
+            csrf={csrf}
+            theme={theme}
+            codeThemes={codeThemes}
+          />
+        </CommentVisibilityProvider>
+      </ConversationLockProvider>
     );
   }
   return <PullList repo={repo} url={url} csrf={csrf} />;

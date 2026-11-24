@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 
 export type BypassActor =
   | { kind: "repository_admin" }
+  | { kind: "repository_maintain" }
   | { kind: "repository_write" }
   | { kind: "organization_owner" }
   | { kind: "team"; id: string };
@@ -22,6 +23,7 @@ export interface BypassOptions {
 
 const roleOptions = [
   { actor: { kind: "repository_admin" }, label: "Repository administrators" },
+  { actor: { kind: "repository_maintain" }, label: "Repository maintainers" },
   { actor: { kind: "repository_write" }, label: "Repository writers" },
   { actor: { kind: "organization_owner" }, label: "Organization owners" },
 ] satisfies { actor: BypassActor; label: string }[];

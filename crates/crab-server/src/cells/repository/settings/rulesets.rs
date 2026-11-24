@@ -56,6 +56,7 @@ pub(crate) enum Enforcement {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum BypassActor {
     RepositoryAdmin,
+    RepositoryMaintain,
     RepositoryWrite,
     OrganizationOwner,
     Team { id: Uuid },
@@ -97,6 +98,24 @@ impl<'a> BypassContext<'a> {
         }
         self
     }
+
+    pub(crate) fn allows(self, grants: &[BypassGrant], pull: bool) -> bool {
+        use crate::RepositoryAccess::{Admin, Maintain, Write};
+
+        if !self.role.is_some_and(|role| role >= Write) {
+            return false;
+        }
+        grants.iter().any(|grant| {
+            (pull || grant.mode == BypassMode::Always)
+                && match grant.actor {
+                    BypassActor::RepositoryAdmin => self.role == Some(Admin),
+                    BypassActor::RepositoryMaintain => self.role == Some(Maintain),
+                    BypassActor::RepositoryWrite => self.role == Some(Write),
+                    BypassActor::OrganizationOwner => self.organization_owner,
+                    BypassActor::Team { id } => self.teams.contains(&id),
+                }
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -109,6 +128,8 @@ pub(crate) struct Ruleset {
     pub include: Vec<String>,
     pub exclude: Vec<String>,
     pub restrict_creations: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub restrict_updates: bool,
     pub restrict_deletions: bool,
     pub require_pull_request: bool,
     pub required_approvals: u8,
@@ -119,6 +140,8 @@ pub(crate) struct Ruleset {
     pub require_up_to_date: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub require_merge_queue: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_linear_history: bool,
     pub required_checks: Vec<String>,
     pub required_integrations: Vec<Uuid>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -137,20 +160,7 @@ impl Ruleset {
     }
 
     pub(crate) fn allows_bypass(&self, context: BypassContext<'_>, pull: bool) -> bool {
-        use crate::RepositoryAccess::{Admin, Write};
-
-        if !context.role.is_some_and(|role| role >= Write) {
-            return false;
-        }
-        self.bypass_actors.iter().any(|grant| {
-            (pull || grant.mode == BypassMode::Always)
-                && match grant.actor {
-                    BypassActor::RepositoryAdmin => context.role == Some(Admin),
-                    BypassActor::RepositoryWrite => context.role == Some(Write),
-                    BypassActor::OrganizationOwner => context.organization_owner,
-                    BypassActor::Team { id } => context.teams.contains(&id),
-                }
-        })
+        context.allows(&self.bypass_actors, pull)
     }
 
     pub(crate) fn violation(
@@ -163,6 +173,11 @@ impl Ruleset {
         }
         if self.restrict_deletions && update.new.is_none() {
             return Some("Repository ruleset restricts ref deletion");
+        }
+        // PR publication validates its explicitly selected bypasses against
+        // current branch policy when authorizing the exact merge reservation.
+        if !pull && self.restrict_updates && update.old.is_some() && update.new.is_some() {
+            return Some("Repository ruleset restricts ref updates");
         }
         if !pull && update.old.is_some() && self.require_merge_queue {
             return Some("Repository ruleset requires the merge queue");
@@ -187,7 +202,11 @@ impl Ruleset {
             && self.name.trim() == self.name
             && !self.name.chars().any(char::is_control)
             && (!self.requires_pull() || self.target == Target::Branch)
-            && (self.requires_pull() || self.restrict_creations || self.restrict_deletions)
+            && (self.requires_pull()
+                || self.restrict_creations
+                || self.restrict_updates
+                || self.require_linear_history
+                || self.restrict_deletions)
             && !self.include.is_empty()
             && [&self.include, &self.exclude].into_iter().all(|patterns| {
                 let mut unique = HashSet::new();

@@ -1,5 +1,7 @@
 import { AssigneeAvatars } from "@/components/discussion/metadata";
-import { useRef, useState } from "react";
+import { BlockedBadge } from "@/components/discussion/blocked-badge";
+import { IssueTypeBadge } from "@/components/discussion/issue-type-badge";
+import { useState } from "react";
 import {
   CircleDotIcon,
   FileTextIcon,
@@ -32,7 +34,20 @@ import {
 import { Link } from "@/components/navigation/link";
 import { cn } from "@/lib/utils";
 import type { Repository } from "@/lib/api";
-import { priorities, workHref, type Row, type ItemPage } from "./model";
+import {
+  priorities,
+  workHref,
+  type Row,
+  type ItemPage,
+  type GroupBy,
+} from "./model";
+import { ProjectIssueType } from "./issue-type";
+import {
+  projectGroups,
+  type ChangeProjectItem,
+  ProjectGroupMoveFailure,
+  useProjectGroupMove,
+} from "./grouping";
 export function WorkIcon({ row }: { row: Row }) {
   const Icon = row.restricted
     ? LockKeyholeIcon
@@ -56,9 +71,11 @@ export function WorkIcon({ row }: { row: Row }) {
 export function ItemTitle({
   repo,
   row,
+  showIssueType,
 }: {
   repo?: Pick<Repository, "owner" | "name">;
   row: Row;
+  showIssueType?: boolean;
 }) {
   const source = row.repository ?? repo;
   return (
@@ -83,6 +100,10 @@ export function ItemTitle({
             <span>
               {row.restricted ? "Repository access required" : "Draft note"}
             </span>
+          )}
+          {row.blocked && !row.restricted && <BlockedBadge />}
+          {showIssueType && !row.restricted && row.issue_type && (
+            <IssueTypeBadge type={row.issue_type} />
           )}
           {row.parent && source && (
             <Link href={workHref(source, row.parent.subject)}>
@@ -131,101 +152,169 @@ export function LinkedItems({
     </div>
   );
 }
+function ProjectGroupLabel({ name, count }: { name: string; count: number }) {
+  return (
+    <span className="inline-flex items-center gap-2">
+      <span className="max-w-[min(36ch,65vw)] truncate" title={name}>
+        {name}
+      </span>
+      <Badge variant="outline">
+        {count}
+        <span className="sr-only">{count === 1 ? " item" : " items"}</span>
+      </Badge>
+    </span>
+  );
+}
 export function ProjectTable({
   repo,
   page,
   editable,
   onEdit,
-  onStatus,
+  groupBy,
+  onChangeItem,
+  showIssueType,
+  onIssueTypeChange,
 }: {
-  repo?: Pick<Repository, "owner" | "name">;
+  repo?: Pick<Repository, "id" | "owner" | "name">;
   page: ItemPage;
   editable: boolean;
   onEdit: (row: Row) => void;
-  onStatus: (row: Row, status: string) => void;
+  groupBy?: GroupBy;
+  onChangeItem: ChangeProjectItem;
+  showIssueType?: boolean;
+  onIssueTypeChange?: () => void;
 }) {
+  const groups = groupBy ? projectGroups(page, groupBy) : undefined;
+  const showType = groupBy === "issue_type" || showIssueType;
+  const fields = page.project.definition.fields;
+  const types = page.issue_types ?? [];
+  const columns = 6 + fields.length + Number(!!showType) + Number(editable);
+  const { draggable, dropTarget, over, error, reload } = useProjectGroupMove(
+    groupBy,
+    repo,
+    onIssueTypeChange,
+    editable ? onChangeItem : undefined,
+  );
+  const renderRow = (row: Row) => (
+    <TableRow key={row.item.id} {...draggable(row)}>
+      <TableCell>
+        <ItemTitle repo={repo} row={row} />
+      </TableCell>
+      {showType && (
+        <TableCell>
+          <ProjectIssueType
+            row={row}
+            repo={repo}
+            options={types}
+            onChange={onIssueTypeChange}
+          />
+        </TableCell>
+      )}
+      <TableCell>
+        {row.assignees.length ? (
+          <AssigneeAvatars assignees={row.assignees} />
+        ) : (
+          <span className="muted">Unassigned</span>
+        )}
+      </TableCell>
+      <TableCell>
+        {editable && !row.restricted ? (
+          <Select
+            value={row.item.status}
+            onValueChange={(status) =>
+              onChangeItem(row, (item) => ({ ...item, status }))
+            }
+          >
+            <SelectTrigger
+              aria-label={`Status for ${row.work?.title ?? row.item.title}`}
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {page.project.definition.statuses.map((status) => (
+                  <SelectItem key={status} value={status}>
+                    {status}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        ) : (
+          <Badge variant="secondary">{row.item.status}</Badge>
+        )}
+      </TableCell>
+      <TableCell>{priorities[row.item.priority]}</TableCell>
+      <TableCell>{row.item.end ?? "—"}</TableCell>
+      {fields.map((f) => (
+        <TableCell key={f.id}>{row.item.values[f.id] ?? "—"}</TableCell>
+      ))}
+      <TableCell>
+        <LinkedItems repo={repo} row={row} />
+      </TableCell>
+      {editable && (
+        <TableCell>
+          <Button
+            size="icon-sm"
+            variant="ghost"
+            aria-label={`Edit ${row.work?.title ?? row.item.title}`}
+            onClick={() => onEdit(row)}
+          >
+            <PencilIcon />
+          </Button>
+        </TableCell>
+      )}
+    </TableRow>
+  );
+
   return (
-    <Table className="project-table">
-      <TableHeader>
-        <TableRow>
-          <TableHead>Title</TableHead>
-          <TableHead>Assignees</TableHead>
-          <TableHead>Status</TableHead>
-          <TableHead>Priority</TableHead>
-          <TableHead>Target date</TableHead>
-          {page.project.definition.fields.map((f) => (
-            <TableHead key={f.id}>{f.name}</TableHead>
-          ))}
-          <TableHead>Linked work</TableHead>
-          {editable && (
-            <TableHead>
-              <span className="sr-only">Actions</span>
-            </TableHead>
-          )}
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {page.items.map((row) => (
-          <TableRow key={row.item.id}>
-            <TableCell>
-              <ItemTitle repo={repo} row={row} />
-            </TableCell>
-            <TableCell>
-              {row.assignees.length ? (
-                <AssigneeAvatars assignees={row.assignees} />
-              ) : (
-                <span className="muted">Unassigned</span>
-              )}
-            </TableCell>
-            <TableCell>
-              {editable && !row.restricted ? (
-                <Select
-                  value={row.item.status}
-                  onValueChange={(status) => onStatus(row, status)}
-                >
-                  <SelectTrigger
-                    aria-label={`Status for ${row.work?.title ?? row.item.title}`}
-                  >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectGroup>
-                      {page.project.definition.statuses.map((status) => (
-                        <SelectItem key={status} value={status}>
-                          {status}
-                        </SelectItem>
-                      ))}
-                    </SelectGroup>
-                  </SelectContent>
-                </Select>
-              ) : (
-                <Badge variant="secondary">{row.item.status}</Badge>
-              )}
-            </TableCell>
-            <TableCell>{priorities[row.item.priority]}</TableCell>
-            <TableCell>{row.item.end ?? "—"}</TableCell>
-            {page.project.definition.fields.map((f) => (
-              <TableCell key={f.id}>{row.item.values[f.id] ?? "—"}</TableCell>
+    <>
+      <ProjectGroupMoveFailure error={error} reload={reload} />
+      <Table className="project-table">
+        <TableHeader>
+          <TableRow>
+            <TableHead>Title</TableHead>
+            {showType && <TableHead>Type</TableHead>}
+            <TableHead>Assignees</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead>Priority</TableHead>
+            <TableHead>Target date</TableHead>
+            {fields.map((f) => (
+              <TableHead key={f.id}>{f.name}</TableHead>
             ))}
-            <TableCell>
-              <LinkedItems repo={repo} row={row} />
-            </TableCell>
+            <TableHead>Linked work</TableHead>
             {editable && (
-              <TableCell>
-                <Button
-                  size="icon-sm"
-                  variant="ghost"
-                  aria-label={`Edit ${row.work?.title ?? row.item.title}`}
-                  onClick={() => onEdit(row)}
-                >
-                  <PencilIcon />
-                </Button>
-              </TableCell>
+              <TableHead>
+                <span className="sr-only">Actions</span>
+              </TableHead>
             )}
           </TableRow>
-        ))}
-      </TableBody>
-    </Table>
+        </TableHeader>
+        {groups ? (
+          groups.map(({ key, name, count, rows }) => (
+            <TableBody
+              key={key}
+              aria-label={name}
+              className={cn(over === key && "project-group-drop")}
+              {...dropTarget(key)}
+            >
+              <TableRow>
+                <TableHead
+                  scope="rowgroup"
+                  colSpan={columns}
+                  className="project-group-heading"
+                >
+                  <ProjectGroupLabel name={name} count={count} />
+                </TableHead>
+              </TableRow>
+              {rows.map(renderRow)}
+            </TableBody>
+          ))
+        ) : (
+          <TableBody>{page.items.map(renderRow)}</TableBody>
+        )}
+      </Table>
+    </>
   );
 }
 export function ProjectBoard({
@@ -233,73 +322,79 @@ export function ProjectBoard({
   page,
   editable,
   onEdit,
-  onStatus,
+  groupBy = "status",
+  onChangeItem,
+  showIssueType,
+  onIssueTypeChange,
 }: {
-  repo?: Pick<Repository, "owner" | "name">;
+  repo?: Pick<Repository, "id" | "owner" | "name">;
   page: ItemPage;
   editable: boolean;
   onEdit: (row: Row) => void;
-  onStatus: (row: Row, status: string) => void;
+  groupBy?: GroupBy;
+  onChangeItem: ChangeProjectItem;
+  showIssueType?: boolean;
+  onIssueTypeChange?: () => void;
 }) {
-  const dragged = useRef<Row | null>(null);
-  const [over, setOver] = useState<string>();
+  const byType = groupBy === "issue_type";
+  const columns = projectGroups(page, groupBy);
+  const types = page.issue_types ?? [];
+  const { draggable, dropTarget, movable, over, error, reload } =
+    useProjectGroupMove(
+      groupBy,
+      repo,
+      onIssueTypeChange,
+      editable ? onChangeItem : undefined,
+    );
   return (
-    <div className="project-board" role="region" aria-label="Project board">
-      {page.project.definition.statuses.map((status) => (
-        <section
-          key={status}
-          className={cn(
-            "project-board-column",
-            over === status && "project-board-drop",
-          )}
-          onDragOver={(e) => {
-            if (editable && dragged.current) {
-              e.preventDefault();
-              setOver(status);
-            }
-          }}
-          onDragLeave={() => setOver(undefined)}
-          onDrop={(e) => {
-            e.preventDefault();
-            if (
-              editable &&
-              dragged.current &&
-              dragged.current.item.status !== status
-            )
-              onStatus(dragged.current, status);
-            dragged.current = null;
-            setOver(undefined);
-          }}
-        >
-          <header>
-            <span className="project-status-dot" />
-            <h2>{status}</h2>
-            <Badge variant="secondary">{page.counts[status] ?? 0}</Badge>
-          </header>
-          <div className="project-board-cards">
-            {page.items
-              .filter((row) => row.item.status === status)
-              .map((row) => (
+    <>
+      <ProjectGroupMoveFailure error={error} reload={reload} />
+      <div className="project-board" role="region" aria-label="Project board">
+        {columns.map(({ key, name, count, rows }) => (
+          <section
+            key={key}
+            aria-label={name}
+            className={cn(
+              "project-board-column",
+              over === key && "project-board-drop",
+            )}
+            {...dropTarget(key)}
+          >
+            <header>
+              <span className="project-status-dot" />
+              <h2>{name}</h2>
+              <Badge variant="secondary">{count}</Badge>
+            </header>
+            <div className="project-board-cards">
+              {rows.map((row) => (
                 <article
                   className="project-board-card"
                   key={row.item.id}
-                  draggable={editable && !row.restricted}
-                  onDragStart={() => {
-                    dragged.current = row;
-                  }}
-                  onDragEnd={() => {
-                    dragged.current = null;
-                    setOver(undefined);
-                  }}
+                  {...draggable(row)}
                 >
-                  <ItemTitle repo={repo} row={row} />
+                  <ItemTitle
+                    repo={repo}
+                    row={row}
+                    showIssueType={!byType && showIssueType}
+                  />
                   <footer>
                     <AssigneeAvatars assignees={row.assignees} />
+                    {groupBy !== "status" && (
+                      <Badge variant="secondary">{row.item.status}</Badge>
+                    )}
                     <Badge variant="outline">
                       {priorities[row.item.priority]}
                     </Badge>
                     {row.item.end && (
                       <time dateTime={row.item.end}>{row.item.end}</time>
+                    )}
+                    {byType && movable(row) && (
+                      <ProjectIssueType
+                        row={row}
+                        repo={repo}
+                        options={types}
+                        onChange={onIssueTypeChange}
+                      />
                     )}
                     {editable && (
                       <Button
@@ -315,15 +410,16 @@ export function ProjectBoard({
                   <LinkedItems repo={repo} row={row} />
                 </article>
               ))}
-            {!page.items.some((row) => row.item.status === status) && (
-              <p className="project-column-empty">
-                {page.counts[status] ? "No items on this page" : "No items yet"}
-              </p>
-            )}
-          </div>
-        </section>
-      ))}
-    </div>
+              {!rows.length && (
+                <p className="project-column-empty">
+                  {count ? "No items on this page" : "No items yet"}
+                </p>
+              )}
+            </div>
+          </section>
+        ))}
+      </div>
+    </>
   );
 }
 const day = 86400000;
@@ -335,11 +431,17 @@ export function ProjectRoadmap({
   page,
   editable,
   onEdit,
+  groupBy,
+  showIssueType,
+  onIssueTypeChange,
 }: {
-  repo?: Pick<Repository, "owner" | "name">;
+  repo?: Pick<Repository, "id" | "owner" | "name">;
   page: ItemPage;
   editable: boolean;
   onEdit: (row: Row) => void;
+  groupBy?: GroupBy;
+  showIssueType?: boolean;
+  onIssueTypeChange?: () => void;
 }) {
   const [offset, setOffset] = useState(0);
   const today = new Date();
@@ -360,6 +462,77 @@ export function ProjectRoadmap({
         Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + offset + i, 1),
       ),
   );
+  const groups = groupBy ? projectGroups(page, groupBy) : undefined;
+  const byType = groupBy === "issue_type";
+  const types = page.issue_types ?? [];
+  const renderRow = (row: Row) => {
+    const from = row.item.start
+      ? date(row.item.start)
+      : row.item.end
+        ? date(row.item.end)
+        : null;
+    const to = row.item.end
+      ? date(row.item.end) + day
+      : from === null
+        ? null
+        : from + day;
+    const visible = from !== null && to !== null && to > start && from < end;
+    const left =
+      from === null ? 0 : Math.max(0, ((from - start) / day / days) * 100);
+    const right =
+      to === null ? 0 : Math.min(100, ((to - start) / day / days) * 100);
+    return (
+      <div className="project-roadmap-row" role="row" key={row.item.id}>
+        <div role="cell">
+          <ItemTitle
+            repo={repo}
+            row={row}
+            showIssueType={!byType && showIssueType}
+          />
+          {byType && onIssueTypeChange && row.issue_type_version != null && (
+            <ProjectIssueType
+              row={row}
+              repo={repo}
+              options={types}
+              onChange={onIssueTypeChange}
+            />
+          )}
+        </div>
+        <div
+          className="project-roadmap-track"
+          role="cell"
+          style={{ backgroundSize: `${100 / days}% 100%` }}
+        >
+          {visible ? (
+            <Button
+              className="project-roadmap-bar"
+              variant="secondary"
+              style={{
+                left: `${left}%`,
+                width: `${Math.max(right - left, 1)}%`,
+              }}
+              disabled={!editable}
+              aria-label={`Schedule ${row.work?.title ?? row.item.title}: ${row.item.start ?? row.item.end} to ${row.item.end ?? row.item.start}`}
+              onClick={() => onEdit(row)}
+            >
+              {row.item.status}
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={!editable}
+              onClick={() => onEdit(row)}
+            >
+              {from === null
+                ? "Set dates"
+                : `${row.item.start ?? row.item.end} · outside this quarter`}
+            </Button>
+          )}
+        </div>
+      </div>
+    );
+  };
   return (
     <div className="project-roadmap">
       <div className="project-roadmap-controls">
@@ -427,67 +600,23 @@ export function ProjectRoadmap({
               ))}
             </div>
           </div>
-          {page.items.map((row) => {
-            const from = row.item.start
-              ? date(row.item.start)
-              : row.item.end
-                ? date(row.item.end)
-                : null;
-            const to = row.item.end
-              ? date(row.item.end) + day
-              : from === null
-                ? null
-                : from + day;
-            const visible =
-              from !== null && to !== null && to > start && from < end;
-            const left =
-              from === null
-                ? 0
-                : Math.max(0, ((from - start) / day / days) * 100);
-            const right =
-              to === null
-                ? 0
-                : Math.min(100, ((to - start) / day / days) * 100);
-            return (
-              <div className="project-roadmap-row" role="row" key={row.item.id}>
-                <div role="cell">
-                  <ItemTitle repo={repo} row={row} />
-                </div>
-                <div
-                  className="project-roadmap-track"
-                  role="cell"
-                  style={{ backgroundSize: `${100 / days}% 100%` }}
-                >
-                  {visible ? (
-                    <Button
-                      className="project-roadmap-bar"
-                      variant="secondary"
-                      style={{
-                        left: `${left}%`,
-                        width: `${Math.max(right - left, 1)}%`,
-                      }}
-                      disabled={!editable}
-                      aria-label={`Schedule ${row.work?.title ?? row.item.title}: ${row.item.start ?? row.item.end} to ${row.item.end ?? row.item.start}`}
-                      onClick={() => onEdit(row)}
+          {groups
+            ? groups
+                .filter(({ count }) => count > 0)
+                .map(({ key, name, count, rows }) => (
+                  <div key={key} role="rowgroup" aria-label={name}>
+                    <div
+                      className="project-group-heading project-roadmap-group"
+                      role="row"
                     >
-                      {row.item.status}
-                    </Button>
-                  ) : (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      disabled={!editable}
-                      onClick={() => onEdit(row)}
-                    >
-                      {from === null
-                        ? "Set dates"
-                        : `${row.item.start ?? row.item.end} · outside this quarter`}
-                    </Button>
-                  )}
-                </div>
-              </div>
-            );
-          })}
+                      <div role="cell" aria-colspan={2}>
+                        <ProjectGroupLabel name={name} count={count} />
+                      </div>
+                    </div>
+                    {rows.map(renderRow)}
+                  </div>
+                ))
+            : page.items.map(renderRow)}
         </div>
       </div>
     </div>

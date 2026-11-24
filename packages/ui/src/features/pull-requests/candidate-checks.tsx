@@ -18,6 +18,7 @@ interface Preview {
   base_oid: string;
   head_oid: string;
   previous_oid: string | null;
+  method?: MergeMethod;
 }
 
 interface Candidate {
@@ -51,12 +52,12 @@ const promotionMessages = {
   checks_pending: "Required checks must pass on the candidate.",
   checks_unconfigured:
     "Set required checks on the base branch to use tested merges.",
-  method_disabled: "Enable merge commits to use tested merges.",
+  method_disabled: "Enable the candidate’s merge method to publish it.",
 };
 
 interface Promotion {
   tested_candidate_oid: string;
-  method: "merge_commit";
+  method: MergeMethod;
   version: number;
   base_oid: string;
   head_oid: string;
@@ -312,7 +313,7 @@ export function PullChecks({
                       setRetryMerge(undefined);
                       setConfirmation({
                         tested_candidate_oid: candidate.commit,
-                        method: "merge_commit",
+                        method: candidate.method ?? "merge_commit",
                         version: preview.version,
                         base_oid: preview.base_oid,
                         head_oid: preview.head_oid,

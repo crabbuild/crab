@@ -82,6 +82,7 @@ async fn project_sources_show_live_issues_pulls_links_and_native_search() {
                 version: 1,
                 actor: actor(),
                 can_triage: true,
+                can_moderate: false,
                 title: Some("Current title".into()),
                 body: None,
                 state: Some(1),

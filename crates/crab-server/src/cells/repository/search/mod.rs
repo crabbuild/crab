@@ -8,6 +8,7 @@ pub(crate) mod completion;
 pub(crate) mod contributions;
 mod counts;
 pub(crate) mod index;
+pub(crate) mod issue_types;
 pub(crate) mod labels;
 pub(crate) mod milestones;
 mod navigation;
@@ -55,11 +56,13 @@ enum Term {
     Text(String),
     Label(Vec<String>),
     Milestone(String),
+    IssueType(String),
     State(SubjectState),
     Reason(super::issues::lifecycle::Reason),
     Kind(SubjectKind),
     Unmerged,
     Draft(bool),
+    Locked(bool),
     Missing(Metadata),
 }
 
@@ -69,9 +72,14 @@ enum Metadata {
     Label,
     Assignee,
     Milestone,
+    IssueType,
 }
 
 impl Query {
+    pub(crate) fn uses_issue_types(&self) -> bool {
+        self.expression.has_term(issue_types::is_type)
+    }
+
     fn names(&self, select: fn(&Term) -> Option<&str>) -> std::collections::BTreeSet<String> {
         fn collect(
             expression: &Expression,
@@ -101,21 +109,12 @@ impl Query {
         names
     }
     pub(super) fn needs_lifecycle(&self) -> bool {
-        fn has(expression: &Expression) -> bool {
-            match expression {
-                Expression::Term {
-                    value: Term::Reason(_) | Term::Missing(Metadata::Reason),
-                    ..
-                } => true,
-                Expression::Not(inner)
-                | Expression::Scope {
-                    expression: inner, ..
-                } => has(inner),
-                Expression::And(parts) | Expression::Or(parts) => parts.iter().any(has),
-                _ => false,
-            }
-        }
-        has(&self.expression)
+        self.expression
+            .has_term(|term| matches!(term, Term::Reason(_) | Term::Missing(Metadata::Reason)))
+    }
+    fn needs_lock_state(&self) -> bool {
+        self.expression
+            .has_term(|term| matches!(term, Term::Locked(_)))
     }
     pub(crate) fn parse(source: Option<&str>) -> Result<Self, &'static str> {
         let Some(source) = source else {
@@ -140,6 +139,20 @@ impl Query {
             return Err("Search query has an unexpected closing parenthesis");
         }
         Ok(Self { expression })
+    }
+}
+
+impl Expression {
+    fn has_term(&self, matches: fn(&Term) -> bool) -> bool {
+        match self {
+            Self::Term { value, .. } => matches(value),
+            Self::Not(inner)
+            | Self::Scope {
+                expression: inner, ..
+            } => inner.has_term(matches),
+            Self::And(parts) | Self::Or(parts) => parts.iter().any(|part| part.has_term(matches)),
+            Self::All => false,
+        }
     }
 }
 
@@ -359,6 +372,7 @@ fn atom_expression(atom: &str) -> Result<Expression, &'static str> {
                 }
             }),
             "milestone" => Term::Milestone(unquote(value)?.to_lowercase()),
+            "type" => Term::IssueType(unquote(value)?.to_lowercase()),
             "is" | "state" => match unquote(value)?.to_ascii_lowercase().as_str() {
                 "open" => Term::State(SubjectState::Open),
                 "closed" => Term::State(SubjectState::Closed),
@@ -366,6 +380,8 @@ fn atom_expression(atom: &str) -> Result<Expression, &'static str> {
                     Term::State(SubjectState::Merged)
                 }
                 "unmerged" if qualifier.eq_ignore_ascii_case("is") => Term::Unmerged,
+                "locked" if qualifier.eq_ignore_ascii_case("is") => Term::Locked(true),
+                "unlocked" if qualifier.eq_ignore_ascii_case("is") => Term::Locked(false),
                 "issue" if qualifier.eq_ignore_ascii_case("is") => Term::Kind(SubjectKind::Issue),
                 "pr" if qualifier.eq_ignore_ascii_case("is") => Term::Kind(SubjectKind::Pull),
                 _ => return Err("Search is/state qualifier has an unsupported value"),
@@ -383,10 +399,11 @@ fn atom_expression(atom: &str) -> Result<Expression, &'static str> {
                     "label" => Term::Missing(Metadata::Label),
                     "assignee" => Term::Missing(Metadata::Assignee),
                     "milestone" => Term::Missing(Metadata::Milestone),
+                    "type" => Term::Missing(Metadata::IssueType),
                     "reason" => Term::Missing(Metadata::Reason),
                     _ => {
                         return Err(
-                            "Search no qualifier supports label, assignee, milestone and reason",
+                            "Search no qualifier supports label, assignee, milestone, type and reason",
                         );
                     }
                 }

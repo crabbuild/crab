@@ -32,6 +32,9 @@ import { DiscussionMarkdown } from "@/components/discussion/markdown";
 import { CreateProject } from "./create";
 import { ItemEditor } from "./item";
 import { ProjectSettings } from "./settings";
+import { ProjectTypeFilter } from "./issue-type";
+import { ProjectGrouping, selectedGrouping } from "./grouping";
+import type { IssueType } from "@/lib/contracts";
 import { ProjectBoard, ProjectTable, ProjectRoadmap } from "./views";
 import { useProjectCommands } from "./commands";
 import { ProjectHistory } from "./history";
@@ -40,6 +43,7 @@ import { checkpointDraft, itemDraft, readDraft } from "./draft-storage";
 import {
   projectHref,
   type Listing,
+  type Item,
   type ItemPage,
   type Project,
   type Row,
@@ -184,9 +188,11 @@ function ProjectDetail({
   url: URL;
   id: string;
 }) {
-  const resource = useRequest<{ project: Project; can_manage: boolean }>(
-    endpoint(repo, `projects/${id}`),
-  );
+  const resource = useRequest<{
+    project: Project;
+    can_manage: boolean;
+    issue_types?: IssueType[];
+  }>(endpoint(repo, `projects/${id}`));
   return (
     <Result state={resource} timingLabel="Project settings">
       {(data) => (
@@ -195,6 +201,7 @@ function ProjectDetail({
           url={url}
           initial={data.project}
           canManage={data.can_manage}
+          typeChoices={data.issue_types ?? []}
         />
       )}
     </Result>
@@ -205,11 +212,13 @@ function ProjectWorkspace({
   url,
   initial,
   canManage,
+  typeChoices,
 }: {
   repo: Repository;
   url: URL;
   initial: Project;
   canManage: boolean;
+  typeChoices: IssueType[];
 }) {
   const [project, setProject] = useState(initial);
   const [editing, setEditing] = useState<Row | "new" | { draft: string }>();
@@ -219,6 +228,15 @@ function ProjectWorkspace({
     project.definition.views[0];
   const query = url.searchParams.get("q") ?? selected.query;
   const status = url.searchParams.get("status") ?? selected.status ?? "";
+  const groupBy = selectedGrouping(
+    selected.layout,
+    project.definition.fields,
+    !!repo.organization_id,
+    url.searchParams.get("group_by") ?? selected.group_by,
+  );
+  const issueType = repo.organization_id
+    ? (url.searchParams.get("issue_type") ?? selected.issue_type_filter ?? "")
+    : "";
   const hidden = url.searchParams.has("hide_closed")
     ? url.searchParams.get("hide_closed") === "true"
     : selected.hide_closed;
@@ -230,7 +248,12 @@ function ProjectWorkspace({
       q: query,
       status: status || undefined,
       hide_closed: String(hidden),
+      issue_type: issueType || undefined,
+      group_by: groupBy,
       after,
+      type_cursor: after
+        ? (url.searchParams.get("type_cursor") ?? undefined)
+        : undefined,
       revision: after
         ? (url.searchParams.get("revision") ?? undefined)
         : undefined,
@@ -246,6 +269,7 @@ function ProjectWorkspace({
     }
     next.searchParams.delete("after");
     next.searchParams.delete("revision");
+    next.searchParams.delete("type_cursor");
     navigate(next.pathname + next.search);
   }
   useEffect(() => {
@@ -261,21 +285,26 @@ function ProjectWorkspace({
   const manager = resource.data?.can_manage ?? canManage;
   const editable =
     manager && !repo.archived && !project.archived && !commands.locked;
-  async function changeStatus(row: Row, status: string) {
+  const onIssueTypeChange =
+    repo.archived || project.archived
+      ? undefined
+      : () => (after ? filters({}) : resource.retry());
+  async function changeItem(row: Row, edit: (item: Item) => Item) {
     if (!commands.account) return;
     const scope = { target: { repo }, project: project.id, item: row.item.id };
     const previous = readDraft(commands.account, scope, "item");
     if (previous?.kind === "item") {
       checkpointDraft(commands.account, scope, {
         ...previous,
-        item: { ...previous.item, status },
+        item: edit(previous.item),
       });
       setEditing(row);
       return;
     }
+    const item = edit(row.item);
     const checkpoint = checkpointDraft(commands.account, scope, {
       ...itemDraft(project, row, repo.id),
-      item: { ...row.item, status },
+      item,
     });
     await commands.submit(
       repo,
@@ -283,7 +312,7 @@ function ProjectWorkspace({
         kind: "item",
         project: project.id,
         version: row.version,
-        item: { ...row.item, status },
+        item,
       },
       checkpoint,
     );
@@ -352,6 +381,8 @@ function ProjectWorkspace({
             q: undefined,
             status: undefined,
             hide_closed: undefined,
+            issue_type: undefined,
+            group_by: undefined,
           })
         }
       >
@@ -421,6 +452,20 @@ function ProjectWorkspace({
               onValueChange={(value) => filters({ hide_closed: value })}
               options={{ false: "All work", true: "Open work" }}
             />
+            {repo.organization_id && (
+              <ProjectTypeFilter
+                types={typeChoices}
+                value={issueType}
+                onChange={(value) => filters({ issue_type: value })}
+              />
+            )}
+            <ProjectGrouping
+              layout={selected.layout}
+              fields={project.definition.fields}
+              issueTypes={!!repo.organization_id}
+              groupBy={groupBy}
+              onChange={(value) => filters({ group_by: value })}
+            />
             <Button variant="outline" type="submit">
               Apply
             </Button>
@@ -437,6 +482,11 @@ function ProjectWorkspace({
               <RefreshCwIcon />
             </Button>
           </form>
+          {resource.error && after && (
+            <Button variant="outline" onClick={() => filters({})}>
+              First page
+            </Button>
+          )}
           <Result state={resource} timingLabel="Project items">
             {({ page, can_manage }) => (
               <>
@@ -455,14 +505,20 @@ function ProjectWorkspace({
                       page={page}
                       editable={editable && can_manage}
                       onEdit={setEditing}
-                      onStatus={changeStatus}
+                      groupBy={groupBy}
+                      onChangeItem={changeItem}
+                      showIssueType={selected.show_issue_type}
+                      onIssueTypeChange={onIssueTypeChange}
                     />
                   ) : selected.layout === "roadmap" ? (
                     <ProjectRoadmap
                       repo={repo}
+                      groupBy={groupBy}
                       page={page}
                       editable={editable && can_manage}
                       onEdit={setEditing}
+                      showIssueType={selected.show_issue_type}
+                      onIssueTypeChange={onIssueTypeChange}
                     />
                   ) : (
                     <ProjectTable
@@ -470,7 +526,10 @@ function ProjectWorkspace({
                       page={page}
                       editable={editable && can_manage}
                       onEdit={setEditing}
-                      onStatus={changeStatus}
+                      groupBy={groupBy}
+                      onChangeItem={changeItem}
+                      showIssueType={selected.show_issue_type}
+                      onIssueTypeChange={onIssueTypeChange}
                     />
                   )
                 ) : (
@@ -480,12 +539,12 @@ function ProjectWorkspace({
                         <FolderKanbanIcon />
                       </EmptyMedia>
                       <EmptyTitle>
-                        {query || status || hidden
+                        {query || status || hidden || issueType
                           ? "No work matches this view"
                           : "Your project starts here"}
                       </EmptyTitle>
                       <EmptyDescription>
-                        {query || status || hidden
+                        {query || status || hidden || issueType
                           ? "Change the filters to see more work."
                           : "Add an issue or pull request, create an issue, or capture a draft note."}
                       </EmptyDescription>
@@ -521,6 +580,11 @@ function ProjectWorkspace({
                             "revision",
                             String(page.revision),
                           );
+                          if (page.type_cursor)
+                            next.searchParams.set(
+                              "type_cursor",
+                              page.type_cursor,
+                            );
                           navigate(next.pathname + next.search);
                         }}
                       >
@@ -561,6 +625,8 @@ function ProjectWorkspace({
         <ProjectSettings
           target={{ repo }}
           project={project}
+          issueTypes={!!repo.organization_id}
+          typeChoices={typeChoices}
           onClose={() => setSettings(false)}
         />
       )}

@@ -20,7 +20,7 @@ export function SignIn({
   const failed = query.has("auth_error");
   query.delete("auth_error");
   const search = query.toString();
-  const returnTo = search ? `${url.pathname}?${search}` : url.pathname;
+  const returnTo = `${url.pathname}${search ? `?${search}` : ""}${url.hash}`;
   const login = `/auth/login?${new URLSearchParams({ return_to: returnTo })}`;
   const signUp = `${login}&sign_up=true`;
 

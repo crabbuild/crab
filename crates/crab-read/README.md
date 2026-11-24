@@ -27,6 +27,10 @@ the shared Xet client through background source tasks, so cancellation cannot
 release remote dependencies while a worker still needs them. Closed or expired
 retention rejects new reconstruction, including warm cache hits; provider failures
 remain typed errors. Capture registration and authorization stay with the caller.
+`ArtifactPointer` binds a selected Git pointer's hash and logical size to a
+captured catalog. `CapturedArtifact` prepares its retained stream using private
+staging for metadata. The caller keeps staging alive until the worker closes the
+lookup and releases the transfer.
 
 ## Why it exists
 

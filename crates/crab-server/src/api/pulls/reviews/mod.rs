@@ -102,6 +102,8 @@ pub(in crate::api) fn review_view(
         "author": authors.view(&review.author),
         "body": review.body,
         "reactions": reactions,
+        "has_edit_history": reactions.has_edit_history,
+        "minimization": reactions.minimization,
         "state": state,
         "dismissal": detail.dismissal.as_ref().map(|value| json!({
             "author": authors.view(&value.author),
@@ -126,18 +128,14 @@ async fn pull_and_head(
     let pull = storage::pull(server, repo, id)
         .await?
         .ok_or(Error::NotFound)?;
-    if let Some(merge) = &pull.merge {
-        // Freshness follows the reviewed source head, including after a synthetic merge commit.
-        let head = merge.head_oid.clone();
-        return Ok((pull, Some(head)));
-    }
-    let head = if let Some(fork) = pull.head_repository {
-        super::git::fork_repository(server, repo, fork)?
-            .ref_oid(&pull.head_ref)
-            .await?
-    } else {
-        repo.ref_oid(&pull.head_ref).await?
-    };
+    let head = super::review_head(
+        server,
+        repo,
+        pull.head_repository,
+        &pull.head_ref,
+        pull.merge.as_ref().map(|merge| merge.head_oid.clone()),
+    )
+    .await?;
     Ok((pull, head))
 }
 
@@ -403,6 +401,7 @@ async fn edit(
     let review = storage::update_review(
         &server,
         repo,
+        &principal,
         id,
         review_number,
         actor.clone(),

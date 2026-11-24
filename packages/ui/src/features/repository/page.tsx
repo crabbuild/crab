@@ -52,6 +52,7 @@ import { FileNavigation } from "./files/navigation";
 import { LatestCommit } from "./latest-commit";
 import { ForkSync } from "./fork-sync";
 import { RepositoryRefControls, RepositoryToolbar } from "./toolbar";
+import { TopicLinks } from "./topic-links";
 
 const RepositoryTree = lazy(() =>
   import("./tree").then((module) => ({ default: module.RepositoryTree })),
@@ -95,6 +96,11 @@ const Releases = lazy(() =>
 const RepositoryRulesets = lazy(() =>
   import("@/features/settings/rulesets").then((module) => ({
     default: module.RepositoryRulesets,
+  })),
+);
+const RepositoryProperties = lazy(() =>
+  import("@/features/organizations/repository-properties").then((module) => ({
+    default: module.RepositoryProperties,
   })),
 );
 const Settings = lazy(() =>
@@ -415,7 +421,7 @@ export function RepositoryPage({
               icon: HistoryIcon,
               active: view === "activity",
             },
-            ...(repo.can_admin
+            ...(repo.can_admin || repo.can_maintain
               ? [
                   {
                     view: "settings",
@@ -585,8 +591,21 @@ export function RepositoryPage({
           >
             <RepositoryRulesets key={repo.id} repo={repo} />
           </Suspense>
+        ) : view === "properties" && repo.organization_id ? (
+          <section className="settings-section grid gap-4 p-4">
+            <h2 className="text-lg font-semibold">Repository properties</h2>
+            <Suspense
+              fallback={
+                <div role="status">
+                  <Spinner /> Loading properties…
+                </div>
+              }
+            >
+              <RepositoryProperties key={repo.id} repo={repo} csrf={csrf} />
+            </Suspense>
+          </section>
         ) : view === "settings" ? (
-          repo.can_admin ? (
+          repo.can_admin || repo.can_maintain ? (
             <Result state={visibleRefState} timingLabel="Repository references">
               {(data) => (
                 <Suspense
@@ -621,7 +640,7 @@ export function RepositoryPage({
             </Result>
           ) : (
             <div className="notice error" role="alert">
-              Administrator access is required to view repository settings.
+              Maintain access is required to view repository settings.
             </div>
           )
         ) : issuesView ? (
@@ -740,6 +759,7 @@ export function RepositoryPage({
                 <div className="notice">
                   <h2>This repository is empty</h2>
                   <p>Push an initial commit with Crab to start browsing.</p>
+                  {overview && <TopicLinks names={repo.topics} />}
                 </div>
               ) : rev ? (
                 <>
@@ -1038,6 +1058,7 @@ export function RepositoryPage({
                               <p>
                                 {repo.description || "No description provided."}
                               </p>
+                              <TopicLinks names={repo.topics} />
                               <div className="about-links">
                                 <Link
                                   href={repoHref(repo, {

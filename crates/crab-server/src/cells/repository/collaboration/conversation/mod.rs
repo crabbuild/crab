@@ -163,9 +163,11 @@ pub(super) fn project_event(context: &Transaction<'_>, event: &Event) -> Result<
     if matches!(
         event.target,
         Target::IssueComment { .. } | Target::PullComment { .. } | Target::PullReview { .. }
-    ) && event.action != Action::ReviewDismissed
-        || event.action == Action::Created
-            && matches!(event.target, Target::Issue { .. } | Target::Pull { .. })
+    ) && !matches!(
+        event.action,
+        Action::ReviewDismissed | Action::CommentHidden { .. } | Action::CommentRestored
+    ) || event.action == Action::Created
+        && matches!(event.target, Target::Issue { .. } | Target::Pull { .. })
     {
         return Ok(());
     }

@@ -185,7 +185,7 @@ async fn queue_publishes_tested_squash_and_rebase_history_and_expires_stale_meth
         save_method(0, method).await.error_for_status().unwrap();
         h.write(Method::PUT, &format!("{REPO}/settings/branch-protections"), &alice, json!({
             "expected_version":0,"rules":[{"branch":"main","required_approvals":0,"required_checks":["ci"],
-                "require_merge_queue":true}],
+                "require_merge_queue":true,"require_linear_history":true}],
         })).await.error_for_status().unwrap();
         let credential: Value = h
             .write(

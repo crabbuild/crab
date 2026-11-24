@@ -49,6 +49,8 @@ pub(super) struct Input {
     pub base_oid: String,
     pub head_oid: String,
     pub previous_oid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<MergeMethod>,
 }
 
 #[derive(Deserialize)]
@@ -261,8 +263,7 @@ fn decode_candidate(oid: ObjectId, object: &crab_remote_git::RemoteGitObject) ->
             )?,
             _ => return Err(Error::CellContract("Expected a single-parent candidate")),
         };
-        if comparison.source.queue.is_none()
-            || !matches!(comparison.method, MergeMethod::Squash | MergeMethod::Rebase)
+        if !comparison.method.preserves_linear_history()
             || (comparison.method == MergeMethod::Squash && parent != base)
         {
             return Err(Error::CellContract("Invalid linear merge candidate"));
@@ -403,6 +404,9 @@ async fn promotion_status(
         },
     )
     .await?;
+    if !report.permits_method(candidate.method) {
+        return Ok(("pull_blocked", vec![]));
+    }
     if candidate.source.queue.is_none()
         && !super::merge_methods::load(server, repo)
             .await?
@@ -416,9 +420,12 @@ async fn promotion_status(
         Ok(()) => "ready",
         Err(Error::MergeCandidateChecks) if checks.is_empty() => "checks_unconfigured",
         Err(Error::MergeCandidateChecks) => "checks_pending",
-        Err(Error::MergeBlocked | Error::MergeUnresolvedConversations | Error::MergeHeadBehind) => {
-            "pull_blocked"
-        }
+        Err(
+            Error::MergeBlocked
+            | Error::MergeUpdatesRestricted
+            | Error::MergeUnresolvedConversations
+            | Error::MergeHeadBehind,
+        ) => "pull_blocked",
         Err(error) => return Err(error),
     };
     Ok((
@@ -455,11 +462,22 @@ async fn detail(
         ),
         None => !queue_required,
     };
-    let preview = tips
-        .as_ref()
-        .filter(|(base, head)| {
-            base != head && writable && eligible(&pull) && !queue_required && queue.is_none()
-        })
+    let preview_tips = tips.as_ref().filter(|(base, head)| {
+        base != head && writable && eligible(&pull) && !queue_required && queue.is_none()
+    });
+    let linear_required = (preview_tips.is_some() || candidate.is_some())
+        && super::requires_linear_history(&server, &repo, &pull.base_ref).await?;
+    let preview_method = if preview_tips.is_some() && linear_required {
+        super::merge_methods::load(&server, &repo)
+            .await?
+            .enabled
+            .into_iter()
+            .find(|method| method.preserves_linear_history())
+    } else {
+        None
+    };
+    let preview = preview_tips
+        .filter(|_| !linear_required || preview_method.is_some())
         .map(|(base, head)| Input {
             request_id: Uuid::now_v7(),
             version: pull.version,
@@ -468,6 +486,7 @@ async fn detail(
             previous_oid: candidate
                 .as_ref()
                 .map(|candidate| candidate.oid.to_string()),
+            method: preview_method,
         });
     let effective = match (&queued, &tips) {
         (Some(state), Some((base, _))) if candidate.is_some() && queue_current => {
@@ -481,6 +500,7 @@ async fn detail(
     let current = candidate.as_ref().is_some_and(|candidate| {
         queue_current
             && candidate.source.queue == queue
+            && (!linear_required || candidate.method.preserves_linear_history())
             && queued
                 .as_ref()
                 .is_none_or(|state| candidate.method == state.job.method)
@@ -586,7 +606,14 @@ pub(super) async fn stage(
 ) -> Result<ObjectId> {
     let job = plan.map(|(job, _)| job);
     let queue = plan.map(|(job, base)| job.candidate_id(base.order_revision));
-    let method = job.map_or(MergeMethod::MergeCommit, |job| job.method);
+    let method = job.map_or(input.method.unwrap_or(MergeMethod::MergeCommit), |job| {
+        job.method
+    });
+    if !method.supports_queue() || (job.is_some() && input.method.is_some()) {
+        return Err(Error::Invalid(
+            "Use the merge method from the candidate comparison",
+        ));
+    }
     if !principal.can_write(repo.id) {
         return Err(Error::MergePermission);
     }
@@ -660,6 +687,14 @@ pub(super) async fn stage(
         .ok_or(Error::NotFound)?;
     if queue.is_none() && settings::requires_merge_queue(server, repo, &pull.base_ref).await? {
         return Err(Error::MergeQueueRequired);
+    }
+    if !method.preserves_linear_history()
+        && super::requires_linear_history(server, repo, &pull.base_ref).await?
+    {
+        return Err(Error::MergeLinearHistory);
+    }
+    if queue.is_none() && input.method.is_some() {
+        super::merge_methods::require(server, repo, method).await?;
     }
     if settings::load_lifecycle(server, repo).await?.archived {
         return Err(Error::Archived);
@@ -843,6 +878,12 @@ pub(crate) async fn authorize_merge_candidate(
     };
     if queue_required && queue.is_none() {
         return Err(ReceiveError::Settings(Box::new(Error::MergeQueueRequired)));
+    }
+    if let CandidatePublication::Prepare { method, .. } = candidate
+        && !method.preserves_linear_history()
+        && super::requires_linear_history(server, repo, &pull.base_ref).await?
+    {
+        return Err(ReceiveError::Settings(Box::new(Error::MergeLinearHistory)));
     }
     let allowed = match (queue, active) {
         (None, None) => true,

@@ -157,6 +157,7 @@ pub(super) async fn create_thread(
             .await,
     )? {
         CreatePullReviewThreadOutcome::Archived => Err(Error::Archived),
+        CreatePullReviewThreadOutcome::Locked => Err(Error::ConversationLocked),
         CreatePullReviewThreadOutcome::MergePending => Err(Error::MergePending),
         CreatePullReviewThreadOutcome::Created(thread) => Ok(from_thread(*thread)),
         CreatePullReviewThreadOutcome::PullNotFound => Err(Error::NotFound),
@@ -170,6 +171,7 @@ pub(super) async fn create_thread(
 pub(super) async fn update_thread(
     server: &Server,
     repo: &Repository,
+    principal: &crate::auth::Principal,
     pull: u64,
     number: u64,
     input: PullReviewThreadEdit,
@@ -182,6 +184,10 @@ pub(super) async fn update_thread(
                 &routed.target,
                 crate::app::mutation_identity()?,
                 UpdatePullReviewThreadInput {
+                    can_post_locked: app::membership(server, principal, repo)
+                        .await?
+                        .principal
+                        .can_write(repo.id),
                     key: PullReviewThreadKey { pull, number },
                     actor: crate::cells::repository::RepositoryAuthor::from(&input.actor),
                     can_resolve: input.can_resolve,
@@ -194,6 +200,7 @@ pub(super) async fn update_thread(
             .await,
     )? {
         UpdatePullReviewThreadOutcome::Archived => Err(Error::Archived),
+        UpdatePullReviewThreadOutcome::Locked => Err(Error::ConversationLocked),
         UpdatePullReviewThreadOutcome::MergePending => Err(Error::MergePending),
         UpdatePullReviewThreadOutcome::Updated(thread) => Ok(from_thread(*thread)),
         UpdatePullReviewThreadOutcome::NotFound => Err(Error::NotFound),
@@ -270,6 +277,7 @@ pub(super) async fn reply_submission(
 pub(super) async fn create_reply(
     server: &Server,
     repo: &Repository,
+    principal: &crate::auth::Principal,
     pull: u64,
     thread: u64,
     input: NewPullReviewReply,
@@ -282,6 +290,10 @@ pub(super) async fn create_reply(
                 &routed.target,
                 crate::app::mutation_identity()?,
                 CreatePullReviewReplyInput {
+                    can_post_locked: app::membership(server, principal, repo)
+                        .await?
+                        .principal
+                        .can_write(repo.id),
                     pull,
                     thread,
                     submission_id: storage::submission_id(&input.request_id)?,
@@ -292,6 +304,7 @@ pub(super) async fn create_reply(
             .await,
     )? {
         CreatePullReviewReplyOutcome::Archived => Err(Error::Archived),
+        CreatePullReviewReplyOutcome::Locked => Err(Error::ConversationLocked),
         CreatePullReviewReplyOutcome::Created(reply) => Ok(from_reply(reply)),
         CreatePullReviewReplyOutcome::ThreadNotFound => Err(Error::NotFound),
         CreatePullReviewReplyOutcome::RequestConflict => Err(Error::RequestConflict),
@@ -301,6 +314,7 @@ pub(super) async fn create_reply(
 pub(super) async fn update_reply(
     server: &Server,
     repo: &Repository,
+    principal: &crate::auth::Principal,
     pull: u64,
     thread: u64,
     number: u64,
@@ -316,6 +330,10 @@ pub(super) async fn update_reply(
                 &routed.target,
                 crate::app::mutation_identity()?,
                 UpdatePullReviewReplyInput {
+                    can_post_locked: app::membership(server, principal, repo)
+                        .await?
+                        .principal
+                        .can_write(repo.id),
                     key: PullReviewReplyKey {
                         pull,
                         thread,
@@ -329,6 +347,7 @@ pub(super) async fn update_reply(
             .await,
     )? {
         UpdatePullReviewReplyOutcome::Archived => Err(Error::Archived),
+        UpdatePullReviewReplyOutcome::Locked => Err(Error::ConversationLocked),
         UpdatePullReviewReplyOutcome::Updated(reply) => Ok(from_reply(reply)),
         UpdatePullReviewReplyOutcome::NotFound => Err(Error::NotFound),
         UpdatePullReviewReplyOutcome::Forbidden => Err(Error::Forbidden),

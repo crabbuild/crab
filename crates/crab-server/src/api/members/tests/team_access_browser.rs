@@ -125,15 +125,44 @@ async fn organization_owner_grants_and_revokes_a_team_members_repository_access_
     owner
         .run(&["wait", "--fn", "!document.querySelector('[role=dialog]')"])
         .await;
+    let role = "[aria-label='Role for Release engineers']";
+    owner.run(&["wait", role]).await;
+    owner.run(&["select", role, "admin"]).await;
     click(&owner, "button", "Save team access").await;
     owner.run(&["wait", "--text", "Team access saved."]).await;
     teammate.run(&["open", &repository]).await;
     teammate
         .run(&["wait", "--text", "This repository is empty"])
         .await;
+    click(&teammate, "link", "Settings").await;
+    teammate.run(&["wait", "--text", "Members"]).await;
+    click(&teammate, "link", "Members").await;
+    teammate
+        .run(&["wait", "--text", "Other administrator"])
+        .await;
 
     owner.run(&["reload"]).await;
-    owner.run(&["wait", "--text", "Release engineers"]).await;
+    owner
+        .run(&[
+            "wait",
+            "--fn",
+            "document.querySelector('[aria-label=\"Role for Release engineers\"]')?.value === 'admin'",
+        ])
+        .await;
+    owner.run(&["select", role, "write"]).await;
+    click(&owner, "button", "Save team access").await;
+    owner.run(&["wait", "--text", "Team access saved."]).await;
+    teammate.run(&["open", &repository]).await;
+    teammate
+        .run(&["wait", "--text", "This repository is empty"])
+        .await;
+    assert!(
+        !teammate
+            .run(&["snapshot"])
+            .await
+            .contains("link \"Settings\"")
+    );
+
     click(&owner, "button", "Remove Release engineers").await;
     owner
         .run(&[
@@ -170,8 +199,5 @@ async fn click(browser: &Browser, role: &str, name: &str) {
 
 async fn sign_in(browser: &Browser, url: &str) {
     browser.run(&["open", url]).await;
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    click(browser, "button", "Continue to sign in").await;
+    browser.sign_in().await;
 }

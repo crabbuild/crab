@@ -16,9 +16,9 @@ pub(crate) async fn serve(request: Request) -> Response {
     // and recognize only browser pages so missing APIs/assets still return 404.
     let components: Vec<_> = path.trim_end_matches('/').split('/').collect();
     let account_route = match components.as_slice() {
-        ["-", "profile" | "notifications"]
+        ["-", "profile" | "notifications" | "code-search"]
         | ["-", "notifications", "watched" | "subscriptions"]
-        | ["-", "settings", "saved-replies"] => true,
+        | ["-", "settings", "saved-replies" | "review-availability"] => true,
         ["-", "users" | "organizations" | "repository-transfers", id]
         | ["-", "organizations", id, "invitation" | "projects"] => {
             uuid::Uuid::parse_str(id).is_ok_and(|id| !id.is_nil())
@@ -37,6 +37,13 @@ pub(crate) async fn serve(request: Request) -> Response {
             && components[0] != "auth"
             && components[0] != "git"
             && (components.len() == 2
+                || (components.len() == 3
+                    && matches!(
+                        components[2],
+                        "code-search" | "projects" | "properties" | "rulesets"
+                    ))
+                || matches!(components.as_slice(), [_, _, "projects", id]
+                    if uuid::Uuid::parse_str(id).is_ok_and(|id| !id.is_nil()))
                 || matches!(
                     components[2],
                     "tree"
@@ -130,13 +137,42 @@ mod tests {
             ("/team/repo.name/compare/main...feature%2Fx", StatusCode::OK),
             ("/team/repo.name/releases/tag/v1.0.0", StatusCode::OK),
             ("/team/repo.name/settings/access", StatusCode::OK),
+            ("/team/repo.name/code-search", StatusCode::OK),
+            ("/team/repo.name/projects", StatusCode::OK),
+            (
+                "/team/repo.name/projects/01900000-0000-7000-8000-000000000001",
+                StatusCode::OK,
+            ),
+            ("/team/repo.name/projects/unknown", StatusCode::NOT_FOUND),
+            (
+                "/team/repo.name/projects/00000000-0000-0000-0000-000000000000",
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "/team/repo.name/projects/01900000-0000-7000-8000-000000000001/unknown",
+                StatusCode::NOT_FOUND,
+            ),
+            ("/team/repo.name/properties", StatusCode::OK),
+            ("/team/repo.name/rulesets", StatusCode::OK),
+            ("/team/repo.name/properties/unknown", StatusCode::NOT_FOUND),
             ("/team/repo.name/results", StatusCode::OK),
             (
                 "/team/repo.name/results?report=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
                 StatusCode::OK,
             ),
             ("/-/profile", StatusCode::OK),
+            ("/-/code-search", StatusCode::OK),
+            (
+                "/-/code-search?organization=01900000-0000-7000-8000-000000000001&q=match",
+                StatusCode::OK,
+            ),
+            ("/-/code-search/unknown", StatusCode::NOT_FOUND),
             ("/-/settings/saved-replies", StatusCode::OK),
+            ("/-/settings/review-availability", StatusCode::OK),
+            (
+                "/-/settings/review-availability/unknown",
+                StatusCode::NOT_FOUND,
+            ),
             ("/-/notifications", StatusCode::OK),
             ("/-/notifications/watched", StatusCode::OK),
             ("/-/notifications/subscriptions", StatusCode::OK),

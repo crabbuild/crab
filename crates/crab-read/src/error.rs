@@ -36,6 +36,14 @@ pub enum ReadError {
     #[error("metadata error")]
     Metadata(#[from] crab_metadata::error::MetadataError),
 
+    #[cfg(feature = "hydration")]
+    #[error("reconstruction failed and captured file lookup could not close: {operation}")]
+    CapturedLookupClose {
+        operation: Box<ReadError>,
+        #[source]
+        source: crab_metadata::error::MetadataError,
+    },
+
     #[error("remote Git error: {0}")]
     RemoteGit(#[from] crab_remote_git::Error),
 

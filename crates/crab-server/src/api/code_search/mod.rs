@@ -190,7 +190,6 @@ fn acquire(server: &Server) -> std::result::Result<read_admission::Admission, Re
 struct Pattern {
     query: Arc<QueryPlan>,
     directory: GitPath,
-    case_sensitive: bool,
     uses_text: bool,
     has_symbols: bool,
 }
@@ -209,7 +208,6 @@ impl Pattern {
             has_symbols: query.leaves.iter().any(qualifiers::Predicate::uses_symbols),
             query: Arc::new(query),
             directory: GitPath::new(path.as_bytes().to_vec())?,
-            case_sensitive,
         })
     }
 }
@@ -340,9 +338,7 @@ async fn inspect(
         let found = futures_util::future::try_join_all(batch.iter().map(|item| async move {
             match item {
                 TreeListingItem::Blob(entry) => {
-                    pattern
-                        .inspect_entry(snapshot, entry, scope, operation)
-                        .await
+                    pattern.inspect_entry(entry, scope, operation).await
                 }
                 TreeListingItem::CommonPrefix(_) => Err(Error::InternalInvariant {
                     invariant: "ungrouped code search received a grouped path",

@@ -16,13 +16,12 @@ use uuid::Uuid;
 use crate::{
     BranchProtection,
     api::assignees::Selection,
-    api::checks::{self, CheckRun},
     api::labels,
     api::reactions,
     api::statuses::{self, StatusState},
     app::{self, Error, Result},
     auth::{Identity, Principal},
-    cells::repository::{MergeReviewers, collaboration::Target},
+    cells::repository::{MergeMethod, MergeReviewers, collaboration::Target},
     repository::Repository,
     server::Server,
 };
@@ -36,9 +35,11 @@ mod codeowners;
 pub(crate) use branch_update::authorize_branch_update;
 pub(super) mod comments;
 mod git;
+pub(super) use git::review_head;
 mod merge;
 mod merge_methods;
 mod readiness;
+mod required_checks;
 mod review_requests;
 mod review_threads;
 pub(crate) use review_threads::authorize_suggestion_publication;
@@ -48,6 +49,7 @@ pub(super) mod rollups;
 pub(super) mod storage;
 mod viewed;
 use crate::cells::repository::{ListPulls, PullSummary};
+use required_checks::RequiredCheck;
 use storage::{NewPullRequest, PullRequest, PullState};
 
 pub(super) async fn require_check_head(
@@ -184,16 +186,23 @@ async fn pull_view(
         && auto_merge::active_queue(server, repo, pull.number)
             .await?
             .is_some();
-    let merge_methods = merge_methods.enabled;
+    let configured_methods = merge_methods.enabled;
+    let merge_methods: Vec<_> = configured_methods
+        .iter()
+        .copied()
+        .filter(|method| requirements.permits_method(*method))
+        .collect();
     let eligible_bypass = pull.state == PullState::Open
         && !merge_queued
         && !pull.draft
         && pull.merge_pending.is_none()
         && branches_available
-        && !merge_methods.is_empty()
-        && (requirements.queue_required || !requirements.satisfied)
+        && !configured_methods.is_empty()
+        && (requirements.queue_required
+            || !requirements.satisfied
+            || merge_methods.len() < configured_methods.len())
         && !requirements.bypass_options.is_empty();
-    let can_bypass = if eligible_bypass {
+    let bypass_merge_methods: Vec<_> = if eligible_bypass {
         let requested: Vec<_> = requirements
             .bypass_options
             .iter()
@@ -211,12 +220,15 @@ async fn pull_view(
         )
         .await
         {
-            Ok(bypassed) => bypassed.satisfied && !bypassed.queue_required,
-            Err(Error::MergeBypassUnavailable) => false,
+            Ok(bypassed) if bypassed.satisfied && !bypassed.queue_required => configured_methods
+                .into_iter()
+                .filter(|method| bypassed.permits_method(*method))
+                .collect(),
+            Ok(_) | Err(Error::MergeBypassUnavailable) => vec![],
             Err(error) => return Err(error),
         }
     } else {
-        false
+        vec![]
     };
     let reaction = reactions::one(
         server,
@@ -261,6 +273,7 @@ async fn pull_view(
         "title": pull.title,
         "body": pull.body,
         "reactions": reaction,
+        "has_edit_history": reaction.has_edit_history,
         "state": pull.state,
         "author": authors.view(&pull.author),
         "base_ref": pull.base_ref,
@@ -297,17 +310,20 @@ async fn pull_view(
             && !merge_queued
             && !pull.draft
             && can_write
-            && !merge_methods.is_empty()
             && (pull.merge_pending.is_some()
-                || (!requirements.queue_required && current.is_some() && requirements.satisfied)),
+                || (!merge_methods.is_empty() && !requirements.queue_required
+                    && current.is_some() && requirements.satisfied)),
         "branches_available": branches_available,
         "merge_methods": merge_methods,
+        "bypass_merge_methods": bypass_merge_methods,
         "auto_merge_configured": auto_merge_configured,
         "merge_queued": merge_queued,
         "merge_queue_required": requirements.queue_required,
         "merge_requirements": {
-            "bypass_options": if can_bypass { requirements.bypass_options.as_slice() } else { &[] },
+            "bypass_options": if bypass_merge_methods.is_empty() { &[] } else { requirements.bypass_options.as_slice() },
             "protected": requirements.protected,
+            "updates_restricted": requirements.updates_restricted,
+            "linear_history_required": requirements.linear_history_required,
             "required_approvals": requirements.required_approvals,
             "rulesets": requirements.rulesets,
             "approvals": requirements.approvals,
@@ -346,6 +362,8 @@ async fn pull_view(
 struct MergeRequirements {
     queue_required: bool,
     protected: bool,
+    updates_restricted: bool,
+    linear_history_required: bool,
     rulesets: Vec<String>,
     bypass_options: Vec<crate::repository::settings::BypassOption>,
     required_approvals: usize,
@@ -361,6 +379,16 @@ struct MergeRequirements {
 }
 
 impl MergeRequirements {
+    fn permits_method(&self, method: MergeMethod) -> bool {
+        !self.linear_history_required || method.preserves_linear_history()
+    }
+
+    fn require_method(&self, method: MergeMethod) -> Result<()> {
+        self.permits_method(method)
+            .then_some(())
+            .ok_or(Error::MergeLinearHistory)
+    }
+
     fn require_queue(&self, target: MergeCheckTarget<'_>) -> Result<()> {
         if self.queue_required && !matches!(target, MergeCheckTarget::Queue(_)) {
             return Err(Error::MergeQueueRequired);
@@ -369,6 +397,9 @@ impl MergeRequirements {
     }
 
     fn enforce(&self) -> Result<()> {
+        if self.updates_restricted {
+            return Err(Error::MergeUpdatesRestricted);
+        }
         if self.unresolved_conversations.is_some_and(|count| count > 0) {
             return Err(Error::MergeUnresolvedConversations);
         }
@@ -382,7 +413,7 @@ impl MergeRequirements {
             checks.is_empty()
                 || checks
                     .iter()
-                    .any(|check| check.state != Some(StatusState::Success))
+                    .any(|check| check.state() != Some(StatusState::Success))
         }) {
             return Err(Error::MergeCandidateChecks);
         }
@@ -390,52 +421,21 @@ impl MergeRequirements {
     }
 }
 
-struct RequiredCheck {
-    context: String,
-    state: Option<StatusState>,
-    description: Option<String>,
-    target_url: Option<String>,
-    author: Option<String>,
-    updated_at: Option<u64>,
-    run_id: Option<u64>,
-    provider: &'static str,
-    integration: Option<Uuid>,
-}
-
-impl RequiredCheck {
-    fn view(&self, oid: &str) -> Value {
-        json!({
-            "context": self.context,
-            "state": self.state,
-            "description": self.description,
-            "target_url": self.target_url,
-            "author": self.author,
-            "updated_at": self.updated_at,
-            "run_id": self.run_id,
-            "provider": self.provider,
-            "integration_id": self.integration,
-            "head_sha": oid,
-        })
-    }
-
-    fn run(run: &CheckRun) -> Self {
-        let integration = run.integration_id();
-        Self {
-            context: run.name.clone(),
-            state: Some(run.requirement_state()),
-            description: Some(run.output_title.clone()),
-            target_url: run.details_url.clone(),
-            author: Some(run.author.name.clone()),
-            updated_at: Some(run.updated_at),
-            run_id: Some(run.number),
-            provider: if integration.is_some() {
-                "github_actions"
-            } else {
-                "crab_check_run"
-            },
-            integration,
-        }
-    }
+async fn requires_linear_history(
+    server: &Server,
+    repo: &Repository,
+    reference: &str,
+) -> Result<bool> {
+    let policy = crate::repository::settings::load_ref_policy(server, repo).await?;
+    let default_ref = policy.default_ref(repo).await?;
+    Ok(policy
+        .protections
+        .protection(reference)
+        .is_some_and(|rule| rule.require_linear_history)
+        || policy
+            .active()?
+            .matches(reference, &default_ref)
+            .any(|(_, rule)| rule.require_linear_history))
 }
 
 #[derive(Clone, Copy)]
@@ -488,24 +488,16 @@ async fn requirements(
     };
     let policy = policy.merge_protection(&pull.base_ref, &default_ref, actor, bypass)?;
     let protection = policy.protection.as_ref();
-    let (checks, candidate_checks, unresolved, code_owners, head_up_to_date) = match protection {
+    let ((checks, candidate_checks), unresolved, code_owners, head_up_to_date) = match protection {
         Some(rule) => tokio::try_join!(
-            load_required_checks(server, repo, head_oid, rule, false),
-            async {
-                if let Some(oid) = tested_oid {
-                    load_required_checks(
-                        server,
-                        repo,
-                        oid,
-                        rule,
-                        matches!(target, MergeCheckTarget::Queue(_)),
-                    )
-                    .await
-                    .map(Some)
-                } else {
-                    Ok(None)
-                }
-            },
+            required_checks::load(
+                server,
+                repo,
+                rule,
+                head_oid,
+                tested_oid,
+                matches!(target, MergeCheckTarget::Queue(_))
+            ),
             async {
                 if rule.require_conversation_resolution {
                     review_threads::storage::unresolved_conversations(server, repo, pull.number)
@@ -557,7 +549,7 @@ async fn requirements(
                     .map(Some)
             },
         )?,
-        _ => (vec![], tested_oid.map(|_| vec![]), None, None, None),
+        _ => ((vec![], tested_oid.map(|_| vec![])), None, None, None),
     };
     let mut requirements = merge_requirements(pull, protection, head_oid, reviewers, checks);
     requirements.candidate_checks = candidate_checks;
@@ -567,6 +559,10 @@ async fn requirements(
     requirements.code_owners = code_owners;
     requirements.rulesets = policy.rulesets;
     requirements.bypass_options = policy.bypass_options;
+    requirements.updates_restricted = policy.updates_restricted;
+    requirements.linear_history_required = policy.linear_history_required;
+    requirements.protected |= policy.updates_restricted || policy.linear_history_required;
+    requirements.satisfied &= !policy.updates_restricted;
     requirements.unresolved_conversations = unresolved;
     requirements.satisfied &= unresolved.is_none_or(|count| count == 0);
     requirements.head_up_to_date = head_up_to_date;
@@ -581,6 +577,7 @@ pub(crate) async fn authorize_merge_publication(
     publication: &crate::git::receive::PullPublication,
     plan: Option<&str>,
     update: &crab_git::receive_plan::RefUpdate,
+    linear_history: Option<bool>,
 ) -> Result<()> {
     let head_oid = publication.head_oid.to_string();
     let pull = storage::pull(server, repo, publication.number)
@@ -632,6 +629,14 @@ pub(crate) async fn authorize_merge_publication(
     )
     .await?;
     report.require_queue(target)?;
+    report.require_method(pending.method)?;
+    if report.linear_history_required {
+        match linear_history {
+            Some(true) => (),
+            Some(false) => return Err(Error::MergeLinearHistory),
+            None => return Err(Error::MergeConflict),
+        }
+    }
     if !grant.principal.is_auto_merge() {
         merge_methods::require(server, repo, pending.method).await?;
     }
@@ -655,6 +660,8 @@ fn merge_requirements(
         return MergeRequirements {
             queue_required: false,
             protected: false,
+            updates_restricted: false,
+            linear_history_required: false,
             rulesets: Vec::new(),
             bypass_options: Vec::new(),
             required_approvals: 0,
@@ -688,12 +695,14 @@ fn merge_requirements(
     let required_approvals = usize::from(rule.required_approvals);
     let checks_satisfied = checks
         .iter()
-        .all(|check| check.state == Some(StatusState::Success));
+        .all(|check| check.state() == Some(StatusState::Success));
     let reviews_satisfied = (required_approvals == 0 && !rule.required_code_owner_reviews)
         || (changes_requested == 0 && approvals >= required_approvals);
     MergeRequirements {
         queue_required: rule.require_merge_queue,
         protected: true,
+        updates_restricted: false,
+        linear_history_required: false,
         rulesets: Vec::new(),
         bypass_options: Vec::new(),
         required_approvals,
@@ -707,102 +716,6 @@ fn merge_requirements(
         candidate_checks: None,
         satisfied: reviews_satisfied && checks_satisfied,
     }
-}
-
-async fn load_required_checks(
-    server: &Server,
-    repo: &Repository,
-    oid: &str,
-    rule: &BranchProtection,
-    queued_candidate: bool,
-) -> Result<Vec<RequiredCheck>> {
-    let ((statuses, check_runs), integrations) = tokio::try_join!(
-        async {
-            if rule.required_checks.is_empty() {
-                Ok((vec![], vec![]))
-            } else {
-                tokio::try_join!(
-                    statuses::latest(server, repo, oid),
-                    checks::latest(server, repo, oid)
-                )
-            }
-        },
-        super::integrations::required(
-            server,
-            repo,
-            oid,
-            &rule.required_integrations,
-            queued_candidate
-        ),
-    )?;
-    let mut checks = rule
-        .required_checks
-        .iter()
-        .map(|context| {
-            let status = statuses
-                .iter()
-                .find(|status| statuses::same_context(&status.context, context));
-            let run = check_runs.iter().find(|run| {
-                run.integration_id().is_none() && statuses::same_context(&run.name, context)
-            });
-            if let Some(run) = run.filter(|run| {
-                status.is_none_or(|status| {
-                    // Both report kinds must pass. Show the report that blocks
-                    // the merge first, and use recency only within that state.
-                    let blocking = |state| match state {
-                        StatusState::Error | StatusState::Failure => 2,
-                        StatusState::Pending => 1,
-                        StatusState::Success => 0,
-                    };
-                    (blocking(run.requirement_state()), run.updated_at)
-                        >= (blocking(status.state), status.created_at)
-                })
-            }) {
-                return RequiredCheck {
-                    context: context.clone(),
-                    ..RequiredCheck::run(run)
-                };
-            }
-            RequiredCheck {
-                context: context.clone(),
-                state: status.map(|status| status.state),
-                description: status.and_then(|status| status.description.clone()),
-                target_url: status.and_then(|status| status.target_url.clone()),
-                author: status.map(|status| status.author.name.clone()),
-                updated_at: status.map(|status| status.created_at),
-                run_id: None,
-                provider: "crab_status",
-                integration: None,
-            }
-        })
-        .collect::<Vec<_>>();
-    for id in &rule.required_integrations {
-        let connection = integrations.iter().find(|connection| connection.id == *id);
-        if let Some(run) = connection.and_then(|connection| connection.run.clone()) {
-            checks.push(RequiredCheck::run(&checks::check_run(run)?));
-            continue;
-        }
-        checks.push(RequiredCheck {
-            context: connection
-                .map_or_else(|| "GitHub Actions workflow".into(), |row| row.name.clone()),
-            state: None,
-            description: Some(
-                if connection.is_some() {
-                    "Waiting for GitHub Actions on this commit."
-                } else {
-                    "GitHub Actions connection is unavailable. Review the branch protection rule."
-                }
-                .into(),
-            ),
-            target_url: None,
-            author: None,
-            updated_at: None,
-            run_id: None,
-            provider: "github_actions",
-            integration: Some(*id),
-        });
-    }
-    Ok(checks)
 }
 
 pub(super) fn pull_list_view(
@@ -849,6 +762,7 @@ async fn list(
     let mut input = params.input("is:open")?;
     let review_teams =
         super::discussion_search::resolve_people(&server, &principal, repo, &mut input).await?;
+    let type_scope = super::discussion_search::issue_types::bind(&server, repo, &mut input).await?;
     let review_source = input
         .review_context
         .as_ref()
@@ -866,6 +780,7 @@ async fn list(
         page.items.iter().map(|pull| &pull.author),
     )
     .await?;
+    super::discussion_search::issue_types::verify(&server, repo, type_scope.as_ref()).await?;
     let assignees = Selection::load(
         &server,
         &principal,
@@ -882,7 +797,7 @@ async fn list(
         bound.verify(&server, &principal, repo).await?;
     }
     Ok(Json(
-        json!({"repository_id":repo.id,"can_bulk_edit":assignees.principal.can_triage(repo.id),"items":items,"next":page.next,"counts":page.counts,"matching":page.matching,"navigation":page.navigation,"authored_by_me":page.authored_by_me,"assigned_to_me":page.assigned_to_me,"review_requested_from_me":page.review_requested_from_me}),
+        json!({"repository_id":repo.id,"can_bulk_edit":assignees.principal.can_triage(repo.id),"items":items,"next":page.next,"counts":page.counts,"matching":page.matching,"navigation":page.navigation,"lock_filter":page.lock_filter,"authored_by_me":page.authored_by_me,"assigned_to_me":page.assigned_to_me,"review_requested_from_me":page.review_requested_from_me}),
     ))
 }
 

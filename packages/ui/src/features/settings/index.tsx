@@ -3,7 +3,7 @@ import type { OrganizationView, Session } from "@/lib/contracts";
 import { useRequest, type Refs, type Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 import { DeployTokens } from "./deploy-tokens";
-import { DefaultBranchSettings } from "./general";
+import { GeneralSettings } from "./general";
 import { MemberSettings } from "./members";
 import { MentionSettings } from "./mentions";
 import { BranchProtectionSettings } from "./protections";
@@ -38,13 +38,32 @@ export function Settings({
   onDefaultChanged: () => void;
   onRepositoryChanged: () => void;
 }) {
-  const organization = identity ? repo.organization_id : undefined;
+  const organization =
+    identity && repo.can_admin ? repo.organization_id : undefined;
   const ownership = useRequest<OrganizationView>(
     organization
       ? `/api/organizations/${encodeURIComponent(organization)}`
       : null,
   );
   const teamSection = section === "team-access";
+  if (!repo.can_admin) {
+    return section === "general" ? (
+      <GeneralSettings
+        repo={repo}
+        refs={refs}
+        csrf={csrf}
+        onChanged={onDefaultChanged}
+        onRepositoryChanged={onRepositoryChanged}
+      />
+    ) : (
+      <div className="notice error" role="alert">
+        Administrator access is required for these settings.{" "}
+        <Link href={repoHref(repo, { view: "settings" })}>
+          General settings
+        </Link>
+      </div>
+    );
+  }
   return (
     <div className="settings-layout">
       <nav className="settings-nav" aria-label="Repository settings">
@@ -165,7 +184,7 @@ export function Settings({
           onRepositoryChanged={onRepositoryChanged}
         />
       ) : (
-        <DefaultBranchSettings
+        <GeneralSettings
           repo={repo}
           refs={refs}
           csrf={csrf}

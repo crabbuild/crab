@@ -112,22 +112,24 @@ impl Mutation for SetTeamReviewRequest {
         {
             return Err(Error::Invalid("too many team review recipients"));
         }
-        let assigned = match (requested, input.routing) {
+        let (assigned, retain_team) = match (requested, input.routing) {
             (true, Some(plan)) => {
+                let keep_team = plan.keep_team;
                 let selected =
                     routing::assign(context, &pull, &input.actor, input.team, plan, false)?;
                 let assigned = !selected.is_empty();
                 // An enabled team with no available reviewers remains visible
                 // as requested, without notifying members who cannot take the request.
                 recipients = Some(selected);
-                assigned
+                (assigned, keep_team || !assigned)
             }
-            _ => false,
+            _ => (false, requested),
         };
         requests.retain(|entry| entry.team != input.team);
         if assigned {
             context.put_document(&receipt, &true)?;
-        } else if requested {
+        }
+        if retain_team {
             if requests.len() >= MAX_TEAM_GRANTS {
                 return Ok(MutationResult::Rejected(Limit));
             }

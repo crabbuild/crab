@@ -22,7 +22,7 @@ pub(super) async fn reconcile(
     let commit = candidate::queue_commit(server, repo, git, pull, job, prospective).await?;
     let report =
         queue_requirements(server, repo, pull, &grant, (base, head), commit.as_deref()).await?;
-    if report.checks.is_empty() || !report.satisfied {
+    if report.checks.is_empty() || !report.satisfied || !report.permits_method(job.method) {
         return if state.first {
             stop_front(server, repo, state, Stop::RequirementsChanged).await
         } else {
@@ -81,6 +81,7 @@ pub(super) async fn reconcile(
             base_oid: attempt.base_oid,
             head_oid: head.to_owned(),
             previous_oid: attempt.previous_oid,
+            method: None,
         };
         return match candidate::stage(
             server,
@@ -94,6 +95,9 @@ pub(super) async fn reconcile(
         .await
         {
             Ok(_) | Err(Error::BranchUpdateChanged) => Ok(()),
+            Err(Error::MergeLinearHistory) if state.first => {
+                stop_front(server, repo, state, Stop::RequirementsChanged).await
+            }
             Err(Error::MergeConflict | Error::UnsafeRebase) if state.first => {
                 stop_front(server, repo, state, Stop::Conflict).await
             }
@@ -105,10 +109,12 @@ pub(super) async fn reconcile(
     };
     let checks = report.candidate_checks.as_deref().unwrap_or_default();
     if report.enforce().is_err() {
-        let stopped = if checks
-            .iter()
-            .any(|check| matches!(check.state, Some(StatusState::Error | StatusState::Failure)))
-        {
+        let stopped = if checks.iter().any(|check| {
+            matches!(
+                check.state(),
+                Some(StatusState::Error | StatusState::Failure)
+            )
+        }) {
             Some(Stop::ChecksFailed)
         } else if check_timed_out(queue, timeout_minutes)? {
             Some(Stop::ChecksTimedOut)

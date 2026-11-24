@@ -102,29 +102,68 @@ impl Read for LookupIdentities {
     type Output = Vec<Option<IdentityKey>>;
 
     fn execute(context: &mut Transaction<'_>, ids: Self::Input) -> Result<Self::Output> {
-        if ids.len() > 100 || ids.iter().any(Uuid::is_nil) {
-            return Err(Error::Invalid(
-                "Identity lookup requires at most 100 valid actor IDs",
-            ));
-        }
-        ids.into_iter()
-            .map(|id| {
-                let rows = context.query(
-                    "SELECT issuer, subject FROM accounts WHERE id = ?",
-                    &[SqlValue::Blob(id.as_bytes().to_vec())],
-                )?;
-                match rows.rows.first().map(Vec::as_slice) {
-                    Some([SqlValue::Text(issuer), SqlValue::Text(subject)]) => {
-                        Ok(Some(IdentityKey {
-                            issuer: issuer.clone(),
-                            subject: subject.clone(),
-                        }))
-                    }
-                    None => Ok(None),
-                    _ => Err(Error::Invalid("Account identity record is invalid")),
-                }
+        identities(context, ids, |_, identity| Ok(identity))
+    }
+}
+
+fn identities<T>(
+    context: &Transaction<'_>,
+    ids: Vec<Uuid>,
+    map: impl Fn(Uuid, IdentityKey) -> Result<T>,
+) -> Result<Vec<Option<T>>> {
+    if ids.len() > 100 || ids.iter().any(Uuid::is_nil) {
+        return Err(Error::Invalid(
+            "Identity lookup requires at most 100 valid actor IDs",
+        ));
+    }
+    ids.into_iter()
+        .map(|id| {
+            let rows = context.query(
+                "SELECT issuer, subject FROM accounts WHERE id = ?",
+                &[SqlValue::Blob(id.as_bytes().to_vec())],
+            )?;
+            match rows.rows.first().map(Vec::as_slice) {
+                Some([SqlValue::Text(issuer), SqlValue::Text(subject)]) => map(
+                    id,
+                    IdentityKey {
+                        issuer: issuer.clone(),
+                        subject: subject.clone(),
+                    },
+                )
+                .map(Some),
+                None => Ok(None),
+                _ => Err(Error::Invalid("Account identity record is invalid")),
+            }
+        })
+        .collect()
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct RoutingLookup {
+    pub actors: Vec<Uuid>,
+    pub check_availability: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct RoutingIdentity {
+    pub identity: IdentityKey,
+    pub busy: bool,
+}
+
+pub(crate) struct LookupRoutingIdentities;
+impl Read for LookupRoutingIdentities {
+    const CLASS: &'static str = CLASS;
+    const ID: u32 = 32;
+    type Input = RoutingLookup;
+    type Output = Vec<Option<RoutingIdentity>>;
+
+    fn execute(context: &mut Transaction<'_>, input: RoutingLookup) -> Result<Self::Output> {
+        identities(context, input.actors, |actor, identity| {
+            Ok(RoutingIdentity {
+                identity,
+                busy: input.check_availability && review_availability::busy(context, actor)?,
             })
-            .collect()
+        })
     }
 }
 

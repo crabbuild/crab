@@ -1,20 +1,22 @@
 use std::collections::{HashMap, HashSet};
 
 use crab_remote_git::{
-    OperationContext, OperationKind, RemoteGitRepository, RemoteGitSnapshot, Revision,
-    RevisionError,
+    CommitMembership, OperationContext, OperationKind, RemoteGitRepository, RemoteGitSnapshot,
+    Revision, RevisionError,
 };
 
 use super::*;
 use crate::cells::repository::{ListMergedPullsForRelease, MergedPullForRelease};
 
-const MAX_MERGED_PULLS: usize = 4096;
+mod configuration;
+use configuration::Rules;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Parameters {
     target_oid: String,
     previous_tag: Option<String>,
+    configuration_file_path: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -22,6 +24,7 @@ pub(super) struct GeneratedNotes {
     target_oid: String,
     previous_tag: Option<String>,
     previous_oid: Option<String>,
+    configuration_file: Option<String>,
     body: String,
 }
 
@@ -50,6 +53,7 @@ pub(super) async fn generate(
         &operation,
         target_oid,
         parameters.previous_tag,
+        parameters.configuration_file_path,
     )
     .await;
     // Finish with the Git failure itself so locator-close and interruption
@@ -79,6 +83,7 @@ async fn draft(
     operation: &OperationContext,
     target_oid: ObjectId,
     previous_tag: Option<String>,
+    configuration_file_path: Option<String>,
 ) -> Result<GeneratedNotes> {
     let target = git
         .snapshot(&Revision::Commit(target_oid), operation)
@@ -89,6 +94,9 @@ async fn draft(
             } => Error::CommitNotFound,
             error => crate::Error::from(error).into(),
         })?;
+    let mut target_membership = target
+        .commit_membership_reader(operation)
+        .map_err(crate::Error::from)?;
     let previous = match previous_tag.as_deref() {
         Some("") => None,
         Some(name) => {
@@ -100,51 +108,61 @@ async fn draft(
             let previous = entry.peeled.unwrap_or(entry.target);
             Some((name, previous))
         }
-        None => published_predecessor(server, repo, git, &target, operation).await?,
+        None => {
+            published_predecessor(server, repo, git, target_oid, &mut target_membership).await?
+        }
     };
-    let pulls = merged_pulls(server, repo).await?;
-    let mut candidates = pulls
-        .iter()
-        .map(|pull| target_oid_from_merge(&pull.commit_oid))
-        .collect::<Result<Vec<_>>>()?;
-    candidates.extend(previous.as_ref().map(|(_, oid)| *oid));
-    let mut included = target
-        .commit_membership(&candidates, operation)
-        .await
-        .map_err(crate::Error::from)?;
-    if let Some((_, previous_oid)) = &previous {
-        if included.pop() != Some(true) {
-            return Err(Error::Invalid(
-                "The previous tag must point to the release target or one of its ancestors",
-            ));
-        }
-        let base = git
-            .snapshot(&Revision::Commit(*previous_oid), operation)
-            .await
-            .map_err(crate::Error::from)?;
-        candidates.pop();
-        let excluded = base
-            .commit_membership(&candidates, operation)
-            .await
-            .map_err(crate::Error::from)?;
-        for (included, excluded) in included.iter_mut().zip(excluded) {
-            *included &= !excluded;
-        }
-    }
-    let body = markdown(
+    let (configuration_file, rules) = configuration::load(
+        server,
         repo,
-        target_oid,
-        previous.as_ref().map(|(_, oid)| *oid),
-        pulls
-            .into_iter()
-            .zip(included)
-            .filter_map(|(pull, include)| include.then_some(pull)),
-    )?;
+        &target,
+        operation,
+        configuration_file_path.as_deref(),
+    )
+    .await?;
+    let previous_oid = previous.as_ref().map(|(_, oid)| *oid);
+    let notes = if previous_oid == Some(target_oid) {
+        Notes::new(&rules)
+    } else {
+        let base = if let Some(previous_oid) = previous_oid {
+            if target_membership
+                .contains(&[previous_oid])
+                .await
+                .map_err(crate::Error::from)?
+                != [true]
+            {
+                return Err(Error::Invalid(
+                    "The previous tag must point to the release target or one of its ancestors",
+                ));
+            }
+            Some(
+                git.snapshot(&Revision::Commit(previous_oid), operation)
+                    .await
+                    .map_err(crate::Error::from)?,
+            )
+        } else {
+            None
+        };
+        let mut base_membership = base
+            .as_ref()
+            .map(|base| base.commit_membership_reader(operation))
+            .transpose()
+            .map_err(crate::Error::from)?;
+        collect_notes(
+            server,
+            repo,
+            &rules,
+            &mut target_membership,
+            base_membership.as_mut(),
+        )
+        .await?
+    };
     Ok(GeneratedNotes {
         target_oid: target_oid.to_string(),
-        previous_oid: previous.as_ref().map(|(_, oid)| oid.to_string()),
+        previous_oid: previous_oid.map(|oid| oid.to_string()),
         previous_tag: previous.map(|(name, _)| name),
-        body,
+        configuration_file,
+        body: notes.render(repo, target_oid, previous_oid, &rules)?,
     })
 }
 
@@ -160,8 +178,8 @@ async fn published_predecessor(
     server: &Server,
     repo: &Repository,
     git: &RemoteGitRepository,
-    target: &RemoteGitSnapshot,
-    operation: &OperationContext,
+    target: ObjectId,
+    membership: &mut CommitMembership<'_>,
 ) -> Result<Option<(String, ObjectId)>> {
     let tags = git
         .refs()
@@ -170,12 +188,12 @@ async fn published_predecessor(
         .filter_map(|entry| {
             let oid = entry.peeled.unwrap_or(entry.target);
             let name = entry.name.strip_prefix("refs/tags/")?;
-            (oid != target.commit_oid()).then_some((name, entry.target, oid))
+            (oid != target).then_some((name, entry.target, oid))
         })
         .collect::<Vec<_>>();
     let candidates = tags.iter().map(|(_, _, oid)| *oid).collect::<Vec<_>>();
-    let included = target
-        .commit_membership(&candidates, operation)
+    let included = membership
+        .contains(&candidates)
         .await
         .map_err(crate::Error::from)?;
     let tags = tags
@@ -206,9 +224,15 @@ async fn published_predecessor(
     Ok(None)
 }
 
-async fn merged_pulls(server: &Server, repo: &Repository) -> Result<Vec<MergedPullForRelease>> {
+async fn collect_notes(
+    server: &Server,
+    repo: &Repository,
+    rules: &Rules,
+    target: &mut CommitMembership<'_>,
+    mut base: Option<&mut CommitMembership<'_>>,
+) -> Result<Notes> {
     let routed = app::repository_cell(server, repo)?;
-    let mut pulls = Vec::new();
+    let mut notes = Notes::new(rules);
     let mut before = None;
     loop {
         let (page, next) = app::query_output(
@@ -217,57 +241,122 @@ async fn merged_pulls(server: &Server, repo: &Repository) -> Result<Vec<MergedPu
                 .query::<ListMergedPullsForRelease>(&routed.target, None, before)
                 .await,
         )?;
-        pulls.extend(page);
-        if pulls.len() > MAX_MERGED_PULLS {
-            return Err(Error::Invalid(
-                "This repository has too many merged pull requests to generate notes automatically",
-            ));
+        let candidates = page
+            .iter()
+            .map(|pull| target_oid_from_merge(&pull.commit_oid))
+            .collect::<Result<Vec<_>>>()?;
+        let mut included = target
+            .contains(&candidates)
+            .await
+            .map_err(crate::Error::from)?;
+        if let Some(base) = base.as_deref_mut()
+            && included.iter().any(|include| *include)
+        {
+            let excluded = base
+                .contains(&candidates)
+                .await
+                .map_err(crate::Error::from)?;
+            for (include, exclude) in included.iter_mut().zip(excluded) {
+                *include &= !exclude;
+            }
         }
-        let Some(next) = next else { return Ok(pulls) };
+        for (pull, include) in page.into_iter().zip(included) {
+            if include && let Some(section) = rules.section(&pull) {
+                notes.append(repo.id, section, pull)?;
+            }
+        }
+        let Some(next) = next else { return Ok(notes) };
         before = Some(next);
     }
 }
 
-fn markdown(
-    repo: &Repository,
-    target: ObjectId,
-    previous: Option<ObjectId>,
-    pulls: impl Iterator<Item = MergedPullForRelease>,
-) -> Result<String> {
-    let mut body = String::from("## What's changed\n\n");
-    let mut contributors = Vec::new();
-    let mut authors = HashSet::new();
-    for pull in pulls {
+struct Notes {
+    contributors: Vec<String>,
+    authors: HashSet<(String, String)>,
+    sections: Vec<String>,
+    bytes: usize,
+}
+
+impl Notes {
+    fn new(rules: &Rules) -> Self {
+        Self {
+            contributors: Vec::new(),
+            authors: HashSet::new(),
+            sections: vec![String::new(); rules.categories.len().max(1)],
+            bytes: 0,
+        }
+    }
+
+    fn append(
+        &mut self,
+        repository: uuid::Uuid,
+        section: usize,
+        pull: MergedPullForRelease,
+    ) -> Result<()> {
         let title = markdown_text(&pull.title);
         let author = markdown_text(&pull.author.name);
-        body.push_str(&format!(
+        let line = format!(
             "- {title} by {author} in [#{}](/api/discussion-references/{}/pull/{})\n",
-            pull.number, repo.id, pull.number
-        ));
-        if authors.insert((pull.author.issuer, pull.author.subject)) {
-            contributors.push(author);
+            pull.number, repository, pull.number
+        );
+        self.bytes += line.len();
+        if self
+            .authors
+            .insert((pull.author.issuer, pull.author.subject))
+        {
+            self.bytes += author.len() + "- \n".len();
+            self.contributors.push(author);
         }
-    }
-    if contributors.is_empty() {
-        body.push_str("No merged pull requests in this range.\n");
-    } else {
-        body.push_str("\n## Contributors\n\n");
-        for author in contributors {
-            body.push_str(&format!("- {author}\n"));
+        if self.bytes > app::MAX_TEXT_BODY_BYTES {
+            return Err(notes_too_large());
         }
+        self.sections[section].push_str(&line);
+        Ok(())
     }
-    if let Some(previous) = previous {
-        body.push_str(&format!(
-            "\n[Full changelog](/{}/{}/commits/{target}?since={previous}&repository_id={})\n",
-            repo.config.owner, repo.config.name, repo.id
-        ));
+
+    fn render(
+        self,
+        repo: &Repository,
+        target: ObjectId,
+        previous: Option<ObjectId>,
+        rules: &Rules,
+    ) -> Result<String> {
+        let mut body = String::from("## What's changed\n\n");
+        if self.contributors.is_empty() {
+            body.push_str("No merged pull requests in this range.\n");
+        } else {
+            for (index, section) in self
+                .sections
+                .into_iter()
+                .enumerate()
+                .filter(|(_, text)| !text.is_empty())
+            {
+                if let Some(category) = rules.categories.get(index) {
+                    body.push_str(&format!("### {}\n\n", markdown_text(&category.title)));
+                }
+                body.push_str(&section);
+                body.push('\n');
+            }
+            body.push_str("## Contributors\n\n");
+            for author in self.contributors {
+                body.push_str(&format!("- {author}\n"));
+            }
+        }
+        if let Some(previous) = previous {
+            body.push_str(&format!(
+                "\n[Full changelog](/{}/{}/commits/{target}?since={previous}&repository_id={})\n",
+                repo.config.owner, repo.config.name, repo.id
+            ));
+        }
+        if app::body(&body, false).is_err() {
+            return Err(notes_too_large());
+        }
+        Ok(body)
     }
-    if app::body(&body, false).is_err() {
-        return Err(Error::Invalid(
-            "The generated notes exceed 64 KiB. Choose a more recent previous tag.",
-        ));
-    }
-    Ok(body)
+}
+
+fn notes_too_large() -> Error {
+    Error::Invalid("The generated notes exceed 64 KiB. Choose a more recent previous tag.")
 }
 
 fn markdown_text(value: &str) -> String {

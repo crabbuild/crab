@@ -32,14 +32,14 @@ interface Choice {
   query: string | null;
   selected: boolean;
 }
-type CatalogOption = Choice & {
-  number: number;
-  title: string;
-  color?: string;
-  description?: string | null;
-  excluded?: boolean;
-  exclude_query?: string | null;
-};
+type CatalogOption = Choice &
+  ({ number: number } | { id: string }) & {
+    title: string;
+    color?: string;
+    description?: string | null;
+    excluded?: boolean;
+    exclude_query?: string | null;
+  };
 type AuthorOption = Choice & {
   actor: Pick<ActorProfile, "id" | "handle" | "name">;
 };
@@ -87,6 +87,15 @@ const presentations = {
     noun: "labels",
     singular: "label",
     timing: "Label filters",
+  },
+  "issue-types": {
+    title: "Filter by issue type",
+    trigger: "Types",
+    find: "Find an issue type",
+    initial: "No type",
+    noun: "issue types",
+    singular: "issue type",
+    timing: "Issue type filters",
   },
 } as const;
 
@@ -290,7 +299,9 @@ function CatalogFilter({
                     ? "Authors"
                     : kind === "labels"
                       ? "Labels"
-                      : "Milestones"
+                      : kind === "milestones"
+                        ? "Milestones"
+                        : "Issue types"
               }
               aria-multiselectable={kind === "labels" || undefined}
               className={cn(
@@ -304,7 +315,9 @@ function CatalogFilter({
                     ? choice.person.id
                     : "actor" in choice
                       ? choice.actor.id
-                      : choice.number;
+                      : "number" in choice
+                        ? choice.number
+                        : choice.id;
                 const title =
                   "person" in choice
                     ? choice.person.name

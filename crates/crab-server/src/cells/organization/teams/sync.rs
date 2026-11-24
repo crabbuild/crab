@@ -56,6 +56,14 @@ pub(crate) enum SyncAction {
     Unlink { actor: Uuid, version: u64 },
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AuditChange {
+    Linked,
+    Synchronized,
+    Unlinked,
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SyncInput {
@@ -93,7 +101,7 @@ impl Mutation for SyncGroup {
             row.group == input.binding.group && row.generation == input.binding.generation
         });
 
-        let editor = match input.action {
+        let (actor, change) = match input.action {
             SyncAction::Link { actor, version } => {
                 if matches {
                     return Ok(MutationResult::Success(SyncOutcome::Applied));
@@ -101,7 +109,7 @@ impl Mutation for SyncGroup {
                 if current.is_some() || team.version != version || !owner(context, actor)? {
                     return Ok(MutationResult::Success(SyncOutcome::Stale));
                 }
-                Some(actor)
+                (Some(actor), AuditChange::Linked)
             }
             SyncAction::Unlink { actor, version } => {
                 if current.is_none() {
@@ -110,7 +118,7 @@ impl Mutation for SyncGroup {
                 if !matches || team.version != version || !owner(context, actor)? {
                     return Ok(MutationResult::Success(SyncOutcome::Stale));
                 }
-                Some(actor)
+                (Some(actor), AuditChange::Unlinked)
             }
             SyncAction::Refresh => {
                 if !matches {
@@ -122,15 +130,15 @@ impl Mutation for SyncGroup {
                 {
                     return Ok(MutationResult::Success(SyncOutcome::Applied));
                 }
-                None
+                (None, AuditChange::Synchronized)
             }
         };
 
         if input.members.len() > MAX_GROUP_MEMBERS || input.members.iter().any(Uuid::is_nil) {
             return Err(Error::Invalid("identity provider group roster is invalid"));
         }
-        replace_roster(context, team.id, &input.members)?;
-        if matches!(input.action, SyncAction::Unlink { .. }) {
+        let (updated, removed) = replace_roster(context, team.id, &input.members)?;
+        if change == AuditChange::Unlinked {
             context.delete_document(&binding_key(team.id))?;
         } else {
             context.put_document(&binding_key(team.id), &input.binding)?;
@@ -143,11 +151,20 @@ impl Mutation for SyncGroup {
                 blob(team.id),
             ],
         )?;
-        if let Some(who) = editor {
-            advance(context, who, Action::TeamEdited { team: team.id })?;
-        } else {
-            super::super::advance_revision(context)?;
-        }
+        // Commit the audit event with the binding and roster. A replay that
+        // observes the committed binding returns before changing either.
+        super::super::append_event(
+            context,
+            actor,
+            Action::TeamGroupSync {
+                team: team.id,
+                group: input.binding.group,
+                group_revision: input.binding.revision,
+                change,
+                updated,
+                removed,
+            },
+        )?;
         Ok(MutationResult::Success(SyncOutcome::Applied))
     }
 }
@@ -157,7 +174,7 @@ fn owner(context: &Transaction<'_>, actor: Uuid) -> Result<bool> {
         .is_some_and(|member| member.active && member.role == OrganizationRole::Owner))
 }
 
-fn replace_roster(context: &Transaction<'_>, team: Uuid, members: &[Uuid]) -> Result<()> {
+fn replace_roster(context: &Transaction<'_>, team: Uuid, members: &[Uuid]) -> Result<(u64, u64)> {
     let people = members
         .iter()
         .map(|id| id.simple().to_string())
@@ -165,13 +182,13 @@ fn replace_roster(context: &Transaction<'_>, team: Uuid, members: &[Uuid]) -> Re
     let args = [blob(team), SqlValue::Text(serde_json::to_string(&people)?)];
     // Synced accounts are existing organization members. Store their current
     // membership epoch so leaving the organization invalidates all team grants.
-    context.query(
+    let removed = context.query(
         "UPDATE organization_team_members SET role=NULL,version=version+1
          WHERE team=?1 AND role IS NOT NULL
            AND lower(hex(actor)) NOT IN (SELECT value FROM json_each(?2))",
         &args,
     )?;
-    context.query(
+    let updated = context.query(
         "INSERT INTO organization_team_members(team,actor,membership_epoch,role,version)
          SELECT ?1,m.actor,e.epoch,'member',1
          FROM organization_members m JOIN organization_membership_epochs e ON e.actor=m.actor
@@ -181,5 +198,5 @@ fn replace_roster(context: &Transaction<'_>, team: Uuid, members: &[Uuid]) -> Re
          WHERE role IS NOT 'member' OR membership_epoch<>excluded.membership_epoch",
         &args,
     )?;
-    Ok(())
+    Ok((updated.rows_affected, removed.rows_affected))
 }

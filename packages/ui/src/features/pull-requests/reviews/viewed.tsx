@@ -1,12 +1,47 @@
 import { useMutation } from "@/components/discussion/mutations";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { endpoint, useRequest, type Change, type Repository } from "@/lib/api";
-import { useState } from "react";
+import {
+  endpoint,
+  request,
+  useRequest,
+  type Change,
+  type Repository,
+} from "@/lib/api";
+import { useCallback, useState } from "react";
 
 interface Progress {
   version: number;
   files: Record<string, string>;
+}
+
+interface ProgressPage extends Progress {
+  next: string | null;
+}
+
+async function loadProgress(
+  url: string,
+  signal: AbortSignal,
+  repositoryId?: string,
+) {
+  const first = await request<ProgressPage>(url, signal, repositoryId);
+  const { version } = first.data;
+  let { next } = first.data;
+  const files = { ...first.data.files };
+  while (next) {
+    const query = new URLSearchParams({
+      version: String(version),
+      after: next,
+    });
+    const page = await request<ProgressPage>(
+      `${url.split("?", 1)[0]}?${query}`,
+      signal,
+      repositoryId,
+    );
+    Object.assign(files, page.data.files);
+    next = page.data.next;
+  }
+  return { data: { version, files }, timing: first.timing };
 }
 
 export function useViewedFiles(
@@ -17,29 +52,45 @@ export function useViewedFiles(
 ) {
   const url = endpoint(repo, `pulls/${pull}/viewed`);
   const tracked = changes?.filter((change) => change.view_id) ?? [];
-  const request = useRequest<Progress>(tracked.length ? url : null);
+  const request = useRequest<Progress>(
+    tracked.length ? url : null,
+    repo.id,
+    loadProgress,
+  );
   const mutation = useMutation(csrf, repo);
-  const [saved, setSaved] = useState<Progress>();
-  const progress = request.data && (saved ?? request.data);
-  function hasViewed(id: string) {
-    return progress?.files[id.slice(0, 64)] === id.slice(64);
-  }
+  const [saved, setSaved] = useState<{ loaded: Progress; current: Progress }>();
+  const progress =
+    saved?.loaded === request.data ? saved?.current : request.data;
+  const isViewed = useCallback(
+    (file: Change) => {
+      const id = file.view_id;
+      return !!id && progress?.files[id.slice(0, 64)] === id.slice(64);
+    },
+    [progress],
+  );
   function renderFileActions(file: Change) {
     const id = file.view_id;
-    if (!id || !progress) return null;
+    const loaded = request.data;
+    if (!id || !progress || !loaded) return null;
     return (
       <label className="inline-flex items-center gap-2 text-sm">
         <Checkbox
-          checked={hasViewed(id)}
+          checked={isViewed(file)}
           aria-label={`Viewed ${file.path}`}
           disabled={repo.archived || mutation.pending || !!mutation.error}
           onCheckedChange={async (viewed) => {
-            const result = await mutation.run<Progress>(url, "PUT", {
+            const result = await mutation.run<{ version: number }>(url, "PUT", {
               version: progress.version,
               file: id,
               viewed: viewed === true,
             });
-            if (result) setSaved(result);
+            if (result && result.version !== progress.version) {
+              const path = id.slice(0, 64);
+              const files = { ...progress.files };
+              if (viewed === true) files[path] = id.slice(64);
+              else delete files[path];
+              setSaved({ loaded, current: { version: result.version, files } });
+            }
           }}
         />
         Viewed
@@ -64,14 +115,17 @@ export function useViewedFiles(
       </div>
     ) : progress && tracked.length > 0 ? (
       <p className="muted" role="status">
-        {
-          tracked.filter(
-            (change) => change.view_id && hasViewed(change.view_id),
-          ).length
-        }{" "}
-        of {tracked.length} files viewed
+        {tracked.filter(isViewed).length} of {tracked.length} files viewed
+      </p>
+    ) : request.loading && tracked.length > 0 ? (
+      <p className="muted" role="status">
+        Loading viewed files…
       </p>
     ) : null;
 
-  return { status, renderFileActions };
+  return {
+    status,
+    renderFileActions,
+    isViewed: progress ? isViewed : undefined,
+  };
 }

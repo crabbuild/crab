@@ -78,6 +78,8 @@ async fn seed(cell: &RepositoryCell, count: usize) {
         write::<CreateComment>(
             cell,
             CreateCommentInput {
+                can_mark_duplicate: false,
+                can_post_locked: false,
                 issue: 1,
                 submission_id: *Uuid::now_v7().as_bytes(),
                 author: actor("Alice"),
@@ -88,6 +90,8 @@ async fn seed(cell: &RepositoryCell, count: usize) {
         write::<CreatePullComment>(
             cell,
             CreatePullCommentInput {
+                can_mark_duplicate: false,
+                can_post_locked: false,
                 pull: 1,
                 submission_id: *Uuid::now_v7().as_bytes(),
                 author: actor("Alice"),
@@ -98,6 +102,7 @@ async fn seed(cell: &RepositoryCell, count: usize) {
         write::<CreatePullReview>(
             cell,
             CreatePullReviewInput {
+                can_post_locked: false,
                 base_revision: None,
                 review_teams: Vec::new(),
                 pull: 1,
@@ -132,6 +137,7 @@ async fn one_ordered_stream_contains_contributions_and_lifecycle_without_duplica
                 number: 1,
                 actor: actor("Alice"),
                 can_triage: true,
+                can_moderate: false,
                 version,
                 title: None,
                 body: None,
@@ -289,6 +295,8 @@ async fn serialized_byte_bounds_keep_every_large_contribution_reachable() {
         write::<CreateComment>(
             &cell,
             CreateCommentInput {
+                can_mark_duplicate: false,
+                can_post_locked: false,
                 issue: 1,
                 submission_id: *Uuid::now_v7().as_bytes(),
                 author: actor("Alice"),
@@ -497,6 +505,7 @@ async fn relationships_and_inline_thread_lifecycle_share_canonical_event_identit
     write::<CreatePullReviewThread>(
         &cell,
         CreatePullReviewThreadInput {
+            can_post_locked: false,
             pull: 1,
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor("Bob"),
@@ -516,6 +525,7 @@ async fn relationships_and_inline_thread_lifecycle_share_canonical_event_identit
     write::<CreatePullReviewReply>(
         &cell,
         CreatePullReviewReplyInput {
+            can_post_locked: false,
             pull: 1,
             thread: 1,
             submission_id: *Uuid::now_v7().as_bytes(),
@@ -527,6 +537,7 @@ async fn relationships_and_inline_thread_lifecycle_share_canonical_event_identit
     write::<UpdatePullReviewThread>(
         &cell,
         UpdatePullReviewThreadInput {
+            can_post_locked: false,
             key: PullReviewThreadKey { pull: 1, number: 1 },
             actor: actor("Bob"),
             can_resolve: true,

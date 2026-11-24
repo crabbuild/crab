@@ -1,3 +1,4 @@
+use super::discussion_target::target;
 use std::{collections::BTreeMap, sync::Arc};
 
 use axum::{
@@ -21,6 +22,10 @@ use crate::{
 
 #[derive(Serialize)]
 pub(super) struct View {
+    #[serde(skip)]
+    pub(super) minimization: Option<crate::cells::repository::collaboration::minimization::State>,
+    #[serde(skip)]
+    pub(super) has_edit_history: bool,
     revision: u64,
     groups: BTreeMap<Kind, Group>,
 }
@@ -37,42 +42,6 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .route("/api/repos/{owner}/{name}/reactions/{*target}", put(select))
         .layer(axum::extract::DefaultBodyLimit::max(2048))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
-}
-
-fn target(path: &str) -> Result<Target> {
-    fn number(value: &str) -> Result<u64> {
-        app::number(value.parse().map_err(|_| Error::NotFound)?)
-    }
-    match path.split('/').collect::<Vec<_>>().as_slice() {
-        ["issues", id] => Ok(Target::Issue {
-            number: number(id)?,
-        }),
-        ["pulls", id] => Ok(Target::Pull {
-            number: number(id)?,
-        }),
-        ["issues", issue, "comments", id] => Ok(Target::IssueComment {
-            issue: number(issue)?,
-            number: number(id)?,
-        }),
-        ["pulls", pull, "comments", id] => Ok(Target::PullComment {
-            pull: number(pull)?,
-            number: number(id)?,
-        }),
-        ["pulls", pull, "reviews", id] => Ok(Target::PullReview {
-            pull: number(pull)?,
-            number: number(id)?,
-        }),
-        ["pulls", pull, "threads", id] => Ok(Target::PullThread {
-            pull: number(pull)?,
-            number: number(id)?,
-        }),
-        ["pulls", pull, "threads", thread, "replies", id] => Ok(Target::PullReply {
-            pull: number(pull)?,
-            thread: number(thread)?,
-            number: number(id)?,
-        }),
-        _ => Err(Error::NotFound),
-    }
 }
 
 async fn select(
@@ -102,11 +71,14 @@ async fn select(
     let summary = match result.output {
         Outcome::Applied(value) => value,
         Outcome::Archived => return Err(Error::Archived),
+        Outcome::Locked => return Err(Error::ConversationLocked),
         Outcome::NotFound => return Err(Error::NotFound),
     };
     Ok(Json(View {
         revision: result.receipt.revision,
         groups: summary.groups,
+        minimization: None,
+        has_edit_history: false,
     }))
 }
 
@@ -148,6 +120,8 @@ pub(super) async fn read(
             Ok(View {
                 revision: observed.receipt.revision,
                 groups: value.groups,
+                minimization: value.minimization,
+                has_edit_history: value.has_edit_history,
             })
         })
         .collect()

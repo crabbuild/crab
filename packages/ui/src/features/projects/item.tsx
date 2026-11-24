@@ -38,10 +38,14 @@ export function WorkPicker({
   repo,
   onSelect,
   kind,
+  excludeIssue,
+  disabled = false,
 }: {
   repo: Repository;
   onSelect: (work: Work) => void;
   kind?: "issue";
+  excludeIssue?: number;
+  disabled?: boolean;
 }) {
   const [query, setQuery] = useState("");
   const id = useId();
@@ -59,36 +63,44 @@ export function WorkPicker({
           placeholder="Search title or #number…"
           maxLength={256}
           value={query}
+          disabled={disabled}
           onChange={(e) => setQuery(e.target.value)}
         />
       </Field>
       <Result state={resource}>
-        {(data) => (
-          <div className="project-work-choices" aria-label="Matching work">
-            {data.items.map((work) => (
-              <Button
-                className="project-work-choice"
-                type="button"
-                variant="ghost"
-                key={`${work.subject.kind}:${work.subject.number}`}
-                onClick={() => onSelect(work)}
-              >
-                {work.subject.kind === "issue" ? (
-                  <CircleDotIcon data-icon="inline-start" />
-                ) : (
-                  <GitPullRequestIcon data-icon="inline-start" />
-                )}
-                <span>{work.title}</span>
-                <small>#{work.subject.number}</small>
-              </Button>
-            ))}
-            {!data.items.length && (
-              <p className="muted p-3">
-                No matching work. Try a different title or number.
-              </p>
-            )}
-          </div>
-        )}
+        {(data) => {
+          const items = data.items.filter(
+            ({ subject }) =>
+              subject.kind !== "issue" || subject.number !== excludeIssue,
+          );
+          return (
+            <div className="project-work-choices" aria-label="Matching work">
+              {items.map((work) => (
+                <Button
+                  className="project-work-choice"
+                  type="button"
+                  variant="ghost"
+                  disabled={disabled}
+                  key={`${work.subject.kind}:${work.subject.number}`}
+                  onClick={() => onSelect(work)}
+                >
+                  {work.subject.kind === "issue" ? (
+                    <CircleDotIcon data-icon="inline-start" />
+                  ) : (
+                    <GitPullRequestIcon data-icon="inline-start" />
+                  )}
+                  <span>{work.title}</span>
+                  <small>#{work.subject.number}</small>
+                </Button>
+              ))}
+              {!items.length && (
+                <p className="muted p-3">
+                  No matching work. Try a different title or number.
+                </p>
+              )}
+            </div>
+          );
+        }}
       </Result>
     </FieldGroup>
   );

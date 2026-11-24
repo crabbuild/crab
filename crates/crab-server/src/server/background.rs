@@ -144,6 +144,12 @@ pub(super) async fn sweep_projections(server: Arc<Server>) -> Result<()> {
         let count = repositories.len().min(PROJECTION_SWEEP_BATCH);
         for offset in 0..count {
             let repository = Arc::clone(&repositories[(start + offset) % repositories.len()]);
+            if server.cells().is_some()
+                && let Err(error) =
+                    crate::repository::commit_closures::recover(&server, &repository).await
+            {
+                tracing::warn!(repository = %repository.id, %error, "issue closure recovery will retry");
+            }
             let now = Instant::now();
             let probe_started = now;
             let source = match crate::repository::projection::current_source(

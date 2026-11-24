@@ -179,6 +179,8 @@ impl Mutation for Change {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SubmitInput {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_post_locked: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub review_teams: Vec<Uuid>,
     pub key: Key,
@@ -261,6 +263,7 @@ impl Mutation for Submit {
         let review = CreatePullReview::write(
             context,
             CreatePullReviewInput {
+                can_post_locked: input.can_post_locked,
                 review_teams: input.review_teams,
                 pull: input.key.pull,
                 submission_id: child_id(input.request_id, input.expected),
@@ -281,6 +284,7 @@ impl Mutation for Submit {
         };
         let mut threads = Vec::with_capacity(draft.comments.len());
         for mut comment in draft.comments {
+            comment.can_post_locked = input.can_post_locked;
             comment.submission_id =
                 child_id(input.request_id, Uuid::from_bytes(comment.submission_id));
             comment.author = input.key.actor.clone();

@@ -274,6 +274,7 @@ async function fixture(page: Page) {
               repository:
                 repositories.find((repo) => repo.id === row.repository) ?? null,
               work: row.repository ? work(row.repository) : null,
+              blocked: row.repository === repositories[0].id,
               assignees: [],
               parent: null,
               progress: null,
@@ -358,6 +359,8 @@ test("one project coordinates matching issue numbers across repositories with pl
   await expect(
     page.getByRole("link", { name: "Ship client", exact: true }),
   ).toHaveAttribute("href", "/team/client/issues/1");
+  const blocked = page.getByText("Blocked", { exact: true });
+  await expect(blocked).toHaveCount(1);
   expect(new Set(state.items.map((item) => item.repository)).size).toBe(2);
   await page.screenshot({
     path: test.info().outputPath("workspace-board.png"),
@@ -372,15 +375,18 @@ test("one project coordinates matching issue numbers across repositories with pl
   await expect(
     page.getByRole("link", { name: "Ship client", exact: true }),
   ).toBeVisible();
+  await expect(blocked).toHaveCount(0);
   await page.getByRole("tab", { name: "Table", exact: true }).click();
   await expect(
     page.getByRole("combobox", { name: "Status for Ship API", exact: true }),
   ).toBeVisible();
+  await expect(blocked).toBeVisible();
   await page.getByRole("combobox", { name: "Layout", exact: true }).click();
   await page.getByRole("option", { name: "Roadmap", exact: true }).click();
   await expect(
     page.getByRole("table", { name: "Project roadmap", exact: true }),
   ).toBeVisible();
+  await expect(blocked).toBeVisible();
   await page.getByRole("button", { name: "Edit", exact: true }).click();
   const properties = page.getByRole("dialog", { name: "Project properties" });
   await properties

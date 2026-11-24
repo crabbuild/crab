@@ -1,6 +1,8 @@
 pub(crate) mod audit;
+pub(crate) mod description;
 mod read;
 mod rename;
+pub(crate) mod topics;
 pub(crate) mod transfer;
 pub(crate) use rename::Rename;
 
@@ -60,7 +62,12 @@ pub struct CatalogRecord {
     #[serde(default, skip_serializing_if = "ownership_epoch_is_initial")]
     pub(crate) ownership_epoch: u32,
     pub application: RepositoryApplicationState,
+    // The creation request matches the original description on replay.
     pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description_edit: Option<description::Description>,
+    #[serde(default, skip_serializing_if = "topics::Topics::is_initial")]
+    pub(crate) topics: topics::Topics,
     pub members: Vec<RepositoryMember>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<RepositoryGroup>,
@@ -96,14 +103,13 @@ impl OrganizationAccess {
         let mut unique = HashSet::new();
         if self.id.is_nil()
             || self.teams.len() > MAX_TEAM_GRANTS
-            || self.teams.iter().any(|grant| {
-                grant.team.is_nil()
-                    || grant.access == crate::RepositoryAccess::Admin
-                    || !unique.insert(grant.team)
-            })
+            || self
+                .teams
+                .iter()
+                .any(|grant| grant.team.is_nil() || !unique.insert(grant.team))
         {
             return Err(CatalogError::Invalid(
-                "team grants need a valid organization and at most 100 unique teams with read, triage, or write access",
+                "team grants need a valid organization and at most 100 unique teams",
             ));
         }
         Ok(())
@@ -158,6 +164,8 @@ pub struct MembershipSnapshot {
     pub(crate) renamed: bool,
     #[serde(skip)]
     pub(crate) ownership_epoch: u32,
+    #[serde(skip)]
+    pub(crate) name: String,
     pub members: Vec<RepositoryMember>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<RepositoryGroup>,
@@ -269,6 +277,14 @@ impl CatalogDocument {
                 return Err(CatalogError::Invalid(
                     "repository IDs, names, prefixes, and placement generations must be valid and unique",
                 ));
+            }
+            if record
+                .description_edit
+                .as_ref()
+                .is_some_and(|edit| !edit.valid_saved())
+                || !record.topics.valid_saved()
+            {
+                return Err(CatalogError::Invalid("repository metadata is invalid"));
             }
             if let Some(upstream) = record.forked_from {
                 record.access_record(records.get(&upstream).copied())?;
@@ -445,6 +461,7 @@ impl CatalogRecord {
             revision,
             renamed: self.name_version() > 0,
             ownership_epoch: self.ownership_epoch,
+            name: self.name.clone(),
             organization: source.organization.clone(),
             members: source.members.clone(),
             groups: source.groups.clone(),
@@ -475,7 +492,7 @@ impl CatalogRecord {
                 .repository_prefix(&normalized)
                 .map_err(|_| CatalogError::Invalid("repository prefix is invalid"))?,
             default_branch: default_branch.to_owned(),
-            description: self.description.clone(),
+            description: self.description().description,
             members: self.members.clone(),
             groups: self.groups.clone(),
             protected_branches: self.protected_branches.clone(),
@@ -547,6 +564,8 @@ impl CatalogStore {
             ownership_epoch: 0,
             application: RepositoryApplicationState::EmptyCellPending,
             description,
+            description_edit: None,
+            topics: topics::Topics::default(),
             members,
             groups: Vec::new(),
             protected_branches: Vec::new(),
@@ -586,6 +605,8 @@ impl CatalogStore {
                 ownership_epoch: 0,
                 application: RepositoryApplicationState::EmptyCellPending,
                 description,
+                description_edit: None,
+                topics: topics::Topics::default(),
                 members,
                 groups: Vec::new(),
                 protected_branches: Vec::new(),
@@ -620,6 +641,8 @@ impl CatalogStore {
                 ownership_epoch: 0,
                 application: RepositoryApplicationState::GitImportPending,
                 description,
+                description_edit: None,
+                topics: topics::Topics::default(),
                 members,
                 groups: Vec::new(),
                 protected_branches: Vec::new(),
@@ -675,6 +698,8 @@ impl CatalogStore {
             ownership_epoch: 0,
             application: RepositoryApplicationState::EmptyCellPending,
             description,
+            description_edit: None,
+            topics: topics::Topics::default(),
             members,
             groups: Vec::new(),
             protected_branches: Vec::new(),

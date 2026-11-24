@@ -105,32 +105,6 @@ async fn mirror_ref(
     Ok(Some(format!("refs/heads/{prefix}{}/{number}", repo.id)))
 }
 
-pub(super) async fn required(
-    server: &Server,
-    repo: &Repository,
-    oid: &str,
-    connections: &[Uuid],
-    queued_candidate: bool,
-) -> Result<Vec<stored::RequiredConnection>> {
-    if connections.is_empty() || shared_key(server).is_none() {
-        return Ok(Vec::new());
-    }
-    let cell = app::repository_cell(server, repo)?;
-    app::query_output(
-        cell.client
-            .query::<stored::ReadRequirements>(
-                cell.target,
-                None,
-                stored::Requirements {
-                    oid: oid.to_owned(),
-                    connections: connections.to_vec(),
-                    queued_candidate,
-                },
-            )
-            .await,
-    )
-}
-
 fn admin(
     server: &Server,
     principal: &Principal,
@@ -247,7 +221,7 @@ async fn delivery_history(
     Ok(Json(items))
 }
 
-fn shared_key(server: &Server) -> Option<&[u8; 32]> {
+pub(super) fn shared_key(server: &Server) -> Option<&[u8; 32]> {
     server.auth.as_ref()?.webhook_key()
 }
 

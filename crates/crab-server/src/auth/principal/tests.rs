@@ -62,6 +62,10 @@ fn oidc_groups_union_exact_current_grants_without_exceeding_the_token_scope() {
     let scoped = git.with_membership(id, &config, "https://identity.example", None);
     assert!(scoped.can_read(id));
     assert!(!scoped.can_triage(id));
+    config.groups[0].access = RepositoryAccess::Maintain;
+    let maintainer = browser.with_membership(id, &config, "https://identity.example", None);
+    assert!(maintainer.can_maintain(id));
+    assert!(!maintainer.can_admin(id));
     config.groups[0].group = "/engineering".into();
     assert!(
         !browser
@@ -121,6 +125,7 @@ fn repository_administration_stays_out_of_write_scoped_git_tokens() {
         None,
     );
     assert!(git.can_write(Uuid::from_u128(1)));
+    assert!(!git.can_maintain(Uuid::from_u128(1)));
     assert!(!git.can_admin(Uuid::from_u128(1)));
     assert!(
         !Principal::user(active_session())
@@ -137,11 +142,13 @@ fn repository_administration_stays_out_of_write_scoped_git_tokens() {
 #[test]
 fn triage_manages_collaboration_without_code_write_or_repository_administration() {
     let principal = Principal::user(active_session());
-    for (access, triage, write, admin) in [
-        (RepositoryAccess::Read, false, false, false),
-        (RepositoryAccess::Triage, true, false, false),
-        (RepositoryAccess::Write, true, true, false),
-        (RepositoryAccess::Admin, true, true, true),
+    for (access, triage, moderate, write, admin) in [
+        (RepositoryAccess::Read, false, false, false, false),
+        (RepositoryAccess::Triage, true, false, false, false),
+        (RepositoryAccess::Moderate, true, true, false, false),
+        (RepositoryAccess::Write, true, true, true, false),
+        (RepositoryAccess::Maintain, true, true, true, false),
+        (RepositoryAccess::Admin, true, true, true, true),
     ] {
         let repo = member_repository(access);
         let principal =
@@ -150,10 +157,11 @@ fn triage_manages_collaboration_without_code_write_or_repository_administration(
             (
                 principal.can_read(Uuid::from_u128(1)),
                 principal.can_triage(Uuid::from_u128(1)),
+                principal.can_moderate(Uuid::from_u128(1)),
                 principal.can_write(Uuid::from_u128(1)),
                 principal.can_admin(Uuid::from_u128(1))
             ),
-            (true, triage, write, admin),
+            (true, triage, moderate, write, admin),
             "{access:?}"
         );
     }

@@ -90,6 +90,13 @@ and downloads retain their own reads and limits. The tagged `/file` endpoint and
 Diff's embedded-content shape remain separate contracts; the UI never retries
 the old endpoint after a preview request fails.
 
+`FilePreview.stored_size` describes the reconstructed Crab file or the stored
+Git LFS object. The toolbar offers its download and the raw pointer at the
+displayed commit. The browser streams downloads using the signed-in repository
+session. Selecting **Preview** loads a recognized format from the same commit.
+Parquet uses HTTP ranges. Whole-file previews enforce the format's size limit
+before requesting the payload.
+
 Build the UI once, then use this checkout's external Cargo directory to check or
 regenerate the contract:
 

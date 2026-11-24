@@ -113,11 +113,17 @@ async fn page(
             .await,
     )?
     .ok_or(Error::NotFound)?;
-    let head = match &page.source {
-        Some(source) => match &source.merged_head {
-            Some(oid) => Some(oid.clone()),
-            None => repo.ref_oid(&source.head_ref).await?,
-        },
+    let head = match page.source {
+        Some(source) => {
+            pulls::review_head(
+                server,
+                &repo,
+                source.head_repository,
+                &source.head_ref,
+                source.merged_head,
+            )
+            .await?
+        }
         None => None,
     };
     let targets = page
@@ -164,7 +170,13 @@ async fn page(
             let (kind, value) = match entry {
                 Entry::IssueComment(comment) => (
                     "comment",
-                    issues::view::comment(&authors, &comment, &actor, &reaction),
+                    issues::view::comment(
+                        &authors,
+                        &comment,
+                        &actor,
+                        principal.can_moderate(repo.id),
+                        &reaction,
+                    ),
                 ),
                 Entry::PullComment(comment) => {
                     let comment = pulls::storage::from_comment(comment);
@@ -198,9 +210,15 @@ async fn page(
             "Conversation reaction count is invalid",
         ));
     }
-    Ok(Json(
-        json!({"items":items,"start":encode(page.start)?,"end":encode(page.end)?,"has_earlier":page.has_earlier,"has_later":page.has_later,"head_oid":head}),
-    ))
+    Ok(Json(json!({
+        "items": items,
+        "start": encode(page.start)?,
+        "end": encode(page.end)?,
+        "has_earlier": page.has_earlier,
+        "has_later": page.has_later,
+        "head_oid": head,
+        "undo_duplicate_event": page.duplicate_event.filter(|_| principal.can_write(repo.id)),
+    })))
 }
 async fn issue(
     State(server): State<Arc<Server>>,

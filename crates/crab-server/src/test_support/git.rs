@@ -361,6 +361,27 @@ pub(crate) async fn success(path: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
+pub(crate) async fn bare_with_alternates(source: &Path, local: &Path) {
+    let objects = success(
+        source,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "objects",
+        ],
+    )
+    .await;
+    assert!(!objects.contains(['\n', '\r']));
+    std::fs::create_dir(local).unwrap();
+    success(local, &["init", "--bare", "--object-format=sha1", "."]).await;
+    std::fs::write(
+        local.join("objects/info/alternates"),
+        format!("{objects}\n"),
+    )
+    .unwrap();
+}
+
 /// Publishes a real main/feature pair through native HTTP Git receive.
 pub(crate) async fn push_review_branches(path: &Path, url: &str) -> String {
     success(

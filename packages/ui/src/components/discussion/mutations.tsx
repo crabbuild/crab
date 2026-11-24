@@ -35,6 +35,7 @@ export function useMutation(
     url: string,
     method: "POST" | "PUT" | "PATCH" | "DELETE",
     input: object,
+    target: typeof repo = repo,
   ): Promise<T | undefined> {
     if (busy.current) return;
     busy.current = true;
@@ -44,7 +45,7 @@ export function useMutation(
       let payload = input;
       const path = url.split("?", 1)[0];
       if (
-        repo &&
+        target &&
         "body" in input &&
         typeof input.body === "string" &&
         /^\/api\/repos\/[^/]+\/[^/]+\/(issues|pulls)(?:\/|$)/.test(path) &&
@@ -57,11 +58,11 @@ export function useMutation(
             : "version" in input
               ? input.version
               : null;
-        const key = JSON.stringify([method, url, revision, body]);
+        const key = JSON.stringify([target.id, method, url, revision, body]);
         if (preparedBody.current?.key !== key) {
           const { bindCrossReferences } =
             await import("./discussion-references");
-          const stable = await bindCrossReferences(body, repo);
+          const stable = await bindCrossReferences(body, target);
           const limit = /\/issues(?:\/|$)|\/state$/.test(path)
             ? 80 * 1024
             : 160 * 1024;
@@ -79,7 +80,7 @@ export function useMutation(
         headers: {
           "Content-Type": "application/json",
           "X-CSRF-Token": csrf,
-          ...(repo ? { "X-Crab-Repository-Id": repo.id } : {}),
+          ...(target ? { "X-Crab-Repository-Id": target.id } : {}),
         },
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(35_000),
@@ -134,12 +135,14 @@ export function ConflictReview<
   },
 >({
   url,
+  repositoryId,
   onResolve,
 }: {
   url: string;
+  repositoryId?: string;
   onResolve: (latest: T, choice: "draft" | "saved") => void;
 }) {
-  const latest = useRequest<T>(url);
+  const latest = useRequest<T>(url, repositoryId);
   const panel = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (document.activeElement === document.body) panel.current?.focus();

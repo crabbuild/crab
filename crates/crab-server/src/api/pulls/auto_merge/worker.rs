@@ -219,6 +219,8 @@ async fn reconcile(
         Ok(record) => record,
         Err(
             Error::MergeBlocked
+            | Error::MergeLinearHistory
+            | Error::MergeUpdatesRestricted
             | Error::MergeUnresolvedConversations
             | Error::MergeHeadBehind
             | Error::DraftPull,

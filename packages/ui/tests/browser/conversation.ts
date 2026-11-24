@@ -44,11 +44,13 @@ export function conversationPage(
     reviews = [],
     activity = [],
     head = null,
+    undoDuplicateEvent = null,
   }: {
     comments?: readonly object[];
     reviews?: readonly object[];
     activity?: readonly object[];
     head?: string | null;
+    undoDuplicateEvent?: number | null;
   } = {},
 ) {
   const sourceOrder = { comment: 0, review: 1, activity: 2 };
@@ -110,6 +112,7 @@ export function conversationPage(
       has_earlier: start > 0 && start < end,
       has_later: end < entries.length && start < end,
       head_oid: head,
+      undo_duplicate_event: undoDuplicateEvent,
     },
   });
 }

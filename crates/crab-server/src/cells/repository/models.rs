@@ -149,6 +149,10 @@ pub(crate) struct IssueRecord {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CreateCommentInput {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_post_locked: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_mark_duplicate: bool,
     pub submission_id: [u8; 16],
     pub issue: u64,
     pub author: RepositoryAuthor,
@@ -168,6 +172,7 @@ pub(crate) struct CommentRecord {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum CreateCommentOutcome {
+    Locked,
     Archived,
     Created(CommentRecord),
     IssueNotFound,
@@ -188,6 +193,8 @@ pub(crate) struct UpdateIssueInput {
     pub number: u64,
     pub actor: RepositoryAuthor,
     pub can_triage: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_moderate: bool,
     pub version: u64,
     pub title: Option<String>,
     pub body: Option<String>,
@@ -213,12 +220,15 @@ pub(crate) enum UpdateIssueOutcome {
 pub(crate) struct UpdateCommentInput {
     pub key: CommentKey,
     pub actor: RepositoryAuthor,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_moderate: bool,
     pub version: u64,
     pub body: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum UpdateCommentOutcome {
+    Locked,
     Archived,
     Updated(CommentRecord),
     NotFound,
@@ -228,7 +238,11 @@ pub(crate) enum UpdateCommentOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct IssueSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_type: Option<super::issues::issue_type::Selection>,
     pub lifecycle: super::issues::lifecycle::Lifecycle,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocked: bool,
     pub number: u64,
     pub author: RepositoryAuthor,
     pub title: String,

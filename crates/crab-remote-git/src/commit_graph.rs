@@ -25,6 +25,10 @@ pub(crate) struct CommitGraphIndex {
 }
 
 impl CommitGraphIndex {
+    pub(crate) fn has_ancestor_sets(&self) -> bool {
+        matches!(self.graph, Graph::Capsule(_))
+    }
+
     pub(crate) fn view(&self) -> CommitGraphView<'_> {
         match &self.graph {
             Graph::Manifest(graph) => CommitGraphView::Materialized(graph),

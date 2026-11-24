@@ -229,7 +229,7 @@ None,
                                 layout: layout.clone(),
                                 graph: crab_git::receive_plan::GraphLimits { max_ref_updates: 16, max_graph_steps: 1024, max_object_bytes: LIMIT as usize, max_read_bytes: LIMIT },
                                 pack: crab_git::incoming_pack::ReceiveLimits { max_pack_bytes: LIMIT, max_objects: 1024, max_object_bytes: LIMIT as usize, max_inflated_bytes: LIMIT, max_delta_depth: 128 },
-                                policy: |_: &str| crab_git::receive_plan::RefPolicy { allow_delete: true, allow_non_fast_forward: false },
+                                policy: |_: &str| crab_git::receive_plan::RefPolicy { allow_delete: true, allow_non_fast_forward: false, inspect_linear_history: false },
                             },
                         ).await?;
                         assert_eq!(prepared.plan().pointers().len(), 1);

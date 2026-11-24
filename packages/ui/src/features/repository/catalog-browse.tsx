@@ -1,4 +1,5 @@
 import { RepoIcon } from "@primer/octicons-react";
+import { useRef } from "react";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Badge } from "@/components/ui/badge";
@@ -6,12 +7,18 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { navigate, useRequest, type Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
+import { RepositoryPropertyFilters } from "./catalog-property-filters";
+import { RepositoryStateFilters } from "./catalog-state-filters";
+import { TopicLinks } from "./topic-links";
 
 type Entry = Pick<
   Repository,
-  "id" | "owner" | "name" | "description" | "archived"
+  "id" | "owner" | "name" | "description" | "archived" | "topics"
 >;
-type Page = { repositories: Entry[]; next: string | null };
+type Page = {
+  repositories: (Entry & { fork: boolean })[];
+  next: string | null;
+};
 
 export function BrowseRepositories({
   url,
@@ -29,6 +36,7 @@ export function BrowseRepositories({
   if (after) params.set("after", after);
   if (organization) params.set("organization", organization);
   const page = useRequest<Page>(`/api/repos?${params}`);
+  const searchInput = useRef<HTMLInputElement>(null);
 
   function href(search: string, next?: string) {
     const destination = new URL(url);
@@ -37,6 +45,13 @@ export function BrowseRepositories({
     if (search) destination.searchParams.set("q", search);
     if (next) destination.searchParams.set("after", next);
     return destination.pathname + destination.search;
+  }
+
+  const draft = () => searchInput.current?.value.trim() ?? query;
+  function apply(search: string) {
+    if (search.length > 200) return false;
+    navigate(href(search));
+    return true;
   }
 
   return (
@@ -57,11 +72,16 @@ export function BrowseRepositories({
       >
         <Input
           key={query}
+          ref={searchInput}
           type="search"
           className="max-w-md flex-1"
           name="q"
           aria-label="Search repositories"
-          placeholder="Search by name, owner, or description"
+          placeholder={
+            organization
+              ? "Search names or use topic: and props. filters"
+              : "Search names, descriptions, or topic:name"
+          }
           maxLength={200}
           defaultValue={query}
         />
@@ -74,6 +94,21 @@ export function BrowseRepositories({
           </Button>
         )}
       </form>
+      <RepositoryStateFilters
+        key={query}
+        query={query}
+        draft={draft}
+        apply={apply}
+      />
+      {organization && (
+        <RepositoryPropertyFilters
+          organization={organization}
+          apply={(filter) => {
+            const text = draft();
+            return apply(text ? `${text} ${filter}` : filter);
+          }}
+        />
+      )}
       <Result state={page} timingLabel="Repository search">
         {({ repositories, next }) => (
           <>
@@ -100,15 +135,24 @@ export function BrowseRepositories({
                       {repo.archived && (
                         <Badge variant="outline">Archived</Badge>
                       )}
+                      {repo.fork && <Badge variant="outline">Fork</Badge>}
                     </div>
                     {repo.description && (
                       <p className="muted mt-1 break-words">
                         {repo.description}
                       </p>
                     )}
+                    <TopicLinks
+                      names={repo.topics}
+                      href={(topic) => href(`topic:${topic}`)}
+                    />
                   </li>
                 ))}
               </ul>
+            ) : next ? (
+              <p role="status" className="notice">
+                No matches on this page. More repositories are available.
+              </p>
             ) : query || after ? (
               <p role="status" className="notice">
                 No repositories match this search.

@@ -6,6 +6,7 @@ workspace volume. This creates only synthetic repositories and credentials.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import pathlib
@@ -29,7 +30,7 @@ parser.add_argument("--artifacts", required=True, type=pathlib.Path)
 parser.add_argument("--large-file-bytes", type=int, default=0,
                     help="Also qualify a stock Git LFS object of this exact size")
 parser.add_argument("--recovery", action="store_true",
-                    help="Also qualify SIGKILL and a full-root restore into an empty cache; requires boto3")
+                    help="Also qualify SIGKILL and a version-selected full-root restore; requires boto3")
 args = parser.parse_args()
 if args.recovery:
     import boto3
@@ -66,8 +67,9 @@ with open(run / "commands.log", "w") as log:
 
     repository_ids = {}
 
-    def request(path, body=None, *, method=None):
-        headers = {"Content-Type": "application/json"}
+    def request(path, body=None, *, method=None, raw=False):
+        binary_body = isinstance(body, bytes)
+        headers = {"Content-Type": "application/octet-stream" if binary_body else "application/json"}
         parts = urllib.parse.urlsplit(path).path.split("/")
         if body is not None and parts[1:3] == ["api", "repos"] and len(parts) >= 5:
             owner, name = parts[3:5]
@@ -78,12 +80,12 @@ with open(run / "commands.log", "w") as log:
             headers["X-Crab-Repository-Id"] = repository_ids[key]
         req = urllib.request.Request(
             origin + path,
-            data=None if body is None else json.dumps(body).encode(),
+            data=body if binary_body or body is None else json.dumps(body).encode(),
             headers=headers,
             method=method,
         )
         with urllib.request.urlopen(req, timeout=35) as r:
-            return json.load(r)
+            return r.read() if raw else json.load(r)
 
     def index_request(body=None):
         context = ssl.create_default_context(cafile=str(run / "ca.crt"))
@@ -181,6 +183,7 @@ with open(run / "commands.log", "w") as log:
         cmd(["docker", "run", "--rm", "--user", "0:0", "--entrypoint", "/bin/sh",
              "--volume", storage_volume + ":/data", object_store_image,
              "-c", "chown 10001:10001 /data"])
+        bucket = urllib.parse.urlsplit(storage_url).netloc
         cmd(
             [
                 "docker",
@@ -238,10 +241,13 @@ with open(run / "commands.log", "w") as log:
                 "s3api",
                 "create-bucket",
                 "--bucket",
-                "crab-cellar-test",
+                bucket,
             ],
             env=env,
         )
+        if args.recovery:
+            cmd(["aws", "--endpoint-url", endpoint, "s3api", "put-bucket-versioning",
+                 "--bucket", bucket, "--versioning-configuration", "Status=Enabled"], env=env)
         cmd(
             [
                 "openssl",
@@ -785,6 +791,27 @@ with open(run / "commands.log", "w") as log:
         if args.large_file_bytes:
             large_file = large_files.prepare(cmd, run, origin, args.large_file_bytes, env)
             large_files.verify_resume(run, origin, large_file)
+            large_files.verify_file_view_range(run, origin, large_file)
+
+        if args.recovery:
+            repo_path = "/api/repos/team/project"
+            tag = "v1.0.0-restore-proof"
+            release = request(repo_path + "/releases", {
+                "request_id": str(uuid.uuid4()), "tag_name": tag, "target_oid": merged_head,
+                "title": "Full-root restore proof", "body": "Release metadata and asset bytes survive restore.",
+                "prerelease": True, "draft": False,
+            })
+            assert release["tag_oid"] == merged_head
+            release_path = f"{repo_path}/releases/{release['number']}"
+            asset_id = str(uuid.uuid4())
+            payload = b"Crab release restore qualification\x00\xff"
+            release = request(release_path + "/assets?" + urllib.parse.urlencode({
+                "request_id": asset_id, "name": "restore-proof.bin", "version": release["version"],
+            }), payload)
+            asset_path = f"{release_path}/assets/{asset_id}"
+            asset = release["assets"][0]
+            assert asset["id"] == asset_id and asset["digest"] == "sha256:" + hashlib.sha256(payload).hexdigest()
+            assert request(asset_path, raw=True) == payload
 
         # The same assertions cover graceful and abrupt process replacement.
         forced_status = crash() if args.recovery else stop()
@@ -814,17 +841,19 @@ with open(run / "commands.log", "w") as log:
             assert request(path + "/milestone")["milestone"]["number"] == milestone["number"]
         if args.recovery:
             paths = ["/api/profile", organization_root, organization_root + "/members", audit_path,
-                     "/api/repos/team/project/issues", "/api/repos/team/project/pulls", pins_path]
+                     "/api/repos/team/project/issues", "/api/repos/team/project/pulls", pins_path, release_path]
             saved = {path: request(path) for path in paths}
             remote = origin + "/git/team/project.git"
             refs = subprocess.check_output(["git", "ls-remote", remote], env=env, text=True)
+            assert f"{merged_head}\trefs/tags/{tag}" in refs.splitlines()
+            assert saved[release_path] == release
             started = time.monotonic()
             stop()
             assert server is None, "All fixture writers must stop before the root is copied"
             backup = run / "backup"
             backup.mkdir()
             original_storage = storage_url
-            storage_url, root_proof, cleanup_backup = copy_root(storage_url, backup, env)
+            storage_url, root_proof, cleanup_backup = copy_root(storage_url, backup, env, select_versions=True)
             restored_cache = run / "restored-cells"
             restored_cache.mkdir(mode=0o777)
             restored_cache.chmod(0o777)
@@ -843,6 +872,12 @@ with open(run / "commands.log", "w") as log:
             wait()
             assert {path: request(path) for path in paths} == saved, "Restored application state differs"
             assert subprocess.check_output(["git", "ls-remote", remote], env=env, text=True) == refs
+            restored_git = run / "restored-project"
+            cmd(["git", "clone", remote, restored_git], env=env)
+            cmd(["git", "-C", restored_git, "fsck", "--strict"], env=env)
+            restored_tag = subprocess.check_output(["git", "-C", restored_git, "rev-parse", f"refs/tags/{tag}"], text=True).strip()
+            assert restored_tag == merged_head
+            assert request(asset_path, raw=True) == payload, "Restored release asset differs"
             if large_file:
                 large_files.verify(cmd, run, origin, large_file, "restore", env)
                 large_files.verify_resume(run, origin, large_file)
@@ -854,6 +889,8 @@ with open(run / "commands.log", "w") as log:
                 "restored_into_empty_cache": True,
                 "application_state_verified": True,
                 "git_refs_verified": True,
+                "git_clone_verified": True,
+                "release_asset_verified": True,
                 "offline_copy_and_restore_seconds": time.monotonic() - started,
             }
             if large_file:
@@ -942,6 +979,7 @@ with open(run / "commands.log", "w") as log:
                 "stock_git_lfs": True,
                 "native_push_origin_verification": True,
                 "range_resume": True,
+                "pinned_file_view_range": True,
                 "process_restart": True,
             }
         if recovery:

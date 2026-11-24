@@ -151,7 +151,10 @@ export function AutoMerge({
 
   const canSchedule =
     !!value?.can_enable && !pull.can_merge && pull.branches_available;
-  const canEnqueue = !!value?.can_enqueue && pull.branches_available;
+  const canEnqueue =
+    !!value?.can_enqueue &&
+    pull.branches_available &&
+    !pull.merge_requirements.updates_restricted;
   if (!value || (!scheduled && !canSchedule && !canEnqueue)) return null;
 
   function confirm(queue: boolean, button: HTMLButtonElement) {

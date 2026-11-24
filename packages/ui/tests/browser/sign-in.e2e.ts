@@ -16,7 +16,9 @@ test("OIDC sign-in explains registration and preserves the requested destination
     route.fulfill({ contentType: "text/html", body: "<h1>Provider</h1>" }),
   );
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/demo/parity/issues?state=closed&auth_error=sign_in_failed");
+  await page.goto(
+    "/demo/parity/issues?state=closed&auth_error=sign_in_failed#issuecomment-7",
+  );
   await expect(
     page.getByRole("heading", { name: "Sign in to Crab" }),
   ).toBeVisible();
@@ -40,7 +42,7 @@ test("OIDC sign-in explains registration and preserves the requested destination
   await signIn.focus();
   await signIn.press("Enter");
   expect(new URL((await request).url()).searchParams.get("return_to")).toBe(
-    "/demo/parity/issues?state=closed",
+    "/demo/parity/issues?state=closed#issuecomment-7",
   );
 });
 

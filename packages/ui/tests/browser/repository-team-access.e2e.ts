@@ -145,7 +145,7 @@ test("organization owners can search teams and reconcile a stale grant edit", as
   await removeDeleted.click();
   await page
     .getByRole("combobox", { name: "Role for Release engineers" })
-    .selectOption("triage");
+    .selectOption("admin");
 
   state.revision++;
   await save.click();
@@ -164,7 +164,7 @@ test("organization owners can search teams and reconcile a stale grant edit", as
     page.getByText("Team access saved.", { exact: true }),
   ).toBeVisible();
   expect(writes).toEqual([
-    { expected_revision: 10, teams: [{ team: engineers, access: "triage" }] },
+    { expected_revision: 10, teams: [{ team: engineers, access: "admin" }] },
     { expected_revision: 11, teams: [] },
   ]);
 

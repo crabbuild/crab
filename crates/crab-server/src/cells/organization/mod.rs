@@ -18,7 +18,9 @@ pub(crate) const MAX_VERSION: u64 = 9_007_199_254_740_991;
 pub(crate) mod automation;
 mod commands;
 mod invitations;
+pub(crate) mod issue_types;
 pub(crate) mod projects;
+pub(crate) mod properties;
 mod reads;
 pub(crate) mod repositories;
 pub(crate) mod rulesets;
@@ -169,6 +171,13 @@ pub(crate) enum Action {
     RulesetsChanged {
         version: u64,
     },
+    RepositoryPropertiesChanged {
+        repository: Option<Uuid>,
+        version: u64,
+    },
+    IssueTypesChanged {
+        version: u64,
+    },
     ProjectChanged {
         project: Uuid,
     },
@@ -177,6 +186,14 @@ pub(crate) enum Action {
     },
     TeamEdited {
         team: Uuid,
+    },
+    TeamGroupSync {
+        team: Uuid,
+        group: Uuid,
+        group_revision: u64,
+        change: teams::sync::AuditChange,
+        updated: u64,
+        removed: u64,
     },
     TeamDeleted {
         team: Uuid,
@@ -209,20 +226,20 @@ pub(crate) enum Action {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Event {
     pub revision: u64,
-    pub actor: Uuid,
+    pub actor: Option<Uuid>,
     pub action: Action,
     pub created_at_ms: u64,
 }
 const EVENTS: &str = "organization/v1/events/";
-fn advance_revision(context: &Transaction<'_>) -> Result<u64> {
+fn advance(context: &Transaction<'_>, actor: Uuid, action: Action) -> Result<()> {
+    append_event(context, Some(actor), action)
+}
+fn append_event(context: &Transaction<'_>, actor: Option<Uuid>, action: Action) -> Result<()> {
     let result = context.query("UPDATE organization_identity SET app_revision = app_revision + 1 WHERE singleton = 1 AND app_revision < 9007199254740991 RETURNING app_revision", &[])?;
     let Some([value]) = result.rows.first().map(Vec::as_slice) else {
         return Err(Error::Invalid("organization revision limit reached"));
     };
-    uint(value)
-}
-fn advance(context: &Transaction<'_>, actor: Uuid, action: Action) -> Result<()> {
-    let revision = advance_revision(context)?;
+    let revision = uint(value)?;
     let created_at_ms = u64::try_from(context.now_ms())
         .map_err(|_| Error::Invalid("organization clock is negative"))?;
     context.put_document(
@@ -309,6 +326,9 @@ pub(in crate::cells) fn authorize(
     if teams::handles(operation, mutation) {
         return teams::authorize(context, operation, mutation, input);
     }
+    if mutation && operation == properties::SetValues::ID {
+        return properties::authorize_save(context, input);
+    }
     let owner = match (operation, mutation) {
         // The private repository reads use catalog-bound team IDs. The public
         // repository boundary authorizes their callers before it returns data.
@@ -320,6 +340,11 @@ pub(in crate::cells) fn authorize(
             | RepositoryTeamNames::ID
             | CodeOwnerTeams::ID
             | rulesets::Applicable::ID
+            | rulesets::NameProtection::ID
+            | properties::GetValues::ID
+            | properties::search::MatchRepositories::ID
+            | properties::search::Fields::ID
+            | issue_types::Active::ID
             | automation::Verify::ID,
             false,
         ) => return Ok(()),
@@ -329,6 +354,9 @@ pub(in crate::cells) fn authorize(
             | ListActivity::ID
             | ListInvitations::ID
             | rulesets::Get::ID
+            | properties::GetSchema::ID
+            | properties::GetSelection::ID
+            | issue_types::Get::ID
             | InspectMemberRepositoryRoles::ID
             | automation::List::ID,
             false,
@@ -342,6 +370,9 @@ pub(in crate::cells) fn authorize(
             | repositories::AuthorizeCreation::ID
             | repositories::AuthorizeImportPublication::ID
             | rulesets::Replace::ID
+            | properties::SetSchema::ID
+            | properties::SetSelection::ID
+            | issue_types::Replace::ID
             | automation::Change::ID,
             true,
         ) => true,
@@ -399,6 +430,7 @@ pub(in crate::cells) fn dispatch_read(
         projects::List::ID => invoke_read::<projects::List>(context, input),
         projects::Get::ID => invoke_read::<projects::Get>(context, input),
         projects::Items::ID => invoke_read::<projects::Items>(context, input),
+        projects::TypeSources::ID => invoke_read::<projects::TypeSources>(context, input),
         teams::GetPreparation::ID => invoke_read::<teams::GetPreparation>(context, input),
         teams::List::ID => invoke_read::<teams::List>(context, input),
         teams::ResolveReviewTeams::ID => invoke_read::<teams::ResolveReviewTeams>(context, input),
@@ -423,6 +455,16 @@ pub(in crate::cells) fn dispatch_read(
         }
         rulesets::Get::ID => invoke_read::<rulesets::Get>(context, input),
         rulesets::Applicable::ID => invoke_read::<rulesets::Applicable>(context, input),
+        rulesets::NameProtection::ID => invoke_read::<rulesets::NameProtection>(context, input),
+        properties::GetSchema::ID => invoke_read::<properties::GetSchema>(context, input),
+        issue_types::Get::ID => invoke_read::<issue_types::Get>(context, input),
+        issue_types::Active::ID => invoke_read::<issue_types::Active>(context, input),
+        properties::GetValues::ID => invoke_read::<properties::GetValues>(context, input),
+        properties::search::MatchRepositories::ID => {
+            invoke_read::<properties::search::MatchRepositories>(context, input)
+        }
+        properties::search::Fields::ID => invoke_read::<properties::search::Fields>(context, input),
+        properties::GetSelection::ID => invoke_read::<properties::GetSelection>(context, input),
         repositories::Owners::ID => invoke_read::<repositories::Owners>(context, input),
         teams::MentionMembers::ID => invoke_read::<teams::MentionMembers>(context, input),
         automation::List::ID => invoke_read::<automation::List>(context, input),
@@ -466,6 +508,10 @@ pub(in crate::cells) fn dispatch_mutation(
             invoke_mutation::<repositories::AuthorizeImportPublication>(context, input)
         }
         rulesets::Replace::ID => invoke_mutation::<rulesets::Replace>(context, input),
+        properties::SetSchema::ID => invoke_mutation::<properties::SetSchema>(context, input),
+        issue_types::Replace::ID => invoke_mutation::<issue_types::Replace>(context, input),
+        properties::SetValues::ID => invoke_mutation::<properties::SetValues>(context, input),
+        properties::SetSelection::ID => invoke_mutation::<properties::SetSelection>(context, input),
         automation::Change::ID => invoke_mutation::<automation::Change>(context, input),
         Edit::ID => invoke_mutation::<Edit>(context, input),
         ChangeMember::ID => invoke_mutation::<ChangeMember>(context, input),

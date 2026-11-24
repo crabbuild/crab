@@ -1,19 +1,26 @@
 mod activity;
 mod archive;
+mod artifact_content;
 pub(crate) mod asset_transfer;
 mod assignees;
 mod branches;
 mod catalog;
 mod catalog_browse;
 mod checks;
+mod comment_visibility;
 mod contents;
 mod conversation;
 pub(crate) mod discussion_attachments;
 mod discussion_bulk;
 mod discussion_creation;
+mod discussion_lock;
 mod discussion_search;
 mod discussion_state;
+mod discussion_target;
+mod duplicates;
+mod edit_history;
 mod fork_sync;
+mod issue_dependencies;
 mod issues;
 mod labels;
 mod links;
@@ -26,6 +33,7 @@ mod projects;
 mod pulls;
 mod reactions;
 mod releases;
+mod repository_metadata;
 mod repository_name;
 mod repository_transfer;
 mod results;
@@ -136,6 +144,8 @@ enum ApiError {
     Service(#[from] crate::Error),
     #[error("JSON response encoding failed")]
     Json(#[from] serde_json::Error),
+    #[error("stored file read failed")]
+    Artifact(#[from] crab_read::ReadError),
 }
 
 impl IntoResponse for ApiError {
@@ -239,6 +249,14 @@ impl IntoResponse for ApiError {
                 "encoding",
                 "The response could not be encoded",
             ),
+            Self::Artifact(error) => {
+                tracing::warn!(?error, "stored file read failed");
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "artifact_unavailable",
+                    "The stored file could not be read. Check repository storage and retry",
+                )
+            }
         };
         (
             status,
@@ -538,6 +556,11 @@ pub(crate) fn routes(server: Arc<Server>) -> axum::Router<Arc<Server>> {
         .merge(integrations::routes(Arc::clone(&server)))
         .merge(crate::auth::deploy_tokens::routes(Arc::clone(&server)))
         .merge(conversation::routes(Arc::clone(&server)))
+        .merge(discussion_lock::routes(Arc::clone(&server)))
+        .merge(edit_history::routes(Arc::clone(&server)))
+        .merge(duplicates::routes(Arc::clone(&server)))
+        .merge(issue_dependencies::routes(Arc::clone(&server)))
+        .merge(comment_visibility::routes(Arc::clone(&server)))
         .merge(discussion_state::routes(Arc::clone(&server)))
         .merge(discussion_bulk::routes(Arc::clone(&server)))
         .merge(discussion_attachments::routes())
@@ -549,6 +572,7 @@ pub(crate) fn routes(server: Arc<Server>) -> axum::Router<Arc<Server>> {
         .merge(branches::routes())
         .merge(fork_sync::routes(Arc::clone(&server)))
         .merge(rulesets::routes())
+        .merge(organizations::properties::repository_routes())
         .merge(checks::routes(Arc::clone(&server)))
         .merge(contents::routes())
         .merge(issues::routes(Arc::clone(&server)))
@@ -567,11 +591,22 @@ pub(crate) fn routes(server: Arc<Server>) -> axum::Router<Arc<Server>> {
         )
         .route("/api/repos", axum::routing::get(catalog::list))
         .merge(catalog::creation_routes(Arc::clone(&server)))
+        .merge(repository_metadata::routes(Arc::clone(&server)))
         .merge(repository_name::routes(Arc::clone(&server)))
         .merge(repository_transfer::routes(Arc::clone(&server)))
         .route(
             "/api/repos/{owner}/{name}/archive",
             axum::routing::get(archive::download),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/lfs-content",
+            axum::routing::get(artifact_content::download)
+                .layer(Extension(artifact_content::Kind::Lfs)),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/crab-content",
+            axum::routing::get(artifact_content::download)
+                .layer(Extension(artifact_content::Kind::Crab)),
         )
         .route(
             "/api/repos/{owner}/{name}/{action}",

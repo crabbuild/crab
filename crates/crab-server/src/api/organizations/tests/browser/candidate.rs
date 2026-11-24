@@ -241,7 +241,7 @@ async fn native_browser_publishes_the_tested_merge_candidate_after_a_lost_reply(
     browser
         .run(&["open", &format!("{}/team/private/pull/1/checks", h.origin)])
         .await;
-    click("Continue to sign in").await;
+    browser.sign_in().await;
     click("Prepare merge candidate").await;
     browser.run(&["wait", "--text", "Candidate checks"]).await;
     browser

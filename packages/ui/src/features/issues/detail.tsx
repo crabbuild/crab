@@ -1,5 +1,12 @@
+import { EditHistory } from "@/components/discussion/conversation/edit-history";
+import {
+  ConversationLockControl,
+  useConversationLock,
+} from "@/components/discussion/conversation/lock";
 import { SubIssues } from "@/features/projects/discussion";
 import { Author } from "@/components/discussion/author";
+import { BlockedBadge } from "@/components/discussion/blocked-badge";
+import { IssueTypeBadge } from "@/components/discussion/issue-type-badge";
 import { Reactions } from "@/components/discussion/reactions";
 import { repoHref } from "@/lib/repository-route";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -22,6 +29,8 @@ import { Issue } from "./model";
 import { timestamp } from "@/components/discussion/time";
 import { Comments } from "./comments";
 import { PinIssue } from "./pins";
+import { IssueDependencies } from "./dependencies";
+import { IssueTypeControl } from "./type";
 
 function IssueBadge({ issue }: { issue: Issue }) {
   const { state, state_reason: reason } = issue;
@@ -56,6 +65,7 @@ export function IssueDetail({
   number: number;
   csrf: string;
 }) {
+  const conversationLock = useConversationLock();
   const resource = useRequest<Issue>(endpoint(repo, `issues/${number}`));
   const [issue, setIssue] = useState<Issue>();
   const [editing, setEditing] = useState(false);
@@ -82,7 +92,10 @@ export function IssueDetail({
           <Button
             variant="outline"
             size="sm"
-            onClick={resource.retry}
+            onClick={() => {
+              resource.retry();
+              conversationLock?.refresh();
+            }}
             aria-busy={resource.loading}
           >
             Refresh
@@ -102,6 +115,8 @@ export function IssueDetail({
       </div>
       <p className="issue-meta">
         <IssueBadge issue={current} />
+        {current.blocked && <BlockedBadge />}
+        {current.issue_type && <IssueTypeBadge type={current.issue_type} />}
         <span className="muted">
           <Author author={current.author} /> opened this issue{" "}
           {timestamp(current.created_at)}
@@ -112,6 +127,12 @@ export function IssueDetail({
           {resource.error}
         </p>
       )}
+      <ConversationLockControl
+        repo={repo}
+        target={`issues/${number}`}
+        csrf={csrf}
+        onChanged={() => setMetadataEpoch((value) => value + 1)}
+      />
       <div className="discussion-detail-layout">
         <div className="discussion-main">
           {editing ? (
@@ -136,7 +157,13 @@ export function IssueDetail({
                 <time dateTime={new Date(current.created_at).toISOString()}>
                   {timestamp(current.created_at)}
                 </time>
-                {current.version > 1 && <span className="muted">edited</span>}
+                {current.has_edit_history && (
+                  <EditHistory
+                    repo={repo}
+                    csrf={csrf}
+                    target={`issues/${number}`}
+                  />
+                )}
               </header>
               <DiscussionMarkdown>{current.body}</DiscussionMarkdown>
               <Reactions
@@ -172,6 +199,29 @@ export function IssueDetail({
             setMetadataEpoch((value) => value + 1);
           }}
         >
+          {!repo.archived &&
+          current.issue_types?.length &&
+          current.issue_type_version !== undefined ? (
+            <IssueTypeControl
+              key={`${current.issue_type_version}:${current.issue_type?.id ?? ""}:${current.issue_types.map((type) => type.id).join(",")}`}
+              repo={repo}
+              csrf={csrf}
+              number={number}
+              version={current.issue_type_version}
+              type={current.issue_type}
+              types={current.issue_types}
+              refresh={resource.retry}
+            />
+          ) : null}
+          <IssueDependencies
+            repo={repo}
+            csrf={csrf}
+            issue={number}
+            onChanged={() => {
+              setMetadataEpoch((value) => value + 1);
+              resource.retry();
+            }}
+          />
           <PinIssue
             repo={repo}
             csrf={csrf}
