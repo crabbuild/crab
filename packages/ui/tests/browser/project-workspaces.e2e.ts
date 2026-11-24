@@ -749,6 +749,9 @@ test("project history presents attributed field changes without overflowing a mo
   );
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`${home}/${projectId}`);
+  await expect(
+    page.getByRole("tablist", { name: "Project views" }).getByRole("tab"),
+  ).toHaveText(["Overview", "Board", "Table", "Roadmap", "History"]);
   await page.getByRole("tab", { name: "History", exact: true }).click();
   const history = page.getByRole("region", {
     name: "Project history",

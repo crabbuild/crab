@@ -413,7 +413,6 @@ function ProjectWorkspace({
         }
       >
         <TabsList variant="line" className="project-view-tabs">
-          <TabsTrigger value="history">History</TabsTrigger>
           {project.definition.views.map((view) => {
             const ViewIcon =
               view.layout === "board"
@@ -428,6 +427,7 @@ function ProjectWorkspace({
               </TabsTrigger>
             );
           })}
+          <TabsTrigger value="history">History</TabsTrigger>
         </TabsList>
         <TabsContent value="history">
           <ProjectHistory

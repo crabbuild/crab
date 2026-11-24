@@ -300,6 +300,12 @@ test("templates, linked issue and PR items, board moves, roadmap dates, saved se
 }) => {
   await setup(page);
   await create(page);
+  await expect(page.getByRole("tablist").getByRole("tab")).toHaveText([
+    "Table",
+    "Board",
+    "Roadmap",
+    "History",
+  ]);
   await page.getByRole("button", { name: "Add item", exact: true }).click();
   await page.getByLabel("Add", { exact: true }).click();
   await page

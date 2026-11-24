@@ -390,7 +390,6 @@ function PlanningWorkspace({
           aria-label="Project views"
         >
           <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="history">History</TabsTrigger>
           {project.definition.views.map((view) => {
             const Icon =
               view.layout === "board"
@@ -405,6 +404,7 @@ function PlanningWorkspace({
               </TabsTrigger>
             );
           })}
+          <TabsTrigger value="history">History</TabsTrigger>
         </TabsList>
         <TabsContent value="history">
           <ProjectHistory
