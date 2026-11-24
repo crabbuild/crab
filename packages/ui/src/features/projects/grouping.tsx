@@ -1,4 +1,5 @@
 import { useRef, useState, type DragEvent } from "react";
+import { PlusIcon } from "lucide-react";
 import { useMutation } from "@/components/discussion/mutations";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -136,6 +137,41 @@ export function applyProjectGroup(
   if (key) values[field] = key;
   else delete values[field];
   return { ...item, values };
+}
+
+export function AddToProjectGroup({
+  grouping,
+  value,
+  name,
+  onAdd,
+  onCreateIssue,
+}: {
+  grouping?: GroupBy;
+  value: string;
+  name: string;
+  onAdd?: AddProjectGroupItem;
+  onCreateIssue?: (typeId: string | null) => void;
+}) {
+  if (!grouping) return null;
+  const byType = grouping === "issue_type";
+  if (byType ? !onCreateIssue || value === "other" : !onAdd) return null;
+  const label = byType ? `Create issue in ${name}` : `Add work to ${name}`;
+  return (
+    <Button
+      type="button"
+      size="icon-sm"
+      variant="ghost"
+      aria-label={label}
+      title={label}
+      onClick={() => {
+        if (grouping === "issue_type")
+          onCreateIssue?.(value === "none" ? null : value);
+        else onAdd?.(grouping, value);
+      }}
+    >
+      <PlusIcon aria-hidden="true" />
+    </Button>
+  );
 }
 
 export function useProjectGroupMove(

@@ -202,6 +202,7 @@ async fn project(cell: &RepositoryCell) -> Uuid {
                     name: "Alice".into(),
                 },
                 can_write: true,
+                issue_type: None,
                 command: projects::Command::Create {
                     id: project,
                     name: "Canonical planning".into(),

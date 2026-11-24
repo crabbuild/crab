@@ -34,7 +34,7 @@ export type ProjectItemSelection =
   | Row
   | "new"
   | { draft: string }
-  | { initialItem: Item };
+  | { initialItem: Item; initialIssueType?: string | null };
 export interface View {
   id: string;
   name: string;
@@ -136,6 +136,7 @@ export type Command =
       version: number;
       item: Item;
       parent: number | null;
+      type_id?: string;
     }
   | { kind: "remove"; project: string; version: number; item: string }
   | { kind: "parent"; child: number; parent: number | null; version: number };

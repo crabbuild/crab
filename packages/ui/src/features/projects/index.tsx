@@ -328,12 +328,17 @@ function ProjectWorkspace({
     const draft = blankItem(status || project.definition.statuses[0]);
     setEditing({ initialItem: applyProjectGroup(draft, group, key) });
   };
-  const createInGroup =
-    editable && groupBy !== undefined && groupBy !== "issue_type";
-  const initialItem =
+  const addGroupIssue = (typeId: string | null) =>
+    setEditing({
+      initialItem: blankItem(status || project.definition.statuses[0]),
+      initialIssueType: typeId,
+    });
+  const createInGroup = editable && groupBy !== undefined;
+  const newItem =
     typeof editing === "object" && "initialItem" in editing
-      ? editing.initialItem
+      ? editing
       : undefined;
+  const initialItem = newItem?.initialItem;
   const editingRow =
     typeof editing === "object" && "item" in editing ? editing : undefined;
   const draftItem =
@@ -523,6 +528,7 @@ function ProjectWorkspace({
                       editable={editable && can_manage}
                       onEdit={setEditing}
                       onAddGroupItem={addGroupItem}
+                      onAddGroupIssue={addGroupIssue}
                       groupBy={groupBy}
                       onChangeItem={changeItem}
                       showIssueType={selected.show_issue_type}
@@ -536,6 +542,7 @@ function ProjectWorkspace({
                       editable={editable && can_manage}
                       onEdit={setEditing}
                       onAddGroupItem={addGroupItem}
+                      onAddGroupIssue={addGroupIssue}
                       showIssueType={selected.show_issue_type}
                       onIssueTypeChange={onIssueTypeChange}
                     />
@@ -546,6 +553,7 @@ function ProjectWorkspace({
                       editable={editable && can_manage}
                       onEdit={setEditing}
                       onAddGroupItem={addGroupItem}
+                      onAddGroupIssue={addGroupIssue}
                       groupBy={groupBy}
                       onChangeItem={changeItem}
                       showIssueType={selected.show_issue_type}
@@ -639,6 +647,8 @@ function ProjectWorkspace({
           row={editingRow}
           draftItem={draftItem}
           initialItem={initialItem}
+          initialIssueType={newItem?.initialIssueType}
+          typeChoices={resource.data?.page.issue_types ?? typeChoices}
           onClose={() => setEditing(undefined)}
         />
       )}

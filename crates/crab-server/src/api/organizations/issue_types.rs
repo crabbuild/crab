@@ -94,6 +94,26 @@ pub(in crate::api) async fn active(server: &Server, organization: Option<Uuid>) 
         .output)
 }
 
+pub(in crate::api) async fn active_selection(
+    server: &Server,
+    repo: &Repository,
+    id: Uuid,
+) -> Result<Option<Selection>> {
+    let Some(organization) = repo.organization else {
+        return Ok(None);
+    };
+    Ok(active(server, Some(organization))
+        .await?
+        .definitions
+        .iter()
+        .any(|definition| definition.id == id)
+        .then_some(Selection {
+            id,
+            organization,
+            ownership_epoch: repo.ownership_epoch,
+        }))
+}
+
 pub(in crate::api) fn visible<'a>(
     repo: &Repository,
     selection: Option<Selection>,
@@ -154,15 +174,14 @@ pub(in crate::api) async fn assign(
             if !membership.principal.can_triage(repo.id) {
                 return Err(Error::NotFound);
             }
-            if let Some(id) = input.type_id
-                && !active(&server, Some(organization))
-                    .await?
-                    .definitions
-                    .iter()
-                    .any(|definition| definition.id == id)
-            {
-                return Err(Error::Invalid("Choose an enabled issue type"));
-            }
+            let selection = match input.type_id {
+                Some(id) => Some(
+                    active_selection(&server, &repo, id)
+                        .await?
+                        .ok_or(Error::Invalid("Choose an enabled issue type"))?,
+                ),
+                None => None,
+            };
             app::account(&membership.principal)?;
             if cancel.is_cancelled() {
                 return Err(Error::MergeBusy);
@@ -177,11 +196,7 @@ pub(in crate::api) async fn assign(
                         issue_type::SetInput {
                             number,
                             expected_version: input.expected_version,
-                            selection: input.type_id.map(|id| Selection {
-                                id,
-                                organization,
-                                ownership_epoch: repo.ownership_epoch,
-                            }),
+                            selection,
                         },
                     )
                     .await,

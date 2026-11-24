@@ -2805,6 +2805,13 @@ Choose **Add work to** on a status or custom-field group to start an item
 with that value. The editor keeps the prefilled value when you switch work
 sources. Unfinished items started this way have separate recovery drafts.
 
+In a repository Project, **Create issue in** on an issue-type group opens
+the new issue editor with the type selected. The issue, its type, and its
+Project membership save together. This action also supports **No type**.
+If a type is disabled before submission, the editor can select an enabled
+type and keep the draft. The repository Project `create_issue` command
+accepts an optional `type_id` with the enabled organization type UUID.
+
 Use `group_by=status`, `group_by=issue_type`, or `group_by=field:<UUID>` with
 either Project item endpoint to receive `group_counts`. Issue-type groupings
 include `issue_type_group` per item and carry `type_cursor` on continuation.
