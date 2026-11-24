@@ -11,14 +11,16 @@ import { IssueTypeControl } from "@/features/issues/type";
 import type { Repository } from "@/lib/api";
 import type { IssueType } from "@/lib/contracts";
 import { useProjectCommands } from "./commands";
-import type { Row } from "./model";
+import type { Layout, Row } from "./model";
 
-export function ProjectBoardGrouping({
+export function ProjectGrouping({
+  layout,
   grouped,
   onChange,
-  label = "Group board by",
+  label,
   id,
 }: {
+  layout: Layout;
   grouped: boolean;
   onChange: (grouped: boolean) => void;
   label?: string;
@@ -27,9 +29,12 @@ export function ProjectBoardGrouping({
   return (
     <FieldSelect
       id={id}
-      label={label}
-      value={grouped ? "type" : "status"}
-      options={{ status: "Workflow status", type: "Issue type" }}
+      label={label ?? (layout === "board" ? "Group board by" : "Group by")}
+      value={grouped ? "type" : "default"}
+      options={{
+        default: layout === "board" ? "Workflow status" : "No grouping",
+        type: "Issue type",
+      }}
       onValueChange={(value) => onChange(value === "type")}
     />
   );

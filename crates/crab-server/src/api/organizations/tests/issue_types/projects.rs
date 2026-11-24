@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::http::browser::Browser;
 
 async fn project_with_issue(
     h: &Harness,
@@ -204,8 +205,6 @@ async fn project_issue_type_fields_follow_source_permissions_and_assignment() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires agent-browser and built embedded UI; uses real OIDC/native Cells"]
 async fn native_browser_edits_project_issue_type_field() {
-    use crate::test_support::http::browser::Browser;
-
     let (h, alice, _, repo, key) = fixture().await;
     let id = project_with_issue(
         &h,
@@ -483,8 +482,6 @@ async fn project_type_filter_counts_matching_rows_across_repositories_and_pages(
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires agent-browser and built embedded UI; uses real OIDC/native Cells"]
 async fn native_browser_moves_issues_between_type_columns() {
-    use crate::test_support::http::browser::Browser;
-
     let (h, alice, _, repo, key) = fixture().await;
     let id = project_with_issue(
         &h,
@@ -522,32 +519,12 @@ async fn native_browser_moves_issues_between_type_columns() {
             r#"!document.querySelector('[role=dialog]') && !!document.querySelector('.project-board-column[aria-label="No type"] article[draggable=true]')"#,
         ])
         .await;
-    let points = browser
-        .run(&[
-            "eval",
-            r#"[
-                document.querySelector('.project-board-column[aria-label="No type"] article'),
-                document.querySelector('.project-board-column[aria-label="Feature"] > header')
-            ].map(element => {
-                const { left, top, height } = element.getBoundingClientRect();
-                return [Math.round(left + 24), Math.round(top + height / 2)];
-            })"#,
-        ])
-        .await;
-    let [[source_x, source_y], [target_x, target_y]] =
-        serde_json::from_str::<[[i32; 2]; 2]>(&points).unwrap();
-    let move_to = async |x: i32, y: i32| {
-        browser
-            .run(&["mouse", "move", &x.to_string(), &y.to_string()])
-            .await;
-    };
-    move_to(source_x, source_y).await;
-    browser.run(&["mouse", "down"]).await;
-    move_to(source_x + 16, source_y).await;
-    move_to(target_x, target_y).await;
-    // The browser emits dragenter on arrival and needs another move for dragover.
-    move_to(target_x + 1, target_y).await;
-    browser.run(&["mouse", "up"]).await;
+    drag_between_groups(
+        &browser,
+        ".project-board-column[aria-label='No type'] article",
+        ".project-board-column[aria-label='Feature'] > header",
+    )
+    .await;
     browser
         .run(&[
             "wait",
@@ -577,4 +554,141 @@ async fn native_browser_moves_issues_between_type_columns() {
             ".project-board-column[aria-label='No type'] article",
         ])
         .await;
+}
+
+async fn drag_between_groups(browser: &Browser, source: &str, target: &str) {
+    let selectors = serde_json::to_string(&[source, target]).unwrap();
+    let expression = format!(
+        r#"{selectors}.map(selector => {{
+            const element = document.querySelector(selector);
+            const {{ left, top, height }} = element.getBoundingClientRect();
+            const x = Math.round(left + 24), y = Math.round(top + height / 2);
+            if (!element.contains(document.elementFromPoint(x, y))) {{
+                throw new Error("Drag point is outside its element: " + selector);
+            }}
+            return [x, y];
+        }})"#,
+    );
+    let points = browser.run(&["eval", &expression]).await;
+    let [[source_x, source_y], [target_x, target_y]] =
+        serde_json::from_str::<[[i32; 2]; 2]>(&points).unwrap();
+    let move_to = async |x: i32, y: i32| {
+        browser
+            .run(&["mouse", "move", &x.to_string(), &y.to_string()])
+            .await;
+    };
+    move_to(source_x, source_y).await;
+    browser.run(&["mouse", "down"]).await;
+    move_to(source_x + 16, source_y).await;
+    move_to(target_x, target_y).await;
+    // The browser emits dragenter on arrival and needs another move for dragover.
+    move_to(target_x + 1, target_y).await;
+    browser.run(&["mouse", "up"]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires agent-browser and built embedded UI; uses real OIDC/native Cells"]
+async fn native_browser_groups_project_tables_and_roadmaps_by_issue_type() {
+    let (h, alice, org, repo, key) = fixture().await;
+    let root = format!("{org}/projects");
+    let id = project_with_issue(&h, &alice, &root, repo, true, false).await;
+    let items = format!("{root}/{id}/items");
+    let row = h.json(&items, &alice).await["page"]["items"][0].clone();
+    let mut scheduled = row["item"].clone();
+    scheduled["start"] = json!("2026-01-15");
+    scheduled["end"] = json!("2026-02-01");
+    let saved: Value = h
+        .write(
+            Method::POST,
+            &format!("{root}/commands"),
+            &alice,
+            json!({"request_id":Uuid::now_v7(),"command":{
+                "kind":"item","project":id,"version":row["version"],"repository":repo,"item":scheduled
+            }}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(saved["outcome"], "applied", "{saved}");
+
+    let browser = Browser::new("project-type-groups");
+    let organization = org.rsplit('/').next().unwrap();
+    let project = format!("{}/-/organizations/{organization}/projects/{id}", h.origin);
+    let click = async |role: &str, name: &str| {
+        browser
+            .run(&["find", "role", role, "click", "--name", name, "--exact"])
+            .await;
+    };
+    browser.run(&["open", &project]).await;
+    browser.sign_in().await;
+    browser.run(&["set", "viewport", "1280", "900"]).await;
+    browser.run(&["wait", "table.project-table"]).await;
+    click("button", "Settings").await;
+    browser
+        .run(&["wait", "--text", "Save project settings"])
+        .await;
+    click("tab", "Views").await;
+    for name in ["Group by for Table", "Group by for Roadmap"] {
+        click("combobox", name).await;
+        click("option", "Issue type").await;
+    }
+    click("button", "Save project settings").await;
+    browser
+        .run(&[
+            "wait",
+            "--fn",
+            r#"!document.querySelector('[role=dialog]') && !!document.querySelector('.project-table tbody[aria-label="No type"] tr[draggable=true]')"#,
+        ])
+        .await;
+    drag_between_groups(
+        &browser,
+        ".project-table tbody[aria-label='No type'] tr[draggable=true]",
+        ".project-table tbody[aria-label='Feature'] th",
+    )
+    .await;
+    browser
+        .run(&[
+            "wait",
+            ".project-table tbody[aria-label='Feature'] tr[draggable=true]",
+        ])
+        .await;
+    let issue = format!("/api/repos/{key}/issues/1");
+    assert_eq!(
+        h.json(&issue, &alice).await["issue_type"]["name"],
+        "Feature"
+    );
+
+    browser.run(&["open", &project]).await;
+    browser
+        .run(&[
+            "wait",
+            ".project-table tbody[aria-label='Feature'] tr[draggable=true]",
+        ])
+        .await;
+    click("tab", "Roadmap").await;
+    browser
+        .run(&[
+            "wait",
+            ".project-roadmap [role=rowgroup][aria-label='Feature'] .project-roadmap-row",
+        ])
+        .await;
+    click("button", "Change issue type for Classify this report").await;
+    click("combobox", "Issue type").await;
+    click("option", "No type").await;
+    click("button", "Save issue type").await;
+    browser
+        .run(&[
+            "wait",
+            ".project-roadmap [role=rowgroup][aria-label='No type'] .project-roadmap-row",
+        ])
+        .await;
+    click("combobox", "Group by").await;
+    click("option", "No grouping").await;
+    browser.run(&["wait", "--fn", "!document.querySelector('.project-roadmap [role=rowgroup]') && !!document.querySelector('.project-roadmap-row')"]).await;
+    assert!(h.json(&issue, &alice).await["issue_type"].is_null());
+    let after = h.json(&items, &alice).await;
+    assert_eq!(after["page"]["items"][0]["item"], scheduled);
 }

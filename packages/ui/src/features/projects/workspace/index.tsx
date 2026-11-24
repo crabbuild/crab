@@ -30,7 +30,7 @@ import { DraftRecovery } from "../drafts";
 import { checkpointDraft, itemDraft, readDraft } from "../draft-storage";
 import { projectEndpoint, type ItemPage, type Row } from "../model";
 import { ProjectSettings } from "../settings";
-import { ProjectBoardGrouping, ProjectTypeFilter } from "../issue-type";
+import { ProjectGrouping, ProjectTypeFilter } from "../issue-type";
 import { ProjectBoard, ProjectTable, ProjectRoadmap } from "../views";
 import { FieldSelect } from "@/components/ui/field-select";
 import { ProjectProperties } from "./forms";
@@ -162,11 +162,9 @@ function PlanningWorkspace({
     requestedLayout === "roadmap"
       ? requestedLayout
       : selected.layout;
-  const grouped =
-    layout === "board" &&
-    (url.searchParams.has("group_by_type")
-      ? url.searchParams.get("group_by_type") === "true"
-      : !!selected.group_by_type);
+  const grouped = url.searchParams.has("group_by_type")
+    ? url.searchParams.get("group_by_type") === "true"
+    : !!selected.group_by_type;
   const status = url.searchParams.get("status") ?? selected.status ?? "";
   const issueType =
     url.searchParams.get("issue_type") ?? selected.issue_type_filter ?? "";
@@ -355,7 +353,7 @@ function PlanningWorkspace({
           <div className="workspace-project-content">
             <div className="workspace-project-work">
               {resource.error &&
-                (after || status || repository || issueType) && (
+                (after || status || repository || issueType || grouped) && (
                   <Button
                     variant="outline"
                     onClick={() =>
@@ -363,6 +361,7 @@ function PlanningWorkspace({
                         status: "",
                         repository: undefined,
                         issue_type: "",
+                        group_by_type: "false",
                       })
                     }
                   >
@@ -476,14 +475,13 @@ function PlanningWorkspace({
                           value={issueType}
                           onChange={(value) => filters({ issue_type: value })}
                         />
-                        {layout === "board" && (
-                          <ProjectBoardGrouping
-                            grouped={grouped}
-                            onChange={(value) =>
-                              filters({ group_by_type: String(value) })
-                            }
-                          />
-                        )}
+                        <ProjectGrouping
+                          layout={layout}
+                          grouped={grouped}
+                          onChange={(value) =>
+                            filters({ group_by_type: String(value) })
+                          }
+                        />
                         <span className="text-sm text-muted-foreground">
                           {page.total.toLocaleString()}{" "}
                           {page.total === 1 ? "item" : "items"}

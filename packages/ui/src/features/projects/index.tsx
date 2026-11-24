@@ -32,7 +32,7 @@ import { DiscussionMarkdown } from "@/components/discussion/markdown";
 import { CreateProject } from "./create";
 import { ItemEditor } from "./item";
 import { ProjectSettings } from "./settings";
-import { ProjectBoardGrouping, ProjectTypeFilter } from "./issue-type";
+import { ProjectGrouping, ProjectTypeFilter } from "./issue-type";
 import type { IssueType } from "@/lib/contracts";
 import { ProjectBoard, ProjectTable, ProjectRoadmap } from "./views";
 import { useProjectCommands } from "./commands";
@@ -227,7 +227,6 @@ function ProjectWorkspace({
   const query = url.searchParams.get("q") ?? selected.query;
   const status = url.searchParams.get("status") ?? selected.status ?? "";
   const grouped =
-    selected.layout === "board" &&
     !!repo.organization_id &&
     (url.searchParams.has("group_by_type")
       ? url.searchParams.get("group_by_type") === "true"
@@ -283,6 +282,10 @@ function ProjectWorkspace({
   const manager = resource.data?.can_manage ?? canManage;
   const editable =
     manager && !repo.archived && !project.archived && !commands.locked;
+  const onIssueTypeChange =
+    repo.archived || project.archived
+      ? undefined
+      : () => (after ? filters({}) : resource.retry());
   async function changeStatus(row: Row, status: string) {
     if (!commands.account) return;
     const scope = { target: { repo }, project: project.id, item: row.item.id };
@@ -452,8 +455,9 @@ function ProjectWorkspace({
                 onChange={(value) => filters({ issue_type: value })}
               />
             )}
-            {repo.organization_id && selected.layout === "board" && (
-              <ProjectBoardGrouping
+            {repo.organization_id && (
+              <ProjectGrouping
+                layout={selected.layout}
                 grouped={grouped}
                 onChange={(value) => filters({ group_by_type: String(value) })}
               />
@@ -499,11 +503,7 @@ function ProjectWorkspace({
                       onEdit={setEditing}
                       onStatus={changeStatus}
                       showIssueType={selected.show_issue_type}
-                      onIssueTypeChange={
-                        repo.archived || project.archived
-                          ? undefined
-                          : () => (after ? filters({}) : resource.retry())
-                      }
+                      onIssueTypeChange={onIssueTypeChange}
                     />
                   ) : selected.layout === "roadmap" ? (
                     <ProjectRoadmap
@@ -512,6 +512,7 @@ function ProjectWorkspace({
                       editable={editable && can_manage}
                       onEdit={setEditing}
                       showIssueType={selected.show_issue_type}
+                      onIssueTypeChange={onIssueTypeChange}
                     />
                   ) : (
                     <ProjectTable
@@ -521,11 +522,7 @@ function ProjectWorkspace({
                       onEdit={setEditing}
                       onStatus={changeStatus}
                       showIssueType={selected.show_issue_type}
-                      onIssueTypeChange={
-                        repo.archived || project.archived
-                          ? undefined
-                          : () => (after ? filters({}) : resource.retry())
-                      }
+                      onIssueTypeChange={onIssueTypeChange}
                     />
                   )
                 ) : (

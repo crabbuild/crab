@@ -24,7 +24,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useProjectCommands, CommandError } from "./commands";
 import type { Project, Field as ProjectField, Layout } from "./model";
 import { useProjectDraft } from "./drafts";
-import { ProjectBoardGrouping, ProjectTypeFilter } from "./issue-type";
+import { ProjectGrouping, ProjectTypeFilter } from "./issue-type";
 import type { IssueType } from "@/lib/contracts";
 export function ProjectSettings({
   target,
@@ -486,30 +486,29 @@ export function ProjectSettings({
                       )}
                       {issueTypes && (
                         <>
-                          {view.layout === "board" && (
-                            <Field>
-                              <FieldLabel
-                                htmlFor={`${id}-board-group-${view.id}`}
-                              >
-                                Board columns
-                              </FieldLabel>
-                              <ProjectBoardGrouping
-                                id={`${id}-board-group-${view.id}`}
-                                label={`Board columns for ${view.name}`}
-                                grouped={view.group_by_type ?? false}
-                                onChange={(value) =>
-                                  setDraft({
-                                    ...draft,
-                                    views: draft.views.map((current, n) =>
-                                      n === i
-                                        ? { ...current, group_by_type: value }
-                                        : current,
-                                    ),
-                                  })
-                                }
-                              />
-                            </Field>
-                          )}
+                          <Field>
+                            <FieldLabel htmlFor={`${id}-group-${view.id}`}>
+                              {view.layout === "board"
+                                ? "Board columns"
+                                : "Group by"}
+                            </FieldLabel>
+                            <ProjectGrouping
+                              id={`${id}-group-${view.id}`}
+                              layout={view.layout}
+                              label={`${view.layout === "board" ? "Board columns" : "Group by"} for ${view.name}`}
+                              grouped={view.group_by_type ?? false}
+                              onChange={(value) =>
+                                setDraft({
+                                  ...draft,
+                                  views: draft.views.map((current, n) =>
+                                    n === i
+                                      ? { ...current, group_by_type: value }
+                                      : current,
+                                  ),
+                                })
+                              }
+                            />
+                          </Field>
                           <Field>
                             <FieldLabel
                               htmlFor={`${id}-issue-type-filter-${view.id}`}
