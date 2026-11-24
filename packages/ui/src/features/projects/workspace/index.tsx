@@ -433,7 +433,7 @@ function PlanningWorkspace({
                   </Button>
                 )}
               <Result state={resource}>
-                {({ page }) =>
+                {({ page, can_manage: canManageItems }) =>
                   overview ? (
                     <section className="workspace-project-overview">
                       <h2>About this project</h2>
@@ -559,12 +559,16 @@ function PlanningWorkspace({
                           {page.total === 1 ? "item" : "items"}
                         </span>
                       </div>
-                      {page.items.length || createInGroup ? (
+                      {layout === "board" ||
+                      page.items.length ||
+                      createInGroup ? (
                         <View
                           page={page}
-                          editable={editable}
+                          viewId={selected.id}
+                          editable={editable && canManageItems}
                           bulkTarget={
                             layout !== "roadmap" &&
+                            canManageItems &&
                             detail.can_manage &&
                             !project.archived
                               ? { organization }

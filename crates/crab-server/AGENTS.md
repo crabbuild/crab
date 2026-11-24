@@ -532,6 +532,9 @@ boundary. Native and HTTP tests stay with those owners. Private preparation
 reuses `server/management/lifecycle.rs` and `cli/lifecycle.rs` through
 `cells prepare-projects`. The browser owner is `packages/ui/src/features/projects/`;
 its account/repository-bound command provider stays above route loading.
+`cells/repository/projects/grouping.rs` owns advisory board column limits for
+both Project scopes. Changes use the Project revision, submission receipt, and
+history.
 
 `cells/organization/projects/` owns organization project definitions, planning
 properties, UUID-bound repository links/items, creator membership incarnations

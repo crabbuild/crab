@@ -299,6 +299,28 @@ async function fixture(page: Page, movedIssue = false) {
               definition: command.definition,
               archived: command.archived,
             };
+          if (command.kind === "column_limit") {
+            const { view, group_by, value, limit } = command.column;
+            project = {
+              ...project,
+              definition: {
+                ...project.definition,
+                views: project.definition.views.map((saved) => {
+                  if (saved.id !== view) return saved;
+                  const columns = { ...saved.column_limits?.[group_by] };
+                  if (limit === null) delete columns[value];
+                  else columns[value] = limit;
+                  return {
+                    ...saved,
+                    column_limits: {
+                      ...saved.column_limits,
+                      [group_by]: columns,
+                    },
+                  };
+                }),
+              },
+            };
+          }
           outcome = {
             outcome: "applied",
             project: project.id,
@@ -1228,6 +1250,50 @@ test("the board move menu clears a custom column with the keyboard on mobile", a
     "Todo",
     "In progress",
   ]);
+});
+
+test("board column limits recover the saved write and stay with their grouping", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  state.addStreamField();
+  state.addDraft("Launch API");
+  state.addDraft("Launch client");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${home}/${projectId}`);
+  await selectDarkTheme(page);
+  await page
+    .getByRole("button", { name: "Column limit for Todo" })
+    .press("Enter");
+  const editor = page.getByRole("dialog", { name: "Column limit for Todo" });
+  await editor.getByRole("spinbutton", { name: "Item limit" }).fill("1");
+  await expectNoAccessibilityViolations(page);
+  state.loseNext();
+  await editor.getByRole("button", { name: "Save limit" }).click();
+  await expect(
+    page.getByRole("button", { name: "Retry submission" }),
+  ).toBeVisible();
+  await page.reload();
+  await page.getByRole("button", { name: "Retry submission" }).click();
+  const todo = page.getByRole("region", { name: "Todo", exact: true });
+  await expect(todo.getByText("2 / 1", { exact: true })).toBeVisible();
+  await expect(todo.getByText("2 items, limit 1, over limit")).toHaveCount(1);
+  expect(state.submissions[1]).toEqual(state.submissions[0]);
+  expect(state.submissions[0].command).toMatchObject({
+    kind: "column_limit",
+    column: { view: views[0].id, group_by: "status", value: "Todo", limit: 1 },
+  });
+  await page.screenshot({
+    path: test.info().outputPath("board-column-limit-mobile-dark.png"),
+  });
+  const grouping = page.getByLabel("Group board by", { exact: true });
+  await chooseSelectOption(grouping, { label: "Workstream" });
+  await expect(
+    page.getByRole("region", { name: "No value", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("2 / 1", { exact: true })).toHaveCount(0);
+  await chooseSelectOption(grouping, { label: "Workflow status" });
+  await expect(todo.getByText("2 / 1", { exact: true })).toBeVisible();
 });
 
 test("a failed recovery checkpoint prevents the new native request", async ({

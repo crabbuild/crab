@@ -2987,6 +2987,21 @@ from different columns. The move uses one bulk Project submission and offers
 **Undo** after saving. Cards already in the destination keep their revisions
 and still participate in the batch's conflict checks.
 
+In a saved board view, open a column's menu and enter an **Item limit**.
+The header shows the matching item count and the limit, with a warning when
+the count exceeds the limit. A limit is advisory, so moves and additions can
+still put work into the column. Each saved view and grouping has its own
+limits. Project managers can change or remove them.
+
+Both Project command endpoints accept `column_limit` with `project`,
+`version`, and `column: {view, group_by, value, limit}`. The limit is a positive
+32-bit integer. Use `null` to remove it. Saved board views expose the optional
+`column_limits` map keyed by grouping and column value. Group values are status
+names, issue-type UUIDs or `none`/`other`, or single-select option names (the
+empty string means **No value**). Older records without this field load with
+no limits. Update all server replicas before first saving a limit so each
+replica can read the updated view definition.
+
 Choose **Add work to** on a status or custom-field group to start an item
 with that value. The editor keeps the prefilled value when you switch work
 sources. Unfinished items started this way have separate recovery drafts.

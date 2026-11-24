@@ -49,6 +49,74 @@ async fn bulk_project(h: &Harness, actor: &str) -> (Uuid, [Uuid; 2]) {
 }
 
 #[tokio::test]
+async fn column_limits_are_versioned_board_settings() {
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    let (project, _) = bulk_project(&h, &alice).await;
+    let items = format!("{ROOT}/projects/{project}/items");
+    let original = h.json(&items, &alice).await;
+    let version = &original["page"]["project"]["version"];
+    let view = &original["page"]["project"]["definition"]["views"][1];
+    let payload = |view: &Value, value: &str, limit: Value| {
+        json!({"request_id":Uuid::now_v7(),"command":{
+            "kind":"column_limit","project":project,"version":version,
+            "column":{"view":view,"group_by":"status","value":value,"limit":limit}
+        }})
+    };
+    let path = format!("{ROOT}/projects/commands");
+    let zero = h
+        .write(
+            Method::POST,
+            &path,
+            &alice,
+            payload(&view["id"], "Done", json!(0)),
+        )
+        .await;
+    assert!(zero.status().is_client_error());
+    assert_eq!(zero.headers()["x-crab-write-outcome"], "rejected");
+    let table = &original["page"]["project"]["definition"]["views"][0]["id"];
+    for invalid in [
+        payload(table, "Done", json!(1)),
+        payload(&view["id"], "Unknown", json!(1)),
+    ] {
+        assert_eq!(
+            project_command(&h, &alice, invalid).await["outcome"],
+            "rejected"
+        );
+    }
+    let body = payload(&view["id"], "Done", json!(1));
+    let saved = project_command(&h, &alice, body.clone()).await;
+    assert_eq!(saved["outcome"], "applied");
+    assert_eq!(project_command(&h, &alice, body).await, saved);
+    assert_eq!(
+        project_command(&h, &alice, payload(&view["id"], "Done", json!(2))).await["outcome"],
+        "rejected"
+    );
+
+    let current = h.json(&items, &alice).await;
+    let mut definition = current["page"]["project"]["definition"].clone();
+    assert_eq!(
+        definition["views"][1]["column_limits"],
+        json!({"status":{"Done":1}})
+    );
+    assert!(definition["views"][0].get("column_limits").is_none());
+    definition["statuses"] = json!(["Todo", "In progress"]);
+    let edit = json!({"request_id":Uuid::now_v7(),"command":{
+        "kind":"edit","project":project,"version":saved["version"],"definition":definition,"archived":false
+    }});
+    assert_eq!(
+        project_command(&h, &alice, edit).await["outcome"],
+        "applied"
+    );
+    assert!(
+        h.json(&items, &alice).await["page"]["project"]["definition"]["views"][1]
+            .get("column_limits")
+            .is_none()
+    );
+    h.close().await;
+}
+
+#[tokio::test]
 async fn bulk_project_fields_apply_once_and_roll_back_on_a_stale_item() {
     let h = Harness::new(false).await;
     let alice = h.login().await;
@@ -122,12 +190,13 @@ async fn bulk_project_fields_apply_once_and_roll_back_on_a_stale_item() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires agent-browser and the built embedded UI"]
-async fn browser_bulk_edits_moves_and_undoes_project_items() {
+async fn browser_bulk_edits_moves_and_undoes_project_items_with_column_limits() {
     use crate::test_support::http::browser::Browser;
     let h = Harness::new(false).await;
     let alice = h.login().await;
     let (project, _) = bulk_project(&h, &alice).await;
     let browser = Browser::new("project-bulk");
+    browser.run(&["set", "viewport", "1440", "1000"]).await;
     browser
         .run(&[
             "open",
@@ -208,6 +277,23 @@ async fn browser_bulk_edits_moves_and_undoes_project_items() {
             "[role=checkbox][aria-label='Select all editable cards in Todo']",
         ])
         .await;
+    let column_limit = "button[aria-label='Column limit for Done']";
+    browser.run(&["focus", column_limit]).await;
+    browser.run(&["press", "Enter"]).await;
+    browser.run(&["wait", "input[name=limit]"]).await;
+    browser.run(&["fill", "input[name=limit]", "1"]).await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Save limit",
+            "--exact",
+        ])
+        .await;
+    browser.run(&["wait", "--text", "0 / 1"]).await;
     browser
         .run(&[
             "find",
@@ -228,6 +314,12 @@ async fn browser_bulk_edits_moves_and_undoes_project_items() {
         ])
         .await;
     browser.run(&["wait", "--fn", "document.querySelectorAll(\".project-board-column[aria-label='Done'] .project-board-card\").length === 2"]).await;
+    browser
+        .run(&[
+            "wait",
+            ".project-board-column[aria-label='Done'] [data-slot=badge][data-variant=warning]",
+        ])
+        .await;
     let moved = h.json(&route, &alice).await;
     assert!(
         moved["page"]["items"]
@@ -250,6 +342,22 @@ async fn browser_bulk_edits_moves_and_undoes_project_items() {
             .iter()
             .all(|row| row["version"] == 5 && row["item"]["status"] == "Todo")
     );
+    browser.run(&["reload"]).await;
+    browser.run(&["wait", "--text", "0 / 1"]).await;
+    browser.run(&["focus", column_limit]).await;
+    browser.run(&["press", "Enter"]).await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Remove limit",
+            "--exact",
+        ])
+        .await;
+    browser.run(&["wait", "--fn", "document.querySelector(\".project-board-column[aria-label='Done'] header [data-slot=badge]\")?.textContent.trim() === '0'"]).await;
     drop(browser);
     h.close().await;
 }

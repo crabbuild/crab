@@ -45,6 +45,7 @@ export interface View {
   show_issue_type?: boolean;
   issue_type_filter?: string | null;
   group_by?: GroupBy;
+  column_limits?: Partial<Record<GroupBy, Record<string, number>>>;
 }
 export interface Field {
   id: string;
@@ -150,6 +151,17 @@ export type Command =
       version: number;
       definition: Definition;
       archived: boolean;
+    }
+  | {
+      kind: "column_limit";
+      project: string;
+      version: number;
+      column: {
+        view: string;
+        group_by: GroupBy;
+        value: string;
+        limit: number | null;
+      };
     }
   | { kind: "item"; project: string; version: number; item: Item }
   | {

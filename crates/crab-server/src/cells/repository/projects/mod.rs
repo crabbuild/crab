@@ -7,7 +7,7 @@ use crate::cells::{
     Error, Result,
     application::{Mutation, MutationResult, Read, SqlValue},
 };
-use grouping::GroupBy;
+use grouping::{ColumnLimits, GroupBy};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
@@ -58,6 +58,8 @@ pub(crate) struct View {
     pub issue_type_filter: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_by: Option<GroupBy>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    column_limits: ColumnLimits,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -127,6 +129,17 @@ fn names_valid(names: &[String], maximum: usize) -> bool {
         && names.iter().collect::<BTreeSet<_>>().len() == names.len()
 }
 impl Definition {
+    pub(crate) fn prune_board_limits(&mut self) {
+        // Drop limits for removed workflow values or fields so reusing a name
+        // later does not restore a warning for a different column.
+        for view in &mut self.views {
+            view.column_limits.retain(|group, columns| {
+                columns.retain(|value, _| group.board_column(value, &self.statuses, &self.fields));
+                view.layout == Layout::Board && !columns.is_empty()
+            });
+        }
+    }
+
     pub(crate) fn valid(&self) -> bool {
         serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= 64 * 1024)
             && text_valid(&self.name, 100, true)
@@ -166,6 +179,13 @@ impl Definition {
                     && v.status.as_ref().is_none_or(|s| self.statuses.contains(s))
                     && v.issue_type_filter.as_deref().is_none_or(|value| {
                         super::issues::issue_type::search::Filter::parse(value).is_ok()
+                    })
+                    && v.column_limits.iter().all(|(group, columns)| {
+                        v.layout == Layout::Board
+                            && !columns.is_empty()
+                            && columns.keys().all(|value| {
+                                group.board_column(value, &self.statuses, &self.fields)
+                            })
                     })
                     && match v.group_by {
                         Some(GroupBy::Field(id)) => self.fields.iter().any(|field| {

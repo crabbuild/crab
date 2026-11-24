@@ -26,6 +26,11 @@ pub(crate) enum Command {
         definition: Definition,
         archived: bool,
     },
+    ColumnLimit {
+        project: Uuid,
+        version: u64,
+        column: grouping::ColumnLimit,
+    },
     CreateIssue {
         project: Uuid,
         version: u64,
@@ -293,6 +298,9 @@ fn apply(
         Command::Edit {
             project, version, ..
         }
+        | Command::ColumnLimit {
+            project, version, ..
+        }
         | Command::Item {
             project, version, ..
         }
@@ -307,7 +315,9 @@ fn apply(
     let Some(mut project) = load(context, project_id)? else {
         return Ok(rejected("Project not found"));
     };
-    if matches!(command, Command::Edit { .. }) && project.version != version {
+    if matches!(command, Command::Edit { .. } | Command::ColumnLimit { .. })
+        && project.version != version
+    {
         return Ok(rejected(
             "This project changed; refresh and review before saving",
         ));
@@ -321,6 +331,8 @@ fn apply(
             archived,
             ..
         } => {
+            let mut definition = definition.clone();
+            definition.prune_board_limits();
             if !definition.valid() {
                 return Ok(rejected("Invalid project settings, fields, or views"));
             }
@@ -351,8 +363,16 @@ fn apply(
                     "Existing fields and their types must be retained while the project contains items",
                 ));
             }
-            project.definition = definition.clone();
+            project.definition = definition;
             project.archived = *archived;
+        }
+        Command::ColumnLimit { column, .. } => {
+            if project.archived {
+                return Ok(rejected("Archived projects are read-only"));
+            }
+            if let Err(reason) = column.apply(&mut project.definition) {
+                return Ok(rejected(reason));
+            }
         }
         Command::Item { item: entry, .. } | Command::CreateIssue { item: entry, .. } => {
             if project.archived {
@@ -529,7 +549,7 @@ fn apply(
     project.version = super::super::collaboration::next_version(project.version)?;
     project.updated_at = super::super::timestamp(context.now_ms())?;
     save(context, &project)?;
-    if matches!(command, Command::Edit { .. }) {
+    if matches!(command, Command::Edit { .. } | Command::ColumnLimit { .. }) {
         after = Some(history::project_snapshot(&project));
     }
     history::append(context, &input.actor, &project, event_target, before, after)?;

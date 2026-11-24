@@ -36,7 +36,10 @@ export interface Detail {
   lead: { id: string; handle: string; name: string } | null;
 }
 export type WorkspaceCommand =
-  | Extract<Command, { kind: "create" | "edit" | "remove" | "bulk_fields" }>
+  | Extract<
+      Command,
+      { kind: "create" | "edit" | "column_limit" | "remove" | "bulk_fields" }
+    >
   | {
       kind: "create_issue";
       project: string;

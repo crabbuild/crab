@@ -14,6 +14,11 @@ pub(crate) enum Command {
         definition: planning::Definition,
         archived: bool,
     },
+    ColumnLimit {
+        project: Uuid,
+        version: u64,
+        column: planning::grouping::ColumnLimit,
+    },
     Planning {
         project: Uuid,
         version: u64,
@@ -52,6 +57,7 @@ impl Command {
         match self {
             Self::Create { .. } => None,
             Self::Edit { project, .. }
+            | Self::ColumnLimit { project, .. }
             | Self::Planning { project, .. }
             | Self::Repository { project, .. }
             | Self::Item { project, .. }
@@ -64,6 +70,7 @@ impl Command {
         match self {
             Self::Create { .. } | Self::CreateIssue { .. } | Self::BulkFields { .. } => 0,
             Self::Edit { version, .. }
+            | Self::ColumnLimit { version, .. }
             | Self::Planning { version, .. }
             | Self::Repository { version, .. }
             | Self::Item { version, .. }
@@ -299,6 +306,8 @@ fn apply_command(
                     "Finish pending issue creation before removing its status or fields or archiving the Project",
                 ));
             }
+            let mut definition = definition.clone();
+            definition.prune_board_limits();
             if !definition.valid() {
                 return Ok(rejected(
                     "Check the project name, workflow, fields and views",
@@ -322,14 +331,19 @@ fn apply_command(
             )?;
             for row in rows.rows {
                 let item: Item = serde_json::from_str(&text(&row[0])?)?;
-                if !item.item.valid(definition) {
+                if !item.item.valid(&definition) {
                     return Ok(rejected(
                         "Existing work uses a removed status or field. Update those items first.",
                     ));
                 }
             }
-            project.definition = definition.clone();
+            project.definition = definition;
             project.archived = *archived;
+        }
+        Command::ColumnLimit { column, .. } => {
+            if let Err(reason) = column.apply(&mut project.definition) {
+                return Ok(rejected(reason));
+            }
         }
         Command::Planning { properties, .. } => {
             if !properties_valid(context, properties)? {

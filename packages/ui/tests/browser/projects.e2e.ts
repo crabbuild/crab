@@ -335,6 +335,13 @@ test("templates, linked issue and PR items, board moves, roadmap dates, saved se
       .getByRole("link", { name: "Ship project management", exact: true }),
   ).toBeVisible();
   await expect(blocked).toBeVisible();
+  await page.getByRole("button", { name: "Column limit for Done" }).click();
+  const limit = page.getByRole("dialog", { name: "Column limit for Done" });
+  await expect(
+    limit.getByRole("spinbutton", { name: "Item limit" }),
+  ).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(limit).toBeHidden();
   await page
     .getByRole("button", { name: "Edit Ship project management", exact: true })
     .click();

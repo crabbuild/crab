@@ -524,11 +524,14 @@ function ProjectWorkspace({
                     <span>Showing {page.items.length} on this page</span>
                   )}
                 </div>
-                {page.items.length || createInGroup ? (
+                {selected.layout === "board" ||
+                page.items.length ||
+                createInGroup ? (
                   selected.layout === "board" ? (
                     <ProjectBoard
                       repo={repo}
                       page={page}
+                      viewId={selected.id}
                       editable={editable && can_manage}
                       bulkTarget={bulkTarget}
                       onEdit={setEditing}
