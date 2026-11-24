@@ -91,9 +91,16 @@ impl CreateIssue {
                         vec![integer(number)?],
                     )],
                 })?;
-                let issue = current[0].rows.first().ok_or(crate::cells::Error::Invalid(
-                    "repository issue submission has no issue row",
-                ))?;
+                let Some(issue) = current[0].rows.first() else {
+                    if transfer::publication::moved(context, number)?.is_some() {
+                        return Ok(MutationResult::Success(CreateIssueOutcome::Transferred(
+                            number,
+                        )));
+                    }
+                    return Err(crate::cells::Error::Invalid(
+                        "repository issue submission has no issue row",
+                    ));
+                };
                 return Ok(MutationResult::Success(CreateIssueOutcome::Created(
                     Box::new(issue_from_row(issue)?),
                 )));
@@ -124,24 +131,7 @@ impl CreateIssue {
         };
         let milestone = input.metadata.selection.milestone;
         let now = timestamp(context.now_ms())?;
-        let sequence = context.sql(&SqlBatch {
-            statements: vec![
-                statement(
-                    "UPDATE repository_sequences SET last = last + 1 WHERE kind = 'issue' AND last < 9007199254740991",
-                    vec![],
-                ),
-                statement(
-                    "SELECT last FROM repository_sequences WHERE kind = 'issue'",
-                    vec![],
-                ),
-            ],
-        })?;
-        if sequence[0].rows_affected != 1 {
-            return Err(crate::cells::Error::Invalid(
-                "repository issue numbering is exhausted",
-            ));
-        }
-        let number = result_u64(&sequence, 1, 0)?;
+        let number = allocate_issue(context)?;
         let record = IssueRecord {
             number,
             author: input.author,
@@ -193,6 +183,27 @@ impl CreateIssue {
             Box::new(record),
         )))
     }
+}
+
+fn allocate_issue(context: &Transaction<'_>) -> crate::cells::Result<u64> {
+    let sequence = context.sql(&SqlBatch {
+        statements: vec![
+            statement(
+                "UPDATE repository_sequences SET last = last + 1 WHERE kind = 'issue' AND last < 9007199254740991",
+                vec![],
+            ),
+            statement(
+                "SELECT last FROM repository_sequences WHERE kind = 'issue'",
+                vec![],
+            ),
+        ],
+    })?;
+    if sequence[0].rows_affected != 1 {
+        return Err(crate::cells::Error::Invalid(
+            "repository issue numbering is exhausted",
+        ));
+    }
+    result_u64(&sequence, 1, 0)
 }
 
 pub(crate) struct CreateComment;

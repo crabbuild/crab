@@ -34,6 +34,16 @@ fn load(context: &Transaction<'_>) -> crate::cells::Result<State> {
     Ok(state)
 }
 
+pub(super) fn retire(context: &Transaction<'_>, number: u64) -> crate::cells::Result<()> {
+    let mut state = load(context)?;
+    if let Some(index) = state.numbers.iter().position(|pinned| *pinned == number) {
+        state.numbers.remove(index);
+        state.version = collaboration::next_version(state.version)?;
+        context.put_document(KEY, &state)?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PinnedIssue {

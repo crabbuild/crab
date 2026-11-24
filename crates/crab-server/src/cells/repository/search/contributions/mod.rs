@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 mod rebuild;
 mod text;
 pub(in crate::cells::repository::search) use rebuild::{clear, rebuild, reset};
-pub(in crate::cells::repository::search) use text::flush;
+pub(in crate::cells::repository) use text::flush;
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -106,6 +106,22 @@ pub(in crate::cells::repository) fn edit(
     body: &str,
 ) -> Result<()> {
     text::edit(context, &Key::try_from(target)?, body)
+}
+
+pub(in crate::cells::repository) fn retire_issue(
+    context: &Transaction<'_>,
+    issue: u64,
+) -> Result<()> {
+    loop {
+        let deleted = context.query(
+            "DELETE FROM discussion_index_commenters WHERE source = 0 AND discussion = ?1 AND number IN (SELECT number FROM discussion_index_commenters WHERE source = 0 AND discussion = ?1 ORDER BY number LIMIT 64)",
+            &[integer(issue)?],
+        )?;
+        if deleted.rows_affected == 0 {
+            return Ok(());
+        }
+        flush(context)?;
+    }
 }
 
 fn insert(

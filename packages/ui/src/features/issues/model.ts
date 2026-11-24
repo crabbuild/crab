@@ -2,7 +2,7 @@ import type { DiscussionTotals, ListLabel } from "@/components/discussion/list";
 import type { DiscussionAuthor } from "@/components/discussion/author";
 import type { Comment } from "@/components/discussion/conversation/model";
 import type { IssueType, RepositoryAssignee } from "@/lib/contracts";
-import type { RepositoryLabel } from "@/lib/api";
+import type { Repository, RepositoryLabel } from "@/lib/api";
 
 export type IssueStateReason = "completed" | "not_planned" | "reopened";
 export interface Issue extends Comment {
@@ -20,6 +20,15 @@ export interface Issue extends Comment {
   can_assign: boolean;
   can_close: boolean;
 }
+export type IssueTransfer = {
+  transfer:
+    | { state: "pending" | "unavailable" }
+    | {
+        state: "ready";
+        repository: Pick<Repository, "id" | "owner" | "name">;
+        number: number;
+      };
+};
 export type IssueListItem = DiscussionTotals & {
   kind: "issue";
   labels: ListLabel[];

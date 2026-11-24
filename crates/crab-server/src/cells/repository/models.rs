@@ -130,6 +130,7 @@ pub(crate) enum CreateIssueOutcome {
     MetadataRejected(super::collaboration::creation::Failure),
     Archived,
     Created(Box<IssueRecord>),
+    Transferred(u64),
     RequestConflict,
 }
 

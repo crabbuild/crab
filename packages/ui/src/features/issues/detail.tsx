@@ -25,7 +25,7 @@ import { Editor } from "@/components/discussion/editor";
 import { Failure } from "@/components/discussion/failure";
 import { useReturnFocus } from "@/components/discussion/hooks";
 
-import { Issue } from "./model";
+import type { Issue, IssueTransfer } from "./model";
 import { timestamp } from "@/components/discussion/time";
 import { Comments } from "./comments";
 import { PinIssue } from "./pins";
@@ -66,7 +66,9 @@ export function IssueDetail({
   csrf: string;
 }) {
   const conversationLock = useConversationLock();
-  const resource = useRequest<Issue>(endpoint(repo, `issues/${number}`));
+  const resource = useRequest<Issue | IssueTransfer>(
+    endpoint(repo, `issues/${number}`),
+  );
   const [issue, setIssue] = useState<Issue>();
   const [editing, setEditing] = useState(false);
   const [metadataEpoch, setMetadataEpoch] = useState(0);
@@ -76,10 +78,49 @@ export function IssueDetail({
   const accept = useCallback((incoming: Issue) => {
     setIssue((old) => (old && old.version > incoming.version ? old : incoming));
   }, []);
+  const response = resource.data;
+  const loaded = response && !("transfer" in response) ? response : undefined;
+  const transfer =
+    response && "transfer" in response ? response.transfer : null;
+  const destination =
+    transfer?.state === "ready"
+      ? repoHref(transfer.repository, {
+          view: "issues",
+          issue: String(transfer.number),
+          repository_id: transfer.repository.id,
+        })
+      : undefined;
   useEffect(() => {
-    if (resource.data) accept(resource.data);
-  }, [resource.data, accept]);
-  const current = issue ?? resource.data;
+    if (loaded) accept(loaded);
+  }, [loaded, accept]);
+  useEffect(() => {
+    if (destination)
+      window.location.replace(destination + window.location.hash);
+  }, [destination]);
+  if (transfer) {
+    return (
+      <section className="issues-page issue-detail">
+        <Link href={repoHref(repo, { view: "issues" })}>← Back to issues</Link>
+        <p className="notice" role="status">
+          {transfer.state === "ready"
+            ? "Opening the transferred issue…"
+            : transfer.state === "pending"
+              ? "This issue is being transferred."
+              : "This issue was transferred to a repository you can’t access."}
+        </p>
+        {transfer.state === "pending" && (
+          <Button
+            variant="outline"
+            onClick={resource.retry}
+            aria-busy={resource.loading}
+          >
+            Refresh
+          </Button>
+        )}
+      </section>
+    );
+  }
+  const current = issue ?? loaded;
   if (!current) return <Result state={resource}>{() => null}</Result>;
   return (
     <section className="issues-page issue-detail">

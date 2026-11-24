@@ -6,16 +6,19 @@ use crate::cells::{
     Error, Result,
     directory::IdentityKey,
     repository::collaboration::{
-        Subject, SubjectKind,
+        Subject, SubjectKind, Target,
         activity::{self, ListActivity},
         locks,
         milestones::GetAssignment,
+        minimization,
     },
 };
 
 const COMMENT_PAGE: u8 = 8;
 const ACTIVITY_PAGE: u8 = 16;
 const PREFIX: &str = "collaboration/v1/issue-transfers/staged/";
+
+pub(crate) mod publication;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -56,7 +59,7 @@ pub(crate) enum Records {
     },
     Comments {
         before: Option<u64>,
-        items: Vec<CommentRecord>,
+        items: Vec<Comment>,
         next: Option<u64>,
     },
     Activity {
@@ -70,10 +73,18 @@ pub(crate) enum Records {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Header {
     pub issue: IssueRecord,
+    pub lifecycle: lifecycle::Lifecycle,
     pub labels: Vec<String>,
     pub milestone: Option<MilestoneKey>,
     pub issue_type: Option<issue_type::Selection>,
     pub lock: locks::Lock,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Comment {
+    pub record: CommentRecord,
+    pub visibility: Option<minimization::State>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -132,7 +143,7 @@ impl Records {
                 items,
                 next,
             } => {
-                if items.iter().any(|item| item.issue != source.issue) {
+                if items.iter().any(|item| item.record.issue != source.issue) {
                     return Err(Error::Invalid(
                         "Issue transfer comment belongs to another issue",
                     ));
@@ -141,7 +152,7 @@ impl Records {
                     *before,
                     *next,
                     COMMENT_PAGE,
-                    items.iter().map(|item| item.number),
+                    items.iter().map(|item| item.record.number),
                 )?;
             }
             Self::Activity {
@@ -207,6 +218,17 @@ fn identity(context: &Transaction<'_>) -> Result<(Uuid, u64)> {
     Ok((id, result_u64_from_row(row, 1)?))
 }
 
+fn observed(context: &Transaction<'_>, issue: &IssueRecord) -> Result<Source> {
+    let (repository, revision) = identity(context)?;
+    Ok(Source {
+        repository,
+        issue: issue.number,
+        version: issue.version,
+        revision,
+        issue_type_version: issue_type::load(context, issue.number)?.version,
+    })
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum CaptureOutcome {
@@ -237,15 +259,7 @@ impl Read for Capture {
         let Some(issue) = GetIssue::execute(context, number)? else {
             return Ok(CaptureOutcome::Missing);
         };
-        let (repository, revision) = identity(context)?;
-        let assigned_type = issue_type::load(context, number)?;
-        let source = Source {
-            repository,
-            issue: number,
-            version: issue.version,
-            revision,
-            issue_type_version: assigned_type.version,
-        };
+        let source = observed(context, &issue)?;
         if issue.version != expected_version
             || matches!(&input, CaptureInput::Continue { source: expected, .. } if *expected != source)
         {
@@ -276,8 +290,10 @@ impl Read for Capture {
                         due_on: milestone.due_on,
                     });
                 let lock = locks::load(context, subject)?;
+                let assigned_type = issue_type::load(context, number)?;
                 Records::Issue {
                     header: Box::new(Header {
+                        lifecycle: lifecycle::get(context, number, false)?,
                         issue,
                         labels,
                         milestone,
@@ -301,6 +317,19 @@ impl Read for Capture {
                 else {
                     return Err(Error::Invalid("Issue transfer comment target is missing"));
                 };
+                let items = items
+                    .into_iter()
+                    .map(|record| {
+                        let visibility = minimization::load(
+                            context,
+                            Target::IssueComment {
+                                issue: number,
+                                number: record.number,
+                            },
+                        )?;
+                        Ok(Comment { record, visibility })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
                 Records::Comments {
                     before,
                     items,
@@ -364,6 +393,7 @@ struct Job {
     actor: IdentityKey,
     source: Source,
     progress: Progress,
+    publication: Option<publication::DestinationState>,
 }
 
 pub(crate) struct Stage;
@@ -466,6 +496,7 @@ impl Mutation for Stage {
                 actor: input.actor,
                 source,
                 progress,
+                publication: None,
             },
         )?;
         Ok(MutationResult::Success(StageOutcome::Saved { progress }))

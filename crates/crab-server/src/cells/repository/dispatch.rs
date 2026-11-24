@@ -49,6 +49,15 @@ pub(in crate::cells) fn dispatch_mutation(
         <issues::transfer::Stage as Mutation>::ID => {
             invoke_mutation::<issues::transfer::Stage>(context, input)
         }
+        issues::transfer::publication::Prepare::ID => {
+            invoke_mutation::<issues::transfer::publication::Prepare>(context, input)
+        }
+        issues::transfer::publication::Retire::ID => {
+            invoke_mutation::<issues::transfer::publication::Retire>(context, input)
+        }
+        issues::transfer::publication::Publish::ID => {
+            invoke_mutation::<issues::transfer::publication::Publish>(context, input)
+        }
         recent_pushes::Record::ID => invoke_mutation::<recent_pushes::Record>(context, input),
         #[cfg(test)]
         SeedHistoricalMerges::ID => invoke_mutation::<SeedHistoricalMerges>(context, input),
@@ -454,6 +463,9 @@ pub(in crate::cells) fn dispatch_read(
         <GetIssueDetail as Read>::ID => invoke_read::<GetIssueDetail>(context, input),
         <issues::transfer::Capture as Read>::ID => {
             invoke_read::<issues::transfer::Capture>(context, input)
+        }
+        issues::transfer::publication::GetMove::ID => {
+            invoke_read::<issues::transfer::publication::GetMove>(context, input)
         }
         <GetComment as Read>::ID => invoke_read::<GetComment>(context, input),
         <ListDiscussions as Read>::ID => invoke_read::<ListDiscussions>(context, input),

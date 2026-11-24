@@ -503,12 +503,24 @@ Conflicting bytes and out-of-order frames cannot advance the transfer. Staging
 allocates no issue number and contributes no rows to the destination's issue
 lists, discussion index, or inbox.
 
-Publication still requires a source decision that rechecks both repositories'
-current Write grants and shared owner. That decision must fence the captured
-source, preserve remaining discussion state and attachments, recover the
-destination publication on retry, and enable an access-checked link from the
-original issue. Clean up abandoned staged frames after the source has
-recorded cancellation. The browser action follows that publication path.
+The destination reserves a number after all frames are staged, and the
+reservation leaves issue lists unchanged. The source rechecks the capture
+version and commits its move record with removal of the issue and its search
+projections. The destination publishes the reserved number from that decision
+and replays the same result after a lost reply. Issue text, author, dates,
+comment numbers, moderation, and the conversation lock are restored in the
+target Cell. Labels match by name, and a milestone matches by title and due
+date. Historical events with source-local references remain in their source
+frames to avoid resolving their numbers in the destination repository.
+
+The issue detail route resolves the move through independent, current grants
+on the original and destination repositories. It exposes the destination only
+after publication, and the browser retains the original comment anchor.
+
+The HTTP write workflow must bind publication to both current Write grants and
+the shared owner. It also owns attachment copy and link rewriting, remaining
+discussion state and relationship placement, and cleanup of abandoned staging.
+The native write commands stay private while those paths are under construction.
 
 ## Reviewer search preparation
 

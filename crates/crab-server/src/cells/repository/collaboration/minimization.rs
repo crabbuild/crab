@@ -38,11 +38,22 @@ fn key(target: Target) -> String {
     format!("{PREFIX}/minimization/{}", target.key())
 }
 
-pub(super) fn load(context: &Transaction<'_>, target: Target) -> Result<Option<State>> {
+pub(in crate::cells::repository) fn load(
+    context: &Transaction<'_>,
+    target: Target,
+) -> Result<Option<State>> {
     if !supports(target) {
         return Ok(None);
     }
     context.document(&key(target))
+}
+
+pub(in crate::cells::repository) fn store(
+    context: &Transaction<'_>,
+    target: Target,
+    state: State,
+) -> Result<()> {
+    context.put_document(&key(target), &state)
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -93,7 +104,7 @@ impl Mutation for Set {
             reason: input.reason,
         };
         // Retain the restored version so a stale hide cannot restore a reason.
-        context.put_document(&key(input.target), &saved)?;
+        store(context, input.target, saved)?;
         let action = match saved.reason {
             Some(reason) => Action::CommentHidden { reason },
             None => Action::CommentRestored,

@@ -122,6 +122,16 @@ pub(in crate::cells::repository) fn load(
     Ok(context.document(&key(subject))?.unwrap_or_default())
 }
 
+pub(in crate::cells::repository) fn store(
+    context: &Transaction<'_>,
+    subject: Subject,
+    lock: Lock,
+) -> Result<()> {
+    context.put_document(&key(subject), &lock)?;
+    index::locks::project(context, subject, lock)?;
+    index::invalidate_cursors(context)
+}
+
 pub(in crate::cells::repository) fn blocked(
     context: &Transaction<'_>,
     target: Target,
@@ -239,9 +249,7 @@ impl Mutation for Set {
             reason,
             deadline,
         };
-        context.put_document(&key(input.subject), &saved)?;
-        index::locks::project(context, input.subject, saved)?;
-        index::invalidate_cursors(context)?;
+        store(context, input.subject, saved)?;
         let target = match input.subject.kind {
             SubjectKind::Issue => Target::Issue {
                 number: input.subject.number,

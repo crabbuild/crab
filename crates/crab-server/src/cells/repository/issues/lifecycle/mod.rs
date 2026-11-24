@@ -59,7 +59,11 @@ pub(in crate::cells::repository) fn create(context: &Transaction<'_>, issue: u64
     ensure_ready(context)?;
     store(context, issue, &Lifecycle::default())
 }
-fn store(context: &Transaction<'_>, issue: u64, value: &Lifecycle) -> Result<()> {
+pub(in crate::cells::repository) fn store(
+    context: &Transaction<'_>,
+    issue: u64,
+    value: &Lifecycle,
+) -> Result<()> {
     let reason = value
         .state_reason
         .map_or(SqlValue::Null, |value| SqlValue::Text(value.name().into()));

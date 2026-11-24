@@ -2475,6 +2475,15 @@ owner label does not acquire ownership.
 
 Every route prefix is `/api/repos/{owner}/{name}`. Browser mutations require the session cookie, canonical `Origin`, and CSRF token.
 
+### Follow a transferred issue
+
+The original issue detail returns a `transfer` object after a committed move.
+`ready` includes the current destination repository UUID and address and its
+issue number. The browser opens that issue and keeps the comment anchor.
+`pending` means destination publication is still in progress. `unavailable`
+omits the destination when the reader lacks current access. A retry of the
+original creation can return the original `number` with `transferred: true`.
+
 ### Open an issue from a repository template
 
 Commit templates to `.github/ISSUE_TEMPLATE/` on the repository's default

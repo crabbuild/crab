@@ -355,10 +355,34 @@ pub(in crate::cells::repository) fn append(
         action,
         created_at: timestamp(context.now_ms())?,
     };
+    store(context, &event)?;
+    super::watches::participate(context, &event)?;
+    super::mentions::watched(context, &event)?;
+    Ok(event)
+}
+
+pub(in crate::cells::repository) fn import(
+    context: &Transaction<'_>,
+    mut event: Event,
+) -> crate::cells::Result<()> {
+    validate_author(&event.actor)?;
+    event.action.validate(event.target)?;
+    if !event.target.exists(context)? {
+        return Err(crate::cells::Error::Invalid(
+            "Imported activity target is missing",
+        ));
+    }
+    event.number = super::next_version(latest(context)?)?;
+    store(context, &event)
+}
+
+fn store(context: &Transaction<'_>, event: &Event) -> crate::cells::Result<()> {
+    let number = event.number;
+    let subject = event.target.subject();
     // The caller's SQL write, event, indexes, and sequence share the native
     // command transaction. A rejected command cannot leave phantom activity.
     context.put_document(SEQUENCE, &number)?;
-    context.put_document(&format!("{}{number:016x}", events(None)), &event)?;
+    context.put_document(&format!("{}{number:016x}", events(None)), event)?;
     context.put_document(&format!("{}{number:016x}", events(Some(subject))), &true)?;
     if let Some(related) = event.action.related_subject() {
         if related.closed(context)?.is_none() {
@@ -369,10 +393,7 @@ pub(in crate::cells::repository) fn append(
         // A relationship is one repository event visible from both subjects.
         context.put_document(&format!("{}{number:016x}", events(Some(related))), &true)?;
     }
-    super::conversation::project_event(context, &event)?;
-    super::watches::participate(context, &event)?;
-    super::mentions::watched(context, &event)?;
-    Ok(event)
+    super::conversation::project_event(context, event)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
