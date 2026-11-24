@@ -427,19 +427,77 @@ async fn submit(
             .await
             .map(Json);
     }
-    let first = submit_change(&server, &principal, id, actor, &input, cancel).await;
+    if !cancel && matches!(input.command, Command::BulkFields { .. }) {
+        // Serialize source checks with transfers in this organization. The
+        // native write also compares every stored placement revision.
+        return super::properties::policy_write(server, id, move |server, _, cancel| async move {
+            let output =
+                submit_change(&server, &principal, id, actor, &input, false, Some(&cancel)).await?;
+            checked_outcome(output)
+        })
+        .await;
+    }
+    let first = submit_change(&server, &principal, id, actor, &input, cancel, None).await;
     // A competing planning write can invalidate the address check before it
     // reaches the Organization Cell. The same request remains safe to retry.
     let output = match first {
         Err(Error::Cell(crate::cells::Error::StaleSearch)) => {
-            submit_change(&server, &principal, id, actor, &input, cancel).await?
+            submit_change(&server, &principal, id, actor, &input, cancel, None).await?
         }
         result => result?,
     };
+    checked_outcome(output)
+}
+
+fn checked_outcome(output: projects::Outcome) -> Result<Json<projects::Outcome>> {
     if output == projects::Outcome::RequestConflict {
         return Err(Error::Conflict);
     }
     Ok(Json(output))
+}
+
+async fn bulk_sources_allowed(
+    server: &Server,
+    principal: &Principal,
+    organization: Uuid,
+    actor: Uuid,
+    project: Uuid,
+    items: &[crate::cells::planning::bulk::Edit],
+) -> Result<bool> {
+    if !crate::cells::planning::bulk::valid(items) {
+        return Ok(false);
+    }
+    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    let result = app::query_output(
+        cells
+            .query::<projects::BulkSources>(
+                Address::Organization(organization),
+                None,
+                projects::BulkSourceQuery {
+                    actor,
+                    project,
+                    items: items.iter().map(|edit| edit.item).collect(),
+                },
+            )
+            .await,
+    );
+    let sources = match result {
+        Ok(Some(sources)) => sources,
+        Ok(None) | Err(Error::Cell(crate::cells::Error::AccessDenied)) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let mut checks = stream::iter(
+        sources
+            .into_iter()
+            .map(|(repo, subject)| work::can_use_source(server, principal, repo, subject, true)),
+    )
+    .buffer_unordered(8);
+    while let Some(allowed) = checks.try_next().await? {
+        if !allowed {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 async fn submit_change(
@@ -449,6 +507,7 @@ async fn submit_change(
     actor: Uuid,
     input: &Submission,
     cancel: bool,
+    policy: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<projects::Outcome> {
     use crate::cells::repository::{
         collaboration::SubjectKind, issues::transfer::publication::Destination,
@@ -459,6 +518,10 @@ async fn submit_change(
         match &input.command {
             Command::Repository { repository, .. } => (
                 accessible(server, principal, *repository).await?.is_some(),
+                None,
+            ),
+            Command::BulkFields { project, items } => (
+                bulk_sources_allowed(server, principal, id, actor, *project, items).await?,
                 None,
             ),
             Command::Item {
@@ -519,6 +582,9 @@ async fn submit_change(
         }
     };
     app::account(principal)?;
+    if policy.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
+        return Err(Error::MergeBusy);
+    }
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     app::command_output(
         cells

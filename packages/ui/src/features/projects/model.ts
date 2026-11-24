@@ -119,7 +119,20 @@ export interface Template {
   description: string;
   definition: Definition;
 }
+export type BulkField =
+  | { field: "status"; value: string }
+  | { field: "priority"; value: number }
+  | { field: "start" | "end"; value: string | null }
+  | { field: "custom"; id: string; value: string | null };
+export type BulkEdit = { item: string; version: number; change: BulkField };
+export type BulkCommand = {
+  kind: "bulk_fields";
+  project: string;
+  items: BulkEdit[];
+};
+
 export type Command =
+  | BulkCommand
   | { kind: "sub_issue"; parent: number; title: string; body: string }
   | {
       kind: "reorder_sub_issue";

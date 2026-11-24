@@ -562,6 +562,13 @@ function PlanningWorkspace({
                         <View
                           page={page}
                           editable={editable}
+                          bulkTarget={
+                            layout === "table" &&
+                            detail.can_manage &&
+                            !project.archived
+                              ? { organization }
+                              : undefined
+                          }
                           onEdit={setEditing}
                           onAddGroupItem={addGroupItem}
                           onAddGroupIssue={

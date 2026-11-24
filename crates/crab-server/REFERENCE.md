@@ -2913,6 +2913,27 @@ Reload the latest data after HTTP 409.
 Update all serving peers before using the new settings so every peer can
 read the new audit events and handle issue type requests.
 
+### Edit multiple Project items
+
+In a repository or organization Project table, select rows with their
+checkboxes. The header checkbox selects the editable items on the current
+page. Choose a status, priority, planning date or custom field, then select
+**Apply to selected**. A blank optional value clears that field. Organization
+Project edits require access to every selected item's source work.
+
+**Undo** restores the previous values as one new edit. If another change
+advanced any of the selected item revisions, refresh and make a new selection.
+After an interrupted request, use **Retry submission** to recover its decision.
+
+The existing Project commands endpoints accept
+`{kind:"bulk_fields",project,items:[{item,version,change}]}`. A selection
+contains 1–50 unique item UUIDs with their current revisions. Each change sets
+`status`, `priority`, `start`, `end`, or `custom` using a `field` tag and
+`value`. A custom change also identifies the field by UUID in `id`.
+Planning dates and custom fields use `null` to clear a value. The entire
+command commits or rolls back together and keeps one payload-bound receipt.
+Upgrade the serving peers and embedded UI together before using this command.
+
 ### Show issue types in Projects
 
 In **Settings** → **Views**, turn on **Show issue type** for a saved Project
@@ -3363,8 +3384,8 @@ issue/pull state preparation. Historical successful counts/digests/keys are
 preserved in bounded frames; old failed decisions cannot be reconstructed.
 No discussion-index rebuild is required. HTTP defers archive policy to the native
 command so a committed submission can recover after archive.
-Catalog-owned grants remain the authority; native grant cutover/cross-Cell fencing,
-bulk Project actions and wider GitHub parity remain delivery work.
+Catalog-owned grants remain the authority. Native grant cutover, broader
+cross-Cell fencing, and wider GitHub parity remain delivery work.
 Coordinate private peer and UI updates before using bulk issue type assignment.
 
 ### Browse activity

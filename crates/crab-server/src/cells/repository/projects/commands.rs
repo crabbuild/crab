@@ -1,5 +1,5 @@
 use super::*;
-use crate::cells::planning as ledger;
+use crate::cells::planning::{self as ledger, bulk};
 use crate::cells::repository::issues::issue_type;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -38,6 +38,10 @@ pub(crate) enum Command {
         project: Uuid,
         version: u64,
         item: Item,
+    },
+    BulkFields {
+        project: Uuid,
+        items: Vec<bulk::Edit>,
     },
     Remove {
         project: Uuid,
@@ -150,7 +154,7 @@ impl Mutation for Change {
         } else if input.cancel {
             Outcome::Cancelled
         } else {
-            match context.apply(|context| apply(context, &input))? {
+            match context.apply(|context| apply(context, &input, &input.command))? {
                 MutationResult::Success(value) | MutationResult::Rejected(value) => value,
             }
         };
@@ -212,11 +216,18 @@ fn new_project(
         version: 1,
     }))
 }
-fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResult<Outcome>> {
+fn apply(
+    context: &mut Transaction<'_>,
+    input: &Request,
+    command: &Command,
+) -> Result<MutationResult<Outcome>> {
     if super::super::settings::archived(context)? {
         return Ok(rejected("Archived repositories are read-only"));
     }
-    match &input.command {
+    match command {
+        Command::BulkFields { project, items } => {
+            return apply_bulk(context, input, *project, items);
+        }
         Command::Create { id, name, template } => {
             let Some(template) = templates().into_iter().find(|t| t.id == *template) else {
                 return Ok(rejected("Unknown project template"));
@@ -278,7 +289,7 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
         } => return hierarchy::reorder(context, *parent, *child, *sibling, *position, order_token),
         _ => {}
     }
-    let (project_id, version) = match &input.command {
+    let (project_id, version) = match command {
         Command::Edit {
             project, version, ..
         }
@@ -296,7 +307,7 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
     let Some(mut project) = load(context, project_id)? else {
         return Ok(rejected("Project not found"));
     };
-    if matches!(input.command, Command::Edit { .. }) && project.version != version {
+    if matches!(command, Command::Edit { .. }) && project.version != version {
         return Ok(rejected(
             "This project changed; refresh and review before saving",
         ));
@@ -304,7 +315,7 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
     let mut event_target = ledger::Target::Project;
     let mut before = Some(history::project_snapshot(&project));
     let mut after = None;
-    match &input.command {
+    match command {
         Command::Edit {
             definition,
             archived,
@@ -406,7 +417,7 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
             let mut entry = entry.clone();
             if let Command::CreateIssue {
                 parent, type_id, ..
-            } = &input.command
+            } = command
             {
                 if entry.subject.is_some() {
                     return Ok(rejected("This item is already an issue or pull request"));
@@ -508,7 +519,7 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
     project.version = super::super::collaboration::next_version(project.version)?;
     project.updated_at = super::super::timestamp(context.now_ms())?;
     save(context, &project)?;
-    if matches!(input.command, Command::Edit { .. }) {
+    if matches!(command, Command::Edit { .. }) {
         after = Some(history::project_snapshot(&project));
     }
     history::append(context, &input.actor, &project, event_target, before, after)?;
@@ -516,5 +527,45 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
     Ok(MutationResult::Success(Outcome::Applied {
         project: Some(project.id),
         version: project.version,
+    }))
+}
+
+fn apply_bulk(
+    context: &mut Transaction<'_>,
+    input: &Request,
+    project: Uuid,
+    edits: &[bulk::Edit],
+) -> Result<MutationResult<Outcome>> {
+    if !bulk::valid(edits) {
+        return Ok(rejected("Select up to 50 distinct Project items"));
+    }
+    let Some(saved) = load(context, project)? else {
+        return Ok(rejected("Project not found"));
+    };
+    let mut version = saved.version;
+    for edit in edits {
+        let Some(mut item) = item(context, project, edit.item)? else {
+            return Ok(MutationResult::Rejected(Outcome::ItemConflict {
+                project,
+                item: edit.item,
+                version: ledger::item_version(context, project, edit.item)?,
+            }));
+        };
+        if !edit.change.update(&mut item, &saved.definition) {
+            return Ok(rejected("The selected Project field is unavailable"));
+        }
+        let command = Command::Item {
+            project,
+            version: edit.version,
+            item,
+        };
+        match apply(context, input, &command)? {
+            MutationResult::Success(Outcome::Applied { version: next, .. }) => version = next,
+            outcome => return Ok(outcome),
+        }
+    }
+    Ok(MutationResult::Success(Outcome::Applied {
+        project: Some(project),
+        version,
     }))
 }

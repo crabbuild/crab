@@ -14,8 +14,8 @@ pub(crate) use history::{GetHistory, HistoryQuery};
 pub(in crate::cells) use issue_creation::due;
 pub(crate) use issue_creation::{ResolveInput, ResolveIssue};
 pub(crate) use reads::{
-    Get, GetAttachmentSources, Items, ItemsQuery, List, ListQuery, MatchedItems, ProjectKey,
-    Sources, SourcesQuery, View, WorkSource,
+    BulkSourceQuery, BulkSources, Get, GetAttachmentSources, Items, ItemsQuery, List, ListQuery,
+    MatchedItems, ProjectKey, Sources, SourcesQuery, View, WorkSource,
 };
 
 const READY: &str = "organization/projects/v1/ready";
@@ -200,6 +200,7 @@ pub(in crate::cells::organization) fn handles(operation: u32, mutation: bool) ->
                 | GetHistory::ID
                 | Sources::ID
                 | GetAttachmentSources::ID
+                | BulkSources::ID
         )
     }
 }

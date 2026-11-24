@@ -14,6 +14,7 @@ import {
   LockKeyholeIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import {
   Select,
@@ -40,7 +41,9 @@ import {
   type Row,
   type ItemPage,
   type GroupBy,
+  type ProjectTarget,
 } from "./model";
+import { ProjectBulkEditor, useProjectSelection } from "./bulk";
 import { ProjectIssueType } from "./issue-type";
 import {
   projectGroups,
@@ -179,6 +182,7 @@ export function ProjectTable({
   onAddGroupIssue,
   showIssueType,
   onIssueTypeChange,
+  bulkTarget,
 }: {
   repo?: Pick<Repository, "id" | "owner" | "name">;
   page: ItemPage;
@@ -190,12 +194,19 @@ export function ProjectTable({
   onAddGroupIssue?: (typeId: string | null) => void;
   showIssueType?: boolean;
   onIssueTypeChange?: () => void;
+  bulkTarget?: ProjectTarget;
 }) {
+  const selection = useProjectSelection(page);
   const groups = groupBy ? projectGroups(page, groupBy) : undefined;
   const showType = groupBy === "issue_type" || showIssueType;
   const fields = page.project.definition.fields;
   const types = page.issue_types ?? [];
-  const columns = 6 + fields.length + Number(!!showType) + Number(editable);
+  const columns =
+    6 +
+    fields.length +
+    Number(!!showType) +
+    Number(editable) +
+    Number(!!bulkTarget);
   const { draggable, dropTarget, over, error, reload } = useProjectGroupMove(
     groupBy,
     repo,
@@ -203,7 +214,25 @@ export function ProjectTable({
     editable ? onChangeItem : undefined,
   );
   const renderRow = (row: Row) => (
-    <TableRow key={row.item.id} {...draggable(row)}>
+    <TableRow
+      key={row.item.id}
+      data-state={selection.checked(row) ? "selected" : undefined}
+      {...draggable(row)}
+    >
+      {bulkTarget && (
+        <TableCell>
+          {!row.restricted && (
+            <Checkbox
+              aria-label={`Select ${row.work?.title ?? row.item.title}`}
+              checked={selection.checked(row)}
+              disabled={!editable}
+              onCheckedChange={(checked) =>
+                selection.toggle(row, checked === true)
+              }
+            />
+          )}
+        </TableCell>
+      )}
       <TableCell>
         <ItemTitle repo={repo} row={row} />
       </TableCell>
@@ -277,9 +306,29 @@ export function ProjectTable({
   return (
     <>
       <ProjectGroupMoveFailure error={error} reload={reload} />
+      {bulkTarget && (
+        <ProjectBulkEditor
+          target={bulkTarget}
+          project={page.project}
+          selection={selection}
+          disabled={!editable}
+        />
+      )}
       <Table className="project-table">
         <TableHeader>
           <TableRow>
+            {bulkTarget && (
+              <TableHead>
+                <Checkbox
+                  aria-label="Select all Project items on this page"
+                  checked={selection.all}
+                  disabled={!editable || selection.empty}
+                  onCheckedChange={(checked) =>
+                    selection.toggleAll(checked === true)
+                  }
+                />
+              </TableHead>
+            )}
             <TableHead>Title</TableHead>
             {showType && <TableHead>Type</TableHead>}
             <TableHead>Assignees</TableHead>

@@ -475,6 +475,7 @@ pub(in crate::cells) fn dispatch_read(
         }
         projects::Get::ID => invoke_read::<projects::Get>(context, input),
         projects::Items::ID => invoke_read::<projects::Items>(context, input),
+        projects::BulkSources::ID => invoke_read::<projects::BulkSources>(context, input),
         projects::Sources::ID => invoke_read::<projects::Sources>(context, input),
         projects::GetAttachmentSources::ID => {
             invoke_read::<projects::GetAttachmentSources>(context, input)

@@ -1671,6 +1671,14 @@ JSON Pointer escaping; each custom value has its own path. Rejections, cancellat
 and identical replay do not append changes. Preparation seeds revision one for
 existing items without fabricating past actors or history.
 
+Bulk field edits use the same item mutation inside one savepoint. One
+conflict rolls back every item change, revision and history entry. The
+outer Project submission transaction records the terminal result for exact
+replay. Organization Projects resolve the selected placement IDs to their
+stored sources and check current repository access before the write. The
+browser records an inverse edit in the submission journal and uses the next
+item revisions for Undo.
+
 Both project APIs expose `/{project}/history`: newest-first by default,
 `before=REVISION` for older UI entries, or `after=REVISION` for ascending worker
 consumption, with ten entries and an exclusive next cursor. Both directions

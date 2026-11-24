@@ -552,6 +552,11 @@ function ProjectWorkspace({
                       repo={repo}
                       page={page}
                       editable={editable && can_manage}
+                      bulkTarget={
+                        can_manage && !project.archived && !repo.archived
+                          ? { repo }
+                          : undefined
+                      }
                       onEdit={setEditing}
                       onAddGroupItem={addGroupItem}
                       onAddGroupIssue={addGroupIssue}

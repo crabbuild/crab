@@ -12,6 +12,8 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
   projectEndpoint,
+  type BulkCommand,
+  type BulkEdit,
   type Command,
   type Outcome,
   type ProjectRepository,
@@ -36,6 +38,11 @@ interface Commands {
     organization: string,
     command: WorkspaceCommand,
     draft?: DraftCheckpoint,
+  ) => Promise<Outcome | undefined>;
+  submitBulk: (
+    target: Intent["target"],
+    command: BulkCommand,
+    undo: BulkEdit[],
   ) => Promise<Outcome | undefined>;
   locked: boolean;
   generation: number;
@@ -68,7 +75,12 @@ export function ProjectCommandsProvider({
   const completion = useRef<((outcome: Outcome) => void) | null>(null);
   const [generation, setGeneration] = useState(0);
   const [error, setError] = useState<string>();
-  const [notice, setNotice] = useState<string>();
+  const [notice, setNotice] = useState<{ title: string; message: string }>();
+  const [undo, setUndo] = useState<{
+    account: string;
+    target: Intent["target"];
+    command: BulkCommand;
+  }>();
   const [pending, setPending] = useState(false);
   const [journalError, setJournalError] = useState<string>();
   const activeAccount = useRef(account);
@@ -111,6 +123,7 @@ export function ProjectCommandsProvider({
     setPending(true);
     setError(undefined);
     setNotice(undefined);
+    setUndo(undefined);
     try {
       // Recovery must use the persisted intent, including its original target.
       // Never turn a lost response into a replacement submission after reload.
@@ -166,15 +179,21 @@ export function ProjectCommandsProvider({
         throw new Error("The server acknowledgement was invalid.");
       if (value.outcome === "item_conflict") {
         const command = captured.body.command;
+        const target =
+          command.kind === "bulk_fields"
+            ? command.items.some((edit) => edit.item === value.item)
+            : command.kind === "item" ||
+                command.kind === "remove" ||
+                command.kind === "create_issue"
+              ? value.item ===
+                (typeof command.item === "string"
+                  ? command.item
+                  : command.item.id)
+              : false;
         if (
-          (command.kind !== "item" &&
-            command.kind !== "remove" &&
-            command.kind !== "create_issue") ||
+          !target ||
+          !("project" in command) ||
           value.project !== command.project ||
-          value.item !==
-            (typeof command.item === "string"
-              ? command.item
-              : command.item.id) ||
           !Number.isSafeInteger(value.version) ||
           value.version < 0
         )
@@ -216,12 +235,33 @@ export function ProjectCommandsProvider({
       setIntent(null);
       if (value.outcome === "rejected") setError(value.reason);
       if (value.outcome === "issue_already_linked")
-        setNotice(
-          "The issue was already added to this Project. Its current planning fields were kept.",
-        );
+        setNotice({
+          title: "Issue added to Project",
+          message:
+            "The issue was already added to this Project. Its current planning fields were kept.",
+        });
+      if (
+        value.outcome === "applied" &&
+        captured.body.command.kind === "bulk_fields"
+      ) {
+        const command = captured.body.command;
+        setNotice({
+          title: "Project items updated",
+          message: `Saved ${command.items.length} Project item${command.items.length === 1 ? "" : "s"}.`,
+        });
+        if (captured.undo?.length) {
+          setUndo({
+            account: captured.account,
+            target: captured.target,
+            command: { ...command, items: captured.undo },
+          });
+        }
+      }
       if (value.outcome === "item_conflict")
         setError(
-          "This item changed since you opened it. Your draft is preserved. Review the saved item before saving again.",
+          captured.body.command.kind === "bulk_fields"
+            ? "A selected item changed. Refresh the Project and select the items again."
+            : "This item changed since you opened it. Your draft is preserved. Review the saved item before saving again.",
         );
       completion.current?.(value);
       completion.current = null;
@@ -241,6 +281,7 @@ export function ProjectCommandsProvider({
     target: Intent["target"],
     command: Command | WorkspaceCommand,
     draft?: DraftCheckpoint,
+    undo?: BulkEdit[],
   ) {
     if (!account || current.current || busy.current || journalError)
       return Promise.resolve(undefined);
@@ -259,6 +300,7 @@ export function ProjectCommandsProvider({
           : target,
       body: { request_id: crypto.randomUUID(), command },
       ...(draft ? { draft } : {}),
+      ...(undo ? { undo } : {}),
     };
     try {
       saveProjectIntent(captured);
@@ -286,6 +328,8 @@ export function ProjectCommandsProvider({
           submit({ repo: { ...repo } }, command, draft),
         submitOrganization: (organization, command, draft) =>
           submit({ organization }, command, draft),
+        submitBulk: (target, command, undo) =>
+          submit(target, command, undefined, undo),
         locked: !!intent,
         generation,
         error: journalError ?? error,
@@ -307,7 +351,7 @@ export function ProjectCommandsProvider({
               ? "Project submission"
               : error
                 ? "Changes were not saved"
-                : "Issue added to Project"}
+                : notice?.title}
           </AlertTitle>
           <AlertDescription>
             {intent?.account !== account && intent ? (
@@ -317,7 +361,17 @@ export function ProjectCommandsProvider({
               </p>
             ) : (
               <>
-                <p>{error ?? notice ?? "Saving your changes…"}</p>
+                <p>{error ?? notice?.message ?? "Saving your changes…"}</p>
+                {undo?.account === account && !intent && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={pending}
+                    onClick={() => void submit(undo.target, undo.command)}
+                  >
+                    Undo
+                  </Button>
+                )}
                 {intent && (
                   <div className="flex flex-wrap gap-2">
                     <Button
@@ -345,6 +399,7 @@ export function ProjectCommandsProvider({
                     onClick={() => {
                       setError(undefined);
                       setNotice(undefined);
+                      setUndo(undefined);
                     }}
                   >
                     Dismiss

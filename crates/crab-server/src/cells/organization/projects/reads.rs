@@ -7,6 +7,41 @@ use planning::grouping::{self, GroupBy};
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct BulkSourceQuery {
+    pub actor: Uuid,
+    pub project: Uuid,
+    pub items: Vec<Uuid>,
+}
+
+pub(crate) struct BulkSources;
+impl Read for BulkSources {
+    const CLASS: &'static str = super::super::CLASS;
+    const ID: u32 = 90;
+    type Input = BulkSourceQuery;
+    type Output = Option<Vec<(Uuid, Subject)>>;
+
+    fn execute(context: &mut Transaction<'_>, input: BulkSourceQuery) -> Result<Self::Output> {
+        let Some(project) = load(context, input.project)? else {
+            return Ok(None);
+        };
+        if input.items.len() > ledger::bulk::LIMIT || !can_manage(context, input.actor, &project)? {
+            return Ok(None);
+        }
+        let mut sources = Vec::new();
+        for id in input.items {
+            let Some(entry) = item(context, input.project, id)? else {
+                return Ok(None);
+            };
+            if let Some((repo, subject)) = entry.repository.zip(entry.item.subject) {
+                sources.push((repo, subject));
+            }
+        }
+        Ok(Some(sources))
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct AttachmentSources {
     pub project_version: u64,
     pub issues: Vec<Destination>,

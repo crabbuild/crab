@@ -1,5 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import { pickDate } from "./date-picker";
+import { chooseSelectOption } from "./select";
 import {
   expectNoAccessibilityViolations,
   selectDarkTheme,
@@ -185,6 +186,35 @@ async function fixture(page: Page, movedIssue = false) {
           throw new Error(
             "Issue publication requires the native Project browser fixture",
           );
+        } else if (command.kind === "bulk_fields") {
+          const stale = command.items.find(
+            ({ item, version }) => revisions.get(item) !== version,
+          );
+          if (stale) {
+            outcome = {
+              outcome: "item_conflict",
+              project: project.id,
+              item: stale.item,
+              version: revisions.get(stale.item) ?? 0,
+            };
+          } else {
+            for (const edit of command.items) {
+              const row = items.find(({ item }) => item.id === edit.item);
+              if (!row || edit.change.field !== "status")
+                throw new Error("Unexpected Project bulk fixture edit");
+              row.item = { ...row.item, status: edit.change.value };
+              revisions.set(edit.item, edit.version + 1);
+            }
+            project = {
+              ...project,
+              version: project.version + command.items.length,
+            };
+            outcome = {
+              outcome: "applied",
+              project: project.id,
+              version: project.version,
+            };
+          }
         } else if (
           movedIssue &&
           command.kind === "item" &&
@@ -363,6 +393,24 @@ async function fixture(page: Page, movedIssue = false) {
   return {
     submissions,
     items,
+    addDraft(title: string) {
+      const id = crypto.randomUUID();
+      items.push({
+        repository: null,
+        item: {
+          id,
+          title,
+          subject: null,
+          body: "",
+          status: "Todo",
+          priority: 0,
+          start: null,
+          end: null,
+          values: {},
+        },
+      });
+      revisions.set(id, 1);
+    },
     editFirstItem(title: string) {
       const row = items[0];
       row.item = { ...row.item, title };
@@ -1002,6 +1050,54 @@ test("a lost submission survives reload and stays bound to its original account"
   await expect(page.getByLabel("Project name", { exact: true })).toHaveValue(
     "",
   );
+});
+
+test("bulk Project edits recover the original submission and Undo after reload", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  state.addDraft("Roll out API");
+  state.addDraft("Roll out client");
+  await page.goto(`${home}/${projectId}`);
+  await page.getByRole("tab", { name: "Table", exact: true }).click();
+  await page
+    .getByRole("checkbox", { name: /Select all Project items/ })
+    .check();
+  await chooseSelectOption(page.getByLabel("New value", { exact: true }), {
+    label: "Done",
+  });
+  state.loseNext();
+  await page
+    .getByRole("button", { name: "Apply to selected", exact: true })
+    .click();
+  const retry = page.getByRole("button", {
+    name: "Retry submission",
+    exact: true,
+  });
+  await expect(retry).toBeEnabled();
+  const sent = structuredClone(state.submissions[0]);
+  expect(sent.command.kind).toBe("bulk_fields");
+  await page.reload();
+  await retry.click();
+  await expect(
+    page.getByRole("button", { name: "Undo", exact: true }),
+  ).toBeVisible();
+  expect(state.submissions[1]).toEqual(sent);
+  await expect(page.getByLabel("Status for Roll out API")).toHaveText("Done");
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect(page.getByLabel("Status for Roll out API")).toHaveText("Todo");
+  await expect(page.getByLabel("Status for Roll out client")).toHaveText(
+    "Todo",
+  );
+  const inverse = state.submissions[2];
+  expect(inverse.request_id).not.toBe(sent.request_id);
+  expect(inverse.command).toMatchObject({
+    kind: "bulk_fields",
+    items: [
+      { version: 2, change: { field: "status", value: "Todo" } },
+      { version: 2, change: { field: "status", value: "Todo" } },
+    ],
+  });
 });
 
 test("a failed recovery checkpoint prevents the new native request", async ({
