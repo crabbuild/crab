@@ -1,6 +1,7 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use crab_remote_git::{RemoteGitRepository, RepositoryOptions};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
@@ -8,6 +9,48 @@ use crate::{
     repository::Repository,
     server::Server,
 };
+
+pub(super) async fn with_comparison_leases<T, F>(
+    upstream: &Repository,
+    fork: Option<&Repository>,
+    base_ref: String,
+    head_ref: String,
+    cancel: &CancellationToken,
+    work: impl FnOnce(CancellationToken) -> F,
+) -> Result<T>
+where
+    F: Future<Output = Result<T>>,
+{
+    let mut refs = vec![base_ref];
+    if fork.is_none() {
+        refs.push(head_ref.clone());
+    }
+    let ttl = Duration::from_secs(300);
+    // Fork merges and branch updates take upstream refs before fork refs.
+    crab_remote::publication::with_leases(
+        &upstream.store,
+        &upstream.layout,
+        refs,
+        ttl,
+        cancel,
+        |_holders, scoped| async move {
+            if let Some(fork) = fork {
+                crab_remote::publication::with_leases(
+                    &fork.store,
+                    &fork.layout,
+                    [head_ref],
+                    ttl,
+                    &scoped,
+                    |_holders, scoped| work(scoped),
+                )
+                .await
+            } else {
+                work(scoped).await
+            }
+        },
+    )
+    .await
+}
 
 pub(super) async fn committed_branch_edit(
     repository: &Repository,

@@ -485,7 +485,7 @@ impl IntoResponse for Error {
             Self::MergeBusy => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "busy",
-                "Git writes are busy; retry this merge shortly",
+                "Git writes are busy. Retry this action shortly.",
             ),
             Self::MergePermission => (
                 StatusCode::FORBIDDEN,

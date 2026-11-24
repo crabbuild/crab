@@ -87,10 +87,34 @@ pub(super) async fn exercise(
     .await;
 
     for (method, target) in targets {
-        let opened: Value = repository_write(
-            h, Method::POST, &pulls, alice, id,
-            json!({"request_id":Uuid::now_v7(),"title":"Merge from a fork","body":"", "base_ref":format!("refs/heads/{target}"),"head_ref":"refs/heads/proposal","head_repository":fork,"expected":{"base_oid":base,"head_oid":head}}),
-        ).await.error_for_status().unwrap().json().await.unwrap();
+        let input = json!({"request_id":Uuid::now_v7(),"title":"Merge from a fork","body":"", "base_ref":format!("refs/heads/{target}"),"head_ref":"refs/heads/proposal","head_repository":fork,"expected":{"base_oid":base,"head_oid":head}});
+        if method == "squash" {
+            let source = h.server.repositories.by_id(fork).unwrap();
+            let locked =
+                crab_remote::publication::with_leases::<_, crab_remote::publication::Error, _, _>(
+                    &source.store,
+                    &source.layout,
+                    ["refs/heads/proposal".into()],
+                    std::time::Duration::from_secs(30),
+                    &h.server.cancellation,
+                    |_, _| async {
+                        let response =
+                            repository_write(h, Method::POST, &pulls, alice, id, input.clone())
+                                .await;
+                        Ok(response.status())
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(locked, StatusCode::TOO_MANY_REQUESTS);
+        }
+        let opened: Value = repository_write(h, Method::POST, &pulls, alice, id, input)
+            .await
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
         let number = opened["number"].as_u64().unwrap();
         let path = format!("{pulls}/{number}/merge");
         let request = json!({"request_id":Uuid::now_v7(),"version":opened["version"],"method":method,"base_oid":base,"head_oid":head});

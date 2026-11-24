@@ -3879,8 +3879,12 @@ remain unchanged. Update serving peers and the bundled UI together.
 Pull creation records exact base and head branch names plus their opening commit OIDs. Detail reads refresh both live tips without rewriting the immutable opening evidence.
 
 Browser creation supplies `expected: {base_oid, head_oid}` from its completed
-comparison. A stale or deleted ref records a terminal 409 `comparison_changed`
-with the rejected write-outcome header. Review the refreshed comparison and use
+comparison. The server rechecks both refs under the same leases native Git
+writes use and holds them through the Repository Cell decision. For a fork,
+it leases the upstream base before the fork head. A busy ref returns HTTP 429
+and the same submission can be retried. A stale or deleted ref records a
+terminal 409 `comparison_changed` with the rejected write-outcome header.
+Review the refreshed comparison and use
 a new submission UUID. Exact retries recover the original result even if refs
 have moved again. Tagged ref-only create clients retain server-side tip capture.
 Inline review `base_oid` identifies the effective comparison base while PR

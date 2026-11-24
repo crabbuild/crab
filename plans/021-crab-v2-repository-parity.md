@@ -6,6 +6,8 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
 
 - Compare and create now share merge-base reads and submit the inspected tips.
   Native submission decisions preserve both successful and stale attempts.
+  Creation rechecks the inspected tips while holding the base and head Git ref
+  leases through the Repository Cell decision, including on private fork PRs.
   Per-file diffs and inline review anchors now resolve one path at the pinned
   commits. A native 516-file fixture with diverged branches verified diff reads
   and review anchors under an entry budget the full comparison exceeds.
