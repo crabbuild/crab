@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { mockPullRequest } from "./pulls/fixture";
+import { openSecondaryFilter } from "./discussion-filters";
 import {
   expectNoAccessibilityViolations,
   selectDarkTheme,
@@ -315,9 +316,9 @@ for (const viewport of [
     ).toBeVisible();
     data.hold();
     try {
-      await page
-        .getByRole("button", { name: "Filter by label", exact: true })
-        .click();
+      await openSecondaryFilter(
+        page.getByRole("button", { name: "Filter by label", exact: true }),
+      );
       await page.getByRole("option", { name: /^Bug/ }).click();
       await expect(
         page.getByText("Loading results…", { exact: true }),

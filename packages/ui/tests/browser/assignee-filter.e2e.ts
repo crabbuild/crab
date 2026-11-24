@@ -1,3 +1,4 @@
+import { openSecondaryFilter } from "./discussion-filters";
 import { expect, test, type Page } from "@playwright/test";
 import { mockPullRequest } from "./pulls/fixture";
 import {
@@ -109,7 +110,7 @@ for (const view of ["issues", "pulls"] as const) {
       exact: true,
     });
     expect(requests).toHaveLength(0);
-    await trigger.click();
+    await openSecondaryFilter(trigger);
     const input = page.getByRole("combobox", { name: "Find a person" });
     await expect(input).toBeFocused();
     await expect(
@@ -133,7 +134,7 @@ for (const view of ["issues", "pulls"] as const) {
     expect(new URL(page.url()).searchParams.get("powerbar")).toBe("1");
     await expect(trigger).toBeFocused();
     await page.reload();
-    await trigger.click();
+    await openSecondaryFilter(trigger);
     await expect(
       page.getByRole("option", { name: "Public Alice @public-alice" }),
     ).toHaveAttribute("aria-selected", "true");
@@ -143,7 +144,7 @@ for (const view of ["issues", "pulls"] as const) {
     await expect
       .poll(() => new URL(page.url()).searchParams.get("q"))
       .toBe("is:open no:assignee");
-    await trigger.click();
+    await openSecondaryFilter(trigger);
     await page
       .getByRole("option", { name: "Former member", exact: true })
       .click();
@@ -162,7 +163,7 @@ for (const view of ["issues", "pulls"] as const) {
     await expect(personal).toHaveAttribute("aria-current", "page");
     await page.reload();
     await expect(personal).toHaveAttribute("aria-current", "page");
-    await trigger.click();
+    await openSecondaryFilter(trigger);
     await page.getByRole("button", { name: "Clear assignee filter" }).click();
     await expect(personal).not.toHaveAttribute("aria-current");
   });
@@ -180,7 +181,7 @@ test("assignee menu exposes failures, retries and accessible mobile dark content
     name: "Filter by assignee",
     exact: true,
   });
-  await trigger.click();
+  await openSecondaryFilter(trigger);
   await expect(page.getByRole("alert")).toContainText("Assignees unavailable");
   state.fail(false);
   await page.getByRole("button", { name: "Retry people" }).click();

@@ -263,6 +263,14 @@ the account's private inbox. Group-backed repositories appear when the current
 SSO session grants access. Open a discussion from its notification or mark the
 notification read.
 
+The Issues and Pull Requests search boxes highlight qualifiers, values, and
+Boolean operators as you type. Press `/` to focus search or use **Add filter**
+to browse available qualifiers without replacing the current query. Choose a
+qualifier to see matching values from the server. Use the arrow keys to move
+through suggestions and Enter or Tab to insert the highlighted choice. On
+narrow lists, **More filters** keeps the filter pickers available alongside
+sort and list density.
+
 Use the primitive APIs directly: buttons contain icons with `data-icon`, inputs
 with addons use `InputGroup`, menus compose their groups/items, and forms use
 `Field`/`FieldGroup`. Use `Select` for styled option menus rather than browser

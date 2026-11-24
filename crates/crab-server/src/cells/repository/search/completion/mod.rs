@@ -257,36 +257,49 @@ fn suggestions(
             }
         }
     } else if !prefix.starts_with("type:") {
-        for (value, description) in [
+        let qualifiers = [
+            ("is:", "Filter by work type, state, or conversation lock"),
+            ("state:", "Filter by open or closed state"),
+            ("label:", "Filter by repository label"),
+            ("author:", "Filter by public username"),
+            ("assignee:", "Filter by assignee"),
+            ("milestone:", "Filter by repository milestone"),
+            ("review:", "Filter review status"),
+            ("review-requested:", "Filter pending reviewers"),
+            ("type:", "Filter by issue type"),
+            ("in:", "Choose which discussion text to search"),
+            ("no:", "Find work with missing metadata"),
+            ("comments:", "Filter by the number of comments"),
+        ];
+        let values = [
             ("is:open", "Open work"),
             ("is:closed", "Closed work, including merged pull requests"),
             ("is:issue", "Issues"),
             ("is:pr", "Pull requests"),
             ("is:merged", "Merged pull requests"),
+            ("draft:true", "Draft pull requests"),
             ("is:unmerged", "Pull requests that have not merged"),
             ("is:locked", "Locked conversations"),
             ("is:unlocked", "Unlocked conversations"),
-            ("draft:true", "Draft pull requests"),
+            ("draft:", "Filter drafts"),
             ("draft:false", "Non-draft pull requests"),
-            ("label:", "Filter by repository label"),
+            ("state:open", "Open work"),
+            (
+                "state:closed",
+                "Closed work, including merged pull requests",
+            ),
             ("reason:completed", "Issues closed as completed"),
             ("reason:\"not planned\"", "Issues closed as not planned"),
             ("reason:reopened", "Issues reopened after closure"),
             ("no:reason", "Issues without a state reason"),
             ("no:label", "Work without labels"),
             ("no:assignee", "Unassigned work"),
-            ("milestone:", "Filter by repository milestone"),
             ("no:milestone", "Work without a milestone"),
-            ("type:", "Filter by issue type"),
             ("no:type", "Issues without a type"),
-            ("author:", "Filter by public username"),
             ("commenter:", "Filter discussion participants"),
             ("author:@me", "Work created by you"),
-            ("assignee:", "Filter by assignee"),
             ("assignee:@me", "Work assigned to you"),
             ("assignee:*", "Work with any assignee"),
-            ("review:", "Filter review status"),
-            ("review-requested:", "Filter pending reviewers"),
             ("team-review-requested:", "Filter by requested team"),
             ("reviewed-by:", "Filter submitted reviewers"),
             (
@@ -314,9 +327,11 @@ fn suggestions(
                 "interactions:1..10",
                 "One to ten comments and reactions combined",
             ),
-        ] {
+        ];
+        for (value, description) in qualifiers.into_iter().chain(values) {
             if negative && (value.starts_with("no:") || value.starts_with("in:"))
                 || !value.starts_with(&prefix)
+                || value == prefix
             {
                 continue;
             }
