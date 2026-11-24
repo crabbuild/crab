@@ -13,6 +13,7 @@ mod auto_merge;
 mod branch_restore;
 mod branch_update;
 mod candidate;
+mod check_history;
 mod open_comparison;
 mod recent_pushes;
 mod retarget;

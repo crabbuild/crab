@@ -4331,7 +4331,10 @@ is the newest unresolved conversation. A resolved anchor can still be used
 as the starting position. The endpoint requires current repository read
 access.
 
-If either branch is deleted, the conversation and original OIDs remain visible while live comparison becomes unavailable. A completed merge retains its pre-merge comparison after source deletion.
+If either branch is deleted, the conversation and original OIDs remain visible.
+A completed merge retains its pre-merge base and head IDs after source deletion.
+File and commit browsing still needs reachable Git objects. The **Checks** tab
+can read stored reports for the recorded merge commits independently of Git reachability.
 
 Reviews record `commented`, `approved`, or `changes_requested` against the exact current head. Pull authors cannot approve or request changes on their own pull. Advancing the head marks older reviews as not current.
 
@@ -4762,6 +4765,12 @@ up-to-date head when required. Crab rechecks current write access, both source
 tips, the candidate ref, file locks, and the current policy before publication.
 The merged pull request records the tested SHA.
 
+After merge, **Checks** opens the recorded reviewed head. If Crab published a
+tested candidate, **Tested merge checks** shows reports for that separately
+recorded commit. Both views list stored commit statuses and check runs,
+including after squash or rebase and source branch deletion. These are the
+reports currently stored for the displayed SHA.
+
 `GET .../pulls/{number}/merge-candidate` returns `preview` and `candidate`.
 Submit `preview` with `POST` to prepare the recorded comparison. It contains
 the request ID, PR version, exact tip OIDs, prior candidate OID, and the
@@ -5073,6 +5082,10 @@ Authorization: Basic base64_encoded_crab_and_token
 State is `pending`, `success`, `failure`, or `error`. Context matching is case-insensitive. The newest report replaces the visible result for that context; replaying an older request returns its original record without replacing newer state.
 
 `GET /api/repos/{owner}/{name}/commits/{sha}/status` returns the latest context results and combined state.
+For a completed pull request, pass `?pull={number}` to read the exact recorded
+source head or the published tested SHA. The same read scope applies to the
+check run list and detail. Repository access and commit admission for reporting
+still apply to writes.
 
 Status limits include 1,000 submissions per commit, 128 retained contexts, 140 description characters, a 2 KiB target URL, and an 8 KiB request body. Target URLs require HTTPS, except loopback HTTP during local development.
 

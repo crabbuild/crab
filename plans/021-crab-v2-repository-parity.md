@@ -15,6 +15,11 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
 - Protected merge checks direct reviewer grants, evaluates same-name statuses
   and check runs together, leases both refs and reconciles with a durable receipt.
   The prior tag's pending records still use their tagged retry contract.
+- Merged pull requests retain access to check runs and commit statuses for
+  the exact reviewed head and, when published, the tested candidate. The
+  Checks tab separates these commits after squash or rebase and branch
+  cleanup. Historical code browsing for a now-unreachable head still needs
+  a Git retention policy.
 - Writers can restore a missing head branch from a completed pull request.
   The panel shows the saved commit. Publication checks the current source
   repository, write grant and ref rules, and requires the branch name to be

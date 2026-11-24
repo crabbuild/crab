@@ -64,10 +64,25 @@ pub(super) async fn require_check_head(
     repo: &Repository,
     number: u64,
     oid: gix_hash::ObjectId,
+    access: statuses::CommitAccess,
 ) -> Result<String> {
     let pull = storage::pull(server, repo, app::number(number)?)
         .await?
         .ok_or(Error::CommitNotFound)?;
+    if matches!(access, statuses::CommitAccess::Read)
+        && let Some(merge) = &pull.merge
+    {
+        // A squash or rebase can leave the reviewed head unreachable after
+        // cleanup. The completed merge authorizes only its recorded reports.
+        let requested = oid.to_string();
+        return if requested == merge.head_oid
+            || merge.tested_candidate && requested == merge.commit_oid
+        {
+            Ok(requested)
+        } else {
+            Err(Error::CommitNotFound)
+        };
+    }
     if pull.head_repository.is_none() {
         return statuses::require_commit(server, repo, oid).await;
     }
