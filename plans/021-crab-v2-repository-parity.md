@@ -13,6 +13,11 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
 - Protected merge checks direct reviewer grants, evaluates same-name statuses
   and check runs together, leases both refs and reconciles with a durable receipt.
   The prior tag's pending records still use their tagged retry contract.
+- Writers can restore a missing head branch from a completed pull request.
+  The panel shows the saved commit. Publication checks the current source
+  repository, write grant and ref rules, and requires the branch name to be
+  unused. Git objects must still be retained. Deleting from the PR, automatic
+  cleanup after merge, and retargeting dependent PRs remain open.
 - Viewed progress now persists per account and PR, keyed to file diff identity.
 - Release notes process merged pull requests in pages using the pinned Git
   range. A native fixture added 4,096 historical merge records, then published

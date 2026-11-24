@@ -28,6 +28,8 @@ use crate::{
 
 pub(crate) mod auto_merge;
 mod base;
+mod branch_restore;
+pub(crate) use branch_restore::authorize_branch_restore;
 mod branch_update;
 pub(super) mod candidate;
 pub(crate) use candidate::authorize_merge_candidate;
@@ -112,6 +114,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
             get(detail).patch(edit),
         )
         .merge(comments::routes())
+        .merge(branch_restore::routes())
         .merge(branch_update::routes())
         .merge(base::routes())
         .merge(reviews::routes())

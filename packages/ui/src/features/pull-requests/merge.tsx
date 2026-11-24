@@ -34,6 +34,7 @@ import { branch } from "./presentation";
 import { AutoMerge } from "./auto-merge";
 import { RequiredChecks } from "./required-checks";
 import { CodeOwnersSummary } from "./codeowners";
+import { RestoreBranch } from "./restore-branch";
 
 export function MergePanel({
   repo,
@@ -95,6 +96,9 @@ export function MergePanel({
     (requirements.required_approvals === 0 && !requirements.code_owners) ||
     (requirements.changes_requested === 0 &&
       requirements.approvals >= requirements.required_approvals);
+  const restoreBranch = pull.state !== "open" && (
+    <RestoreBranch repo={repo} pull={pull} csrf={csrf} onRestored={refresh} />
+  );
 
   async function merge() {
     // A pending publication must replay the exact original submission, even if
@@ -147,6 +151,7 @@ export function MergePanel({
             )}
           </div>
         </div>
+        {restoreBranch}
       </section>
     );
   if (pull.state === "closed")
@@ -159,6 +164,7 @@ export function MergePanel({
             <p>Reopen it before merging these commits.</p>
           </div>
         </div>
+        {restoreBranch}
       </section>
     );
   if (pull.draft)

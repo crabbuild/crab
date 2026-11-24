@@ -96,6 +96,10 @@ pub(crate) enum Error {
     BranchUpdateChanged,
     #[error("The replacement branch name is already in use")]
     BranchUpdateDestination,
+    #[error("The branch name is already in use")]
+    BranchRestoreConflict,
+    #[error("Branch restoration failed")]
+    BranchRestore(#[source] Box<crate::git::receive::ReceiveError>),
     #[error("The base changes do not merge cleanly into the head branch")]
     BranchUpdateConflict,
     #[error("The pull request cannot be safely rebased")]
@@ -284,6 +288,7 @@ impl IntoResponse for Error {
                     | Self::TransferPublication(_)
                     | Self::RepositoryNamePublication(_)
                     | Self::Merge(_)
+                    | Self::BranchRestore(_)
                     | Self::MergeObject(_)
                     | Self::Release(_)
                     | Self::ReleaseAssetIo(_)
@@ -296,7 +301,9 @@ impl IntoResponse for Error {
             tracing::error!(error = ?self, "collaboration request failed");
         }
         let staging = match &self {
-            Self::Merge(error) | Self::Release(error) => error.staging_status(),
+            Self::Merge(error) | Self::Release(error) | Self::BranchRestore(error) => {
+                error.staging_status()
+            }
             _ => None,
         };
         if let Some((status, message)) = staging {
@@ -414,6 +421,16 @@ impl IntoResponse for Error {
                 StatusCode::CONFLICT,
                 "branch_update_destination",
                 "Choose an unused replacement branch name",
+            ),
+            Self::BranchRestoreConflict => (
+                StatusCode::CONFLICT,
+                "branch_restore_conflict",
+                "The branch name is already in use. Reload the pull request.",
+            ),
+            Self::BranchRestore(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "branch_restore_failed",
+                "Crab could not restore this branch. Retry shortly.",
             ),
             Self::BranchUpdateConflict => (
                 StatusCode::CONFLICT,

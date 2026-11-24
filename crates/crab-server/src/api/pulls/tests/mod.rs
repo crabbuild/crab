@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 mod auto_merge;
+mod branch_restore;
 mod branch_update;
 mod candidate;
 mod retarget;

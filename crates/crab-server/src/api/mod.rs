@@ -54,7 +54,9 @@ mod revalidation;
 pub(crate) use integrations::{GitHubActions, ci_git_path, webhook_path};
 pub(crate) use pulls::authorize_merge_publication;
 pub(crate) use pulls::authorize_suggestion_publication;
-pub(crate) use pulls::{authorize_branch_update, authorize_merge_candidate, auto_merge};
+pub(crate) use pulls::{
+    authorize_branch_restore, authorize_branch_update, authorize_merge_candidate, auto_merge,
+};
 pub(crate) use query::comparison_blobs;
 use query::execute;
 use representation::{asset_response, commit_json, decode_cursor, decode_hex, encode_cursor};

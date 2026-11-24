@@ -4158,6 +4158,21 @@ the new head. The switch records an activity event, expires prior approvals,
 and starts a new review comparison. If the PR or a captured tip changes before
 the switch, Crab shows a link to the branch and leaves the PR on its current head.
 
+On a closed or merged pull request, **Restore branch** recreates a missing
+head branch in the source repository. The panel shows the commit that will
+be restored. Merged pull requests use the exact original head recorded at
+merge. Closed pull requests use the head saved in their comparison.
+Restore requires current Write access in the source repository and follows
+its branch protection and rulesets. It can recover only commits still present
+in storage. If the branch name has been reused, the request reports a conflict.
+
+`GET /api/repos/{owner}/{name}/pulls/{number}/restore-branch` returns the
+available action as `branch`, including its pull version, repository UUID,
+and commit. `POST` to the same endpoint accepts
+`request_id`, `version`, `repository_id`, and `head_oid`. The published
+ref must still be absent. Retrying a recorded request recovers the original
+result without replaying the Git update.
+
 Choose **Update with rebase** from the branch update menu to replay the head
 commits on top of the captured base. Confirm **Rebase branch** to replace the
 head history with the new commits. Crab preserves authors and commit messages,

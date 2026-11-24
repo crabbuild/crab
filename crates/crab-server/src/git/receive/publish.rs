@@ -73,6 +73,7 @@ fn native_plan_id(
 
 pub(super) enum Publication {
     NativePush,
+    BranchRestore(super::BranchRestorePublication),
     ReviewSuggestions(super::SuggestionPublication),
     BranchUpdate(super::BranchUpdatePublication),
     ForkSync {
@@ -86,6 +87,7 @@ impl Publication {
     fn plan_id(&self) -> Option<String> {
         match self {
             Self::NativePush => None,
+            Self::BranchRestore(restore) => Some(restore.plan_id.clone()),
             Self::ReviewSuggestions(batch) => Some(batch.plan_id.clone()),
             Self::BranchUpdate(update) => Some(update.plan_id.clone()),
             Self::ForkSync { plan_id, .. } => Some(plan_id.clone()),
@@ -99,6 +101,7 @@ impl Publication {
     ) -> &'a CancellationToken {
         match self {
             Self::NativePush
+            | Self::BranchRestore(_)
             | Self::ReviewSuggestions(_)
             | Self::BranchUpdate(_)
             | Self::ForkSync { .. } => server,
@@ -342,6 +345,8 @@ async fn run_request(
 ) -> Result<Vec<u8>> {
     let entry = super::target(server, principal, key).ok_or(ReceiveError::NotFound)?;
     if matches!(&input.publication, Publication::BranchUpdate(update) if update.repository != entry.id)
+        || matches!(&input.publication, Publication::BranchRestore(restore)
+            if restore.source.id != entry.id || restore.source.ownership_epoch != entry.ownership_epoch)
     {
         return Err(ReceiveError::NotFound);
     }
@@ -355,6 +360,7 @@ async fn run_request(
         .map(|update| update.name.clone())
         .chain(match &input.publication {
             Publication::NativePush
+            | Publication::BranchRestore(_)
             | Publication::ReviewSuggestions(_)
             | Publication::ForkSync { .. } => None,
             Publication::PullRequest(pull)
@@ -680,6 +686,13 @@ async fn publish_attempt(
     if !current.principal.can_write(entry.id) {
         return Err(ReceiveError::Forbidden);
     }
+    if let Publication::BranchRestore(restore) = &input.publication
+        && committed_plan(entry, &request.updates, &restore.plan_id).await?
+    {
+        // This can be a replay after someone deleted the restored branch.
+        // The original action is complete and must not recreate it again.
+        return Ok(vec![]);
+    }
     let defer_readiness = input.defer_readiness;
     let (mut view, mut repository) = entry
         .open_capsule_repository(server, repository_options(server)?, cancel)
@@ -790,6 +803,28 @@ async fn publish_attempt(
         }
     }
     let visibility = view.git_visibility_index().await?;
+    let restored_pack = if let Publication::BranchRestore(restore) = &input.publication {
+        let [update] = request.updates.as_slice() else {
+            return Err(ReceiveError::Request(
+                "Branch restoration requires one ref edit",
+            ));
+        };
+        crate::api::authorize_branch_restore(server, principal, entry, restore, update).await?;
+        if refs.contains_key(&update.name) {
+            return Err(ReceiveError::BranchChanged);
+        }
+        let commit = update.new.ok_or(ReceiveError::BranchChanged)?;
+        super::fork_merge::restore_pack(&repository, &visibility, commit, cancel).await?
+    } else {
+        None
+    };
+    let pack = match restored_pack.as_ref() {
+        Some(pack) if pack.size() <= super::MAX_BODY => {
+            Some(BufReader::new(std::fs::File::open(pack.path())?))
+        }
+        Some(_) => return Err(ReceiveError::TooLarge),
+        None => input.pack,
+    };
     let has_branch = refs.keys().any(|name| name.starts_with("refs/heads/"));
     principal.identity().ok_or(ReceiveError::Forbidden)?;
     let initial_head = (!defer_readiness && !has_branch)
@@ -907,7 +942,7 @@ async fn publish_attempt(
         repository.clone(),
         visibility,
         scratch,
-        input.pack,
+        pack,
         request.updates.clone(),
         visibility_bases,
         cancel,
@@ -1281,6 +1316,14 @@ async fn commit_authorized(
             ));
         };
         crate::api::authorize_branch_update(server, entry, branch, &update.name).await?;
+    }
+    if let Publication::BranchRestore(restore) = mutation.publication {
+        let [update] = mutation.updates else {
+            return Err(ReceiveError::Request(
+                "Branch restoration requires one ref edit",
+            ));
+        };
+        crate::api::authorize_branch_restore(server, principal, entry, restore, update).await?;
     }
     if let Some(plan) = plan_id
         && sends_publication_webhook(server, principal, entry, mutation.updates)
