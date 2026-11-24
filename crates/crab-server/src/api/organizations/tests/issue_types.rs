@@ -319,6 +319,136 @@ async fn issue_type_filters_count_sparse_results_and_bind_schema_changes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn bulk_issue_types_rollback_stale_assignments_and_recover_after_policy_changes() {
+    let (h, alice, org, repo, key) = fixture().await;
+    let root = format!("/api/repos/{key}");
+    let edit = format!("{root}/discussions/bulk");
+    let schema = format!("{org}/issue-types");
+    let initial = h.json(&schema, &alice).await;
+    let mut definitions = initial["definitions"].as_array().unwrap().clone();
+    let bug = definitions[1]["id"].clone();
+    let feature = definitions[2]["id"].clone();
+    repository_write(
+        &h,
+        Method::POST,
+        &format!("{root}/issues"),
+        &alice,
+        repo,
+        json!({"request_id":Uuid::now_v7(),"title":"Second report","body":""}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let role = async |access| {
+        let members = format!("{root}/members");
+        let acl = h.json(&members, &alice).await;
+        repository_write(&h, Method::PUT, &members, &alice, repo,
+            json!({"expected_revision":acl["revision"],"members":[{"subject":"bob-id","name":"Bob","access":access}],"groups":[]}))
+            .await.error_for_status().unwrap();
+    };
+    role("triage").await;
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    let select = async || {
+        h.json(
+            &format!("{root}/discussions/selection?repository_id={repo}&items=issue:1:1,issue:2:1"),
+            &bob,
+        )
+        .await["items"]
+            .clone()
+    };
+    let request = |items: Value, type_id: Value| {
+        json!({
+            "repository_id":repo,"request_id":Uuid::now_v7(),"items":items,
+            "action":{"kind":"issue_type","type_id":type_id}
+        })
+    };
+    let submit = async |input| repository_write(&h, Method::POST, &edit, &bob, repo, input).await;
+    let initial = select().await;
+    assert_eq!(initial[0]["issue_type_version"], 0);
+    assert_eq!(initial[1]["issue_type_version"], 0);
+    let stale = request(initial, bug.clone());
+    repository_write(
+        &h,
+        Method::PUT,
+        &format!("{root}/issues/2/type"),
+        &alice,
+        repo,
+        json!({"expected_version":0,"type_id":feature}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+
+    let rejected = submit(stale.clone()).await;
+    assert_eq!(rejected.status(), StatusCode::CONFLICT);
+    assert_eq!(rejected.headers()["x-crab-write-outcome"], "rejected");
+    assert!(h.json(&format!("{root}/issues/1"), &bob).await["issue_type"].is_null());
+    let filtered = format!("{root}/issues?q=is%3Aissue+type%3ABug");
+    assert_eq!(h.json(&filtered, &bob).await["matching"], 0);
+
+    let fresh = request(select().await, bug.clone());
+    assert_eq!(
+        submit(fresh.clone())
+            .await
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()["count"],
+        2
+    );
+    assert_eq!(h.json(&filtered, &bob).await["matching"], 2);
+    assert_eq!(submit(stale).await.status(), StatusCode::CONFLICT);
+
+    let clear = request(select().await, Value::Null);
+    assert_eq!(
+        submit(clear)
+            .await
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()["count"],
+        2
+    );
+    assert_eq!(h.json(&filtered, &bob).await["matching"], 0);
+
+    definitions[1]["enabled"] = json!(false);
+    h.write(
+        Method::PUT,
+        &schema,
+        &alice,
+        json!({"expected_version":0,"definitions":definitions}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let disabled = submit(request(select().await, bug)).await;
+    assert_eq!(disabled.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(disabled.headers()["x-crab-write-outcome"], "rejected");
+    role("read").await;
+    assert_eq!(
+        submit(fresh)
+            .await
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()["count"],
+        2
+    );
+    for (number, version) in [(1, 2), (2, 3)] {
+        assert!(h.json(&format!("{root}/issues/{number}"), &bob).await["issue_type"].is_null());
+        assert_eq!(
+            h.json(&format!("{root}/issues/{number}"), &alice).await["issue_type_version"],
+            version
+        );
+    }
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires agent-browser and built embedded UI; uses real OIDC/native Cells"]
 async fn native_browser_manages_and_assigns_issue_types() {
     use crate::test_support::http::browser::Browser;
@@ -376,6 +506,30 @@ async fn native_browser_manages_and_assigns_issue_types() {
     browser.run(&["wait", "[role='option'][id]"]).await;
     click("option", "Reliability").await;
     browser.run(&["wait", "--fn", "new URL(location.href).searchParams.get('q')?.includes('type:') && document.body.textContent.includes('Classify this report') && !document.body.textContent.includes('Not yet classified')"]).await;
+
+    browser
+        .run(&["open", &format!("{}/{key}/issues", h.origin)])
+        .await;
+    browser.run(&["wait", "--fn", "document.querySelector('[aria-label=\"Select all items on this page\"]')?.disabled === false"]).await;
+    click("checkbox", "Select all items on this page").await;
+    browser.run(&["wait", "--fn", "document.querySelector('[aria-label=\"Set issue type for selected issues\"]')?.disabled === false"]).await;
+    click("button", "Set issue type for selected issues").await;
+    browser.run(&["wait", "--fn", "Array.from(document.querySelectorAll('[data-slot=popover-content] button')).some(button => button.textContent.trim() === 'Reliability' && !button.disabled)"]).await;
+    click("button", "Reliability").await;
+    browser
+        .run(&[
+            "wait",
+            "--fn",
+            "document.body.textContent.includes('Updated 2 selected items.')",
+        ])
+        .await;
+    let root = format!("/api/repos/{key}");
+    for number in [1, 2] {
+        assert_eq!(
+            h.json(&format!("{root}/issues/{number}"), &alice).await["issue_type"]["name"],
+            "Reliability"
+        );
+    }
 
     browser.run(&["open", &settings]).await;
     browser.run(&["wait", "--text", "Reliability"]).await;

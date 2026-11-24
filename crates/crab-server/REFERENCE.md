@@ -3189,7 +3189,8 @@ Row checkboxes, Shift selection and Select all operate on the current page only.
 GET `/api/repos/{owner}/{name}/discussions/selection?repository_id={uuid}&items=issue:1:3,pull:2:4`
 checks 1–100 distinct subjects and their expected record versions in one native
 snapshot. Its `{repository_id, items}` response contains `{item: {subject: {kind, number}, version},
-milestone_version}` entries. A stale or missing subject rejects preparation;
+milestone_version}` entries. Issue entries also carry `issue_type_version`.
+A stale or missing subject rejects preparation;
 current Triage permission is required. The UUID must match the resolved repository;
 a reused owner/name cannot retarget the captured selection. The browser retains
 these exact entries and UUID.
@@ -3207,6 +3208,11 @@ POST `/api/repos/{owner}/{name}/discussions/bulk` accepts
   Historical assignees remain removable after losing access.
 - `{kind: "milestone", number: milestone number or null}`;
   both source record and independent milestone assignment versions are checked.
+- `{kind: "issue_type", type_id: type UUID or null}`;
+  choose **Type** for an issue-only selection in an organization repository.
+  The type must be enabled in that organization. **No type** clears the
+  assignments. The organization policy lease protects type resolution and the
+  repository transaction checks both the issue and assignment versions.
 
 All selected changes, source versions, progress, activity, index effects and the
 permanent submission receipt commit together. Any rejection rolls all items back;
@@ -3231,7 +3237,8 @@ preserved in bounded frames; old failed decisions cannot be reconstructed.
 No discussion-index rebuild is required. HTTP defers archive policy to the native
 command so a committed submission can recover after archive.
 Catalog-owned grants remain the authority; native grant cutover/cross-Cell fencing,
-Projects/type bulk actions and wider GitHub parity remain delivery work.
+bulk Project actions and wider GitHub parity remain delivery work.
+Coordinate private peer and UI updates before using bulk issue type assignment.
 
 ### Browse activity
 

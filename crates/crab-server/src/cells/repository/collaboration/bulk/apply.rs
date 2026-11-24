@@ -122,6 +122,45 @@ fn apply_item(
                 },
             );
         }
+        Action::IssueType { type_id } => {
+            let selection = match (type_id, input.issue_type_authority) {
+                (None, Some(IssueTypeAuthority::Clear)) => None,
+                (Some(id), Some(IssueTypeAuthority::Assign(selection))) if *id == selection.id => {
+                    Some(selection)
+                }
+                _ => return Ok(Some(Failure::InvalidIssueType)),
+            };
+            let expected_version = selected.issue_type_version.ok_or(Error::Invalid(
+                "bulk issue type selection version is missing",
+            ))?;
+            // The single-item command recognizes adjacent-version replays.
+            // Bulk receipts already handle replay, so a fresh intent is strict.
+            if issue_type::load(context, item.subject.number)?.version != expected_version {
+                return Ok(Some(Failure::Conflict));
+            }
+            return Ok(
+                match issue_type::Set::execute(
+                    context,
+                    issue_type::SetInput {
+                        number: item.subject.number,
+                        expected_version,
+                        selection,
+                    },
+                )? {
+                    MutationResult::Success(issue_type::Outcome::Saved(_)) => None,
+                    MutationResult::Rejected(issue_type::Outcome::Archived) => {
+                        Some(Failure::Archived)
+                    }
+                    MutationResult::Rejected(issue_type::Outcome::NotFound) => {
+                        Some(Failure::NotFound)
+                    }
+                    MutationResult::Rejected(issue_type::Outcome::Conflict) => {
+                        Some(Failure::Conflict)
+                    }
+                    _ => return Err(Error::Invalid("bulk issue type outcome is inconsistent")),
+                },
+            );
+        }
     }
     Ok(match item.subject.kind {
         SubjectKind::Issue => match UpdateIssue::execute(

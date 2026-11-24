@@ -6,8 +6,16 @@ import {
   selectDarkTheme,
 } from "./accessibility";
 
-async function fixture(page: Page) {
-  await mockPullRequest(page);
+const bugType = {
+  id: "00000000-0000-4000-8000-000000000013",
+  title: "Bug",
+  description: "",
+};
+
+async function fixture(page: Page, organization = false) {
+  const { lifecycle } = await mockPullRequest(page);
+  if (organization)
+    lifecycle.organizationId = "00000000-0000-4000-8000-000000000011";
   const alice = {
     id: "00000000-0000-4000-8000-000000000001",
     name: "Alice",
@@ -46,6 +54,7 @@ async function fixture(page: Page) {
       items: {
         item: { subject: { kind: string; number: number }; version: number };
         milestone_version: number;
+        issue_type_version?: number;
       }[];
       action: {
         kind: string;
@@ -54,6 +63,7 @@ async function fixture(page: Page) {
         add?: (string | number)[];
         remove?: (string | number)[];
         number?: number | null;
+        type_id?: string | null;
       };
     }[],
     lose: false,
@@ -101,6 +111,7 @@ async function fixture(page: Page) {
             version: Number(version),
           },
           milestone_version: 0,
+          issue_type_version: kind === "issue" ? 0 : undefined,
         };
       });
     return route.fulfill({
@@ -159,7 +170,8 @@ async function fixture(page: Page) {
           ];
         if (action.kind === "assignees")
           item.assignees = action.add!.includes(alice.id) ? [alice] : [];
-        if (action.kind !== "milestone") item.version++;
+        if (action.kind !== "milestone" && action.kind !== "issue_type")
+          item.version++;
       }
       saved.set(input.request_id, input.items.length);
     }
@@ -190,6 +202,16 @@ async function fixture(page: Page) {
       },
     });
   });
+  await page.route(/\/discussion-search\/issue-types(?:\?|$)/, (route) =>
+    route.fulfill({
+      json: {
+        items: [bugType],
+        clear: { query: "is:issue", selected: true },
+        missing: { query: "is:issue no:type", selected: false },
+        truncated: false,
+      },
+    }),
+  );
   return model;
 }
 const issue = (page: Page, number = 1) =>
@@ -337,6 +359,45 @@ test("bulk labels, assignees, milestones and state update the exact mixed select
     "open",
   ]);
   await expectNoAccessibilityViolations(page);
+});
+
+test("bulk issue type retry keeps the captured assignment versions", async ({
+  page,
+}) => {
+  const model = await fixture(page, true);
+  await page.goto("/team/project/issues");
+  const type = page.getByRole("button", {
+    name: "Set issue type for selected issues",
+  });
+  await issue(page).check();
+  await pull(page).check();
+  await expect(type).toHaveCount(0);
+  await pull(page).uncheck();
+  await issue(page, 2).check();
+  await type.click();
+  model.lose = true;
+  await page.getByRole("button", { name: "Bug", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Retry original bulk action" })
+    .click();
+  await expect(
+    page.getByRole("region", { name: "Bulk discussion actions" }),
+  ).toHaveCount(0);
+  expect(model.writes).toHaveLength(2);
+  expect(model.writes[0].action).toEqual({
+    kind: "issue_type",
+    type_id: bugType.id,
+  });
+  expect(
+    model.writes[0].items.map((item) => [
+      item.item.subject.number,
+      item.issue_type_version,
+    ]),
+  ).toEqual([
+    [1, 0],
+    [2, 0],
+  ]);
+  expect(model.writes[1]).toEqual(model.writes[0]);
 });
 
 for (const view of ["issues", "pulls"])

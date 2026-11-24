@@ -65,6 +65,7 @@ async fn history(cell: &RepositoryCell, kind: Kind) -> Vec<(Command, Value)> {
                         version: index + 1,
                     },
                     milestone_version: 0,
+                    issue_type_version: None,
                 }],
                 action: bulk::Action::State {
                     state: if index % 2 == 0 {
@@ -74,6 +75,7 @@ async fn history(cell: &RepositoryCell, kind: Kind) -> Vec<(Command, Value)> {
                     },
                     reason: None,
                 },
+                issue_type_authority: None,
                 eligible: vec![],
                 reopen_available: Default::default(),
             }),

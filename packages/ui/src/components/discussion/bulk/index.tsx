@@ -16,11 +16,15 @@ import { Spinner } from "@/components/ui/spinner";
 import { RequestWidget } from "@/components/request/result";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import type { DiscussionItem } from "../row";
-import { MetadataPicker, MilestonePicker } from "./pickers";
+import { IssueTypePicker, MetadataPicker, MilestonePicker } from "./pickers";
 
 type Subject = { kind: "issue" | "pull"; number: number };
 type Versioned = { subject: Subject; version: number };
-type Selected = { item: Versioned; milestone_version: number };
+type Selected = {
+  item: Versioned;
+  milestone_version: number;
+  issue_type_version?: number;
+};
 export type BulkAction =
   | {
       kind: "state";
@@ -29,7 +33,8 @@ export type BulkAction =
     }
   | { kind: "labels"; add: number[]; remove: number[] }
   | { kind: "assignees"; add: string[]; remove: string[] }
-  | { kind: "milestone"; number: number | null };
+  | { kind: "milestone"; number: number | null }
+  | { kind: "issue_type"; type_id: string | null };
 type Intent = {
   repository_id: string;
   request_id: string;
@@ -333,6 +338,18 @@ export function BulkActions({
               disabled={disabled}
               onApply={bulk.submit}
             />
+            {repo.organization_id && !hasPulls && (
+              <IssueTypePicker
+                repo={repo}
+                disabled={
+                  disabled ||
+                  !bulk.prepared.data?.items.every(
+                    (item) => item.issue_type_version !== undefined,
+                  )
+                }
+                onApply={bulk.submit}
+              />
+            )}
             <Button
               variant="ghost"
               size="sm"

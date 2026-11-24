@@ -189,7 +189,9 @@ preparation commands also prepare these ledgers; ordinary mutations require thei
 prepared format. Nested SDK scopes discard domain work before a terminal
 rejection commits. State format-2 records remain unchanged by this extraction.
 `api/discussion_bulk/` binds repository UUIDs, resolves current roster eligibility
-and owns the bulk HTTP contract.
+and owns the bulk HTTP contract. It holds the organization policy lease when
+applying issue types; the repository command checks the captured type assignment
+versions and reuses the canonical issue-type projection.
 `collaboration/locks.rs` owns versioned issue and PR conversation locks, their
 deadlines and activity. `search/index/locks.rs` projects the persisted records
 for indexed filtering. Ready format-14 indexes copy the lock records through

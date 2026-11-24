@@ -317,3 +317,79 @@ export function MilestonePicker({
     </Popover>
   );
 }
+
+export function IssueTypePicker({
+  repo,
+  disabled,
+  onApply,
+}: {
+  repo: Repository;
+  disabled: boolean;
+  onApply: Apply;
+}) {
+  const [open, setOpen] = useState(false);
+  const catalog = useRequest<{
+    items: { id: string; title: string; description: string }[];
+  }>(open ? endpoint(repo, "discussion-search/issue-types") : null, repo.id);
+  function choose(typeId: string | null) {
+    setOpen(false);
+    void onApply({ kind: "issue_type", type_id: typeId });
+  }
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={disabled}
+          aria-label="Set issue type for selected issues"
+        >
+          Type
+          <ChevronDownIcon data-icon="inline-end" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-80 max-w-[calc(100vw-2rem)]" align="end">
+        <PopoverHeader>
+          <PopoverTitle>Set issue type</PopoverTitle>
+        </PopoverHeader>
+        <Button
+          variant="ghost"
+          className="justify-start"
+          disabled={disabled}
+          onClick={() => choose(null)}
+        >
+          No type
+        </Button>
+        <Result state={catalog} timingLabel="Bulk issue types">
+          {(data) => (
+            <div className="flex max-h-64 flex-col gap-1 overflow-y-auto">
+              {data.items.map((item) => (
+                <Button
+                  key={item.id}
+                  variant="ghost"
+                  className="h-auto justify-start whitespace-normal text-left"
+                  disabled={disabled}
+                  onClick={() => choose(item.id)}
+                >
+                  <span className="min-w-0">
+                    {item.title}
+                    {item.description && (
+                      <span className="block text-xs text-muted-foreground">
+                        {item.description}
+                      </span>
+                    )}
+                  </span>
+                </Button>
+              ))}
+              {!data.items.length && (
+                <p role="status" className="text-sm text-muted-foreground">
+                  No enabled issue types.
+                </p>
+              )}
+            </div>
+          )}
+        </Result>
+      </PopoverContent>
+    </Popover>
+  );
+}
