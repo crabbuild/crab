@@ -65,6 +65,7 @@ pub(in crate::api) struct AccessRepository {
     direct: Option<RepositoryAccess>,
     teams: Vec<MemberAccessTeam>,
     organization_owner: bool,
+    baseline: Option<RepositoryAccess>,
     sso_group_ceiling: Option<RepositoryAccess>,
     inherited_from: Option<String>,
 }
@@ -200,6 +201,7 @@ async fn list(
         let direct = RepositoryMember::access_for(&source.members, &identity.subject)
             .filter(|_| known_provider);
         let organization_owner = known_provider && roles.owner;
+        let baseline = roles.baseline.filter(|_| known_provider);
         let teams: Vec<_> = source
             .organization
             .iter()
@@ -217,6 +219,7 @@ async fn list(
             .into_iter()
             .chain(teams.iter().map(|team| team.access))
             .chain(organization_owner.then_some(RepositoryAccess::Admin))
+            .chain(baseline)
             .max();
         let sso_group_ceiling = source
             .groups
@@ -232,6 +235,7 @@ async fn list(
             direct,
             teams,
             organization_owner,
+            baseline,
             sso_group_ceiling,
             inherited_from: repo.forked_from.map(|_| source.name.clone()),
         });

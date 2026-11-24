@@ -15,17 +15,32 @@ pub(crate) async fn serve(request: Request) -> Response {
     // Application deep links must survive reloads. Reserve service namespaces
     // and recognize only browser pages so missing APIs/assets still return 404.
     let components: Vec<_> = path.trim_end_matches('/').split('/').collect();
+    let valid_id = |id: &str| uuid::Uuid::parse_str(id).is_ok_and(|id| !id.is_nil());
+    let valid_organization = |segment: &str| {
+        let id = match segment.rsplit_once("--") {
+            Some((slug, id)) if !slug.is_empty() => id,
+            Some(_) => return false,
+            None => segment,
+        };
+        valid_id(id)
+    };
     let account_route = match components.as_slice() {
-        ["-", "profile" | "notifications" | "code-search"]
+        [
+            "-",
+            "profile" | "notifications" | "code-search" | "organizations",
+        ]
         | ["-", "notifications", "watched" | "subscriptions"]
+        | ["-", "repositories", "personal"]
         | ["-", "settings", "saved-replies" | "review-availability"] => true,
-        ["-", "users" | "organizations" | "repository-transfers", id]
-        | ["-", "organizations", id, "invitation" | "projects"] => {
-            uuid::Uuid::parse_str(id).is_ok_and(|id| !id.is_nil())
+        ["-", "users" | "repository-transfers", id] | ["-", "users", id, "repositories"] => {
+            valid_id(id)
         }
-        ["-", "organizations", organization, "projects", project] => [organization, project]
-            .into_iter()
-            .all(|id| uuid::Uuid::parse_str(id).is_ok_and(|id| !id.is_nil())),
+        ["-", "organizations", id] | ["-", "organizations", id, "invitation" | "projects"] => {
+            valid_organization(id)
+        }
+        ["-", "organizations", organization, "projects", project] => {
+            valid_organization(organization) && valid_id(project)
+        }
         _ => false,
     };
     let application_route = path.is_empty()
@@ -179,6 +194,20 @@ mod tests {
             (
                 "/-/users/01900000-0000-7000-8000-000000000001",
                 StatusCode::OK,
+            ),
+            ("/-/repositories/personal", StatusCode::OK),
+            ("/-/organizations", StatusCode::OK),
+            (
+                "/-/users/01900000-0000-7000-8000-000000000001/repositories",
+                StatusCode::OK,
+            ),
+            (
+                "/-/organizations/crab-engineering--01900000-0000-7000-8000-000000000001/invitation",
+                StatusCode::OK,
+            ),
+            (
+                "/-/organizations/crab-engineering--00000000-0000-0000-0000-000000000000",
+                StatusCode::NOT_FOUND,
             ),
             (
                 "/-/organizations/01900000-0000-7000-8000-000000000001",

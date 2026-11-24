@@ -22,8 +22,9 @@ use crate::{
     cells::{
         Address,
         organization::{
-            Role,
-            repositories::{AuthorizeCreation, Authorized, Creation, valid_creation},
+            Caller,
+            discovery::{GetLanding, Landing},
+            repositories::{AuthorizeCreation, Creation, CreationOutcome, valid_creation},
         },
     },
     server::Server,
@@ -367,14 +368,26 @@ async fn organization_creation(
     Path(organization): Path<Uuid>,
 ) -> app::Result<Json<serde_json::Value>> {
     let actor = super::organizations::actor(&server, &principal).await?;
-    let role = crate::repository::access::organization_role(&server, organization, actor).await?;
-    if role != Some(Role::Owner) {
-        return Err(app::Error::NotFound);
-    }
+    creation_allowed(&server, organization, actor).await?;
     app::account(&principal)?;
     Ok(Json(
         json!({"owner":organization_namespace(organization),"default_branch":"main"}),
     ))
+}
+
+async fn creation_allowed(server: &Server, organization: Uuid, actor: Uuid) -> app::Result<()> {
+    let cells = server.cells().ok_or(app::Error::CellUnavailable)?;
+    match cells
+        .query::<GetLanding>(Address::Organization(organization), None, Caller { actor })
+        .await
+        .map_err(super::organizations::read_error)?
+        .output
+    {
+        Some(Landing::Member {
+            can_create: true, ..
+        }) => Ok(()),
+        _ => Err(app::Error::NotFound),
+    }
 }
 
 async fn create_organization(
@@ -402,23 +415,20 @@ async fn create_organization(
         .map_err(super::organizations::read_error)?
         .output;
     match authorized {
-        Authorized::Accepted => {
+        CreationOutcome::Accepted { grant_creator } => {
             let response = publish(
                 &server,
                 &principal,
                 BrowserNamespace::Organization(organization),
+                grant_creator,
                 input,
             )
             .await?;
-            if crate::repository::access::organization_role(&server, organization, actor).await?
-                != Some(Role::Owner)
-            {
-                return Err(app::Error::NotFound);
-            }
+            creation_allowed(&server, organization, actor).await?;
             app::account(&principal)?;
             Ok(response)
         }
-        Authorized::Conflict => Err(app::Error::RepositoryNameUnavailable),
+        CreationOutcome::Conflict => Err(app::Error::RepositoryNameUnavailable),
     }
 }
 
@@ -452,6 +462,7 @@ async fn create(
         &server,
         &principal,
         BrowserNamespace::Personal(owner),
+        true,
         input,
     )
     .await
@@ -461,12 +472,12 @@ async fn publish(
     server: &Arc<Server>,
     principal: &Principal,
     namespace: BrowserNamespace,
+    grant_creator: bool,
     input: CreateRepository,
 ) -> app::Result<(StatusCode, Json<CreatedRepository>)> {
     let actor = app::actor(principal)?;
     let catalog = server.catalog().ok_or(app::Error::CellUnavailable)?;
-    let members = if principal.is_local() || matches!(&namespace, BrowserNamespace::Organization(_))
-    {
+    let members = if principal.is_local() || !grant_creator {
         Vec::new()
     } else {
         vec![RepositoryMember {

@@ -24,6 +24,11 @@ async function fixture(page: Page) {
     writes: unknown[];
     fail: boolean;
     metadataVisible: boolean;
+    policy: {
+      version: number;
+      member_creation: boolean;
+      baseline: "read" | "write" | null;
+    };
   } = {
     organization: {
       id,
@@ -46,6 +51,7 @@ async function fixture(page: Page) {
     writes: [],
     fail: false,
     metadataVisible: true,
+    policy: { version: 0, member_creation: false, baseline: null },
   };
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -80,6 +86,14 @@ async function fixture(page: Page) {
         });
     }
     const base = `/api/organizations/${id}`;
+    if (path === `${base}/repository-policy`) {
+      if (method === "PUT") {
+        const input = request.postDataJSON();
+        expect(input.version).toBe(state.policy.version);
+        state.policy = { ...input, version: input.version + 1 };
+      }
+      return route.fulfill({ json: state.policy });
+    }
     if (path === base) {
       if (method === "PATCH") {
         const input = request.postDataJSON() as Partial<Organization>;
@@ -202,6 +216,27 @@ async function fixture(page: Page) {
   });
   return state;
 }
+
+test("organization owners save repository policy from settings", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  await page.goto(`${root}?tab=settings`);
+  await page
+    .getByRole("combobox", { name: "Who can create repositories" })
+    .click();
+  await page.getByRole("option", { name: "All organization members" }).click();
+  await page.getByRole("combobox", { name: "Baseline member access" }).click();
+  await page.getByRole("option", { name: "Read", exact: true }).click();
+  await page.getByRole("button", { name: "Save repository policy" }).click();
+  await expect(page.getByText("Repository policy saved.")).toBeVisible();
+  expect(state.policy).toEqual({
+    version: 1,
+    member_creation: true,
+    baseline: "read",
+  });
+  await expectNoAccessibilityViolations(page);
+});
 
 test("owners see identity-provider management and blocked access in People", async ({
   page,

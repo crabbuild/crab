@@ -3,6 +3,7 @@ use crate::{
     app,
     cells::{
         Address,
+        directory::organizations::{Candidate, RecordCandidate},
         directory::{IdentityKey, RegisterAccounts},
         organization::{Bootstrap, BootstrapInput},
     },
@@ -38,6 +39,17 @@ pub(crate) async fn bootstrap_on(
         .unwrap()
         .output;
     let id = Uuid::now_v7();
+    cells
+        .command::<RecordCandidate>(
+            Address::Directory,
+            app::mutation_identity().unwrap(),
+            Candidate {
+                actor: actors[0],
+                organization: id,
+            },
+        )
+        .await
+        .unwrap();
     cells.initialize(Address::Organization(id)).await.unwrap();
     cells
         .command::<Bootstrap>(

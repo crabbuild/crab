@@ -1,8 +1,8 @@
 use super::*;
 use crate::cells::directory::{AccountsExist, CompleteHandles, validate_handle_prefix};
 use organization::{
-    CancelInvitation, DecideInvitation, Decision, GetInvitation, InvitationKey, Invite,
-    InviteInput, ListInvitations,
+    CancelInvitation, DecideInvitation, Decision, FindInvitations, GetInvitation, InvitationKey,
+    Invite, InviteInput,
 };
 
 #[derive(Serialize)]
@@ -92,6 +92,9 @@ async fn invite(
     if exists.as_slice() != [true] {
         return Err(Error::Invalid("Choose a registered account"));
     }
+    // Record the candidate before the offer can commit. Discovery and mail
+    // disclose only offers that the Organization Cell currently confirms.
+    super::discovery::record_candidate(&cells, id, recipient).await?;
     app::account(&principal)?;
     let result = app::command_output(
         cells
@@ -165,74 +168,22 @@ async fn list(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path(id): Path<Uuid>,
-    Query(params): Query<MemberParameters>,
+    Query(params): Query<people::Parameters>,
 ) -> Result<Json<OrganizationPage<InvitationOffer>>> {
-    let actor = actor(&server, &principal).await?;
-    let after = params.after.as_deref().map(decode).transpose()?;
-    let cells = server.cells().ok_or(Error::CellUnavailable)?;
-    let page = cells
-        .query::<ListInvitations>(
-            target(id)?,
-            None,
-            PageQuery {
-                actor,
-                after,
-                limit: params.limit.unwrap_or(30),
-            },
-        )
-        .await
-        .map_err(read_error)?
-        .output;
-    let Page::Page {
-        items,
-        next,
-        revision,
-    } = page
-    else {
-        return Err(Error::PageChanged);
-    };
-    let profiles = app::query_output(
-        cells
-            .query::<LookupProfiles>(
-                Address::Directory,
-                None,
-                items.iter().map(|value| value.recipient).collect(),
-            )
-            .await,
-    )?;
-    if profiles.len() != items.len() {
-        return Err(Error::CellContract(
-            "Invitation profiles returned an invalid result count",
-        ));
-    }
-    // ListInvitations checks owner authority again after the Directory read. A
-    // plain member can read the roster, but must not recover pending offers.
-    let current = cells
-        .query::<GetOrganization>(target(id)?, None, Caller { actor })
-        .await
-        .map_err(read_error)?
-        .output
-        .ok_or(Error::NotFound)?;
-    if current.role != Role::Owner {
-        return Err(Error::NotFound);
-    }
-    app::account(&principal)?;
-    let items = items
-        .into_iter()
-        .zip(profiles)
-        .map(|(invitation, profile)| InvitationOffer {
+    let (page, _) = people::page::<FindInvitations, _, _>(
+        &server,
+        &principal,
+        id,
+        Collection::Invitations,
+        params,
+        |invitation| invitation.recipient,
+        |invitation, profile| InvitationOffer {
             invitation,
             profile,
-        })
-        .collect::<Vec<_>>();
-    let next = next
-        .map(|cursor| serde_json::to_vec(&cursor).map(|bytes| URL_SAFE_NO_PAD.encode(bytes)))
-        .transpose()?;
-    Ok(Json(OrganizationPage {
-        items,
-        next,
-        revision,
-    }))
+        },
+    )
+    .await?;
+    Ok(Json(page))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

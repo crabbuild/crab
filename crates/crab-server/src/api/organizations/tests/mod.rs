@@ -18,6 +18,93 @@ mod repository_access;
 mod review_workload;
 
 #[tokio::test]
+async fn people_search_filters_current_profiles_roles_teams_and_invitation_status() {
+    let h = Harness::new(false).await;
+    let (id, alice_actor, bob_actor) =
+        crate::test_support::http::organizations::bootstrap(&h).await;
+    let alice = h.login().await;
+    let owned = h.json("/api/organizations", &alice).await;
+    assert_eq!(owned["items"][0]["organization"]["id"], json!(id));
+    assert_eq!(owned["items"][0]["actor"], json!(alice_actor));
+    assert_eq!(owned["items"][0]["role"], "owner");
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    h.write(
+        Method::POST,
+        "/api/profile",
+        &bob,
+        json!({"request_id":Uuid::now_v7(),"handle":"bob","name":"Bob Engineer"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let root = format!("/api/organizations/{id}");
+    h.write(
+        Method::PUT,
+        &format!("{root}/invitations/{bob_actor}"),
+        &alice,
+        json!({"version":0,"role":"member"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let pending = format!("{root}/invitations?status=pending&role=member&q=engineer");
+    assert_eq!(
+        h.json(&pending, &alice).await["items"][0]["invitation"]["recipient"],
+        json!(bob_actor)
+    );
+    assert_eq!(
+        h.json("/api/organizations", &bob).await["items"][0]["kind"],
+        "invitation"
+    );
+    h.write(
+        Method::POST,
+        &format!("{root}/invitation"),
+        &bob,
+        json!({"version":1,"accept":true}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert_eq!(h.json(&pending, &alice).await["items"], json!([]));
+    let accepted = format!("{root}/invitations?status=accepted&q=bob");
+    assert_eq!(
+        h.json(&accepted, &alice).await["items"][0]["invitation"]["state"],
+        "accepted"
+    );
+
+    let team = Uuid::now_v7();
+    let commands = format!("{root}/teams/commands");
+    h.write(Method::POST, &commands, &alice,
+        json!({"request_id":team,"command":{"kind":"create","name":"Release","description":"","visibility":"secret"}}))
+        .await.error_for_status().unwrap();
+    let filtered = format!("{root}/members?role=member&team={team}&q=%40bob");
+    assert_eq!(h.json(&filtered, &alice).await["items"], json!([]));
+    assert_eq!(
+        h.http
+            .get(format!("{}{filtered}", h.origin))
+            .header(header::COOKIE, &bob)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    h.write(Method::POST, &commands, &alice,
+        json!({"request_id":Uuid::now_v7(),"command":{"kind":"member","team":team,"member":bob_actor,"version":0,"role":"member"}}))
+        .await.error_for_status().unwrap();
+    assert_eq!(
+        h.json(&filtered, &bob).await["items"][0]["profile"]["handle"],
+        "bob"
+    );
+    assert_eq!(
+        h.json("/api/organizations", &bob).await["items"][0]["kind"],
+        "member"
+    );
+    h.close().await;
+}
+
+#[tokio::test]
 async fn invitations_require_consent_and_current_qualified_authority_without_repository_grants() {
     let h = Harness::new(false).await;
     let (id, alice_id, bob_id) = crate::test_support::http::organizations::bootstrap(&h).await;

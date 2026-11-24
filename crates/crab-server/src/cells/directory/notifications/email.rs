@@ -196,6 +196,14 @@ pub(crate) struct TransferSource {
     pub created_at_ms: u64,
 }
 
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct InvitationSource {
+    pub organization: Uuid,
+    pub version: u64,
+    pub created_at_ms: u64,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Job {
@@ -203,6 +211,8 @@ pub(crate) struct Job {
     pub repository: Uuid,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transfer: Option<TransferSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invitation: Option<InvitationSource>,
     pub preference_version: u64,
     pub expires: u64,
     due: u64,
@@ -235,6 +245,7 @@ pub(super) fn enqueue(context: &Transaction<'_>, actor: Uuid, notice: &Notice) -
         notice.repository,
         notice.created_at_ms,
         None,
+        None,
     )
 }
 
@@ -244,9 +255,10 @@ fn queue(
     repository: Uuid,
     created_at_ms: u64,
     transfer: Option<TransferSource>,
+    invitation: Option<InvitationSource>,
 ) -> Result<()> {
     let preference = preference(context, id.actor)?;
-    if !preference.enabled && transfer.is_none() {
+    if !preference.enabled && transfer.is_none() && invitation.is_none() {
         return Ok(());
     }
     let now = now(context)?;
@@ -260,8 +272,7 @@ fn queue(
         return Ok(());
     }
     if !preference.enabled {
-        // Restarting the catalog scan must not turn a previously discarded
-        // transfer into new activity after the recipient opts in.
+        // Reconciliation must preserve the first delivery decision after opt-in changes.
         return context.put_document(&id.receipt(expires), &true);
     }
     store_job(
@@ -270,6 +281,7 @@ fn queue(
             id,
             repository,
             transfer,
+            invitation,
             preference_version: preference.version,
             expires,
             due: now,
@@ -325,6 +337,51 @@ impl Mutation for QueueTransferMail {
                 item.repository,
                 item.source.created_at_ms,
                 Some(item.source),
+                None,
+            )?;
+        }
+        Ok(MutationResult::Success(()))
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct InvitationMail {
+    pub actor: Uuid,
+    pub source: InvitationSource,
+}
+
+pub(crate) struct QueueInvitationMail;
+impl Mutation for QueueInvitationMail {
+    const CLASS: &'static str = CLASS;
+    const ID: u32 = 81;
+    type Input = Vec<InvitationMail>;
+    type Output = ();
+
+    fn execute(context: &mut Transaction<'_>, input: Self::Input) -> Result<MutationResult<()>> {
+        if input.len() > super::super::organizations::PAGE_SIZE {
+            return Err(Error::Invalid("Invalid invitation email batch"));
+        }
+        for InvitationMail { actor, source } in input {
+            if actor.is_nil() || source.organization.is_nil() || source.version == 0 {
+                return Err(Error::Invalid("Invalid invitation email source"));
+            }
+            let mut hash = blake3::Hasher::new_derive_key("crab organization invitation email v1");
+            hash.update(source.organization.as_bytes());
+            hash.update(&source.version.to_be_bytes());
+            hash.update(&source.created_at_ms.to_be_bytes());
+            let mut bytes = [0; 16];
+            bytes.copy_from_slice(&hash.finalize().as_bytes()[..16]);
+            queue(
+                context,
+                JobId {
+                    actor,
+                    notice: Uuid::from_bytes(bytes),
+                },
+                source.organization,
+                source.created_at_ms,
+                None,
+                Some(source),
             )?;
         }
         Ok(MutationResult::Success(()))

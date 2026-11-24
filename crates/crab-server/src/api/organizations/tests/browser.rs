@@ -1,5 +1,6 @@
 use super::*;
 use crate::cells::organization::{ChangeMember, ChangeOutcome, MemberChange, Role};
+use crate::cells::organization::{ListMembers, Page, PageQuery};
 use crate::test_support::http::browser::Browser;
 
 mod branch_update;
@@ -1841,7 +1842,21 @@ async fn native_browser_invitation_consent_and_removed_member_privacy() {
         panic!("page changed")
     };
     assert_eq!(items.len(), 1);
-    invitee.run(&["open", &format!("{root}/invitation")]).await;
+    invitee
+        .run(&[
+            "open",
+            &format!("{}/-/notifications?tab=organization-invitations", h.origin),
+        ])
+        .await;
+    invitee
+        .run(&["wait", "a[href*='crab-engineering--'][href$='/invitation']"])
+        .await;
+    invitee
+        .run(&[
+            "click",
+            "a[href*='crab-engineering--'][href$='/invitation']",
+        ])
+        .await;
     invitee
         .run(&["wait", "--text", "Invitation to Crab engineering"])
         .await;
@@ -1894,6 +1909,26 @@ async fn native_browser_invitation_consent_and_removed_member_privacy() {
     assert_eq!((items.len(), member.role), (2, Role::Member));
     let controls = invitee.run(&["snapshot", "-i"]).await;
     assert!(!controls.contains("Remove"));
+    invitee
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Open user menu",
+            "--exact",
+        ])
+        .await;
+    invitee
+        .run(&["wait", "a[role='menuitem'][href='/-/organizations']"])
+        .await;
+    invitee
+        .run(&["click", "a[role='menuitem'][href='/-/organizations']"])
+        .await;
+    invitee
+        .run(&["wait", "a[href*='crab-engineering--']"])
+        .await;
     let removed = cells
         .command::<ChangeMember>(
             Address::Organization(id),
@@ -1909,6 +1944,14 @@ async fn native_browser_invitation_consent_and_removed_member_privacy() {
         .unwrap()
         .output;
     assert!(matches!(removed, ChangeOutcome::Applied(_)));
+    invitee.run(&["reload"]).await;
+    invitee
+        .run(&[
+            "wait",
+            "--text",
+            "You don’t belong to any organizations yet.",
+        ])
+        .await;
     invitee.run(&["open", &format!("{root}/invitation")]).await;
     invitee
         .run(&["wait", "--text", "Organization invitation"])

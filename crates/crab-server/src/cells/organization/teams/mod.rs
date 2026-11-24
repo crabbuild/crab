@@ -127,7 +127,8 @@ pub(crate) struct MemberKey {
 }
 
 const COLUMNS: &str = "id,name,description,visibility,version,created_at_ms,updated_at_ms";
-const ACTIVE_MEMBERSHIP: &str = "m.role IS NOT NULL AND o.active=1 AND m.membership_epoch=e.epoch";
+pub(super) const ACTIVE_MEMBERSHIP: &str =
+    "m.role IS NOT NULL AND o.active=1 AND m.membership_epoch=e.epoch";
 pub(super) fn team(context: &Transaction<'_>, id: Uuid) -> Result<Option<Team>> {
     actor(id)?;
     context
@@ -189,7 +190,7 @@ fn membership(context: &Transaction<'_>, team: Uuid, person: Uuid) -> Result<Mem
         version: uint(version)?,
     })
 }
-fn view(context: &Transaction<'_>, person: Uuid, id: Uuid) -> Result<Option<View>> {
+pub(super) fn view(context: &Transaction<'_>, person: Uuid, id: Uuid) -> Result<Option<View>> {
     let Some(organization) = member(context, person)?.filter(|member| member.active) else {
         return Err(Error::AccessDenied);
     };

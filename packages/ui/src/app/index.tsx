@@ -23,22 +23,21 @@ import { Spinner } from "@/components/ui/spinner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SignIn } from "@/features/auth/sign-in";
 import { GitAccess } from "@/features/git-access";
-import { GitImport } from "@/features/imports";
-import { CreateRepository } from "@/features/repository/create";
+import { RepositoryOwnerActions } from "@/features/repository/owner-actions";
 import { NotificationLink, Notifications } from "@/features/notifications";
 import { DiscussionSubscriptions } from "@/features/notifications/subscriptions";
 import { WatchedRepositories } from "@/features/notifications/watched";
-import { gitOwnerSuggestion } from "@/features/imports/source";
 import {
   OrganizationPage,
   OrganizationInvitation,
 } from "@/features/organizations";
+import { OrganizationDirectory } from "@/features/organizations/directory";
 import {
   TeamFeedback,
   useTeamCommands,
 } from "@/features/organizations/teams/commands";
 import { ProfileSettings, UserProfile } from "@/features/profile";
-import { LogOutIcon, UserRoundIcon } from "lucide-react";
+import { Building2Icon, LogOutIcon, UserRoundIcon } from "lucide-react";
 import { RepositoryPage } from "@/features/repository/page";
 import { TransferPage } from "@/features/settings/transfer";
 import { BrowseRepositories } from "@/features/repository/catalog-browse";
@@ -145,12 +144,13 @@ export function App() {
       url.pathname,
     );
   const personalRepositories = url.pathname === "/-/repositories/personal";
+  const organizations = url.pathname === "/-/organizations";
   const repositoryCatalogPage = url.pathname === "/" || personalRepositories;
   const transferId = /^\/-\/repository-transfers\/([0-9a-f-]{36})$/i.exec(
     url.pathname,
   )?.[1];
   const organizationRoute =
-    /^\/-\/organizations\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(\/invitation|\/projects(?:\/([0-9a-f-]{36}))?)?$/i.exec(
+    /^\/-\/organizations\/(?:[^/]+--)?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(\/invitation|\/projects(?:\/([0-9a-f-]{36}))?)?$/i.exec(
       url.pathname,
     );
   const route =
@@ -159,6 +159,7 @@ export function App() {
     personalRepositories ||
     transferId ||
     organizationRoute ||
+    organizations ||
     notifications ||
     codeSearch
       ? undefined
@@ -442,6 +443,12 @@ export function App() {
                           Your repositories
                         </Link>
                       </DropdownMenuItem>
+                      <DropdownMenuItem asChild>
+                        <Link href="/-/organizations">
+                          <Building2Icon aria-hidden="true" /> Your
+                          organizations
+                        </Link>
+                      </DropdownMenuItem>
                     </DropdownMenuGroup>
                     {session.data.user && (
                       <>
@@ -509,6 +516,10 @@ export function App() {
                 id={transferId}
                 csrf={session.data.csrf ?? ""}
               />
+            ) : organizations ? (
+              <div className="px-4 py-6 sm:px-8">
+                <OrganizationDirectory key={teamAccount} />
+              </div>
             ) : organizationRoute ? (
               organizationRoute[2]?.startsWith("/projects") ? (
                 <OrganizationProjects
@@ -563,24 +574,12 @@ export function App() {
                       ? "Personal repositories"
                       : "Repositories"}
                   </h1>
-                  <div className="flex flex-wrap items-start gap-2">
-                    <CreateRepository
-                      csrf={session.data?.csrf ?? ""}
-                      onCreated={(repository) => navigate(repoHref(repository))}
-                    />
-                    <GitImport
-                      key={`${importAccount}:${personalRepositories}`}
-                      account={importAccount}
-                      personal={personalRepositories}
-                      csrf={session.data?.csrf ?? ""}
-                      defaultOwner={gitOwnerSuggestion(
-                        session.data?.user?.name,
-                      )}
-                      onImported={(repository) =>
-                        navigate(repoHref(repository))
-                      }
-                    />
-                  </div>
+                  <RepositoryOwnerActions
+                    key={importAccount}
+                    account={importAccount}
+                    csrf={session.data.csrf ?? ""}
+                    personal={personalRepositories}
+                  />
                 </div>
                 <nav
                   aria-label="Repository ownership"

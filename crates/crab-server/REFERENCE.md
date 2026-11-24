@@ -739,28 +739,39 @@ interrupted request with its original UUID and fields to reuse the reservation
 and repository UUID. The form retains those fields and the UUID in session
 storage until the request is confirmed.
 
-Organization owners can choose **Repositories → New repository** from their
-organization page. The organization owns the new private repository, and its
+Organization owners and members allowed by repository policy can choose
+**Repositories → New repository** on the organization page or select the
+organization in the home catalog's owner picker. The organization owns the
+new private repository, and its
 URL uses `org-<organization UUID without hyphens>` as the stable namespace.
 Renaming the organization leaves repository URLs and IDs stable.
 
 Current organization owners inherit repository Admin access. This grant is
 resolved from the current organization role for browser and Git requests,
 including requests made with an existing Git token. Git tokens retain their
-original repository and read/write limits. Ordinary organization members and
-outside collaborators need repository-specific access. Removing an owner
+original repository and read/write limits. Ordinary organization members can
+receive baseline access from organization policy. Outside collaborators
+require repository-specific grants. Removing an owner
 removes their inherited access. Separately assigned repository grants follow
 their own lifecycle.
 
 `GET /api/organizations/{organization}/repositories/creation` returns the
-organization destination for an owner. `POST` accepts the same body as
-personal creation. The Organization Cell records the owner's authorized
-submission before catalog and Git initialization, and rechecks ownership
-before replay. A retry uses the same account, submission ID, and fields.
+destination when current policy allows creation. `POST` accepts the same body
+as personal creation. The Organization Cell checks the current role and policy
+before recording or replaying the submission. A member who creates a repository
+receives its direct Admin grant. Current organization owners inherit Admin.
+A retry uses the same account, submission ID, and fields. Organization imports
+require a current owner.
 `GET /api/repos?organization={organization}` lists only repositories the
 caller can access. Managed namespaces accept new repositories through the
-organization creation path. Organization imports and member-managed
-repository creation policy are separate capabilities.
+organization creation path.
+
+Organization owners can read and update `/api/organizations/{id}/repository-policy`
+and configure it in **Settings → Repository policy**. Updates carry the saved
+`version`, `member_creation`, and `baseline` (`null`, `read`, or `write`).
+The default is owners-only creation with no baseline. The highest applicable
+organization, repository, and group role applies subject to credential limits.
+The People repository access inspector shows the baseline separately.
 
 Upgrade serving replicas together before starting organization-owned
 creation. Existing catalog entries keep their previous ownership and grants.
@@ -5022,9 +5033,20 @@ invitation decisions, membership tombstones and audit append are transactional.
 
 Current organization owners inherit Admin on their organization’s repositories.
 Other organization members can inherit roles through repository team grants.
-Registered-account invitations currently use manually shared acceptance links;
-email delivery, owner-name discovery, nested teams, owner registry and
-cross-authority repository/project fencing remain unfinished. See `CELLAR.md`
+The account menu's **Your organizations** page and **Notifications →
+Organization invitations** use `GET /api/organizations` with an optional
+`after` continuation. The Directory index locates candidate organizations.
+Current membership and pending offers are checked by each native Organization
+Cell, including for organizations without repositories. Readable browser
+links include the display-name slug and stable UUID. Organization invitation
+emails use verified opt-in delivery and link to the inbox.
+
+Discovery starts with fresh organization state. Bootstrap owners and invitees
+are indexed automatically. People searches accept `q`, `role`, and an optional visible
+`team` UUID. Invitation searches use `q`, `role`, and `status` for owners.
+Search cursors bind the account, filters, and current organization revision.
+Nested teams and cross-authority repository/project fencing remain separate
+work. See `CELLAR.md`
 for preparation, expiry and coordinated deployment contracts. Native tests live
 in `cells/organization/tests/`, HTTP tests
 in `api/organizations/tests/`, and browser fixtures in

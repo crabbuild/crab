@@ -296,6 +296,17 @@ impl Read for ListInvitations {
     type Input = PageQuery;
     type Output = Page<Invitation>;
     fn execute(context: &mut Transaction<'_>, input: Self::Input) -> Result<Self::Output> {
+        FindInvitations::execute(context, input.into())
+    }
+}
+
+pub(crate) struct FindInvitations;
+impl Read for FindInvitations {
+    const CLASS: &'static str = CLASS;
+    const ID: u32 = 84;
+    type Input = PeopleQuery;
+    type Output = Page<Invitation>;
+    fn execute(context: &mut Transaction<'_>, input: Self::Input) -> Result<Self::Output> {
         if !(1..=50).contains(&input.limit) {
             return Err(Error::Invalid(
                 "organization invitation pages require 1–50 entries",
@@ -304,7 +315,26 @@ impl Read for ListInvitations {
         let organization =
             record(context)?.ok_or(Error::Invalid("organization record is missing"))?;
         let mut values = Vec::new();
-        let predicate = if let Some(cursor) = &input.after {
+        let state = match input.status {
+            None => "state = 'pending'",
+            Some(InvitationState::Pending) => "state = 'pending' AND expires_at_ms > ?",
+            Some(InvitationState::Expired) => "state = 'pending' AND expires_at_ms <= ?",
+            Some(InvitationState::Accepted) => "state = 'accepted'",
+            Some(InvitationState::Declined) => "state = 'declined'",
+            Some(InvitationState::Cancelled) => "state = 'cancelled'",
+        };
+        let mut predicate = state.to_owned();
+        if matches!(
+            input.status,
+            Some(InvitationState::Pending | InvitationState::Expired)
+        ) {
+            values.push(SqlValue::Integer(context.now_ms()));
+        }
+        if let Some(role) = input.role {
+            values.push(SqlValue::Text(role.name().to_owned()));
+            predicate.push_str(" AND role = ?");
+        }
+        if let Some(cursor) = &input.after {
             actor(cursor.after)?;
             if cursor.collection != Collection::Invitations
                 || cursor.organization != organization.id
@@ -313,12 +343,10 @@ impl Read for ListInvitations {
                 return Ok(Page::Changed);
             }
             values.push(blob(cursor.after));
-            " AND recipient > ?"
-        } else {
-            ""
-        };
+            predicate.push_str(" AND recipient > ?");
+        }
         values.push(SqlValue::Integer(i64::from(input.limit) + 1));
-        let mut items = context.query(&format!("SELECT {COLUMNS} FROM organization_invitations WHERE state = 'pending'{predicate} ORDER BY recipient LIMIT ?"), &values)?.rows.iter().map(|values| row(values).map(|value| value.visible(context.now_ms()))).collect::<Result<Vec<_>>>()?;
+        let mut items = context.query(&format!("SELECT {COLUMNS} FROM organization_invitations WHERE {predicate} ORDER BY recipient LIMIT ?"), &values)?.rows.iter().map(|values| row(values).map(|value| value.visible(context.now_ms()))).collect::<Result<Vec<_>>>()?;
         let more = items.len() > usize::from(input.limit);
         items.truncate(usize::from(input.limit));
         let next = if more {

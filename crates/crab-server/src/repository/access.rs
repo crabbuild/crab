@@ -78,6 +78,7 @@ pub(crate) fn organization_access(
         .iter()
         .filter(|team| grant.teams.binary_search(&team.team).is_ok())
         .map(|team| team.access)
+        .chain(grant.baseline)
         .max()
 }
 
@@ -178,6 +179,9 @@ pub(crate) async fn organization_members(
             .await,
     )?;
     let mut grants = BTreeMap::new();
+    if let Some((access, actors)) = roster.baseline {
+        grants.extend(actors.into_iter().map(|actor| (actor, access)));
+    }
     for (team, actor) in roster.members {
         let access = teams
             .iter()

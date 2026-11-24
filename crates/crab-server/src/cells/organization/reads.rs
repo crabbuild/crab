@@ -32,6 +32,29 @@ pub(crate) struct PageQuery {
     pub after: Option<PageCursor>,
     pub limit: u8,
 }
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PeopleQuery {
+    pub actor: Uuid,
+    pub after: Option<PageCursor>,
+    pub limit: u8,
+    pub role: Option<Role>,
+    pub team: Option<Uuid>,
+    pub status: Option<InvitationState>,
+}
+
+impl From<PageQuery> for PeopleQuery {
+    fn from(page: PageQuery) -> Self {
+        Self {
+            actor: page.actor,
+            after: page.after,
+            limit: page.limit,
+            role: None,
+            team: None,
+            status: None,
+        }
+    }
+}
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum Page<T> {
     Changed,
@@ -79,6 +102,17 @@ impl Read for ListMembers {
     type Input = PageQuery;
     type Output = Page<Member>;
     fn execute(context: &mut Transaction<'_>, input: Self::Input) -> Result<Self::Output> {
+        FindMembers::execute(context, input.into())
+    }
+}
+
+pub(crate) struct FindMembers;
+impl Read for FindMembers {
+    const CLASS: &'static str = CLASS;
+    const ID: u32 = 83;
+    type Input = PeopleQuery;
+    type Output = Page<Member>;
+    fn execute(context: &mut Transaction<'_>, input: Self::Input) -> Result<Self::Output> {
         if !(1..=50).contains(&input.limit) {
             return Err(Error::Invalid(
                 "organization member pages require 1–50 entries",
@@ -96,15 +130,32 @@ impl Read for ListMembers {
             }
         }
         let mut values = Vec::new();
-        let predicate = if let Some(cursor) = &input.after {
+        let mut predicate = String::new();
+        if let Some(cursor) = &input.after {
             values.push(blob(cursor.after));
-            " AND actor > ?"
-        } else {
-            ""
-        };
+            predicate.push_str(" AND o.actor > ?");
+        }
+        if let Some(role) = input.role {
+            values.push(SqlValue::Text(role.name().to_owned()));
+            predicate.push_str(" AND o.role = ?");
+        }
+        if let Some(team) = input.team {
+            if teams::view(context, input.actor, team)?.is_none() {
+                return Err(Error::AccessDenied);
+            }
+            values.push(blob(team));
+            predicate.push_str(&format!(
+                " AND EXISTS (
+                SELECT 1 FROM organization_team_members m
+                JOIN organization_membership_epochs e ON e.actor=o.actor
+                WHERE m.actor=o.actor AND m.team=? AND {}
+            )",
+                teams::ACTIVE_MEMBERSHIP
+            ));
+        }
         values.push(SqlValue::Integer(i64::from(input.limit) + 1));
         let sql = format!(
-            "SELECT actor, role, active, version FROM organization_members WHERE active = 1{predicate} ORDER BY actor LIMIT ?"
+            "SELECT o.actor, o.role, o.active, o.version FROM organization_members o WHERE o.active = 1{predicate} ORDER BY o.actor LIMIT ?"
         );
         let mut items = context
             .query(&sql, &values)?

@@ -119,34 +119,39 @@ async fn organization_owner_grants_and_revokes_a_team_members_repository_access_
             "No repositories with team access are visible to you.",
         ])
         .await;
-    click(&owner, "link", "Browse organization repositories").await;
-    owner
-        .run(&["wait", "a[aria-label='Manage team access for private']"])
-        .await;
-    click(&owner, "link", "Manage team access for private").await;
-
     let teammate = Browser::new("grant-teammate");
     sign_in(&teammate, &repository).await;
     teammate
         .run(&["wait", "--text", "Repository not found"])
         .await;
 
-    click(&owner, "button", "Add team").await;
-    owner.run(&["wait", "--text", "Find a team"]).await;
+    click(&owner, "button", "Grant repository access").await;
     owner
-        .run(&["find", "label", "Find a team", "fill", "Release"])
+        .run(&["wait", "[aria-label='Available repositories'] button"])
         .await;
-    click(&owner, "button", "Search").await;
-    owner.run(&["wait", "--text", "Release engineers"]).await;
-    click(&owner, "button", "Add Release engineers").await;
+    click(&owner, "button", "private").await;
+    owner.run(&["wait", "[aria-label='Repository role']"]).await;
+    click(&owner, "combobox", "Repository role").await;
+    owner.run(&["wait", "--text", "Admin"]).await;
+    click(&owner, "option", "Admin").await;
+    click(&owner, "button", "Save grant").await;
     owner
-        .run(&["wait", "--fn", "!document.querySelector('[role=dialog]')"])
+        .run(&["wait", "--text", "Team access saved for private."])
+        .await;
+    owner
+        .run(&[
+            "wait",
+            "--fn",
+            "!document.querySelector('[data-slot=dialog-content]')",
+        ])
+        .await;
+    owner
+        .run(&["wait", "a[aria-label='Manage team access for private']"])
+        .await;
+    owner
+        .run(&["click", "a[aria-label='Manage team access for private']"])
         .await;
     let role = "[aria-label='Role for Release engineers']";
-    owner.run(&["wait", role]).await;
-    owner.run(&["select", role, "admin"]).await;
-    click(&owner, "button", "Save team access").await;
-    owner.run(&["wait", "--text", "Team access saved."]).await;
     teammate.run(&["open", &team_repositories]).await;
     teammate
         .run(&[

@@ -89,7 +89,7 @@ export type Invitation = { recipient: string, role: OrganizationRole, version: n
 export type InvitationView = { organization: Organization | null, invitation: Invitation | null, };
 
 // prettier-ignore
-export type OrganizationView = { organization: Organization, actor: string, role: OrganizationRole, };
+export type OrganizationView = { organization: Organization, actor: string, role: OrganizationRole, can_create: boolean, };
 
 // prettier-ignore
 export type OrganizationPage<T> = { items: Array<T>, next: string | null, revision: number, };
@@ -110,7 +110,7 @@ export type IssueType = { id: string, name: string, description: string, color: 
 export type IssueTypeSchema = { version: number, definitions: Array<IssueType>, };
 
 // prettier-ignore
-export type AuditAction = "organization_created" | "automation_changed" | "organization_edited" | "organization_membership" | "organization_invitation" | "rulesets_changed" | "repository_properties_changed" | "issue_types_changed" | "project_changed" | "team_created" | "team_edited" | "team_group_sync" | "team_deleted" | "team_membership" | "team_creation_policy" | "repository_registered" | "repository_access_changed" | "repository_transferred_in" | "repository_transferred_out";
+export type AuditAction = "organization_created" | "automation_changed" | "organization_edited" | "organization_membership" | "organization_invitation" | "rulesets_changed" | "repository_properties_changed" | "issue_types_changed" | "project_changed" | "team_created" | "team_edited" | "team_group_sync" | "team_deleted" | "team_membership" | "team_creation_policy" | "repository_policy_changed" | "repository_registered" | "repository_access_changed" | "repository_transferred_in" | "repository_transferred_out";
 
 // prettier-ignore
 export type AuditRepository = { id: string, name: string, };
@@ -143,7 +143,7 @@ export type MemberAccessAccount = "active" | "suspended" | "provider_unavailable
 export type MemberAccessTeam = { id: string, name: string, access: RepositoryAccess, };
 
 // prettier-ignore
-export type AccessRepository = { id: string, owner: string, name: string, access: RepositoryAccess | null, direct: RepositoryAccess | null, teams: Array<MemberAccessTeam>, organization_owner: boolean, sso_group_ceiling: RepositoryAccess | null, inherited_from: string | null, };
+export type AccessRepository = { id: string, owner: string, name: string, access: RepositoryAccess | null, direct: RepositoryAccess | null, teams: Array<MemberAccessTeam>, organization_owner: boolean, baseline: RepositoryAccess | null, sso_group_ceiling: RepositoryAccess | null, inherited_from: string | null, };
 
 // prettier-ignore
 export type MemberRepositoryAccess = { account: MemberAccessAccount, managed: boolean, items: Array<AccessRepository>, next: string | null, };

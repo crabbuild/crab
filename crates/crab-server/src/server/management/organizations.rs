@@ -14,6 +14,7 @@ use crate::{
     catalog::{CatalogRecord, MembershipActor, OrganizationAccess},
     cells::{
         Address,
+        directory::organizations::{Candidate, RecordCandidate},
         directory::{IdentityKey, RegisterAccounts},
         organization::{self, Bootstrap, BootstrapInput, Caller, ChangeOutcome, teams},
     },
@@ -144,6 +145,18 @@ async fn bootstrap(
             "Account registration returned an invalid result count",
         ));
     };
+    app::command_output(
+        cells
+            .command::<RecordCandidate>(
+                Address::Directory,
+                app::mutation_identity()?,
+                Candidate {
+                    actor: *actor,
+                    organization: id,
+                },
+            )
+            .await,
+    )?;
     let target = Address::Organization(id);
     cells.initialize(target).await.map_err(Error::Cell)?;
     let result = app::command_output(

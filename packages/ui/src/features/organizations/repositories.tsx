@@ -11,6 +11,7 @@ export function OrganizationRepositories({
   name,
   actor,
   canCreate,
+  owner,
   url,
   csrf,
 }: {
@@ -18,6 +19,7 @@ export function OrganizationRepositories({
   name: string;
   actor: string;
   canCreate: boolean;
+  owner: boolean;
   url: URL;
   csrf: string;
 }) {
@@ -37,27 +39,27 @@ export function OrganizationRepositories({
             </Link>
           </Button>
           {canCreate && (
-            <>
-              <CreateRepository
-                key={`${id}:${actor}`}
-                organization={{ id, name, actor }}
-                csrf={csrf}
-                onCreated={(repo) => navigate(repoHref(repo))}
-              />
-              <GitImport
-                key={`${id}:${actor}:${requestedImport ?? ""}`}
-                account={actor}
-                organization={{ id, name, requestedJob: requestedImport }}
-                csrf={csrf}
-                onImported={(repo) => navigate(repoHref(repo))}
-              />
-            </>
+            <CreateRepository
+              key={`${id}:${actor}`}
+              organization={{ id, name, actor }}
+              csrf={csrf}
+              onCreated={(repo) => navigate(repoHref(repo))}
+            />
+          )}
+          {owner && (
+            <GitImport
+              key={`${id}:${actor}:${requestedImport ?? ""}`}
+              account={actor}
+              organization={{ id, name, requestedJob: requestedImport }}
+              csrf={csrf}
+              onImported={(repo) => navigate(repoHref(repo))}
+            />
           )}
         </div>
       </header>
       <BrowseRepositories
         url={url}
-        scope={{ kind: "organization", organization: id, owner: canCreate }}
+        scope={{ kind: "organization", organization: id, owner }}
       />
     </section>
   );

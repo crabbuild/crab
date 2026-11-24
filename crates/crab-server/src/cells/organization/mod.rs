@@ -17,12 +17,14 @@ pub(crate) const MAX_VERSION: u64 = 9_007_199_254_740_991;
 
 pub(crate) mod automation;
 mod commands;
+pub(crate) mod discovery;
 mod invitations;
 pub(crate) mod issue_types;
 pub(crate) mod projects;
 pub(crate) mod properties;
 mod reads;
 pub(crate) mod repositories;
+pub(crate) mod repository_policy;
 pub(crate) mod rulesets;
 use teams::repository_access::{
     CodeOwnerTeams, InspectMemberRepositoryRoles, RepositoryTeamNames, RepositoryTeamRoster,
@@ -33,12 +35,12 @@ pub(crate) use commands::{
     Bootstrap, BootstrapInput, ChangeMember, ChangeOutcome, Edit, EditInput, MemberChange,
 };
 pub(crate) use invitations::{
-    CancelInvitation, DecideInvitation, Decision, GetInvitation, Invitation, InvitationKey,
-    InvitationState, InvitationView, Invite, InviteInput, ListInvitations,
+    CancelInvitation, DecideInvitation, Decision, FindInvitations, GetInvitation, Invitation,
+    InvitationKey, InvitationState, InvitationView, Invite, InviteInput, ListInvitations,
 };
 pub(crate) use reads::{
-    ActivityQuery, Caller, Collection, GetMember, GetOrganization, ListActivity, ListMembers,
-    MemberKey, Page, PageCursor, PageQuery,
+    ActivityQuery, Caller, Collection, FindMembers, GetMember, GetOrganization, ListActivity,
+    ListMembers, MemberKey, Page, PageCursor, PageQuery, PeopleQuery,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -206,6 +208,7 @@ pub(crate) enum Action {
     TeamCreationPolicy {
         member_creation: bool,
     },
+    RepositoryPolicyChanged,
     Edited {
         name: bool,
         description: bool,
@@ -348,17 +351,20 @@ pub(in crate::cells) fn authorize(
             | automation::Verify::ID,
             false,
         ) => return Ok(()),
-        (GetOrganization::ID | ListMembers::ID, false) => false,
+        (discovery::GetLanding::ID, false) => return Ok(()),
+        (GetOrganization::ID | ListMembers::ID | FindMembers::ID, false) => false,
         (
             GetMember::ID
             | ListActivity::ID
             | ListInvitations::ID
+            | FindInvitations::ID
             | rulesets::Get::ID
             | properties::GetSchema::ID
             | properties::GetSelection::ID
             | issue_types::Get::ID
             | InspectMemberRepositoryRoles::ID
-            | automation::List::ID,
+            | automation::List::ID
+            | repository_policy::Get::ID,
             false,
         )
         | (
@@ -367,8 +373,8 @@ pub(in crate::cells) fn authorize(
             | ChangeMember::ID
             | Invite::ID
             | CancelInvitation::ID
-            | repositories::AuthorizeCreation::ID
             | repositories::AuthorizeImportPublication::ID
+            | repository_policy::Set::ID
             | rulesets::Replace::ID
             | properties::SetSchema::ID
             | properties::SetSelection::ID
@@ -376,6 +382,18 @@ pub(in crate::cells) fn authorize(
             | automation::Change::ID,
             true,
         ) => true,
+        (repositories::AuthorizeCreation::ID, true) => {
+            let caller: Caller = serde_json::from_value(input.clone())?;
+            actor(caller.actor)?;
+            let policy = repository_policy::load(context)?;
+            return if member(context, caller.actor)?
+                .is_some_and(|member| member.active && policy.can_create(member.role))
+            {
+                Ok(())
+            } else {
+                Err(Error::AccessDenied)
+            };
+        }
         // Invitations belong to the organization. Their recipient can inspect
         // and decide an offer without already holding organization membership.
         (GetInvitation::ID, false) => {
@@ -466,15 +484,19 @@ pub(in crate::cells) fn dispatch_read(
         properties::search::Fields::ID => invoke_read::<properties::search::Fields>(context, input),
         properties::GetSelection::ID => invoke_read::<properties::GetSelection>(context, input),
         repositories::Owners::ID => invoke_read::<repositories::Owners>(context, input),
+        repository_policy::Get::ID => invoke_read::<repository_policy::Get>(context, input),
         teams::MentionMembers::ID => invoke_read::<teams::MentionMembers>(context, input),
         automation::List::ID => invoke_read::<automation::List>(context, input),
         automation::Verify::ID => invoke_read::<automation::Verify>(context, input),
         GetOrganization::ID => invoke_read::<GetOrganization>(context, input),
+        discovery::GetLanding::ID => invoke_read::<discovery::GetLanding>(context, input),
         ListMembers::ID => invoke_read::<ListMembers>(context, input),
+        FindMembers::ID => invoke_read::<FindMembers>(context, input),
         GetMember::ID => invoke_read::<GetMember>(context, input),
         ListActivity::ID => invoke_read::<ListActivity>(context, input),
         GetInvitation::ID => invoke_read::<GetInvitation>(context, input),
         ListInvitations::ID => invoke_read::<ListInvitations>(context, input),
+        FindInvitations::ID => invoke_read::<FindInvitations>(context, input),
         _ => Err(Error::Invalid("unknown organization query")),
     }
 }
@@ -501,6 +523,7 @@ pub(in crate::cells) fn dispatch_mutation(
         teams::sync::SyncGroup::ID => invoke_mutation::<teams::sync::SyncGroup>(context, input),
         teams::Cancel::ID => invoke_mutation::<teams::Cancel>(context, input),
         Bootstrap::ID => invoke_mutation::<Bootstrap>(context, input),
+        repository_policy::Set::ID => invoke_mutation::<repository_policy::Set>(context, input),
         repositories::AuthorizeCreation::ID => {
             invoke_mutation::<repositories::AuthorizeCreation>(context, input)
         }

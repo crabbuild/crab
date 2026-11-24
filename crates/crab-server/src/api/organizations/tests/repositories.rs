@@ -1,12 +1,141 @@
 use super::*;
 use crate::{
     catalog::{BrowserNamespace, MembershipActor, RepositoryApplicationState},
-    cells::organization::repositories::{AuthorizeCreation, Authorized, Creation},
+    cells::organization::repositories::{AuthorizeCreation, Creation, CreationOutcome},
     test_support::git,
 };
 
 mod fork_merges;
 mod sync;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn repository_policy_controls_creation_and_current_baseline_access() {
+    let h = Harness::new(false).await;
+    let (organization, _, bob_actor) =
+        crate::test_support::http::organizations::bootstrap(&h).await;
+    h.server
+        .catalog()
+        .unwrap()
+        .mark_cell_ready(h.server.repositories.values()[0].id)
+        .await
+        .unwrap();
+    let alice = h.login().await;
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    let root = format!("/api/organizations/{organization}");
+    let policy = format!("{root}/repository-policy");
+    let creation = format!("{root}/repositories/creation");
+    let invitation = format!("{root}/invitations/{bob_actor}");
+    h.write(
+        Method::PUT,
+        &invitation,
+        &alice,
+        json!({"version":0,"role":"member"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    h.write(
+        Method::POST,
+        &format!("{root}/invitation"),
+        &bob,
+        json!({"version":1,"accept":true}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let repo: Value = h
+        .write(
+            Method::POST,
+            &creation,
+            &alice,
+            json!({"request_id":Uuid::now_v7(),"name":"shared","description":""}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let owner = repo["owner"].as_str().unwrap();
+    let listing = format!("/api/repos?organization={organization}&limit=30");
+    assert_eq!(h.json(&listing, &bob).await["repositories"], json!([]));
+    let member_create =
+        json!({"request_id":Uuid::now_v7(),"name":"member-created","description":""});
+    assert_eq!(
+        h.write(Method::POST, &creation, &bob, member_create.clone())
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        h.write(
+            Method::PUT,
+            &policy,
+            &bob,
+            json!({"version":0,"member_creation":true,"baseline":"write"})
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    h.write(
+        Method::PUT,
+        &policy,
+        &alice,
+        json!({"version":0,"member_creation":true,"baseline":"write"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert_eq!(
+        h.json(&format!("/api/repos?owner={owner}&name=shared"), &bob)
+            .await["repositories"][0]["access"],
+        "write"
+    );
+    let access = h
+        .json(
+            &format!("{root}/members/{bob_actor}/repository-access"),
+            &alice,
+        )
+        .await;
+    assert_eq!(access["items"][0]["baseline"], "write");
+    assert_eq!(
+        h.json("/api/organizations", &bob).await["items"][0]["can_create"],
+        true
+    );
+    h.write(Method::POST, &creation, &bob, member_create.clone())
+        .await
+        .error_for_status()
+        .unwrap();
+    assert_eq!(
+        h.json(
+            &format!("/api/repos?owner={owner}&name=member-created"),
+            &bob
+        )
+        .await["repositories"][0]["can_admin"],
+        true
+    );
+    h.write(
+        Method::PUT,
+        &policy,
+        &alice,
+        json!({"version":1,"member_creation":false,"baseline":null}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert_eq!(
+        h.write(Method::POST, &creation, &bob, member_create)
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let visible = h.json(&listing, &bob).await;
+    assert_eq!(visible["repositories"].as_array().unwrap().len(), 1);
+    assert_eq!(visible["repositories"][0]["name"], "member-created");
+    h.close().await;
+}
 
 pub(super) async fn repository_write(
     h: &Harness,
@@ -437,7 +566,12 @@ async fn organization_repository_ownership_survives_creator_revocation_without_a
         )
         .await
         .unwrap();
-    assert!(matches!(ticket.output, Authorized::Accepted));
+    assert!(matches!(
+        ticket.output,
+        CreationOutcome::Accepted {
+            grant_creator: false
+        }
+    ));
     let pending = catalog
         .reserve_browser_repository(
             BrowserNamespace::Organization(id),
