@@ -2470,6 +2470,7 @@ owner label does not acquire ownership.
 | Edit history | `GET /api/repos/{owner}/{name}/edit-history/{target}` and `DELETE ...?revision={number}` |
 | Activity | `GET /api/repos/{owner}/{name}/activity`, `GET /api/repos/{owner}/{name}/issues/{number}/activity`, `GET /api/repos/{owner}/{name}/pulls/{number}/activity` |
 | Linked work | Issue/pull `GET .../{number}/links`; `GET/PUT /api/repos/{owner}/{name}/pulls/{pull}/linked-issues/{issue}` |
+| Cross-repository linked work | `GET/PUT .../issues/{issue}/linked-pulls/{repository}/{pull}` |
 | Development branches | `GET .../issues/{number}/links?include_branches=true`; `PUT/POST .../issues/{number}/development-branches` |
 | Issue dependencies | `GET .../issues/{number}/dependencies/{blocked_by|blocking}`; `GET/PUT .../issues/{number}/dependencies/{direction}/{other}` |
 | Assign or clear an issue type | `PUT .../issues/{number}/type` |
@@ -2579,6 +2580,24 @@ the relationship under **From linked branch**. This also works when the head
 is in a fork. Merging into the default branch closes the linked issue through
 the normal pull-request merge path. This promotion covers up to ten issues
 per pull request. The issue and the pull request must belong to the same repository.
+
+### Link a pull request from another repository
+
+Choose **Link pull request** on an issue and select a repository and pull
+request within the same organization. Creating or removing the link requires
+Write access to the issue repository and Read access to the pull request
+repository. Either sidebar shows the relationship to readers with access
+to both endpoints. The link follows the issue through transfers within the
+organization.
+
+Use the pull request repository UUID as `{repository}` in the edit route.
+GET returns the link's `active` flag and `version`. PUT accepts the desired
+`active` flag and the observed `version`. Repeating a completed transition
+returns its current state. A stale conflicting write returns HTTP 409.
+Cross-repository links appear under `cross_repository` on the first page of
+each linked-work response and are limited to ten per issue or pull request.
+These links record related work. Automatic closure on merge is available
+for links within a single repository.
 
 ### Close a linked issue when its pull request merges
 

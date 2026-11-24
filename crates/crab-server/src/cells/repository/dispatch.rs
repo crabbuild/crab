@@ -450,6 +450,9 @@ pub(in crate::cells) fn dispatch_read(
         }
         <GetLink as Read>::ID => invoke_read::<GetLink>(context, input),
         <ListLinks as Read>::ID => invoke_read::<ListLinks>(context, input),
+        collaboration::GetDevelopmentEndpoint::ID => {
+            invoke_read::<collaboration::GetDevelopmentEndpoint>(context, input)
+        }
         collaboration::links::branches::Get::ID => {
             invoke_read::<collaboration::links::branches::Get>(context, input)
         }

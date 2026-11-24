@@ -17,6 +17,7 @@ pub(crate) const MAX_VERSION: u64 = 9_007_199_254_740_991;
 
 pub(crate) mod automation;
 mod commands;
+pub(crate) mod development;
 pub(crate) mod discovery;
 mod invitations;
 pub(crate) mod issue_types;
@@ -351,6 +352,11 @@ pub(in crate::cells) fn authorize(
             | automation::Verify::ID,
             false,
         ) => return Ok(()),
+        // Linked work is governed by the two repository grants. The trusted
+        // HTTP caller checks both before using this organization-owned index.
+        (development::List::ID | development::Get::ID, false) | (development::Set::ID, true) => {
+            return Ok(());
+        }
         (discovery::GetLanding::ID, false) => return Ok(()),
         (GetOrganization::ID | ListMembers::ID | FindMembers::ID, false) => false,
         (
@@ -446,6 +452,8 @@ pub(in crate::cells) fn dispatch_read(
         projects::GetPreparation::ID => invoke_read::<projects::GetPreparation>(context, input),
         projects::GetHistory::ID => invoke_read::<projects::GetHistory>(context, input),
         projects::List::ID => invoke_read::<projects::List>(context, input),
+        development::List::ID => invoke_read::<development::List>(context, input),
+        development::Get::ID => invoke_read::<development::Get>(context, input),
         projects::Get::ID => invoke_read::<projects::Get>(context, input),
         projects::Items::ID => invoke_read::<projects::Items>(context, input),
         projects::Sources::ID => invoke_read::<projects::Sources>(context, input),
@@ -515,6 +523,7 @@ pub(in crate::cells) fn dispatch_mutation(
         }
         projects::Prepare::ID => invoke_mutation::<projects::Prepare>(context, input),
         projects::Change::ID => invoke_mutation::<projects::Change>(context, input),
+        development::Set::ID => invoke_mutation::<development::Set>(context, input),
         projects::ResolveIssue::ID => invoke_mutation::<projects::ResolveIssue>(context, input),
         #[cfg(test)]
         teams::tests::WithoutTeams::ID => {

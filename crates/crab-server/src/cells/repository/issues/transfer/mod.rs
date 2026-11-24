@@ -92,6 +92,8 @@ pub(crate) struct Header {
     pub lock: locks::Lock,
     #[serde(default, skip_serializing_if = "links::branches::State::is_empty")]
     pub branches: links::branches::State,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<publication::Destination>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -173,6 +175,12 @@ impl Records {
         match self {
             Self::Issue { header } => {
                 header.branches.validate()?;
+                if let Some(origin) = header.origin {
+                    validate_number(origin.number)?;
+                    if origin.repository.is_nil() {
+                        return Err(Error::Invalid("Issue transfer has an invalid origin"));
+                    }
+                }
                 if header.issue.number != source.issue
                     || header.issue.version != source.version
                     || header.issue.state != 0
@@ -406,6 +414,7 @@ impl Read for Capture {
                         issue_type: assigned_type.selection,
                         lock,
                         branches: links::branches::load(context, number)?,
+                        origin: publication::origin(context, number)?,
                     }),
                 }
             }

@@ -42,9 +42,9 @@ export function WorkPicker({
   excludeIssue,
   disabled = false,
 }: {
-  repo: Repository;
+  repo: Pick<Repository, "id" | "owner" | "name">;
   onSelect: (work: Work) => void;
-  kind?: "issue";
+  kind?: "issue" | "pull";
   excludeIssue?: number;
   disabled?: boolean;
 }) {
@@ -52,12 +52,17 @@ export function WorkPicker({
   const id = useId();
   const resource = useRequest<{ items: Work[] }>(
     endpoint(repo, "projects/candidates", { q: query, kind }),
+    repo.id,
   );
   return (
     <FieldGroup>
       <Field>
         <FieldLabel htmlFor={id}>
-          {kind ? "Find an issue" : "Find an issue or pull request"}
+          {kind === "issue"
+            ? "Find an issue"
+            : kind === "pull"
+              ? "Find a pull request"
+              : "Find an issue or pull request"}
         </FieldLabel>
         <Input
           id={id}

@@ -8,6 +8,10 @@ import { repoHref } from "@/lib/repository-route";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { DevelopmentBranches, type BranchLinks } from "./development-branches";
+import {
+  CrossRepositoryLinks,
+  type RelatedWork,
+} from "./cross-repository-links";
 
 interface LinkedWork {
   work: {
@@ -25,6 +29,7 @@ interface LinkPage {
   next: number | null;
   can_manage: boolean;
   branches?: BranchLinks;
+  cross_repository?: RelatedWork[];
 }
 interface LinkState {
   active: boolean;
@@ -170,10 +175,21 @@ export function LinkedWork({
                   },
                 )}
               </ul>
-            ) : (
+            ) : !page.cross_repository?.length ? (
               <p className="muted">
                 No linked {pull ? "issues" : "pull requests"}.
               </p>
+            ) : null}
+            {page.cross_repository && (
+              <CrossRepositoryLinks
+                items={page.cross_repository}
+                repo={repo}
+                issue={pull ? undefined : Number(path.split("/")[1])}
+                pull={pull}
+                csrf={csrf}
+                canManage={page.can_manage && !repo.archived}
+                onSaved={resource.retry}
+              />
             )}
             <div className="discussion-actions">
               {before && (

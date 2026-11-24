@@ -102,6 +102,35 @@ pub(crate) struct SubjectSummary {
     pub state: SubjectState,
 }
 
+#[derive(Deserialize, Serialize)]
+pub(crate) struct DevelopmentEndpoint {
+    pub work: SubjectSummary,
+    pub issue_origin: Option<super::issues::transfer::publication::Destination>,
+}
+
+pub(crate) struct GetDevelopmentEndpoint;
+impl crate::cells::application::Read for GetDevelopmentEndpoint {
+    const CLASS: &'static str = super::CLASS;
+    const ID: u32 = 467;
+    type Input = Subject;
+    type Output = Option<DevelopmentEndpoint>;
+
+    fn execute(
+        context: &mut Transaction<'_>,
+        subject: Subject,
+    ) -> crate::cells::Result<Self::Output> {
+        let Some(work) = subject.summary(context)? else {
+            return Ok(None);
+        };
+        let issue_origin = if subject.kind == SubjectKind::Issue {
+            super::issues::transfer::publication::origin(context, subject.number)?
+        } else {
+            None
+        };
+        Ok(Some(DevelopmentEndpoint { work, issue_origin }))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum SubjectState {

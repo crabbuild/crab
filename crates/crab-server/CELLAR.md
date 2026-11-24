@@ -566,6 +566,15 @@ branch can promote. Merge publication checks those receipts before capturing
 the default-branch closure set, so an unacknowledged branch creation can
 still close its issue on time.
 
+Explicit cross-repository issue and pull request links live in the shared
+Organization Cell. One transaction updates the versioned relationship and
+both bounded indexes. Removing a relationship retains its version so a stale
+request cannot recreate it. The issue points to its stable origin from the
+transfer header. The reverse view follows committed issue moves and checks
+current repository grants before exposing the destination. The owning
+organization's policy lease serializes edits with issue retirement and
+repository ownership changes.
+
 Repository ownership acceptance and the operator's initial organization
 assignment check for incoming issue reservations under the existing policy
 lease. Publication clears the reservation in the same transaction that

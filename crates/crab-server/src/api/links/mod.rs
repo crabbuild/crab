@@ -20,6 +20,7 @@ use crate::{
 };
 
 mod branches;
+mod cross_repository;
 
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
@@ -38,6 +39,10 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .route(
             "/api/repos/{owner}/{name}/issues/{issue}/development-branches",
             axum::routing::put(branches::set).post(branches::create),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/issues/{issue}/linked-pulls/{repository}/{pull}",
+            get(cross_repository::detail).put(cross_repository::set),
         )
         .layer(axum::extract::DefaultBodyLimit::max(4096))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
@@ -92,6 +97,12 @@ async fn list(
     if params.include_branches && kind == SubjectKind::Issue {
         output["branches"] =
             branches::view(&server, &principal, &repo, &cell, subject.number).await?;
+    }
+    if params.before.is_none()
+        && let Some(organization) = repo.organization
+    {
+        output["cross_repository"] =
+            json!(cross_repository::list(&server, &principal, &repo, subject, organization).await?);
     }
     Ok(Json(output))
 }
