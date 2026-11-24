@@ -114,11 +114,14 @@ path.
 
 The roots disable force deletion and enable object versioning. Don’t remove versioning, public-access protection, encryption, or provider-native identity to shorten setup.
 
-The 24-hour lifecycle rule applies only to
-`repositories/.crab/http-server/v1/auth/`. It removes expired login flows,
-sessions, Git-token records, and any unique storage-preflight object left when
-a process dies between its write and delete. The maximum active identity
-lifetime is eight hours, so this rule never expires a valid session.
+One-day expiration applies to the `flows/`, `git-tokens/`,
+`identity-sessions/`, `preflight/`, and `sessions/` prefixes under
+`repositories/.crab/http-server/v1/auth/`. Active credentials expire within
+eight hours. SCIM user and group records under `auth/scim/` are persistent.
+If you used an earlier root with a one-day rule for all of `auth/`, update the
+bucket policy before enabling or resuming SCIM. Follow the
+[identity recovery steps](../operations.md#manage-membership-and-sessions)
+if a current SCIM directory is missing.
 
 S3 and GCS also retain noncurrent versions below the complete Crab root for 90
 days by default. Set `recovery_version_retention_days` from 30 through 3650 to

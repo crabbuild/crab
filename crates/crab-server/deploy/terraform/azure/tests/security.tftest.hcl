@@ -101,8 +101,11 @@ run "expires_only_short_lived_auth_state" {
     condition = toset(one([
       for rule in azurerm_storage_management_policy.repositories.rule : rule
       if rule.name == "expireCrabAuthState"
-    ]).filters[0].prefix_match) == toset(["${var.container_name}/${var.root_prefix}/.crab/http-server/v1/auth/"])
-    error_message = "The one-day lifecycle rule must remain scoped to Crab's short-lived auth namespace."
+      ]).filters[0].prefix_match) == toset([
+      for path in ["flows", "git-tokens", "identity-sessions", "preflight", "sessions"] :
+      "${var.container_name}/${var.root_prefix}/.crab/http-server/v1/auth/${path}/"
+    ])
+    error_message = "The one-day lifecycle rule must preserve the SCIM directory and expire only short-lived auth objects."
   }
 
   assert {

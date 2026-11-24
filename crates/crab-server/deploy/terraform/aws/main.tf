@@ -1,5 +1,7 @@
 locals {
-  auth_prefix         = "${var.root_prefix}/.crab/http-server/v1/auth/"
+  auth_prefix = "${var.root_prefix}/.crab/http-server/v1/auth/"
+  # SCIM directories share auth/ but must survive credential expiry.
+  expiring_auth_paths = toset(["flows", "git-tokens", "identity-sessions", "preflight", "sessions"])
   bucket_list_actions = ["s3:ListBucket"]
   object_actions = [
     "s3:AbortMultipartUpload",
@@ -93,20 +95,24 @@ resource "aws_s3_bucket_lifecycle_configuration" "repositories" {
 
   depends_on = [aws_s3_bucket_versioning.repositories]
 
-  rule {
-    id     = "expire-crab-auth-state"
-    status = "Enabled"
+  dynamic "rule" {
+    for_each = local.expiring_auth_paths
 
-    filter {
-      prefix = local.auth_prefix
-    }
+    content {
+      id     = "expire-crab-auth-${rule.value}"
+      status = "Enabled"
 
-    expiration {
-      days = 1
-    }
+      filter {
+        prefix = "${local.auth_prefix}${rule.value}/"
+      }
 
-    noncurrent_version_expiration {
-      noncurrent_days = 1
+      expiration {
+        days = 1
+      }
+
+      noncurrent_version_expiration {
+        noncurrent_days = 1
+      }
     }
   }
 

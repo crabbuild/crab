@@ -415,6 +415,19 @@ jobs:
               > "${default_rendered}"
           grep -F 'port: management' "${default_rendered}"
           grep -F 'app.kubernetes.io/name: crab-server' "${default_rendered}"
+          if grep -E 'scim_token_file|path: scim-token' "${default_rendered}"; then
+            echo "chart enabled SCIM by default" >&2
+            exit 1
+          fi
+
+          scim_rendered="${RUNNER_TEMP}/crab-server-scim.yaml"
+          docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
+              --set-string secrets.scimTokenKey=identity-provisioning-token \
+              > "${scim_rendered}"
+          grep -F 'scim_token_file = "/run/secrets/crab/scim-token"' "${scim_rendered}"
+          grep -F 'key: "identity-provisioning-token"' "${scim_rendered}"
+          test "$(grep -Fc 'path: scim-token' "${scim_rendered}")" -eq 1
 
           external_rendered="${RUNNER_TEMP}/crab-server-external-config.yaml"
           docker run --rm --volume "${PWD}:/src:ro" --workdir /src \

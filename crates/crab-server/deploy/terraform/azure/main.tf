@@ -4,6 +4,8 @@ data "azurerm_resource_group" "server" {
 
 locals {
   auth_prefix = "${var.root_prefix}/.crab/http-server/v1/auth/"
+  # SCIM directories share auth/ but must survive credential expiry.
+  expiring_auth_paths = ["flows", "git-tokens", "identity-sessions", "preflight", "sessions"]
 }
 
 resource "azurerm_storage_account" "repositories" {
@@ -53,7 +55,7 @@ resource "azurerm_storage_management_policy" "repositories" {
     enabled = true
 
     filters {
-      prefix_match = ["${var.container_name}/${local.auth_prefix}"]
+      prefix_match = [for path in local.expiring_auth_paths : "${var.container_name}/${local.auth_prefix}${path}/"]
       blob_types   = ["blockBlob"]
     }
 

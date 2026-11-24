@@ -82,6 +82,9 @@ public_url = {{ required "config.auth.publicUrl is required when config.existing
 {{- if .Values.secrets.oidcClientSecretKey }}
 client_secret_file = "/run/secrets/crab/oidc-client-secret"
 {{- end }}
+{{- if .Values.secrets.scimTokenKey }}
+scim_token_file = "/run/secrets/crab/scim-token"
+{{- end }}
 state_key_file = "/run/secrets/crab/state-key"
 {{- end }}
 
