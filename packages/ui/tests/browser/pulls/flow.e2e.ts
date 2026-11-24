@@ -207,6 +207,56 @@ for (const { address, missing, replacement } of [
   });
 }
 
+test("a late pull request template preserves what the author typed", async ({
+  page,
+}) => {
+  const fixture = await mockPullRequest(page);
+  let showTemplate = () => {};
+  const pending = new Promise<void>((resolve) => {
+    showTemplate = resolve;
+  });
+  await page.route(/\/pulls\/templates(?:\?|$)/, async (route) => {
+    await pending;
+    await route.fulfill({
+      json: {
+        default: {
+          file: "pull_request_template.md",
+          path: ".github/pull_request_template.md",
+          body: "## Review checklist",
+        },
+        items: [],
+        truncated: false,
+        source: null,
+      },
+    });
+  });
+  await page.goto("/team/project/compare/main...feature%2Fdocs");
+  const description = page.getByRole("textbox", {
+    name: "Description",
+    exact: true,
+  });
+  try {
+    await page
+      .getByRole("textbox", { name: "Title", exact: true })
+      .fill("Keep my draft");
+    await expect(
+      page.getByText("Loading pull request templates…"),
+    ).toBeVisible();
+    await description.fill("An author already wrote this.");
+  } finally {
+    showTemplate();
+  }
+  await expect(page.getByLabel("Pull request template")).toHaveValue(
+    ".github/pull_request_template.md",
+  );
+  await expect(description).toHaveValue("An author already wrote this.");
+  await page
+    .getByRole("button", { name: "Create pull request", exact: true })
+    .click();
+  await expect(page).toHaveURL(/\/pull\/2$/);
+  expect(fixture.pullSubmissions[0].body).toBe("An author already wrote this.");
+});
+
 test("a rejected stale comparison reloads before submitting a fresh pull request", async ({
   page,
 }) => {

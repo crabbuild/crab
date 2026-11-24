@@ -21,6 +21,7 @@ export function CreationForm({
   recovering,
   rejected,
   onReview,
+  descriptionBefore,
   descriptionHint,
   descriptionFields,
   children,
@@ -38,6 +39,7 @@ export function CreationForm({
   recovering: boolean;
   rejected: boolean;
   onReview: () => void;
+  descriptionBefore?: ReactNode;
   descriptionHint?: ReactNode;
   descriptionFields?: ReactNode;
   children: ReactNode;
@@ -63,6 +65,7 @@ export function CreationForm({
               placeholder="Title"
             />
           </Field>
+          {descriptionBefore}
           {descriptionFields ?? (
             <Field>
               <Editor

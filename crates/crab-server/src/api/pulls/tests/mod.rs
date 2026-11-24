@@ -16,6 +16,7 @@ mod candidate;
 mod retarget;
 mod stacked;
 mod strict_head;
+mod templates;
 
 async fn json_request(
     client: &reqwest::Client,

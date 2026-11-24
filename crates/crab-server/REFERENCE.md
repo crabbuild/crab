@@ -2408,6 +2408,7 @@ owner label does not acquire ownership.
 | Issue templates | `GET /api/repos/{owner}/{name}/issues/templates` |
 | Issue comments | `GET/POST /api/repos/{owner}/{name}/issues/{number}/comments`, `GET/PATCH /api/repos/{owner}/{name}/issues/{number}/comments/{comment}` |
 | Pull requests | `GET/POST /api/repos/{owner}/{name}/pulls`, `GET/PATCH /api/repos/{owner}/{name}/pulls/{number}` |
+| Pull request templates | `GET /api/repos/{owner}/{name}/pulls/templates` |
 | Pull comments | `GET/POST /api/repos/{owner}/{name}/pulls/{number}/comments`, `GET/PATCH /api/repos/{owner}/{name}/pulls/{number}/comments/{comment}` |
 | Reviews | `GET/POST /api/repos/{owner}/{name}/pulls/{number}/reviews`, `GET/PATCH /api/repos/{owner}/{name}/pulls/{number}/reviews/{review}` |
 | Pending review | `GET/PUT /api/repos/{owner}/{name}/pulls/{number}/pending-review`, `POST .../pending-review/submit` |
@@ -3778,6 +3779,21 @@ after success/recovery and records pin/unpin events in each issue conversation;
 pure reorder does not add a timeline event.
 
 ### Work with pull requests and reviews
+
+The pull request composer fills the description from `pull_request_template.md`
+on the destination repository's default branch. Crab looks in `.github/`, the
+repository root, then `docs/`. Put named Markdown templates in a
+`PULL_REQUEST_TEMPLATE/` directory under any of these locations. Authors can
+choose a template in the composer or open a comparison link with
+`?template=release.md`. A `body` parameter supplies the initial description
+when both parameters are present. Choosing a different template requires
+applying it explicitly, and changing the comparison branches keeps edits.
+
+When a repository has no local pull request templates, Crab looks in the
+namespace's `.github` repository. Inheritance requires current read access
+to both repositories. A local empty default template provides a blank initial
+description and overrides the shared catalog. The composer lists up to 32
+named templates and accepts ordinary UTF-8 Markdown files up to 32 KiB each.
 
 The browser compares the head to the Git merge base. It sends the exact
 base tip and head from that preview when creating the pull request. If either

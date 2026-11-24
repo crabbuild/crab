@@ -51,6 +51,7 @@ mod reviewers;
 pub(super) mod reviews;
 pub(super) mod rollups;
 pub(super) mod storage;
+mod templates;
 mod viewed;
 use crate::cells::repository::{ListPulls, PullSummary};
 use required_checks::RequiredCheck;
@@ -111,6 +112,10 @@ fn same_author(left: &Identity, right: &Identity) -> bool {
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .route("/api/repos/{owner}/{name}/pulls", get(list).post(create))
+        .route(
+            "/api/repos/{owner}/{name}/pulls/templates",
+            get(templates::list),
+        )
         .route(
             "/api/repos/{owner}/{name}/pulls/{number}",
             get(detail).patch(edit),

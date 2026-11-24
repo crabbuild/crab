@@ -45,6 +45,7 @@ mod write;
 mod contracts;
 
 mod code_search;
+mod community_defaults;
 mod integrations;
 mod query;
 mod read_admission;

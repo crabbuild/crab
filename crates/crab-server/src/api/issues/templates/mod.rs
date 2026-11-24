@@ -1,14 +1,14 @@
 use super::*;
 use crate::{
-    api::members::roster::{Candidate, Roster},
+    api::{
+        community_defaults,
+        members::roster::{Candidate, Roster},
+    },
     cells::repository::collaboration::creation::Selection as Metadata,
     repository::Repository,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use crab_remote_git::{
-    ContentClassification, EntryKind, GitPath, OperationContext, OperationKind, PageRequest,
-    RemoteGitSnapshot, RepositoryOptions, Revision, TreeEntry,
-};
+use crab_remote_git::{GitPath, OperationKind, PageRequest, RepositoryOptions, Revision};
 use hmac::{Hmac, Mac};
 use serde::Serialize;
 use sha2::Sha256;
@@ -17,9 +17,7 @@ mod document;
 use document::Document;
 
 const DIRECTORY: &str = ".github/ISSUE_TEMPLATE";
-const DEFAULTS_REPOSITORY: &str = ".github";
 const LIMIT: usize = 32;
-const FILE_BYTES: u64 = 32 * 1024;
 const GRANT_MS: i64 = 60 * 60 * 1000;
 
 #[derive(Default)]
@@ -133,40 +131,11 @@ impl Grant {
             return Ok(true);
         };
         let Some(source) =
-            defaults_repository(server, repo).filter(|source| source.id == source_id)
+            community_defaults::source(server, repo).filter(|source| source.id == source_id)
         else {
             return Ok(false);
         };
-        can_inherit(server, principal, repo, &source).await
-    }
-}
-
-fn defaults_repository(server: &Server, repo: &Repository) -> Option<Arc<Repository>> {
-    if repo.config.name == DEFAULTS_REPOSITORY
-        || (repo.organization.is_none()
-            && !crate::catalog::is_personal_namespace(&repo.config.owner))
-    {
-        return None;
-    }
-    server
-        .repositories
-        .get(&(repo.config.owner.clone(), DEFAULTS_REPOSITORY.into()))
-        .filter(|source| source.id != repo.id && source.organization == repo.organization)
-}
-
-async fn can_inherit(
-    server: &Server,
-    principal: &Principal,
-    destination: &Repository,
-    source: &Repository,
-) -> Result<bool> {
-    let Some(reader) = principal.related_read(destination.id, source.id) else {
-        return Ok(false);
-    };
-    match app::membership(server, &reader, source).await {
-        Ok(_) => Ok(true),
-        Err(Error::NotFound) => Ok(false),
-        Err(error) => Err(error),
+        community_defaults::readable(server, principal, repo, &source).await
     }
 }
 
@@ -179,10 +148,10 @@ async fn resolved_catalog(
     if local.overrides_defaults() {
         return Ok((local, None));
     }
-    let Some(source) = defaults_repository(server, repo) else {
+    let Some(source) = community_defaults::source(server, repo) else {
         return Ok((local, None));
     };
-    if !can_inherit(server, principal, repo, &source).await? {
+    if !community_defaults::readable(server, principal, repo, &source).await? {
         return Ok((local, None));
     }
     let mut inherited = load(server, &source).await?;
@@ -232,7 +201,7 @@ pub(super) async fn list(
     )?;
     let principal = app::membership(&server, &principal, &repo).await?.principal;
     if let Some(source) = &source
-        && !can_inherit(&server, &principal, &repo, source).await?
+        && !community_defaults::readable(&server, &principal, &repo, source).await?
     {
         return Err(Error::NotFound);
     }
@@ -312,7 +281,7 @@ async fn load(server: &Server, repo: &Repository) -> Result<Catalog> {
         };
         let config_path = GitPath::new(format!("{DIRECTORY}/config.yml").into_bytes())?;
         if let Some(entry) = snapshot.entry(&config_path, &operation).await? {
-            if let Some(config) = text(&snapshot, &entry, &operation)
+            if let Some(config) = community_defaults::template_text(&snapshot, &entry, &operation)
                 .await?
                 .and_then(|source| serde_yaml::from_str(&source).ok())
             {
@@ -340,7 +309,7 @@ async fn load(server: &Server, repo: &Repository) -> Result<Catalog> {
                 found.truncated = true;
                 continue;
             }
-            if let Some(parsed) = text(&snapshot, &entry, &operation)
+            if let Some(parsed) = community_defaults::template_text(&snapshot, &entry, &operation)
                 .await?
                 .and_then(|source| Document::parse(name, &source))
             {
@@ -361,22 +330,4 @@ async fn load(server: &Server, repo: &Repository) -> Result<Catalog> {
         .finish(outcome)
         .await
         .map_err(crate::Error::from)?)
-}
-
-async fn text(
-    snapshot: &RemoteGitSnapshot,
-    entry: &TreeEntry,
-    operation: &OperationContext,
-) -> crab_remote_git::Result<Option<String>> {
-    if entry.kind != EntryKind::Blob
-        || operation.read_object_metadata(entry.oid).await?.size > FILE_BYTES
-    {
-        return Ok(None);
-    }
-    let blob = snapshot.read_blob(&entry.path, operation).await?;
-    if blob.metadata.classification != ContentClassification::OrdinaryGit || blob.bytes.contains(&0)
-    {
-        return Ok(None);
-    }
-    Ok(String::from_utf8(blob.bytes.into()).ok())
 }
