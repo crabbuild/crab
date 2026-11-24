@@ -7,6 +7,7 @@ import { useMutation } from "./mutations";
 import { repoHref } from "@/lib/repository-route";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
+import { DevelopmentBranches, type BranchLinks } from "./development-branches";
 
 interface LinkedWork {
   work: {
@@ -22,6 +23,7 @@ interface LinkPage {
   items: LinkedWork[];
   next: number | null;
   can_manage: boolean;
+  branches?: BranchLinks;
 }
 interface LinkState {
   active: boolean;
@@ -45,13 +47,16 @@ export function LinkedWork({
   const [before, setBefore] = useState<string>();
   const [issue, setIssue] = useState("");
   const [closesOnMerge, setClosesOnMerge] = useState(allowIssueClosure);
-  const resource = useRequest<LinkPage>(
-    endpoint(repo, `${path}/links`, { before }),
-  );
-  const mutation = useMutation(csrf, repo);
   const pull = path.startsWith("pulls/")
     ? Number(path.split("/")[1])
     : undefined;
+  const resource = useRequest<LinkPage>(
+    endpoint(repo, `${path}/links`, {
+      before,
+      include_branches: pull ? undefined : "true",
+    }),
+  );
+  const mutation = useMutation(csrf, repo);
   const issueNumber = Number(issue);
   const validIssue = Number.isSafeInteger(issueNumber) && issueNumber > 0;
   const pairUrl =
@@ -250,6 +255,15 @@ export function LinkedWork({
                   Link issue
                 </Button>
               </form>
+            )}
+            {page.branches && !pull && (
+              <DevelopmentBranches
+                repo={repo}
+                issue={Number(path.split("/")[1])}
+                csrf={csrf}
+                links={page.branches}
+                onChanged={resource.retry}
+              />
             )}
           </>
         )}

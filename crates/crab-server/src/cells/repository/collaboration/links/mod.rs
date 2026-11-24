@@ -9,6 +9,7 @@ use super::{Page, Subject, SubjectKind, SubjectSummary, Target, activity, next_v
 const ROOT: &str = "collaboration/v1/links";
 const MAX_CLOSING_ISSUES: usize = 10;
 
+pub(crate) mod branches;
 mod closure;
 pub(crate) mod commits;
 pub(crate) mod keywords;

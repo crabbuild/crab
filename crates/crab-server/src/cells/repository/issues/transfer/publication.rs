@@ -269,6 +269,7 @@ impl Mutation for Retire {
             number: issue.number,
         };
         pins::retire(context, issue.number)?;
+        links::branches::retire(context, issue.number)?;
         milestones::transfer_assignment(context, subject, None)?;
         search::contributions::retire_issue(context, issue.number)?;
         if !context.query(
@@ -710,6 +711,7 @@ fn install(context: &mut Transaction<'_>, reservation: &Reservation, count: u64)
     issue.label_ids.sort_unstable();
     validate_issue(&issue)?;
     insert_issue(context, &issue)?;
+    links::branches::install(context, number, &header.branches)?;
     lifecycle::store(context, number, &header.lifecycle)?;
     let subject = Subject {
         kind: SubjectKind::Issue,

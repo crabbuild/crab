@@ -90,6 +90,8 @@ pub(crate) struct Header {
     pub milestone: Option<MilestoneKey>,
     pub issue_type: Option<issue_type::Selection>,
     pub lock: locks::Lock,
+    #[serde(default, skip_serializing_if = "links::branches::State::is_empty")]
+    pub branches: links::branches::State,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -170,6 +172,7 @@ impl Records {
     fn validate(&self, source: Source) -> Result<()> {
         match self {
             Self::Issue { header } => {
+                header.branches.validate()?;
                 if header.issue.number != source.issue
                     || header.issue.version != source.version
                     || header.issue.state != 0
@@ -401,6 +404,7 @@ impl Read for Capture {
                         milestone,
                         issue_type: assigned_type.selection,
                         lock,
+                        branches: links::branches::load(context, number)?,
                     }),
                 }
             }

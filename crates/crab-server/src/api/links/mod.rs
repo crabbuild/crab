@@ -19,6 +19,8 @@ use crate::{
     server::Server,
 };
 
+mod branches;
+
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .route(
@@ -33,6 +35,10 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
             "/api/repos/{owner}/{name}/pulls/{pull}/linked-issues/{issue}",
             get(detail).put(set),
         )
+        .route(
+            "/api/repos/{owner}/{name}/issues/{issue}/development-branches",
+            axum::routing::put(branches::set),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(4096))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
@@ -42,6 +48,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
 struct Parameters {
     before: Option<u64>,
     limit: Option<u8>,
+    include_branches: bool,
 }
 
 async fn list(
@@ -80,9 +87,13 @@ async fn list(
             .await,
     )?
     .ok_or(Error::NotFound)?;
-    Ok(Json(
-        json!({"items":page.items,"next":page.next,"can_manage":principal.can_write(repo.id)}),
-    ))
+    let mut output =
+        json!({"items":page.items,"next":page.next,"can_manage":principal.can_write(repo.id)});
+    if params.include_branches && kind == SubjectKind::Issue {
+        output["branches"] =
+            branches::view(&server, &principal, &repo, &cell, subject.number).await?;
+    }
+    Ok(Json(output))
 }
 
 async fn detail(

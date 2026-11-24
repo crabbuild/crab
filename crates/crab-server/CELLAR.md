@@ -536,6 +536,14 @@ destinations and commits them with the issue. Shared attachments reuse the same
 destination ID.
 Code examples, link titles, and external links retain their original text.
 
+Development branch links store the target repository UUID and full ref in the
+issue's Repository Cell. The issue header captures the bounded link list and
+its version. Publication installs both with the destination issue, and source
+retirement removes the old record. Changing links advances the repository
+revision, so an issue transfer cannot retire a stale snapshot of those links.
+HTTP readers check current repository grants before returning target identity
+or ref data. Existing transfer headers and issues require no new preparation.
+
 Repository ownership acceptance and the operator's initial organization
 assignment check for incoming issue reservations under the existing policy
 lease. Publication clears the reservation in the same transaction that

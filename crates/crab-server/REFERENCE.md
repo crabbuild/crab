@@ -2470,6 +2470,7 @@ owner label does not acquire ownership.
 | Edit history | `GET /api/repos/{owner}/{name}/edit-history/{target}` and `DELETE ...?revision={number}` |
 | Activity | `GET /api/repos/{owner}/{name}/activity`, `GET /api/repos/{owner}/{name}/issues/{number}/activity`, `GET /api/repos/{owner}/{name}/pulls/{number}/activity` |
 | Linked work | Issue/pull `GET .../{number}/links`; `GET/PUT /api/repos/{owner}/{name}/pulls/{pull}/linked-issues/{issue}` |
+| Development branches | `GET .../issues/{number}/links?include_branches=true`; `PUT .../issues/{number}/development-branches` |
 | Issue dependencies | `GET .../issues/{number}/dependencies/{blocked_by|blocking}`; `GET/PUT .../issues/{number}/dependencies/{direction}/{other}` |
 | Assign or clear an issue type | `PUT .../issues/{number}/type` |
 
@@ -2541,6 +2542,26 @@ Crab's private defaults require current Read access to both repositories.
 Losing source access hides the inherited choices and invalidates outstanding
 proofs for new writes. The original submission can still recover an issue
 created while the proof was authorized.
+
+### Link a branch to an issue
+
+Open **Linked branches** in the issue sidebar and choose **Link branch**.
+Select a repository and one of its existing branches. Write access to the
+issue repository and Read access to the branch repository are required.
+Each issue supports up to ten links. Readers see branches only while they
+can read both repositories. Issue transfers retain the links and continue
+to check each branch repository's access.
+
+`GET .../issues/{number}/links?include_branches=true` returns a `branches`
+object with `items`, `version`, and `can_manage`. Each item contains the
+target repository address, the full ref, and `exists`. A ref that has since
+been deleted remains removable and appears as unavailable. The link follows
+the named branch as commits change.
+
+Send `{branch: {repository, reference}, active, version}` to
+`PUT .../issues/{number}/development-branches` using the target repository
+UUID and the issue's observed branch-link version. The response includes
+the committed version. A conflicting mutation returns HTTP 409.
 
 ### Close a linked issue when its pull request merges
 

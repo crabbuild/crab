@@ -213,6 +213,9 @@ pub(in crate::cells) fn dispatch_mutation(
         }
         <SetPullReadiness as Mutation>::ID => invoke_mutation::<SetPullReadiness>(context, input),
         <SetLink as Mutation>::ID => invoke_mutation::<SetLink>(context, input),
+        collaboration::links::branches::Set::ID => {
+            invoke_mutation::<collaboration::links::branches::Set>(context, input)
+        }
         commit_closures::Reserve::ID => invoke_mutation::<commit_closures::Reserve>(context, input),
         commit_closures::Resolve::ID => invoke_mutation::<commit_closures::Resolve>(context, input),
         <SetReaction as Mutation>::ID => invoke_mutation::<SetReaction>(context, input),
@@ -438,6 +441,9 @@ pub(in crate::cells) fn dispatch_read(
         }
         <GetLink as Read>::ID => invoke_read::<GetLink>(context, input),
         <ListLinks as Read>::ID => invoke_read::<ListLinks>(context, input),
+        collaboration::links::branches::Get::ID => {
+            invoke_read::<collaboration::links::branches::Get>(context, input)
+        }
         <collaboration::conversation::ListConversation as Read>::ID => {
             invoke_read::<collaboration::conversation::ListConversation>(context, input)
         }
