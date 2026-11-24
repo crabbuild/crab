@@ -18,6 +18,10 @@ import { Link } from "@/components/navigation/link";
 import { Result, RequestWidget } from "@/components/request/result";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import {
+  ChangeComparison,
+  usePullComparison,
+} from "@/features/repository/diff";
 import { short } from "@/lib/format";
 import {
   ChecklistIcon,
@@ -44,6 +48,30 @@ function PullBadge({ pull }: { pull: PullRequest }) {
       <Icon />
       {status[0].toUpperCase() + status.slice(1)}
     </span>
+  );
+}
+
+function PublicPullFiles({
+  repo,
+  pull,
+  theme,
+  codeThemes,
+}: {
+  repo: Repository;
+  pull: PullRequest;
+  theme: "light" | "dark";
+  codeThemes: CodeThemes;
+}) {
+  const comparison = usePullComparison(repo, pull.base_oid, pull.head_oid);
+  return (
+    <ChangeComparison
+      state={comparison}
+      repo={repo}
+      base={comparison.data?.base}
+      rev={comparison.data?.commit ?? ""}
+      theme={theme}
+      codeThemes={codeThemes}
+    />
   );
 }
 
@@ -85,23 +113,27 @@ export function PullDetail({
     setEpoch((value) => value + 1);
   }
   const data = current ?? pull.data;
+  const publicReader = repo.public_read_only === true;
   const requestedTab = repositoryRoute(url)?.pullTab;
   const tab =
     requestedTab === "commits" ||
     requestedTab === "files" ||
-    requestedTab === "checks"
+    (requestedTab === "checks" && !publicReader)
       ? requestedTab
       : "conversation";
   const thread = Number(url.searchParams.get("thread"));
   const reply = Number(url.searchParams.get("reply"));
   const unresolvedOnly = url.searchParams.get("threads") === "unresolved";
   const linkedThread =
-    tab === "files" && Number.isSafeInteger(thread) && thread > 0;
+    !publicReader &&
+    tab === "files" &&
+    Number.isSafeInteger(thread) &&
+    thread > 0;
   const pendingReview = usePendingReview(
     repo,
     number,
     csrf,
-    tab === "files" && !linkedThread,
+    !publicReader && tab === "files" && !linkedThread,
   );
   const [visitedConversation, setVisitedConversation] = useState(
     tab === "conversation",
@@ -167,19 +199,27 @@ export function PullDetail({
                   <strong>
                     <Author author={data.author} />
                   </strong>{" "}
-                  wants to merge <code>{short(data.head_oid)}</code> from{" "}
-                  {data.head_repository ? (
-                    <Link
-                      href={repoHref(data.head_repository, {
-                        rev: data.head_ref,
-                      })}
-                    >
-                      <code>
-                        {data.head_repository.name}:{branch(data.head_ref)}
-                      </code>
-                    </Link>
+                  wants to merge{" "}
+                  {!data.head_ref ? (
+                    "from an unavailable source branch"
+                  ) : data.head_repository ? (
+                    <>
+                      <code>{short(data.head_oid)}</code> from{" "}
+                      <Link
+                        href={repoHref(data.head_repository, {
+                          rev: data.head_ref,
+                        })}
+                      >
+                        <code>
+                          {data.head_repository.name}:{branch(data.head_ref)}
+                        </code>
+                      </Link>
+                    </>
                   ) : (
-                    <code>{branch(data.head_ref)}</code>
+                    <>
+                      <code>{short(data.head_oid)}</code> from{" "}
+                      <code>{branch(data.head_ref)}</code>
+                    </>
                   )}{" "}
                   into <code>{branch(data.base_ref)}</code>
                 </span>
@@ -224,17 +264,19 @@ export function PullDetail({
             >
               <GitCommitIcon /> Commits
             </Link>
-            <Link
-              className={tab === "checks" ? "active" : ""}
-              aria-current={tab === "checks" ? "page" : undefined}
-              href={repoHref(repo, {
-                view: "pulls",
-                pull: String(number),
-                pull_tab: "checks",
-              })}
-            >
-              <ChecklistIcon /> Checks
-            </Link>
+            {!publicReader && (
+              <Link
+                className={tab === "checks" ? "active" : ""}
+                aria-current={tab === "checks" ? "page" : undefined}
+                href={repoHref(repo, {
+                  view: "pulls",
+                  pull: String(number),
+                  pull_tab: "checks",
+                })}
+              >
+                <ChecklistIcon /> Checks
+              </Link>
+            )}
             <Link
               className={tab === "files" ? "active" : ""}
               aria-current={tab === "files" ? "page" : undefined}
@@ -249,9 +291,9 @@ export function PullDetail({
           </nav>
           {tab !== "checks" && !data.branches_available && (
             <div className="notice error">
-              One of this pull request&apos;s branches no longer exists. The
-              original commit IDs remain recorded, but the live comparison is
-              unavailable.
+              {publicReader
+                ? "The source comparison is unavailable in this public view."
+                : "One of this pull request’s branches no longer exists. The original commit IDs remain recorded, but the live comparison is unavailable."}
             </div>
           )}
           {tab === "checks" ? (
@@ -284,6 +326,15 @@ export function PullDetail({
                 Number.isSafeInteger(reply) && reply > 0 ? reply : undefined
               }
             />
+          ) : tab === "files" && publicReader ? (
+            data.branches_available && (
+              <PublicPullFiles
+                repo={repo}
+                pull={data}
+                theme={theme}
+                codeThemes={codeThemes}
+              />
+            )
           ) : tab === "files" ? (
             <>
               {data.branches_available && (

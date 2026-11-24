@@ -29,6 +29,8 @@ async function fixture(page: Page) {
       member_creation: boolean;
       member_transfer: boolean;
       member_deletion: boolean;
+      private_forks: boolean;
+      member_visibility: boolean;
       baseline: "read" | "write" | null;
       default_branch: string;
     };
@@ -59,6 +61,8 @@ async function fixture(page: Page) {
       member_creation: false,
       member_transfer: false,
       member_deletion: false,
+      private_forks: false,
+      member_visibility: false,
       baseline: null,
       default_branch: "main",
     },
@@ -264,9 +268,83 @@ test("organization owners save repository policy from settings", async ({
     member_creation: true,
     member_transfer: true,
     member_deletion: true,
+    private_forks: false,
+    member_visibility: false,
     baseline: "read",
     default_branch: "trunk",
   });
+  await expectNoAccessibilityViolations(page);
+});
+
+test("private fork settings respect the organization policy", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  const repo = {
+    id: "01900000-0000-7000-8000-000000000020",
+    owner: "org-crab",
+    name: "library",
+    organization_id: id,
+    can_admin: true,
+  };
+  const settings = `/${repo.owner}/${repo.name}/settings`;
+  const endpoint = `/api/repositories/${repo.id}/forking`;
+  let forking = { version: 0, allowed: true };
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const { pathname } = new URL(request.url());
+    if (pathname === "/api/repos") {
+      return route.fulfill({
+        json: {
+          repositories: [
+            {
+              ...repo,
+              forking: {
+                ...forking,
+                organization_allows: state.policy.private_forks,
+              },
+            },
+          ],
+        },
+      });
+    }
+    if (pathname.endsWith("/refs"))
+      return route.fulfill({ json: { head: null, refs: [] } });
+    if (pathname.endsWith("/settings/merge-methods"))
+      return route.fulfill({ json: { version: 0, enabled: ["merge_commit"] } });
+    if (pathname === endpoint) {
+      expect(request.method()).toBe("PUT");
+      expect(request.headers()["x-csrf-token"]).toBe("csrf");
+      expect(state.policy.private_forks).toBe(true);
+      expect(request.postDataJSON()).toEqual({ allowed: false, version: 0 });
+      forking = { allowed: false, version: 1 };
+      return route.fulfill({ json: forking });
+    }
+    return route.fallback();
+  });
+
+  await page.goto(settings);
+  const repositoryPolicy = page.getByRole("checkbox", {
+    name: "Allow forking",
+    exact: true,
+  });
+  await expect(repositoryPolicy).toBeDisabled();
+  await expect(repositoryPolicy).not.toBeChecked();
+  await page.goto(`${root}?tab=privileges`);
+  const organizationPolicy = page.getByRole("checkbox", {
+    name: "Allow forking of private repositories",
+  });
+  await organizationPolicy.click();
+  await page.getByRole("button", { name: "Save repository policy" }).click();
+  await expect(page.getByText("Repository policy saved.")).toBeVisible();
+  await page.goto(settings);
+  await expect(repositoryPolicy).toBeChecked();
+  await repositoryPolicy.click();
+  await page.getByRole("button", { name: "Save forking setting" }).click();
+  await expect.poll(() => forking).toEqual({ version: 1, allowed: false });
+  await page.reload();
+  await expect(repositoryPolicy).toBeEnabled();
+  await expect(repositoryPolicy).not.toBeChecked();
   await expectNoAccessibilityViolations(page);
 });
 

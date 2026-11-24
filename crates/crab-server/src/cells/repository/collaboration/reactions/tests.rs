@@ -110,7 +110,7 @@ async fn desired_memberships_are_unique_across_retries_and_display_name_changes(
             None,
             Query {
                 targets: vec![target],
-                actor: actor("bob"),
+                actor: Some(actor("bob")),
             },
         )
         .await
@@ -142,7 +142,7 @@ async fn concurrent_actors_cannot_lose_reaction_counts_or_underflow_on_removal()
                 None,
                 Query {
                     targets: vec![target],
-                    actor: actor("actor-0"),
+                    actor: Some(actor("actor-0")),
                 },
             )
             .await
@@ -283,7 +283,7 @@ async fn every_discussion_target_is_scoped_to_its_parent() {
             None,
             Query {
                 targets,
-                actor: actor("bob"),
+                actor: Some(actor("bob")),
             },
         )
         .await
@@ -342,7 +342,7 @@ async fn archived_reactions_are_readable_but_fresh_writes_are_rejected() {
             None,
             Query {
                 targets: vec![target],
-                actor: actor("alice"),
+                actor: Some(actor("alice")),
             },
         )
         .await
@@ -357,7 +357,7 @@ async fn archived_reactions_are_readable_but_fresh_writes_are_rejected() {
                 None,
                 Query {
                     targets: vec![target; count],
-                    actor: actor("alice"),
+                    actor: Some(actor("alice")),
                 },
             )
             .await;
@@ -429,7 +429,7 @@ async fn native_restart_restores_actor_memberships_counts_and_command_receipts()
                 Some(committed.receipt),
                 Query {
                     targets: vec![target],
-                    actor: actor(subject),
+                    actor: Some(actor(subject)),
                 },
             )
             .await

@@ -61,10 +61,9 @@ pub(in crate::api) async fn resolve(
     }
     let mut keys: BTreeMap<_, _> = handles.into_iter().zip(keys).collect();
     if names.contains("@me") {
-        let actor = app::actor(principal)?;
         keys.insert(
             "@me".into(),
-            Some(IdentityKey {
+            principal.identity().map(|actor| IdentityKey {
                 issuer: actor.issuer,
                 subject: actor.subject,
             }),
@@ -192,16 +191,18 @@ pub(super) async fn options(
             );
         }
     }
-    let roster = Roster::load(&server, &principal, &repo).await?;
-    for person in roster.items {
-        if person.name.to_lowercase().contains(&search)
-            || person
-                .profile
-                .as_ref()
-                .is_some_and(|profile| profile.handle.contains(prefix))
-            || person.id.to_string() == search
-        {
-            people.insert(person.id, person);
+    if !principal.is_public_reader(repo.id) {
+        let roster = Roster::load(&server, &principal, &repo).await?;
+        for person in roster.items {
+            if person.name.to_lowercase().contains(&search)
+                || person
+                    .profile
+                    .as_ref()
+                    .is_some_and(|profile| profile.handle.contains(prefix))
+                || person.id.to_string() == search
+            {
+                people.insert(person.id, person);
+            }
         }
     }
     let mut people: Vec<_> = people.into_values().collect();

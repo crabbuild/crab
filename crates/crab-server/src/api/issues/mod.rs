@@ -138,16 +138,20 @@ async fn list(
             .query::<ListDiscussions>(&routed.target, None, input)
             .await,
     )?;
-    let rollups = super::pulls::rollups::load(
-        &server,
-        &repo,
-        review_source.as_deref(),
-        page.items.iter().filter_map(|item| match item {
-            DiscussionSummary::Pull(pull) => Some(pull),
-            DiscussionSummary::Issue(_) => None,
-        }),
-    )
-    .await?;
+    let rollups = if principal.is_public_reader(repo.id) {
+        Default::default()
+    } else {
+        super::pulls::rollups::load(
+            &server,
+            &repo,
+            review_source.as_deref(),
+            page.items.iter().filter_map(|item| match item {
+                DiscussionSummary::Pull(pull) => Some(pull),
+                DiscussionSummary::Issue(_) => None,
+            }),
+        )
+        .await?
+    };
     let authors = super::profiles::attribution::Authors::load(
         &server,
         &principal,
@@ -191,9 +195,14 @@ async fn list(
                 &assignees,
                 issue_types::visible(&repo, issue.issue_type, types),
             )),
-            DiscussionSummary::Pull(pull) => {
-                super::pulls::pull_list_view(&authors, pull, &page.labels, &assignees, &rollups)
-            }
+            DiscussionSummary::Pull(pull) => super::pulls::pull_list_view(
+                &authors,
+                pull,
+                &page.labels,
+                &assignees,
+                &rollups,
+                assignees.principal.is_public_reader(repo.id),
+            ),
         })
         .collect::<Result<Vec<_>>>()?;
     if let Some(bound) = review_teams {
@@ -431,7 +440,7 @@ async fn rendered(
     id: u64,
     minimum: Option<crate::cells::Receipt>,
 ) -> Result<Json<Value>> {
-    let author = actor(principal)?;
+    let author = principal.member_identity(repo.id);
     let routed = app::repository_cell(server, repo)?;
     // Mutation receipts keep their original record bytes. Read lifecycle and
     // content together after the commit so replay/enrichment cannot mix versions.
@@ -442,7 +451,8 @@ async fn rendered(
             .await,
     )?;
     let issue = detail.issue.as_ref().ok_or(Error::NotFound)?;
-    let reaction = reactions::one(server, repo, &author, Target::Issue { number: id }).await?;
+    let reaction =
+        reactions::one(server, repo, author.as_ref(), Target::Issue { number: id }).await?;
     let authors = Authors::load(server, principal, std::iter::once(&issue.author)).await?;
     let types = if principal.can_triage(repo.id) || detail.issue_type.selection.is_some() {
         issue_types::active(server, repo.organization)
@@ -453,7 +463,13 @@ async fn rendered(
     };
     let assignees = Selection::load(server, principal, repo, issue.assignees.iter()).await?;
     let mut issue = view::issue(
-        &authors, issue, &detail, &author, &assignees, repo.id, &reaction,
+        &authors,
+        issue,
+        &detail,
+        author.as_ref(),
+        &assignees,
+        repo.id,
+        &reaction,
     )?;
     issue["issue_type"] = json!(issue_types::visible(
         repo,
@@ -474,7 +490,7 @@ async fn comments(
     Query(params): Query<ListParameters>,
 ) -> Result<Json<Value>> {
     let repo = repository(&server, &principal, &(owner, name))?;
-    let author = actor(&principal)?;
+    let author = principal.member_identity(repo.id);
     if params.state.is_some() || params.q.is_some() {
         return Err(Error::Invalid("Comments do not support list filters"));
     }
@@ -503,7 +519,7 @@ async fn comments(
             number: comment.number,
         })
         .collect();
-    let reactions = reactions::read(&server, &repo, &author, targets).await?;
+    let reactions = reactions::read(&server, &repo, author.as_ref(), targets).await?;
     let authors = Authors::load(
         &server,
         &principal,
@@ -515,7 +531,7 @@ async fn comments(
         "items": items
             .iter()
             .zip(reactions)
-            .map(|(comment, reactions)| view::comment(&authors, comment, &author, editor.principal.can_moderate(repo.id), &reactions))
+            .map(|(comment, reactions)| view::comment(&authors, comment, author.as_ref(), editor.principal.can_moderate(repo.id), &reactions))
             .collect::<Vec<_>>(),
         "next": next,
     })))
@@ -588,7 +604,7 @@ async fn comment_detail(
     Path((owner, name, id, comment)): Path<(String, String, u64, u64)>,
 ) -> Result<Json<Value>> {
     let repo = repository(&server, &principal, &(owner, name))?;
-    let author = actor(&principal)?;
+    let author = principal.member_identity(repo.id);
     let routed = crate::app::repository_cell(&server, &repo)?;
     let comment = crate::app::query_output(
         routed
@@ -607,7 +623,7 @@ async fn comment_detail(
     let reaction = reactions::one(
         &server,
         &repo,
-        &author,
+        author.as_ref(),
         Target::IssueComment {
             issue: comment.issue,
             number: comment.number,
@@ -619,7 +635,7 @@ async fn comment_detail(
     Ok(Json(view::comment(
         &authors,
         &comment,
-        &author,
+        author.as_ref(),
         editor.principal.can_moderate(repo.id),
         &reaction,
     )))

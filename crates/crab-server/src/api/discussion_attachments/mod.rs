@@ -234,8 +234,12 @@ async fn download(
         .repositories
         .by_id(repository_id)
         .ok_or(Error::NotFound)?;
-    app::membership(&server, &principal, &repo).await?;
-    let actor = (&app::actor(&principal)?).into();
+    let grant = app::membership(&server, &principal, &repo).await?;
+    let actor = grant
+        .principal
+        .member_identity(repo.id)
+        .as_ref()
+        .map(Into::into);
     let cell = app::repository_cell(&server, &repo)?;
     let upload = app::query_output(
         cell.client
@@ -257,7 +261,7 @@ async fn download(
             result.map_err(|_| Error::AttachmentTransfer(asset_transfer::Error::Cancelled))??
         }
     };
-    app::membership(&server, &principal, &repo).await?;
+    app::membership(&server, &grant.principal, &repo).await?;
     if metadata.size != upload.size {
         return Err(Error::Storage(crab_storage::StorageError::CorruptObject {
             path: metadata.location.to_string(),

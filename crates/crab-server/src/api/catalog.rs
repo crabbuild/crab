@@ -37,6 +37,8 @@ pub(super) struct RepositorySelection {
     q: Option<String>,
     after: Option<String>,
     limit: Option<u8>,
+    #[serde(default)]
+    public: bool,
 }
 
 pub(super) async fn list(
@@ -44,13 +46,22 @@ pub(super) async fn list(
     Extension(principal): Extension<Principal>,
     Query(selection): Query<RepositorySelection>,
 ) -> app::Result<Json<serde_json::Value>> {
+    if principal.is_anonymous()
+        && (!principal.permits_public_reads() || (!selection.public && selection.owner.is_none()))
+    {
+        return Err(app::Error::SessionRequired);
+    }
     if selection.owner.is_some() != selection.name.is_some() {
         return Err(app::Error::Invalid(
             "owner and name must be provided together",
         ));
     }
-    if selection.q.is_some() || selection.after.is_some() || selection.limit.is_some() {
-        if selection.owner.is_some() {
+    if selection.q.is_some()
+        || selection.after.is_some()
+        || selection.limit.is_some()
+        || selection.public
+    {
+        if selection.owner.is_some() || (selection.public && selection.organization.is_some()) {
             return Err(app::Error::Invalid(
                 "Search and exact repository lookup cannot be combined",
             ));
@@ -58,9 +69,13 @@ pub(super) async fn list(
         return catalog_browse::list(
             &server,
             &principal,
-            selection
-                .organization
-                .map_or(Scope::All, Scope::Organization),
+            if selection.public {
+                Scope::Public
+            } else {
+                selection
+                    .organization
+                    .map_or(Scope::All, Scope::Organization)
+            },
             Search {
                 query: selection.q.unwrap_or_default(),
                 after: selection.after,
@@ -69,7 +84,9 @@ pub(super) async fn list(
         )
         .await;
     }
-    app::actor(&principal)?;
+    if !principal.is_anonymous() {
+        app::actor(&principal)?;
+    }
     let address = selection.owner.as_deref().zip(selection.name.as_deref());
     let mut matches = visible(&server, &principal, address, selection.organization).await?;
     if matches.is_empty()
@@ -88,11 +105,21 @@ pub(super) async fn list(
         repository,
         principal: current,
         organization_owner,
+        forking,
+        visibility,
         topics,
         ..
     } in matches
     {
-        let protections = crate::repository::settings::load(&server, &repository).await?;
+        let public_reader = current.is_public_reader(repository.id);
+        let protections = if public_reader {
+            crate::repository::settings::BranchProtections {
+                version: 0,
+                rules: Vec::new(),
+            }
+        } else {
+            crate::repository::settings::load(&server, &repository).await?
+        };
         let lifecycle = crate::repository::settings::load_lifecycle(&server, &repository).await?;
         let mut view = json!({
             "id": repository.id,
@@ -100,8 +127,12 @@ pub(super) async fn list(
             "description": repository.config.description,
             "access": if current.can_write(repository.id) { "write" } else { "read" },
             "can_admin": current.can_admin(repository.id),
+            "visibility": visibility,
+            "can_configure_visibility": current.can_admin(repository.id) && repository.forked_from.is_none()
+                && (repository.organization.is_some() || crate::catalog::is_personal_namespace(&repository.config.owner)),
+            "public_read_only": public_reader,
             "can_maintain": current.can_maintain(repository.id),
-            "can_fork": organization_owner && repository.forked_from.is_none(),
+            "can_fork": organization_owner && forking.is_some_and(|(enabled, policy)| enabled && policy.allowed),
             "protection_version": protections.version,
             "protected_branches": protections.rules,
             "archive_version": lifecycle.version,
@@ -109,6 +140,15 @@ pub(super) async fn list(
         });
         if let Some(organization) = repository.organization {
             view["organization_id"] = json!(organization);
+        }
+        if current.can_admin(repository.id)
+            && let Some((organization_allows, policy)) = forking
+        {
+            view["forking"] = json!({
+                "organization_allows": organization_allows,
+                "version": policy.version,
+                "allowed": policy.allowed,
+            });
         }
         if !topics.is_empty() {
             view["topics"] = json!(topics);
@@ -124,29 +164,39 @@ pub(super) async fn list(
         repositories.push(view);
     }
     if !principal.is_local()
-        && repositories
-            .iter()
-            .any(|repo| repo.get("organization_id").is_some() || repo.get("topics").is_some())
+        && repositories.iter().any(|repo| {
+            repo.get("organization_id").is_some()
+                || repo.get("topics").is_some()
+                || repo.get("visibility") == Some(&json!("public"))
+        })
     {
         // Recheck access and topics after potentially slow settings reads.
         let current: std::collections::HashMap<_, _> =
             visible(&server, &principal, address, selection.organization)
                 .await?
                 .into_iter()
-                .map(|visible| (visible.repository.id.to_string(), visible.topics))
+                .map(|visible| (visible.repository.id.to_string(), visible))
                 .collect();
         repositories.retain_mut(|repo| {
-            if repo.get("organization_id").is_none() && repo.get("topics").is_none() {
+            if repo.get("organization_id").is_none()
+                && repo.get("topics").is_none()
+                && repo.get("visibility") != Some(&json!("public"))
+            {
                 return true;
             }
-            let Some(topics) = repo["id"].as_str().and_then(|id| current.get(id)) else {
+            let Some(visible) = repo["id"].as_str().and_then(|id| current.get(id)) else {
                 return false;
             };
+            if repo["public_read_only"] != visible.principal.is_public_reader(visible.repository.id)
+            {
+                return false;
+            }
             if let Some(fields) = repo.as_object_mut() {
-                if topics.is_empty() {
+                fields.insert("visibility".into(), json!(visible.visibility));
+                if visible.topics.is_empty() {
                     fields.remove("topics");
                 } else {
-                    fields.insert("topics".into(), json!(topics));
+                    fields.insert("topics".into(), json!(visible.topics));
                 }
             }
             true
@@ -161,6 +211,8 @@ pub(super) struct VisibleRepository {
     pub(super) team_access: Option<RepositoryAccess>,
     pub(super) principal: Principal,
     pub(super) organization_owner: bool,
+    forking: Option<(bool, crate::catalog::forking::Forking)>,
+    pub(super) visibility: crate::catalog::visibility::Visibility,
 }
 
 pub(super) async fn visible(
@@ -219,6 +271,7 @@ pub(super) async fn visible_matching(
     let mut organizations = std::collections::HashMap::new();
     if let Some(grants) = &grants
         && !local_listing
+        && !principal.is_anonymous()
     {
         for repo in &selected {
             if let Some(record) = grants.get(&repo.id)
@@ -269,30 +322,44 @@ pub(super) async fn visible_matching(
             let mut config = repository.config.clone();
             config.members = source.members.clone();
             config.groups = source.groups.clone();
-            principal.with_catalog_membership(
-                repository.id,
-                &config,
-                issuer,
-                record
-                    .organization_id()
-                    .and_then(|id| organization_grants.get(&id))
-                    .and_then(|grant| {
-                        source.organization.as_ref().and_then(|access| {
-                            crate::repository::access::organization_access(grant, &access.teams)
-                        })
-                    }),
-                record.name_version() > 0,
-            )
+            principal
+                .with_catalog_membership(
+                    repository.id,
+                    &config,
+                    issuer,
+                    record
+                        .organization_id()
+                        .and_then(|id| organization_grants.get(&id))
+                        .and_then(|grant| {
+                            source.organization.as_ref().and_then(|access| {
+                                crate::repository::access::organization_access(grant, &access.teams)
+                            })
+                        }),
+                    record.name_version() > 0,
+                )
+                .with_public_visibility(record.id, record.visibility.value.is_public())
         } else {
             principal.clone()
         };
         if !current.can_read(repository.id) || (team.is_some() && team_access.is_none()) {
             continue;
         }
-        let organization_owner = repository
+        let organization = repository
             .organization
-            .and_then(|id| organization_grants.get(&id))
-            .is_some_and(|grant| grant.owner);
+            .and_then(|id| organization_grants.get(&id));
+        let organization_owner = organization.is_some_and(|grant| grant.owner);
+        let forking = record
+            .filter(|record| {
+                record.organization_id().is_some()
+                    && record.forked_from.is_none()
+                    && !record.visibility.value.is_public()
+            })
+            .map(|record| {
+                (
+                    organization.is_some_and(|grant| grant.private_forks),
+                    record.forking,
+                )
+            });
         visible.push(VisibleRepository {
             topics: record.map_or_else(
                 || repository.topics.clone(),
@@ -301,6 +368,10 @@ pub(super) async fn visible_matching(
             repository,
             principal: current,
             organization_owner,
+            forking,
+            visibility: record.map_or(crate::catalog::visibility::Visibility::Private, |record| {
+                record.visibility.value
+            }),
             team_access,
         });
     }

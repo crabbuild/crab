@@ -141,6 +141,21 @@ export function RepositoryPage({
 }) {
   const route = repositoryRoute(url);
   const view = route?.view ?? "code";
+  const publicReader = repo.public_read_only === true;
+  const publicView =
+    [
+      "code",
+      "blame",
+      "commit",
+      "commits",
+      "branches",
+      "tags",
+      "code-search",
+      "labels",
+      "milestones",
+    ].includes(view) ||
+    (view === "issues" && route?.issue !== "new") ||
+    (view === "pulls" && route?.pull !== "new" && !route?.action);
   const historyBase = route?.since;
   const canWrite = repo.access === "write" && !repo.archived;
   const forkSource = repo.forked_from;
@@ -451,18 +466,25 @@ export function RepositoryPage({
                   },
                 ]
               : []),
-          ].map(({ view: tab, label, icon: Icon, active }) => (
-            <Link
-              key={tab}
-              className={active ? "active" : ""}
-              aria-current={active ? "page" : undefined}
-              href={repoHref(repo, { view: tab })}
-            >
-              <Icon /> {label}
-            </Link>
-          ))}
+          ]
+            .filter(
+              (tab) =>
+                !publicReader || ["code", "issues", "pulls"].includes(tab.view),
+            )
+            .map(({ view: tab, label, icon: Icon, active }) => (
+              <Link
+                key={tab}
+                className={active ? "active" : ""}
+                aria-current={active ? "page" : undefined}
+                href={repoHref(repo, { view: tab })}
+              >
+                <Icon /> {label}
+              </Link>
+            ))}
         </nav>
-        {identity && <RepositoryWatch key={repo.id} repo={repo} csrf={csrf} />}
+        {identity && !publicReader && (
+          <RepositoryWatch key={repo.id} repo={repo} csrf={csrf} />
+        )}
         {view !== "code-search" && (
           <Button asChild variant="outline" size="sm" className="shrink-0">
             <Link
@@ -550,7 +572,8 @@ export function RepositoryPage({
           <span>This repository was archived and is read-only.</span>
         </div>
       )}
-      {!repo.archived &&
+      {!publicReader &&
+        !repo.archived &&
         (!forkSource || canWrite) &&
         (overview || (view === "pulls" && !route?.pull && !route?.action)) && (
           <RecentPushes
@@ -566,7 +589,12 @@ export function RepositoryPage({
       <div
         className={`repo-body${view === "projects" ? " repo-project-workspace" : ""}${overview ? " repo-overview" : ""}${fileWorkspace ? " repo-file-workspace" : ""}${discussionNavigation ? " repo-discussion-workspace" : ""}${view === "settings" ? " repo-settings-workspace" : ""}`}
       >
-        {view === "fork-compare" ? (
+        {publicReader && !publicView ? (
+          <div className="notice">
+            <h2>Repository access required</h2>
+            <Link href={repoHref(repo)}>Browse the public code</Link>
+          </div>
+        ) : view === "fork-compare" ? (
           forkSource ? (
             <Result state={visibleRefState} timingLabel="Fork references">
               {(data) => (
@@ -1096,23 +1124,27 @@ export function RepositoryPage({
                                 {repo.description || "No description provided."}
                               </p>
                               <TopicLinks names={repo.topics} />
-                              <div className="about-links">
-                                <Link
-                                  href={repoHref(repo, {
-                                    view: "activity",
-                                  })}
-                                >
-                                  <HistoryIcon /> Activity
-                                </Link>
-                                <Link href={repoHref(repo, { view: "issues" })}>
-                                  <IssueOpenedIcon /> Issues
-                                </Link>
-                                <Link
-                                  href={repoHref(repo, { view: "releases" })}
-                                >
-                                  <TagIcon /> Releases
-                                </Link>
-                              </div>
+                              {!publicReader && (
+                                <div className="about-links">
+                                  <Link
+                                    href={repoHref(repo, {
+                                      view: "activity",
+                                    })}
+                                  >
+                                    <HistoryIcon /> Activity
+                                  </Link>
+                                  <Link
+                                    href={repoHref(repo, { view: "issues" })}
+                                  >
+                                    <IssueOpenedIcon /> Issues
+                                  </Link>
+                                  <Link
+                                    href={repoHref(repo, { view: "releases" })}
+                                  >
+                                    <TagIcon /> Releases
+                                  </Link>
+                                </div>
+                              )}
                               {data.refs.some((ref) =>
                                 ref.name.startsWith("refs/heads/"),
                               ) && (

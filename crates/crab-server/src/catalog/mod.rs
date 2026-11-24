@@ -1,10 +1,12 @@
 pub(crate) mod audit;
 pub(crate) mod deletion;
 pub(crate) mod description;
+pub(crate) mod forking;
 mod read;
 mod rename;
 pub(crate) mod topics;
 pub(crate) mod transfer;
+pub(crate) mod visibility;
 pub(crate) use rename::Rename;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -69,6 +71,10 @@ pub struct CatalogRecord {
     description_edit: Option<description::Description>,
     #[serde(default, skip_serializing_if = "topics::Topics::is_initial")]
     pub(crate) topics: topics::Topics,
+    #[serde(default, skip_serializing_if = "forking::Forking::is_initial")]
+    pub(crate) forking: forking::Forking,
+    #[serde(default, skip_serializing_if = "visibility::Setting::is_initial")]
+    pub(crate) visibility: visibility::Setting,
     pub members: Vec<RepositoryMember>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<RepositoryGroup>,
@@ -169,6 +175,10 @@ pub struct MembershipSnapshot {
     pub(crate) ownership_epoch: u32,
     #[serde(skip)]
     pub(crate) name: String,
+    #[serde(skip)]
+    pub(crate) visibility: visibility::Visibility,
+    #[serde(skip)]
+    pub(crate) forked_from: Option<Uuid>,
     pub members: Vec<RepositoryMember>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<RepositoryGroup>,
@@ -277,6 +287,8 @@ impl CatalogDocument {
         for record in &self.repositories {
             if record.placement_generation == 0
                 || record.ownership_epoch > record.name_version()
+                || (record.visibility.value.is_public()
+                    && record.application != RepositoryApplicationState::CellReady)
                 || !names.insert((record.owner.to_lowercase(), record.name.to_lowercase()))
                 || !prefixes.insert(record.prefix.clone())
             {
@@ -289,12 +301,15 @@ impl CatalogDocument {
                 .as_ref()
                 .is_some_and(|edit| !edit.valid_saved())
                 || !record.topics.valid_saved()
+                || !record.forking.valid_saved()
+                || !record.visibility.valid_saved()
             {
                 return Err(CatalogError::Invalid("repository metadata is invalid"));
             }
             if let Some(upstream) = record.forked_from {
                 record.access_record(records.get(&upstream).copied())?;
-                if !record.members.is_empty()
+                if record.visibility.value.is_public()
+                    || !record.members.is_empty()
                     || !record.groups.is_empty()
                     || record
                         .organization
@@ -453,6 +468,7 @@ impl CatalogRecord {
             .filter(|source| {
                 source.id == upstream
                     && source.forked_from.is_none()
+                    && !source.visibility.value.is_public()
                     && source.organization.is_some()
                     && source.organization_id() == self.organization_id()
                     && source.application == RepositoryApplicationState::CellReady
@@ -469,6 +485,8 @@ impl CatalogRecord {
             renamed: self.name_version() > 0,
             ownership_epoch: self.ownership_epoch,
             name: self.name.clone(),
+            visibility: self.visibility.value,
+            forked_from: self.forked_from,
             organization: source.organization.clone(),
             members: source.members.clone(),
             groups: source.groups.clone(),
@@ -573,6 +591,8 @@ impl CatalogStore {
             description,
             description_edit: None,
             topics: topics::Topics::default(),
+            forking: forking::Forking::default(),
+            visibility: visibility::Setting::default(),
             members,
             groups: Vec::new(),
             protected_branches: Vec::new(),
@@ -624,6 +644,8 @@ impl CatalogStore {
                 description,
                 description_edit: None,
                 topics: topics::Topics::default(),
+                forking: forking::Forking::default(),
+                visibility: visibility::Setting::default(),
                 members,
                 groups: Vec::new(),
                 protected_branches: Vec::new(),
@@ -660,6 +682,8 @@ impl CatalogStore {
                 description,
                 description_edit: None,
                 topics: topics::Topics::default(),
+                forking: forking::Forking::default(),
+                visibility: visibility::Setting::default(),
                 members,
                 groups: Vec::new(),
                 protected_branches: Vec::new(),
@@ -717,6 +741,8 @@ impl CatalogStore {
             description,
             description_edit: None,
             topics: topics::Topics::default(),
+            forking: forking::Forking::default(),
+            visibility: visibility::Setting::default(),
             members,
             groups: Vec::new(),
             protected_branches: Vec::new(),

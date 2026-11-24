@@ -3,7 +3,7 @@ use uuid::Uuid;
 use crate::{
     app,
     auth::{Identity, Principal},
-    catalog::BrowserNamespace,
+    catalog::{BrowserNamespace, CatalogDocument, CatalogStore},
     cells::{
         Address,
         organization::{
@@ -11,7 +11,7 @@ use crate::{
             repositories::{AuthorizeImportPublication, Authorized, ImportPublication},
         },
     },
-    repository::access::{actor_id, organization_role},
+    repository::access::{actor_id, organization_grant, organization_role},
     server::Server,
     storage_root::StorageRoot,
 };
@@ -92,6 +92,23 @@ impl ImportAccount {
         }
         Ok(())
     }
+
+    pub(super) async fn check_fork(
+        &self,
+        server: &Server,
+        catalog: &CatalogStore,
+        source: Option<Uuid>,
+    ) -> Result<(), ImportError> {
+        if let Some(source) = source {
+            let owner = self.organization.ok_or(ImportError::NotFound)?;
+            let (document, _) = catalog
+                .load_snapshot()
+                .await
+                .map_err(ImportError::Catalog)?;
+            owner.require_fork(server, &document, source).await?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -109,6 +126,31 @@ impl OrganizationOwner {
             Some(Role::Owner) => Ok(()),
             _ => Err(ImportError::NotFound),
         }
+    }
+
+    pub(super) async fn require_fork(
+        self,
+        server: &Server,
+        document: &CatalogDocument,
+        source: Uuid,
+    ) -> Result<(), ImportError> {
+        let source = document
+            .repository_by_id(source)
+            .filter(|record| {
+                record.organization_id() == Some(self.id) && record.forked_from.is_none()
+            })
+            .ok_or(ImportError::NotFound)?;
+        let cells = server.cells().ok_or(ImportError::Unavailable)?;
+        let grant = organization_grant(&cells, self.id, self.actor, false)
+            .await
+            .map_err(ImportError::organization)?;
+        if !grant.owner {
+            return Err(ImportError::NotFound);
+        }
+        if !grant.private_forks || !source.forking.allowed || source.visibility.value.is_public() {
+            return Err(ImportError::ForkingDisabled);
+        }
+        Ok(())
     }
 
     pub(super) async fn policy_grant(

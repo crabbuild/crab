@@ -31,6 +31,15 @@ impl Selection {
                 principal: initial.principal,
             });
         }
+        if initial.principal.is_public_reader(repo.id) {
+            let profiles = profiles(server, &ids).await?;
+            let current = app::membership(server, principal, repo).await?;
+            return Ok(Self {
+                profiles,
+                names: BTreeMap::new(),
+                principal: current.principal,
+            });
+        }
         let initial_members = members(server, &initial).await?;
         let keys = identities(principal, &initial_members)?;
         let (bound, profiles) = tokio::try_join!(accounts(server, &keys), profiles(server, &ids))?;

@@ -85,6 +85,8 @@ impl CatalogDocument {
                 || record.ownership_epoch != record.name_version()
                 || record.application != RepositoryApplicationState::CellReady
                 || record.transfer.is_some()
+                || !record.forking.valid_saved()
+                || !record.visibility.valid_saved()
                 || record.organization.as_ref().is_none_or(|organization| {
                     !organization.teams.is_empty() || organization.validate().is_err()
                 })

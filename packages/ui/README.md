@@ -322,6 +322,11 @@ back to the repository list when the current viewer can open the organization.
 Repository administrators can check whether they can delete a repository in
 **Settings → General → Danger Zone**. Organization owners can restore eligible
 repositories from **Settings → Deleted repositories** for 90 days.
+Organization owners can allow private forks in **Settings → Member privileges**.
+Repository admins can then control new forks from **Settings → General → Forking**.
+Owners can change repository visibility from **Settings → General → Danger Zone**.
+Signed-out visitors can find public repositories through **Browse public
+repositories** and open their code, issues, and pull requests.
 
 The **Personal** catalog at
 `/-/repositories/personal` lists repositories in the signed-in account's

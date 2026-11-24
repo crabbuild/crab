@@ -34,6 +34,7 @@ pub(crate) enum Action {
     TransferredOut,
     Deleted,
     Restored,
+    VisibilityChanged,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

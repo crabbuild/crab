@@ -20,6 +20,10 @@ pub(crate) struct ActorTeams {
     pub member_transfer: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub member_deletion: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub private_forks: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub member_visibility: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline: Option<RepositoryAccess>,
     pub teams: Vec<Uuid>,
@@ -36,16 +40,22 @@ impl Read for RepositoryTeamsForActor {
 
     fn execute(context: &mut Transaction<'_>, input: Self::Input) -> Result<Self::Output> {
         actor(input.actor)?;
+        let policy = super::super::repository_policy::load(context)?;
         let Some(organization) = member(context, input.actor)?.filter(|member| member.active)
         else {
-            return Ok(ActorTeams::default());
+            return Ok(ActorTeams {
+                private_forks: policy.private_forks,
+                member_visibility: policy.member_visibility,
+                ..ActorTeams::default()
+            });
         };
         let owner = organization.role == OrganizationRole::Owner;
-        let policy = super::super::repository_policy::load(context)?;
         let mut grant = ActorTeams {
             owner,
             member_transfer: policy.member_transfer,
             member_deletion: policy.member_deletion,
+            private_forks: policy.private_forks,
+            member_visibility: policy.member_visibility,
             baseline: policy.baseline,
             ..Default::default()
         };

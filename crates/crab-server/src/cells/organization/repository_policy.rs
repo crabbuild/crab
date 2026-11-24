@@ -15,6 +15,10 @@ pub(crate) struct Policy {
     pub member_transfer: bool,
     #[serde(default)]
     pub member_deletion: bool,
+    #[serde(default)]
+    pub private_forks: bool,
+    #[serde(default)]
+    pub member_visibility: bool,
     pub baseline: Option<RepositoryAccess>,
     #[serde(default = "default_repository_branch")]
     pub default_branch: String,
@@ -27,6 +31,8 @@ impl Default for Policy {
             member_creation: false,
             member_transfer: false,
             member_deletion: false,
+            private_forks: false,
+            member_visibility: false,
             baseline: None,
             default_branch: default_repository_branch(),
         }

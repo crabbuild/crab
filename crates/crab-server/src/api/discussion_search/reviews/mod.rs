@@ -23,6 +23,11 @@ pub(super) async fn bind_source(
     if !query.needs_review_source() {
         return Ok(());
     }
+    if principal.is_public_reader(repo.id) {
+        return Err(app::Error::Invalid(
+            "Review and check filters require repository access",
+        ));
+    }
     let cell = app::repository_cell(server, repo)?;
     let state = app::query_output(
         cell.client

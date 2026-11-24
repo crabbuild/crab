@@ -201,7 +201,9 @@ export function DiscussionListControls({
         filterButton("issue-types", layout !== "full")}
       {(lock || (loading && supportsConversationFilter)) &&
         filterButton("conversations", layout !== "full")}
-      {view === "pulls" && filterButton("reviews", layout !== "full")}
+      {view === "pulls" &&
+        !repo.public_read_only &&
+        filterButton("reviews", layout !== "full")}
     </>
   );
   return (

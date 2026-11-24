@@ -14,7 +14,7 @@ pub(super) fn issue(
     authors: &Authors,
     issue: &IssueRecord,
     detail: &IssueDetail,
-    author: &Identity,
+    author: Option<&Identity>,
     assignees: &Selection,
     repository: uuid::Uuid,
     reactions: &reactions::View,
@@ -77,10 +77,10 @@ pub(super) fn summary(
     })
 }
 
-pub(in crate::api) fn comment(
+pub(in crate::api) fn comment<'a>(
     authors: &Authors,
     comment: &CommentRecord,
-    author: &Identity,
+    author: impl Into<Option<&'a Identity>>,
     can_moderate: bool,
     reactions: &reactions::View,
 ) -> Value {
@@ -94,7 +94,7 @@ pub(in crate::api) fn comment(
         "version": comment.version,
         "created_at": comment.created_at_ms,
         "updated_at": comment.updated_at_ms,
-        "can_edit": same_author(&comment.author, author) || can_moderate,
+        "can_edit": same_author(&comment.author, author.into()) || can_moderate,
     })
 }
 
@@ -106,6 +106,6 @@ fn state_name(state: u8) -> &'static str {
     }
 }
 
-fn same_author(left: &RepositoryAuthor, right: &Identity) -> bool {
-    left.issuer == right.issuer && left.subject == right.subject
+fn same_author(left: &RepositoryAuthor, right: Option<&Identity>) -> bool {
+    right.is_some_and(|right| left.issuer == right.issuer && left.subject == right.subject)
 }

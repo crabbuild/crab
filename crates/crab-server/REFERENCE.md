@@ -768,7 +768,7 @@ organization creation path.
 
 Organization owners can read and update `/api/organizations/{id}/repository-policy`
 and configure it in **Settings → Member privileges**. Updates carry the saved
-`version`, `member_creation`, `member_transfer`, `member_deletion`, `baseline`
+`version`, `member_creation`, `member_transfer`, `member_deletion`, `private_forks`, `baseline`
 (`null`, `read`, or `write`), and `default_branch` (a short Git branch name).
 By default only owners can create, transfer, or delete repositories, and
 members have no base access.
@@ -783,6 +783,33 @@ repository's default branch.
 
 Upgrade serving replicas together before starting organization-owned
 creation. Existing catalog entries keep their previous ownership and grants.
+
+### Repository visibility
+
+Managed repositories start private. In **Settings → General → Danger Zone**,
+an organization owner can make a repository public or private. Organization
+owners can let repository admins change visibility in **Member privileges**.
+Administrators can change visibility in a managed personal repository.
+
+Public repositories appear in **Public repositories** and support signed-out
+code browsing, source archives, and HTTP Git clone and fetch. Visitors can
+also browse published issues, pull requests, conversations, attachments, and
+available same-repository pull request comparisons. Repository access is still
+required for writes, draft reviews, settings, checks, and Git LFS transport.
+Large files linked from published code can be downloaded through the browser.
+Changing back to private removes public access on subsequent requests. Copies
+already downloaded remain available to their recipients.
+
+Publishing a repository detaches its existing private forks in the same
+catalog update. They keep their private visibility and current repository
+grants. Pending fork jobs must settle before the repository can become public.
+
+`GET /api/repositories/{id}/visibility` returns the current setting and
+eligibility. Send `version`, `value` (`public` or `private`), and the exact
+`owner/name` as `confirmation` to `PUT` on the same route. Update
+`member_visibility` in the organization repository policy to delegate the
+change to repository admins. Upgrade serving replicas together before using
+visibility changes.
 
 ### Find a repository
 
@@ -1019,8 +1046,16 @@ files. The server needs outbound access to the configured Git host or proxy.
 
 ### Private organization forks
 
-An organization owner can choose **Fork repository** in a source repository's
-Code view. Choose a new repository name in the same organization. Crab copies
+Private forks are disabled by default. An organization owner can enable them
+in **Settings → Member privileges**. When the organization allows forks, a
+repository admin can disable them for an individual source in
+**Settings → General → Forking**. Repositories allow forks whenever their
+organization allows them, unless an admin opts out. Changing either setting
+governs future forks. Existing forks retain their current access.
+
+An organization owner can choose **Fork repository** in the source repository's
+Code view when both policies allow it. Choose a new repository name in the
+same organization. Crab copies
 the advertised Git refs and history through the native Git service and keeps
 the source repository UUID as the fork's lineage. Before publishing refs, Crab
 copies and verifies reachable Git LFS payloads. For native Crab Xet files, it
@@ -1039,9 +1074,12 @@ rulesets still apply to the fork, including its initial Git publication.
 the source repository ID header and browser CSRF token. It returns an
 organization job with `fork_source`. Use the organization Git import status and
 resume routes with the same job ID. Resume with `{}` and a current organization
-owner session. The job exposes the fork after verifying the pinned refs and
-preparing its repository Cell. Deploy the updated server on all replicas before
-creating forks.
+owner session. A job verifies the pinned refs and checks both policies again
+before the fork becomes visible. Enable both policies to resume a blocked job.
+Repository admins can update the source policy with `PUT /api/repositories/{id}/forking`
+and `{version, allowed}`. The exact repository lookup returns the current
+setting and the organization policy to repository admins. Deploy the updated
+server on all replicas before using these policies.
 
 On the fork's **Code** view, select a branch and choose **Sync fork**. Crab
 compares it with the upstream branch of the same name. Writers can choose

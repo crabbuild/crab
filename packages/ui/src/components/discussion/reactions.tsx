@@ -42,7 +42,7 @@ export function Reactions({
   csrf: string;
 }) {
   const lock = useConversationLock()?.lock;
-  const readOnly = repo.archived || lock?.locked;
+  const readOnly = repo.public_read_only || repo.archived || lock?.locked;
   const [current, setCurrent] = useState(summary);
   const [open, setOpen] = useState(false);
   const mutation = useMutation(csrf, repo);
