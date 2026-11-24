@@ -1,4 +1,8 @@
-use super::{members::roster::Roster, write::rejected};
+use super::{
+    members::roster::Roster,
+    organizations::{issue_types, properties},
+    write::rejected,
+};
 use crate::{
     app::{self, Error},
     auth::Principal,
@@ -6,9 +10,10 @@ use crate::{
         assignments::Assignee,
         collaboration::{
             Subject, SubjectKind,
-            bulk::{self, Action, Failure, Outcome},
+            bulk::{self, Action, Failure, IssueTypeAuthority, Outcome},
         },
     },
+    repository::Repository,
     server::Server,
 };
 use axum::{
@@ -151,7 +156,6 @@ async fn edit(
     } else {
         vec![]
     };
-    let routed = app::repository_cell(&server, &repo).map_err(IntoResponse::into_response)?;
     let candidates = if matches!(
         input.action,
         Action::State {
@@ -174,35 +178,62 @@ async fn edit(
     } else {
         vec![]
     };
-    let repository = repo.id;
-    let output = super::pulls::reopen::with_available(
-        &server,
-        &principal,
-        &repo,
-        candidates,
-        super::pulls::reopen::Access::Triage,
-        move |reopen_available, grant| async move {
-            app::command_output(
-                routed
-                    .client
-                    .command::<bulk::Edit>(
-                        &routed.target,
-                        app::mutation_identity()?,
-                        bulk::Input {
-                            submission_id,
-                            actor: (&actor).into(),
-                            can_triage: grant.principal.can_triage(repository),
-                            items: input.items,
-                            action: input.action,
-                            eligible,
-                            reopen_available,
-                        },
-                    )
-                    .await,
-            )
-        },
-    )
-    .await
+    let command = bulk::Input {
+        submission_id,
+        actor: (&actor).into(),
+        can_triage: false,
+        items: input.items,
+        action: input.action,
+        eligible,
+        reopen_available: Default::default(),
+        issue_type_authority: None,
+    };
+    let output = if let (Action::IssueType { type_id }, Some(organization)) =
+        (&command.action, repo.organization)
+    {
+        let type_id = *type_id;
+        let source = Arc::clone(&repo);
+        let author = principal.clone();
+        // Hold the same lease as individual assignments and schema changes
+        // through the commit of all selected issues, even if the client leaves.
+        properties::policy_write(
+            Arc::clone(&server),
+            organization,
+            move |server, _, cancel| async move {
+                let mut command = command;
+                command.issue_type_authority = match type_id {
+                    Some(id) => issue_types::active_selection(&server, &source, id)
+                        .await?
+                        .map(IssueTypeAuthority::Assign),
+                    None => Some(IssueTypeAuthority::Clear),
+                };
+                let grant = app::membership(&server, &author, &source).await?;
+                if cancel.is_cancelled() {
+                    return Err(Error::MergeBusy);
+                }
+                command.can_triage = grant.principal.can_triage(source.id);
+                submit(&server, &source, command).await
+            },
+        )
+        .await
+    } else {
+        let worker = Arc::clone(&server);
+        let source = Arc::clone(&repo);
+        super::pulls::reopen::with_available(
+            &server,
+            &principal,
+            &repo,
+            candidates,
+            super::pulls::reopen::Access::Triage,
+            move |reopen_available, grant| async move {
+                let mut command = command;
+                command.can_triage = grant.principal.can_triage(source.id);
+                command.reopen_available = reopen_available;
+                submit(&worker, &source, command).await
+            },
+        )
+        .await
+    }
     .map_err(IntoResponse::into_response)?;
     let count = match output {
         Outcome::Applied(count) => count,
@@ -216,6 +247,21 @@ async fn edit(
         .map_err(IntoResponse::into_response)?;
     Ok(Json(json!({"count":count})))
 }
+
+async fn submit(
+    server: &Server,
+    repo: &Repository,
+    input: bulk::Input,
+) -> app::Result<Outcome<u16>> {
+    let routed = app::repository_cell(server, repo)?;
+    app::command_output(
+        routed
+            .client
+            .command::<bulk::Edit>(&routed.target, app::mutation_identity()?, input)
+            .await,
+    )
+}
+
 fn failure(reason: Failure) -> Error {
     match reason {
         Failure::Invalid => {
@@ -237,6 +283,9 @@ fn failure(reason: Failure) -> Error {
         Failure::InvalidAssignees => Error::Invalid(
             "Add current repository members; each item supports at most 10 assignees",
         ),
+        Failure::InvalidIssueType => {
+            Error::Invalid("Choose an enabled issue type from the repository's organization")
+        }
     }
 }
 

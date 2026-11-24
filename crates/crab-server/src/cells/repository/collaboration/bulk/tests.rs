@@ -87,6 +87,7 @@ fn input(items: Vec<Selected>, action: Action) -> Input {
         items,
         action,
         eligible: vec![],
+        issue_type_authority: None,
     }
 }
 fn applied(result: Outcome<u16>) -> u16 {

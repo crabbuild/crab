@@ -42,6 +42,7 @@ pub(super) use git::review_head;
 mod merge;
 mod merge_methods;
 mod readiness;
+mod recent_pushes;
 pub(in crate::api) mod reopen;
 mod required_checks;
 mod review_requests;
@@ -112,6 +113,10 @@ fn same_author(left: &Identity, right: &Identity) -> bool {
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .route("/api/repos/{owner}/{name}/pulls", get(list).post(create))
+        .route(
+            "/api/repos/{owner}/{name}/pulls/recent-pushes",
+            get(recent_pushes::list),
+        )
         .route(
             "/api/repos/{owner}/{name}/pulls/templates",
             get(templates::list),

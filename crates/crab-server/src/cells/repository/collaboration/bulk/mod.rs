@@ -6,7 +6,12 @@ use super::{
 use crate::cells::{
     Error, Result,
     application::{Mutation, MutationResult, Read, Transaction},
-    repository::{self, RepositoryAuthor, assignments::Assignee, issues::lifecycle::Reason, *},
+    repository::{
+        self, RepositoryAuthor,
+        assignments::Assignee,
+        issues::{issue_type, lifecycle::Reason},
+        *,
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -27,6 +32,8 @@ pub(crate) struct Versioned {
 pub(crate) struct Selected {
     pub item: Versioned,
     pub milestone_version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_type_version: Option<u64>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -46,7 +53,17 @@ pub(crate) enum Action {
     Milestone {
         number: Option<u64>,
     },
+    IssueType {
+        type_id: Option<Uuid>,
+    },
 }
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub(crate) enum IssueTypeAuthority {
+    Clear,
+    Assign(issue_type::Selection),
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Input {
@@ -60,6 +77,10 @@ pub(crate) struct Input {
     pub eligible: Vec<Assignee>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub reopen_available: BTreeSet<u64>,
+    // Membership and enabled type are checked under the organization policy
+    // lease. A committed retry uses the receipt even if a type was disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_type_authority: Option<IssueTypeAuthority>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum Failure {
@@ -74,6 +95,7 @@ pub(crate) enum Failure {
     BranchesUnavailable,
     InvalidLabels,
     InvalidAssignees,
+    InvalidIssueType,
 }
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) enum Outcome<T> {
@@ -120,6 +142,15 @@ fn valid_action(action: &Action, items: &[Selected]) -> bool {
             valid_delta(add, remove, 10) && add.iter().chain(remove).all(|id| !id.is_nil())
         }
         Action::Milestone { number } => number.is_none_or(|id| validate_number(id).is_ok()),
+        Action::IssueType { type_id } => {
+            type_id.is_none_or(|id| !id.is_nil())
+                && items.iter().all(|item| {
+                    item.item.subject.kind == SubjectKind::Issue
+                        && item
+                            .issue_type_version
+                            .is_some_and(|version| version <= MAX_NUMBER)
+                })
+        }
     }
 }
 
@@ -143,9 +174,15 @@ impl Read for Select {
             }
             let assignment = milestones::GetAssignment::execute(context, item.subject)?
                 .ok_or(Error::Invalid("bulk selection assignment is missing"))?;
+            let issue_type_version = if item.subject.kind == SubjectKind::Issue {
+                Some(issue_type::load(context, item.subject.number)?.version)
+            } else {
+                None
+            };
             selected.push(Selected {
                 item,
                 milestone_version: assignment.version,
+                issue_type_version,
             });
         }
         Ok(Outcome::Applied(selected))

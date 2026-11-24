@@ -53,6 +53,7 @@ import { LatestCommit } from "./latest-commit";
 import { ForkSync } from "./fork-sync";
 import { RepositoryRefControls, RepositoryToolbar } from "./toolbar";
 import { TopicLinks } from "./topic-links";
+import { RecentPushes } from "@/features/pull-requests/recent-pushes";
 
 const RepositoryTree = lazy(() =>
   import("./tree").then((module) => ({ default: module.RepositoryTree })),
@@ -544,6 +545,19 @@ export function RepositoryPage({
           <span>This repository was archived and is read-only.</span>
         </div>
       )}
+      {!repo.archived &&
+        (!forkSource || canWrite) &&
+        (overview || (view === "pulls" && !route?.pull && !route?.action)) && (
+          <RecentPushes
+            key={JSON.stringify([
+              repo.id,
+              view,
+              identity?.issuer,
+              identity?.subject,
+            ])}
+            repo={repo}
+          />
+        )}
       <div
         className={`repo-body${view === "projects" ? " repo-project-workspace" : ""}${overview ? " repo-overview" : ""}${fileWorkspace ? " repo-file-workspace" : ""}${discussionNavigation ? " repo-discussion-workspace" : ""}${view === "settings" ? " repo-settings-workspace" : ""}`}
       >

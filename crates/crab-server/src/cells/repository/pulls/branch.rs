@@ -174,3 +174,36 @@ pub(super) fn qualified_head(reference: &str, fork: Option<uuid::Uuid>) -> Strin
         |fork| format!("{fork}:{reference}"),
     )
 }
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct PushedHead {
+    pub name: String,
+    pub fork: Option<Uuid>,
+    pub base: String,
+    pub oid: String,
+}
+
+pub(crate) struct HasPullForPush;
+impl Read for HasPullForPush {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
+    const ID: u32 = 453;
+    type Input = PushedHead;
+    type Output = bool;
+
+    fn execute(context: &mut Transaction<'_>, input: PushedHead) -> crate::cells::Result<bool> {
+        search::index::ensure_ready(context)?;
+        let rows = context.query(
+            "SELECT 1 FROM discussion_index d JOIN discussion_index_pull_sources s ON s.document=d.rowid
+                WHERE d.kind=1 AND s.head_ref=? AND (d.state=? OR
+                    (d.state=? AND s.base_ref=? AND s.merged_head_oid=?)) LIMIT 1",
+            &[
+                SqlValue::Blob(qualified_head(&input.name, input.fork).into_bytes()),
+                SqlValue::Integer(i64::from(PullState::Open.code())),
+                SqlValue::Integer(i64::from(PullState::Merged.code())),
+                SqlValue::Text(input.base),
+                SqlValue::Text(input.oid),
+            ],
+        )?;
+        Ok(!rows.rows.is_empty())
+    }
+}

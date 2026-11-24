@@ -53,6 +53,8 @@ export async function mockPullRequest(
   }
   const lifecycle: {
     repositoryId: string;
+    organizationId?: string;
+    forkedFrom?: { id: string; owner: string; name: string };
     state: "open" | "closed" | "merged";
     branchesAvailable: boolean;
     head: string;
@@ -280,6 +282,8 @@ export async function mockPullRequest(
           repositories: [
             {
               id: lifecycle.repositoryId,
+              organization_id: lifecycle.organizationId,
+              forked_from: lifecycle.forkedFrom,
               owner: "team",
               name: "project",
               description: "A repository for our team.",

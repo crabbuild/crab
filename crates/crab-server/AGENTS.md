@@ -138,6 +138,10 @@ and thread writers. Review threads belong to `pulls/review_threads/`.
 `api/pulls/review_threads/suggestions.rs` builds a single expected-head Git
 commit from versioned review suggestions. The actor and exact batch bind the
 Capsule plan. Retry reads its durable branch receipt before checking live tips.
+`recent_pushes.rs` keeps bounded actor-scoped native push intents.
+`git/receive/recent_pushes.rs` records candidates before Git publication.
+`api/pulls/recent_pushes.rs` checks committed receipts and live ref transactions
+before offering comparison links. Intent recording is advisory for Git receive.
 `pulls/viewed.rs` owns actor-scoped review progress,
 bound to stable comparison file identities. Browse projection reads and
 writes belong to `projection/`. `dispatch.rs` alone decodes operation IDs. `search/` owns the shared issue/PR
@@ -189,7 +193,9 @@ preparation commands also prepare these ledgers; ordinary mutations require thei
 prepared format. Nested SDK scopes discard domain work before a terminal
 rejection commits. State format-2 records remain unchanged by this extraction.
 `api/discussion_bulk/` binds repository UUIDs, resolves current roster eligibility
-and owns the bulk HTTP contract.
+and owns the bulk HTTP contract. It holds the organization policy lease when
+applying issue types; the repository command checks the captured type assignment
+versions and reuses the canonical issue-type projection.
 `collaboration/locks.rs` owns versioned issue and PR conversation locks, their
 deadlines and activity. `search/index/locks.rs` projects the persisted records
 for indexed filtering. Ready format-14 indexes copy the lock records through
