@@ -773,6 +773,22 @@ The default is owners-only creation with no baseline. The highest applicable
 organization, repository, and group role applies subject to credential limits.
 The People repository access inspector shows the baseline separately.
 
+Organization owners can open **People → Outside collaborators** to inspect
+direct repository grants for people without current organization membership.
+Search by the name on the grant or by repository name. **Manage access** opens
+the repository access editor to change or remove the grant. The search and
+current page stay in the address when you return from the editor. Inherited fork
+access is managed on its source. People with direct grants may still be listed
+before their first sign-in.
+
+`GET /api/organizations/{id}/outside-collaborators` returns the grant name,
+public profile when available, repository identity, and direct role. It omits
+private provider subjects and group claims. Pass `q` to search and `limit`
+from 1 to 50. Continue with `after` and the same search. Each page scans a
+bounded batch and may return a continuation with fewer rows. Changes to the
+organization or catalog invalidate the continuation. Repository role edits
+use the existing revision-bound access editor and audit trail.
+
 Upgrade serving replicas together before starting organization-owned
 creation. Existing catalog entries keep their previous ownership and grants.
 

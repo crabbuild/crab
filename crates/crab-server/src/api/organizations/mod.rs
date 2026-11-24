@@ -29,6 +29,7 @@ pub(super) mod automation;
 mod discovery;
 pub(super) mod invitations;
 pub(super) mod issue_types;
+pub(super) mod outside_collaborators;
 mod people;
 mod projects;
 pub(super) mod properties;
@@ -79,6 +80,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .merge(invitations::routes())
         .merge(audit::routes())
         .merge(automation::routes())
+        .merge(outside_collaborators::routes())
         .merge(repository_access::routes())
         .merge(repository_policy::routes())
         .merge(teams::routes())

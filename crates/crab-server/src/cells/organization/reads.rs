@@ -95,6 +95,42 @@ impl Read for GetMember {
         member(context, input.member)
     }
 }
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MembershipInspection {
+    pub actor: Uuid,
+    pub revision: u64,
+    pub candidates: Vec<Uuid>,
+}
+
+pub(crate) struct InspectMemberships;
+impl Read for InspectMemberships {
+    const CLASS: &'static str = CLASS;
+    const ID: u32 = 93;
+    type Input = MembershipInspection;
+    type Output = Option<Vec<Uuid>>;
+
+    fn execute(context: &mut Transaction<'_>, input: Self::Input) -> Result<Self::Output> {
+        if input.candidates.len() > 100 {
+            return Err(Error::Invalid(
+                "Membership inspection requires at most 100 accounts",
+            ));
+        }
+        if record(context)?.is_none_or(|organization| organization.version != input.revision) {
+            return Ok(None);
+        }
+        let mut active = Vec::new();
+        for candidate in input.candidates {
+            actor(candidate)?;
+            if member(context, candidate)?.is_some_and(|member| member.active) {
+                active.push(candidate);
+            }
+        }
+        Ok(Some(active))
+    }
+}
+
 pub(crate) struct ListMembers;
 impl Read for ListMembers {
     const CLASS: &'static str = CLASS;

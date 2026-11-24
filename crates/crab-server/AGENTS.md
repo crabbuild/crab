@@ -225,6 +225,9 @@ not grant native Organization or team authority. Tests stay with these owners.
 grant inspection from a catalog revision and the Organization Cell's current
 team memberships. Its native read shares the same team-epoch predicate as
 repository authorization. The public view omits provider identity and claims.
+`api/organizations/outside_collaborators.rs` checks direct catalog grants
+against current Organization membership, with both revisions bound to the
+continuation. Repository settings own grant changes.
 `api/organizations/audit/` pages and exports owner-only audit history from
 immutable Organization events and catalog membership events. `catalog/audit.rs`
 records event-time scope and chain links in the catalog CAS outbox. Never

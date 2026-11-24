@@ -311,6 +311,80 @@ test("organization Project policy requires a new confirmation when the inheritin
   await expect(review).toBeDisabled();
 });
 
+test("owners can find outside repository collaborators and open the access editor", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  let reads = 0;
+  await page.route(
+    `**/api/organizations/${id}/outside-collaborators*`,
+    (route) => {
+      reads++;
+      const query = new URL(route.request().url()).searchParams;
+      return route.fulfill({
+        json: {
+          items: query.get("q")
+            ? [
+                {
+                  name: "Visiting engineer",
+                  profile: null,
+                  owner: "team",
+                  repository: "library",
+                  repository_id: "01900000-0000-7000-8000-000000000015",
+                  access: "triage",
+                },
+              ]
+            : [],
+          next: query.get("q") ? null : "page-two",
+          revision: 1,
+        },
+      });
+    },
+  );
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(root);
+  await page
+    .getByRole("link", { name: "Outside collaborators", exact: true })
+    .click();
+  await expect(
+    page.getByText("No outside collaborator grants on this page."),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Next page" })).toBeEnabled();
+  await page
+    .getByRole("searchbox", { name: "Find outside collaborators" })
+    .fill("library");
+  await page
+    .getByRole("search", { name: "Outside collaborator search" })
+    .getByRole("button", { name: "Search", exact: true })
+    .click();
+  const grants = page.getByRole("list", {
+    name: "Outside collaborator grants",
+  });
+  await expect(grants).toContainText("Visiting engineer");
+  await expect(grants).toContainText("Triage");
+  await expect(
+    grants.getByRole("link", {
+      name: "Manage library access for Visiting engineer",
+    }),
+  ).toHaveAttribute("href", "/team/library/settings/access");
+  await expectNoAccessibilityViolations(page);
+  await page.reload();
+  await expect(
+    page.getByRole("searchbox", { name: "Find outside collaborators" }),
+  ).toHaveValue("library");
+  await expect(grants).toContainText("Visiting engineer");
+  const ownerReads = reads;
+  state.role = "member";
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: "Organization members" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Outside collaborators", exact: true }),
+  ).toHaveCount(0);
+  expect(reads).toBe(ownerReads);
+});
+
 test("owners see identity-provider management and blocked access in People", async ({
   page,
 }) => {

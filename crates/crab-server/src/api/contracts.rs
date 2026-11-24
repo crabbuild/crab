@@ -66,6 +66,7 @@ fn typescript() -> String {
         organizations::repository_access::MemberAccessTeam::decl(&config),
         organizations::repository_access::AccessRepository::decl(&config),
         organizations::repository_access::MemberRepositoryAccess::decl(&config),
+        organizations::outside_collaborators::OutsideCollaboratorGrant::decl(&config),
         organizations::invitations::InvitationOffer::decl(&config),
         organization::teams::Visibility::decl(&config),
         organization::teams::Role::decl(&config),

@@ -155,6 +155,9 @@ export type AccessRepository = { id: string, owner: string, name: string, access
 export type MemberRepositoryAccess = { account: MemberAccessAccount, managed: boolean, items: Array<AccessRepository>, next: string | null, };
 
 // prettier-ignore
+export type OutsideCollaboratorGrant = { name: string, profile: ActorSummary | null, owner: string, repository: string, repository_id: string, access: RepositoryAccess, };
+
+// prettier-ignore
 export type InvitationOffer = { invitation: Invitation, profile: ActorSummary | null, };
 
 // prettier-ignore
