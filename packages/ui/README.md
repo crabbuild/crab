@@ -429,6 +429,9 @@ access can use the picker.
 Organization-owned repositories show a **Linked projects** collection in
 **Projects**. It lists shared Projects the viewer can read. Project editors
 can search for and link an active Project from the same organization.
+Project administrators can choose a **Default repository** under
+**Repositories** → **Manage**. New issue drafts preselect it when writable,
+and the editor offers any writable linked repository as an explicit choice.
 
 When a linked issue moves, its row opens the current issue while planning edits
 retain the stored project item and its history. A reader needs access to the
@@ -437,9 +440,10 @@ includes published destinations and counts relocated work there.
 Adding the moved issue again keeps its existing Project placement and shows an
 already-linked message.
 
-Shared projects link existing work and support draft notes. Source creation,
-draft conversion, title/state saved filters and custom project templates remain
-repository-scoped. Linking does not migrate repository projects. Workflow
+Shared projects link existing work, create issues in writable organization
+repositories, and support draft notes. Draft conversion, title/state saved
+filters and custom project templates remain repository-scoped. Linking does
+not migrate repository projects. Workflow
 automation and cross-organization/personal project discovery are
 separate features. Preparation and API contracts are in
 `crates/crab-server/CELLAR.md`; browser proof is

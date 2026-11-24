@@ -76,6 +76,7 @@ async function fixture(page: Page, movedIssue = false) {
   const revisions = new Map<string, number>();
   const decisions = new Map<string, Outcome>();
   const submissions: { request_id: string; command: WorkspaceCommand }[] = [];
+  let defaultRepository: string | null | undefined;
   let lose = false;
   const movedItem = "01900000-0000-7000-8000-000000000030";
   if (movedIssue) {
@@ -355,8 +356,15 @@ async function fixture(page: Page, movedIssue = false) {
         json: {
           project,
           can_manage: true,
-          repositories: repositories.filter((repo) => linked.has(repo.id)),
+          repositories: repositories
+            .filter((repo) => linked.has(repo.id))
+            .map((repo) => ({
+              ...repo,
+              can_create_issue: defaultRepository !== undefined || undefined,
+            })),
           restricted_repositories: 0,
+          default_repository: defaultRepository,
+          default_repository_configured: defaultRepository !== undefined,
           lead: { id: actor, name: "Alice", handle: "alice" },
         },
       });
@@ -443,6 +451,10 @@ async function fixture(page: Page, movedIssue = false) {
   return {
     submissions,
     items,
+    setDefaultRepository(repository: string | null) {
+      defaultRepository = repository;
+      for (const repo of repositories) linked.add(repo.id);
+    },
     addDraft(title: string, status = "Todo", values: Item["values"] = {}) {
       const id = crypto.randomUUID();
       items.push({
@@ -489,6 +501,40 @@ async function fixture(page: Page, movedIssue = false) {
     },
   };
 }
+
+test("an unavailable issue default requires a destination and a draft retains the explicit choice", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  state.setDefaultRepository(null);
+  await page.goto(`${home}/${projectId}`);
+  await page
+    .getByRole("button", { name: "Add work", exact: true })
+    .first()
+    .click();
+  const editor = page.getByRole("dialog", { name: "Add work to project" });
+  await editor.getByRole("tab", { name: "New issue", exact: true }).click();
+  const repository = editor.getByRole("combobox", { name: "Issue repository" });
+  await expect(repository).toHaveText("Choose a repository");
+  await expect(
+    editor.getByRole("button", { name: "Create issue" }),
+  ).toBeDisabled();
+  await chooseSelectOption(repository, { label: "team/server" });
+  await editor
+    .getByLabel("Title", { exact: true })
+    .fill("Preserve my destination");
+  state.setDefaultRepository(repositories[1].id);
+  await page.reload();
+  await page
+    .getByRole("button", { name: "Resume item draft", exact: true })
+    .click();
+  await expect(editor.getByLabel("Title", { exact: true })).toHaveValue(
+    "Preserve my destination",
+  );
+  await expect(repository).toHaveText("team/server");
+  expect(state.submissions).toHaveLength(0);
+});
+
 test("one project coordinates matching issue numbers across repositories with planning views and properties", async ({
   page,
 }) => {

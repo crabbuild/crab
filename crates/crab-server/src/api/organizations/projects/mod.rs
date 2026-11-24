@@ -199,7 +199,7 @@ async fn list(
 ) -> Result<Json<Value>> {
     let actor = authority::caller(&server, &principal, id).await?;
     if let Some(repository) = input.repository {
-        discoverable_repository(&server, &principal, id, repository).await?;
+        owned_repository(&server, &principal, id, repository).await?;
     }
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     let page = cells
@@ -221,7 +221,7 @@ async fn list(
         .map_err(read_error)?
         .output;
     if let Some(repository) = input.repository {
-        discoverable_repository(&server, &principal, id, repository).await?;
+        owned_repository(&server, &principal, id, repository).await?;
     }
     app::account(&principal)?;
     if actor.guest()
@@ -272,12 +272,12 @@ async fn accessible(
         Err(error) => Err(error),
     }
 }
-async fn discoverable_repository(
+async fn owned_repository(
     server: &Server,
     principal: &Principal,
     organization: Uuid,
     repository: Uuid,
-) -> Result<()> {
+) -> Result<Arc<Repository>> {
     let repo = server
         .repositories
         .by_id(repository)
@@ -302,7 +302,7 @@ async fn discoverable_repository(
     current
         .principal
         .can_read(repository)
-        .then_some(())
+        .then_some(repo)
         .ok_or(Error::NotFound)
 }
 fn repository(repo: &Repository) -> Value {
@@ -358,12 +358,37 @@ async fn detail(
             Err(error) => return Err(error),
         }
     }
-    app::account(&principal)?;
     if current.project.version != view.project.version {
         return Err(Error::PageChanged);
     }
+    let configured = current.project.default_repository;
+    let mut default_repository = None;
+    if let Some(default) = configured
+        && let Some(index) = repositories
+            .iter()
+            .position(|entry| entry["id"] == json!(default.id))
+    {
+        match owned_repository(&server, &principal, id, default.id).await {
+            Ok(repo) if repo.ownership_epoch == default.ownership_epoch => {
+                if crate::repository::settings::load_lifecycle(&server, &repo)
+                    .await?
+                    .archived
+                {
+                    repositories[index]["can_create_issue"] = json!(false);
+                } else {
+                    default_repository = Some(default.id);
+                }
+            }
+            Ok(_) => (),
+            Err(Error::NotFound) => {
+                repositories.remove(index);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    app::account(&principal)?;
     Ok(Json(
-        json!({"project":public_project(&current.project),"can_manage":current.can_manage,"can_admin":current.can_admin,"repositories":repositories,"restricted_repositories":view.repositories.len()-repositories.len(),"lead":profiles.first().cloned().flatten(),"issue_types":types}),
+        json!({"project":public_project(&current.project),"can_manage":current.can_manage,"can_admin":current.can_admin,"repositories":repositories,"restricted_repositories":view.repositories.len()-repositories.len(),"lead":profiles.first().cloned().flatten(),"issue_types":types,"default_repository":default_repository,"default_repository_configured":configured.is_some()}),
     ))
 }
 #[derive(Default, Deserialize)]
@@ -637,10 +662,11 @@ async fn submit(
                         ..
                     }
                     | Command::LinkRepository { .. }
+                    | Command::SetDefaultRepository { .. }
             ))
     {
-        // Direct grants and repository transfers can invalidate guest evidence.
-        // Reacquire it inside the same policy lease as those publications.
+        // Repository access and ownership can change guest qualification and
+        // source selection. Check both under the publication policy lease.
         return super::properties::policy_write(server, id, move |server, _, cancel| async move {
             let actor = authority::viewer(&server, &principal, id, actor.id()).await?;
             let output =
@@ -724,6 +750,7 @@ async fn submit_change(
     use crate::cells::repository::{
         collaboration::SubjectKind, issues::transfer::publication::Destination,
     };
+    let mut source_epoch = None;
     let (source_allowed, attachment) = if cancel {
         (false, None)
     } else {
@@ -733,13 +760,30 @@ async fn submit_change(
                 None,
             ),
             Command::LinkRepository { repository, .. } => {
-                let allowed =
-                    match discoverable_repository(server, principal, id, *repository).await {
-                        Ok(()) => true,
-                        Err(Error::NotFound) => false,
-                        Err(error) => return Err(error),
-                    };
+                let allowed = match owned_repository(server, principal, id, *repository).await {
+                    Ok(_) => true,
+                    Err(Error::NotFound) => false,
+                    Err(error) => return Err(error),
+                };
                 (allowed, None)
+            }
+            Command::SetDefaultRepository {
+                repository: Some(repository),
+                ..
+            } => {
+                match owned_repository(server, principal, id, *repository).await {
+                    Ok(repo) => {
+                        if !crate::repository::settings::load_lifecycle(server, &repo)
+                            .await?
+                            .archived
+                        {
+                            source_epoch = Some(repo.ownership_epoch);
+                        }
+                    }
+                    Err(Error::NotFound) => (),
+                    Err(error) => return Err(error),
+                }
+                (source_epoch.is_some(), None)
             }
             Command::BulkFields { project, items } => (
                 bulk_sources_allowed(server, principal, id, actor, *project, items).await?,
@@ -832,7 +876,7 @@ async fn submit_change(
                     cancel,
                     source_allowed,
                     attachment,
-                    source_epoch: None,
+                    source_epoch,
                     eligible_outside,
                 },
             )

@@ -3090,6 +3090,23 @@ unlinked active Projects you can edit. Submit `link_repository` with
 endpoint. Publication rechecks access and ownership under the organization
 policy lease.
 
+An organization Project administrator can set **Default repository** under
+**Repositories** → **Manage**. The destination must be an active, readable
+repository owned by the organization. Saving the default also links the
+repository and lists the Project on its **Linked projects** page. Clear or
+change the default before removing that link.
+
+In the Project's **New issue** form, the default is preselected for people
+who can write to it. They can choose another writable linked repository.
+If the default is unavailable, the form asks for a destination. A saved
+draft or retried submission retains its chosen repository.
+
+Submit `set_default_repository` with `project`, `version`, and a repository
+UUID or `null` to the organization Project command endpoint. The server binds
+the default to the repository's current ownership epoch. Project detail
+returns `default_repository_configured` and the currently visible, active
+`default_repository`. A Project membership grants no repository access.
+
 With source repository triage access, drag an issue to another type group in
 a table or board, or use the **Change issue type** control in any layout.
 Moving to **No type** clears the assignment. The item retains its Project

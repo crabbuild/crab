@@ -66,8 +66,16 @@ pub(crate) struct Project {
     pub updated_at: u64,
     pub created_by: Uuid,
     pub creator_epoch: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_repository: Option<DefaultRepository>,
     #[serde(default, skip_serializing_if = "access::Policy::is_default")]
     access: access::Policy,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DefaultRepository {
+    pub id: Uuid,
+    pub ownership_epoch: u32,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -116,6 +124,9 @@ fn load(context: &Transaction<'_>, project: Uuid) -> Result<Option<Project>> {
                 || record.version > MAX_VERSION
                 || !record.definition.valid()
                 || !record.access.valid()
+                || record
+                    .default_repository
+                    .is_some_and(|default| default.id.is_nil())
             {
                 return Err(Error::Invalid("organization project record is invalid"));
             }
@@ -271,7 +282,9 @@ pub(in crate::cells::organization) fn authorize(
                     target: AccessTarget::Team { .. },
                     ..
                 } if active.is_none() => return Err(Error::AccessDenied),
-                Command::SetAccess { .. } => AccessRole::Admin,
+                Command::SetAccess { .. } | Command::SetDefaultRepository { .. } => {
+                    AccessRole::Admin
+                }
                 Command::Edit { archived, .. } if archived != project.archived => AccessRole::Admin,
                 _ => AccessRole::Write,
             };

@@ -49,6 +49,9 @@ export function WorkspaceItemEditor({
   onClose: () => void;
 }) {
   const writable = detail.repositories.filter((repo) => repo.can_create_issue);
+  const issueDefault = detail.default_repository_configured
+    ? (writable.find((repo) => repo.id === detail.default_repository)?.id ?? "")
+    : (writable[0]?.id ?? "");
   const typeChoices = detail.issue_types ?? [];
   const saved = useProjectDraft(
     {
@@ -74,7 +77,7 @@ export function WorkspaceItemEditor({
       repository:
         row?.source_repository ??
         (initialIssueType !== undefined
-          ? writable[0]?.id
+          ? issueDefault
           : detail.repositories[0]?.id) ??
         "",
       issueType: initialIssueType,
@@ -97,6 +100,9 @@ export function WorkspaceItemEditor({
     existing: wasExisting,
     restricted,
   } = saved.value;
+  const [issueRepositoryChoice, setIssueRepositoryChoice] = useState(() =>
+    mode === "issue" ? repository : undefined,
+  );
   const canWriteIssue = writable.some((repo) => repo.id === repository);
   const setItem = (item: Item) => saved.update({ item });
   const setMode = (mode: string) => {
@@ -104,7 +110,11 @@ export function WorkspaceItemEditor({
     if (mode === "issue")
       saved.update({
         mode,
-        repository: canWriteIssue ? repository : (writable[0]?.id ?? ""),
+        repository:
+          issueRepositoryChoice ??
+          (!detail.default_repository_configured && canWriteIssue
+            ? repository
+            : issueDefault),
         work: null,
       });
   };
@@ -316,7 +326,10 @@ export function WorkspaceItemEditor({
                             id={`${id}-issue-repository`}
                             label="Issue repository"
                             value={canWriteIssue ? repository : "choose"}
-                            onValueChange={setRepository}
+                            onValueChange={(choice) => {
+                              setIssueRepositoryChoice(choice);
+                              setRepository(choice);
+                            }}
                             options={{
                               choose: "Choose a repository",
                               ...Object.fromEntries(
@@ -327,6 +340,13 @@ export function WorkspaceItemEditor({
                               ),
                             }}
                           />
+                          {detail.default_repository_configured &&
+                            !issueDefault && (
+                              <p className="text-sm text-muted-foreground">
+                                The default repository is unavailable for issue
+                                creation.
+                              </p>
+                            )}
                         </Field>
                         {!writable.length && (
                           <p className="text-sm text-muted-foreground">

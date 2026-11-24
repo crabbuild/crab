@@ -43,6 +43,12 @@ pub(crate) enum Command {
         version: u64,
         repository: Uuid,
     },
+    SetDefaultRepository {
+        project: Uuid,
+        version: u64,
+        #[serde(deserialize_with = "Option::<Uuid>::deserialize")]
+        repository: Option<Uuid>,
+    },
     SetDefaultAccess {
         version: u64,
         role: AccessRole,
@@ -91,6 +97,7 @@ impl Command {
             | Self::SetAccess { project, .. }
             | Self::LinkTeam { project, .. }
             | Self::LinkRepository { project, .. }
+            | Self::SetDefaultRepository { project, .. }
             | Self::Planning { project, .. }
             | Self::Repository { project, .. }
             | Self::Item { project, .. }
@@ -108,6 +115,7 @@ impl Command {
             | Self::SetAccess { version, .. }
             | Self::LinkTeam { version, .. }
             | Self::LinkRepository { version, .. }
+            | Self::SetDefaultRepository { version, .. }
             | Self::SetDefaultAccess { version, .. }
             | Self::Planning { version, .. }
             | Self::Repository { version, .. }
@@ -304,6 +312,7 @@ fn apply_command(
             updated_at: now,
             created_by: input.actor.id(),
             creator_epoch: epoch(context, input.actor.id())?,
+            default_repository: None,
             access: Default::default(),
         };
         save(context, &project)?;
@@ -455,6 +464,50 @@ fn apply_command(
             after = Some(serde_json::to_value(properties)?);
             project.properties = properties.clone();
         }
+        Command::SetDefaultRepository { repository, .. } => {
+            let previous = project.default_repository;
+            let next = if let Some(id) = repository {
+                let Some(ownership_epoch) = input
+                    .source_epoch
+                    .filter(|_| input.source_allowed && !id.is_nil())
+                else {
+                    return Ok(rejected(
+                        "Choose an active repository you can access in this organization",
+                    ));
+                };
+                Some(DefaultRepository {
+                    id: *id,
+                    ownership_epoch,
+                })
+            } else {
+                None
+            };
+            if next == previous {
+                return Ok(MutationResult::Success(Outcome::Applied {
+                    project: Some(project_id),
+                    version: project.version,
+                }));
+            }
+            let target = next
+                .or(previous)
+                .ok_or(Error::Invalid("Default repository target is missing"))?;
+            if next.is_some()
+                && !link_repository(
+                    context,
+                    project_id,
+                    target.id,
+                    &repositories(context, project_id)?,
+                )?
+            {
+                return Ok(rejected("A project can link up to 20 repositories"));
+            }
+            // History carries one repository target and booleans. Exposing the
+            // previous destination could disclose a different private source.
+            event_target = ledger::Target::Repository { id: target.id };
+            before = Some(serde_json::json!({"default_repository": previous == Some(target)}));
+            after = Some(serde_json::json!({"default_repository": next.is_some()}));
+            project.default_repository = next;
+        }
         Command::Repository { repository, .. } | Command::LinkRepository { repository, .. } => {
             if repository.is_nil() || !input.source_allowed {
                 return Ok(rejected(
@@ -475,13 +528,18 @@ fn apply_command(
             before = Some(serde_json::json!({"linked":linked_repositories.contains(repository)}));
             after = Some(serde_json::json!({"linked":linked}));
             if linked {
-                if !linked_repositories.contains(repository)
-                    && linked_repositories.len() >= MAX_REPOSITORIES
-                {
+                if !link_repository(context, project_id, *repository, &linked_repositories)? {
                     return Ok(rejected("A project can link up to 20 repositories"));
                 }
-                context.query("INSERT INTO organization_project_repositories(project,repository) VALUES(?,?) ON CONFLICT DO NOTHING",&[blob(project_id),blob(*repository)])?;
             } else {
+                if project
+                    .default_repository
+                    .is_some_and(|default| default.id == *repository)
+                {
+                    return Ok(rejected(
+                        "Clear or change the default repository before unlinking it",
+                    ));
+                }
                 if pending
                     .values()
                     .any(|reservation| reservation.repository == *repository)
@@ -669,6 +727,25 @@ fn apply_command(
         project: Some(project_id),
         version: project.version,
     }))
+}
+
+fn link_repository(
+    context: &Transaction<'_>,
+    project: Uuid,
+    repository: Uuid,
+    links: &[Uuid],
+) -> Result<bool> {
+    if links.contains(&repository) {
+        return Ok(true);
+    }
+    if links.len() >= MAX_REPOSITORIES {
+        return Ok(false);
+    }
+    context.query(
+        "INSERT INTO organization_project_repositories(project,repository) VALUES(?,?)",
+        &[blob(project), blob(repository)],
+    )?;
+    Ok(true)
 }
 
 fn apply_bulk(

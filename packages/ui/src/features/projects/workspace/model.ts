@@ -40,6 +40,8 @@ export interface Detail {
   can_admin?: boolean;
   repositories: LinkedRepository[];
   restricted_repositories: number;
+  default_repository?: string | null;
+  default_repository_configured?: boolean;
   issue_types?: IssueType[];
   lead: { id: string; handle: string; name: string } | null;
 }
@@ -98,6 +100,12 @@ export type WorkspaceCommand =
       project: string;
       version: number;
       repository: string;
+    }
+  | {
+      kind: "set_default_repository";
+      project: string;
+      version: number;
+      repository: string | null;
     }
   | {
       kind: "set_default_access";

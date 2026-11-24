@@ -560,6 +560,8 @@ team owner for visibility and current maintainer authority.
 Repository Project discovery uses the existing link relation and rechecks
 current repository access and ownership. Linking from a repository shares the
 organization policy lease with ownership and repository grant changes.
+The Project's default issue repository shares that lease. Its link and the
+ownership-bound choice commit in the same native transaction.
 Project access cannot authorize a linked repository. Both project scopes share
 canonical source metadata in `cells/repository/projects/reads.rs`; never copy
 source titles/states into organization records or treat project access as a

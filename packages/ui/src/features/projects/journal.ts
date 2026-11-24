@@ -99,6 +99,7 @@ export function readProjectIntent(account: string): ProjectIntent | null {
       "set_access",
       "link_team",
       "link_repository",
+      "set_default_repository",
       "set_default_access",
       "planning",
       "repository",

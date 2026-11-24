@@ -2,6 +2,7 @@ use super::*;
 use crate::test_support::http::{Harness, organizations::bootstrap};
 use reqwest::{Method, StatusCode};
 
+mod default_repository;
 mod outside;
 mod repository_projects;
 mod team_projects;
