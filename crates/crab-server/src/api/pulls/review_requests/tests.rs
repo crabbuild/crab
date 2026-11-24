@@ -105,6 +105,11 @@ async fn qualified_members_can_be_requested_cancelled_and_fulfilled_by_http_revi
     );
     *h.provider.mode.lock().await = "member".into();
     let bob = h.login().await;
+    let work = "/api/personal-work?relation=review_requested";
+    assert_eq!(
+        h.json(work, &bob).await["items"][0]["title"],
+        "Please review"
+    );
     let review = json!({"request_id":uuid::Uuid::now_v7(),"state":"approved","body":"Looks good","commit_oid":head});
     let created = h
         .write(
@@ -121,6 +126,7 @@ async fn qualified_members_can_be_requested_cancelled_and_fulfilled_by_http_revi
         .unwrap();
     let page = h.json(REVIEWERS, &alice).await;
     assert_eq!(page["version"], 5);
+    assert_eq!(h.json(work, &bob).await["items"], json!([]));
     assert_eq!(
         page["items"][0]["request"]["state"],
         json!({"kind":"fulfilled","review":created["number"]})

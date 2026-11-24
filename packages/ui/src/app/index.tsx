@@ -24,6 +24,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { SignIn } from "@/features/auth/sign-in";
 import { GitAccess } from "@/features/git-access";
 import { RepositoryOwnerActions } from "@/features/repository/owner-actions";
+import { PersonalWork } from "@/features/personal-work";
 import { NotificationLink, Notifications } from "@/features/notifications";
 import { DiscussionSubscriptions } from "@/features/notifications/subscriptions";
 import { WatchedRepositories } from "@/features/notifications/watched";
@@ -37,7 +38,12 @@ import {
   useTeamCommands,
 } from "@/features/organizations/teams/commands";
 import { ProfileSettings, UserProfile } from "@/features/profile";
-import { Building2Icon, LogOutIcon, UserRoundIcon } from "lucide-react";
+import {
+  Building2Icon,
+  ListTodoIcon,
+  LogOutIcon,
+  UserRoundIcon,
+} from "lucide-react";
 import { RepositoryPage } from "@/features/repository/page";
 import { TransferPage } from "@/features/settings/transfer";
 import { BrowseRepositories } from "@/features/repository/catalog-browse";
@@ -131,6 +137,7 @@ export function App() {
   }, [codeTheme, resolved]);
   const url = new URL(location, window.location.origin);
   const codeSearch = url.pathname === "/-/code-search";
+  const myWork = url.pathname === "/-/work";
   const inbox = url.pathname === "/-/notifications";
   const watched = url.pathname === "/-/notifications/watched";
   const subscriptions = url.pathname === "/-/notifications/subscriptions";
@@ -161,6 +168,7 @@ export function App() {
     organizationRoute ||
     organizations ||
     notifications ||
+    myWork ||
     codeSearch
       ? undefined
       : repositoryRoute(url);
@@ -266,7 +274,9 @@ export function App() {
                 ? "Projects · Crab"
                 : codeSearch
                   ? "Search code · Crab"
-                  : "Repositories · Crab";
+                  : myWork
+                    ? "My work · Crab"
+                    : "Repositories · Crab";
   }, [
     authenticated,
     repo,
@@ -276,6 +286,7 @@ export function App() {
     projectWorkspace,
     transferId,
     codeSearch,
+    myWork,
   ]);
   useEffect(() => {
     if (!importedRepository || url.pathname !== "/") return;
@@ -370,6 +381,18 @@ export function App() {
                   >
                     <SearchIcon data-icon="inline-start" />
                     <span className="hidden sm:inline">Search code</span>
+                  </Link>
+                </Button>
+              )}
+              {session.data?.authenticated && (
+                <Button asChild variant="ghost" size="sm">
+                  <Link
+                    href="/-/work"
+                    aria-label="My work"
+                    aria-current={myWork ? "page" : undefined}
+                  >
+                    <ListTodoIcon data-icon="inline-start" />
+                    <span className="hidden sm:inline">My work</span>
                   </Link>
                 </Button>
               )}
@@ -484,7 +507,9 @@ export function App() {
                 {sessionError}
               </p>
             )}
-            {codeSearch ? (
+            {myWork ? (
+              <PersonalWork key={teamAccount} url={url} />
+            ) : codeSearch ? (
               <Suspense
                 fallback={
                   <p role="status" className="notice">

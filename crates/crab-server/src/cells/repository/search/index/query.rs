@@ -1,5 +1,7 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
+pub(crate) mod work;
+
 use super::*;
 use crate::cells::repository::collaboration::{SubjectState, reactions::Kind};
 use crate::cells::repository::search::{
@@ -591,7 +593,7 @@ fn scoped_expression(
                 format!("EXISTS (SELECT 1 FROM discussion_index_labels dl JOIN repository_labels l ON l.number = dl.label WHERE dl.document = d.rowid AND l.deleted_version IS NULL AND l.name_key IN ({values}))")
             }
             Term::Author(name) => bindings.person(name).map_or_else(|| "0".into(), |value| {
-                format!("EXISTS (SELECT 1 FROM discussion_index_authors a WHERE a.document = d.rowid AND a.identity = {value})")
+                format!("d.rowid IN (SELECT a.document FROM discussion_index_authors a WHERE a.identity = {value})")
             }),
             Term::Commenter(name) => bindings.person(name).map_or_else(|| "0".into(), |value| {
                 format!("EXISTS (SELECT 1 FROM discussion_index_commenters c WHERE c.identity = {value} AND c.kind = d.kind AND c.discussion = d.number)")
@@ -604,7 +606,7 @@ fn scoped_expression(
                 match id {
                     Some(id) => {
                         let value = bindings.text(&id);
-                        format!("EXISTS (SELECT 1 FROM discussion_index_assignees a WHERE a.document = d.rowid AND a.actor = {value})")
+                        format!("d.rowid IN (SELECT a.document FROM discussion_index_assignees a WHERE a.actor = {value})")
                     }
                     None => "0".into(),
                 }
@@ -616,7 +618,7 @@ fn scoped_expression(
                 use super::super::reviews::Kind;
                 let direct = bindings.person(name).map_or_else(|| "0".into(), |value| {
                     let predicate = kind.predicate();
-                    format!("d.kind = 1 AND EXISTS (SELECT 1 FROM discussion_index_reviewers r WHERE r.pull = d.number AND r.identity = {value} AND ({predicate}))")
+                    format!("d.kind = 1 AND d.number IN (SELECT r.pull FROM discussion_index_reviewers r WHERE r.identity = {value} AND ({predicate}))")
                 });
                 if *kind == Kind::ReviewRequested && name == "@me" && !bindings.review_teams.mine.is_empty() {
                     let teams = bindings.text(&serde_json::to_string(&bindings.review_teams.mine)?);

@@ -16,7 +16,7 @@ pub(in crate::cells::repository) mod locks;
 mod projection;
 mod query;
 pub(crate) mod references;
-pub(crate) use query::{Direction, LabelSummary, Page, SearchInput, Sort};
+pub(crate) use query::{Direction, LabelSummary, Page, SearchInput, Sort, work};
 pub(in crate::cells::repository) use query::{Labelled, Metrics, page};
 mod rebuild;
 pub(crate) use rebuild::RebuildIndex;

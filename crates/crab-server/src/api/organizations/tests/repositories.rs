@@ -1060,6 +1060,10 @@ async fn repository_team_access_follows_current_membership_and_private_team_visi
     assert_eq!(h.json(&mine, &bob).await["matching"], 1);
     let direct = search("pulls", "is:open user-review-requested:@me");
     assert_eq!(h.json(&direct, &bob).await["matching"], 0);
+    let work = "/api/personal-work?relation=review_requested";
+    let requested = h.json(work, &bob).await;
+    assert_eq!(requested["items"].as_array().unwrap().len(), 1);
+    assert_eq!(requested["items"][0]["repository"]["id"], json!(repo_id));
 
     h.deliver_notifications(owner, "library").await;
     let notified = h.json(&inbox, &bob).await;
@@ -1093,6 +1097,7 @@ async fn repository_team_access_follows_current_membership_and_private_team_visi
     );
     assert_eq!(h.json(&named, &bob).await["matching"], 0);
     assert_eq!(h.json(&mine, &bob).await["matching"], 0);
+    assert_eq!(h.json(work, &bob).await["items"], json!([]));
     let reviewed = h.json(&reviewers, &alice).await;
     assert_eq!(
         reviewed["teams"][0]["state"],

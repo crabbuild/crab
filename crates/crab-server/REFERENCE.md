@@ -4626,8 +4626,8 @@ navigation without changing query parameters, native cursors or data requests.
 Compact rows preserve the displayed metadata. When browser storage is denied,
 the current component's selection still works in memory. The sidebar measures
 available viewport height with diagnostics present, and wraps on narrow screens.
-Detail/create routes keep full-width layouts. These controls do not implement
-saved views or personal author/assignment/review navigation.
+Detail/create routes keep full-width layouts. The repository navigation opens
+personal author, assignment, and review request filters for that repository.
 Count/loading rows and the optional diagnostic header retain their height during
 refresh so a completed request cannot move an open menu under a pressed pointer.
 Before a measurement exists, the diagnostic header shows a dash and explains
@@ -4656,6 +4656,29 @@ triage permission controls changes to label or assignee sets.
 Stored assignments retain stable IDs and name snapshots after grant removal.
 Public profiles provide current presentation without granting access. Label
 renames appear immediately; deleted labels disappear without rewriting discussions.
+
+### Find your work across repositories
+
+Open **My work** in the global navigation. **Pull requests** and **Issues**
+each offer **Created by me** and **Assigned to me**. **Review requests** includes
+open pull requests requested from you or your current teams. Created and
+assigned work can be filtered by Open, Closed, or All states. Closed pull
+requests include both merged and unmerged work. Rows are newest first by
+creation time, with repository-qualified links and a draft or lifecycle label.
+
+`GET /api/personal-work` requires a browser account. It accepts
+`kind=pull|issue`, `relation=authored|assigned|review_requested`,
+`state=open|closed|all`, `limit` from 1 to 50, and `after` from the previous
+result. The default is 30 open authored pull requests. Review requests require
+`kind=pull` and `state=open`. The response contains `items` and nullable `next`.
+
+Upgrade server peers and the embedded UI together to expose **My work**. Each
+readable repository supplies bounded summaries from its existing discussion index.
+The server merges those ordered pages with at most eight repository reads in
+flight. It rechecks the readable repositories and applicable team membership
+before returning results. Continuations bind the account, filters, and this
+access scope. A changed scope returns HTTP 409 and the browser offers **First
+page**. Refresh the first page to see new work created ahead of a continuation.
 
 ### Understand pagination and storage
 
