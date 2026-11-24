@@ -2,6 +2,7 @@ use super::*;
 use crate::{
     api::write,
     cells::repository::{PullChildKey, review_dismissals},
+    repository::settings::{self, RulesetScope, with_ruleset_lease},
 };
 use axum::routing::put;
 
@@ -31,57 +32,82 @@ async fn dismiss(
         Ok(()) => input.body,
         Err(error) => return Ok(write::rejected(error)),
     };
-    let principal = app::membership(&server, &principal, &repo).await?.principal;
     let pull_number = app::number(pull)?;
-    let pull = storage::pull(&server, &repo, pull_number)
-        .await?
-        .ok_or(Error::NotFound)?;
-    let configured_protected = configured_protected(&repo, &pull.base_ref);
-    let default_ref = if principal.can_admin(repo.id) {
-        String::new()
-    } else {
-        repo.open_ref_view().await?.head().to_owned()
+    let key = PullChildKey {
+        pull: pull_number,
+        number: app::number(review)?,
     };
-    let organization_protected = if principal.can_admin(repo.id) {
-        false
-    } else {
-        let inherited = crate::repository::settings::inherited_rulesets(&server, &repo).await?;
-        crate::cells::repository::rulesets::ActiveRulesets::new(&inherited)
-            .map_err(Error::Cell)?
-            .requires_pull(&pull.base_ref, &default_ref)
-    };
-    let cell = app::repository_cell(&server, &repo)?;
-    let outcome = app::command_output(
-        cell.client
-            .command::<review_dismissals::DismissReview>(
-                &cell.target,
-                app::mutation_identity()?,
-                review_dismissals::Input {
-                    submission_id: storage::submission_id(&input.request_id)?,
-                    key: PullChildKey {
-                        pull: pull_number,
-                        number: app::number(review)?,
-                    },
-                    version: app::number(input.version)?,
-                    actor: (&actor).into(),
-                    body,
-                    can_write: principal.can_write(repo.id),
-                    can_admin: principal.can_admin(repo.id),
-                    configured_protected,
-                    organization_protected,
-                    default_ref,
-                },
-            )
-            .await,
-    )?;
+    let submission_id = storage::submission_id(&input.request_id)?;
+    let version = app::number(input.version)?;
+    let (send, reply) = tokio::sync::oneshot::channel();
+    let tracker = server.receives.clone();
+    tracker.spawn(async move {
+        let outcome = with_ruleset_lease(
+            &server,
+            RulesetScope::Repository(&repo),
+            &server.cancellation,
+            |cancel| {
+                let server = server.as_ref();
+                let repo = repo.as_ref();
+                async move {
+                    let pull = storage::pull(server, repo, pull_number)
+                        .await?
+                        .ok_or(Error::NotFound)?;
+                    let grant = app::membership(server, &principal, repo).await?;
+                    let can_write = grant.principal.can_write(repo.id);
+                    let policy = if can_write {
+                        settings::load_ref_policy(server, repo)
+                            .await?
+                            .review_dismissal(server, repo, &grant, &actor, &pull.base_ref)
+                            .await?
+                    } else {
+                        ReviewDismissalPolicy::default()
+                    };
+                    if cancel.is_cancelled() {
+                        return Err(Error::MergeBusy);
+                    }
+                    let cell = app::repository_cell(server, repo)?;
+                    let outcome = app::command_output(
+                        cell.client
+                            .command::<review_dismissals::DismissReview>(
+                                &cell.target,
+                                app::mutation_identity()?,
+                                review_dismissals::Input {
+                                    submission_id,
+                                    key,
+                                    version,
+                                    actor: (&actor).into(),
+                                    body,
+                                    can_write,
+                                    can_admin: grant.principal.can_admin(repo.id),
+                                    configured_protected: configured_protected(
+                                        repo,
+                                        &pull.base_ref,
+                                    ),
+                                    base_ref: pull.base_ref,
+                                    policy,
+                                },
+                            )
+                            .await,
+                    )?;
+                    if outcome == review_dismissals::Outcome::Dismissed {
+                        app::membership(server, &principal, repo).await?;
+                    }
+                    Ok(outcome)
+                }
+            },
+        )
+        .await;
+        let _ = send.send(outcome);
+    });
+    let outcome = reply.await.map_err(|_| Error::MergeBusy)??;
     use review_dismissals::Outcome;
     let error = match outcome {
         Outcome::Dismissed => {
-            app::membership(&server, &principal, &repo).await?;
             return Ok(Json(json!({"dismissed":true})).into_response());
         }
         Outcome::NotFound => Error::NotFound,
-        Outcome::Forbidden => Error::Forbidden,
+        Outcome::Forbidden => Error::ReviewDismissalPermission,
         Outcome::Archived => Error::Archived,
         Outcome::Conflict => Error::Conflict,
         Outcome::RequestConflict => return Err(Error::RequestConflict),

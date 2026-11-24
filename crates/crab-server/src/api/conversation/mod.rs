@@ -146,11 +146,12 @@ async fn page(
         })
         .collect();
     let authors = Authors::load(server, principal, actors.into_iter()).await?;
-    let principal = app::membership(server, principal, &repo).await?.principal;
-    let ruleset_protected = pulls::reviews::ruleset_requires_admin(
+    let grant = app::membership(server, principal, &repo).await?;
+    let can_dismiss = pulls::reviews::dismissal_allowed(
         server,
         &repo,
-        &principal,
+        &grant,
+        &actor,
         page.items.iter().find_map(|entry| match entry {
             Entry::Review(detail) if detail.dismissible => Some(detail),
             _ => None,
@@ -174,7 +175,7 @@ async fn page(
                         &authors,
                         &comment,
                         &actor,
-                        principal.can_moderate(repo.id),
+                        grant.principal.can_moderate(repo.id),
                         &reaction,
                     ),
                 ),
@@ -193,9 +194,7 @@ async fn page(
                         &actor,
                         head.as_deref(),
                         &reaction,
-                        &principal,
-                        &repo,
-                        ruleset_protected,
+                        can_dismiss,
                     ),
                 ),
                 Entry::Activity(_) => {

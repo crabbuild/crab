@@ -52,6 +52,8 @@ pub(crate) enum Error {
     CommitNotFound,
     #[error("Only the author can edit this content")]
     Forbidden,
+    #[error("You do not have permission to dismiss reviews for this branch")]
+    ReviewDismissalPermission,
     #[error("You do not have permission to edit this issue or comment")]
     IssueEditPermission,
     #[error("This conversation is locked")]
@@ -365,6 +367,11 @@ impl IntoResponse for Error {
             Self::Invalid(message) => (StatusCode::BAD_REQUEST, "invalid_request", *message),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found", "Resource not found"),
             Self::CommitNotFound => (StatusCode::NOT_FOUND, "not_found", "Commit not found"),
+            Self::ReviewDismissalPermission => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "You do not have permission to dismiss reviews for this branch",
+            ),
             Self::Forbidden => (
                 StatusCode::FORBIDDEN,
                 "forbidden",

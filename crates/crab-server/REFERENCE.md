@@ -1217,7 +1217,8 @@ collection with matching `expected_version`. Each entry contains `id` (UUID),
 `include`, `exclude`, `restrict_creations`, `restrict_updates`, `restrict_deletions`,
 `require_pull_request`, `required_approvals`, `required_code_owner_reviews`,
 `require_conversation_resolution`, `require_up_to_date`, `require_merge_queue`, `require_linear_history`,
-`required_checks`, and `required_integrations`. Branch-only settings must have
+`required_checks`, `required_integrations`, and optional `review_dismissal`.
+Branch-only settings must have
 empty or zero values on tag rulesets. A stale replacement returns HTTP 409.
 
 Rulesets govern Crab Server Git HTTP, browser Git changes, releases that create
@@ -4157,8 +4158,21 @@ for the changed private search/rollup input contract.
 
 PUT `/api/repos/{owner}/{name}/pulls/{number}/reviews/{review}/dismissals`
 accepts `{request_id, version, body}`. The nonempty reason uses the existing
-64 KiB discussion-body contract. Write permission is required; on a protected
-base branch, Admin permission is required. The native transaction reads current
+64 KiB discussion-body contract. Repository Write permission is required.
+Administrators can configure **Restrict who can dismiss pull request reviews**
+in a branch ruleset with a pull request requirement. The rule's optional
+`review_dismissal` array contains up to 64 `{kind: "user" | "team", id}` entries.
+Each matching explicit rule must allow the actor through a named account or
+current team membership. An empty array prevents manual dismissal. If no
+explicit rule matches, a protected base still requires Admin permission.
+
+Repository rulesets offer collaborators and visible teams with repository
+access. Organization rulesets offer active organization members and visible
+teams. Organization team membership can authorize a writer with a separate
+repository grant. Repository readers see that an active restriction applies,
+and repository ruleset administrators can see its local selections.
+
+The native transaction reads current
 branch protection, archive and pending merge state, verifies the review version,
 records the explanation, advances review/PR versions, removes only the matching
 active decision and appends one conversation event. An older dismissal cannot
@@ -4169,8 +4183,10 @@ The configured version-zero policy applies before the first administrative save,
 as it does for merge and Git publication. Native dismissal receives that initial
 branch classification from HTTP composition; rules saved in the native transaction
 take precedence, including an explicitly empty set. Review create/edit/detail/list
-and conversation capabilities use the same precedence. This retains the existing
-configuration seed contract; native cross-Cell authority fencing remains separate.
+and conversation capabilities use the same ruleset policy. A tracked write worker
+refreshes membership inside the shared ruleset lease, which also serializes
+default-branch changes. The native command verifies the evaluated base ref so a
+concurrent PR retarget cannot use a decision made for its former base.
 
 Public review details, lists and conversation entries expose effective state
 `dismissed`, nullable `dismissal: {author, body, created_at}` and `can_dismiss`.
@@ -4191,8 +4207,8 @@ to the review after success. Reasons appear with the original review; the later
 conversation event links directly to it.
 
 Run private `cells prepare-review-state --owner OWNER --name REPO` on existing
-repositories. Serving never installs missing schemas. Full per-user/team review
-dismissal restrictions and broader review/workspace parity remain open. This
+repositories. Upgrade peers and embedded UI together for the private dismissal
+command contract. This
 workflow follows [GitHub review dismissal](https://docs.github.com/en/pull-requests/how-tos/review-pull-requests/dismissing-a-pull-request-review)
 and its [protected-branch permission contract](https://docs.github.com/en/rest/pulls/reviews#dismiss-a-review-for-a-pull-request), checked 2026-10-22.
 

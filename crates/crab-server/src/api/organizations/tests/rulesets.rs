@@ -421,6 +421,7 @@ async fn inherited_rules_follow_repository_targets_and_keep_bypass_sources_disti
         {"actor":{"kind":"organization_owner"},"mode":"pull_request"},
         {"actor":{"kind":"team","id":team},"mode":"pull_request"},
     ]);
+    entries[0]["ruleset"]["review_dismissal"] = json!([{"kind":"team","id":team}]);
     h.write(
         Method::PUT,
         &org_rules,
@@ -447,6 +448,25 @@ async fn inherited_rules_follow_repository_targets_and_keep_bypass_sources_disti
             .iter()
             .any(|option| option["id"] == inherited_id)
     );
+    let reviews = format!("{pull}/reviews");
+    let submit_review =
+        || async {
+            repository_write(&h, Method::POST, &reviews, &bob, release_id, json!({
+            "request_id":Uuid::now_v7(),"state":"approved","body":"Reviewed","commit_oid":head,
+        })).await.error_for_status().unwrap().json::<Value>().await.unwrap()
+        };
+    let dismiss =
+        async |review: Value| {
+            let path = format!("{reviews}/{}/dismissals", review["number"]);
+            repository_write(&h, Method::PUT, &path, &bob, release_id, json!({
+            "request_id":Uuid::now_v7(),"version":review["version"],"body":"Superseded review",
+        })).await
+        };
+    let first = submit_review().await;
+    assert_eq!(first["can_dismiss"], true);
+    dismiss(first).await.error_for_status().unwrap();
+    let second = submit_review().await;
+    assert_eq!(second["can_dismiss"], true);
     h.write(Method::POST, &commands, &alice, membership(1, Value::Null))
         .await
         .error_for_status()
@@ -455,6 +475,9 @@ async fn inherited_rules_follow_repository_targets_and_keep_bypass_sources_disti
         h.json(&pull, &bob).await["merge_requirements"]["bypass_options"],
         json!([])
     );
+    let second_path = format!("{reviews}/{}", second["number"]);
+    assert_eq!(h.json(&second_path, &bob).await["can_dismiss"], false);
+    assert_eq!(dismiss(second).await.status(), StatusCode::FORBIDDEN);
 
     let detail = h.json(&pull, &alice).await;
     let options = detail["merge_requirements"]["bypass_options"]
@@ -462,20 +485,15 @@ async fn inherited_rules_follow_repository_targets_and_keep_bypass_sources_disti
         .unwrap();
     let ids: Vec<_> = options.iter().map(|option| option["id"].clone()).collect();
     assert_eq!(ids, vec![json!(id), inherited_id]);
-    let done: Value = repository_write(
-        &h,
-        Method::POST,
-        &merge,
-        &alice,
-        release_id,
-        request(json!(ids)),
-    )
-    .await
-    .error_for_status()
-    .unwrap()
-    .json()
-    .await
-    .unwrap();
+    let mut final_request = request(json!(ids));
+    final_request["version"] = detail["version"].clone();
+    let done: Value = repository_write(&h, Method::POST, &merge, &alice, release_id, final_request)
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(done["merge"]["bypass_rulesets"], json!(ids));
     let advertised = git::success(
         source.path(),

@@ -2,6 +2,7 @@ use super::*;
 use crate::cells::repository::collaboration::lifecycle::{
     LifecycleStatus, PrepareLifecycleInput, PrepareLifecycleOutcome,
 };
+use crate::cells::repository::rulesets::ReviewDismissalPolicy;
 
 const SCHEMA: &str = "repository/pulls/reviews/dismissals/format";
 
@@ -215,10 +216,8 @@ pub(crate) struct Input {
     pub can_write: bool,
     pub can_admin: bool,
     pub configured_protected: bool,
-    #[serde(default)]
-    pub organization_protected: bool,
-    #[serde(default)]
-    pub default_ref: String,
+    pub base_ref: String,
+    pub policy: ReviewDismissalPolicy,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum Outcome {
@@ -312,20 +311,18 @@ impl Mutation for DismissReview {
         let Some(existing) = GetReviewDetail::execute(context, input.key.clone())? else {
             return Ok(MutationResult::Rejected(Outcome::NotFound));
         };
-        // Configuration seeds policy only until the first administrative save.
-        // Persisted rules in this transaction override a stale configured seed.
-        if !input.can_admin {
-            use crate::cells::repository::rulesets::{ActiveRulesets, GetRulesets};
-            let rulesets = GetRulesets::execute(context, ())?;
-            if existing
+        // Rulesets and the default branch are held stable by the policy lease.
+        // A concurrent PR retarget must not use the previous branch's decision.
+        if existing.base_ref != input.base_ref {
+            return Ok(MutationResult::Rejected(Outcome::Conflict));
+        }
+        if !input.policy.allows(
+            input.can_admin,
+            existing
                 .admin_required
-                .unwrap_or(input.configured_protected)
-                || input.organization_protected
-                || ActiveRulesets::new(&rulesets)?
-                    .requires_pull(&existing.base_ref, &input.default_ref)
-            {
-                return Ok(MutationResult::Rejected(Outcome::Forbidden));
-            }
+                .unwrap_or(input.configured_protected),
+        ) {
+            return Ok(MutationResult::Rejected(Outcome::Forbidden));
         }
         if existing.review.version != input.version {
             return Ok(MutationResult::Rejected(Outcome::Conflict));

@@ -8,7 +8,8 @@ use crate::{
     app::{Error, Result},
     auth::Principal,
     cells::repository::rulesets::{
-        ActiveRulesets, BypassContext, GetRefPolicy, Ruleset, RulesetId, Rulesets,
+        ActiveRulesets, BypassContext, GetRefPolicy, ReviewDismissalActor, ReviewDismissalPolicy,
+        Ruleset, RulesetId, Rulesets,
     },
     cells::repository::{
         BranchProtectionRecord, BranchProtectionSettings, GetBranchProtections,
@@ -353,6 +354,73 @@ pub(crate) struct MergePolicy {
 }
 
 impl RefPolicy {
+    pub(crate) async fn review_dismissal(
+        &self,
+        server: &Server,
+        repo: &Repository,
+        grant: &crate::app::Membership,
+        actor: &crate::auth::Identity,
+        reference: &str,
+    ) -> Result<ReviewDismissalPolicy> {
+        let default_ref = self.default_ref(repo).await?;
+        let rules = self.active()?;
+        let allows_user = rules.matches(reference, &default_ref).any(|(_, rule)| {
+            rule.review_dismissal
+                .iter()
+                .flatten()
+                .any(|entry| matches!(entry, ReviewDismissalActor::User { .. }))
+        });
+        let actor_id = if allows_user {
+            super::access::actor_id(
+                server,
+                crate::cells::directory::IdentityKey {
+                    issuer: actor.issuer.clone(),
+                    subject: actor.subject.clone(),
+                },
+            )
+            .await?
+        } else {
+            None
+        };
+        let organization = self.organization.filter(|_| {
+            grant.teams.is_empty()
+                && !grant.principal.is_local()
+                && rules.matches(reference, &default_ref).any(|(id, rule)| {
+                    matches!(id, RulesetId::Organization { .. })
+                        && rule
+                            .review_dismissal
+                            .iter()
+                            .flatten()
+                            .any(|entry| matches!(entry, ReviewDismissalActor::Team { .. }))
+                })
+        });
+        let teams = if let Some(organization) = organization {
+            let mut grants = super::access::organization_grants(
+                server,
+                &grant.principal,
+                [(organization, true)].into(),
+            )
+            .await?;
+            Some(
+                grants
+                    .remove(&organization)
+                    .unwrap_or_default()
+                    .bypass_teams,
+            )
+        } else {
+            None
+        };
+        let access = grant
+            .bypass_context(repo.id)
+            .organization_teams(teams.as_deref());
+        Ok(rules.matches(reference, &default_ref).fold(
+            ReviewDismissalPolicy::Unrestricted,
+            |policy, (id, rule)| {
+                policy.combine(rule.dismissal_policy(actor_id, access.for_rule(id).teams))
+            },
+        ))
+    }
+
     pub(crate) fn active(&self) -> Result<MatchingRulesets<'_>> {
         Ok(MatchingRulesets {
             local: ActiveRulesets::new(&self.rulesets).map_err(Error::Cell)?,

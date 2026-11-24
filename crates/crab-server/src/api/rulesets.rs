@@ -13,7 +13,7 @@ use crate::{
     auth::Principal,
     cells::repository::rulesets::{
         BypassActor, Enforcement, GetRulesets, ReplaceRulesets, ReplaceRulesetsInput,
-        ReplaceRulesetsOutcome, Rulesets,
+        ReplaceRulesetsOutcome, ReviewDismissalActor, Rulesets,
     },
     repository::settings::{RulesetScope, with_ruleset_lease},
     server::Server,
@@ -39,6 +39,9 @@ async fn inherited(
     let mut inherited = crate::repository::settings::inherited_rulesets(server, repo).await?;
     for rule in &mut inherited.rulesets {
         rule.bypass_actors.clear();
+        if let Some(actors) = &mut rule.review_dismissal {
+            actors.clear();
+        }
     }
     Ok(Some(Inherited {
         organization,
@@ -129,6 +132,9 @@ async fn read(
             .retain(|rule| rule.enforcement == Enforcement::Active);
         for rule in &mut settings.rulesets {
             rule.bypass_actors.clear();
+            if let Some(actors) = &mut rule.review_dismissal {
+                actors.clear();
+            }
         }
         None
     };
@@ -170,6 +176,46 @@ async fn replace(
         return Err(Error::Invalid(
             "Choose a visible team with repository access for ruleset bypass",
         ));
+    }
+    let dismissers: std::collections::HashSet<_> = input
+        .rulesets
+        .iter()
+        .flat_map(|rule| rule.review_dismissal.iter().flatten())
+        .copied()
+        .collect();
+    if !dismissers.is_empty() {
+        let current = app::query_output({
+            let routed = app::repository_cell(&server, &repo)?;
+            routed
+                .client
+                .query::<GetRulesets>(&routed.target, None, ())
+                .await
+        })?;
+        let previous: std::collections::HashSet<_> = current
+            .rulesets
+            .iter()
+            .flat_map(|rule| rule.review_dismissal.iter().flatten())
+            .copied()
+            .collect();
+        let new: Vec<_> = dismissers.difference(&previous).collect();
+        let roster = if new
+            .iter()
+            .any(|entry| matches!(entry, ReviewDismissalActor::User { .. }))
+        {
+            Some(super::members::roster::Roster::load(&server, &principal, &repo).await?)
+        } else {
+            None
+        };
+        if new.iter().any(|entry| match entry {
+            ReviewDismissalActor::User { id } => roster
+                .as_ref()
+                .is_none_or(|roster| roster.author(*id).is_none()),
+            ReviewDismissalActor::Team { id } => !options.teams.iter().any(|team| team.id == *id),
+        }) {
+            return Err(Error::Invalid(
+                "Choose repository collaborators or visible teams with repository access for review dismissal",
+            ));
+        }
     }
     let inherited = inherited(&server, &repo).await?;
     let (send, reply) = tokio::sync::oneshot::channel();

@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, HashSet};
 use super::properties::{self, PropertyValue, Schema};
 use super::*;
 use crate::cells::repository::rulesets::{
-    BypassActor, BypassGrant, Enforcement, MAX_RULESETS, Pattern, Ruleset, Rulesets, Target,
+    BypassActor, BypassGrant, Enforcement, MAX_RULESETS, Pattern, ReviewDismissalActor, Ruleset,
+    Rulesets, Target,
 };
 
 const KEY: &str = "organization/v1/rulesets";
@@ -231,6 +232,7 @@ pub(crate) enum ReplaceOutcome {
     Saved(Settings),
     Conflict,
     UnavailableTeam,
+    UnavailableMember,
     UnavailableProperty,
 }
 
@@ -276,6 +278,12 @@ impl Mutation for Replace {
                 return Ok(MutationResult::Rejected(ReplaceOutcome::UnavailableTeam));
             }
         }
+        let old_members = dismissal_members(&current.rulesets);
+        for id in dismissal_members(&input.rulesets).difference(&old_members) {
+            if !member(context, *id)?.is_some_and(|member| member.active) {
+                return Ok(MutationResult::Rejected(ReplaceOutcome::UnavailableMember));
+            }
+        }
         if current.rulesets == input.rulesets {
             return Ok(MutationResult::Success(ReplaceOutcome::Saved(current)));
         }
@@ -298,9 +306,37 @@ impl Mutation for Replace {
 fn team_ids(entries: &[Entry]) -> HashSet<Uuid> {
     entries
         .iter()
-        .flat_map(|entry| &entry.ruleset.bypass_actors)
-        .filter_map(|grant| match grant.actor {
-            BypassActor::Team { id } => Some(id),
+        .flat_map(|entry| {
+            let bypass_teams =
+                entry
+                    .ruleset
+                    .bypass_actors
+                    .iter()
+                    .filter_map(|grant| match grant.actor {
+                        BypassActor::Team { id } => Some(id),
+                        _ => None,
+                    });
+            let dismissal_teams =
+                entry
+                    .ruleset
+                    .review_dismissal
+                    .iter()
+                    .flatten()
+                    .filter_map(|actor| match actor {
+                        ReviewDismissalActor::Team { id } => Some(*id),
+                        _ => None,
+                    });
+            bypass_teams.chain(dismissal_teams)
+        })
+        .collect()
+}
+
+fn dismissal_members(entries: &[Entry]) -> HashSet<Uuid> {
+    entries
+        .iter()
+        .flat_map(|entry| entry.ruleset.review_dismissal.iter().flatten())
+        .filter_map(|actor| match actor {
+            ReviewDismissalActor::User { id } => Some(*id),
             _ => None,
         })
         .collect()
