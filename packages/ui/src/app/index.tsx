@@ -555,6 +555,7 @@ export function App() {
               />
             ) : inbox ? (
               <Notifications
+                key={teamAccount}
                 csrf={session.data.csrf ?? ""}
                 repositories={catalog.data?.repositories ?? []}
                 url={url}

@@ -19,7 +19,7 @@ use crate::{
             IdentityKey,
             notifications::{
                 Entry, List, ListInput, NoticeTarget, Position, Reason, ReleaseKind,
-                State as NotificationState, Thread, ThreadPage, View,
+                State as NotificationState, Thread, ThreadPage, View, filters::Kind,
             },
         },
         repository::{
@@ -36,6 +36,7 @@ use crate::{
 
 mod discussions;
 mod email;
+mod filters;
 mod issue_transfers;
 mod state;
 mod subscriptions;
@@ -47,6 +48,10 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .route("/api/notifications", get(list))
         .route("/api/notifications/unread", get(unread))
         .route("/api/notifications/email", get(email::get).put(email::set))
+        .route(
+            "/api/notifications/filters",
+            get(filters::get).put(filters::update),
+        )
         .route("/api/notifications/watched", get(watched::list))
         .route("/api/notifications/subscriptions", get(discussions::list))
         .route("/api/notifications/{id}/state", put(state::single))
@@ -82,8 +87,11 @@ struct Parameters {
     before: Option<String>,
     limit: Option<u8>,
     repository: Option<Uuid>,
+    organization: Option<Uuid>,
     unread: Option<bool>,
+    read: Option<bool>,
     reason: Option<Reason>,
+    kind: Option<Kind>,
     view: Option<View>,
 }
 
@@ -164,6 +172,9 @@ async fn list(
     if !(1..=50).contains(&limit) {
         return Err(Error::Invalid("Notification pages require 1–50 items"));
     }
+    if params.unread == Some(true) && params.read == Some(true) {
+        return Err(Error::Invalid("Choose read or unread notifications"));
+    }
     let mut before = params.before.as_deref().map(cursor).transpose()?;
     if let Some(id) = params.repository {
         let repo = server.repositories.by_id(id).ok_or(Error::NotFound)?;
@@ -185,7 +196,11 @@ async fn list(
                 .repository
                 .is_some_and(|id| id != entry.notice.repository)
                 || (params.unread == Some(true) && thread.state.read)
+                || (params.read == Some(true) && !thread.state.read)
                 || params.reason.is_some_and(|reason| reason != entry.reason)
+                || params
+                    .kind
+                    .is_some_and(|kind| !kind.matches(entry.notice.target))
             {
                 continue;
             }
@@ -195,7 +210,17 @@ async fn list(
                 .push((order, thread));
         }
         let batches: Vec<Vec<(usize, Item)>> = stream::iter(groups)
-            .map(|(id, entries)| repository_items(&server, &principal, &actor, id, view, entries))
+            .map(|(id, entries)| {
+                repository_items(
+                    &server,
+                    &principal,
+                    &actor,
+                    id,
+                    params.organization,
+                    view,
+                    entries,
+                )
+            })
             .buffer_unordered(8)
             .try_collect()
             .await?;
@@ -419,13 +444,16 @@ async fn repository_items(
     principal: &Principal,
     actor: &IdentityKey,
     id: Uuid,
+    organization: Option<Uuid>,
     view: View,
     entries: Vec<(usize, Thread)>,
 ) -> Result<Vec<(usize, Item)>> {
     let Some(repo) = server.repositories.by_id(id) else {
         return Ok(Vec::new());
     };
-    if !may_notify(server, principal, &repo, actor).await? {
+    if organization.is_some_and(|organization| repo.organization != Some(organization))
+        || !may_notify(server, principal, &repo, actor).await?
+    {
         return Ok(Vec::new());
     }
     let sources = resolve_sources(
@@ -536,7 +564,13 @@ async fn repository_items(
     }
     // Source reads await a different Cell. Recheck the current grant once
     // per repository before presenting its whole batch.
-    if !may_notify(server, principal, &repo, actor).await? {
+    if organization.is_some_and(|organization| {
+        server
+            .repositories
+            .by_id(id)
+            .is_none_or(|repo| repo.organization != Some(organization))
+    }) || !may_notify(server, principal, &repo, actor).await?
+    {
         return Ok(Vec::new());
     }
     Ok(items)

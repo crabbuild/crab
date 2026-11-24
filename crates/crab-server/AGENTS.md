@@ -290,6 +290,9 @@ The sender rechecks both grants and the destination issue before sending an
 authenticated inbox link. `notifications/triage.rs` binds all
 selected rows to observed activity in one transaction. `notifications/filing.rs`
 retains saved and completed conversations with private activity-order indexes.
+`notifications/filters.rs` owns account-private, revisioned inbox filters.
+Applying a filter uses the ordinary inbox query and its current repository
+grants. The filter stores repository and organization IDs without labels.
 `notifications/retention.rs` sweeps expired completions and fences replay.
 `collaboration/watches/inbox.rs` commits inbox dismissal with the Repository
 watch preference. `api/notifications/` checks repository access and mute state before listing

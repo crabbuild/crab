@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 pub(crate) mod email;
 mod filing;
+pub(crate) mod filters;
 mod retention;
 mod triage;
 use filing::Filed;
