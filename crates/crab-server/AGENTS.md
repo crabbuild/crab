@@ -138,6 +138,10 @@ and thread writers. Review threads belong to `pulls/review_threads/`.
 `api/pulls/review_threads/suggestions.rs` builds a single expected-head Git
 commit from versioned review suggestions. The actor and exact batch bind the
 Capsule plan. Retry reads its durable branch receipt before checking live tips.
+`recent_pushes.rs` keeps bounded actor-scoped native push intents.
+`git/receive/recent_pushes.rs` records candidates before Git publication.
+`api/pulls/recent_pushes.rs` checks committed receipts and live ref transactions
+before offering comparison links. Intent recording is advisory for Git receive.
 `pulls/viewed.rs` owns actor-scoped review progress,
 bound to stable comparison file identities. Browse projection reads and
 writes belong to `projection/`. `dispatch.rs` alone decodes operation IDs. `search/` owns the shared issue/PR

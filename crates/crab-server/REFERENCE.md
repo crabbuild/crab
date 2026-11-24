@@ -3816,6 +3816,21 @@ pure reorder does not add a timeline event.
 
 ### Work with pull requests and reviews
 
+After a stock Git push, the repository Code and Pull requests pages can show
+**Compare & pull request** for up to three of the signed-in user's recent
+branches. Same-repository comparisons start at the current default branch.
+Fork links use the upstream comparison flow and its existing access rules.
+The shortcut disappears while an open PR uses the branch, or after a PR merges
+that exact tip into the default branch.
+
+`GET /api/repos/{owner}/{name}/pulls/recent-pushes` returns `base_ref` and
+`items` with branch `name` and `oid`. The server considers the last four
+eligible pushes in 24 hours, up to eight branches per push. It checks the
+committed Git receipt against the transaction that owns each current ref.
+An unpublished push, deletion, or replacement by another transaction
+cannot supply a shortcut. Imports and automation pushes are excluded. The
+shortcut uses a fresh comparison before authoring and publication.
+
 The pull request composer fills the description from `pull_request_template.md`
 on the destination repository's default branch. Crab looks in `.github/`, the
 repository root, then `docs/`. Put named Markdown templates in a

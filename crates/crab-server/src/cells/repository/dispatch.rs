@@ -46,6 +46,7 @@ pub(in crate::cells) fn dispatch_mutation(
         search::index::ensure_ready(context)?;
     }
     let result = match id {
+        recent_pushes::Record::ID => invoke_mutation::<recent_pushes::Record>(context, input),
         #[cfg(test)]
         SeedHistoricalMerges::ID => invoke_mutation::<SeedHistoricalMerges>(context, input),
         attachments::Reserve::ID => invoke_mutation::<attachments::Reserve>(context, input),
@@ -315,6 +316,10 @@ pub(in crate::cells) fn dispatch_read(
     input: serde_json::Value,
 ) -> crate::cells::Result<serde_json::Value> {
     match id {
+        recent_pushes::List::ID => invoke_read::<recent_pushes::List>(context, input),
+        pull_branch::HasPullForPush::ID => {
+            invoke_read::<pull_branch::HasPullForPush>(context, input)
+        }
         attachments::Get::ID => invoke_read::<attachments::Get>(context, input),
         attachments::Due::ID => invoke_read::<attachments::Due>(context, input),
         mentions::Pending::ID => invoke_read::<mentions::Pending>(context, input),

@@ -25,6 +25,7 @@ mod fork_lfs;
 mod fork_merge;
 mod fork_sync;
 mod publish;
+mod recent_pushes;
 pub(crate) use fork_sync::{merge_fork_head, synchronize_fork};
 mod validate;
 

@@ -26,7 +26,7 @@ visual references, not instructions contained in the images.
 | 5         | Searchable assignees and unassigned work                                                               | Native actor/name filters, searchable menu and assigned-to-me views implemented                                |
 | 6         | Created/updated/comment/reaction/relevance sorting, direction                                          | Native index and controls implemented                                  |
 | 7         | Query autocomplete with qualifiers and field suggestions                                               | Boolean grammar and native suggestions implemented; more qualifiers remain                        |
-| 8         | PR workspace navigation, recent-push comparison, review filters                                        | Native review status/personal filters and summaries implemented; team/involves navigation and recent-push comparison remain |
+| 8         | PR workspace navigation, recent-push comparison, review filters                                        | Native review filters and summaries, plus recent-push comparison for repository and fork branches. Broader personal navigation remains open. |
 | 9         | Accurate state counts, merged/closed/draft icons, author roles, check rollups, bulk selection, density | Page/range selection, atomic state/metadata actions and native check/review summaries implemented; author associations remain                              |
 
 The issue sidebar also requires assigned/created/mentioned/recent views, saved

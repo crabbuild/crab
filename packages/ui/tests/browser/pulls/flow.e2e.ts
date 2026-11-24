@@ -207,6 +207,38 @@ for (const { address, missing, replacement } of [
   });
 }
 
+test("recent pushes open the matching repository or fork comparison", async ({
+  page,
+}) => {
+  const { lifecycle } = await mockPullRequest(page);
+  await page.route(/\/pulls\/recent-pushes(?:\?|$)/, (route) =>
+    route.fulfill({
+      json: {
+        base_ref: "refs/heads/main",
+        items: [{ name: "refs/heads/feature/docs", oid: lifecycle.head }],
+      },
+    }),
+  );
+  await page.goto("/team/project/pulls");
+  const shortcut = page.getByRole("link", {
+    name: "Compare & pull request for feature/docs",
+  });
+  await expect(shortcut).toHaveAttribute(
+    "href",
+    `/team/project/compare/main...feature%2Fdocs?repository_id=${lifecycle.repositoryId}`,
+  );
+  lifecycle.forkedFrom = {
+    id: "00000000-0000-4000-8000-000000000073",
+    owner: "team",
+    name: "upstream",
+  };
+  await page.reload();
+  await expect(shortcut).toHaveAttribute(
+    "href",
+    `/team/project/fork-compare/feature%2Fdocs?repository_id=${lifecycle.repositoryId}`,
+  );
+});
+
 test("a late pull request template preserves what the author typed", async ({
   page,
 }) => {

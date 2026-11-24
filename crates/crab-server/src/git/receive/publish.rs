@@ -1402,8 +1402,8 @@ async fn commit_authorized(
         } else {
             settings::load_ref_policy(server, entry).await?
         };
-        let default_ref = match closure_default {
-            Some(reference) => reference,
+        let default_ref = match &closure_default {
+            Some(reference) => reference.clone(),
             None => policy.default_ref(entry).await?,
         };
         let organization_teams = policy.organization_teams(server, &current).await?;
@@ -1505,6 +1505,25 @@ async fn commit_authorized(
         {
             closing_publication = Some(publication);
         }
+    }
+    if let Some(plan) = plan_id
+        && matches!(mutation.publication, Publication::NativePush)
+        && principal.import_grant().is_none()
+        && principal.automation_credential().is_none()
+    {
+        let default = if entry.forked_from.is_none() {
+            mutation
+                .initial_head
+                .as_ref()
+                .map(|(_, _, head)| head.as_str())
+                .or(closure_default.as_deref())
+        } else {
+            None
+        };
+        // Persist the candidate ahead of the ref commit so a lost response
+        // cannot erase a successful push. The browser verifies the receipt.
+        super::recent_pushes::record(server, entry, &identity, plan, mutation.updates, default)
+            .await;
     }
     let outcome = artifacts
         .commit(plan_id, TTL, cancel)

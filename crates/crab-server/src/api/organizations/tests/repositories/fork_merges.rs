@@ -10,6 +10,7 @@ use crate::test_support::git::success as git;
 pub(super) async fn exercise(
     h: &Harness,
     alice: &str,
+    fork_author: &str,
     id: Uuid,
     fork: Uuid,
     (upstream_work, upstream_remote): (&Path, &str),
@@ -77,6 +78,18 @@ pub(super) async fn exercise(
     }
     git(fork_work, &["push", "origin", "proposal"]).await;
     let head = git(fork_work, &["rev-parse", "proposal"]).await;
+    let source = h.server.repositories.by_id(fork).unwrap();
+    let suggestions = format!(
+        "/api/repos/{}/{}/pulls/recent-pushes",
+        source.config.owner, source.config.name
+    );
+    assert_eq!(h.json(&suggestions, alice).await["items"], json!([]));
+    let recent = h.json(&suggestions, fork_author).await;
+    assert_eq!(recent["base_ref"], "refs/heads/main");
+    assert_eq!(
+        recent["items"][0],
+        json!({"name":"refs/heads/proposal","oid":head})
+    );
     // Use the exact upstream base already fetched by stock Git and the fork's
     // proposal to obtain an independent expected tree for all three methods.
     git(fork_work, &["fetch", upstream_remote, "main"]).await;
@@ -128,6 +141,14 @@ pub(super) async fn exercise(
             .unwrap();
         let number = opened["number"].as_u64().unwrap();
         if method == "squash" {
+            let recent = h.json(&suggestions, fork_author).await;
+            assert!(
+                recent["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|item| item["name"] != "refs/heads/proposal")
+            );
             let detail = format!("{pulls}/{number}");
             let closed: Value = repository_write(
                 h,

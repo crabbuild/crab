@@ -355,6 +355,7 @@ async fn private_fork_recovers_git_publication_and_uses_live_source_permissions(
     fork_merges::exercise(
         &h,
         &alice,
+        &bob,
         id,
         fork_id,
         (local.path(), upstream_remote.as_str()),
