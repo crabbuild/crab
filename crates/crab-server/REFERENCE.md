@@ -4171,8 +4171,25 @@ at merge. Closed pull requests use the head saved in their comparison. Both
 actions require current Write access and follow the source repository's branch
 protection and rulesets. The repository's default branch cannot be deleted.
 
+Repository administrators can enable **Automatically delete head branches**
+in **Settings** under **Pull request merge methods**. Use the setting in the
+source repository, including a fork. Crab records the opt-in and the source
+branch's Git transaction during publication, then queues deletion when the
+merge completes. Direct merges, auto-merge, and the merge queue use the same
+cleanup. The actor who publishes the merge needs current Write access in the
+source repository. Cleanup skips archived repositories, the default branch,
+protected branches, ruleset violations, branches used by another open pull
+request, and branches that moved or were recreated. Changing the setting
+invalidates pending cleanup from the previous setting. Restore an automatically
+deleted branch the same way as a manually deleted branch.
+
+`PUT .../settings/merge-methods` accepts the optional administrator-only
+`delete_head_branches` boolean. It defaults to `false`.
+
 `GET /api/repos/{owner}/{name}/pulls/{number}/head-branch` returns the available
 `branch` action with its pull version, source repository UUID, and commit.
+`cleanup_pending: true` indicates that automatic deletion is queued for a
+branch that still offers the delete action.
 `POST` accepts `action` (`delete` or `restore`), `request_id`, `version`,
 `repository_id`, and `head_oid`. Publication checks the exact tip or its absence
 under the Git ref lease. Retrying a recorded request recovers its result

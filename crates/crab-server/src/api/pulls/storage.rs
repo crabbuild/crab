@@ -5,7 +5,7 @@ use crate::{
     app::{self, Error, Result},
     auth::Identity,
     cells::repository::{
-        CaptureIssueClosure, CaptureIssueClosureInput, CreatePull, CreatePullComment,
+        CaptureMergeEffects, CaptureMergeEffectsInput, CreatePull, CreatePullComment,
         CreatePullCommentInput, CreatePullCommentOutcome, CreatePullInput, CreatePullOutcome,
         CreatePullReview, CreatePullReviewInput, CreatePullReviewOutcome, GetPull, GetPullComment,
         GetPullMergeSubmission, GetPullReviewSubmission, GetPullSubmission, ListPullComments,
@@ -658,24 +658,26 @@ pub(super) async fn complete_merge(
     transition_merge(server, repo, pull, record, PullMergeTransition::Complete).await
 }
 
-pub(super) async fn capture_issue_closure(
+pub(super) async fn capture_merge_effects(
     server: &Server,
     repo: &Repository,
     pull: u64,
     record: &PullMerge,
     on_default: bool,
+    cleanup: Option<crate::cells::repository::pull_branch::CleanupPlan>,
 ) -> Result<()> {
     let routed = crate::app::repository_cell(server, repo)?;
     if !crate::app::command_output(
         routed
             .client
-            .command::<CaptureIssueClosure>(
+            .command::<CaptureMergeEffects>(
                 &routed.target,
                 crate::app::mutation_identity()?,
-                CaptureIssueClosureInput {
+                CaptureMergeEffectsInput {
                     pull,
                     request_id: submission_id(&record.request_id)?,
                     on_default,
+                    cleanup,
                 },
             )
             .await,

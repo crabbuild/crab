@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use futures_util::{StreamExt, stream};
 
+use super::super::head_branch::automatic as cleanup;
 use super::*;
 
 const INTERVAL: Duration = Duration::from_secs(3);
@@ -11,6 +12,7 @@ const WORKERS: usize = 4;
 pub(crate) async fn run(server: Arc<Server>) -> crate::Result<()> {
     let mut offset = 0;
     let mut pages = BTreeMap::new();
+    let mut cleanup_pages = BTreeMap::new();
     loop {
         tokio::select! {
             () = server.cancellation.cancelled() => return Ok(()),
@@ -22,12 +24,17 @@ pub(crate) async fn run(server: Arc<Server>) -> crate::Result<()> {
         }
         repos.sort_unstable_by_key(|repo| repo.id);
         pages.retain(|id, _| repos.binary_search_by_key(id, |repo| repo.id).is_ok());
+        cleanup_pages.retain(|id, _| repos.binary_search_by_key(id, |repo| repo.id).is_ok());
         let start = offset % repos.len();
         let count = repos.len().min(REPOSITORIES_PER_PASS);
         let mut jobs = Vec::new();
+        let mut cleanups = Vec::new();
         for index in 0..count {
             let repo = &repos[(start + index) % repos.len()];
-            let result = pending(&server, repo, pages.get(&repo.id).copied()).await;
+            let (result, cleanup_result) = tokio::join!(
+                pending(&server, repo, pages.get(&repo.id).copied()),
+                cleanup::pending(&server, repo, cleanup_pages.get(&repo.id).copied()),
+            );
             match result {
                 Ok(mut page) => {
                     let before = page
@@ -40,10 +47,26 @@ pub(crate) async fn run(server: Arc<Server>) -> crate::Result<()> {
                         pages.remove(&repo.id);
                     }
                     page.sort_by_key(Job::sweep_order);
-                    jobs.extend(page.into_iter().map(|job| (repo, job)));
+                    jobs.extend(page.into_iter().map(|job| (Arc::clone(repo), job)));
                 }
                 Err(error) => {
                     tracing::debug!(repository_id = %repo.id, error = ?error, "auto-merge queue read deferred")
+                }
+            }
+            match cleanup_result {
+                Ok(page) => {
+                    if let Some(last) = page
+                        .last()
+                        .filter(|_| page.len() == crate::cells::repository::pull_branch::PAGE)
+                    {
+                        cleanup_pages.insert(repo.id, last.pull);
+                    } else {
+                        cleanup_pages.remove(&repo.id);
+                    }
+                    cleanups.extend(page.into_iter().map(|job| (Arc::clone(repo), job)));
+                }
+                Err(error) => {
+                    tracing::debug!(repository_id = %repo.id, ?error, "branch cleanup read deferred")
                 }
             }
         }
@@ -52,9 +75,19 @@ pub(crate) async fn run(server: Arc<Server>) -> crate::Result<()> {
             let server = &server;
             async move {
                 if !server.cancellation.is_cancelled()
-                    && let Err(error) = with_lock(server, repo, job.pull, |cancel| reconcile(server, repo, job, cancel)).await
+                    && let Err(error) = with_lock(server, &repo, job.pull, |cancel| reconcile(server, &repo, job, cancel)).await
                 {
                     tracing::debug!(repository_id = %repo.id, error = ?error, "auto-merge attempt deferred");
+                }
+            }
+        }).await;
+        stream::iter(cleanups).for_each_concurrent(WORKERS, |(repo, job)| {
+            let server = &server;
+            async move {
+                if !server.cancellation.is_cancelled()
+                    && let Err(error) = cleanup::reconcile(server, &repo, job).await
+                {
+                    tracing::debug!(repository_id = %repo.id, ?error, "branch cleanup attempt deferred");
                 }
             }
         }).await;

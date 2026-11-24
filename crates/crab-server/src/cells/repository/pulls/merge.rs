@@ -7,17 +7,19 @@ use crate::cells::repository::collaboration::{
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CaptureIssueClosureInput {
+pub(crate) struct CaptureMergeEffectsInput {
     pub pull: u64,
     pub request_id: [u8; 16],
     pub on_default: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<branch::CleanupPlan>,
 }
 
-pub(crate) struct CaptureIssueClosure;
-impl Mutation for CaptureIssueClosure {
+pub(crate) struct CaptureMergeEffects;
+impl Mutation for CaptureMergeEffects {
     const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 232;
-    type Input = CaptureIssueClosureInput;
+    type Input = CaptureMergeEffectsInput;
     type Output = bool;
 
     fn execute(
@@ -41,6 +43,7 @@ impl Mutation for CaptureIssueClosure {
             input.on_default,
             &pull.body,
         )?;
+        branch::capture(context, input.pull, input.request_id, input.cleanup)?;
         Ok(MutationResult::Success(true))
     }
 }
@@ -171,6 +174,7 @@ impl Mutation for TransitionPullMerge {
                 }
                 pull.merge_pending = None;
                 links::clear_closure(context, pull.number)?;
+                branch::finalize(context, pull.number, input.merge.request_id, false)?;
             }
             PullMergeTransition::Complete => {
                 if let Some(done) = &pull.merge {
@@ -195,6 +199,7 @@ impl Mutation for TransitionPullMerge {
                 }
                 pull.state = PullState::Merged;
                 pull.merge_pending = None;
+                branch::finalize(context, pull.number, input.merge.request_id, true)?;
                 pull.merge = Some(input.merge);
             }
         }

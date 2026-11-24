@@ -16,6 +16,7 @@ interface MergeSettings {
   version: number;
   enabled: MergeMethod[];
   auto_merge?: boolean;
+  delete_head_branches?: boolean;
   merge_queue?: boolean;
   merge_queue_method?: MergeMethod;
   merge_queue_builds?: number;
@@ -129,6 +130,8 @@ function MergeMethodForm({
 }) {
   const [enabled, setEnabled] = useState(settings.enabled);
   const [autoMerge, setAutoMerge] = useState(settings.auto_merge ?? false);
+  const savedDeleteBranches = settings.delete_head_branches ?? false;
+  const [deleteBranches, setDeleteBranches] = useState(savedDeleteBranches);
   const [mergeQueue, setMergeQueue] = useState(settings.merge_queue ?? false);
   const savedQueueMethod = settings.merge_queue_method ?? "merge_commit";
   const [queueMethod, setQueueMethod] = useState(savedQueueMethod);
@@ -185,6 +188,7 @@ function MergeMethodForm({
   const mutation = useMutation(csrf, repo);
   const changed =
     autoMerge !== (settings.auto_merge ?? false) ||
+    deleteBranches !== savedDeleteBranches ||
     mergeQueue !== (settings.merge_queue ?? false) ||
     queueMethod !== savedQueueMethod ||
     builds !== savedBuilds ||
@@ -199,6 +203,9 @@ function MergeMethodForm({
       enabled,
       ...(autoMerge !== (settings.auto_merge ?? false)
         ? { auto_merge: autoMerge }
+        : {}),
+      ...(deleteBranches !== savedDeleteBranches
+        ? { delete_head_branches: deleteBranches }
         : {}),
       ...(mergeQueue !== (settings.merge_queue ?? false)
         ? { merge_queue: mergeQueue }
@@ -278,6 +285,21 @@ function MergeMethodForm({
         </label>
         {repo.can_admin && (
           <div className="grid gap-3">
+            <label className="flex items-start gap-2">
+              <input
+                className="mt-1"
+                type="checkbox"
+                checked={deleteBranches}
+                onChange={({ target }) => setDeleteBranches(target.checked)}
+              />
+              <span>
+                Automatically delete head branches
+                <small className="block text-muted-foreground">
+                  Delete eligible branches in this repository after their pull
+                  requests merge.
+                </small>
+              </span>
+            </label>
             <label className="flex items-start gap-2">
               <input
                 className="mt-1"

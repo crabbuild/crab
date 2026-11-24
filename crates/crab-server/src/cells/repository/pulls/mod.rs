@@ -487,7 +487,7 @@ pub(crate) use reviews::{
 
 mod merge;
 pub(crate) use merge::{
-    CaptureIssueClosure, CaptureIssueClosureInput, GetPullMergeSubmission, ReservePullMerge,
+    CaptureMergeEffects, CaptureMergeEffectsInput, GetPullMergeSubmission, ReservePullMerge,
     TransitionPullMerge,
 };
 

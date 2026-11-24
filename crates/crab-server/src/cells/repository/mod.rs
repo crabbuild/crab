@@ -54,7 +54,7 @@ pub(crate) use pulls::review_threads::{
 };
 pub(crate) use pulls::viewed;
 pub(crate) use pulls::{
-    CaptureIssueClosure, CaptureIssueClosureInput, CreatePull, CreatePullComment,
+    CaptureMergeEffects, CaptureMergeEffectsInput, CreatePull, CreatePullComment,
     CreatePullCommentInput, CreatePullCommentOutcome, CreatePullInput, CreatePullOutcome,
     CreatePullReview, CreatePullReviewInput, CreatePullReviewOutcome, GetPull, GetPullComment,
     GetPullMergeSubmission, GetPullReview, GetPullReviewSubmission, GetPullSubmission,

@@ -271,7 +271,10 @@ pub(in crate::cells) fn dispatch_mutation(
             invoke_mutation::<UpdatePullReviewReply>(context, input)
         }
         <ReservePullMerge as Mutation>::ID => invoke_mutation::<ReservePullMerge>(context, input),
-        CaptureIssueClosure::ID => invoke_mutation::<CaptureIssueClosure>(context, input),
+        CaptureMergeEffects::ID => invoke_mutation::<CaptureMergeEffects>(context, input),
+        pull_branch::FinishCleanup::ID => {
+            invoke_mutation::<pull_branch::FinishCleanup>(context, input)
+        }
         <TransitionPullMerge as Mutation>::ID => {
             invoke_mutation::<TransitionPullMerge>(context, input)
         }
@@ -471,6 +474,10 @@ pub(in crate::cells) fn dispatch_read(
         <GetPull as Read>::ID => invoke_read::<GetPull>(context, input),
         pull_reopen::ForReopen::ID => invoke_read::<pull_reopen::ForReopen>(context, input),
         pull_branch::InUse::ID => invoke_read::<pull_branch::InUse>(context, input),
+        pull_branch::PendingCleanup::ID => {
+            invoke_read::<pull_branch::PendingCleanup>(context, input)
+        }
+        pull_branch::HasCleanup::ID => invoke_read::<pull_branch::HasCleanup>(context, input),
         viewed::GetViewedFiles::ID => invoke_read::<viewed::GetViewedFiles>(context, input),
         pending_reviews::Get::ID => invoke_read::<pending_reviews::Get>(context, input),
         deploy_tokens::List::ID => invoke_read::<deploy_tokens::List>(context, input),

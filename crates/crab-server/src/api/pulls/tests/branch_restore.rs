@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 const PULL: &str = "/api/repos/team/private/pulls/1";
 const HEAD_BRANCH: &str = "/api/repos/team/private/pulls/1/head-branch";
+const MERGE_SETTINGS: &str = "/api/repos/team/private/settings/merge-methods";
 
 async fn open_pull(
     h: &Harness,
@@ -166,6 +167,166 @@ async fn remote(h: &Harness, writer: &str) -> url::Url {
     remote.set_username("crab").unwrap();
     remote.set_password(token["token"].as_str()).unwrap();
     remote
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn automatic_cleanup_recovers_once_and_skips_a_recreated_ref_or_stale_setting() {
+    use super::super::head_branch::automatic;
+
+    for (recreate, toggle) in [(false, false), (true, false), (false, true)] {
+        let h = Harness::new(false).await;
+        let writer = h.login().await;
+        let remote = remote(&h, &writer).await;
+        let checkout = tempfile::tempdir().unwrap();
+        let path = checkout.path();
+        let (head, opened) = open_pull(&h, &writer, remote.as_str(), path).await;
+        let repo = &h.server.repositories.values()[0];
+        let save =
+            async |version, enabled| {
+                h.write(Method::PUT, MERGE_SETTINGS, &writer, json!({
+                "expected_version":version,"enabled":["squash"],"delete_head_branches":enabled,
+            })).await.error_for_status().unwrap();
+            };
+        save(0, true).await;
+        h.write(
+            Method::PUT,
+            "/api/repos/team/private/settings/branch-protections",
+            &writer,
+            json!({"expected_version":0,"rules":[]}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+        h.write(
+            Method::POST,
+            &format!("{PULL}/merge"),
+            &writer,
+            json!({
+                "request_id":Uuid::now_v7(),"version":opened["version"],"method":"squash",
+                "base_oid":opened["base_oid"],"head_oid":head,
+            }),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+        assert_eq!(h.json(HEAD_BRANCH, &writer).await["cleanup_pending"], true);
+        let pending = async || {
+            automatic::pending(&h.server, repo, None)
+                .await
+                .unwrap()
+                .pop()
+                .unwrap()
+        };
+        let (first, replay) = (pending().await, pending().await);
+        let restore_ref = async || {
+            // After a squash the original head is unreachable through live refs.
+            let mut restore = h.json(HEAD_BRANCH, &writer).await["branch"].clone();
+            assert_eq!(restore["action"], "restore");
+            restore["request_id"] = json!(Uuid::now_v7());
+            h.write(Method::POST, HEAD_BRANCH, &writer, restore)
+                .await
+                .error_for_status()
+                .unwrap();
+        };
+        if recreate {
+            git::success(path, &["push", remote.as_str(), "--delete", "feature"]).await;
+            restore_ref().await;
+        }
+        if toggle {
+            save(1, false).await;
+            save(2, true).await;
+        }
+        automatic::reconcile(&h.server, repo, first).await.unwrap();
+        assert!(
+            automatic::pending(&h.server, repo, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        if !recreate && !toggle {
+            restore_ref().await;
+            automatic::reconcile(&h.server, repo, replay).await.unwrap();
+        }
+        assert_eq!(
+            git::success(path, &["ls-remote", remote.as_str(), "refs/heads/feature"]).await,
+            format!("{head}\trefs/heads/feature")
+        );
+        h.close().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires agent-browser and the built embedded UI"]
+async fn native_browser_enables_automatic_cleanup_and_restores_the_merged_branch() {
+    let h = Harness::new(false).await;
+    let writer = h.login().await;
+    let remote = remote(&h, &writer).await;
+    let checkout = tempfile::tempdir().unwrap();
+    let path = checkout.path();
+    let (head, _) = open_pull(&h, &writer, remote.as_str(), path).await;
+    h.write(
+        Method::PUT,
+        "/api/repos/team/private/settings/branch-protections",
+        &writer,
+        json!({"expected_version":0,"rules":[]}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let browser = Browser::new("auto-cleanup");
+    browser
+        .run(&["open", &format!("{}/team/private/settings", h.origin)])
+        .await;
+    browser.sign_in().await;
+    let click = async |role, name| {
+        browser
+            .run(&["find", "role", role, "click", "--name", name, "--exact"])
+            .await;
+    };
+    browser
+        .run(&["wait", "--text", "Automatically delete head branches"])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "checkbox",
+            "click",
+            "--name",
+            "Automatically delete head branches",
+        ])
+        .await;
+    click("button", "Save merge methods").await;
+    browser.run(&["wait", "--fn", "[...document.querySelectorAll('button')].some(button => button.disabled && button.textContent.trim() === 'Save merge methods')"]).await;
+    assert_eq!(
+        h.json(MERGE_SETTINGS, &writer).await["delete_head_branches"],
+        true
+    );
+    browser
+        .run(&["open", &format!("{}/team/private/pull/1", h.origin)])
+        .await;
+    browser.run(&["wait", "--text", "Merge pull request"]).await;
+    click("button", "Merge pull request").await;
+    click("button", "Confirm merge").await;
+    browser
+        .run(&["wait", "--text", "Automatic deletion of feature is pending"])
+        .await;
+    let worker = tokio::spawn(crate::api::auto_merge::run(h.server.clone()));
+    browser.run(&["wait", "--text", "Restore branch"]).await;
+    assert!(
+        git::success(path, &["ls-remote", remote.as_str(), "refs/heads/feature"])
+            .await
+            .is_empty()
+    );
+    click("button", "Restore branch").await;
+    browser.run(&["wait", "--text", "Restored feature"]).await;
+    assert_eq!(
+        git::success(path, &["ls-remote", remote.as_str(), "refs/heads/feature"]).await,
+        format!("{head}\trefs/heads/feature")
+    );
+    worker.abort();
+    drop(browser);
+    h.close().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

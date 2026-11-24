@@ -325,12 +325,13 @@ async fn merge_completion_closes_captured_issues_once() {
         TransitionPullMergeOutcome::Applied(_)
     ));
     assert!(
-        write::<CaptureIssueClosure>(
+        write::<CaptureMergeEffects>(
             &cell,
-            CaptureIssueClosureInput {
+            CaptureMergeEffectsInput {
                 pull: 1,
                 request_id: merge.request_id,
-                on_default: true
+                on_default: true,
+                cleanup: None,
             }
         )
         .await

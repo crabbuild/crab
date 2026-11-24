@@ -653,7 +653,16 @@ pub(crate) async fn authorize_merge_publication(
     // Save the closure before the marker so finishing a proven receipt does
     // not reinterpret it using a later HEAD or a later edit to the links.
     let on_default = repo.default_ref().await? == update.name;
-    storage::capture_issue_closure(server, repo, pull.number, pending, on_default).await
+    let source = publication.head_repository.as_deref().unwrap_or(repo);
+    let cleanup = head_branch::automatic::capture(
+        server,
+        source,
+        &grant.principal,
+        &pull.head_ref,
+        &head_oid,
+    )
+    .await?;
+    storage::capture_merge_effects(server, repo, pull.number, pending, on_default, cleanup).await
 }
 
 fn merge_requirements(

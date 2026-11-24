@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Failure } from "@/components/discussion/failure";
 import { useSubmission } from "@/components/discussion/hooks";
 import { useMutation } from "@/components/discussion/mutations";
@@ -46,13 +46,23 @@ export function HeadBranch({
     action: Action["action"];
   }>();
   const route = `pulls/${pull.number}/head-branch`;
-  const state = useRequest<{ branch: Action | null }>(
+  const state = useRequest<{
+    branch: Action | null;
+    cleanup_pending?: boolean;
+  }>(
     endpoint(source, route, { upstream, version: String(pull.version) }),
     source.id,
   );
   const branch = state.data?.branch;
   const name = branchName(pull.head_ref);
   const available = branch?.version === pull.version ? branch : undefined;
+  const cleanupPending = state.data?.cleanup_pending;
+  const retry = state.retry;
+  useEffect(() => {
+    if (!cleanupPending) return;
+    const timer = window.setTimeout(retry, 2500);
+    return () => window.clearTimeout(timer);
+  }, [cleanupPending, retry]);
 
   async function submit(input: Action) {
     const result = await mutation.run<{ branch: string; commit: string }>(
@@ -72,6 +82,11 @@ export function HeadBranch({
 
   return (
     <div className="mt-3 space-y-2">
+      {cleanupPending && (
+        <p className="text-sm text-muted-foreground" role="status">
+          Automatic deletion of <code>{name}</code> is pending.
+        </p>
+      )}
       {saved && (
         <p className="text-sm" role="status">
           {saved.action === "delete" ? "Deleted" : "Restored"}{" "}

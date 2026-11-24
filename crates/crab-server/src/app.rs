@@ -124,6 +124,8 @@ pub(crate) enum Error {
     MergeSettingsPermission,
     #[error("Administrator access is required to manage merge queue settings")]
     MergeQueueSettingsPermission,
+    #[error("Administrator access is required to manage automatic branch deletion")]
+    BranchCleanupSettingsPermission,
     #[error("Git writes are busy")]
     MergeBusy,
     #[error("Write access is required to merge pull requests")]
@@ -495,6 +497,11 @@ impl IntoResponse for Error {
                 StatusCode::FORBIDDEN,
                 "merge_queue_settings_permission",
                 "Administrator access is required to manage merge queue settings",
+            ),
+            Self::BranchCleanupSettingsPermission => (
+                StatusCode::FORBIDDEN,
+                "branch_cleanup_settings_permission",
+                "Administrator access is required to manage automatic branch deletion",
             ),
             Self::MergeBusy => (
                 StatusCode::TOO_MANY_REQUESTS,
@@ -1040,6 +1047,20 @@ pub(crate) async fn membership(
     principal: &Principal,
     repo: &Repository,
 ) -> Result<Membership> {
+    if principal.is_auto_merge() {
+        // A persisted automation actor has no live session to enforce suspension.
+        let auth = server.auth.as_ref().ok_or(Error::NotFound)?;
+        let actor = principal.identity().ok_or(Error::NotFound)?;
+        if actor.issuer != auth.issuer()
+            || auth
+                .account_state(&actor.subject)
+                .await
+                .map_err(|error| Error::IdentityAuthority(Box::new(error)))?
+                .suspended
+        {
+            return Err(Error::NotFound);
+        }
+    }
     if principal.is_local() || principal.import_grant().is_some() {
         if !principal.can_read(repo.id) {
             return Err(Error::NotFound);

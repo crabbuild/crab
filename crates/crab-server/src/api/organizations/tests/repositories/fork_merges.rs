@@ -87,6 +87,17 @@ pub(super) async fn exercise(
     .await;
 
     for (method, target) in targets {
+        let source = h.server.repositories.by_id(fork).unwrap();
+        if method == "merge_commit" {
+            let settings = format!(
+                "/api/repos/{}/{}/settings/merge-methods",
+                source.config.owner, source.config.name
+            );
+            let existing = h.json(&settings, alice).await;
+            repository_write(h, Method::PUT, &settings, alice, fork, json!({
+                "expected_version":existing["version"],"enabled":existing["enabled"],"delete_head_branches":true,
+            })).await.error_for_status().unwrap();
+        }
         let input = json!({"request_id":Uuid::now_v7(),"title":"Merge from a fork","body":"", "base_ref":format!("refs/heads/{target}"),"head_ref":"refs/heads/proposal","head_repository":fork,"expected":{"base_oid":base,"head_oid":head}});
         if method == "squash" {
             let source = h.server.repositories.by_id(fork).unwrap();
@@ -280,14 +291,50 @@ pub(super) async fn exercise(
                     base
                 );
             }
-            _ => assert_eq!(
-                git(
-                    upstream_work,
-                    &["rev-list", "--parents", "-1", "FETCH_HEAD"]
-                )
-                .await,
-                format!("{commit} {base} {head}")
-            ),
+            _ => {
+                assert_eq!(
+                    git(
+                        upstream_work,
+                        &["rev-list", "--parents", "-1", "FETCH_HEAD"]
+                    )
+                    .await,
+                    format!("{commit} {base} {head}")
+                );
+                let branch_path = format!(
+                    "/api/repos/{}/{}/pulls/{number}/head-branch?upstream={id}",
+                    source.config.owner, source.config.name
+                );
+                assert_eq!(h.json(&branch_path, alice).await["cleanup_pending"], true);
+                let worker = tokio::spawn(crate::api::auto_merge::run(h.server.clone()));
+                tokio::time::timeout(std::time::Duration::from_secs(20), async {
+                    while h.json(&branch_path, alice).await["branch"]["action"] != "restore" {
+                        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                worker.abort();
+                assert!(
+                    git(fork_work, &["ls-remote", "origin", "refs/heads/proposal"])
+                        .await
+                        .is_empty()
+                );
+                assert_eq!(
+                    git(
+                        upstream_work,
+                        &["ls-remote", upstream_remote, "refs/heads/proposal"]
+                    )
+                    .await,
+                    format!("{base}\trefs/heads/proposal")
+                );
+                let mut restoration = h.json(&branch_path, alice).await["branch"].clone();
+                assert_eq!(restoration["action"], "restore");
+                restoration["request_id"] = json!(Uuid::now_v7());
+                repository_write(h, Method::POST, &branch_path, alice, fork, restoration)
+                    .await
+                    .error_for_status()
+                    .unwrap();
+            }
         }
         if method != "merge_commit" {
             let shutdown = &h.server.cancellation;

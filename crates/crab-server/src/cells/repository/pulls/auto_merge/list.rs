@@ -318,6 +318,7 @@ mod tests {
                     expected_version: 0,
                     enabled: MergeMethod::ALL.to_vec(),
                     auto_merge: None,
+                    delete_head_branches: None,
                     merge_queue: None,
                     merge_queue_method: None,
                     merge_queue_builds: Some(100),

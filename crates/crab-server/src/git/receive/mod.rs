@@ -798,8 +798,19 @@ pub(crate) struct PullBranchPublication {
     pub upstream: Arc<Repository>,
     pub source: Arc<Repository>,
     pub pull: u64,
-    pub version: u64,
+    pub binding: PullBranchBinding,
     pub plan_id: String,
+}
+
+pub(crate) enum PullBranchBinding {
+    Manual {
+        version: u64,
+    },
+    Automatic {
+        merge: uuid::Uuid,
+        setting_generation: u64,
+        ref_transaction: String,
+    },
 }
 
 pub(crate) async fn edit_pull_branch(

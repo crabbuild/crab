@@ -1,11 +1,12 @@
-use super::branch_update::associated_pull;
-use super::*;
-use crate::cells::repository::pull_branch::{InUse, Reference};
-use crate::git::receive::{self, PullBranchPublication, ReceiveError};
+use super::{branch_update::associated_pull, *};
+use crate::cells::repository::pull_branch::{HasCleanup, InUse, Reference};
+use crate::git::receive::{self, PullBranchBinding, PullBranchPublication, ReceiveError};
 use crate::repository::settings;
 use crab_git::receive_plan::{ReceivePlanError, RefUpdate};
 use gix_hash::ObjectId;
 use serde::Serialize;
+
+pub(super) mod automatic;
 
 pub(super) fn routes() -> Router<Arc<Server>> {
     Router::new().route(
@@ -78,31 +79,51 @@ async fn availability(
     let source = app::repository(&server, &principal, &(owner, name))?;
     let upstream = discussion(&server, &source, route.upstream)?;
     let pull = associated_pull(&server, &upstream, &source, app::number(number)?).await?;
-    let branch = check_availability(&server, &principal, &source, &pull).await?;
-    app::membership(&server, &principal, &source).await?;
-    Ok(Json(json!({ "branch": branch })))
+    let current = app::membership(&server, &principal, &source).await?;
+    if !current.principal.can_write(source.id) {
+        return Ok(Json(json!({ "branch": null })));
+    }
+    // Acknowledge cleanup after the ref changes. Read the job first so its
+    // removal cannot hide a concurrent deletion from the browser's refresh.
+    let cleanup_pending = if pull.state == PullState::Merged {
+        let cell = app::repository_cell(&server, &upstream)?;
+        app::query_output(
+            cell.client
+                .query::<HasCleanup>(&cell.target, None, pull.number)
+                .await,
+        )?
+    } else {
+        false
+    };
+    let branch = check_availability(&server, &current, &source, &pull).await?;
+    let current = app::membership(&server, &principal, &source).await?;
+    if !current.principal.can_write(source.id) {
+        return Ok(Json(json!({ "branch": null })));
+    }
+    let mut result = json!({ "branch": branch });
+    if cleanup_pending && branch.is_some_and(|branch| matches!(branch.action, Action::Delete)) {
+        result["cleanup_pending"] = json!(true);
+    }
+    Ok(Json(result))
 }
 
 async fn check_availability(
     server: &Server,
-    principal: &Principal,
+    grant: &app::Membership,
     source: &Repository,
     pull: &PullRequest,
 ) -> Result<Option<Branch>> {
     let Some(head) = saved_head(pull) else {
         return Ok(None);
     };
-    let current = app::membership(server, principal, source).await?;
-    if !current.principal.can_write(source.id)
-        || settings::load_lifecycle(server, source).await?.archived
-    {
+    if settings::load_lifecycle(server, source).await?.archived {
         return Ok(None);
     }
     let action = match source.ref_oid(&pull.head_ref).await? {
         None => Action::Restore,
         Some(ref current_head) if current_head == head => {
             let (allowed, used) = tokio::try_join!(
-                may_delete(server, source, &current, &pull.head_ref, head),
+                may_delete(server, source, grant, &pull.head_ref, head),
                 in_use(server, source, &pull.head_ref),
             )?;
             if !allowed || used {
@@ -236,7 +257,9 @@ async fn edit(
             upstream,
             source,
             pull: number,
-            version: input.version,
+            binding: PullBranchBinding::Manual {
+                version: input.version,
+            },
             plan_id,
         },
     )
@@ -292,7 +315,24 @@ pub(crate) async fn authorize_pull_branch(
         return Err(ReceiveError::NotFound);
     }
     let pull = associated_pull(server, &edit.upstream, source, edit.pull).await?;
-    if pull.version != edit.version
+    let bound = match &edit.binding {
+        PullBranchBinding::Manual { version } => pull.version == *version,
+        PullBranchBinding::Automatic {
+            merge,
+            setting_generation,
+            ..
+        } => {
+            let policy = merge_methods::load(server, source).await?;
+            update.new.is_none()
+                && policy.delete_head_branches
+                && policy.delete_head_branches_generation == *setting_generation
+                && pull
+                    .merge
+                    .as_ref()
+                    .is_some_and(|record| Uuid::parse_str(&record.request_id) == Ok(*merge))
+        }
+    };
+    if !bound
         || update.old.is_some() == update.new.is_some()
         || pull.head_ref != update.name
         || saved_head(&pull)
@@ -303,6 +343,9 @@ pub(crate) async fn authorize_pull_branch(
                 .as_deref()
     {
         return Err(Error::PullBranchChanged.into());
+    }
+    if update.new.is_none() && source.default_ref().await? == update.name {
+        return Err(ReceiveError::Protected);
     }
     // New dependencies on this branch take the same ref lease at creation,
     // retargeting, or reopening. Hold it through the deletion marker.

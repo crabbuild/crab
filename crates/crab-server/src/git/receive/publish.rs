@@ -609,6 +609,13 @@ impl RefMutation<'_> {
         actor: crate::cells::repository::rulesets::BypassContext<'_>,
     ) -> Result<std::collections::BTreeSet<crate::cells::repository::rulesets::RulesetId>> {
         let pull = matches!(self.publication, Publication::PullRequest(_));
+        let automatic_cleanup = matches!(
+            self.publication,
+            Publication::PullBranch(super::PullBranchPublication {
+                binding: super::PullBranchBinding::Automatic { .. },
+                ..
+            })
+        );
         if let Publication::PullRequest(PullPublication {
             candidate: Some(candidate),
             number,
@@ -648,7 +655,7 @@ impl RefMutation<'_> {
                     }
                 });
                 if let Some(message) = violation {
-                    if pull || !rule.allows_bypass(actor.for_rule(id), false) {
+                    if pull || automatic_cleanup || !rule.allows_bypass(actor.for_rule(id), false) {
                         return Err(ReceiveError::RefRule(message));
                     }
                     bypassed.insert(id);
@@ -719,6 +726,15 @@ async fn publish_attempt(
         .into());
     }
     let refs = view.refs().clone();
+    if let (Publication::PullBranch(edit), [update]) =
+        (&input.publication, request.updates.as_slice())
+        && let super::PullBranchBinding::Automatic {
+            ref_transaction, ..
+        } = &edit.binding
+        && view.visible_ref_transactions().get(&update.name) != Some(ref_transaction)
+    {
+        return Err(ReceiveError::BranchChanged);
+    }
     if matches!(input.publication, Publication::ForkSync { .. })
         && request.updates.iter().any(|update| {
             refs.get(&update.name).map(String::as_str)
