@@ -23,6 +23,7 @@ async fn command(cell: &RepositoryCell, command: Command) -> Outcome {
                 request_id: Uuid::now_v7(),
                 actor: actor(),
                 can_write: true,
+                issue_type: None,
                 command,
                 cancel: false,
             },
@@ -163,6 +164,7 @@ async fn project_retries_cancel_conflicts_and_field_validation_preserve_canonica
         request_id: Uuid::now_v7(),
         actor: actor(),
         can_write: true,
+        issue_type: None,
         command: created(id),
         cancel: false,
     };
@@ -432,7 +434,8 @@ async fn issue_creation_conversion_and_parent_assignment_share_one_transaction()
                 project: id,
                 version: 1,
                 item: draft.clone(),
-                parent: Some(999)
+                parent: Some(999),
+                type_id: None,
             }
         )
         .await,
@@ -453,7 +456,8 @@ async fn issue_creation_conversion_and_parent_assignment_share_one_transaction()
                 project: id,
                 version: 1,
                 item: draft,
-                parent: Some(1)
+                parent: Some(1),
+                type_id: None,
             }
         )
         .await,

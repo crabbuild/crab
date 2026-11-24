@@ -10,10 +10,13 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 mod auto_merge;
+mod branch_restore;
 mod branch_update;
 mod candidate;
 mod retarget;
+mod stacked;
 mod strict_head;
+mod templates;
 
 async fn json_request(
     client: &reqwest::Client,
@@ -149,6 +152,23 @@ async fn pull_preview_matches_git_and_creation_keeps_the_inspected_tips() {
         "base_ref":"refs/heads/main", "head_ref":"refs/heads/topic",
         "expected": {"base_oid":preview["base_tip"], "head_oid":preview["commit"]},
     });
+    let repo = &server.repositories.values()[0];
+    for reference in ["refs/heads/main", "refs/heads/topic"] {
+        let (status, body) =
+            crab_remote::publication::with_leases::<_, crab_remote::publication::Error, _, _>(
+                &repo.store,
+                &repo.layout,
+                [reference.to_owned()],
+                std::time::Duration::from_secs(30),
+                &server.cancellation,
+                |_, _| async {
+                    Ok(json_request(&client, reqwest::Method::POST, &pulls, input.clone()).await)
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{reference}: {body}");
+    }
     git::success(path, &["commit", "--allow-empty", "-m", "topic moves"]).await;
     let updated = git::success(path, &["rev-parse", "HEAD"]).await;
     git::success(path, &["push", &git_url, "topic"]).await;

@@ -2437,6 +2437,7 @@ owner label does not acquire ownership.
 | Issue templates | `GET /api/repos/{owner}/{name}/issues/templates` |
 | Issue comments | `GET/POST /api/repos/{owner}/{name}/issues/{number}/comments`, `GET/PATCH /api/repos/{owner}/{name}/issues/{number}/comments/{comment}` |
 | Pull requests | `GET/POST /api/repos/{owner}/{name}/pulls`, `GET/PATCH /api/repos/{owner}/{name}/pulls/{number}` |
+| Pull request templates | `GET /api/repos/{owner}/{name}/pulls/templates` |
 | Pull comments | `GET/POST /api/repos/{owner}/{name}/pulls/{number}/comments`, `GET/PATCH /api/repos/{owner}/{name}/pulls/{number}/comments/{comment}` |
 | Reviews | `GET/POST /api/repos/{owner}/{name}/pulls/{number}/reviews`, `GET/PATCH /api/repos/{owner}/{name}/pulls/{number}/reviews/{review}` |
 | Pending review | `GET/PUT /api/repos/{owner}/{name}/pulls/{number}/pending-review`, `POST .../pending-review/submit` |
@@ -2829,6 +2830,32 @@ workflow status and dates.
 Project editors can drag work between status or custom field groups on a
 table or board. Dropping into **No value** clears the custom field. These
 moves use the versioned Project item command and preserve other item fields.
+
+Choose **Add work to** on a status or custom-field group to start an item
+with that value. The editor keeps the prefilled value when you switch work
+sources. Unfinished items started this way have separate recovery drafts.
+
+In a repository Project, **Create issue in** on an issue-type group opens
+the new issue editor with the type selected. The issue, its type, and its
+Project membership save together. This action also supports **No type**.
+If a type is disabled before submission, the editor can select an enabled
+type and keep the draft. The repository Project `create_issue` command
+accepts an optional `type_id` with the enabled organization type UUID.
+
+In an organization Project, choose **New issue** when adding work, or
+**Create issue in** on an issue-type group. Choose a linked repository
+owned by the organization where you have Write access. The editor keeps
+the selected issue type and planning fields in its recovery draft.
+Organization Project `create_issue` commands take `project`, `repository`,
+`item` (a new item with no subject), and an optional `type_id`.
+The server reserves the Project item, commits the issue and type in the
+repository, and then links the issue. Retry an interrupted submission with
+the same request ID to recover the original result. **Cancel if not
+applied** fences a pending creation or completes the link if the issue
+already exists.
+After five minutes, Crab automatically finishes the link for a published
+issue or cancels a submission that never published, even if the browser
+has lost its saved request.
 
 Use `group_by=status`, `group_by=issue_type`, or `group_by=field:<UUID>` with
 either Project item endpoint to receive `group_counts`. Issue-type groupings
@@ -3782,6 +3809,21 @@ pure reorder does not add a timeline event.
 
 ### Work with pull requests and reviews
 
+The pull request composer fills the description from `pull_request_template.md`
+on the destination repository's default branch. Crab looks in `.github/`, the
+repository root, then `docs/`. Put named Markdown templates in a
+`PULL_REQUEST_TEMPLATE/` directory under any of these locations. Authors can
+choose a template in the composer or open a comparison link with
+`?template=release.md`. A `body` parameter supplies the initial description
+when both parameters are present. Choosing a different template requires
+applying it explicitly, and changing the comparison branches keeps edits.
+
+When a repository has no local pull request templates, Crab looks in the
+namespace's `.github` repository. Inheritance requires current read access
+to both repositories. A local empty default template provides a blank initial
+description and overrides the shared catalog. The composer lists up to 32
+named templates and accepts ordinary UTF-8 Markdown files up to 32 KiB each.
+
 The browser compares the head to the Git merge base. It sends the exact
 base tip and head from that preview when creating the pull request. If either
 tip changes before submission, the API rejects the request before creating a
@@ -3882,8 +3924,12 @@ remain unchanged. Update serving peers and the bundled UI together.
 Pull creation records exact base and head branch names plus their opening commit OIDs. Detail reads refresh both live tips without rewriting the immutable opening evidence.
 
 Browser creation supplies `expected: {base_oid, head_oid}` from its completed
-comparison. A stale or deleted ref records a terminal 409 `comparison_changed`
-with the rejected write-outcome header. Review the refreshed comparison and use
+comparison. The server rechecks both refs under the same leases native Git
+writes use and holds them through the Repository Cell decision. For a fork,
+it leases the upstream base before the fork head. A busy ref returns HTTP 429
+and the same submission can be retried. A stale or deleted ref records a
+terminal 409 `comparison_changed` with the rejected write-outcome header.
+Review the refreshed comparison and use
 a new submission UUID. Exact retries recover the original result even if refs
 have moved again. Tagged ref-only create clients retain server-side tip capture.
 Inline review `base_oid` identifies the effective comparison base while PR
@@ -4160,6 +4206,75 @@ publishes the resolved commit, and then switches the existing pull request to
 the new head. The switch records an activity event, expires prior approvals,
 and starts a new review comparison. If the PR or a captured tip changes before
 the switch, Crab shows a link to the branch and leaves the PR on its current head.
+
+On a closed or merged pull request, **Delete branch** removes the recorded
+head branch from the source repository. The current tip must match the saved
+head, and no open pull request can still use the branch as its head.
+**Restore branch** recreates a missing head at that same commit if its Git
+objects are still present. Merged pull requests use the original head recorded
+at merge. Closed pull requests use the head saved in their comparison. Both
+actions require current Write access and follow the source repository's branch
+protection and rulesets. The repository's default branch cannot be deleted.
+
+When the merged pull request's head and base are in the same repository,
+**Delete branch** on the pull request and automatic deletion move eligible open
+pull requests from that branch to the merged pull request's base. The confirmation
+lists the affected pull requests and the new base. Manual and automatic deletion lease the relevant
+refs, including any dependent fork heads, and save the new comparisons as one
+repository transaction before publishing the deletion. Base changes use the
+same review invalidation and CODEOWNERS behavior as a manual base change.
+The branch is kept if the batch would leave an invalid comparison or contains
+more than 16 dependent pull requests. For a closed unmerged pull request or
+a merged pull request from a fork, a branch used as a base is kept.
+
+From the **Branches** page, the delete confirmation shows the same impact
+when merged pull requests for the exact branch and commit agree on the new base.
+Stock Git can delete these branches with `git push origin --delete <branch>`.
+One atomic push can remove several independent branches and move up to 16
+dependent pull requests in a single repository transaction. Push changes to a
+replacement base or dependent head separately. If matching merges point to
+different bases, use **Delete branch** on the intended merged pull request.
+
+Repository administrators can enable **Automatically delete head branches**
+in **Settings** under **Pull request merge methods**. Use the setting in the
+source repository, including a fork. Crab records the opt-in and the source
+branch's Git transaction during publication, then queues deletion when the
+merge completes. Direct merges, auto-merge, and the merge queue use the same
+cleanup. The actor who publishes the merge needs current Write access in the
+source repository. Cleanup skips archived repositories, the default branch,
+protected branches, ruleset violations, branches with open pull requests that
+cannot be moved, and branches that moved or were recreated. Changing the setting
+invalidates pending cleanup from the previous setting. Restore an automatically
+deleted branch the same way as a manually deleted branch.
+
+`PUT .../settings/merge-methods` accepts the optional administrator-only
+`delete_head_branches` boolean. It defaults to `false`.
+
+`GET /api/repos/{owner}/{name}/pulls/{number}/head-branch` returns the available
+`branch` action with its pull version, source repository UUID, and commit.
+When dependent pull requests can move, `branch.retarget` lists their numbers
+in `pulls`, their new `base_ref`, and a `token` for confirming that exact set.
+`cleanup_pending: true` indicates that automatic deletion is queued for a
+branch that still offers the delete action.
+`POST` accepts `action` (`delete` or `restore`), `request_id`, `version`,
+`repository_id`, and `head_oid`. Include `retarget_token` when confirming a
+delete action with dependent pull requests. Publication checks the exact tip or its absence
+under the Git ref lease. Retrying a recorded request recovers its result
+without repeating the ref edit or retargeting the same pull requests again.
+For a private fork, use the fork's repository route and include the PR's
+repository UUID as `upstream` in the query string.
+
+`GET /api/repos/{owner}/{name}/branches/deletion?name=…&expected_oid=…`
+returns `retarget: null` for an ordinary deletion or the matched pull request
+number, version, destination, dependent numbers, and confirmation token. Submit
+a stacked deletion through the returned pull request's `head-branch` action.
+
+Reopening a closed pull request requires both branch names to exist, including
+the exact source repository for a fork head. Conversation, bulk, and direct
+state edits keep the selected refs leased through the native state decision.
+A missing ref returns HTTP 409 `pull_branches_unavailable`. A combined comment
+or bulk edit rolls back if reopening fails. Exact retries recover recorded
+state submissions. Once the branch is restored, start a fresh reopen action.
 
 Choose **Update with rebase** from the branch update menu to replay the head
 commits on top of the captured base. Confirm **Rebase branch** to replace the

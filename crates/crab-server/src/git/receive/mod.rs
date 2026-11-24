@@ -794,6 +794,48 @@ pub(crate) async fn delete_branch(
     .await
 }
 
+pub(crate) struct PullBranchPublication {
+    pub upstream: Arc<Repository>,
+    pub source: Arc<Repository>,
+    pub pull: u64,
+    pub binding: PullBranchBinding,
+    pub plan_id: String,
+}
+
+pub(crate) enum PullBranchBinding {
+    Manual {
+        version: u64,
+        retarget_token: Option<String>,
+    },
+    Automatic {
+        merge: uuid::Uuid,
+        setting_generation: u64,
+        ref_transaction: String,
+    },
+}
+
+pub(crate) async fn edit_pull_branch(
+    server: Arc<Server>,
+    principal: Principal,
+    update: crab_git::receive_plan::RefUpdate,
+    edit: PullBranchPublication,
+) -> Result<()> {
+    let key = (
+        edit.source.config.owner.clone(),
+        edit.source.config.name.clone(),
+    );
+    publish_ref(
+        server,
+        principal,
+        key,
+        RefPublication::Update {
+            update,
+            publication: publish::Publication::PullBranch(edit),
+        },
+    )
+    .await
+}
+
 pub(crate) async fn set_default_branch(
     server: Arc<Server>,
     principal: Principal,
@@ -953,3 +995,5 @@ async fn publish_ref(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::fault_plan_intent;

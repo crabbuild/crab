@@ -181,6 +181,7 @@ async fn distinct_items_succeed_independently_and_rejected_submissions_remain_te
         request_id: Uuid::now_v7(),
         actor: actor(),
         can_write: false,
+        issue_type: None,
         command: created(Uuid::now_v7()),
         cancel: false,
     };
@@ -325,6 +326,7 @@ async fn native_restart_retains_projects_items_parent_edges_and_submission_decis
         request_id: Uuid::now_v7(),
         actor: actor(),
         can_write: true,
+        issue_type: None,
         command: Command::Parent {
             child: 2,
             parent: Some(1),

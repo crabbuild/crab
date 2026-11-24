@@ -25,7 +25,13 @@ import {
   ChangeComparison,
   usePullComparison,
 } from "@/features/repository/diff";
-import { navigate, type Refs, type Repository } from "@/lib/api";
+import {
+  endpoint,
+  navigate,
+  useRequest,
+  type Refs,
+  type Repository,
+} from "@/lib/api";
 import type { CodeThemes } from "@/lib/code-theme";
 import { repoHref, repositoryRoute } from "@/lib/repository-route";
 import { GitMergeIcon } from "@primer/octicons-react";
@@ -33,6 +39,7 @@ import { useState } from "react";
 
 import type { PullRequest } from "./model";
 import { branch } from "./presentation";
+import { PullTemplatePicker, type PullTemplates } from "./templates";
 
 export function NewPull({
   repo,
@@ -81,7 +88,9 @@ export function NewPull({
   const [title, setTitle] = useState(
     (url.searchParams.get("title") ?? "").slice(0, 256),
   );
-  const [body, setBody] = useState("");
+  const [description, setDescription] = useState(
+    () => url.searchParams.get("body") ?? undefined,
+  );
   const [draft, setDraft] = useState(false);
   const [metadata, setMetadata] = useState<MetadataDraft>({
     labels: [],
@@ -103,6 +112,16 @@ export function NewPull({
   const comparison = usePullComparison(headRepo, base, head, fork && repo.id);
   const preview = comparison.data;
   const canSubmit = Boolean(preview && preview.base !== preview.commit);
+  const requestedTemplate = url.searchParams.get("template");
+  const templates = useRequest<PullTemplates>(
+    canCreate && comparable ? endpoint(repo, "pulls/templates") : null,
+    repo.id,
+  );
+  const initialTemplate = requestedTemplate
+    ? templates.data?.items.find((item) => item.file === requestedTemplate)
+    : templates.data?.default;
+  const body = description ?? initialTemplate?.body ?? "";
+  const awaitingDescription = description === undefined && templates.loading;
   return (
     <section className="pulls-page pull-compose">
       {fork ? (
@@ -193,7 +212,42 @@ export function NewPull({
                 title={title}
                 body={body}
                 onTitle={setTitle}
-                onBody={setBody}
+                onBody={setDescription}
+                descriptionBefore={
+                  awaitingDescription ? (
+                    <p className="muted text-sm" role="status">
+                      Loading pull request templates…
+                    </p>
+                  ) : templates.error ? (
+                    <div className="flex flex-wrap items-center gap-2 text-sm">
+                      <p className="muted">
+                        Pull request templates are unavailable.
+                      </p>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={templates.retry}
+                        disabled={creation.locked}
+                      >
+                        Retry templates
+                      </Button>
+                    </div>
+                  ) : (
+                    templates.data && (
+                      <PullTemplatePicker
+                        catalog={templates.data}
+                        initialTemplate={initialTemplate}
+                        missingTemplate={Boolean(
+                          requestedTemplate && !initialTemplate,
+                        )}
+                        body={body}
+                        onApply={setDescription}
+                        disabled={creation.locked}
+                      />
+                    )
+                  )
+                }
                 descriptionHint={
                   <>
                     Use <code>Fixes #123</code> to close a repository issue when
@@ -212,7 +266,12 @@ export function NewPull({
                 }}
                 onSubmit={(event) => {
                   event.preventDefault();
-                  if (!canSubmit && !creation.recovering) return;
+                  if (
+                    (!canSubmit || awaitingDescription) &&
+                    !creation.recovering
+                  )
+                    return;
+                  setDescription(body);
                   const input = {
                     title,
                     body,
@@ -237,6 +296,7 @@ export function NewPull({
                       creation.pending ||
                       creation.rejected ||
                       !title.trim() ||
+                      awaitingDescription ||
                       (!canSubmit && !creation.recovering)
                     }
                   >

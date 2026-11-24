@@ -223,7 +223,7 @@ async fn native_browser_inherits_issue_templates_and_rechecks_source_access() {
     let application_id = Uuid::parse_str(application["id"].as_str().unwrap()).unwrap();
     let source = format!("/api/repos/{owner}/.github");
     let target = format!("/api/repos/{owner}/app");
-    let publish = async |name: &str, files: &[(&str, &str)]| {
+    let publish = async |name: &str, files: &[(&str, &str)], pull_template: &str| {
         let token: Value = h
             .write(
                 Method::POST,
@@ -246,19 +246,28 @@ async fn native_browser_inherits_issue_templates_and_rechecks_source_access() {
         for (file, content) in files {
             std::fs::write(directory.join(file), content).unwrap();
         }
+        std::fs::write(
+            checkout.path().join(".github/pull_request_template.md"),
+            pull_template,
+        )
+        .unwrap();
         git(
             checkout.path(),
             &["init", "--initial-branch=main", "--object-format=sha1", "."],
         )
         .await;
         git(checkout.path(), &["add", ".github"]).await;
-        git(checkout.path(), &["commit", "-m", "Publish issue settings"]).await;
+        git(
+            checkout.path(),
+            &["commit", "-m", "Publish community templates"],
+        )
+        .await;
         git(checkout.path(), &["push", remote.as_str(), "main"]).await;
     };
     publish(".github", &[
         ("report.md", "---\nname: Shared issue report\nabout: Describe a problem\nlabels: bug\n---\n## Details\n"),
         ("config.yml", "blank_issues_enabled: false\n"),
-    ]).await;
+    ], "## Shared review checklist\n").await;
     // The inherited name must resolve to a label in the destination.
     for name in ["internal", "bug"] {
         repository_write(
@@ -297,14 +306,22 @@ async fn native_browser_inherits_issue_templates_and_rechecks_source_access() {
     *h.provider.mode.lock().await = "member".into();
     let reader = h.login().await;
     let templates = format!("{target}/issues/templates");
+    let pull_templates = format!("{target}/pulls/templates");
     let private = h.json(&templates, &reader).await;
     assert_eq!(private["items"], json!([]));
     assert_eq!(private["source"], Value::Null);
+    assert!(h.json(&pull_templates, &reader).await["default"].is_null());
     access(&source, defaults_id, true).await;
     let inherited = h.json(&templates, &reader).await;
     assert_eq!(inherited["source"], json!({"owner":owner,"name":".github"}));
     assert_eq!(inherited["blank_allowed"], false);
     assert_eq!(inherited["items"][0]["labels"][0]["id"], 2);
+    let inherited_pull = h.json(&pull_templates, &reader).await;
+    assert_eq!(inherited_pull["source"]["id"], defaults_id.to_string());
+    assert_eq!(
+        inherited_pull["default"]["body"],
+        "## Shared review checklist\n"
+    );
 
     let browser = Browser::new("inherited-issues");
     browser
@@ -346,6 +363,9 @@ async fn native_browser_inherits_issue_templates_and_rechecks_source_access() {
     let revoked = h.json(&templates, &reader).await;
     assert_eq!(revoked["source"], Value::Null);
     assert_eq!(revoked["items"], json!([]));
+    let revoked_pull = h.json(&pull_templates, &reader).await;
+    assert!(revoked_pull["source"].is_null());
+    assert!(revoked_pull["default"].is_null());
     let receipt: Value = create_issue(request.clone())
         .await
         .error_for_status()
@@ -357,10 +377,13 @@ async fn native_browser_inherits_issue_templates_and_rechecks_source_access() {
     request["request_id"] = json!(Uuid::now_v7());
     assert_eq!(create_issue(request).await.status(), StatusCode::FORBIDDEN);
     access(&source, defaults_id, true).await;
-    publish("app", &[("config.yml", "{}\n")]).await;
+    publish("app", &[("config.yml", "{}\n")], "").await;
     let local = h.json(&templates, &reader).await;
     assert_eq!(local["source"], Value::Null);
     assert_eq!(local["items"], json!([]));
     assert_eq!(local["blank_allowed"], true);
+    let local_pull = h.json(&pull_templates, &reader).await;
+    assert!(local_pull["source"].is_null());
+    assert_eq!(local_pull["default"]["body"], "");
     h.close().await;
 }

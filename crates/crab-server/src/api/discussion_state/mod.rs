@@ -84,7 +84,7 @@ async fn pull(
     .await
 }
 async fn change(
-    server: &Server,
+    server: &Arc<Server>,
     principal: &Principal,
     key: (String, String),
     mut subject: Subject,
@@ -97,37 +97,51 @@ async fn change(
         app::body(body, true).map_err(rejected)?;
     }
     let author = app::actor(principal).map_err(IntoResponse::into_response)?;
-    let membership = app::membership(server, principal, &repo)
-        .await
-        .map_err(IntoResponse::into_response)?;
     let routed = app::repository_cell(server, &repo).map_err(IntoResponse::into_response)?;
-    let identity = app::mutation_identity().map_err(IntoResponse::into_response)?;
     let submission_id = app::submission_id(&input.request_id).map_err(rejected)?;
-    let output = app::command_output(
-        routed
-            .client
-            .command::<ChangeState>(
-                &routed.target,
-                identity,
-                state::Input {
-                    submission_id,
-                    subject,
-                    actor: (&author).into(),
-                    can_triage: membership.principal.can_triage(repo.id),
-                    can_mark_duplicate: membership.principal.can_write(repo.id),
-                    can_post_locked: super::discussion_target::can_manage(
-                        &membership.principal,
-                        repo.id,
-                        subject.kind,
-                    ),
-                    version: input.version,
-                    state: input.state,
-                    reason: input.reason,
-                    body: input.body,
-                },
+    let candidates = if subject.kind == SubjectKind::Pull && input.state == state::State::Open {
+        vec![(subject.number, input.version)]
+    } else {
+        vec![]
+    };
+    let repository = repo.id;
+    let actor = (&author).into();
+    let output = pulls::reopen::with_available(
+        server,
+        principal,
+        &repo,
+        candidates,
+        pulls::reopen::Access::AuthorOrTriage,
+        move |available, grant| async move {
+            app::command_output(
+                routed
+                    .client
+                    .command::<ChangeState>(
+                        &routed.target,
+                        app::mutation_identity()?,
+                        state::Input {
+                            submission_id,
+                            subject,
+                            actor,
+                            can_triage: grant.principal.can_triage(repository),
+                            can_mark_duplicate: grant.principal.can_write(repository),
+                            can_post_locked: super::discussion_target::can_manage(
+                                &grant.principal,
+                                repository,
+                                subject.kind,
+                            ),
+                            version: input.version,
+                            state: input.state,
+                            reason: input.reason,
+                            body: input.body,
+                            reopen_available: available.contains(&subject.number),
+                        },
+                    )
+                    .await,
             )
-            .await,
+        },
     )
+    .await
     .map_err(IntoResponse::into_response)?;
     let comment = match output {
         Outcome::Applied(comment) => comment,
@@ -155,6 +169,9 @@ async fn change(
         }
         Outcome::Rejected(state::Rejection::MergePending) => {
             return Err(rejected(Error::MergePending).into());
+        }
+        Outcome::Rejected(state::Rejection::BranchesUnavailable) => {
+            return Err(rejected(Error::PullBranchesUnavailable).into());
         }
     };
     let value = if let Some(comment) = comment {

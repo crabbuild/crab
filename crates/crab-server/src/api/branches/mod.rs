@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use axum::{
     Extension, Json, Router,
-    extract::{Path, State, rejection::JsonRejection},
+    extract::{Path, Query, State, rejection::JsonRejection},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{patch, post, put},
+    routing::{get, patch, post, put},
 };
 use gix_hash::ObjectId;
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,10 @@ pub(crate) fn routes() -> Router<Arc<Server>> {
         .route(
             "/api/repos/{owner}/{name}/branches",
             post(create).delete(remove),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/branches/deletion",
+            get(preview_deletion),
         )
         .route(
             "/api/repos/{owner}/{name}/settings/default-branch",
@@ -60,6 +64,17 @@ struct CreateOutput {
 struct DeleteInput {
     name: String,
     expected_oid: String,
+}
+
+impl DeleteInput {
+    fn parse(self) -> Result<(String, ObjectId), Error> {
+        let branch = branch_ref(&self.name).map_err(Error::Input)?;
+        let expected = ObjectId::from_hex(self.expected_oid.as_bytes())
+            .ok()
+            .filter(|oid| oid.kind() == gix_hash::Kind::Sha1 && !oid.is_null())
+            .ok_or(Error::Input("Expected tip must be a full SHA-1 commit ID"))?;
+        Ok((branch, expected))
+    }
 }
 
 #[derive(Serialize)]
@@ -121,12 +136,32 @@ enum Error {
 
 impl From<ReceiveError> for Error {
     fn from(error: ReceiveError) -> Self {
-        Self::Receive(Box::new(error))
+        match error {
+            ReceiveError::Settings(cause)
+                if matches!(
+                    cause.as_ref(),
+                    app::Error::StackedDeletionBlocked(_)
+                        | app::Error::PullBranchInUse
+                        | app::Error::PullBranchChanged
+                ) =>
+            {
+                Self::App(*cause)
+            }
+            error => Self::Receive(Box::new(error)),
+        }
     }
 }
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
+        if let Self::App(
+            error @ (app::Error::StackedDeletionBlocked(_)
+            | app::Error::PullBranchInUse
+            | app::Error::PullBranchChanged),
+        ) = self
+        {
+            return error.into_response();
+        }
         if let Self::Receive(error) = &self
             && let Some((status, message)) = error.staging_status()
         {
@@ -328,11 +363,7 @@ async fn remove(
     if !principal.can_write(repository.id) {
         return Err(Error::Permission);
     }
-    let branch = branch_ref(&input.name).map_err(Error::Input)?;
-    let expected = ObjectId::from_hex(input.expected_oid.as_bytes())
-        .ok()
-        .filter(|oid| oid.kind() == gix_hash::Kind::Sha1 && !oid.is_null())
-        .ok_or(Error::Input("Expected tip must be a full SHA-1 commit ID"))?;
+    let (branch, expected) = input.parse()?;
     match receive::delete_branch(
         Arc::clone(&server),
         principal,
@@ -359,6 +390,43 @@ async fn remove(
         ) => Err(Error::Changed),
         Err(error) => Err(error.into()),
     }
+}
+
+async fn preview_deletion(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name)): Path<(String, String)>,
+    Query(input): Query<DeleteInput>,
+) -> Result<impl IntoResponse, Error> {
+    let repo = app::repository(&server, &principal, &(owner, name))?;
+    let grant = app::membership(&server, &principal, &repo).await?;
+    if !grant.principal.can_write(repo.id) {
+        return Err(Error::Permission);
+    }
+    let (branch, expected) = input.parse()?;
+    let head = expected.to_string();
+    if repo
+        .ref_oid(&branch)
+        .await
+        .map_err(app::Error::from)?
+        .as_deref()
+        != Some(head.as_str())
+    {
+        return Err(Error::Changed);
+    }
+    let retarget = if server.cells().is_some() {
+        crate::api::stacked_pulls::native::preview(&server, &repo, &grant, &branch, &head).await?
+    } else {
+        None
+    };
+    if !app::membership(&server, &principal, &repo)
+        .await?
+        .principal
+        .can_write(repo.id)
+    {
+        return Err(Error::Permission);
+    }
+    Ok(Json(json!({"retarget": retarget})))
 }
 
 async fn set_default(

@@ -73,6 +73,7 @@ fn update(pull: &PullRecord, state: Option<PullState>) -> UpdatePullInput {
         title: Some("Edited".into()),
         body: None,
         state,
+        reopen_available: state == Some(PullState::Open),
         label_ids: None,
         assignees: None,
     }

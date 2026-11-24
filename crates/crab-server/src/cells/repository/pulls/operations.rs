@@ -234,6 +234,14 @@ impl Mutation for UpdatePull {
         if input.state == Some(PullState::Merged) || pull.merge.is_some() && input.state.is_some() {
             return Ok(MutationResult::Rejected(UpdatePullOutcome::InvalidState));
         }
+        if pull.state == PullState::Closed
+            && input.state == Some(PullState::Open)
+            && !input.reopen_available
+        {
+            return Ok(MutationResult::Rejected(
+                UpdatePullOutcome::BranchesUnavailable,
+            ));
+        }
         if let Some(labels) = &input.label_ids {
             for label in labels {
                 let found = context.sql(&SqlBatch { statements: vec![statement("SELECT 1 FROM repository_labels WHERE number = ? AND deleted_version IS NULL", vec![integer(*label)?])] })?;

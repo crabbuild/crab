@@ -1,4 +1,5 @@
 import { useRef, useState, type DragEvent } from "react";
+import { PlusIcon } from "lucide-react";
 import { useMutation } from "@/components/discussion/mutations";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -119,6 +120,59 @@ export function projectGroups(page: ItemPage, grouping: GroupBy) {
 }
 
 export type ChangeProjectItem = (row: Row, edit: (item: Item) => Item) => void;
+type ProjectOwnedGroup = Exclude<GroupBy, "issue_type">;
+export type AddProjectGroupItem = (
+  group: ProjectOwnedGroup,
+  key: string,
+) => void;
+
+export function applyProjectGroup(
+  item: Item,
+  group: ProjectOwnedGroup,
+  key: string,
+): Item {
+  if (group === "status") return { ...item, status: key };
+  const field = group.slice("field:".length);
+  const values = { ...item.values };
+  if (key) values[field] = key;
+  else delete values[field];
+  return { ...item, values };
+}
+
+export function AddToProjectGroup({
+  grouping,
+  value,
+  name,
+  onAdd,
+  onCreateIssue,
+}: {
+  grouping?: GroupBy;
+  value: string;
+  name: string;
+  onAdd?: AddProjectGroupItem;
+  onCreateIssue?: (typeId: string | null) => void;
+}) {
+  if (!grouping) return null;
+  const byType = grouping === "issue_type";
+  if (byType ? !onCreateIssue || value === "other" : !onAdd) return null;
+  const label = byType ? `Create issue in ${name}` : `Add work to ${name}`;
+  return (
+    <Button
+      type="button"
+      size="icon-sm"
+      variant="ghost"
+      aria-label={label}
+      title={label}
+      onClick={() => {
+        if (grouping === "issue_type")
+          onCreateIssue?.(value === "none" ? null : value);
+        else onAdd?.(grouping, value);
+      }}
+    >
+      <PlusIcon aria-hidden="true" />
+    </Button>
+  );
+}
 
 export function useProjectGroupMove(
   grouping: GroupBy | undefined,
@@ -146,18 +200,8 @@ export function useProjectGroupMove(
 
   async function move(row: Row, key: string) {
     if (!grouping) return;
-    if (grouping === "status") {
-      editItem?.(row, (item) => ({ ...item, status: key }));
-      return;
-    }
-    if (grouping.startsWith("field:")) {
-      const field = grouping.slice("field:".length);
-      editItem?.(row, (item) => {
-        const values = { ...item.values };
-        if (key) values[field] = key;
-        else delete values[field];
-        return { ...item, values };
-      });
+    if (grouping !== "issue_type") {
+      editItem?.(row, (item) => applyProjectGroup(item, grouping, key));
       return;
     }
     const source = row.repository ?? repo;

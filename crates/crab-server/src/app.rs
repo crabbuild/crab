@@ -96,6 +96,16 @@ pub(crate) enum Error {
     BranchUpdateChanged,
     #[error("The replacement branch name is already in use")]
     BranchUpdateDestination,
+    #[error("The pull request or branch changed")]
+    PullBranchChanged,
+    #[error("An open pull request still uses the branch")]
+    PullBranchInUse,
+    #[error("{0}")]
+    StackedDeletionBlocked(&'static str),
+    #[error("The pull request has a missing branch")]
+    PullBranchesUnavailable,
+    #[error("Pull request branch edit failed")]
+    PullBranch(#[source] Box<crate::git::receive::ReceiveError>),
     #[error("The base changes do not merge cleanly into the head branch")]
     BranchUpdateConflict,
     #[error("The pull request cannot be safely rebased")]
@@ -116,6 +126,8 @@ pub(crate) enum Error {
     MergeSettingsPermission,
     #[error("Administrator access is required to manage merge queue settings")]
     MergeQueueSettingsPermission,
+    #[error("Administrator access is required to manage automatic branch deletion")]
+    BranchCleanupSettingsPermission,
     #[error("Git writes are busy")]
     MergeBusy,
     #[error("Write access is required to merge pull requests")]
@@ -284,6 +296,7 @@ impl IntoResponse for Error {
                     | Self::TransferPublication(_)
                     | Self::RepositoryNamePublication(_)
                     | Self::Merge(_)
+                    | Self::PullBranch(_)
                     | Self::MergeObject(_)
                     | Self::Release(_)
                     | Self::ReleaseAssetIo(_)
@@ -296,7 +309,9 @@ impl IntoResponse for Error {
             tracing::error!(error = ?self, "collaboration request failed");
         }
         let staging = match &self {
-            Self::Merge(error) | Self::Release(error) => error.staging_status(),
+            Self::Merge(error) | Self::Release(error) | Self::PullBranch(error) => {
+                error.staging_status()
+            }
             _ => None,
         };
         if let Some((status, message)) = staging {
@@ -415,6 +430,29 @@ impl IntoResponse for Error {
                 "branch_update_destination",
                 "Choose an unused replacement branch name",
             ),
+            Self::PullBranchChanged => (
+                StatusCode::CONFLICT,
+                "pull_branch_changed",
+                "The pull request or branch changed. Reload the pull request.",
+            ),
+            Self::PullBranchInUse => (
+                StatusCode::CONFLICT,
+                "pull_branch_in_use",
+                "An open pull request still uses this branch.",
+            ),
+            Self::StackedDeletionBlocked(message) => {
+                (StatusCode::CONFLICT, "stacked_deletion_blocked", *message)
+            }
+            Self::PullBranchesUnavailable => (
+                StatusCode::CONFLICT,
+                "pull_branches_unavailable",
+                "Restore the missing branch before reopening the pull request.",
+            ),
+            Self::PullBranch(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "pull_branch_failed",
+                "Crab could not complete the branch action. Retry shortly.",
+            ),
             Self::BranchUpdateConflict => (
                 StatusCode::CONFLICT,
                 "branch_update_conflict",
@@ -465,10 +503,15 @@ impl IntoResponse for Error {
                 "merge_queue_settings_permission",
                 "Administrator access is required to manage merge queue settings",
             ),
+            Self::BranchCleanupSettingsPermission => (
+                StatusCode::FORBIDDEN,
+                "branch_cleanup_settings_permission",
+                "Administrator access is required to manage automatic branch deletion",
+            ),
             Self::MergeBusy => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "busy",
-                "Git writes are busy; retry this merge shortly",
+                "Git writes are busy. Retry this action shortly.",
             ),
             Self::MergePermission => (
                 StatusCode::FORBIDDEN,
@@ -1009,6 +1052,20 @@ pub(crate) async fn membership(
     principal: &Principal,
     repo: &Repository,
 ) -> Result<Membership> {
+    if principal.is_auto_merge() {
+        // A persisted automation actor has no live session to enforce suspension.
+        let auth = server.auth.as_ref().ok_or(Error::NotFound)?;
+        let actor = principal.identity().ok_or(Error::NotFound)?;
+        if actor.issuer != auth.issuer()
+            || auth
+                .account_state(&actor.subject)
+                .await
+                .map_err(|error| Error::IdentityAuthority(Box::new(error)))?
+                .suspended
+        {
+            return Err(Error::NotFound);
+        }
+    }
     if principal.is_local() || principal.import_grant().is_some() {
         if !principal.can_read(repo.id) {
             return Err(Error::NotFound);

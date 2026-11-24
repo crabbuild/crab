@@ -74,6 +74,7 @@ fn input(kind: SubjectKind) -> Input {
         can_triage: false,
         can_post_locked: false,
         can_mark_duplicate: false,
+        reopen_available: kind == SubjectKind::Pull,
         version: 1,
         state: State::Closed,
         reason: None,

@@ -6,6 +6,7 @@ use crate::{
         collaboration::{Subject, SubjectKind},
         projects::{self, Command, Outcome, Request},
     },
+    repository::Repository,
     server::Server,
 };
 use axum::{
@@ -320,20 +321,53 @@ async fn submit(
         return Err(Error::ProjectPermission);
     }
     let actor = app::actor(&principal)?;
-    let cell = app::repository_cell(&server, &repo)?;
+    let type_id = match &input.command {
+        Command::CreateIssue { type_id, .. } if !cancel => *type_id,
+        _ => None,
+    };
+    let mut request = Request {
+        request_id: input.request_id,
+        command: input.command,
+        actor: (&actor).into(),
+        can_write: true,
+        issue_type: None,
+        cancel,
+    };
+    let Some((organization, type_id)) = repo.organization.zip(type_id) else {
+        return submit_cell(&server, &repo, request).await;
+    };
+    super::organizations::properties::policy_write(
+        server,
+        organization,
+        move |server, _, cancel| async move {
+            let current = app::membership(&server, &principal, &repo).await?;
+            if !current.principal.can_write(repo.id) {
+                return Err(Error::ProjectPermission);
+            }
+            // The Cell resolves a saved decision before examining current type
+            // evidence. A disabled type cannot change the outcome of a retry.
+            request.issue_type =
+                super::organizations::issue_types::active_selection(&server, &repo, type_id)
+                    .await?;
+            app::account(&current.principal)?;
+            if cancel.is_cancelled() {
+                return Err(Error::MergeBusy);
+            }
+            submit_cell(&server, &repo, request).await
+        },
+    )
+    .await
+}
+
+async fn submit_cell(
+    server: &Server,
+    repo: &Repository,
+    request: Request,
+) -> Result<Json<Outcome>> {
+    let cell = app::repository_cell(server, repo)?;
     let output = app::command_output(
         cell.client
-            .command::<projects::Change>(
-                &cell.target,
-                app::mutation_identity()?,
-                Request {
-                    request_id: input.request_id,
-                    command: input.command,
-                    actor: (&actor).into(),
-                    can_write: true,
-                    cancel,
-                },
-            )
+            .command::<projects::Change>(&cell.target, app::mutation_identity()?, request)
             .await,
     )?;
     if output == Outcome::RequestConflict {

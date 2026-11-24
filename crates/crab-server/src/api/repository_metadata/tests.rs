@@ -71,6 +71,20 @@ async fn native_browser_maintainer_edits_topics_description_and_merge_options() 
     );
     let page = browser.run(&["snapshot", "-i"]).await;
     assert!(!page.contains("Allow merge queue"));
+    assert!(!page.contains("Automatically delete head branches"));
+    assert_eq!(
+        h.write(
+            reqwest::Method::PUT,
+            "/api/repos/team/private/settings/merge-methods",
+            &bob,
+            json!({"expected_version":0,"enabled":["merge_commit"],"delete_head_branches":true})
+        )
+        .await
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["error"]["code"],
+        "branch_cleanup_settings_permission"
+    );
     assert!(!page.contains("Rename repository"));
     assert!(!page.contains("Archive repository"));
     browser

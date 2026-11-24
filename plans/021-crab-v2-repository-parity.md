@@ -6,6 +6,8 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
 
 - Compare and create now share merge-base reads and submit the inspected tips.
   Native submission decisions preserve both successful and stale attempts.
+  Creation rechecks the inspected tips while holding the base and head Git ref
+  leases through the Repository Cell decision, including on private fork PRs.
   Per-file diffs and inline review anchors now resolve one path at the pinned
   commits. A native 516-file fixture with diverged branches verified diff reads
   and review anchors under an entry budget the full comparison exceeds.
@@ -13,6 +15,16 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
 - Protected merge checks direct reviewer grants, evaluates same-name statuses
   and check runs together, leases both refs and reconciles with a durable receipt.
   The prior tag's pending records still use their tagged retry contract.
+- Writers can restore a missing head branch from a completed pull request.
+  The panel shows the saved commit. Publication checks the current source
+  repository, write grant and ref rules, and requires the branch name to be
+  unused. Git objects must still be retained. Completed PRs can also delete
+  a head that still matches the recorded commit. Current protection and open
+  base or head dependencies can prevent deletion. Automatic cleanup after
+  merge and retargeting dependent PRs remain open.
+- Reopening a closed PR checks both branch names under publication leases,
+  including through the bulk and direct update paths. A rejected reopen rolls
+  back its comment or other bulk edits in the same native transaction.
 - Viewed progress now persists per account and PR, keyed to file diff identity.
 - Release notes process merged pull requests in pages using the pinned Git
   range. A native fixture added 4,096 historical merge records, then published

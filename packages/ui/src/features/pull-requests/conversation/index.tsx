@@ -38,6 +38,7 @@ export function PullConversation({
     (comment.pending && comment.intent === "state") || refreshing,
   );
   const target = "pulls/" + pull.number;
+  const missingBranch = pull.state === "closed" && !pull.branches_available;
   const href = repoHref(repo, { view: "pulls", pull: String(pull.number) });
   return (
     <div className="pull-conversation">
@@ -102,6 +103,7 @@ export function PullConversation({
                       disabled={
                         busy ||
                         refreshing ||
+                        missingBranch ||
                         comment.pending ||
                         Boolean(comment.intent) ||
                         comment.conflict

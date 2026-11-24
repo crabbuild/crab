@@ -34,8 +34,10 @@ pub(crate) use labels::{CreateLabel, DeleteLabel, ListLabels, UpdateLabel};
 pub(crate) use pulls::SeedHistoricalMerges;
 pub(crate) use pulls::auto_merge as pull_auto_merge;
 pub(crate) use pulls::base as pull_base;
+pub(crate) use pulls::branch as pull_branch;
 pub(crate) use pulls::head as pull_head;
 pub(crate) use pulls::pending_reviews;
+pub(crate) use pulls::reopen as pull_reopen;
 pub(crate) use pulls::review_dismissals;
 pub(crate) use pulls::review_threads::suggestions;
 pub(crate) use pulls::review_threads::{
@@ -52,7 +54,7 @@ pub(crate) use pulls::review_threads::{
 };
 pub(crate) use pulls::viewed;
 pub(crate) use pulls::{
-    CaptureIssueClosure, CaptureIssueClosureInput, CreatePull, CreatePullComment,
+    CaptureMergeEffects, CaptureMergeEffectsInput, CreatePull, CreatePullComment,
     CreatePullCommentInput, CreatePullCommentOutcome, CreatePullInput, CreatePullOutcome,
     CreatePullReview, CreatePullReviewInput, CreatePullReviewOutcome, GetPull, GetPullComment,
     GetPullMergeSubmission, GetPullReview, GetPullReviewSubmission, GetPullSubmission,

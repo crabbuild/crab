@@ -75,6 +75,12 @@ pub(in crate::cells) fn dispatch_mutation(
             invoke_mutation::<projects::tests::Historical>(context, input)
         }
         projects::Change::ID => invoke_mutation::<projects::Change>(context, input),
+        projects::organization_issue::Publish::ID => {
+            invoke_mutation::<projects::organization_issue::Publish>(context, input)
+        }
+        projects::organization_issue::Fence::ID => {
+            invoke_mutation::<projects::organization_issue::Fence>(context, input)
+        }
         projects::preparation::Prepare::ID => {
             invoke_mutation::<projects::preparation::Prepare>(context, input)
         }
@@ -246,6 +252,9 @@ pub(in crate::cells) fn dispatch_mutation(
         }
         <UpdatePull as Mutation>::ID => invoke_mutation::<UpdatePull>(context, input),
         pull_base::Retarget::ID => invoke_mutation::<pull_base::Retarget>(context, input),
+        pull_base::stacked::Apply::ID => {
+            invoke_mutation::<pull_base::stacked::Apply>(context, input)
+        }
         pull_head::Switch::ID => invoke_mutation::<pull_head::Switch>(context, input),
         pull_auto_merge::Edit::ID => invoke_mutation::<pull_auto_merge::Edit>(context, input),
         <CreatePullComment as Mutation>::ID => invoke_mutation::<CreatePullComment>(context, input),
@@ -265,7 +274,10 @@ pub(in crate::cells) fn dispatch_mutation(
             invoke_mutation::<UpdatePullReviewReply>(context, input)
         }
         <ReservePullMerge as Mutation>::ID => invoke_mutation::<ReservePullMerge>(context, input),
-        CaptureIssueClosure::ID => invoke_mutation::<CaptureIssueClosure>(context, input),
+        CaptureMergeEffects::ID => invoke_mutation::<CaptureMergeEffects>(context, input),
+        pull_branch::FinishCleanup::ID => {
+            invoke_mutation::<pull_branch::FinishCleanup>(context, input)
+        }
         <TransitionPullMerge as Mutation>::ID => {
             invoke_mutation::<TransitionPullMerge>(context, input)
         }
@@ -463,6 +475,18 @@ pub(in crate::cells) fn dispatch_read(
             invoke_read::<GetRepositoryLifecycle>(context, input)
         }
         <GetPull as Read>::ID => invoke_read::<GetPull>(context, input),
+        pull_reopen::ForReopen::ID => invoke_read::<pull_reopen::ForReopen>(context, input),
+        pull_branch::InUse::ID => invoke_read::<pull_branch::InUse>(context, input),
+        pull_branch::PendingCleanup::ID => {
+            invoke_read::<pull_branch::PendingCleanup>(context, input)
+        }
+        pull_branch::HasCleanup::ID => invoke_read::<pull_branch::HasCleanup>(context, input),
+        pull_base::stacked::Inspect::ID => {
+            invoke_read::<pull_base::stacked::Inspect>(context, input)
+        }
+        pull_base::stacked::Resolve::ID => {
+            invoke_read::<pull_base::stacked::Resolve>(context, input)
+        }
         viewed::GetViewedFiles::ID => invoke_read::<viewed::GetViewedFiles>(context, input),
         pending_reviews::Get::ID => invoke_read::<pending_reviews::Get>(context, input),
         deploy_tokens::List::ID => invoke_read::<deploy_tokens::List>(context, input),

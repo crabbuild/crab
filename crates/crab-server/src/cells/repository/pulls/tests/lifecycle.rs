@@ -88,6 +88,7 @@ fn edit(version: u64, title: &str) -> UpdatePullInput {
         title: Some(title.into()),
         body: None,
         state: None,
+        reopen_available: false,
         label_ids: None,
         assignees: None,
     }

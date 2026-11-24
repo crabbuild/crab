@@ -34,6 +34,7 @@ import {
   type Item,
 } from "./model";
 import { useProjectDraft } from "./drafts";
+import type { IssueType } from "@/lib/contracts";
 export function WorkPicker({
   repo,
   onSelect,
@@ -110,21 +111,33 @@ export function ItemEditor({
   project,
   row,
   draftItem,
+  initialItem,
+  initialIssueType,
+  typeChoices,
   onClose,
 }: {
   repo: Repository;
   project: Project;
   row?: Row;
   draftItem?: string;
+  initialItem?: Item;
+  initialIssueType?: string | null;
+  typeChoices: IssueType[];
   onClose: () => void;
 }) {
   const saved = useProjectDraft(
-    { target: { repo }, project: project.id, item: row?.item.id ?? draftItem },
+    {
+      target: { repo },
+      project: project.id,
+      item: row?.item.id ?? draftItem ?? initialItem?.id,
+    },
     {
       kind: "item",
-      item: row?.item ?? blankItem(project.definition.statuses[0]),
+      item:
+        row?.item ?? initialItem ?? blankItem(project.definition.statuses[0]),
       mode: row ? (row.item.subject ? "existing" : "draft") : "issue",
       parent: "",
+      issueType: initialIssueType,
       repository: repo.id,
       work: row?.work ?? null,
       version: row?.version ?? 0,
@@ -137,14 +150,14 @@ export function ItemEditor({
     item,
     mode,
     parent,
+    issueType,
     work: picked,
     version,
     definition,
     existing: wasExisting,
   } = saved.value;
   const setItem = (item: Item) => saved.update({ item });
-  const setMode = (mode: "issue" | "existing" | "draft") =>
-    saved.update({ mode });
+  const setMode = (mode: "existing" | "draft") => saved.update({ mode });
   const setParent = (parent: string) => saved.update({ parent });
   const setPicked = (work: Work | null) => saved.update({ work });
   const setVersion = (version: number) => saved.update({ version });
@@ -170,6 +183,7 @@ export function ItemEditor({
             version,
             item: { ...value, subject: null },
             parent: parent ? Number(parent) : null,
+            type_id: issueType ?? undefined,
           }
         : { kind: "item", project: project.id, version, item: value },
       checkpoint,
@@ -210,7 +224,7 @@ export function ItemEditor({
         >
           <fieldset disabled={commands.locked} className="project-form-scroll">
             <FieldGroup>
-              {!wasExisting && (
+              {!wasExisting && issueType === undefined && (
                 <Field>
                   <FieldLabel htmlFor={`${id}-mode`}>Add</FieldLabel>
                   <FieldSelect
@@ -224,18 +238,45 @@ export function ItemEditor({
                         value !== "draft"
                       )
                         return;
-                      setMode(value);
-                      setItem({
-                        ...blankItem(project.definition.statuses[0]),
-                        id: item.id,
+                      saved.update({
+                        mode: value,
+                        item: { ...item, subject: null, title: "", body: "" },
+                        parent: "",
+                        work: null,
                       });
-                      setPicked(null);
                     }}
                     options={{
                       issue: "Create an issue",
                       existing: "Existing issue or pull request",
                       draft: "Draft note",
                     }}
+                  />
+                </Field>
+              )}
+              {!wasExisting && issueType !== undefined && (
+                <Field>
+                  <FieldLabel htmlFor={`${id}-issue-type`}>
+                    Issue type
+                  </FieldLabel>
+                  <FieldSelect
+                    label="Issue type"
+                    id={`${id}-issue-type`}
+                    value={issueType ?? "none"}
+                    options={{
+                      none: "No type",
+                      ...Object.fromEntries(
+                        typeChoices.map(({ id, name }) => [id, name]),
+                      ),
+                      ...(issueType &&
+                      !typeChoices.some((type) => type.id === issueType)
+                        ? { [issueType]: "Unavailable type" }
+                        : {}),
+                    }}
+                    onValueChange={(value) =>
+                      saved.update({
+                        issueType: value === "none" ? null : value,
+                      })
+                    }
                   />
                 </Field>
               )}

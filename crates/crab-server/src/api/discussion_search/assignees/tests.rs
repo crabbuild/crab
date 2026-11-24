@@ -83,6 +83,7 @@ async fn assignee_filters_use_stable_accounts_across_profiles_revocation_boolean
                 title: None,
                 body: None,
                 state: None,
+                reopen_available: false,
                 label_ids: None,
                 assignees: Some(vec![Assignee {
                     id: uuid::Uuid::parse_str(bob_id.as_str().unwrap()).unwrap(),

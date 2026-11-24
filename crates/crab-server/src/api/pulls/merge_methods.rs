@@ -79,6 +79,9 @@ fn authorize_change(
     if !principal.can_maintain(repo.id) {
         return Err(Error::MergeSettingsPermission);
     }
+    if !principal.can_admin(repo.id) && input.delete_head_branches.is_some() {
+        return Err(Error::BranchCleanupSettingsPermission);
+    }
     // Queue configuration is branch policy. The ordinary merge method
     // and auto-merge controls can be delegated to maintainers.
     if !principal.can_admin(repo.id)

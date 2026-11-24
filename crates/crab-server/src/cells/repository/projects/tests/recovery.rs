@@ -55,6 +55,7 @@ async fn same_item_conflicts_preserve_the_winner_and_deletion_fences_stale_creat
             ..actor()
         },
         can_write: true,
+        issue_type: None,
         cancel: false,
         command: Command::Item {
             project,

@@ -268,6 +268,13 @@ impl Repository {
         &self,
         names: &std::collections::BTreeSet<String>,
     ) -> Result<std::collections::BTreeMap<String, String>> {
+        Ok(self.ref_view_for_refs(names).await?.refs().clone())
+    }
+
+    pub(crate) async fn ref_view_for_refs(
+        &self,
+        names: &std::collections::BTreeSet<String>,
+    ) -> Result<crab_read::capsule_protocol::CapsuleRefView> {
         let root = crab_metadata::capsule_protocol::load_root(&self.layout)
             .await
             .map_err(|source| crate::Error::Settings {
@@ -275,13 +282,14 @@ impl Repository {
             })?;
         // Capture selected heads from one authoritative view. List and review
         // freshness need no packs, browse indexes, or unrelated branches.
-        let view = crab_read::capsule_protocol::open_ref_view_from_root_for_refs(
-            &self.layout,
-            root,
-            names,
+        Ok(
+            crab_read::capsule_protocol::open_ref_view_from_root_for_refs(
+                &self.layout,
+                root,
+                names,
+            )
+            .await?,
         )
-        .await?;
-        Ok(view.refs().clone())
     }
 
     pub(crate) async fn open_ref_view(

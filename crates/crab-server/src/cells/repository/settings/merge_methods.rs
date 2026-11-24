@@ -15,6 +15,10 @@ pub(crate) struct MergeMethods {
     #[serde(default, skip_serializing_if = "zero")]
     pub auto_merge_generation: u64,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delete_head_branches: bool,
+    #[serde(default, skip_serializing_if = "zero")]
+    pub delete_head_branches_generation: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub merge_queue: bool,
     #[serde(default, skip_serializing_if = "zero")]
     pub merge_queue_generation: u64,
@@ -68,6 +72,8 @@ pub(crate) struct ReplaceMergeMethodsInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_merge: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delete_head_branches: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_queue: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_queue_method: Option<MergeMethod>,
@@ -119,6 +125,8 @@ pub(in crate::cells::repository) fn load(
         enabled: MergeMethod::ALL.to_vec(),
         auto_merge: false,
         auto_merge_generation: 0,
+        delete_head_branches: false,
+        delete_head_branches_generation: 0,
         merge_queue: false,
         merge_queue_generation: 0,
         merge_queue_method: default_queue_method(),
@@ -223,6 +231,9 @@ impl Mutation for ReplaceMergeMethods {
             .filter(|method| input.enabled.contains(method))
             .collect();
         let auto_merge = input.auto_merge.unwrap_or(current.auto_merge);
+        let delete_head_branches = input
+            .delete_head_branches
+            .unwrap_or(current.delete_head_branches);
         let merge_queue = input.merge_queue.unwrap_or(current.merge_queue);
         let merge_queue_method = input
             .merge_queue_method
@@ -239,6 +250,7 @@ impl Mutation for ReplaceMergeMethods {
         branches.sort_unstable_by(|a, b| a.branch.cmp(&b.branch));
         if current.enabled == enabled
             && current.auto_merge == auto_merge
+            && current.delete_head_branches == delete_head_branches
             && current.merge_queue == merge_queue
             && current.merge_queue_method == merge_queue_method
             && current.merge_queue_builds == merge_queue_builds
@@ -272,6 +284,13 @@ impl Mutation for ReplaceMergeMethods {
             version: current.version + 1,
             enabled,
             auto_merge,
+            delete_head_branches,
+            delete_head_branches_generation: if delete_head_branches == current.delete_head_branches
+            {
+                current.delete_head_branches_generation
+            } else {
+                current.version + 1
+            },
             merge_queue,
             merge_queue_method,
             merge_queue_builds,

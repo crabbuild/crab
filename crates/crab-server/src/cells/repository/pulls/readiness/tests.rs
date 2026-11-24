@@ -419,6 +419,7 @@ async fn missing_closed_and_archived_pulls_reject_readiness_changes() {
             title: None,
             body: None,
             state: Some(PullState::Closed),
+            reopen_available: false,
             label_ids: None,
             assignees: None,
         },
@@ -503,6 +504,7 @@ async fn closing_and_reopening_a_draft_preserves_its_merge_block() {
         title: None,
         body: None,
         state: Some(PullState::Closed),
+        reopen_available: false,
         label_ids: None,
         assignees: None,
     };
@@ -513,6 +515,7 @@ async fn closing_and_reopening_a_draft_preserves_its_merge_block() {
     let reopen = UpdatePullInput {
         version: closed.version,
         state: Some(PullState::Open),
+        reopen_available: true,
         ..close
     };
     let UpdatePullOutcome::Updated(open) = write::<UpdatePull>(&cell, reopen).await else {

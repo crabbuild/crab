@@ -33,7 +33,12 @@ import { CreateProject } from "./create";
 import { ItemEditor } from "./item";
 import { ProjectSettings } from "./settings";
 import { ProjectTypeFilter } from "./issue-type";
-import { ProjectGrouping, selectedGrouping } from "./grouping";
+import {
+  applyProjectGroup,
+  ProjectGrouping,
+  selectedGrouping,
+  type AddProjectGroupItem,
+} from "./grouping";
 import type { IssueType } from "@/lib/contracts";
 import { ProjectBoard, ProjectTable, ProjectRoadmap } from "./views";
 import { useProjectCommands } from "./commands";
@@ -41,11 +46,13 @@ import { ProjectHistory } from "./history";
 import { DraftRecovery } from "./drafts";
 import { checkpointDraft, itemDraft, readDraft } from "./draft-storage";
 import {
+  blankItem,
   projectHref,
   type Listing,
   type Item,
   type ItemPage,
   type Project,
+  type ProjectItemSelection,
   type Row,
 } from "./model";
 export default function Projects({
@@ -221,7 +228,7 @@ function ProjectWorkspace({
   typeChoices: IssueType[];
 }) {
   const [project, setProject] = useState(initial);
-  const [editing, setEditing] = useState<Row | "new" | { draft: string }>();
+  const [editing, setEditing] = useState<ProjectItemSelection>();
   const [settings, setSettings] = useState(false);
   const selected =
     project.definition.views.find((v) => v.id === url.searchParams.get("pv")) ??
@@ -317,6 +324,21 @@ function ProjectWorkspace({
       checkpoint,
     );
   }
+  const addGroupItem: AddProjectGroupItem = (group, key) => {
+    const draft = blankItem(status || project.definition.statuses[0]);
+    setEditing({ initialItem: applyProjectGroup(draft, group, key) });
+  };
+  const addGroupIssue = (typeId: string | null) =>
+    setEditing({
+      initialItem: blankItem(status || project.definition.statuses[0]),
+      initialIssueType: typeId,
+    });
+  const createInGroup = editable && groupBy !== undefined;
+  const newItem =
+    typeof editing === "object" && "initialItem" in editing
+      ? editing
+      : undefined;
+  const initialItem = newItem?.initialItem;
   const editingRow =
     typeof editing === "object" && "item" in editing ? editing : undefined;
   const draftItem =
@@ -498,13 +520,15 @@ function ProjectWorkspace({
                     <span>Showing {page.items.length} on this page</span>
                   )}
                 </div>
-                {page.items.length ? (
+                {page.items.length || createInGroup ? (
                   selected.layout === "board" ? (
                     <ProjectBoard
                       repo={repo}
                       page={page}
                       editable={editable && can_manage}
                       onEdit={setEditing}
+                      onAddGroupItem={addGroupItem}
+                      onAddGroupIssue={addGroupIssue}
                       groupBy={groupBy}
                       onChangeItem={changeItem}
                       showIssueType={selected.show_issue_type}
@@ -517,6 +541,8 @@ function ProjectWorkspace({
                       page={page}
                       editable={editable && can_manage}
                       onEdit={setEditing}
+                      onAddGroupItem={addGroupItem}
+                      onAddGroupIssue={addGroupIssue}
                       showIssueType={selected.show_issue_type}
                       onIssueTypeChange={onIssueTypeChange}
                     />
@@ -526,6 +552,8 @@ function ProjectWorkspace({
                       page={page}
                       editable={editable && can_manage}
                       onEdit={setEditing}
+                      onAddGroupItem={addGroupItem}
+                      onAddGroupIssue={addGroupIssue}
                       groupBy={groupBy}
                       onChangeItem={changeItem}
                       showIssueType={selected.show_issue_type}
@@ -613,11 +641,14 @@ function ProjectWorkspace({
       </Tabs>
       {editing && (
         <ItemEditor
-          key={draftItem ?? editingRow?.item.id ?? "new"}
+          key={draftItem ?? editingRow?.item.id ?? initialItem?.id ?? "new"}
           repo={repo}
           project={project}
           row={editingRow}
           draftItem={draftItem}
+          initialItem={initialItem}
+          initialIssueType={newItem?.initialIssueType}
+          typeChoices={resource.data?.page.issue_types ?? typeChoices}
           onClose={() => setEditing(undefined)}
         />
       )}

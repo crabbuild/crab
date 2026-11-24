@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc};
 use uuid::Uuid;
 mod history;
+mod issue_creation;
 mod type_filter;
 
 pub(super) fn routes() -> Router<Arc<Server>> {
@@ -144,12 +145,21 @@ async fn detail(
     let mut repositories = Vec::new();
     let mut type_source = None;
     for linked in &view.repositories {
-        if let Some(repo) = accessible(&server, &principal, *linked).await? {
-            if repo.organization == Some(id) && type_source.is_none() {
-                type_source = Some(Arc::clone(&repo));
-            }
-            repositories.push(repository(&repo));
+        let Some(repo) = server.repositories.by_id(*linked) else {
+            continue;
+        };
+        let grant = match app::membership(&server, &principal, &repo).await {
+            Ok(grant) => grant,
+            Err(Error::NotFound) => continue,
+            Err(error) => return Err(error),
+        };
+        let owned = repo.organization == Some(id);
+        if owned && type_source.is_none() {
+            type_source = Some(Arc::clone(&repo));
         }
+        let mut entry = repository(&repo);
+        entry["can_create_issue"] = json!(owned && grant.principal.can_write(repo.id));
+        repositories.push(entry);
     }
     let mut types = if type_source.is_some() {
         issue_types::active(&server, Some(id)).await?.definitions
@@ -423,6 +433,11 @@ async fn submit(
     cancel: bool,
 ) -> Result<Json<projects::Outcome>> {
     let actor = actor(&server, &principal).await?;
+    if matches!(input.command, Command::CreateIssue { .. }) {
+        return issue_creation::submit(server, principal, id, actor, input, cancel)
+            .await
+            .map(Json);
+    }
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     let source_allowed = if cancel {
         false
@@ -476,6 +491,7 @@ async fn submit(
                     command: input.command,
                     cancel,
                     source_allowed,
+                    source_epoch: None,
                 },
             )
             .await,

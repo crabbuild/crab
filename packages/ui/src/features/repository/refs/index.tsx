@@ -16,7 +16,13 @@ import {
   TagIcon,
   TrashIcon,
 } from "@primer/octicons-react";
-import { endpoint, type Ref, type Refs, type Repository } from "@/lib/api";
+import {
+  endpoint,
+  useRequest,
+  type Ref,
+  type Refs,
+  type Repository,
+} from "@/lib/api";
 import { Link } from "@/components/navigation/link";
 import { short } from "@/lib/format";
 
@@ -28,6 +34,21 @@ const names = new Intl.Collator("en", {
 function refName(ref: Ref) {
   return ref.name.replace(/^refs\/(?:heads|tags)\//, "");
 }
+
+export type BranchRetarget = {
+  pull: number;
+  version: number;
+  base_ref: string;
+  pulls: number[];
+  token: string;
+};
+
+type DeleteBranch = (
+  name: string,
+  oid: string,
+  retarget: BranchRetarget | null,
+  requestId: string,
+) => Promise<void>;
 
 function RefRow({
   repo,
@@ -47,14 +68,21 @@ function RefRow({
   protectedBranch: boolean;
   canCompare: boolean;
   base?: string;
-  onDelete?: () => Promise<void>;
+  onDelete?: DeleteBranch;
   tag: boolean;
 }) {
   const [copied, setCopied] = useState(false);
-  const [confirming, setConfirming] = useState(false);
+  const [confirmation, setConfirmation] = useState<string>();
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string>();
   const name = refName(ref);
+  const preview = useRequest<{ retarget: BranchRetarget | null }>(
+    confirmation && onDelete
+      ? endpoint(repo, "branches/deletion", { name, expected_oid: ref.oid })
+      : null,
+    repo.id,
+  );
+  const retarget = preview.data?.retarget;
   return (
     <li>
       <div className="ref-name-cell">
@@ -117,18 +145,34 @@ function RefRow({
             variant="destructive"
             onClick={() => {
               setError(undefined);
-              setConfirming(true);
+              setConfirmation(crypto.randomUUID());
             }}
           >
             <TrashIcon data-icon="inline-start" />
           </Button>
         )}
       </div>
-      {confirming && (
+      {confirmation && (
         <div className="ref-delete-confirm">
           <div>
             <strong>Delete {name}?</strong>
-            <span>This removes the branch ref. Its commits remain.</span>
+            {preview.loading && (
+              <span role="status">Checking affected pull requests…</span>
+            )}
+            {retarget && (
+              <span>
+                Pull {retarget.pulls.length === 1 ? "request" : "requests"}{" "}
+                {retarget.pulls.map((pull) => `#${pull}`).join(", ")} will move
+                to{" "}
+                <code>{retarget.base_ref.replace(/^refs\/heads\//, "")}</code>.
+              </span>
+            )}
+            {retarget === null && <span>This removes the branch ref.</span>}
+            {preview.error && (
+              <span className="ref-delete-error" role="alert">
+                {preview.error}
+              </span>
+            )}
             {error && (
               <span className="ref-delete-error" role="alert">
                 {error}
@@ -141,7 +185,7 @@ function RefRow({
               size="sm"
               disabled={deleting}
               onClick={() => {
-                setConfirming(false);
+                setConfirmation(undefined);
                 setError(undefined);
               }}
             >
@@ -150,13 +194,13 @@ function RefRow({
             <Button
               size="sm"
               variant="destructive"
-              disabled={deleting}
+              disabled={deleting || retarget === undefined}
               onClick={async () => {
-                if (!onDelete) return;
+                if (!onDelete || retarget === undefined) return;
                 setDeleting(true);
                 setError(undefined);
                 try {
-                  await onDelete();
+                  await onDelete(ref.name, ref.oid, retarget, confirmation);
                 } catch (failure) {
                   setError(
                     failure instanceof Error
@@ -185,7 +229,7 @@ export function RefsPage({
   repo: Repository;
   refs: Refs;
   type: "branches" | "tags";
-  onDeleteBranch?: (name: string, oid: string) => Promise<void>;
+  onDeleteBranch?: DeleteBranch;
 }) {
   const [query, setQuery] = useState("");
   const normalizedQuery = query.trim().toLocaleLowerCase();
@@ -297,7 +341,7 @@ function RefGroup({
   kind: "branch" | "tag";
   defaultName?: string;
   protectedNames: Set<string>;
-  onDeleteBranch?: (name: string, oid: string) => Promise<void>;
+  onDeleteBranch?: DeleteBranch;
   empty?: string;
 }) {
   return (
@@ -338,7 +382,7 @@ function RefGroup({
                   ref.name !== defaultName &&
                   !protectedNames.has(ref.name) &&
                   onDeleteBranch
-                    ? () => onDeleteBranch(ref.name, ref.oid)
+                    ? onDeleteBranch
                     : undefined
                 }
                 tag={kind === "tag"}

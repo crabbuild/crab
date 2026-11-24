@@ -30,6 +30,8 @@ pub(crate) struct Input {
     pub state: State,
     pub reason: Option<Reason>,
     pub body: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reopen_available: bool,
 }
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -47,6 +49,7 @@ pub(crate) enum Rejection {
     Conflict,
     InvalidState,
     MergePending,
+    BranchesUnavailable,
 }
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) enum Outcome {
@@ -225,6 +228,7 @@ fn apply(context: &mut Transaction<'_>, input: Input) -> Result<MutationResult<O
                 } else {
                     PullState::Closed
                 }),
+                reopen_available: input.reopen_available,
                 title: None,
                 body: None,
                 label_ids: None,
@@ -239,6 +243,9 @@ fn apply(context: &mut Transaction<'_>, input: Input) -> Result<MutationResult<O
                 UpdatePullOutcome::Conflict => Outcome::Rejected(Rejection::Conflict),
                 UpdatePullOutcome::InvalidState => Outcome::Rejected(Rejection::InvalidState),
                 UpdatePullOutcome::MergePending => Outcome::Rejected(Rejection::MergePending),
+                UpdatePullOutcome::BranchesUnavailable => {
+                    Outcome::Rejected(Rejection::BranchesUnavailable)
+                }
                 _ => return Err(Error::Invalid("unexpected pull state outcome")),
             }),
             _ => {

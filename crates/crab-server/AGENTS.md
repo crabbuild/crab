@@ -365,8 +365,17 @@ and session migration paths are supported.
   before serving historical addresses from the shared catalog.
 - `api/repository_metadata/` authorizes description and topic edits under
   the catalog CAS. The original description stays bound to creation replay.
-  Maintain can edit repository metadata and ordinary PR merge options. Queue configuration stays with
-  the administrator boundary in `api/pulls/merge_methods.rs`.
+  Maintain can edit repository metadata and ordinary PR merge options. Queue
+  and automatic head deletion settings stay with the administrator boundary in
+  `api/pulls/merge_methods.rs`. `api/pulls/head_branch/` shares the publication
+  boundary for manual and automatic deletion. The merge transaction promotes
+  cleanup to pending work after Git publication. The worker rechecks the source
+  setting generation and visible ref transaction under Git publication leases.
+  `head_branch/stacked/` reuses the base change transaction for stacked pulls.
+  Stock Git and the branch list resolve a base only from same-repository merges
+  of the branch and exact commit being deleted. The branch list uses the
+  existing pull request deletion action with its confirmed impact. Git pushes
+  lease the combined ref set and commit all dependent comparisons together.
 - `api/catalog_browse/` ranks and pages catalog matches. Reuse `api/catalog.rs`
   for current direct, group, organization, and fork grants and topic metadata. Browse reads
   lifecycle settings only for the result page and rechecks access before

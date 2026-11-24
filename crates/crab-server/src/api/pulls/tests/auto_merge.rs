@@ -176,6 +176,7 @@ async fn queue_publishes_tested_squash_and_rebase_history_and_expires_stale_meth
         let save_method = async |version, queue_method: &str| {
             h.write(Method::PUT, &settings, &alice, json!({
                 "expected_version":version,"enabled":["fast_forward"],"merge_queue_method":queue_method,
+                "delete_head_branches":true,
             })).await
         };
         assert_eq!(
@@ -328,6 +329,20 @@ async fn queue_publishes_tested_squash_and_rebase_history_and_expires_stale_meth
         assert_eq!(
             git(&["ls-remote", remote.as_str(), "refs/heads/main"]).await,
             format!("{tested}\trefs/heads/main")
+        );
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while h.json(&format!("{PULL}/head-branch"), &alice).await["branch"]["action"]
+                != "restore"
+            {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            git(&["ls-remote", remote.as_str(), "refs/heads/feature"])
+                .await
+                .is_empty()
         );
         worker.abort();
         h.close().await;

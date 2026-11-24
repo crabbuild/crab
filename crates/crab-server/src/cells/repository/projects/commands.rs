@@ -1,5 +1,6 @@
 use super::*;
 use crate::cells::planning as ledger;
+use crate::cells::repository::issues::issue_type;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Command {
@@ -30,6 +31,8 @@ pub(crate) enum Command {
         version: u64,
         item: Item,
         parent: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        type_id: Option<Uuid>,
     },
     Item {
         project: Uuid,
@@ -53,6 +56,8 @@ pub(crate) struct Request {
     pub request_id: Uuid,
     pub actor: RepositoryAuthor,
     pub can_write: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_type: Option<issue_type::Selection>,
     pub command: Command,
     pub cancel: bool,
 }
@@ -135,6 +140,7 @@ impl Mutation for Change {
         Ok(MutationResult::Success(outcome))
     }
 }
+
 fn new_project(
     context: &Transaction<'_>,
     id: Uuid,
@@ -215,7 +221,7 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
             if validate_title(title).is_err() || body.len() > 16 * 1024 || body.contains('\0') {
                 return Ok(rejected("Invalid sub-issue title or description"));
             }
-            let created = super::super::CreateIssue::execute(
+            let created = super::super::CreateIssue::for_project(
                 context,
                 super::super::CreateIssueInput {
                     submission_id: *input.request_id.as_bytes(),
@@ -224,6 +230,7 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
                     body: body.clone(),
                     metadata: Default::default(),
                 },
+                None,
             )?;
             let MutationResult::Success(super::super::CreateIssueOutcome::Created(issue)) = created
             else {
@@ -364,13 +371,27 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
                 }
             }
             let mut entry = entry.clone();
-            if let Command::CreateIssue { parent, .. } = &input.command {
+            if let Command::CreateIssue {
+                parent, type_id, ..
+            } = &input.command
+            {
                 if entry.subject.is_some() {
                     return Ok(rejected("This item is already an issue or pull request"));
                 }
+                let selection = if let Some(type_id) = type_id {
+                    let Some(selection) = input
+                        .issue_type
+                        .filter(|selection| selection.id == *type_id)
+                    else {
+                        return Ok(rejected("Choose an enabled issue type"));
+                    };
+                    Some(selection)
+                } else {
+                    None
+                };
                 // Conversion shares the canonical upsert and its item precondition.
                 // A rejected parent or membership rolls back the new issue too.
-                let created = super::super::CreateIssue::execute(
+                let created = super::super::CreateIssue::for_project(
                     context,
                     super::super::CreateIssueInput {
                         submission_id: *input.request_id.as_bytes(),
@@ -379,6 +400,7 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
                         body: entry.body.clone(),
                         metadata: Default::default(),
                     },
+                    selection,
                 )?;
                 let MutationResult::Success(super::super::CreateIssueOutcome::Created(issue)) =
                     created

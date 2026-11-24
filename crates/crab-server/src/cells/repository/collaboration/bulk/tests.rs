@@ -79,6 +79,11 @@ fn input(items: Vec<Selected>, action: Action) -> Input {
         submission_id: *Uuid::now_v7().as_bytes(),
         actor: actor(),
         can_triage: true,
+        reopen_available: items
+            .iter()
+            .filter(|item| item.item.subject.kind == SubjectKind::Pull)
+            .map(|item| item.item.subject.number)
+            .collect(),
         items,
         action,
         eligible: vec![],

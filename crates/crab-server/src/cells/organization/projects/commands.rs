@@ -31,6 +31,12 @@ pub(crate) enum Command {
         repository: Option<Uuid>,
         item: planning::Item,
     },
+    CreateIssue {
+        project: Uuid,
+        repository: Uuid,
+        item: planning::Item,
+        type_id: Option<Uuid>,
+    },
     Remove {
         project: Uuid,
         version: u64,
@@ -45,12 +51,13 @@ impl Command {
             | Self::Planning { project, .. }
             | Self::Repository { project, .. }
             | Self::Item { project, .. }
+            | Self::CreateIssue { project, .. }
             | Self::Remove { project, .. } => Some(*project),
         }
     }
     fn version(&self) -> u64 {
         match self {
-            Self::Create { .. } => 0,
+            Self::Create { .. } | Self::CreateIssue { .. } => 0,
             Self::Edit { version, .. }
             | Self::Planning { version, .. }
             | Self::Repository { version, .. }
@@ -69,6 +76,8 @@ pub(crate) struct Request {
     // Repository access is checked by HTTP, independently of project ownership.
     // It is excluded from the digest so a lost reply can recover after revocation.
     pub source_allowed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_epoch: Option<u32>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
@@ -87,11 +96,18 @@ pub(crate) enum Outcome {
         version: u64,
     },
     RequestConflict,
+    PendingIssue {
+        issue: issue_creation::PendingIssue,
+    },
+    IssueAlreadyLinked {
+        project: Uuid,
+        version: u64,
+    },
 }
 #[derive(Deserialize, Serialize)]
-struct Saved {
+pub(super) struct Saved {
     digest: String,
-    outcome: Outcome,
+    pub(super) outcome: Outcome,
 }
 fn digest(input: &Request) -> Result<String> {
     Ok(
@@ -100,13 +116,22 @@ fn digest(input: &Request) -> Result<String> {
             .to_string(),
     )
 }
-fn key(input: &Request) -> String {
-    format!("organization/projects/v1/submissions/{}", input.request_id)
+fn key(id: Uuid) -> String {
+    format!("organization/projects/v1/submissions/{id}")
+}
+impl Saved {
+    pub(super) fn load(context: &Transaction<'_>, id: Uuid) -> Result<Option<Self>> {
+        actor(id)?;
+        context.document(&key(id))
+    }
+
+    pub(super) fn write(&self, context: &Transaction<'_>, id: Uuid) -> Result<()> {
+        context.put_document(&key(id), self)
+    }
 }
 pub(super) fn recover(context: &Transaction<'_>, input: &Request) -> Result<Option<Outcome>> {
-    actor(input.request_id)?;
     let expected = digest(input)?;
-    Ok(context.document::<Saved>(&key(input))?.map(|saved| {
+    Ok(Saved::load(context, input.request_id)?.map(|saved| {
         if expected == saved.digest {
             saved.outcome
         } else {
@@ -139,17 +164,18 @@ impl Mutation for Change {
                 MutationResult::Success(outcome) | MutationResult::Rejected(outcome) => outcome,
             }
         };
-        context.put_document(
-            &key(&input),
-            &Saved {
-                digest: digest(&input)?,
-                outcome: outcome.clone(),
-            },
-        )?;
+        Saved {
+            digest: digest(&input)?,
+            outcome: outcome.clone(),
+        }
+        .write(context, input.request_id)?;
         Ok(MutationResult::Success(outcome))
     }
 }
-fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResult<Outcome>> {
+pub(super) fn apply(
+    context: &mut Transaction<'_>,
+    input: &Request,
+) -> Result<MutationResult<Outcome>> {
     if let Command::Create { id, name, template } = &input.command {
         let Some(template) = planning::templates()
             .into_iter()
@@ -218,14 +244,17 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
     let Some(mut project) = load(context, project_id)? else {
         return Ok(rejected("Project not found"));
     };
-    if !matches!(input.command, Command::Item { .. } | Command::Remove { .. })
-        && project.version != input.command.version()
+    if !matches!(
+        input.command,
+        Command::Item { .. } | Command::Remove { .. } | Command::CreateIssue { .. }
+    ) && project.version != input.command.version()
     {
         return Ok(rejected(
             "The project changed. Review its current version before saving your draft.",
         ));
     }
-    if project.version >= MAX_VERSION {
+    let pending = issue_creation::reservations(context, project_id)?;
+    if project.version.saturating_add(pending.len() as u64) >= MAX_VERSION {
         return Ok(rejected("Project version limit reached"));
     }
     if project.archived && !matches!(input.command, Command::Edit { .. }) {
@@ -240,6 +269,11 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
             archived,
             ..
         } => {
+            if !issue_creation::can_edit(&pending, *archived, definition) {
+                return Ok(rejected(
+                    "Finish pending issue creation before removing its status or fields or archiving the Project",
+                ));
+            }
             if !definition.valid() {
                 return Ok(rejected(
                     "Check the project name, workflow, fields and views",
@@ -303,6 +337,14 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
                 }
                 context.query("INSERT INTO organization_project_repositories(project,repository) VALUES(?,?) ON CONFLICT DO NOTHING",&[blob(project_id),blob(*repository)])?;
             } else {
+                if pending
+                    .values()
+                    .any(|reservation| reservation.repository == *repository)
+                {
+                    return Ok(rejected(
+                        "Finish pending issue creation before unlinking this repository",
+                    ));
+                }
                 if !context.query("SELECT 1 FROM organization_project_items WHERE project=? AND repository=? LIMIT 1",&[blob(project_id),blob(*repository)])?.rows.is_empty() {return Ok(rejected("Remove this repository's project items before unlinking it"));}
                 context.query("DELETE FROM organization_project_repositories WHERE project=? AND repository=?",&[blob(project_id),blob(*repository)])?;
             }
@@ -313,6 +355,9 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
             version,
             ..
         } => {
+            if pending.contains_key(&next.id) {
+                return Ok(rejected("This item has a pending issue submission"));
+            }
             if !next.valid(&project.definition) || repository.is_some() != next.subject.is_some() {
                 return Ok(rejected("Check the work item and its repository"));
             }
@@ -341,14 +386,8 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
                     "An existing project item's source cannot be replaced",
                 ));
             }
-            if old.is_none() {
-                let count = context.query(
-                    "SELECT COUNT(*) FROM organization_project_items WHERE project=?",
-                    &[blob(project_id)],
-                )?;
-                if uint(&count.rows[0][0])? >= MAX_ITEMS {
-                    return Ok(rejected("This project has reached its 5,000-item limit"));
-                }
+            if old.is_none() && !issue_creation::has_room(context, project_id, &pending)? {
+                return Ok(rejected("This project has reached its 5,000-item limit"));
             }
             let (kind, number) = match next.subject {
                 Some(subject) => (
@@ -387,6 +426,22 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
                 .map(|old| history::item_snapshot(&old.item))
                 .transpose()?;
             after = Some(history::item_snapshot(next)?);
+        }
+        Command::CreateIssue {
+            repository,
+            item,
+            type_id,
+            ..
+        } => {
+            return issue_creation::reserve(
+                context,
+                input,
+                &project,
+                pending,
+                *repository,
+                item,
+                *type_id,
+            );
         }
         Command::Remove {
             item: id, version, ..

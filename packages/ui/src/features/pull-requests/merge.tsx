@@ -34,6 +34,7 @@ import { branch } from "./presentation";
 import { AutoMerge } from "./auto-merge";
 import { RequiredChecks } from "./required-checks";
 import { CodeOwnersSummary } from "./codeowners";
+import { HeadBranch } from "./head-branch";
 
 export function MergePanel({
   repo,
@@ -95,6 +96,9 @@ export function MergePanel({
     (requirements.required_approvals === 0 && !requirements.code_owners) ||
     (requirements.changes_requested === 0 &&
       requirements.approvals >= requirements.required_approvals);
+  const headBranch = pull.state !== "open" && (
+    <HeadBranch repo={repo} pull={pull} csrf={csrf} onChanged={refresh} />
+  );
 
   async function merge() {
     // A pending publication must replay the exact original submission, even if
@@ -147,6 +151,7 @@ export function MergePanel({
             )}
           </div>
         </div>
+        {headBranch}
       </section>
     );
   if (pull.state === "closed")
@@ -156,9 +161,14 @@ export function MergePanel({
           <GitPullRequestClosedIcon size={24} />
           <div>
             <strong>This pull request is closed</strong>
-            <p>Reopen it before merging these commits.</p>
+            <p>
+              {pull.branches_available
+                ? "Reopen it before merging these commits."
+                : "Restore the missing branch before reopening this pull request."}
+            </p>
           </div>
         </div>
+        {headBranch}
       </section>
     );
   if (pull.draft)

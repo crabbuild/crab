@@ -57,8 +57,8 @@ pub(super) async fn select_pack(
     .await??;
     let operation = git.operation(OperationKind::UploadPack, cancel).await?;
     let selection = select_objects(
-        (&upstream_index, prior_ref),
-        (&fork_index, source_ref),
+        |oid| upstream_index.contains_in_ref(prior_ref, oid),
+        |oid| fork_index.contains_in_ref(source_ref, oid),
         result,
         generated,
         &operation,
@@ -74,9 +74,42 @@ pub(super) async fn select_pack(
     Ok((generated, pack))
 }
 
+pub(super) async fn restore_pack(
+    git: &crab_remote_git::RemoteGitRepository,
+    visibility: &GitVisibilityIndex,
+    head: ObjectId,
+    cancel: &CancellationToken,
+) -> Result<Option<GeneratedPack>> {
+    let visible = |oid: &[u8; 20]| {
+        visibility.contains_for_refs(
+            git.refs()
+                .entries
+                .iter()
+                .map(|reference| reference.name.as_str()),
+            oid,
+        )
+    };
+    let oid: &[u8; 20] = head
+        .as_bytes()
+        .try_into()
+        .map_err(|_| ReceiveError::Request("Branch restoration requires a SHA-1 commit"))?;
+    if visible(oid) {
+        return Ok(None);
+    }
+    let operation = git.operation(OperationKind::UploadPack, cancel).await?;
+    // The caller has revalidated this root against the saved PR in this
+    // repository. Read only its verified graph from the retained inventory.
+    // Generic Git receive still rejects dangling OIDs supplied by callers.
+    let selected =
+        select_objects(visible, |_| true, head, BTreeMap::new(), &operation, cancel).await;
+    let (_, selected) = operation.finish(selected).await?;
+    let pack = git.generate_pack(&selected, cancel).await?;
+    Ok(Some(pack))
+}
+
 async fn select_objects(
-    (upstream, base_ref): (&GitVisibilityIndex, &str),
-    (fork, head_ref): (&GitVisibilityIndex, &str),
+    destination_visible: impl Fn(&[u8; 20]) -> bool,
+    source_visible: impl Fn(&[u8; 20]) -> bool,
     result: ObjectId,
     mut unused: BTreeMap<ObjectId, (Kind, Vec<u8>)>,
     operation: &OperationContext,
@@ -99,7 +132,7 @@ async fn select_objects(
                 .map_err(|_| crab_remote_git::Error::InternalInvariant {
                     invariant: "fork merge selected a non-SHA-1 object",
                 })?;
-        if upstream.contains_in_ref(base_ref, hash) {
+        if destination_visible(hash) {
             continue;
         }
         if let Some((actual, bytes)) = unused.remove(&oid) {
@@ -110,7 +143,7 @@ async fn select_objects(
         }
         // Walk only exact dependencies of the result. In particular, a squash
         // or rebase need not publish the original fork commits or their trees.
-        if !fork.contains_in_ref(head_ref, hash) {
+        if !source_visible(hash) {
             return Err(crab_remote_git::Error::ObjectNotFound { oid });
         }
         selected.push(oid);

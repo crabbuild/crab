@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use axum::{
     Extension, Json, Router,
@@ -67,38 +67,13 @@ async fn change(
         .head_repository
         .map(|id| git::fork_repository(&server, &repo, id))
         .transpose()?;
-    let refs = if fork.is_some() {
-        vec![change.base_ref.clone()]
-    } else {
-        vec![change.base_ref.clone(), pull.head_ref.clone()]
-    };
-    let head_ref = pull.head_ref.clone();
-    let work = |cancel: CancellationToken| {
-        inspect(&server, &repo, &principal, &actor, &pull, change, cancel)
-    };
-    // Share merge and update-branch lock order. Both captured tips remain
-    // valid through the transactional base change and approval invalidation.
-    crab_remote::publication::with_leases(
-        &repo.store,
-        &repo.layout,
-        refs,
-        Duration::from_secs(300),
+    git::with_comparison_leases(
+        &repo,
+        fork.as_deref(),
+        change.base_ref.clone(),
+        pull.head_ref.clone(),
         &server.cancellation,
-        |_holders, scoped| async move {
-            if let Some(fork) = fork {
-                crab_remote::publication::with_leases(
-                    &fork.store,
-                    &fork.layout,
-                    [head_ref],
-                    Duration::from_secs(300),
-                    &scoped,
-                    |_holders, scoped| work(scoped),
-                )
-                .await
-            } else {
-                work(scoped).await
-            }
-        },
+        |cancel| inspect(&server, &repo, &principal, &actor, &pull, change, cancel),
     )
     .await
 }

@@ -1,6 +1,7 @@
 use crate::test_support::git::{git, success};
 
 mod faults;
+pub(crate) use faults::fault_plan_intent;
 mod sdk;
 
 use crate::server::Server;

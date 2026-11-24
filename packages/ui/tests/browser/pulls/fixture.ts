@@ -211,6 +211,10 @@ export async function mockPullRequest(
       return route.fulfill({ json: { items: [], can_manage: true } });
     if (path.endsWith("/issues/templates") && request.method() === "GET")
       return route.fulfill({ json: emptyIssueTemplates });
+    if (path.endsWith("/pulls/templates") && request.method() === "GET")
+      return route.fulfill({
+        json: { default: null, items: [], truncated: false, source: null },
+      });
     if (path.endsWith("/issues/pins") && request.method() === "GET")
       return route.fulfill({
         json: { version: 0, items: [], can_manage: true },

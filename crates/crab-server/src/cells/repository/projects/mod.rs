@@ -16,6 +16,7 @@ mod commands;
 pub(crate) mod grouping;
 pub(crate) mod hierarchy;
 mod history;
+pub(crate) mod organization_issue;
 pub(crate) mod preparation;
 mod reads;
 mod templates;

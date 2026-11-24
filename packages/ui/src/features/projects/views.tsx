@@ -44,6 +44,8 @@ import {
 import { ProjectIssueType } from "./issue-type";
 import {
   projectGroups,
+  AddToProjectGroup,
+  type AddProjectGroupItem,
   type ChangeProjectItem,
   ProjectGroupMoveFailure,
   useProjectGroupMove,
@@ -165,6 +167,7 @@ function ProjectGroupLabel({ name, count }: { name: string; count: number }) {
     </span>
   );
 }
+
 export function ProjectTable({
   repo,
   page,
@@ -172,6 +175,8 @@ export function ProjectTable({
   onEdit,
   groupBy,
   onChangeItem,
+  onAddGroupItem,
+  onAddGroupIssue,
   showIssueType,
   onIssueTypeChange,
 }: {
@@ -181,6 +186,8 @@ export function ProjectTable({
   onEdit: (row: Row) => void;
   groupBy?: GroupBy;
   onChangeItem: ChangeProjectItem;
+  onAddGroupItem?: AddProjectGroupItem;
+  onAddGroupIssue?: (typeId: string | null) => void;
   showIssueType?: boolean;
   onIssueTypeChange?: () => void;
 }) {
@@ -304,7 +311,16 @@ export function ProjectTable({
                   colSpan={columns}
                   className="project-group-heading"
                 >
-                  <ProjectGroupLabel name={name} count={count} />
+                  <div className="flex items-center gap-2">
+                    <ProjectGroupLabel name={name} count={count} />
+                    <AddToProjectGroup
+                      grouping={groupBy}
+                      value={key}
+                      name={name}
+                      onAdd={editable ? onAddGroupItem : undefined}
+                      onCreateIssue={editable ? onAddGroupIssue : undefined}
+                    />
+                  </div>
                 </TableHead>
               </TableRow>
               {rows.map(renderRow)}
@@ -324,6 +340,8 @@ export function ProjectBoard({
   onEdit,
   groupBy = "status",
   onChangeItem,
+  onAddGroupItem,
+  onAddGroupIssue,
   showIssueType,
   onIssueTypeChange,
 }: {
@@ -333,6 +351,8 @@ export function ProjectBoard({
   onEdit: (row: Row) => void;
   groupBy?: GroupBy;
   onChangeItem: ChangeProjectItem;
+  onAddGroupItem?: AddProjectGroupItem;
+  onAddGroupIssue?: (typeId: string | null) => void;
   showIssueType?: boolean;
   onIssueTypeChange?: () => void;
 }) {
@@ -364,6 +384,13 @@ export function ProjectBoard({
               <span className="project-status-dot" />
               <h2>{name}</h2>
               <Badge variant="secondary">{count}</Badge>
+              <AddToProjectGroup
+                grouping={groupBy}
+                value={key}
+                name={name}
+                onAdd={editable ? onAddGroupItem : undefined}
+                onCreateIssue={editable ? onAddGroupIssue : undefined}
+              />
             </header>
             <div className="project-board-cards">
               {rows.map((row) => (
@@ -432,6 +459,8 @@ export function ProjectRoadmap({
   editable,
   onEdit,
   groupBy,
+  onAddGroupItem,
+  onAddGroupIssue,
   showIssueType,
   onIssueTypeChange,
 }: {
@@ -440,6 +469,8 @@ export function ProjectRoadmap({
   editable: boolean;
   onEdit: (row: Row) => void;
   groupBy?: GroupBy;
+  onAddGroupItem?: AddProjectGroupItem;
+  onAddGroupIssue?: (typeId: string | null) => void;
   showIssueType?: boolean;
   onIssueTypeChange?: () => void;
 }) {
@@ -602,7 +633,13 @@ export function ProjectRoadmap({
           </div>
           {groups
             ? groups
-                .filter(({ count }) => count > 0)
+                .filter(
+                  ({ count }) =>
+                    count > 0 ||
+                    (!page.items.length &&
+                      editable &&
+                      (byType ? !!onAddGroupIssue : !!onAddGroupItem)),
+                )
                 .map(({ key, name, count, rows }) => (
                   <div key={key} role="rowgroup" aria-label={name}>
                     <div
@@ -610,7 +647,18 @@ export function ProjectRoadmap({
                       role="row"
                     >
                       <div role="cell" aria-colspan={2}>
-                        <ProjectGroupLabel name={name} count={count} />
+                        <div className="flex items-center gap-2">
+                          <ProjectGroupLabel name={name} count={count} />
+                          <AddToProjectGroup
+                            grouping={groupBy}
+                            value={key}
+                            name={name}
+                            onAdd={editable ? onAddGroupItem : undefined}
+                            onCreateIssue={
+                              editable ? onAddGroupIssue : undefined
+                            }
+                          />
+                        </div>
                       </div>
                     </div>
                     {rows.map(renderRow)}

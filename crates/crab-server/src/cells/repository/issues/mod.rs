@@ -21,6 +21,45 @@ impl Mutation for CreateIssue {
         context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
+        Self::write(context, input, true)
+    }
+}
+
+impl CreateIssue {
+    pub(in crate::cells::repository) fn for_project(
+        context: &mut Transaction<'_>,
+        input: CreateIssueInput,
+        selection: Option<issue_type::Selection>,
+    ) -> crate::cells::Result<MutationResult<CreateIssueOutcome>> {
+        // The enclosing Project transaction records the only submission
+        // decision. Standalone issue request IDs cannot select its issue.
+        let created = Self::write(context, input, false)?;
+        if let (MutationResult::Success(CreateIssueOutcome::Created(issue)), Some(selection)) =
+            (&created, selection)
+            && !matches!(
+                issue_type::Set::execute(
+                    context,
+                    issue_type::SetInput {
+                        number: issue.number,
+                        expected_version: 0,
+                        selection: Some(selection),
+                    }
+                )?,
+                MutationResult::Success(issue_type::Outcome::Saved(_))
+            )
+        {
+            return Err(crate::cells::Error::Invalid(
+                "project issue type assignment failed",
+            ));
+        }
+        Ok(created)
+    }
+
+    fn write(
+        context: &mut Transaction<'_>,
+        input: CreateIssueInput,
+        journal: bool,
+    ) -> crate::cells::Result<MutationResult<CreateIssueOutcome>> {
         if settings::archived(context)? {
             return Ok(MutationResult::Rejected(CreateIssueOutcome::Archived));
         }
@@ -29,54 +68,59 @@ impl Mutation for CreateIssue {
         validate_title(&input.title)?;
         validate_body(&input.body, false)?;
         input.metadata.selection.validate()?;
-        let payload_digest = issue_submission_digest(&input);
-        let reservation = context.sql(&SqlBatch {
-            statements: vec![statement(
-                "SELECT payload_digest, issue_number FROM repository_issue_submissions WHERE request_id = ?",
-                vec![SqlValue::Blob(input.submission_id.to_vec())],
-            )],
-        })?;
-        if let Some(row) = reservation[0].rows.first() {
-            if result_blob(row, 0)? != payload_digest.as_bytes() {
-                return Ok(MutationResult::Rejected(
-                    CreateIssueOutcome::RequestConflict,
-                ));
-            }
-            let number = result_u64_from_row(row, 1)?;
-            let current = context.sql(&SqlBatch {
+        use crate::cells::repository::collaboration::{Subject, SubjectKind, creation};
+        let payload_digest = if journal {
+            let payload_digest = issue_submission_digest(&input);
+            let reservation = context.sql(&SqlBatch {
                 statements: vec![statement(
-                    "SELECT number, author_issuer, author_subject, author_name, title, body, state, label_ids, assignees, version, created_at_ms, updated_at_ms FROM repository_issues WHERE number = ?",
-                    vec![integer(number)?],
+                    "SELECT payload_digest, issue_number FROM repository_issue_submissions WHERE request_id = ?",
+                    vec![SqlValue::Blob(input.submission_id.to_vec())],
                 )],
             })?;
-            let issue = current[0].rows.first().ok_or(crate::cells::Error::Invalid(
-                "repository issue submission has no issue row",
-            ))?;
-            return Ok(MutationResult::Success(CreateIssueOutcome::Created(
-                Box::new(issue_from_row(issue)?),
-            )));
-        }
-        use crate::cells::repository::collaboration::{Subject, SubjectKind, creation};
-        match input.metadata.resolve(
-            context,
-            SubjectKind::Issue,
-            input.submission_id,
-            payload_digest,
-            None,
-            None,
-        )? {
-            creation::Resolution::Ready => {}
-            creation::Resolution::Rejected(reason) => {
-                return Ok(MutationResult::Success(
-                    CreateIssueOutcome::MetadataRejected(reason),
-                ));
+            if let Some(row) = reservation[0].rows.first() {
+                if result_blob(row, 0)? != payload_digest.as_bytes() {
+                    return Ok(MutationResult::Rejected(
+                        CreateIssueOutcome::RequestConflict,
+                    ));
+                }
+                let number = result_u64_from_row(row, 1)?;
+                let current = context.sql(&SqlBatch {
+                    statements: vec![statement(
+                        "SELECT number, author_issuer, author_subject, author_name, title, body, state, label_ids, assignees, version, created_at_ms, updated_at_ms FROM repository_issues WHERE number = ?",
+                        vec![integer(number)?],
+                    )],
+                })?;
+                let issue = current[0].rows.first().ok_or(crate::cells::Error::Invalid(
+                    "repository issue submission has no issue row",
+                ))?;
+                return Ok(MutationResult::Success(CreateIssueOutcome::Created(
+                    Box::new(issue_from_row(issue)?),
+                )));
             }
-            creation::Resolution::Conflict => {
-                return Ok(MutationResult::Rejected(
-                    CreateIssueOutcome::RequestConflict,
-                ));
+            match input.metadata.resolve(
+                context,
+                SubjectKind::Issue,
+                input.submission_id,
+                payload_digest,
+                None,
+                None,
+            )? {
+                creation::Resolution::Ready => {}
+                creation::Resolution::Rejected(reason) => {
+                    return Ok(MutationResult::Success(
+                        CreateIssueOutcome::MetadataRejected(reason),
+                    ));
+                }
+                creation::Resolution::Conflict => {
+                    return Ok(MutationResult::Rejected(
+                        CreateIssueOutcome::RequestConflict,
+                    ));
+                }
             }
-        }
+            Some(payload_digest)
+        } else {
+            None
+        };
         let milestone = input.metadata.selection.milestone;
         let now = timestamp(context.now_ms())?;
         let sequence = context.sql(&SqlBatch {
@@ -109,16 +153,18 @@ impl Mutation for CreateIssue {
             created_at_ms: now,
             updated_at_ms: now,
         };
-        context.sql(&SqlBatch {
-            statements: vec![statement(
-                "INSERT INTO repository_issue_submissions(request_id, payload_digest, issue_number) VALUES (?, ?, ?)",
-                vec![
-                    SqlValue::Blob(input.submission_id.to_vec()),
-                    SqlValue::Blob(payload_digest.as_bytes().to_vec()),
-                    integer(record.number)?,
-                ],
-            )],
-        })?;
+        if let Some(payload_digest) = payload_digest {
+            context.sql(&SqlBatch {
+                statements: vec![statement(
+                    "INSERT INTO repository_issue_submissions(request_id, payload_digest, issue_number) VALUES (?, ?, ?)",
+                    vec![
+                        SqlValue::Blob(input.submission_id.to_vec()),
+                        SqlValue::Blob(payload_digest.as_bytes().to_vec()),
+                        integer(record.number)?,
+                    ],
+                )],
+            })?;
+        }
         insert_issue(context, &record)?;
         lifecycle::create(context, record.number)?;
         advance_revision(context)?;

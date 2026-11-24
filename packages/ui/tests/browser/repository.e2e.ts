@@ -3921,6 +3921,10 @@ test("branch and tag pages follow the GitHub refs hierarchy", async ({
       }),
   );
   await page.route(
+    (url) => url.pathname === "/api/repos/team/project/branches/deletion",
+    (route) => route.fulfill({ json: { retarget: null } }),
+  );
+  await page.route(
     (url) => url.pathname === "/api/repos/team/project/branches",
     (route) => {
       expect(route.request().method()).toBe("DELETE");

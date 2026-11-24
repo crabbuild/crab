@@ -162,6 +162,10 @@ async function fixture(page: Page) {
             definition: { ...project.definition, name: command.name },
           };
           outcome = { outcome: "applied", project: project.id, version: 1 };
+        } else if (command.kind === "create_issue") {
+          throw new Error(
+            "Issue publication requires the native Project browser fixture",
+          );
         } else if (
           (command.kind === "item" || command.kind === "remove") &&
           command.version !==

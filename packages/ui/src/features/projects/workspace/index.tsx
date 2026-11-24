@@ -28,10 +28,22 @@ import { useProjectCommands } from "../commands";
 import { ProjectHistory } from "../history";
 import { DraftRecovery } from "../drafts";
 import { checkpointDraft, itemDraft, readDraft } from "../draft-storage";
-import { projectEndpoint, type Item, type ItemPage, type Row } from "../model";
+import {
+  blankItem,
+  projectEndpoint,
+  type Item,
+  type ItemPage,
+  type ProjectItemSelection,
+  type Row,
+} from "../model";
 import { ProjectSettings } from "../settings";
 import { ProjectTypeFilter } from "../issue-type";
-import { ProjectGrouping, selectedGrouping } from "../grouping";
+import {
+  applyProjectGroup,
+  ProjectGrouping,
+  selectedGrouping,
+  type AddProjectGroupItem,
+} from "../grouping";
 import { ProjectBoard, ProjectTable, ProjectRoadmap } from "../views";
 import { FieldSelect } from "@/components/ui/field-select";
 import { ProjectProperties } from "./forms";
@@ -148,7 +160,7 @@ function PlanningWorkspace({
   const { project } = detail;
   const commands = useProjectCommands();
   const generation = useRef(commands.generation);
-  const [editing, setEditing] = useState<Row | "new" | { draft: string }>();
+  const [editing, setEditing] = useState<ProjectItemSelection>();
   const [settings, setSettings] = useState(false);
   const [properties, setProperties] = useState(false);
   const overview = url.searchParams.get("view") === "overview";
@@ -244,11 +256,36 @@ function PlanningWorkspace({
       checkpoint,
     );
   }
+  const addGroupItem: AddProjectGroupItem = (group, key) => {
+    const draft = blankItem(status || project.definition.statuses[0]);
+    setEditing({ initialItem: applyProjectGroup(draft, group, key) });
+  };
+  const canCreateIssue = detail.repositories.some(
+    (repo) => repo.can_create_issue,
+  );
+  const addGroupIssue = (typeId: string | null) => {
+    setEditing({
+      initialItem: blankItem(status || project.definition.statuses[0]),
+      initialIssueType: typeId,
+    });
+  };
+  const createInGroup =
+    editable &&
+    groupBy !== undefined &&
+    (groupBy !== "issue_type" || canCreateIssue);
+  const initialItem =
+    typeof editing === "object" && "initialItem" in editing
+      ? editing.initialItem
+      : undefined;
   const editingRow =
     typeof editing === "object" && "item" in editing ? editing : undefined;
   const draftItem =
     typeof editing === "object" && "draft" in editing
       ? editing.draft
+      : undefined;
+  const initialIssueType =
+    typeof editing === "object" && "initialItem" in editing
+      ? editing.initialIssueType
       : undefined;
   const View =
     layout === "board"
@@ -492,11 +529,15 @@ function PlanningWorkspace({
                           {page.total === 1 ? "item" : "items"}
                         </span>
                       </div>
-                      {page.items.length ? (
+                      {page.items.length || createInGroup ? (
                         <View
                           page={page}
                           editable={editable}
                           onEdit={setEditing}
+                          onAddGroupItem={addGroupItem}
+                          onAddGroupIssue={
+                            canCreateIssue ? addGroupIssue : undefined
+                          }
                           showIssueType={selected.show_issue_type}
                           onIssueTypeChange={
                             project.archived
@@ -635,11 +676,13 @@ function PlanningWorkspace({
       </Tabs>
       {editing && (
         <WorkspaceItemEditor
-          key={draftItem ?? editingRow?.item.id ?? "new"}
+          key={draftItem ?? editingRow?.item.id ?? initialItem?.id ?? "new"}
           organization={organization}
           detail={detail}
           row={editingRow}
           draftItem={draftItem}
+          initialItem={initialItem}
+          initialIssueType={initialIssueType}
           onClose={() => setEditing(undefined)}
         />
       )}

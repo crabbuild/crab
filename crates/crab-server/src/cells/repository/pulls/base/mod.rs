@@ -42,6 +42,8 @@ pub(crate) struct Change {
     pub head_oid: String,
 }
 
+pub(crate) mod stacked;
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Input {

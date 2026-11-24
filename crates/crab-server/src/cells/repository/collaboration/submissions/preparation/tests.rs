@@ -75,6 +75,7 @@ async fn history(cell: &RepositoryCell, kind: Kind) -> Vec<(Command, Value)> {
                     reason: None,
                 },
                 eligible: vec![],
+                reopen_available: Default::default(),
             }),
             Kind::Pins => Command::Pins(pins::Input {
                 submission_id: *Uuid::now_v7().as_bytes(),

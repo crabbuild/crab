@@ -30,6 +30,7 @@ export type DraftData =
       version: number;
       mode: "issue" | "existing" | "draft";
       parent: string;
+      issueType?: string | null;
       repository: string;
       work: Work | null;
       existing: boolean;
@@ -194,6 +195,7 @@ function valid(value: unknown): value is DraftData {
         revision(value.version) &&
         ["issue", "existing", "draft"].includes(String(value.mode)) &&
         string(value.parent) &&
+        (value.issueType === undefined || optionalString(value.issueType)) &&
         string(value.repository) &&
         typeof value.existing === "boolean" &&
         typeof value.restricted === "boolean" &&

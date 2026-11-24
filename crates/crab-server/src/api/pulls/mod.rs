@@ -28,6 +28,9 @@ use crate::{
 
 pub(crate) mod auto_merge;
 mod base;
+mod head_branch;
+pub(crate) use head_branch::authorize_pull_branch;
+pub(crate) use head_branch::stacked as stacked_pulls;
 mod branch_update;
 pub(super) mod candidate;
 pub(crate) use candidate::authorize_merge_candidate;
@@ -39,6 +42,7 @@ pub(super) use git::review_head;
 mod merge;
 mod merge_methods;
 mod readiness;
+pub(in crate::api) mod reopen;
 mod required_checks;
 mod review_requests;
 mod review_threads;
@@ -47,6 +51,7 @@ mod reviewers;
 pub(super) mod reviews;
 pub(super) mod rollups;
 pub(super) mod storage;
+mod templates;
 mod viewed;
 use crate::cells::repository::{ListPulls, PullSummary};
 use required_checks::RequiredCheck;
@@ -108,10 +113,15 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .route("/api/repos/{owner}/{name}/pulls", get(list).post(create))
         .route(
+            "/api/repos/{owner}/{name}/pulls/templates",
+            get(templates::list),
+        )
+        .route(
             "/api/repos/{owner}/{name}/pulls/{number}",
             get(detail).patch(edit),
         )
         .merge(comments::routes())
+        .merge(head_branch::routes())
         .merge(branch_update::routes())
         .merge(base::routes())
         .merge(reviews::routes())
@@ -592,7 +602,10 @@ pub(crate) async fn authorize_merge_publication(
                 && pending.tested_candidate == publication.tested_candidate
                 && pull.head_ref == publication.head_ref
                 && pull.head_repository == publication.head_repository.as_ref().map(|fork| fork.id)
-                && pending.publication_plan.as_deref() == plan
+                // A tagged reservation has no plan. New receipt IDs for its
+                // webhooks or issue closures do not change its merge binding.
+                && pending.publication_plan == publication.plan_id
+                && publication.plan_id.as_deref().is_none_or(|id| plan == Some(id))
                 && update.name == pull.base_ref
                 && update
                     .new
@@ -646,7 +659,16 @@ pub(crate) async fn authorize_merge_publication(
     // Save the closure before the marker so finishing a proven receipt does
     // not reinterpret it using a later HEAD or a later edit to the links.
     let on_default = repo.default_ref().await? == update.name;
-    storage::capture_issue_closure(server, repo, pull.number, pending, on_default).await
+    let source = publication.head_repository.as_deref().unwrap_or(repo);
+    let cleanup = head_branch::automatic::capture(
+        server,
+        source,
+        &grant.principal,
+        &pull.head_ref,
+        &head_oid,
+    )
+    .await?;
+    storage::capture_merge_effects(server, repo, pull.number, pending, on_default, cleanup).await
 }
 
 fn merge_requirements(
@@ -837,7 +859,6 @@ async fn create(
     input: std::result::Result<Json<NewPull>, JsonRejection>,
 ) -> Result<axum::response::Response> {
     let repo = app::repository(&server, &principal, &key)?;
-    let repo = repo.as_ref();
     let Json(input) = input?;
     let actor = app::actor(&principal)?;
     let title = app::title(&input.title)?;
@@ -847,10 +868,10 @@ async fn create(
         return Err(Error::Invalid("Base and head branches must differ"));
     }
     if let Some(fork) = input.head_repository {
-        git::fork_repository(&server, repo, fork)?;
+        git::fork_repository(&server, &repo, fork)?;
         // Private same-organization forks inherit the upstream grant. Keep
         // the browser credential bound to the upstream collaboration route.
-        if !app::membership(&server, &principal, repo)
+        if !app::membership(&server, &principal, &repo)
             .await?
             .principal
             .can_write(repo.id)
@@ -884,18 +905,18 @@ async fn create(
         ));
     }
     let metadata =
-        super::discussion_creation::resolve(&server, &principal, repo, input.metadata).await?;
-    let existing = storage::pull_submission(&server, repo, &request_id).await?;
+        super::discussion_creation::resolve(&server, &principal, &repo, input.metadata).await?;
+    let existing = storage::pull_submission(&server, &repo, &request_id).await?;
     let replay = existing.is_some();
-    let (repository, comparison, mut stale) = if let Some(previous) = existing {
+    let (repository, comparison, stale) = if let Some(previous) = existing {
         // Recovery keeps the original comparison even after branch movement or
         // deletion. Git reads enrich the response; they cannot rebind its intent.
-        let repository = git::PullGit::open(&server, repo, input.head_repository)
+        let repository = git::PullGit::open(&server, &repo, input.head_repository)
             .await
             .ok();
         (repository, input.expected.unwrap_or(previous), false)
     } else {
-        let repository = git::PullGit::open(&server, repo, input.head_repository).await?;
+        let repository = git::PullGit::open(&server, &repo, input.head_repository).await?;
         let tips = repository.tips(&input.base_ref, &input.head_ref);
         let (comparison, stale) = if let Some(expected) = input.expected {
             let stale = tips.as_ref().is_none_or(|(base, head)| {
@@ -939,52 +960,32 @@ async fn create(
     {
         code_owner_requests = codeowners::requests(
             &server,
-            repo,
+            &repo,
             &principal,
             git,
             (&comparison.base_oid, &comparison.head_oid),
         )
         .await?;
-        if !code_owner_requests.is_empty() {
-            let live = git::PullGit::open(&server, repo, input.head_repository).await?;
-            stale = live
-                .tips(&input.base_ref, &input.head_ref)
-                .as_ref()
-                .is_none_or(|(base, head)| {
-                    *base != comparison.base_oid || *head != comparison.head_oid
-                });
-            app::membership(&server, &principal, repo).await?;
-        }
     }
-    if !replay
-        && input.head_repository.is_some()
-        && !app::membership(&server, &principal, repo)
-            .await?
-            .principal
-            .can_write(repo.id)
-    {
-        return Err(Error::Forbidden);
-    }
-    let result = storage::create_pull(
-        &server,
-        repo,
-        NewPullRequest {
-            metadata,
-            code_owner_requests,
-            draft: input.draft,
-            author: actor.clone(),
-            request_id,
-            title,
-            body: input.body,
-            base_ref: input.base_ref,
-            base_oid: comparison.base_oid,
-            head_ref: input.head_ref,
-            head_repository: input.head_repository,
-            head_oid: comparison.head_oid,
-        },
-        stale,
-    )
-    .await;
+    let input = NewPullRequest {
+        metadata,
+        code_owner_requests,
+        draft: input.draft,
+        author: actor.clone(),
+        request_id,
+        title,
+        body: input.body,
+        base_ref: input.base_ref,
+        base_oid: comparison.base_oid,
+        head_ref: input.head_ref,
+        head_repository: input.head_repository,
+        head_oid: comparison.head_oid,
+    };
+    let result = if replay || stale {
+        storage::create_pull(&server, &repo, input, stale).await
+    } else {
+        create_at_comparison(&server, &principal, &repo, input).await
+    };
     let pull = match result {
         Err(Error::CreationRejected(reason)) => {
             return Ok(super::write::rejected(Error::CreationRejected(reason)));
@@ -1001,7 +1002,7 @@ async fn create(
                 pull.number,
                 &actor,
                 &server,
-                repo,
+                &repo,
                 &principal,
                 current.as_ref(),
             )
@@ -1009,6 +1010,73 @@ async fn create(
         ),
     )
         .into_response())
+}
+
+async fn create_at_comparison(
+    server: &Arc<Server>,
+    principal: &Principal,
+    repo: &Arc<Repository>,
+    input: NewPullRequest,
+) -> Result<PullRequest> {
+    let fork = input
+        .head_repository
+        .map(|id| git::fork_repository(server, repo, id))
+        .transpose()?;
+    let worker = Arc::clone(server);
+    let principal = principal.clone();
+    let repo = Arc::clone(repo);
+    let (send, result) = tokio::sync::oneshot::channel();
+    // A timed-out HTTP request must leave the worker holding the ref leases
+    // until the Cell records its decision and the leases can be released.
+    server.receives.spawn(async move {
+        let worker = worker.as_ref();
+        let repo = repo.as_ref();
+        let fork = fork.as_deref();
+        let saved = git::with_comparison_leases(
+            repo,
+            fork,
+            input.base_ref.clone(),
+            input.head_ref.clone(),
+            &worker.cancellation,
+            |cancel| async move {
+                let stale = match fork {
+                    Some(fork) => {
+                        let current = git::fork_repository(worker, repo, fork.id)?;
+                        if current.ownership_epoch != fork.ownership_epoch
+                            || current.identity.placement_generation()
+                                != fork.identity.placement_generation()
+                        {
+                            return Err(Error::RepositoryChanged);
+                        }
+                        let (base, head) = tokio::try_join!(
+                            repo.ref_oid(&input.base_ref),
+                            fork.ref_oid(&input.head_ref),
+                        )?;
+                        base.as_deref() != Some(input.base_oid.as_str())
+                            || head.as_deref() != Some(input.head_oid.as_str())
+                    }
+                    None => {
+                        let refs = repo
+                            .ref_oids(&[input.base_ref.clone(), input.head_ref.clone()].into())
+                            .await?;
+                        refs.get(&input.base_ref) != Some(&input.base_oid)
+                            || refs.get(&input.head_ref) != Some(&input.head_oid)
+                    }
+                };
+                let grant = app::membership(worker, &principal, repo).await?;
+                if fork.is_some() && !grant.principal.can_write(repo.id) {
+                    return Err(Error::Forbidden);
+                }
+                if cancel.is_cancelled() {
+                    return Err(Error::MergeBusy);
+                }
+                storage::create_pull(worker, repo, input, stale).await
+            },
+        )
+        .await;
+        let _ = send.send(saved);
+    });
+    result.await.map_err(|_| Error::MergeBusy)?
 }
 
 async fn detail(
@@ -1059,11 +1127,10 @@ async fn edit(
     input: std::result::Result<Json<PullEdit>, JsonRejection>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
-    let repo = repo.as_ref();
     let Json(input) = input?;
     let actor = app::actor(&principal)?;
     let number = app::number(id)?;
-    let pull = storage::pull(&server, repo, number)
+    let pull = storage::pull(&server, &repo, number)
         .await?
         .ok_or(Error::NotFound)?;
     let label_change = input.label_ids.is_some();
@@ -1073,7 +1140,7 @@ async fn edit(
         .is_some_and(|labels| !labels.is_empty())
         || (input.label_ids.is_none() && !pull.label_ids.is_empty());
     let assignee_change = input.assignee_ids.is_some();
-    let can_triage = app::membership(&server, &principal, repo)
+    let can_triage = app::membership(&server, &principal, &repo)
         .await?
         .principal
         .can_triage(repo.id);
@@ -1108,7 +1175,7 @@ async fn edit(
         return Err(Error::Invalid("No pull request changes supplied"));
     }
     let labels = if needs_label_catalog {
-        labels::catalog(&server, repo).await?
+        labels::catalog(&server, &repo).await?
     } else {
         vec![]
     };
@@ -1126,35 +1193,57 @@ async fn edit(
         .transpose()?;
     // Assignment eligibility and caller role must share the final current roster.
     let (can_triage, assignees) = if let Some(ids) = input.assignee_ids {
-        let roster = crate::api::members::roster::Roster::load(&server, &principal, repo).await?;
+        let roster = crate::api::members::roster::Roster::load(&server, &principal, &repo).await?;
         if !roster.membership.principal.can_triage(repo.id) {
             return Err(Error::AssigneePermission);
         }
         (true, Some(Selection::validate(&roster, ids)?))
     } else {
-        let permissions = app::membership(&server, &principal, repo).await?;
+        let permissions = app::membership(&server, &principal, &repo).await?;
         (permissions.principal.can_triage(repo.id), None)
     };
     if label_change && !can_triage {
         return Err(Error::LabelPermission);
     }
-    let pull = storage::update_pull(
-        &server,
-        repo,
-        number,
-        storage::PullEdit {
-            actor: actor.clone(),
-            can_triage,
-            version: input.version,
-            title,
-            body,
-            state: input.state,
-            label_ids,
-            assignees,
-        },
-    )
-    .await?;
-    let repository = git::PullGit::open(&server, repo, pull.head_repository)
+    let change = storage::PullEdit {
+        actor: actor.clone(),
+        can_triage,
+        version: input.version,
+        title,
+        body,
+        state: input.state,
+        label_ids,
+        assignees,
+    };
+    let pull = if input.state == Some(PullState::Open) && pull.state == PullState::Closed {
+        let worker = Arc::clone(&server);
+        let target = Arc::clone(&repo);
+        reopen::with_available(
+            &server,
+            &principal,
+            &repo,
+            vec![(number, input.version)],
+            reopen::Access::AuthorOrTriage,
+            move |available, grant| async move {
+                let change = storage::PullEdit {
+                    can_triage: grant.principal.can_triage(target.id),
+                    ..change
+                };
+                storage::update_pull(
+                    &worker,
+                    &target,
+                    number,
+                    change,
+                    available.contains(&number),
+                )
+                .await
+            },
+        )
+        .await?
+    } else {
+        storage::update_pull(&server, &repo, number, change, false).await?
+    };
+    let repository = git::PullGit::open(&server, &repo, pull.head_repository)
         .await
         .ok();
     let current = repository
@@ -1165,7 +1254,7 @@ async fn edit(
             pull.number,
             &actor,
             &server,
-            repo,
+            &repo,
             &principal,
             current.as_ref(),
         )
