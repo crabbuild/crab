@@ -1,6 +1,6 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use pulldown_cmark::{Event, Options, Parser, Tag};
+use pulldown_cmark::{CowStr, Event, Options, Parser, Tag};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -21,6 +21,10 @@ const TRANSFER_WINDOW_MS: i64 = 5 * 60 * 1000;
 const RECORD_PREFIX: &str = "collaboration/v1/attachments/records/";
 const EXPIRY_PREFIX: &str = "collaboration/v1/attachments/expiry/";
 const LINK_PREFIX: &str = "/api/discussion-attachments/";
+const MARKDOWN_OPTIONS: Options = Options::ENABLE_TABLES
+    .union(Options::ENABLE_STRIKETHROUGH)
+    .union(Options::ENABLE_FOOTNOTES)
+    .union(Options::ENABLE_TASKLISTS);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -29,6 +33,8 @@ pub(crate) struct Upload {
     pub owner: RepositoryAuthor,
     pub name: String,
     pub size: u64,
+    // The upload API records SHA-256. Object-store write verification uses a
+    // separate BLAKE3 digest and does not change the published metadata.
     pub digest: String,
     pub raster: Option<String>,
 }
@@ -76,6 +82,7 @@ impl Upload {
 enum State {
     Pending,
     Ready,
+    Transferring { request: Uuid },
     Published { target: Target },
 }
 
@@ -199,7 +206,7 @@ impl Mutation for Finish {
         if matches!(state, State::Published { .. }) {
             return Ok(MutationResult::Success(true));
         }
-        if expires <= context.now_ms() {
+        if matches!(state, State::Transferring { .. }) || expires <= context.now_ms() {
             return Ok(MutationResult::Success(false));
         }
         if matches!(state, State::Pending) {
@@ -245,7 +252,7 @@ impl Read for Get {
             return Ok(None);
         };
         let visible = match state {
-            State::Pending => false,
+            State::Pending | State::Transferring { .. } => false,
             State::Ready => expires > context.now_ms() && same_author(&upload.owner, &input.actor),
             State::Published { .. } => true,
         };
@@ -341,17 +348,163 @@ fn link(destination: &str) -> Option<(Uuid, Uuid, bool)> {
 }
 
 fn linked_attachments(body: &str) -> impl Iterator<Item = (Uuid, Uuid, bool)> + '_ {
-    Parser::new_ext(
-        body,
-        Options::ENABLE_TABLES
-            | Options::ENABLE_STRIKETHROUGH
-            | Options::ENABLE_FOOTNOTES
-            | Options::ENABLE_TASKLISTS,
-    )
-    .filter_map(|event| match event {
+    Parser::new_ext(body, MARKDOWN_OPTIONS).filter_map(|event| match event {
         Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => link(&dest_url),
         _ => None,
     })
+}
+
+fn transfer_links(body: &str, repository: Uuid) -> Result<BTreeMap<usize, (usize, Uuid)>> {
+    let mut links = BTreeMap::new();
+    if !body.contains(LINK_PREFIX) && !body.contains(['\\', '&']) {
+        return Ok(links);
+    }
+    for event in Parser::new_ext(body, MARKDOWN_OPTIONS) {
+        let Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) = event else {
+            continue;
+        };
+        let Some((source, id, uploading)) = link(&dest_url) else {
+            continue;
+        };
+        if source != repository {
+            continue;
+        }
+        // The parser borrows unescaped destinations directly from the input,
+        // including references. Reject decoded destinations before moving the
+        // issue so rewriting cannot alter a label, title, or code example.
+        let CowStr::Borrowed(raw) = dest_url else {
+            return Err(Error::AttachmentUnavailable);
+        };
+        if uploading {
+            return Err(Error::AttachmentUnavailable);
+        }
+        let start = raw.as_ptr() as usize;
+        let start = start
+            .checked_sub(body.as_ptr() as usize)
+            .filter(|start| body.get(*start..start.saturating_add(raw.len())) == Some(raw))
+            .ok_or(Error::AttachmentUnavailable)?;
+        links.insert(start, (start + raw.len(), id));
+    }
+    Ok(links)
+}
+
+pub(in crate::cells::repository) fn capture_transfer(
+    context: &Transaction<'_>,
+    repository: Uuid,
+    body: &str,
+) -> Result<Vec<Upload>> {
+    let ids = transfer_links(body, repository)?
+        .into_values()
+        .map(|(_, id)| id)
+        .collect::<BTreeSet<_>>();
+    if ids.len() > MAX_PER_BODY {
+        return Err(Error::AttachmentUnavailable);
+    }
+    ids.into_iter()
+        .map(|id| match context.document::<Record>(&record_key(id))? {
+            Some(Record::Live {
+                upload,
+                state: State::Published { .. },
+                ..
+            }) if upload.id == id => Ok(upload),
+            _ => Err(Error::AttachmentUnavailable),
+        })
+        .collect()
+}
+
+pub(in crate::cells::repository) fn validate_transfer(
+    repository: Uuid,
+    body: &str,
+    uploads: &[Upload],
+) -> Result<()> {
+    let linked = transfer_links(body, repository)?
+        .into_values()
+        .map(|(_, id)| id)
+        .collect::<BTreeSet<_>>();
+    if uploads.len() > MAX_PER_BODY
+        || !linked
+            .into_iter()
+            .eq(uploads.iter().map(|upload| upload.id))
+    {
+        return Err(Error::AttachmentUnavailable);
+    }
+    for upload in uploads {
+        upload.validate()?;
+    }
+    Ok(())
+}
+
+pub(crate) fn transferred_id(request: Uuid, id: Uuid) -> Uuid {
+    let mut hasher = blake3::Hasher::new_derive_key("crab discussion attachment transfer v1");
+    hasher.update(request.as_bytes());
+    hasher.update(id.as_bytes());
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+    uuid::Builder::from_custom_bytes(bytes).into_uuid()
+}
+
+pub(in crate::cells::repository) fn stage_transfer(
+    context: &Transaction<'_>,
+    request: Uuid,
+    mut upload: Upload,
+) -> Result<()> {
+    upload.id = transferred_id(request, upload.id);
+    let key = record_key(upload.id);
+    match context.document::<Record>(&key)? {
+        Some(Record::Live {
+            upload: existing,
+            state: State::Transferring { request: original },
+            ..
+        }) if original == request && existing.matches(&upload) => Ok(()),
+        Some(_) => Err(Error::AttachmentUnavailable),
+        None => context.put_document(
+            &key,
+            &Record::Live {
+                upload,
+                expires: 0,
+                state: State::Transferring { request },
+            },
+        ),
+    }
+}
+
+pub(in crate::cells::repository) fn publish_transfer(
+    context: &Transaction<'_>,
+    request: Uuid,
+    source: Uuid,
+    destination: Uuid,
+    target: Target,
+    body: &mut String,
+) -> Result<()> {
+    let links = transfer_links(body, source)?;
+    for (start, (end, original)) in links.into_iter().rev() {
+        let id = transferred_id(request, original);
+        let key = record_key(id);
+        match context.document::<Record>(&key)? {
+            Some(Record::Live {
+                upload,
+                state: State::Transferring { request: recorded },
+                ..
+            }) if recorded == request => {
+                context.put_document(
+                    &key,
+                    &Record::Live {
+                        upload,
+                        expires: 0,
+                        state: State::Published { target },
+                    },
+                )?;
+            }
+            // A shared attachment needs only one published destination record.
+            Some(Record::Live {
+                state: State::Published { .. },
+                ..
+            }) => {}
+            _ => return Err(Error::AttachmentUnavailable),
+        }
+        body.replace_range(start..end, &format!("{LINK_PREFIX}{destination}/{id}"));
+    }
+    Ok(())
 }
 
 pub(in crate::cells::repository) fn claim(

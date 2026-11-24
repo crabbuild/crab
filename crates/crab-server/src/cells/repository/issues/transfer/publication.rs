@@ -89,7 +89,7 @@ impl Mutation for Prepare {
         if job.actor != input.actor || job.source != input.source {
             return Ok(MutationResult::Rejected(PrepareOutcome::Conflict));
         }
-        if job.progress.next.is_some() {
+        if job.progress.frames == 0 || job.progress.next.is_some() {
             return Ok(MutationResult::Rejected(PrepareOutcome::Incomplete));
         }
         if job.progress.commitment != input.commitment {
@@ -329,6 +329,14 @@ fn install(context: &mut Transaction<'_>, reservation: &Reservation, count: u64)
     };
     let mut issue = header.issue;
     issue.number = number;
+    attachments::publish_transfer(
+        context,
+        reservation.request,
+        reservation.source.repository,
+        reservation.destination.repository,
+        Target::Issue { number },
+        &mut issue.body,
+    )?;
     let names = header
         .labels
         .iter()
@@ -383,13 +391,21 @@ fn install(context: &mut Transaction<'_>, reservation: &Reservation, count: u64)
         for item in items {
             let mut comment = item.record;
             comment.issue = number;
-            validate_comment(&comment)?;
-            last = last.max(comment.number);
-            insert_comment(context, &comment)?;
             let target = Target::IssueComment {
                 issue: number,
                 number: comment.number,
             };
+            attachments::publish_transfer(
+                context,
+                reservation.request,
+                reservation.source.repository,
+                reservation.destination.repository,
+                target,
+                &mut comment.body,
+            )?;
+            validate_comment(&comment)?;
+            last = last.max(comment.number);
+            insert_comment(context, &comment)?;
             if let Some(visibility) = item.visibility {
                 minimization::store(context, target, visibility)?;
             }

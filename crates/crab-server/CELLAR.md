@@ -513,13 +513,22 @@ target Cell. Labels match by name, and a milestone matches by title and due
 date. Historical events with source-local references remain in their source
 frames to avoid resolving their numbers in the destination repository.
 
+Issue bodies and comments carry manifests for linked published attachments in
+the source repository. The receiver reserves the transfer-specific attachment
+IDs before the worker writes their bytes. A staged frame advances only with a
+trusted storage receipt matching the size-checked copies' SHA-256 digests.
+Destination records stay private until publication rewrites Markdown link
+destinations and commits them with the issue. Shared attachments reuse the same
+destination ID.
+Code examples, link titles, and external links retain their original text.
+
 The issue detail route resolves the move through independent, current grants
 on the original and destination repositories. It exposes the destination only
 after publication, and the browser retains the original comment anchor.
 
 The HTTP write workflow must bind publication to both current Write grants and
-the shared owner. It also owns attachment copy and link rewriting, remaining
-discussion state and relationship placement, and cleanup of abandoned staging.
+the shared owner. It also owns the verified object copy, remaining discussion
+state and relationship placement, and cleanup of abandoned staging.
 The native write commands stay private while those paths are under construction.
 
 ## Reviewer search preparation

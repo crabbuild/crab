@@ -8,6 +8,7 @@ use crate::cells::{
     repository::collaboration::{
         Subject, SubjectKind, Target,
         activity::{self, ListActivity},
+        attachments::{self, Upload},
         locks,
         milestones::GetAssignment,
         minimization,
@@ -73,6 +74,7 @@ pub(crate) enum Records {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Header {
     pub issue: IssueRecord,
+    pub attachments: Vec<Upload>,
     pub lifecycle: lifecycle::Lifecycle,
     pub labels: Vec<String>,
     pub milestone: Option<MilestoneKey>,
@@ -84,6 +86,7 @@ pub(crate) struct Header {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Comment {
     pub record: CommentRecord,
+    pub attachments: Vec<Upload>,
     pub visibility: Option<minimization::State>,
 }
 
@@ -95,6 +98,17 @@ pub(crate) struct MilestoneKey {
 }
 
 impl Records {
+    pub(crate) fn uploads(&self) -> impl Iterator<Item = &Upload> {
+        let (attachments, comments): (&[Upload], &[Comment]) = match self {
+            Self::Issue { header } => (&header.attachments, &[]),
+            Self::Comments { items, .. } => (&[], items),
+            Self::Activity { .. } => (&[], &[]),
+        };
+        attachments
+            .iter()
+            .chain(comments.iter().flat_map(|comment| &comment.attachments))
+    }
+
     fn cursor(&self) -> Option<Cursor> {
         match self {
             Self::Issue { .. } => None,
@@ -137,6 +151,11 @@ impl Records {
                         "Issue transfer header does not match its source",
                     ));
                 }
+                attachments::validate_transfer(
+                    source.repository,
+                    &header.issue.body,
+                    &header.attachments,
+                )?;
             }
             Self::Comments {
                 before,
@@ -154,6 +173,13 @@ impl Records {
                     COMMENT_PAGE,
                     items.iter().map(|item| item.record.number),
                 )?;
+                for item in items {
+                    attachments::validate_transfer(
+                        source.repository,
+                        &item.record.body,
+                        &item.attachments,
+                    )?;
+                }
             }
             Self::Activity {
                 before,
@@ -294,6 +320,11 @@ impl Read for Capture {
                 Records::Issue {
                     header: Box::new(Header {
                         lifecycle: lifecycle::get(context, number, false)?,
+                        attachments: attachments::capture_transfer(
+                            context,
+                            source.repository,
+                            &issue.body,
+                        )?,
                         issue,
                         labels,
                         milestone,
@@ -327,7 +358,15 @@ impl Read for Capture {
                                 number: record.number,
                             },
                         )?;
-                        Ok(Comment { record, visibility })
+                        Ok(Comment {
+                            attachments: attachments::capture_transfer(
+                                context,
+                                source.repository,
+                                &record.body,
+                            )?,
+                            record,
+                            visibility,
+                        })
                     })
                     .collect::<Result<Vec<_>>>()?;
                 Records::Comments {
@@ -369,6 +408,9 @@ pub(crate) struct StageInput {
     pub destination: Uuid,
     pub actor: IdentityKey,
     pub frame: Frame,
+    // The trusted HTTP coordinator attests to each immutable object after
+    // checking its size and digest in the destination repository's store.
+    pub copied: std::collections::BTreeMap<Uuid, String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -383,6 +425,7 @@ pub(crate) struct Progress {
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum StageOutcome {
     Saved { progress: Progress },
+    AwaitingCopies,
     Conflict,
     OutOfOrder,
     Archived,
@@ -423,6 +466,27 @@ impl Mutation for Stage {
         validate_number(source.version)?;
         input.actor.validate()?;
         input.frame.records.validate(source)?;
+        let copies = input
+            .frame
+            .records
+            .uploads()
+            .map(|upload| {
+                (
+                    attachments::transferred_id(input.request, upload.id),
+                    upload.digest.as_str(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let needs_copy = !copies.is_empty();
+        let confirmed = !input.copied.is_empty();
+        if confirmed
+            && !copies.into_iter().eq(input
+                .copied
+                .iter()
+                .map(|(id, digest)| (*id, digest.as_str())))
+        {
+            return Err(Error::AttachmentUnavailable);
+        }
         let key = format!("{PREFIX}{}", input.request);
         let job = context.document::<Job>(&key)?;
         let cursor = input.frame.records.cursor();
@@ -434,27 +498,31 @@ impl Mutation for Stage {
             ));
         }
         let digest = blake3::hash(&bytes);
-        let (previous, commitment) = if let Some(job) = &job {
+        let (mut job, reserved) = if let Some(job) = job {
             if job.source != source || job.actor != input.actor {
                 return Ok(MutationResult::Rejected(StageOutcome::Conflict));
             }
             let stored = context.query(
-                "SELECT digest FROM repository_issue_transfer_frames WHERE transfer = ? AND position = ?",
+                "SELECT ordinal, digest FROM repository_issue_transfer_frames WHERE transfer = ? AND position = ?",
                 &[SqlValue::Blob(input.request.as_bytes().to_vec()), SqlValue::Text(position.clone())],
             )?;
-            if let Some(row) = stored.rows.first() {
-                return Ok(if result_blob(row, 0)? == digest.as_bytes() {
-                    MutationResult::Success(StageOutcome::Saved {
+            let reserved = if let Some(row) = stored.rows.first() {
+                if result_blob(row, 1)? != digest.as_bytes() {
+                    return Ok(MutationResult::Rejected(StageOutcome::Conflict));
+                }
+                if result_u64_from_row(row, 0)? <= job.progress.frames {
+                    return Ok(MutationResult::Success(StageOutcome::Saved {
                         progress: job.progress,
-                    })
-                } else {
-                    MutationResult::Rejected(StageOutcome::Conflict)
-                });
-            }
-            if cursor.is_none() || job.progress.next != cursor {
+                    }));
+                }
+                true
+            } else {
+                false
+            };
+            if job.progress.next != cursor || (cursor.is_none() && job.progress.frames != 0) {
                 return Ok(MutationResult::Rejected(StageOutcome::OutOfOrder));
             }
-            (job.progress.frames, job.progress.commitment)
+            (job, reserved)
         } else {
             if cursor.is_some() {
                 return Ok(MutationResult::Rejected(StageOutcome::OutOfOrder));
@@ -462,44 +530,63 @@ impl Mutation for Stage {
             let mut hasher = blake3::Hasher::new_derive_key("crab issue transfer destination v1");
             hasher.update(input.request.as_bytes());
             hasher.update(repository.as_bytes());
-            (0, *hasher.finalize().as_bytes())
+            (
+                Job {
+                    actor: input.actor,
+                    source,
+                    progress: Progress {
+                        frames: 0,
+                        next: None,
+                        commitment: *hasher.finalize().as_bytes(),
+                    },
+                    publication: None,
+                },
+                false,
+            )
         };
         if settings::archived(context)? {
             return Ok(MutationResult::Rejected(StageOutcome::Archived));
         }
-        if previous == 0 {
-            context.install_schema(include_str!("schema.sql"))?;
+        let ordinal = collaboration::next_version(job.progress.frames)?;
+        if !reserved {
+            if confirmed {
+                return Err(Error::AttachmentUnavailable);
+            }
+            if job.progress.frames == 0 {
+                context.install_schema(include_str!("schema.sql"))?;
+            }
+            // Reserve each attachment ID before the trusted worker writes its
+            // object. Concurrent browser uploads cannot claim the same key.
+            for upload in input.frame.records.uploads() {
+                attachments::stage_transfer(context, input.request, upload.clone())?;
+            }
+            context.query(
+                "INSERT INTO repository_issue_transfer_frames(transfer, position, ordinal, digest, payload) VALUES (?, ?, ?, ?, ?)",
+                &[
+                    SqlValue::Blob(input.request.as_bytes().to_vec()),
+                    SqlValue::Text(position),
+                    integer(ordinal)?,
+                    SqlValue::Blob(digest.as_bytes().to_vec()),
+                    SqlValue::Blob(bytes),
+                ],
+            )?;
+        }
+        if needs_copy && !confirmed {
+            context.put_document(&key, &job)?;
+            return Ok(MutationResult::Success(StageOutcome::AwaitingCopies));
         }
         let mut hasher = blake3::Hasher::new_derive_key("crab issue transfer frame v1");
-        hasher.update(&commitment);
+        hasher.update(&job.progress.commitment);
         hasher.update(digest.as_bytes());
-        let progress = Progress {
-            frames: collaboration::next_version(previous)?,
+        job.progress = Progress {
+            frames: ordinal,
             next: input.frame.records.next(),
             commitment: *hasher.finalize().as_bytes(),
         };
-        // Stage bytes without allocating an issue number. Only a later source
-        // publication decision can make this copy visible in the destination.
-        context.query(
-            "INSERT INTO repository_issue_transfer_frames(transfer, position, ordinal, digest, payload) VALUES (?, ?, ?, ?, ?)",
-            &[
-                SqlValue::Blob(input.request.as_bytes().to_vec()),
-                SqlValue::Text(position),
-                integer(progress.frames)?,
-                SqlValue::Blob(digest.as_bytes().to_vec()),
-                SqlValue::Blob(bytes),
-            ],
-        )?;
-        context.put_document(
-            &key,
-            &Job {
-                actor: input.actor,
-                source,
-                progress,
-                publication: None,
-            },
-        )?;
-        Ok(MutationResult::Success(StageOutcome::Saved { progress }))
+        context.put_document(&key, &job)?;
+        Ok(MutationResult::Success(StageOutcome::Saved {
+            progress: job.progress,
+        }))
     }
 }
 

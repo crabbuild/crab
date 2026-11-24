@@ -100,6 +100,7 @@ async fn stage(
                 destination: cell.target,
                 actor: actor.clone(),
                 frame,
+                copied: Default::default(),
             },
         )
         .await
