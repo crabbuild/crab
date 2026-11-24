@@ -95,6 +95,7 @@ export function readProjectIntent(account: string): ProjectIntent | null {
       "copy",
       "edit",
       "column_limit",
+      "reorder_views",
       "planning",
       "repository",
       "item",

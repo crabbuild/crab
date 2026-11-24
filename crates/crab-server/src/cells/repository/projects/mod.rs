@@ -129,6 +129,22 @@ fn names_valid(names: &[String], maximum: usize) -> bool {
         && names.iter().collect::<BTreeSet<_>>().len() == names.len()
 }
 impl Definition {
+    pub(crate) fn reorder_views(&mut self, order: &[Uuid]) -> bool {
+        if self.views.len() != order.len() {
+            return false;
+        }
+        let mut by_id: BTreeMap<_, _> = self.views.iter().map(|view| (view.id, view)).collect();
+        let Some(views) = order
+            .iter()
+            .map(|id| by_id.remove(id).cloned())
+            .collect::<Option<Vec<_>>>()
+        else {
+            return false;
+        };
+        self.views = views;
+        true
+    }
+
     pub(crate) fn prune_board_limits(&mut self) {
         // Drop limits for removed workflow values or fields so reusing a name
         // later does not restore a warning for a different column.

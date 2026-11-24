@@ -534,7 +534,8 @@ reuses `server/management/lifecycle.rs` and `cli/lifecycle.rs` through
 its account/repository-bound command provider stays above route loading.
 `cells/repository/projects/grouping.rs` owns advisory board column limits for
 both Project scopes. Changes use the Project revision, submission receipt, and
-history.
+history. Reordering uses the same boundary and requires an exact permutation
+of the saved view UUIDs.
 
 `cells/organization/projects/` owns organization project definitions, planning
 properties, UUID-bound repository links/items, creator membership incarnations

@@ -117,6 +117,58 @@ async fn column_limits_are_versioned_board_settings() {
 }
 
 #[tokio::test]
+async fn project_view_order_requires_every_current_view_and_the_saved_revision() {
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    let (project, _) = bulk_project(&h, &alice).await;
+    let path = format!("{ROOT}/projects/{project}/items");
+    let original = h.json(&path, &alice).await;
+    let saved = &original["page"]["project"];
+    let views = saved["definition"]["views"].as_array().unwrap();
+    let request = |order: Vec<Value>| {
+        json!({"request_id":Uuid::now_v7(),"command":{
+            "kind":"reorder_views","project":project,"version":saved["version"],"order":order
+        }})
+    };
+    let ids = |indices: &[usize]| {
+        indices
+            .iter()
+            .map(|index| views[*index]["id"].clone())
+            .collect::<Vec<_>>()
+    };
+    for invalid in [
+        ids(&[0, 1]),
+        ids(&[0, 0, 2]),
+        vec![
+            views[0]["id"].clone(),
+            views[1]["id"].clone(),
+            json!(Uuid::now_v7()),
+        ],
+    ] {
+        assert_eq!(
+            project_command(&h, &alice, request(invalid)).await["outcome"],
+            "rejected"
+        );
+    }
+    assert_eq!(h.json(&path, &alice).await["page"]["project"], *saved);
+    let submission = request(ids(&[2, 0, 1]));
+    let applied = project_command(&h, &alice, submission.clone()).await;
+    assert_eq!(applied["outcome"], "applied");
+    assert_eq!(project_command(&h, &alice, submission).await, applied);
+    assert_eq!(
+        project_command(&h, &alice, request(ids(&[1, 2, 0]))).await["outcome"],
+        "rejected"
+    );
+    let current = h.json(&path, &alice).await;
+    assert_eq!(
+        current["page"]["project"]["definition"]["views"],
+        json!([views[2], views[0], views[1]])
+    );
+    assert_eq!(current["page"]["items"], original["page"]["items"]);
+    h.close().await;
+}
+
+#[tokio::test]
 async fn bulk_project_fields_apply_once_and_roll_back_on_a_stale_item() {
     let h = Harness::new(false).await;
     let alice = h.login().await;
@@ -358,6 +410,16 @@ async fn browser_bulk_edits_moves_and_undoes_project_items_with_column_limits() 
         ])
         .await;
     browser.run(&["wait", "--fn", "document.querySelector(\".project-board-column[aria-label='Done'] header [data-slot=badge]\")?.textContent.trim() === '0'"]).await;
+    browser
+        .run(&[
+            "drag",
+            "[data-view-tab]:has([role=tab][data-state=active]) [data-view-tab-handle]",
+            "[data-view-tab]:first-child [role=tab]",
+        ])
+        .await;
+    browser.run(&["wait", "--fn", "[...document.querySelectorAll('[aria-label=\"Project views\"] [role=tab]')].map(tab => tab.textContent.trim()).join(',') === 'Board,Table,Roadmap,History'"]).await;
+    browser.run(&["reload"]).await;
+    browser.run(&["wait", "--fn", "document.querySelector('[aria-label=\"Project views\"] [role=tab]')?.textContent.trim() === 'Board'"]).await;
     drop(browser);
     h.close().await;
 }

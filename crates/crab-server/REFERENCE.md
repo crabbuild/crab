@@ -2970,6 +2970,15 @@ number, and date fields, each page includes counts for its displayed groups.
 Issues without an enabled type use **No type**. Drafts, pull requests, and
 issues whose type is unavailable to the viewer use **Other work**.
 
+Project managers can drag a saved view by its tab handle, or use the active
+tab's **Reorder view** menu to move it left or right. The selected view stays
+open, and the saved order applies to the whole Project. **Overview** stays
+first where available, and **History** stays last.
+
+Both Project command endpoints accept `reorder_views` with `project`,
+`version`, and `order`, a list containing every saved view UUID exactly once.
+The command updates the view order and records it in Project history.
+
 With source repository triage access, drag an issue to another type group in
 a table or board, or use the **Change issue type** control in any layout.
 Moving to **No type** clears the assignment. The item retains its Project

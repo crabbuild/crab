@@ -31,6 +31,11 @@ pub(crate) enum Command {
         version: u64,
         column: grouping::ColumnLimit,
     },
+    ReorderViews {
+        project: Uuid,
+        version: u64,
+        order: Vec<Uuid>,
+    },
     CreateIssue {
         project: Uuid,
         version: u64,
@@ -301,6 +306,9 @@ fn apply(
         | Command::ColumnLimit {
             project, version, ..
         }
+        | Command::ReorderViews {
+            project, version, ..
+        }
         | Command::Item {
             project, version, ..
         }
@@ -315,12 +323,21 @@ fn apply(
     let Some(mut project) = load(context, project_id)? else {
         return Ok(rejected("Project not found"));
     };
-    if matches!(command, Command::Edit { .. } | Command::ColumnLimit { .. })
-        && project.version != version
-    {
+    let changes_definition = matches!(
+        command,
+        Command::Edit { .. } | Command::ColumnLimit { .. } | Command::ReorderViews { .. }
+    );
+    if changes_definition && project.version != version {
         return Ok(rejected(
             "This project changed; refresh and review before saving",
         ));
+    }
+    if matches!(
+        command,
+        Command::ColumnLimit { .. } | Command::ReorderViews { .. }
+    ) && project.archived
+    {
+        return Ok(rejected("Archived projects are read-only"));
     }
     let mut event_target = ledger::Target::Project;
     let mut before = Some(history::project_snapshot(&project));
@@ -367,11 +384,13 @@ fn apply(
             project.archived = *archived;
         }
         Command::ColumnLimit { column, .. } => {
-            if project.archived {
-                return Ok(rejected("Archived projects are read-only"));
-            }
             if let Err(reason) = column.apply(&mut project.definition) {
                 return Ok(rejected(reason));
+            }
+        }
+        Command::ReorderViews { order, .. } => {
+            if !project.definition.reorder_views(order) {
+                return Ok(rejected("Include each saved Project view exactly once"));
             }
         }
         Command::Item { item: entry, .. } | Command::CreateIssue { item: entry, .. } => {
@@ -549,7 +568,7 @@ fn apply(
     project.version = super::super::collaboration::next_version(project.version)?;
     project.updated_at = super::super::timestamp(context.now_ms())?;
     save(context, &project)?;
-    if matches!(command, Command::Edit { .. } | Command::ColumnLimit { .. }) {
+    if changes_definition {
         after = Some(history::project_snapshot(&project));
     }
     history::append(context, &input.actor, &project, event_target, before, after)?;

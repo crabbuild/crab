@@ -38,7 +38,15 @@ export interface Detail {
 export type WorkspaceCommand =
   | Extract<
       Command,
-      { kind: "create" | "edit" | "column_limit" | "remove" | "bulk_fields" }
+      {
+        kind:
+          | "create"
+          | "edit"
+          | "column_limit"
+          | "reorder_views"
+          | "remove"
+          | "bulk_fields";
+      }
     >
   | {
       kind: "create_issue";

@@ -1,10 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   ArrowLeftIcon,
-  CalendarRangeIcon,
-  Columns3Icon,
   FolderKanbanIcon,
-  ListIcon,
   PlusIcon,
   Settings2Icon,
   UsersIcon,
@@ -14,7 +11,7 @@ import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsContent } from "@/components/ui/tabs";
 import {
   Empty,
   EmptyHeader,
@@ -26,6 +23,7 @@ import { DiscussionMarkdown } from "@/components/discussion/markdown";
 import type { OrganizationView } from "@/lib/contracts";
 import { useProjectCommands } from "../commands";
 import { ProjectHistory } from "../history";
+import { ProjectViewTabs } from "../view-tabs";
 import { DraftRecovery } from "../drafts";
 import { checkpointDraft, itemDraft, readDraft } from "../draft-storage";
 import {
@@ -175,6 +173,12 @@ function PlanningWorkspace({
     project.definition.views.find(
       (view) => view.id === url.searchParams.get("pv"),
     ) ?? project.definition.views[0];
+  const activeView =
+    url.searchParams.get("view") === "history"
+      ? "history"
+      : overview
+        ? "overview"
+        : selected.id;
   const requestedLayout = url.searchParams.get("layout");
   const layout =
     requestedLayout === "table" ||
@@ -364,13 +368,7 @@ function PlanningWorkspace({
         }}
       />
       <Tabs
-        value={
-          url.searchParams.get("view") === "history"
-            ? "history"
-            : overview
-              ? "overview"
-              : selected.id
-        }
+        value={activeView}
         onValueChange={(value) =>
           filters({
             view:
@@ -384,28 +382,25 @@ function PlanningWorkspace({
           })
         }
       >
-        <TabsList
-          variant="line"
-          className="project-view-tabs"
-          aria-label="Project views"
-        >
-          <TabsTrigger value="overview">Overview</TabsTrigger>
-          {project.definition.views.map((view) => {
-            const Icon =
-              view.layout === "board"
-                ? Columns3Icon
-                : view.layout === "roadmap"
-                  ? CalendarRangeIcon
-                  : ListIcon;
-            return (
-              <TabsTrigger value={view.id} key={view.id}>
-                <Icon data-icon="inline-start" />
-                {view.name}
-              </TabsTrigger>
-            );
-          })}
-          <TabsTrigger value="history">History</TabsTrigger>
-        </TabsList>
+        <ProjectViewTabs
+          project={project}
+          active={activeView}
+          overview
+          target={
+            detail.can_manage && !project.archived
+              ? { organization }
+              : undefined
+          }
+          editable={editable}
+          preserveSelection={() => {
+            if (
+              !overview &&
+              activeView !== "history" &&
+              url.searchParams.get("pv") !== activeView
+            )
+              filters({ pv: activeView });
+          }}
+        />
         <TabsContent value="history">
           <ProjectHistory
             target={{ organization }}

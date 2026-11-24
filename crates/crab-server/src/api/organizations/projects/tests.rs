@@ -7,7 +7,7 @@ use crate::test_support::http::Harness;
 use reqwest::Method;
 
 #[tokio::test]
-async fn organization_column_limits_are_visible_to_members_and_editable_by_managers() {
+async fn organization_saved_view_settings_are_readable_by_members_and_editable_by_managers() {
     let h = Harness::new(false).await;
     let (organization, owner, member) =
         crate::test_support::http::organizations::bootstrap(&h).await;
@@ -109,6 +109,25 @@ async fn organization_column_limits_are_visible_to_members_and_editable_by_manag
         h.json(&path, &bob).await["project"]["definition"]["views"][0]
             .get("column_limits")
             .is_none()
+    );
+    let views = original["project"]["definition"]["views"]
+        .as_array()
+        .unwrap();
+    let reordered = views.iter().rev().cloned().collect::<Vec<_>>();
+    let order = reordered.iter().map(|view| &view["id"]).collect::<Vec<_>>();
+    let reorder = json!({"request_id":Uuid::now_v7(),"command":{
+        "kind":"reorder_views","project":project,"version":3,"order":order
+    }});
+    assert_eq!(
+        h.write(Method::POST, &commands, &bob, reorder.clone())
+            .await
+            .status(),
+        axum::http::StatusCode::FORBIDDEN
+    );
+    assert_eq!(save(reorder).await["outcome"], "applied");
+    assert_eq!(
+        h.json(&path, &bob).await["project"]["definition"]["views"],
+        json!(reordered)
     );
     h.close().await;
 }

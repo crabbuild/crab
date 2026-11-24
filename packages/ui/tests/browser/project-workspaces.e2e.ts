@@ -299,6 +299,17 @@ async function fixture(page: Page, movedIssue = false) {
               definition: command.definition,
               archived: command.archived,
             };
+          if (command.kind === "reorder_views")
+            project = {
+              ...project,
+              definition: {
+                ...project.definition,
+                views: command.order.map(
+                  (id) =>
+                    project.definition.views.find((view) => view.id === id)!,
+                ),
+              },
+            };
           if (command.kind === "column_limit") {
             const { view, group_by, value, limit } = command.column;
             project = {
@@ -1297,6 +1308,57 @@ test("board column limits recover the saved write and stay with their grouping",
   await expect(page.getByText("2 / 1", { exact: true })).toHaveCount(0);
   await chooseSelectOption(grouping, { label: "Workflow status" });
   await expect(todo.getByText("2 / 1", { exact: true })).toBeVisible();
+});
+
+test("saved views reorder by keyboard and pointer while History stays last", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${home}/${projectId}`);
+  const tabs = page.getByRole("tablist", { name: "Project views" });
+  const board = tabs.getByRole("tab", { name: "Board", exact: true });
+  const reorder = page.getByRole("button", { name: "Reorder Board view" });
+  await reorder.press("Enter");
+  state.loseNext();
+  await page.getByRole("menuitem", { name: "Move right" }).press("Enter");
+  const retry = page.getByRole("button", { name: "Retry submission" });
+  await expect(retry).toBeVisible();
+  await page.reload();
+  await retry.click();
+  await expect(retry).toHaveCount(0);
+  await expect(tabs.getByRole("tab")).toHaveText([
+    "Overview",
+    "Table",
+    "Board",
+    "Roadmap",
+    "History",
+  ]);
+  await expect(board).toHaveAttribute("aria-selected", "true");
+  expect(state.submissions[0].command).toEqual({
+    kind: "reorder_views",
+    project: projectId,
+    version: 1,
+    order: [views[1].id, views[0].id, views[2].id],
+  });
+  expect(state.submissions[1]).toEqual(state.submissions[0]);
+  await page.reload();
+  await expect(board).toHaveAttribute("aria-selected", "true");
+  await page.setViewportSize({ width: 1200, height: 900 });
+  await tabs
+    .locator(`[data-view-tab-handle="${views[2].id}"]`)
+    .dragTo(tabs.getByRole("tab", { name: "Table", exact: true }));
+  await expect(tabs.getByRole("tab")).toHaveText([
+    "Overview",
+    "Roadmap",
+    "Table",
+    "Board",
+    "History",
+  ]);
+  await expect(board).toHaveAttribute("aria-selected", "true");
+  expect(state.submissions[2].command).toMatchObject({
+    order: [views[2].id, views[1].id, views[0].id],
+  });
 });
 
 test("a failed recovery checkpoint prevents the new native request", async ({

@@ -19,6 +19,11 @@ pub(crate) enum Command {
         version: u64,
         column: planning::grouping::ColumnLimit,
     },
+    ReorderViews {
+        project: Uuid,
+        version: u64,
+        order: Vec<Uuid>,
+    },
     Planning {
         project: Uuid,
         version: u64,
@@ -58,6 +63,7 @@ impl Command {
             Self::Create { .. } => None,
             Self::Edit { project, .. }
             | Self::ColumnLimit { project, .. }
+            | Self::ReorderViews { project, .. }
             | Self::Planning { project, .. }
             | Self::Repository { project, .. }
             | Self::Item { project, .. }
@@ -71,6 +77,7 @@ impl Command {
             Self::Create { .. } | Self::CreateIssue { .. } | Self::BulkFields { .. } => 0,
             Self::Edit { version, .. }
             | Self::ColumnLimit { version, .. }
+            | Self::ReorderViews { version, .. }
             | Self::Planning { version, .. }
             | Self::Repository { version, .. }
             | Self::Item { version, .. }
@@ -343,6 +350,11 @@ fn apply_command(
         Command::ColumnLimit { column, .. } => {
             if let Err(reason) = column.apply(&mut project.definition) {
                 return Ok(rejected(reason));
+            }
+        }
+        Command::ReorderViews { order, .. } => {
+            if !project.definition.reorder_views(order) {
+                return Ok(rejected("Include each saved Project view exactly once"));
             }
         }
         Command::Planning { properties, .. } => {

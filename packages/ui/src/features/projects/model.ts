@@ -163,6 +163,7 @@ export type Command =
         limit: number | null;
       };
     }
+  | { kind: "reorder_views"; project: string; version: number; order: string[] }
   | { kind: "item"; project: string; version: number; item: Item }
   | {
       kind: "create_issue";

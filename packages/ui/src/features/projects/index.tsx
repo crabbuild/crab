@@ -45,6 +45,7 @@ import { ProjectBoard } from "./board";
 import { ProjectTable, ProjectRoadmap } from "./views";
 import { useProjectCommands } from "./commands";
 import { ProjectHistory } from "./history";
+import { ProjectViewTabs } from "./view-tabs";
 import { DraftRecovery } from "./drafts";
 import { checkpointDraft, itemDraft, readDraft } from "./draft-storage";
 import {
@@ -292,6 +293,8 @@ function ProjectWorkspace({
     if (resource.data) setProject(resource.data.page.project);
   }, [resource.data]);
   const manager = resource.data?.can_manage ?? canManage;
+  const activeView =
+    url.searchParams.get("pv") === "history" ? "history" : selected.id;
   const bulkTarget =
     manager && !repo.archived && !project.archived ? { repo } : undefined;
   const editable =
@@ -398,9 +401,7 @@ function ProjectWorkspace({
         }}
       />
       <Tabs
-        value={
-          url.searchParams.get("pv") === "history" ? "history" : selected.id
-        }
+        value={activeView}
         onValueChange={(pv) =>
           filters({
             pv,
@@ -412,23 +413,19 @@ function ProjectWorkspace({
           })
         }
       >
-        <TabsList variant="line" className="project-view-tabs">
-          {project.definition.views.map((view) => {
-            const ViewIcon =
-              view.layout === "board"
-                ? Columns3Icon
-                : view.layout === "roadmap"
-                  ? CalendarRangeIcon
-                  : ListIcon;
-            return (
-              <TabsTrigger key={view.id} value={view.id}>
-                <ViewIcon />
-                {view.name}
-              </TabsTrigger>
-            );
-          })}
-          <TabsTrigger value="history">History</TabsTrigger>
-        </TabsList>
+        <ProjectViewTabs
+          project={project}
+          active={activeView}
+          target={bulkTarget}
+          editable={editable}
+          preserveSelection={() => {
+            if (
+              activeView !== "history" &&
+              url.searchParams.get("pv") !== activeView
+            )
+              filters({ pv: activeView });
+          }}
+        />
         <TabsContent value="history">
           <ProjectHistory
             target={{ repo }}
