@@ -4,6 +4,7 @@ use reqwest::{Method, header};
 use serde_json::{Value, json};
 
 const ENDPOINT: &str = "/api/personal-work";
+const SEARCH: &str = "/api/discussion-search";
 
 async fn issue(h: &Harness, repository: &str, cookie: &str, title: &str) -> Value {
     let session = h.json("/api/session", cookie).await;
@@ -21,6 +22,7 @@ async fn issue(h: &Harness, repository: &str, cookie: &str, title: &str) -> Valu
         .json(&json!({"request_id":Uuid::now_v7(),"title":title,"body":""}))
         .send()
         .await
+        .unwrap()
         .error_for_status()
         .unwrap()
         .json()
@@ -145,6 +147,104 @@ async fn personal_work_pages_across_current_grants_and_uses_typed_links() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn workspace_discussion_search_combines_types_and_rechecks_repository_scope() {
+    use crate::test_support::git;
+
+    let h = Harness::new(false).await;
+    h.add_repository("library").await;
+    let alice = h.login().await;
+    let token = h
+        .write(
+            Method::POST,
+            "/api/git-token",
+            &alice,
+            json!({"owner":"team","repository":"private","access":"write"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    let mut remote = url::Url::parse(&format!("{}/git/team/private.git", h.origin)).unwrap();
+    remote.set_username("crab").unwrap();
+    remote.set_password(token["token"].as_str()).unwrap();
+    let clone = tempfile::tempdir().unwrap();
+    git::push_review_branches(clone.path(), remote.as_str()).await;
+    h.write(
+        Method::POST,
+        "/api/repos/team/private/pulls",
+        &alice,
+        json!({"request_id":Uuid::now_v7(), "title":"Release pipeline",
+            "body":"", "base_ref":"refs/heads/main", "head_ref":"refs/heads/feature"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    issue(&h, "private", &alice, "Release guide").await;
+    issue(&h, "library", &alice, "Release checklist").await;
+
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    let query =
+        format!("{SEARCH}?q=release+AND+%28guide+OR+pipeline+OR+checklist%29&sort=updated&limit=1");
+    let mut next = query.clone();
+    let mut rows = Vec::new();
+    let mut continuation = None;
+    for _ in 0..3 {
+        let response = h.json(&next, &bob).await;
+        let item = &response["items"][0];
+        assert_eq!(item["number"], 1);
+        rows.push((
+            item["kind"].as_str().unwrap().to_owned(),
+            item["title"].as_str().unwrap().to_owned(),
+        ));
+        if let Some(cursor) = response["next"].as_str() {
+            next = format!("{query}&after={cursor}");
+            continuation.get_or_insert_with(|| next.clone());
+        } else {
+            assert_eq!(rows.len(), 3);
+        }
+    }
+    rows.sort_unstable();
+    assert_eq!(
+        rows,
+        [
+            ("issue".into(), "Release checklist".into()),
+            ("issue".into(), "Release guide".into()),
+            ("pull".into(), "Release pipeline".into()),
+        ]
+    );
+    let exact = format!("{SEARCH}?q=release&scope=team%2Flibrary&kind=issue");
+    assert_eq!(
+        h.json(&exact, &bob).await["items"][0]["title"],
+        "Release checklist"
+    );
+    assert_eq!(
+        h.json(&format!("{SEARCH}?q=author%3A%40me&scope=team"), &alice)
+            .await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(
+        h.json(&format!("{SEARCH}?q=author%3A%40me&scope=team"), &bob)
+            .await["items"],
+        json!([])
+    );
+    assert_eq!(get(&h, &query, "").await.status(), StatusCode::UNAUTHORIZED);
+    revoke(&h, "library").await;
+    assert_eq!(
+        get(&h, &continuation.unwrap(), &bob).await.status(),
+        StatusCode::CONFLICT
+    );
+    let missing = format!("{SEARCH}?q=release&scope=team%2Fmissing&kind=issue");
+    assert_eq!(h.json(&exact, &bob).await, h.json(&missing, &bob).await);
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires agent-browser and the built embedded UI"]
 async fn browser_opens_personal_work_from_multiple_repositories() {
     use crate::test_support::http::browser::Browser;
@@ -173,6 +273,29 @@ async fn browser_opens_personal_work_from_multiple_repositories() {
     browser.run(&["reload"]).await;
     browser
         .run(&["wait", "--text", "Fix the Private docs"])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "link",
+            "click",
+            "--name",
+            "Search issues and PRs",
+            "--exact",
+        ])
+        .await;
+    browser.run(&["wait", "#discussion-search-terms"]).await;
+    browser
+        .run(&["fill", "#discussion-search-terms", "Library"])
+        .await;
+    browser.run(&["press", "Enter"]).await;
+    browser
+        .run(&["wait", "--text", "Update the Library guide"])
+        .await;
+    browser.run(&["reload"]).await;
+    browser
+        .run(&["wait", "--text", "Update the Library guide"])
         .await;
     browser
         .run(&[

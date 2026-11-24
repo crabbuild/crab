@@ -1,31 +1,11 @@
-import {
-  GitMergeIcon,
-  GitPullRequestClosedIcon,
-  GitPullRequestDraftIcon,
-  GitPullRequestIcon,
-  IssueClosedIcon,
-  IssueOpenedIcon,
-} from "@primer/octicons-react";
-import { RelativeTime } from "@/components/discussion/time";
 import { Link } from "@/components/navigation/link";
-import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
-import { useRequest, type Repository } from "@/lib/api";
-import { repoHref } from "@/lib/repository-route";
+import { useRequest } from "@/lib/api";
+import { WorkResults, type Kind, type WorkPage } from "./results";
 
-type Kind = "issue" | "pull";
 type State = "open" | "closed" | "all";
 type Relation = "authored" | "assigned" | "review_requested";
 type Filter = { kind: Kind; relation: Relation; state: State };
-
-type Item = {
-  repository: Pick<Repository, "id" | "owner" | "name">;
-  number: number;
-  title: string;
-  state: "open" | "closed" | "merged";
-  draft: boolean;
-  created_at: number;
-};
 
 function query(filter: Filter, after?: string) {
   return new URLSearchParams(after ? { ...filter, after } : filter).toString();
@@ -47,64 +27,6 @@ const states: [State, string][] = [
   ["all", "All states"],
 ];
 
-function WorkRow({ kind, item }: { kind: Kind; item: Item }) {
-  const label =
-    item.draft && item.state === "open"
-      ? "Draft"
-      : (
-          {
-            open: "Open",
-            closed: "Closed",
-            merged: "Merged",
-          } as const
-        )[item.state];
-  const Icon =
-    kind === "issue"
-      ? item.state === "open"
-        ? IssueOpenedIcon
-        : IssueClosedIcon
-      : {
-          Open: GitPullRequestIcon,
-          Draft: GitPullRequestDraftIcon,
-          Closed: GitPullRequestClosedIcon,
-          Merged: GitMergeIcon,
-        }[label];
-  const location =
-    kind === "issue"
-      ? { view: "issues", issue: String(item.number) }
-      : { view: "pulls", pull: String(item.number) };
-  const { repository } = item;
-  return (
-    <li className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-x-3 px-4 py-3 sm:grid-cols-[auto_minmax(0,1fr)_auto]">
-      <Icon aria-hidden="true" className="mt-1 text-muted-foreground" />
-      <div className="min-w-0">
-        <Link
-          className="break-words font-medium hover:underline"
-          href={repoHref(repository, {
-            ...location,
-            repository_id: repository.id,
-          })}
-        >
-          {item.title}
-        </Link>
-        <p className="m-0 mt-1 break-words text-sm text-muted-foreground">
-          <Link
-            href={repoHref(repository, { repository_id: repository.id })}
-            className="hover:underline"
-          >
-            {repository.owner}/{repository.name}
-          </Link>
-          {" #"}
-          {item.number}
-        </p>
-      </div>
-      <p className="col-start-2 m-0 mt-1 text-sm text-muted-foreground sm:col-start-3">
-        {label} · Opened <RelativeTime value={item.created_at} />
-      </p>
-    </li>
-  );
-}
-
 export function PersonalWork({ url }: { url: URL }) {
   const kind = url.searchParams.get("kind") === "issue" ? "issue" : "pull";
   const relationValue = url.searchParams.get("relation");
@@ -121,7 +43,7 @@ export function PersonalWork({ url }: { url: URL }) {
       : "open";
   const filter = { kind, relation, state } satisfies Filter;
   const after = url.searchParams.get("after") ?? undefined;
-  const result = useRequest<{ items: Item[]; next: string | null }>(
+  const result = useRequest<WorkPage>(
     `/api/personal-work?${query(filter, after)}`,
   );
   return (
@@ -129,9 +51,14 @@ export function PersonalWork({ url }: { url: URL }) {
       className="mx-auto grid w-full min-w-0 max-w-5xl gap-5 p-4 md:p-6"
       aria-labelledby="work-heading"
     >
-      <h1 id="work-heading" className="m-0 text-2xl font-semibold">
-        My work
-      </h1>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h1 id="work-heading" className="m-0 text-2xl font-semibold">
+          My work
+        </h1>
+        <Button asChild variant="outline">
+          <Link href="/-/discussion-search">Search issues and PRs</Link>
+        </Button>
+      </div>
       <nav className="flex flex-wrap gap-2" aria-label="Work type">
         {(["pull", "issue"] as const).map((value) => (
           <Button
@@ -201,52 +128,14 @@ export function PersonalWork({ url }: { url: URL }) {
           </nav>
         )}
       </div>
-      <Result state={result} timingLabel="personal work">
-        {({ items, next }) => (
-          <>
-            {items.length ? (
-              <ul
-                className="m-0 list-none divide-y rounded-lg border p-0"
-                aria-label="Matching work, newest first"
-              >
-                {items.map((item) => (
-                  <WorkRow
-                    key={`${item.repository.id}:${item.number}`}
-                    kind={kind}
-                    item={item}
-                  />
-                ))}
-              </ul>
-            ) : (
-              <p className="notice">
-                No matching {kind === "pull" ? "pull requests" : "issues"}.
-              </p>
-            )}
-            {(after || next) && (
-              <nav
-                className="flex flex-wrap justify-between gap-2"
-                aria-label="Work pages"
-              >
-                {after && (
-                  <Button asChild variant="outline">
-                    <Link href={href(filter)}>First page</Link>
-                  </Button>
-                )}
-                {next && (
-                  <Button asChild variant="outline" className="ml-auto">
-                    <Link href={href(filter, next)}>Next page</Link>
-                  </Button>
-                )}
-              </nav>
-            )}
-          </>
-        )}
-      </Result>
-      {after && result.error && (
-        <Button asChild variant="outline" className="justify-self-start">
-          <Link href={href(filter)}>First page</Link>
-        </Button>
-      )}
+      <WorkResults
+        result={result}
+        after={after}
+        href={(cursor) => href(filter, cursor)}
+        emptyMessage={
+          kind === "pull" ? "No matching pull requests." : "No matching issues."
+        }
+      />
     </section>
   );
 }

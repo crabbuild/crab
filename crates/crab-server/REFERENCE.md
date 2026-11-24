@@ -4680,6 +4680,26 @@ before returning results. Continuations bind the account, filters, and this
 access scope. A changed scope returns HTTP 409 and the browser offers **First
 page**. Refresh the first page to see new work created ahead of a continuation.
 
+### Search issues and pull requests across repositories
+
+Open **Search issues and PRs** from My work or the user menu. Use the same
+text, Boolean expressions, and discussion qualifiers as the repository lists.
+For example, `is:open label:"bug" deployment` finds open work that matches
+both the label and text. The repository scope accepts an owner namespace or
+an exact `owner/repository`. Search both types together or choose Issues or
+Pull requests, and sort by creation time or recent activity. The browser URL
+keeps the query and filters and opens each result by its type and repository
+UUID.
+
+`GET /api/discussion-search` requires a browser account, plus `q` or `scope`.
+It accepts optional `kind=issue|pull`, `sort=created|updated`, `limit` from 1
+to 50, and `after` from the previous response. It returns `items` and nullable
+`next`. Crab merges bounded pages from each readable repository's discussion
+index. The account, search parameters, and readable scope bind the cursor.
+Current repository access is checked again before results are returned. A
+changed scope returns HTTP 409. An unavailable repository index returns its
+normal preparation error so an incomplete search can be retried.
+
 ### Understand pagination and storage
 
 Issue, pull, comment, and review lists default to 30 items and accept 1 to 50. Indexed discussion lists return matching summaries and use the opaque cursor contract above. Comment/review lists scan at most 200 allocated numbers; a page can be empty and still return `next`. Label lists return the complete bounded catalog of at most 500 active labels.

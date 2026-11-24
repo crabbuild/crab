@@ -265,15 +265,18 @@ impl<'a> Bindings<'a> {
     }
 }
 
-pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
+struct Criteria {
+    query: Query,
+    archived: Option<bool>,
+    review: Option<super::super::reviews::status::Prepared>,
+    now_ms: u64,
+}
+
+fn criteria(
     context: &mut Transaction<'_>,
-    input: SearchInput,
+    input: &SearchInput,
     subject_kind: Option<SubjectKind>,
-    mut summary: impl FnMut(&Transaction<'_>, Subject, Metrics) -> crate::cells::Result<T>,
-) -> crate::cells::Result<Page<T>> {
-    input.validate().map_err(crate::cells::Error::Invalid)?;
-    let generation = ensure_ready(context)?;
-    let revision = revision(context)?;
+) -> crate::cells::Result<Criteria> {
     let query = Query::parse(input.query.as_deref()).map_err(crate::cells::Error::Invalid)?;
     let archived = query
         .needs_lock_state()
@@ -302,6 +305,29 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         .review_teams
         .validate(&query)
         .map_err(crate::cells::Error::Invalid)?;
+    Ok(Criteria {
+        query,
+        archived,
+        review,
+        now_ms,
+    })
+}
+
+pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
+    context: &mut Transaction<'_>,
+    input: SearchInput,
+    subject_kind: Option<SubjectKind>,
+    mut summary: impl FnMut(&Transaction<'_>, Subject, Metrics) -> crate::cells::Result<T>,
+) -> crate::cells::Result<Page<T>> {
+    input.validate().map_err(crate::cells::Error::Invalid)?;
+    let generation = ensure_ready(context)?;
+    let revision = revision(context)?;
+    let Criteria {
+        query,
+        archived,
+        review,
+        now_ms,
+    } = criteria(context, &input, subject_kind)?;
     let identity = context.sql(&SqlBatch {
         statements: vec![statement(
             "SELECT repository_uuid FROM repository_identity WHERE singleton = 1",

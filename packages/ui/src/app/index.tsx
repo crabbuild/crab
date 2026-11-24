@@ -68,6 +68,7 @@ import crabMark from "../../../web/crab.optimized.svg";
 const WorkspaceCodeSearch = lazy(
   () => import("@/features/repository/workspace-code-search"),
 );
+const WorkSearch = lazy(() => import("@/features/personal-work/search"));
 
 export function App() {
   const location = useLocation();
@@ -138,6 +139,7 @@ export function App() {
   const url = new URL(location, window.location.origin);
   const codeSearch = url.pathname === "/-/code-search";
   const myWork = url.pathname === "/-/work";
+  const workSearch = url.pathname === "/-/discussion-search";
   const inbox = url.pathname === "/-/notifications";
   const watched = url.pathname === "/-/notifications/watched";
   const subscriptions = url.pathname === "/-/notifications/subscriptions";
@@ -169,6 +171,7 @@ export function App() {
     organizations ||
     notifications ||
     myWork ||
+    workSearch ||
     codeSearch
       ? undefined
       : repositoryRoute(url);
@@ -276,7 +279,9 @@ export function App() {
                   ? "Search code · Crab"
                   : myWork
                     ? "My work · Crab"
-                    : "Repositories · Crab";
+                    : workSearch
+                      ? "Search issues and pull requests · Crab"
+                      : "Repositories · Crab";
   }, [
     authenticated,
     repo,
@@ -287,6 +292,7 @@ export function App() {
     transferId,
     codeSearch,
     myWork,
+    workSearch,
   ]);
   useEffect(() => {
     if (!importedRepository || url.pathname !== "/") return;
@@ -474,6 +480,12 @@ export function App() {
                           organizations
                         </Link>
                       </DropdownMenuItem>
+                      <DropdownMenuItem asChild>
+                        <Link href="/-/discussion-search">
+                          <SearchIcon aria-hidden="true" /> Search issues and
+                          PRs
+                        </Link>
+                      </DropdownMenuItem>
                     </DropdownMenuGroup>
                     {session.data.user && (
                       <>
@@ -509,6 +521,16 @@ export function App() {
             )}
             {myWork ? (
               <PersonalWork key={teamAccount} url={url} />
+            ) : workSearch ? (
+              <Suspense
+                fallback={
+                  <p role="status" className="notice">
+                    <Spinner /> Loading search…
+                  </p>
+                }
+              >
+                <WorkSearch key={teamAccount} url={url} />
+              </Suspense>
             ) : codeSearch ? (
               <Suspense
                 fallback={

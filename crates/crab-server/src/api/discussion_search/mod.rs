@@ -25,8 +25,25 @@ pub(super) async fn resolve_people(
     repo: &crate::repository::Repository,
     input: &mut crate::cells::repository::SearchInput,
 ) -> Result<Option<review_teams::Bound>> {
+    bind_people(server, principal, input).await?;
+    bind_repository(server, principal, repo, input).await
+}
+
+pub(super) async fn bind_people(
+    server: &Server,
+    principal: &Principal,
+    input: &mut crate::cells::repository::SearchInput,
+) -> Result<()> {
     people::resolve(server, principal, input).await?;
-    assignees::resolve(server, principal, input).await?;
+    assignees::resolve(server, principal, input).await
+}
+
+pub(super) async fn bind_repository(
+    server: &Server,
+    principal: &Principal,
+    repo: &crate::repository::Repository,
+    input: &mut crate::cells::repository::SearchInput,
+) -> Result<Option<review_teams::Bound>> {
     reviews::bind_source(server, principal, repo, input).await?;
     review_teams::bind(server, principal, repo, input).await
 }
