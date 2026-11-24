@@ -42,6 +42,8 @@ pub(in crate::api) fn comment_view(
         "number": comment.number,
         "body": comment.body,
         "reactions": reactions,
+        "has_edit_history": reactions.has_edit_history,
+        "minimization": reactions.minimization,
         "author": authors.view(&comment.author),
         "version": comment.version,
         "created_at": comment.created_at,
@@ -113,6 +115,7 @@ async fn comment(
     let comment = storage::create_comment(
         &server,
         repo,
+        &principal,
         id,
         actor.clone(),
         app::submission(&input.request_id)?,
@@ -184,6 +187,7 @@ async fn edit_comment(
     let comment = storage::update_comment(
         &server,
         repo,
+        &principal,
         app::number(id)?,
         app::number(comment)?,
         actor.clone(),

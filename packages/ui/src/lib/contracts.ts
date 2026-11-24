@@ -8,19 +8,28 @@ export type SessionIdentity = { issuer: string, subject: string, name: string, }
 export type SessionMode = "local" | "oidc" | "github";
 
 // prettier-ignore
-export type Session = { authenticated: boolean, mode: SessionMode, user: SessionIdentity | null, csrf: string | null, };
+export type Session = { authenticated: boolean, mode: SessionMode, user: SessionIdentity | null, csrf: string | null, can_sign_up: boolean, };
 
 // prettier-ignore
-export type BranchProtection = { branch: string, required_approvals: number, required_code_owner_reviews?: boolean, require_conversation_resolution?: boolean, require_up_to_date?: boolean, require_merge_queue?: boolean, required_checks: Array<string>, required_integrations?: Array<string>, };
+export type MergeQueueState = "waiting" | "preparing" | "candidate_scheduled" | "publishing";
+
+// prettier-ignore
+export type MergeQueueItem = { pull: number, title: string, request_id: string, head_oid: string, state: MergeQueueState, can_remove: boolean, can_prioritize: boolean, };
+
+// prettier-ignore
+export type MergeQueuePage = { items: Array<MergeQueueItem>, next: string | null, };
+
+// prettier-ignore
+export type BranchProtection = { branch: string, required_approvals: number, required_code_owner_reviews?: boolean, require_conversation_resolution?: boolean, require_up_to_date?: boolean, require_merge_queue?: boolean, require_linear_history?: boolean, required_checks: Array<string>, required_integrations?: Array<string>, };
 
 // prettier-ignore
 export type FilePreviewState = { "state": "inline", text: string, } | { "state": "omitted_size" } | { "state": "binary" } | { "state": "unsupported_encoding" };
 
 // prettier-ignore
-export type FilePreview = { oid: string, size: number, mode: string, classification: string, commit: string, generation: number, preview: FilePreviewState, };
+export type FilePreview = { oid: string, size: number, stored_size?: number, mode: string, classification: string, commit: string, generation: number, preview: FilePreviewState, };
 
 // prettier-ignore
-export type RepositoryAccess = "read" | "triage" | "write" | "admin";
+export type RepositoryAccess = "read" | "triage" | "moderate" | "write" | "maintain" | "admin";
 
 // prettier-ignore
 export type RepositoryMember = { subject: string, name: string, access: RepositoryAccess, };
@@ -59,6 +68,12 @@ export type ActorSummary = { id: string, handle: string, name: string, };
 export type OwnProfile = { profile: ActorProfile | null, };
 
 // prettier-ignore
+export type ReviewAvailability = { version: number, busy: boolean, expires_at_ms: number | null, };
+
+// prettier-ignore
+export type ReviewAvailabilityChoice = "available" | "thirty_minutes" | "one_hour" | "four_hours" | "one_day" | "one_week" | "until_cleared";
+
+// prettier-ignore
 export type OrganizationRole = "member" | "owner";
 
 // prettier-ignore
@@ -86,7 +101,16 @@ export type OrganizationMembership = { actor: string, role: OrganizationRole, ve
 export type OrganizationMembers = { can_manage: boolean, items: Array<OrganizationMembership>, next: string | null, revision: number, };
 
 // prettier-ignore
-export type AuditAction = "organization_created" | "organization_edited" | "organization_membership" | "organization_invitation" | "rulesets_changed" | "project_changed" | "team_created" | "team_edited" | "team_deleted" | "team_membership" | "team_creation_policy" | "repository_registered" | "repository_access_changed" | "repository_transferred_in" | "repository_transferred_out";
+export type IssueTypeColor = "gray" | "blue" | "green" | "yellow" | "orange" | "red" | "purple" | "pink";
+
+// prettier-ignore
+export type IssueType = { id: string, name: string, description: string, color: IssueTypeColor, enabled: boolean, };
+
+// prettier-ignore
+export type IssueTypeSchema = { version: number, definitions: Array<IssueType>, };
+
+// prettier-ignore
+export type AuditAction = "organization_created" | "automation_changed" | "organization_edited" | "organization_membership" | "organization_invitation" | "rulesets_changed" | "repository_properties_changed" | "issue_types_changed" | "project_changed" | "team_created" | "team_edited" | "team_group_sync" | "team_deleted" | "team_membership" | "team_creation_policy" | "repository_registered" | "repository_access_changed" | "repository_transferred_in" | "repository_transferred_out";
 
 // prettier-ignore
 export type AuditRepository = { id: string, name: string, };
@@ -98,6 +122,21 @@ export type AuditEvent = { id: string, occurred_at_ms: number, action: AuditActi
 export type AuditPage = { items: Array<AuditEvent>, next: string | null, };
 
 // prettier-ignore
+export type AutomationAccess = "read" | "write";
+
+// prettier-ignore
+export type AutomationToken = { id: string, expires_at: number, };
+
+// prettier-ignore
+export type AutomationGrant = { repository: string, name: string | null, access: AutomationAccess, current: boolean, };
+
+// prettier-ignore
+export type AutomationIdentity = { id: string, name: string, enabled: boolean, grants: Array<AutomationGrant>, tokens: Array<AutomationToken>, };
+
+// prettier-ignore
+export type AutomationSnapshot = { version: number, identities: Array<AutomationIdentity>, };
+
+// prettier-ignore
 export type MemberAccessAccount = "active" | "suspended" | "provider_unavailable";
 
 // prettier-ignore
@@ -107,7 +146,7 @@ export type MemberAccessTeam = { id: string, name: string, access: RepositoryAcc
 export type AccessRepository = { id: string, owner: string, name: string, access: RepositoryAccess | null, direct: RepositoryAccess | null, teams: Array<MemberAccessTeam>, organization_owner: boolean, sso_group_ceiling: RepositoryAccess | null, inherited_from: string | null, };
 
 // prettier-ignore
-export type MemberRepositoryAccess = { account: MemberAccessAccount, items: Array<AccessRepository>, next: string | null, };
+export type MemberRepositoryAccess = { account: MemberAccessAccount, managed: boolean, items: Array<AccessRepository>, next: string | null, };
 
 // prettier-ignore
 export type InvitationOffer = { invitation: Invitation, profile: ActorSummary | null, };
@@ -134,7 +173,16 @@ export type TeamMembership = { actor: string, role: TeamRole | null, version: nu
 export type TeamPolicy = { member_creation: boolean, version: number, };
 
 // prettier-ignore
-export type TeamCommand = { "kind": "create", name: string, description: string, visibility: TeamVisibility, } | { "kind": "edit", team: string, version: number, name: string, description: string, visibility: TeamVisibility, } | { "kind": "delete", team: string, version: number, } | { "kind": "member", team: string, member: string, version: number, role: TeamRole | null, } | { "kind": "policy", version: number, member_creation: boolean, };
+export type ReviewRoutingAlgorithm = "disabled" | "round_robin" | "fewest_open";
+
+// prettier-ignore
+export type ReviewRoutingOptions = { count_existing: boolean, keep_team: boolean, };
+
+// prettier-ignore
+export type ReviewRoutingSettings = { version: number, algorithm: ReviewRoutingAlgorithm, reviewers: number, excluded: Array<string>, options: ReviewRoutingOptions, };
+
+// prettier-ignore
+export type TeamCommand = { "kind": "create", name: string, description: string, visibility: TeamVisibility, } | { "kind": "edit", team: string, version: number, name: string, description: string, visibility: TeamVisibility, } | { "kind": "delete", team: string, version: number, } | { "kind": "member", team: string, member: string, version: number, role: TeamRole | null, } | { "kind": "review_routing", team: string, version: number, algorithm: ReviewRoutingAlgorithm, reviewers: number, excluded?: Array<string>, options?: ReviewRoutingOptions, } | { "kind": "policy", version: number, member_creation: boolean, };
 
 // prettier-ignore
 export type TeamSubmission = { request_id: string, command: TeamCommand, };

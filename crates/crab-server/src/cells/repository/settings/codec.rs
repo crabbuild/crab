@@ -8,10 +8,13 @@ const CODE_OWNER_RULES_FORMAT: usize = 102;
 const CONVERSATION_RULES_FORMAT: usize = 103;
 const UP_TO_DATE_RULES_FORMAT: usize = 104;
 const QUEUE_RULES_FORMAT: usize = 105;
+const LINEAR_HISTORY_RULES_FORMAT: usize = 106;
 
 pub(super) fn encode(rules: &[BranchProtectionRecord]) -> Result<Vec<u8>, RecordError> {
     let mut encoder = RecordEncoder::new(MAX_PROTECTION_BYTES)?;
-    let format = if rules.iter().any(|rule| rule.require_merge_queue) {
+    let format = if rules.iter().any(|rule| rule.require_linear_history) {
+        LINEAR_HISTORY_RULES_FORMAT
+    } else if rules.iter().any(|rule| rule.require_merge_queue) {
         QUEUE_RULES_FORMAT
     } else if rules.iter().any(|rule| rule.require_up_to_date) {
         UP_TO_DATE_RULES_FORMAT
@@ -54,13 +57,16 @@ pub(super) fn encode(rules: &[BranchProtectionRecord]) -> Result<Vec<u8>, Record
         if format >= QUEUE_RULES_FORMAT {
             encoder.write_u8(u8::from(rule.require_merge_queue))?;
         }
+        if format >= LINEAR_HISTORY_RULES_FORMAT {
+            encoder.write_u8(u8::from(rule.require_linear_history))?;
+        }
     }
     Ok(encoder.finish())
 }
 
 pub(super) fn decode(bytes: &[u8]) -> Result<Vec<BranchProtectionRecord>, RecordError> {
     let mut decoder = RecordDecoder::new(bytes, MAX_PROTECTION_BYTES)?;
-    let format = bounded_count(&mut decoder, QUEUE_RULES_FORMAT)?;
+    let format = bounded_count(&mut decoder, LINEAR_HISTORY_RULES_FORMAT)?;
     let count = if format >= PROVIDER_RULES_FORMAT {
         bounded_count(&mut decoder, 100)?
     } else {
@@ -89,6 +95,9 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Vec<BranchProtectionRecord>, Record
         }
         if format >= QUEUE_RULES_FORMAT {
             rule.require_merge_queue = flag(&mut decoder)?;
+        }
+        if format >= LINEAR_HISTORY_RULES_FORMAT {
+            rule.require_linear_history = flag(&mut decoder)?;
         }
         rules.push(rule);
     }
@@ -122,6 +131,7 @@ impl StoredRecord for BranchProtectionRecord {
             require_conversation_resolution: false,
             require_up_to_date: false,
             require_merge_queue: false,
+            require_linear_history: false,
             required_checks,
             required_integrations: Vec::new(),
         })

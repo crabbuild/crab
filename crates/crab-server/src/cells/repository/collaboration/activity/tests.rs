@@ -107,6 +107,7 @@ async fn state_and_content_changes_are_ordered_and_rejected_or_noop_edits_emit_n
         version: 1,
         actor: actor("Alice"),
         can_triage: false,
+        can_moderate: false,
         title: Some("Updated title".into()),
         body: None,
         state: Some(1),
@@ -140,6 +141,7 @@ async fn state_and_content_changes_are_ordered_and_rejected_or_noop_edits_emit_n
                 Action::IssueClosed {
                     reason: crate::cells::repository::issues::lifecycle::Reason::Completed,
                     pull: None,
+                    commit: None,
                 }
             ),
             (2, Action::Updated),
@@ -174,6 +176,8 @@ async fn descending_subject_pages_remain_stable_when_new_events_arrive() {
         write::<CreateComment>(
             &cell,
             CreateCommentInput {
+                can_mark_duplicate: false,
+                can_post_locked: false,
                 issue: 1,
                 submission_id: *Uuid::now_v7().as_bytes(),
                 author: actor("Bob"),
@@ -194,6 +198,8 @@ async fn descending_subject_pages_remain_stable_when_new_events_arrive() {
     write::<CreateComment>(
         &cell,
         CreateCommentInput {
+            can_mark_duplicate: false,
+            can_post_locked: false,
             issue: 1,
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor("Bob"),
@@ -293,6 +299,8 @@ async fn event_sequence_subject_index_and_receipts_survive_native_restart() {
             &repository,
             identity(),
             CreateCommentInput {
+                can_mark_duplicate: false,
+                can_post_locked: false,
                 issue: 1,
                 submission_id: *Uuid::now_v7().as_bytes(),
                 author: actor("Bob"),
@@ -335,6 +343,8 @@ async fn review_threads_replies_and_merge_completion_record_their_actual_targets
     write::<CreateComment>(
         &cell,
         CreateCommentInput {
+            can_mark_duplicate: false,
+            can_post_locked: false,
             issue: 1,
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor("Bob"),
@@ -363,6 +373,8 @@ async fn review_threads_replies_and_merge_completion_record_their_actual_targets
     write::<CreatePullComment>(
         &cell,
         CreatePullCommentInput {
+            can_mark_duplicate: false,
+            can_post_locked: false,
             pull: 1,
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor("Bob"),
@@ -373,6 +385,7 @@ async fn review_threads_replies_and_merge_completion_record_their_actual_targets
     write::<CreatePullReview>(
         &cell,
         CreatePullReviewInput {
+            can_post_locked: false,
             base_revision: None,
             review_teams: Vec::new(),
             pull: 1,
@@ -387,6 +400,7 @@ async fn review_threads_replies_and_merge_completion_record_their_actual_targets
     write::<CreatePullReviewThread>(
         &cell,
         CreatePullReviewThreadInput {
+            can_post_locked: false,
             pull: 1,
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor("Bob"),
@@ -406,6 +420,7 @@ async fn review_threads_replies_and_merge_completion_record_their_actual_targets
     write::<CreatePullReviewReply>(
         &cell,
         CreatePullReviewReplyInput {
+            can_post_locked: false,
             pull: 1,
             thread: 1,
             submission_id: *Uuid::now_v7().as_bytes(),
@@ -417,6 +432,7 @@ async fn review_threads_replies_and_merge_completion_record_their_actual_targets
     write::<UpdatePullReviewThread>(
         &cell,
         UpdatePullReviewThreadInput {
+            can_post_locked: false,
             key: PullReviewThreadKey { pull: 1, number: 1 },
             actor: actor("Alice"),
             can_resolve: true,

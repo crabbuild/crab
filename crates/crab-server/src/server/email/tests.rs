@@ -187,7 +187,7 @@ async fn native_browser_opts_in_and_delivers_a_real_mention() {
             .run(&["find", "role", role, "click", "--name", label, "--exact"])
             .await;
     };
-    click("button", "Continue to sign in").await;
+    browser.sign_in().await;
     click("button", "Email settings").await;
     browser.run(&["wait", "--text", "bob@example.test"]).await;
     click("checkbox", "Send me notification emails").await;
@@ -324,6 +324,142 @@ async fn mail_recovery_reuses_provider_key_and_payload_after_lost_acknowledgemen
     let sent = messages.lock().await;
     assert_eq!(sent.len(), 2);
     assert_eq!(sent[0], sent[1]);
+    receiver.abort();
+    h.close().await;
+}
+
+async fn ready_transfer_repository(h: &Harness) -> Uuid {
+    let id = h.server.repositories.values()[0].id;
+    let catalog = h.server.catalog().unwrap();
+    catalog.mark_cell_ready(id).await.unwrap();
+    catalog
+        .set_members(
+            "team",
+            "private",
+            vec![crate::RepositoryMember {
+                subject: "alice-id".into(),
+                name: "Alice".into(),
+                access: crate::RepositoryAccess::Admin,
+            }],
+            true,
+        )
+        .await
+        .unwrap();
+    id
+}
+
+async fn offer_to_bob(h: &Harness, alice: &str, repository: Uuid) -> Uuid {
+    let id = Uuid::now_v7();
+    let result: Value = h
+        .write(
+            Method::POST,
+            &format!("/api/repositories/{repository}/transfer"),
+            alice,
+            json!({
+                "request_id":id,
+                "recipient":{"kind":"account","handle":"bob"},
+                "name":"private-destination-name",
+                "version":0,
+            }),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(result["id"], json!(id));
+    id
+}
+
+async fn cancel_transfer(h: &Harness, alice: &str, offer: Uuid) {
+    h.write(
+        Method::PUT,
+        &format!("/api/repository-transfers/{offer}"),
+        alice,
+        json!({"decision":"cancel"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+}
+
+async fn reconcile_transfers(h: &Harness) {
+    // A fresh capture exercises restart and recovery after a lost queue reply.
+    transfers::reconcile(&h.server, &h.server.cells().unwrap(), &mut None)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn transfer_email_replay_preserves_opt_in_cancellation_and_delivery() {
+    let (endpoint, messages, receiver) = test_provider().await;
+    let h = Harness::with_notification_email(false, endpoint).await;
+    let repository = ready_transfer_repository(&h).await;
+    let alice = h.login().await;
+    let bob = member(&h, "bob@example.test", true).await;
+    handle(&h, &bob).await;
+
+    let opted_out = offer_to_bob(&h, &alice, repository).await;
+    reconcile_transfers(&h).await;
+    assert!(!tick(&h).await);
+    let defaults = h.json(SETTINGS, &bob).await;
+    save(&h, &bob, true, &defaults["version"]).await;
+    reconcile_transfers(&h).await;
+    assert!(!tick(&h).await);
+    cancel_transfer(&h, &alice, opted_out).await;
+
+    let pending = offer_to_bob(&h, &alice, repository).await;
+    reconcile_transfers(&h).await;
+    cancel_transfer(&h, &alice, pending).await;
+    assert!(tick(&h).await);
+    assert!(messages.lock().await.is_empty());
+    assert!(!tick(&h).await);
+
+    offer_to_bob(&h, &alice, repository).await;
+    reconcile_transfers(&h).await;
+    reconcile_transfers(&h).await;
+    assert!(tick(&h).await);
+    reconcile_transfers(&h).await;
+    assert!(!tick(&h).await);
+    assert_eq!(messages.lock().await.len(), 1);
+    receiver.abort();
+    h.close().await;
+}
+
+#[tokio::test]
+async fn email_worker_delivers_one_private_transfer_alert_to_the_verified_recipient() {
+    let (endpoint, messages, receiver) = test_provider().await;
+    let h = Harness::with_notification_email(false, endpoint).await;
+    let repository = ready_transfer_repository(&h).await;
+    let alice = h.login().await;
+    let bob = member(&h, "bob@example.test", true).await;
+    handle(&h, &bob).await;
+    let settings = h.json(SETTINGS, &bob).await;
+    save(&h, &bob, true, &settings["version"]).await;
+    let offer = offer_to_bob(&h, &alice, repository).await;
+
+    let worker = tokio::spawn(run(h.server.clone()));
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while messages.lock().await.is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    h.server.cancellation.cancel();
+    worker.await.unwrap().unwrap();
+
+    let sent = messages.lock().await;
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].1["to"], json!(["bob@example.test"]));
+    assert_eq!(sent[0].1["subject"], "New repository transfer in Crab");
+    let text = sent[0].1["text"].as_str().unwrap();
+    assert!(text.contains(&format!("{}/-/notifications?tab=transfers", h.origin)));
+    assert!(!text.contains("team/private"));
+    assert!(!text.contains("private-destination-name"));
+    assert!(!text.contains(&offer.to_string()));
+    drop(sent);
     receiver.abort();
     h.close().await;
 }

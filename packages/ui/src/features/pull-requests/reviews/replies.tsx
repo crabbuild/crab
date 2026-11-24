@@ -1,3 +1,6 @@
+import { EditHistory } from "@/components/discussion/conversation/edit-history";
+import { CommentVisibility } from "@/components/discussion/conversation/comment-visibility";
+import { useConversationLock } from "@/components/discussion/conversation/lock";
 import { Author } from "@/components/discussion/author";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
 import { Reactions } from "@/components/discussion/reactions";
@@ -32,6 +35,7 @@ export function ReviewReplies({
     endpoint(repo, `pulls/${pull.number}/threads/${thread.number}/replies`, {
       before: before?.toString(),
     });
+  const canPost = useConversationLock()?.lock?.can_post !== false;
   const replies = usePagedRequest<PullReviewReply>(repliesPath);
   const linkedReply = useRequest<PullReviewReply>(
     selected
@@ -50,6 +54,7 @@ export function ReviewReplies({
   const submission = useSubmission();
   async function submit(event: React.FormEvent) {
     event.preventDefault();
+    if (!canPost) return;
     const input = { body };
     const created = await mutation.run<PullReviewReply>(repliesPath(), "POST", {
       ...input,
@@ -111,7 +116,7 @@ export function ReviewReplies({
           Load more replies
         </Button>
       )}
-      {thread.can_reply && !repo.archived && (
+      {thread.can_reply && !repo.archived && (canPost || Boolean(body)) && (
         <form className="review-reply-form" onSubmit={submit}>
           <Editor
             id={`reply-${thread.number}`}
@@ -126,7 +131,7 @@ export function ReviewReplies({
             variant="outline"
             size="sm"
             type="submit"
-            disabled={mutation.pending || !body.trim()}
+            disabled={!canPost || mutation.pending || !body.trim()}
           >
             {mutation.pending ? "Replying…" : "Reply"}
           </Button>
@@ -154,8 +159,10 @@ function ReviewReplyItem({
   const mutation = useMutation(csrf, repo);
   const [editing, setEditing] = useState(false);
   const [body, setBody] = useState(reply.body);
+  const canPost = useConversationLock()?.lock?.can_post !== false;
   async function save(event: React.FormEvent) {
     event.preventDefault();
+    if (!canPost) return;
     const updated = await mutation.run<PullReviewReply>(
       endpoint(
         repo,
@@ -176,62 +183,77 @@ function ReviewReplyItem({
         <Author author={reply.author} />
       </strong>
       <span className="muted">replied {timestamp(reply.created_at)}</span>
-      {editing ? (
-        <form className="review-reply-edit" onSubmit={save}>
-          <Editor
-            id={`reply-${thread.number}-${reply.number}-edit`}
-            label="Edit reply"
-            value={body}
-            onChange={setBody}
-            disabled={mutation.pending}
-            required
-            autoFocus
-          />
-          <div className="discussion-actions">
-            <Button
-              size="sm"
-              variant="default"
-              type="submit"
-              disabled={mutation.pending || !body.trim()}
-            >
-              {mutation.pending ? "Saving…" : "Save"}
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              type="button"
-              disabled={mutation.pending}
-              onClick={() => {
-                setBody(reply.body);
-                setEditing(false);
-              }}
-            >
-              Cancel
-            </Button>
-          </div>
-        </form>
-      ) : (
-        <>
-          <DiscussionMarkdown>{body}</DiscussionMarkdown>
-          {reply.can_edit && !repo.archived && (
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={mutation.pending}
-              onClick={() => setEditing(true)}
-            >
-              Edit
-            </Button>
-          )}
-        </>
-      )}
-      <Reactions
+      <CommentVisibility
         repo={repo}
         csrf={csrf}
         target={`pulls/${pull.number}/threads/${thread.number}/replies/${reply.number}`}
-        summary={reply.reactions}
-      />
-      <Failure message={mutation.error} />
+        minimization={reply.minimization}
+        onChanged={refresh}
+      >
+        {reply.has_edit_history && (
+          <EditHistory
+            repo={repo}
+            csrf={csrf}
+            target={`pulls/${pull.number}/threads/${thread.number}/replies/${reply.number}`}
+          />
+        )}
+        {editing ? (
+          <form className="review-reply-edit" onSubmit={save}>
+            <Editor
+              id={`reply-${thread.number}-${reply.number}-edit`}
+              label="Edit reply"
+              value={body}
+              onChange={setBody}
+              disabled={mutation.pending}
+              required
+              autoFocus
+            />
+            <div className="discussion-actions">
+              <Button
+                size="sm"
+                variant="default"
+                type="submit"
+                disabled={!canPost || mutation.pending || !body.trim()}
+              >
+                {mutation.pending ? "Saving…" : "Save"}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                type="button"
+                disabled={mutation.pending}
+                onClick={() => {
+                  setBody(reply.body);
+                  setEditing(false);
+                }}
+              >
+                Cancel
+              </Button>
+            </div>
+          </form>
+        ) : (
+          <>
+            <DiscussionMarkdown>{body}</DiscussionMarkdown>
+            {reply.can_edit && canPost && !repo.archived && (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={mutation.pending}
+                onClick={() => setEditing(true)}
+              >
+                Edit
+              </Button>
+            )}
+          </>
+        )}
+        <Reactions
+          repo={repo}
+          csrf={csrf}
+          target={`pulls/${pull.number}/threads/${thread.number}/replies/${reply.number}`}
+          summary={reply.reactions}
+        />
+        <Failure message={mutation.error} />
+      </CommentVisibility>
     </div>
   );
 }

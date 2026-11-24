@@ -1,5 +1,6 @@
 export type RulesetId = string | { organization: string; ruleset: string };
 
+import { type CommentMinimization } from "@/components/discussion/conversation/comment-visibility";
 import type { DiscussionTotals, ListLabel } from "@/components/discussion/list";
 import type { DiscussionAuthor } from "@/components/discussion/author";
 import type { RepositoryAssignee } from "@/lib/contracts";
@@ -33,7 +34,24 @@ export type PullListItem = Omit<PullSummary, "labels"> &
 
 export type MergeMethod = "merge_commit" | "squash" | "rebase" | "fast_forward";
 
+export interface RequiredCheckReport {
+  state: "error" | "failure" | "pending" | "success" | null;
+  description: string | null;
+  target_url: string | null;
+  author: string | null;
+  updated_at: number | null;
+  run_id: number | null;
+  run_status?: "queued" | "in_progress" | "completed" | null;
+  conclusion?: string | null;
+  provider?:
+    | "github_actions"
+    | "crab_check_run"
+    | "crab_status"
+    | "crab_status_or_check_run";
+}
+
 export interface PullRequest extends PullSummary {
+  has_edit_history?: boolean;
   reactions: ReactionSummary;
   body: string;
   version: number;
@@ -80,10 +98,13 @@ export interface PullRequest extends PullSummary {
     tested_candidate_oid?: string | null;
   } | null;
   merge_methods: MergeMethod[];
+  bypass_merge_methods?: MergeMethod[];
   merge_requirements: {
     rulesets?: string[];
     bypass_options?: { id: RulesetId; name: string }[];
     protected: boolean;
+    updates_restricted?: boolean;
+    linear_history_required?: boolean;
     required_approvals: number;
     approvals: number;
     changes_requested: number;
@@ -91,18 +112,14 @@ export interface PullRequest extends PullSummary {
     unresolved_conversations?: number | null;
     head_up_to_date?: boolean | null;
     checks_satisfied: boolean;
-    checks: Array<{
-      context: string;
-      state: "error" | "failure" | "pending" | "success" | null;
-      description: string | null;
-      target_url: string | null;
-      author: string | null;
-      updated_at: number | null;
-      run_id: number | null;
-      provider?: "github_actions" | "crab_check_run" | "crab_status";
-      integration_id?: string | null;
-      head_sha?: string;
-    }>;
+    checks: Array<
+      RequiredCheckReport & {
+        context: string;
+        integration_id?: string | null;
+        head_sha?: string;
+        additional_report?: RequiredCheckReport;
+      }
+    >;
     satisfied: boolean;
   };
 }
@@ -126,6 +143,7 @@ export interface CodeOwnersReport {
 }
 
 export interface PullReviewThread extends InlineDiffThread {
+  has_edit_history?: boolean;
   reactions: ReactionSummary;
   path: string;
   base_oid: string;
@@ -144,6 +162,8 @@ export interface PullReviewThread extends InlineDiffThread {
 }
 
 export interface PullReviewReply {
+  has_edit_history?: boolean;
+  minimization?: CommentMinimization | null;
   reactions: ReactionSummary;
   number: number;
   author: DiscussionAuthor;

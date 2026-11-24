@@ -45,6 +45,7 @@ crab-storage = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["pkcs8"] }
 rand = "0.9"
 regex = "1.12.3"
+regex-syntax = "0.8.10"
 pulldown-cmark = { version = "0.13.6", default-features = false }
 openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest", "rustls-tls"] }
 object_store = { workspace = true }
@@ -63,6 +64,15 @@ sysinfo = "0.38.4"
 thiserror = { workspace = true }
 tikv-jemallocator = { version = "0.6", features = ["stats"] }
 time = { workspace = true }
+tree-sitter = "=0.27.0"
+tree-sitter-c = "=0.24.1"
+tree-sitter-cpp = "=0.23.4"
+tree-sitter-go = "=0.25.0"
+tree-sitter-java = "=0.23.5"
+tree-sitter-javascript = "=0.25.0"
+tree-sitter-python = "=0.25.0"
+tree-sitter-rust = "=0.24.0"
+tree-sitter-typescript = "=0.23.2"
 tokio = { workspace = true, features = ["macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-rustls = "0.26"
 tokio-util = { workspace = true, features = ["io", "rt"] }

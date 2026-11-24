@@ -24,7 +24,7 @@ pub(super) fn requested_key(pull: u64, team: Uuid) -> String {
     format!("collaboration/v1/pulls/{pull:016x}/requested-teams/{team}")
 }
 
-pub(in crate::cells::repository::pulls) fn load_teams(
+pub(in crate::cells::repository) fn load_teams(
     context: &Transaction<'_>,
     pull: u64,
 ) -> Result<Vec<TeamRequest>> {
@@ -39,6 +39,8 @@ pub(crate) struct TeamSelection {
     pub actor: RepositoryAuthor,
     pub team: Uuid,
     pub recipients: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<routing::Plan>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -76,6 +78,16 @@ impl Mutation for SetTeamReviewRequest {
         let Some(mut pull) = load_pull(context, input.pull)? else {
             return Ok(MutationResult::Rejected(NotFound));
         };
+        let receipt = format!(
+            "collaboration/v1/team-review-submissions/{:016x}/{}/{:016x}/{}",
+            input.pull,
+            input.team,
+            input.version,
+            reviewer_id(&input.actor),
+        );
+        if input.recipients.is_some() && context.document::<bool>(&receipt)?.is_some() {
+            return Ok(MutationResult::Success(Applied));
+        }
         if pull.state != PullState::Open {
             return Ok(MutationResult::Rejected(Closed));
         }
@@ -93,8 +105,31 @@ impl Mutation for SetTeamReviewRequest {
         if pull.version != input.version {
             return Ok(MutationResult::Rejected(Conflict));
         }
+        let mut recipients = input.recipients;
+        if recipients
+            .as_ref()
+            .is_some_and(|items| items.len() > MAX_REVIEW_RECIPIENTS)
+        {
+            return Err(Error::Invalid("too many team review recipients"));
+        }
+        let (assigned, retain_team) = match (requested, input.routing) {
+            (true, Some(plan)) => {
+                let keep_team = plan.keep_team;
+                let selected =
+                    routing::assign(context, &pull, &input.actor, input.team, plan, false)?;
+                let assigned = !selected.is_empty();
+                // An enabled team with no available reviewers remains visible
+                // as requested, without notifying members who cannot take the request.
+                recipients = Some(selected);
+                (assigned, keep_team || !assigned)
+            }
+            _ => (false, requested),
+        };
         requests.retain(|entry| entry.team != input.team);
-        if requested {
+        if assigned {
+            context.put_document(&receipt, &true)?;
+        }
+        if retain_team {
             if requests.len() >= MAX_TEAM_GRANTS {
                 return Ok(MutationResult::Rejected(Limit));
             }
@@ -126,10 +161,7 @@ impl Mutation for SetTeamReviewRequest {
             &input.actor,
             action,
         )?;
-        if let Some(mut recipients) = input.recipients {
-            if recipients.len() > MAX_REVIEW_RECIPIENTS {
-                return Err(Error::Invalid("too many team review recipients"));
-            }
+        if let Some(mut recipients) = recipients {
             recipients.sort_unstable();
             recipients.dedup();
             let issuer = &input.actor.issuer;

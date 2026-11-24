@@ -1,39 +1,13 @@
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::test_support::{git, http::Harness};
+use crate::test_support::{
+    git::{self, with_http_token as git_command},
+    http::Harness,
+};
 
 const PATH: &str = "/api/repos/team/private/settings/deploy-tokens";
-
-async fn git_command(workspace: &std::path::Path, credential: &str, args: &[&str]) -> bool {
-    tokio::process::Command::new("git")
-        .current_dir(workspace)
-        .args(args)
-        .env(
-            "GIT_CONFIG_GLOBAL",
-            if cfg!(windows) { "NUL" } else { "/dev/null" },
-        )
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_CONFIG_COUNT", "2")
-        .env("GIT_CONFIG_KEY_0", "http.extraHeader")
-        .env(
-            "GIT_CONFIG_VALUE_0",
-            format!(
-                "Authorization: Basic {}",
-                STANDARD.encode(format!("crab:{credential}"))
-            ),
-        )
-        .env("GIT_CONFIG_KEY_1", "protocol.version")
-        .env("GIT_CONFIG_VALUE_1", "2")
-        .output()
-        .await
-        .unwrap()
-        .status
-        .success()
-}
 
 async fn seed(h: &Harness, alice: &str) -> (tempfile::TempDir, String, String) {
     let published: Value = h
@@ -262,19 +236,7 @@ async fn native_browser_creates_and_revokes_ci_checkout_credentials() {
     browser
         .run(&["open", &format!("{}/team/private/settings", h.origin)])
         .await;
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    browser
-        .run(&[
-            "find",
-            "role",
-            "button",
-            "click",
-            "--name",
-            "Continue to sign in",
-        ])
-        .await;
+    browser.sign_in().await;
     browser
         .run(&["wait", "a[href$='/settings/deploy-tokens']"])
         .await;

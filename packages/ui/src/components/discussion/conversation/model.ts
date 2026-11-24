@@ -1,7 +1,14 @@
+import {
+  type CommentMinimization,
+  type MinimizationReason,
+} from "./comment-visibility";
+import type { LockReason } from "./lock";
 import type { DiscussionAuthor } from "../author";
 import type { ReactionSummary } from "../reactions";
 
 export interface Comment {
+  has_edit_history?: boolean;
+  minimization?: CommentMinimization | null;
   reactions: ReactionSummary;
   number: number;
   author: DiscussionAuthor;
@@ -34,6 +41,8 @@ export type Target =
     }
   | { kind: "pull_reply"; pull: number; thread: number; number: number };
 export type Action =
+  | { kind: "locked"; reason: LockReason | null; expires_at_ms?: number }
+  | { kind: "comment_hidden"; reason: MinimizationReason }
   | { kind: "base_changed" | "head_changed"; from: string; to: string }
   | {
       kind: "project_changed" | "project_removed";
@@ -45,7 +54,24 @@ export type Action =
       number: number;
       title: string;
     }
-  | { kind: "issue_closed"; reason: "completed" | "not_planned"; pull?: number }
+  | {
+      kind: "dependency_changed";
+      number: number;
+      title: string;
+      active: boolean;
+    }
+  | {
+      kind: "duplicate_marked" | "duplicate_unmarked";
+      number: number;
+      subject_kind: "issue" | "pull";
+      title: string;
+    }
+  | {
+      kind: "issue_closed";
+      reason: "completed" | "not_planned";
+      pull?: number;
+      commit?: string;
+    }
   | {
       kind: "issue_close_reason_changed";
       from: "completed" | "not_planned" | null;
@@ -58,12 +84,15 @@ export type Action =
         | "team_review_requested"
         | "team_review_request_cancelled"
         | "code_owner_reviews_requested"
+        | "merge_queue_prioritized"
         | "created"
         | "updated"
         | "closed"
         | "reopened"
         | "pinned"
         | "unpinned"
+        | "unlocked"
+        | "comment_restored"
         | "approved"
         | "changes_requested"
         | "review_dismissed"
@@ -101,6 +130,7 @@ export interface Page {
   has_earlier: boolean;
   has_later: boolean;
   head_oid: string | null;
+  undo_duplicate_event?: number | null;
 }
 export function entryKey(entry: Entry) {
   return `${entry.kind}:${entry.value.number}`;

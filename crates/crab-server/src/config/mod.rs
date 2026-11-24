@@ -1,5 +1,5 @@
 use openidconnect::IssuerUrl;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use url::{Host, Url};
@@ -7,6 +7,8 @@ use url::{Host, Url};
 use serde::Deserialize;
 
 use crate::{Error, Result};
+
+pub(crate) const MAX_OUTBOUND_WEBHOOKS: usize = 20;
 
 /// Server listeners, object-storage root, and browser identity configuration.
 #[derive(Clone, Debug, Deserialize)]
@@ -170,6 +172,9 @@ pub struct BranchProtection {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     #[cfg_attr(test, ts(optional = nullable))]
     pub require_merge_queue: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub require_linear_history: bool,
     #[serde(default)]
     pub required_checks: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -212,7 +217,9 @@ pub struct RepositoryGroup {
 pub enum RepositoryAccess {
     Read,
     Triage,
+    Moderate,
     Write,
+    Maintain,
     Admin,
 }
 
@@ -247,14 +254,18 @@ impl Config {
 
     pub(crate) fn validate(&self) -> Result<()> {
         if !self.outbound_webhooks.is_empty() {
-            let mut repositories = HashSet::new();
+            let mut receivers = HashSet::new();
+            let mut counts = HashMap::new();
             if !self
                 .auth
                 .as_ref()
                 .is_some_and(|auth| auth.state_key_file.is_some())
                 || !self.outbound_webhooks.iter().all(|hook| {
+                    let count = counts.entry(hook.repository).or_insert(0);
+                    *count += 1;
                     !hook.repository.is_nil()
-                        && repositories.insert(hook.repository)
+                        && receivers.insert((hook.repository, hook.url.as_str()))
+                        && *count <= MAX_OUTBOUND_WEBHOOKS
                         && hook.url.as_str().len() <= 1024
                         && hook.url.scheme() == "https"
                         && hook.url.host().is_some()
@@ -265,7 +276,7 @@ impl Config {
                 })
             {
                 return Err(Error::Config(
-                    "outbound webhooks require a shared auth state key and one HTTPS receiver without credentials, query, or fragment per repository",
+                    "outbound webhooks require a shared auth state key and up to 20 distinct HTTPS receivers without credentials, query, or fragment per repository",
                 ));
             }
         }
@@ -370,6 +381,11 @@ impl Config {
             {
                 return Err(Error::Config(
                     "browser authentication requires a client ID, an issuer without query parameters, and a public URL without a path or query",
+                ));
+            }
+            if auth.scim_token_file.is_some() && auth.provider != AuthProvider::Oidc {
+                return Err(Error::Config(
+                    "SCIM user provisioning requires OIDC sign-in",
                 ));
             }
             if auth.provider == AuthProvider::GitHub {
@@ -571,6 +587,10 @@ pub(crate) fn validate_repository(repository: &RepositoryConfig) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn valid_repository_description(value: &str) -> bool {
+    value.chars().count() <= 350 && !value.chars().any(char::is_control)
+}
+
 pub(crate) fn valid_repository_component(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 100
@@ -646,6 +666,7 @@ pub struct OidcConfig {
     pub public_url: Url,
     pub client_secret_file: Option<PathBuf>,
     pub state_key_file: Option<PathBuf>,
+    pub scim_token_file: Option<PathBuf>,
     #[serde(default)]
     pub github: Option<GitHubConfig>,
 }

@@ -78,6 +78,10 @@ pub(crate) enum Decision {
 }
 
 impl Offer {
+    pub(crate) fn created_at_ms(&self) -> i64 {
+        self.expires_at_ms.saturating_sub(LIFETIME_MS)
+    }
+
     pub(crate) fn available(&self, record: &CatalogRecord, now_ms: i64) -> bool {
         self.state == State::Pending
             && self.expires_at_ms > now_ms
@@ -275,6 +279,9 @@ impl CatalogStore {
             // Direct collaborators remain. Namespace-owned grants are replaced
             // at the same commit as the address, including former SSO groups.
             new.groups.clear();
+            // A later return to the same organization cannot revive an old
+            // automation grant. Ordinary renames retain their ownership epoch.
+            new.ownership_epoch = new.name_version();
             new.organization = match offer.recipient {
                 Recipient::Organization { id } => Some(OrganizationAccess {
                     id,

@@ -80,6 +80,7 @@ async fn request(cell: &RepositoryCell, author: &RepositoryAuthor, requested: bo
 }
 fn review(author: &RepositoryAuthor, state: ReviewState) -> CreatePullReviewInput {
     CreatePullReviewInput {
+        can_post_locked: false,
         base_revision: None,
         review_teams: Vec::new(),
         pull: 1,

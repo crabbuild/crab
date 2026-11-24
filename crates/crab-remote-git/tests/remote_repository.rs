@@ -3018,6 +3018,61 @@ async fn reads_ref_delta_from_object_store_ranges() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn capped_read_checks_the_final_delta_size_and_verifies_eligible_bytes() {
+    for kind in [DeltaKind::Ref, DeltaKind::Ofs] {
+        let fixture = publish(kind, false, RepositoryOptions::default()).await;
+        let cancellation = CancellationToken::new();
+        let operation = fixture
+            .repository
+            .operation(OperationKind::Content, &cancellation)
+            .await
+            .unwrap();
+        let maximum = fixture.expected.len() as u64;
+        fixture.backend.reset_pack_gets();
+        let result = async {
+            let oversized = operation
+                .read_object_at_most(fixture.target, maximum - 1)
+                .await?;
+            assert!(oversized.is_none());
+            assert_eq!(
+                fixture.backend.pack_gets(),
+                1,
+                "oversized delta opened its base"
+            );
+            let object = operation
+                .read_object_at_most(fixture.target, maximum)
+                .await?;
+            assert_eq!(object.unwrap().data.as_ref(), fixture.expected);
+            fixture.backend.reset_pack_gets();
+            assert!(
+                operation
+                    .read_object_at_most(fixture.target, maximum - 1)
+                    .await?
+                    .is_none()
+            );
+            assert_eq!(fixture.backend.pack_gets(), 0);
+            Ok(())
+        }
+        .await;
+        operation.finish(result).await.unwrap();
+        fixture.runtime.shutdown().await;
+    }
+
+    let fixture = publish(DeltaKind::Ref, true, RepositoryOptions::default()).await;
+    let operation = fixture
+        .repository
+        .operation(OperationKind::Content, &CancellationToken::new())
+        .await
+        .unwrap();
+    let read = operation.read_object_at_most(fixture.target, 0).await;
+    assert!(matches!(
+        operation.finish(read).await,
+        Err(Error::PackedEntryCrcMismatch { .. })
+    ));
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn concurrent_cold_blob_reads_are_single_flight_and_warm_reads_hit_cache() {
     let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
     let setup_cancellation = CancellationToken::new();
@@ -4366,6 +4421,112 @@ async fn ahead_history_excludes_every_base_ancestor_and_binds_both_commits() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn ahead_history_pages_keep_first_parent_order_when_the_index_changes() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let graph = publish_complete_graph(&fixture, true).await;
+    let cancellation = CancellationToken::new();
+    let indexed = fixture
+        .repository
+        .with_commit_graph(&graph, &cancellation)
+        .await
+        .unwrap();
+    let page = async |repository: &crab_remote_git::RemoteGitRepository,
+                      limit: usize,
+                      after: Option<PageCursor>| {
+        let operation = repository
+            .operation(OperationKind::History, &cancellation)
+            .await?;
+        let result = async {
+            let head = repository
+                .snapshot(&Revision::Reference("main".into()), &operation)
+                .await?;
+            let base = repository
+                .snapshot(&Revision::Commit(fixture.semantic_base_commit), &operation)
+                .await?;
+            head.ahead_history(&base, &PageRequest::new(limit, after)?, &operation)
+                .await
+        }
+        .await;
+        operation.finish(result).await
+    };
+    for (first_capture, second_capture) in [
+        (&fixture.repository, &indexed),
+        (&indexed, &fixture.repository),
+    ] {
+        let first = page(first_capture, 2, None).await.unwrap();
+        assert_eq!(first.items.len(), 2);
+        assert_eq!(first.items[1].oid, fixture.root_commit);
+        let cursor = first.next.unwrap();
+        assert_eq!(&cursor.as_bytes()[..2], &[2, 4]);
+        let resumed = page(second_capture, 1, Some(cursor)).await.unwrap();
+        assert_eq!(resumed.items.len(), 1);
+        assert_eq!(resumed.items[0].oid, fixture.side_commit);
+        assert!(resumed.next.is_none());
+    }
+
+    // The tagged cursor had no order field. Its indexed offset still counts
+    // the higher-generation side parent before the first parent.
+    let first = page(&indexed, 1, None).await.unwrap();
+    let mut released = vec![1, 4];
+    released.extend_from_slice(first.items[0].oid.as_bytes());
+    released.extend_from_slice(fixture.semantic_base_commit.as_bytes());
+    released.extend_from_slice(&1u64.to_be_bytes());
+    let released = PageCursor::from_bytes(released).unwrap();
+    let second = page(&indexed, 1, Some(released)).await.unwrap();
+    assert_eq!(second.items[0].oid, fixture.side_commit);
+    let cursor = second.next.unwrap();
+    assert_eq!(&cursor.as_bytes()[..2], &[1, 4]);
+    let last = page(&indexed, 1, Some(cursor)).await.unwrap();
+    assert_eq!(last.items[0].oid, fixture.root_commit);
+    assert!(last.next.is_none());
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn indexed_ahead_history_spends_history_budget_on_topic_commits() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let graph = publish_complete_graph(&fixture, true).await;
+    let cancellation = CancellationToken::new();
+    let repository = fixture
+        .repository
+        .with_commit_graph(&graph, &cancellation)
+        .await
+        .unwrap();
+    let operation = repository
+        .operation_with_limits(
+            OperationKind::History,
+            &cancellation,
+            OperationLimits {
+                max_history_commits: 1,
+                ..OperationLimits::default()
+            },
+        )
+        .await
+        .unwrap();
+    let result = async {
+        let head = repository
+            .snapshot(&Revision::Reference("main".into()), &operation)
+            .await?;
+        let base = repository
+            .snapshot(&Revision::Commit(fixture.side_commit), &operation)
+            .await?;
+        let page = head
+            .ahead_history(&base, &PageRequest::new(1, None)?, &operation)
+            .await?;
+        assert_eq!(
+            page.items.iter().map(|item| item.oid).collect::<Vec<_>>(),
+            [head.commit_oid()]
+        );
+        assert!(page.next.is_none());
+        Ok(())
+    }
+    .await;
+    let result = operation.finish(result).await;
+    fixture.runtime.shutdown().await;
+    result.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn path_history_uses_raw_commits_and_omits_unchanged_merges() {
     let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
     let cancellation = CancellationToken::new();
@@ -4530,6 +4691,46 @@ async fn semantic_changes_cover_modes_types_rename_like_paths_binary_and_pointer
     }
     .await;
     operation.finish(result).await.expect("finish operation");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn commit_membership_batches_share_one_bounded_history_walk() {
+    let options = RepositoryOptions::new(
+        ObjectLimits::default(),
+        OperationLimits {
+            max_history_commits: 2,
+            ..OperationLimits::default()
+        },
+    )
+    .unwrap();
+    let fixture = publish(DeltaKind::Ref, false, options).await;
+    assert!(!fixture.repository.commit_graph_available());
+    let cancel = CancellationToken::new();
+    let operation = fixture
+        .repository
+        .operation(OperationKind::History, &cancel)
+        .await
+        .unwrap();
+    let result = async {
+        let snapshot = fixture
+            .repository
+            .snapshot(&Revision::Reference("semantic-head".into()), &operation)
+            .await?;
+        let mut membership = snapshot.commit_membership_reader(&operation)?;
+        assert_eq!(
+            membership
+                .contains(&[fixture.semantic_head_commit, fixture.side_commit])
+                .await?,
+            [true, false]
+        );
+        assert_eq!(
+            membership.contains(&[fixture.semantic_base_commit]).await?,
+            [true]
+        );
+        Ok(())
+    }
+    .await;
+    operation.finish(result).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

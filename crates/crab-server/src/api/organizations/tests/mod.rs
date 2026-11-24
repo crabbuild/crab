@@ -10,9 +10,12 @@ use axum::http::{StatusCode, header};
 use reqwest::Method;
 
 mod audit;
+mod automation;
 mod codeowners;
+mod issue_types;
 mod repositories;
 mod repository_access;
+mod review_workload;
 
 #[tokio::test]
 async fn invitations_require_consent_and_current_qualified_authority_without_repository_grants() {

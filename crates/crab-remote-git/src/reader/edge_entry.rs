@@ -13,9 +13,9 @@ impl RemoteGitReader {
         let origin = || {
             self.read_origin_locator(
                 session,
-                requested,
-                locator,
+                (requested, locator),
                 max_object_bytes,
+                None,
                 budget,
                 cancellation,
             )
@@ -77,6 +77,7 @@ impl RemoteGitReader {
                             memory.bind(bytes)?,
                             DeltaReadState {
                                 max_object_bytes,
+                                root_size_limit: None,
                                 remaining_depth: self.limits.max_delta_depth,
                                 ancestors: HashSet::new(),
                                 replan: replan.clone(),
@@ -106,9 +107,9 @@ impl RemoteGitReader {
                 }
                 self.read_origin_locator(
                     session,
-                    requested,
-                    locator,
+                    (requested, locator),
                     max_object_bytes,
+                    None,
                     budget,
                     &attempt_cancel,
                 )

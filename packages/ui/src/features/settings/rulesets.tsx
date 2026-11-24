@@ -8,6 +8,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
+import {
+  propertySchemaPath,
+  type PropertyDefinition,
+  type PropertySchema,
+} from "@/features/organizations/property-fields";
 import { type Connections } from "./integrations";
 import {
   RulesetBypassEditor,
@@ -30,6 +35,7 @@ interface Ruleset {
   include: string[];
   exclude: string[];
   restrict_creations: boolean;
+  restrict_updates?: boolean;
   restrict_deletions: boolean;
   require_pull_request: boolean;
   required_approvals: number;
@@ -37,6 +43,7 @@ interface Ruleset {
   require_conversation_resolution: boolean;
   require_up_to_date?: boolean;
   require_merge_queue?: boolean;
+  require_linear_history?: boolean;
   required_checks: string[];
   required_integrations: string[];
   bypass_actors?: BypassGrant[];
@@ -78,6 +85,9 @@ export function OrganizationRulesets({
 }) {
   const path = `/api/organizations/${encodeURIComponent(organization)}/rulesets`;
   const request = useRequest<OrganizationRuleCollection>(path);
+  const properties = useRequest<PropertySchema>(
+    propertySchemaPath(organization),
+  );
   return (
     <section className="grid gap-4" aria-labelledby="organization-rulesets">
       <h2 id="organization-rulesets" className="text-lg font-semibold">
@@ -88,6 +98,7 @@ export function OrganizationRulesets({
           <RulesetsList
             key={value.version}
             organization={organization}
+            definitions={properties.data?.definitions}
             initial={organizationRulesets(value)}
             csrf={csrf}
             editable
@@ -148,6 +159,11 @@ export function RepositoryRulesets({
             Manage rulesets
           </Link>
         )}
+        {csrf === undefined && repo.organization_id && (
+          <Link href={repoHref(repo, { view: "properties" })}>
+            Repository properties
+          </Link>
+        )}
       </div>
       <Result state={request} timingLabel="Repository rulesets">
         {(data) => (
@@ -169,6 +185,7 @@ export function RepositoryRulesets({
 function RulesetsList({
   repo,
   organization,
+  definitions,
   initial,
   csrf,
   editable,
@@ -177,6 +194,7 @@ function RulesetsList({
 }: {
   repo?: Repository;
   organization?: string;
+  definitions?: PropertyDefinition[];
   initial: RulesetsState;
   csrf: string;
   editable: boolean;
@@ -248,6 +266,7 @@ function RulesetsList({
           key={editing.id}
           initial={editing}
           organization={organization}
+          definitions={definitions}
           workflows={workflows.data?.items}
           workflowsError={workflows.error}
           bypassOptions={state.bypass_options}
@@ -296,7 +315,7 @@ function RulesetsList({
         !state.inherited?.rulesets.length &&
         !editing && <p className="notice">No rulesets to display.</p>}
       {rulesets.map((rule) => (
-        <RulesetSummary key={rule.id} rule={rule}>
+        <RulesetSummary key={rule.id} rule={rule} definitions={definitions}>
           {editable && !editing && !deleting && (
             <div className="flex gap-2">
               <Button
@@ -339,9 +358,11 @@ function RulesetsList({
 function RulesetSummary({
   rule,
   children,
+  definitions,
 }: {
   rule: Ruleset;
   children?: ReactNode;
+  definitions?: PropertyDefinition[];
 }) {
   return (
     <article className="settings-section grid gap-2 p-4">
@@ -374,7 +395,9 @@ function RulesetSummary({
           </li>
         )}
         {rule.restrict_creations && <li>Restrict creations</li>}
+        {rule.restrict_updates && <li>Restrict updates</li>}
         {rule.restrict_deletions && <li>Restrict deletions</li>}
+        {rule.require_linear_history && <li>Require linear history</li>}
         {(rule.require_pull_request ||
           rule.require_merge_queue ||
           rule.required_approvals > 0 ||
@@ -412,7 +435,10 @@ function RulesetSummary({
         )}
       </ul>
       {rule.repositories && (
-        <RepositoryTargetSummary target={rule.repositories} />
+        <RepositoryTargetSummary
+          target={rule.repositories}
+          definitions={definitions}
+        />
       )}
       {children}
     </article>
@@ -428,6 +454,7 @@ const lineValues = (text: string) =>
 function RulesetForm({
   initial,
   organization,
+  definitions,
   workflows,
   workflowsError,
   bypassOptions,
@@ -437,6 +464,7 @@ function RulesetForm({
 }: {
   initial: Ruleset;
   organization?: string;
+  definitions?: PropertyDefinition[];
   workflows: Connections["items"] | undefined;
   workflowsError?: string | null;
   bypassOptions?: BypassOptions;
@@ -455,8 +483,22 @@ function RulesetForm({
   const requiredChecks = lineValues(checks);
   const hasRequiredChecks =
     requiredChecks.length > 0 || rule.required_integrations.length > 0;
+  const repositories = rule.repositories;
   const invalidRepositories =
-    rule.repositories?.kind === "selected" && !rule.repositories.ids.length;
+    (repositories?.kind === "selected" && !repositories.ids.length) ||
+    (repositories?.kind === "properties" &&
+      (!repositories.conditions.length ||
+        repositories.conditions.some(
+          (condition) =>
+            condition.value === null ||
+            ("system" in condition
+              ? condition.system === "fork"
+                ? typeof condition.value !== "boolean"
+                : typeof condition.value !== "string" || !condition.value.trim()
+              : !definitions?.some(
+                  (property) => property.id === condition.property,
+                )),
+        )));
   const invalidBypass =
     !branch && rule.bypass_actors?.some(({ mode }) => mode === "pull_request");
   function change(update: Partial<Ruleset>) {
@@ -540,6 +582,7 @@ function RulesetForm({
         {organization && rule.repositories && (
           <RepositoryTargetEditor
             organization={organization}
+            definitions={definitions}
             target={rule.repositories}
             onChange={(repositories) => change({ repositories })}
           />
@@ -589,12 +632,32 @@ function RulesetForm({
         <label className="flex items-center gap-2">
           <input
             type="checkbox"
+            checked={Boolean(rule.restrict_updates)}
+            onChange={(event) =>
+              change({ restrict_updates: event.target.checked })
+            }
+          />{" "}
+          Restrict updates
+        </label>
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
             checked={rule.restrict_deletions}
             onChange={(event) =>
               change({ restrict_deletions: event.target.checked })
             }
           />{" "}
           Restrict deletions
+        </label>
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={Boolean(rule.require_linear_history)}
+            onChange={(event) =>
+              change({ require_linear_history: event.target.checked })
+            }
+          />{" "}
+          Require linear history
         </label>
         {branch && (
           <>

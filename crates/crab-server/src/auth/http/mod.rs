@@ -35,6 +35,8 @@ use url::Url;
 #[derive(Deserialize)]
 pub(crate) struct LoginQuery {
     return_to: Option<String>,
+    #[serde(default)]
+    sign_up: bool,
 }
 
 pub(crate) async fn login(
@@ -44,8 +46,13 @@ pub(crate) async fn login(
     let auth = server.auth.as_ref().ok_or(AuthError::Invalid)?;
     let return_to = query.return_to.unwrap_or_else(|| "/".into());
     validate_return_to(auth, &return_to)?;
+    if query.sign_up && !auth.can_sign_up() {
+        return Err(AuthError::Invalid);
+    }
     match auth.config.provider {
-        AuthProvider::Oidc => login_oidc(auth, return_to, server.email.is_some()).await,
+        AuthProvider::Oidc => {
+            login_oidc(auth, return_to, server.email.is_some(), query.sign_up).await
+        }
         AuthProvider::GitHub => login_github(auth, return_to, server.email.is_some()).await,
     }
 }
@@ -75,10 +82,12 @@ async fn login_oidc(
     auth: &Authentication,
     return_to: String,
     notification_email: bool,
+    sign_up: bool,
 ) -> Result<Response, AuthError> {
-    let (client, groups_scope) = auth.client.as_ref().ok_or(AuthError::Invalid)?;
+    let oidc = auth.oidc.as_ref().ok_or(AuthError::Invalid)?;
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
-    let request = client
+    let request = oidc
+        .client
         .authorize_url(
             CoreAuthenticationFlow::AuthorizationCode,
             CsrfToken::new_random,
@@ -98,8 +107,14 @@ async fn login_oidc(
     };
     // Groups is provider-specific; requesting an unadvertised scope breaks
     // otherwise valid OIDC providers such as Entra ID.
-    let request = if *groups_scope {
+    let request = if oidc.groups_scope {
         request.add_scope(Scope::new("groups".into()))
+    } else {
+        request
+    };
+    let request = if sign_up {
+        // Start registration through the same state-, nonce-, and PKCE-bound flow.
+        request.add_extra_param("prompt", "create")
     } else {
         request
     };
@@ -223,7 +238,9 @@ async fn finish_login(
     }
     let code = query.code.ok_or(AuthError::Invalid)?;
     // Discover fresh signing keys at every callback so provider rotation does not require a restart.
-    let (client, _) = discover(&auth.config, auth.secret.clone(), &auth.http).await?;
+    let client = discover(&auth.config, auth.secret.clone(), &auth.http)
+        .await?
+        .client;
     let transport = |request| {
         bounded_http(
             auth.http.clone(),
@@ -596,6 +613,7 @@ pub(crate) struct SessionResponse {
     mode: SessionMode,
     user: Option<SessionIdentity>,
     csrf: Option<String>,
+    can_sign_up: bool,
 }
 
 pub(crate) async fn session(
@@ -610,12 +628,17 @@ pub(crate) async fn session(
             AuthProvider::GitHub => SessionMode::GitHub,
         })
         .unwrap_or(SessionMode::Local);
+    let can_sign_up = server
+        .auth
+        .as_ref()
+        .is_some_and(Authentication::can_sign_up);
     let value = if principal.is_local() {
         SessionResponse {
             authenticated: true,
             mode: SessionMode::Local,
             user: None,
             csrf: None,
+            can_sign_up: false,
         }
     } else if let Some(session) = principal.user_session() {
         SessionResponse {
@@ -629,6 +652,7 @@ pub(crate) async fn session(
                 name: session.identity.name.clone(),
             }),
             csrf: Some(session.csrf.clone()),
+            can_sign_up,
         }
     } else {
         SessionResponse {
@@ -636,6 +660,7 @@ pub(crate) async fn session(
             mode,
             user: None,
             csrf: None,
+            can_sign_up,
         }
     };
     Json(value)

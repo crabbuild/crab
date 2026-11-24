@@ -65,10 +65,32 @@ async fn read(
 ) -> Result<Json<MergeMethods>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let grant = app::membership(&server, &principal, &repo).await?;
-    if !grant.principal.can_admin(repo.id) {
+    if !grant.principal.can_maintain(repo.id) {
         return Err(Error::MergeSettingsPermission);
     }
     Ok(Json(load(&server, &repo).await?))
+}
+
+fn authorize_change(
+    principal: &Principal,
+    repo: &Repository,
+    input: &ReplaceMergeMethodsInput,
+) -> Result<()> {
+    if !principal.can_maintain(repo.id) {
+        return Err(Error::MergeSettingsPermission);
+    }
+    // Queue configuration is branch policy. The ordinary merge method
+    // and auto-merge controls can be delegated to maintainers.
+    if !principal.can_admin(repo.id)
+        && (input.merge_queue.is_some()
+            || input.merge_queue_method.is_some()
+            || input.merge_queue_builds.is_some()
+            || input.merge_queue_timeout_minutes.is_some()
+            || input.merge_queue_branches.is_some())
+    {
+        return Err(Error::MergeQueueSettingsPermission);
+    }
+    Ok(())
 }
 
 async fn replace(
@@ -84,9 +106,7 @@ async fn replace(
         ));
     }
     let grant = app::membership(&server, &principal, &repo).await?;
-    if !grant.principal.can_admin(repo.id) {
-        return Err(Error::MergeSettingsPermission);
-    }
+    authorize_change(&grant.principal, &repo, &input)?;
     let (send, reply) = tokio::sync::oneshot::channel();
     let tracker = server.receives.clone();
     tracker.spawn(async move {
@@ -97,13 +117,8 @@ async fn replace(
             RulesetScope::Repository(repo),
             &server.cancellation,
             |cancel| async move {
-                if !app::membership(server, &principal, repo)
-                    .await?
-                    .principal
-                    .can_admin(repo.id)
-                {
-                    return Err(Error::MergeSettingsPermission);
-                }
+                let grant = app::membership(server, &principal, repo).await?;
+                authorize_change(&grant.principal, repo, &input)?;
                 if cancel.is_cancelled() {
                     return Err(Error::MergeBusy);
                 }

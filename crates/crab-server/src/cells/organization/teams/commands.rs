@@ -34,6 +34,18 @@ pub(crate) enum Command {
         version: u64,
         role: Option<Role>,
     },
+    ReviewRouting {
+        team: Uuid,
+        version: u64,
+        algorithm: review_routing::Algorithm,
+        reviewers: u8,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
+        excluded: Option<Vec<Uuid>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
+        options: Option<review_routing::Options>,
+    },
     Policy {
         version: u64,
         member_creation: bool,
@@ -47,6 +59,8 @@ pub(crate) enum Outcome {
     Conflict,
     InvalidName,
     InvalidDescription,
+    InvalidRouting,
+    InvalidRoutingExclusions,
     NameTaken,
     NotMember,
     Missing,
@@ -157,6 +171,25 @@ impl Mutation for Change {
                 version,
                 role,
             } => change_member(context, input.actor, *team, *member, *version, *role)?,
+            Command::ReviewRouting {
+                team,
+                version,
+                algorithm,
+                reviewers,
+                excluded,
+                options,
+            } => review_routing::set(
+                context,
+                input.actor,
+                *team,
+                review_routing::Update {
+                    version: *version,
+                    algorithm: *algorithm,
+                    reviewers: *reviewers,
+                    excluded: excluded.as_deref(),
+                    options: *options,
+                },
+            )?,
             Command::Policy {
                 version,
                 member_creation,
@@ -265,6 +298,9 @@ fn change_member(
     let Some(old_team) = team(context, id)? else {
         return Ok(Outcome::Missing);
     };
+    if sync::binding(context, id)?.is_some() {
+        return Ok(Outcome::Conflict);
+    }
     let old = membership(context, id, person)?;
     if old.version != version {
         return Ok(Outcome::Conflict);
@@ -345,7 +381,8 @@ impl Mutation for Cancel {
             }
             Command::Edit { team, .. }
             | Command::Delete { team, .. }
-            | Command::Member { team, .. } => team,
+            | Command::Member { team, .. }
+            | Command::ReviewRouting { team, .. } => team,
         };
         // Cancellation and mutation consult the same ledger in this Cell's
         // transaction. Whichever commits first determines the permanent result;

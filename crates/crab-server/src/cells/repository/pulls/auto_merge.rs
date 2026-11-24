@@ -1,11 +1,16 @@
 use super::*;
 use uuid::Uuid;
 
+pub(crate) mod list;
+mod priority;
+mod window;
+pub(crate) use priority::Priority;
+
 const ACTIVE: &str = "collaboration/v1/auto-merge/active/";
 const QUEUE: &str = "collaboration/v1/merge-queue/";
 const QUEUE_SEQUENCE: &str = "collaboration/v1/merge-queue-sequence";
 const STOPPED: &str = "collaboration/v1/auto-merge/stopped/";
-pub(crate) const PAGE: usize = 8;
+pub(crate) const PAGE: usize = 32;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct Job {
@@ -31,6 +36,8 @@ pub(crate) struct Job {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct QueueEntry {
     sequence: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    priority: bool,
     pub testing: Option<QueueTest>,
 }
 
@@ -40,6 +47,8 @@ pub(crate) struct QueueTest {
     pub version: u64,
     pub base_oid: String,
     pub previous_oid: Option<String>,
+    #[serde(default)]
+    pub order_revision: u64,
 }
 
 impl QueueTest {
@@ -86,7 +95,9 @@ pub(crate) struct State {
     #[serde(default)]
     pub first: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ahead: Option<Vec<Job>>,
+    pub ahead: Option<Vec<window::Predecessor>>,
+    #[serde(default)]
+    pub order_revision: u64,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -110,10 +121,13 @@ pub(crate) enum Change {
         #[serde(default)]
         ruleset_queue_required: bool,
     },
+    Prioritize(Priority),
     Disarm {
         pull: u64,
         id: Uuid,
         reason: Stop,
+        #[serde(default)]
+        front_revision: Option<u64>,
     },
 }
 
@@ -127,11 +141,54 @@ pub(crate) enum Outcome {
     QueueRequired,
 }
 
+#[derive(Deserialize, Serialize)]
+pub(crate) struct QueueSettings {
+    pub method: MergeMethod,
+    method_revision: u64,
+    generation: u64,
+}
+
+impl QueueSettings {
+    fn matches(&self, settings: &settings::merge_methods::MergeMethods) -> bool {
+        self.method == settings.merge_queue_method
+            && self.method_revision == settings.merge_queue_method_revision
+    }
+
+    pub(crate) fn enabled(
+        &self,
+        settings: &settings::merge_methods::MergeMethods,
+        required: bool,
+    ) -> bool {
+        self.matches(settings)
+            && (required
+                || (settings.merge_queue && settings.merge_queue_generation == self.generation))
+    }
+}
+
 impl Job {
-    pub(crate) fn publication_id(&self, version: u64, base: &str, tested: Option<&str>) -> Uuid {
+    pub(crate) fn candidate_id(&self, order_revision: u64) -> Uuid {
+        if order_revision == 0 {
+            return self.id;
+        }
+        let mut digest = blake3::Hasher::new();
+        digest.update(b"crab-merge-queue-order-v1\0");
+        digest.update(self.id.as_bytes());
+        digest.update(&order_revision.to_be_bytes());
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&digest.finalize().as_bytes()[..16]);
+        Uuid::from_bytes(bytes)
+    }
+
+    pub(crate) fn publication_id(
+        &self,
+        version: u64,
+        base: &str,
+        tested: Option<&str>,
+        order_revision: u64,
+    ) -> Uuid {
         let mut digest = blake3::Hasher::new();
         digest.update(b"crab-auto-merge-attempt-v1\0");
-        digest.update(self.id.as_bytes());
+        digest.update(self.candidate_id(order_revision).as_bytes());
         digest.update(&version.to_be_bytes());
         digest.update(base.as_bytes());
         if let Some(tested) = tested {
@@ -149,9 +206,7 @@ impl Job {
         queue_required: bool,
     ) -> bool {
         if self.queue.is_some() {
-            self.queue_method_matches(settings)
-                && (queue_required
-                    || (settings.merge_queue && settings.merge_queue_generation == self.generation))
+            self.queue_settings().enabled(settings, queue_required)
         } else {
             !queue_required
                 && settings.auto_merge
@@ -163,8 +218,27 @@ impl Job {
         &self,
         settings: &settings::merge_methods::MergeMethods,
     ) -> bool {
-        self.method == settings.merge_queue_method
-            && self.queue_method_revision == settings.merge_queue_method_revision
+        self.queue_settings().matches(settings)
+    }
+
+    fn queue_settings(&self) -> QueueSettings {
+        QueueSettings {
+            method: self.method,
+            method_revision: self.queue_method_revision,
+            generation: self.generation,
+        }
+    }
+
+    pub(crate) fn sweep_order(&self) -> (bool, u64) {
+        self.queue.as_ref().map_or((true, self.pull), |entry| {
+            // Favor the queue front within each page to start building
+            // prefixes before successors are scheduled in this pass.
+            if entry.priority {
+                (false, u64::MAX - entry.sequence)
+            } else {
+                (true, entry.sequence)
+            }
+        })
     }
 }
 
@@ -172,29 +246,36 @@ fn queue_prefix(base_ref: &str) -> String {
     format!("{QUEUE}{}/", blake3::hash(base_ref.as_bytes()).to_hex())
 }
 
-fn queue_key(base_ref: &str, sequence: u64) -> String {
-    // Cellar scans newest keys first. Invert the Cell-assigned sequence to
-    // read admission order without relying on HTTP clocks or PR numbers.
-    format!("{}{:016x}", queue_prefix(base_ref), u64::MAX - sequence)
+fn queue_key(base_ref: &str, entry: &QueueEntry) -> String {
+    let prefix = queue_prefix(base_ref);
+    // Descending scans read explicit moves first, latest move first. Inverted
+    // sequences preserve FIFO ordering and the keys of existing admissions.
+    if entry.priority {
+        format!("{prefix}priority/{:016x}", entry.sequence)
+    } else {
+        format!("{prefix}{:016x}", u64::MAX - entry.sequence)
+    }
+}
+
+fn allocate_sequence(context: &Transaction<'_>) -> crate::cells::Result<u64> {
+    let sequence = context
+        .document::<u64>(QUEUE_SEQUENCE)?
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or(crate::cells::Error::Invalid(
+            "Merge queue sequence is exhausted",
+        ))?;
+    context.put_document(QUEUE_SEQUENCE, &sequence)?;
+    Ok(sequence)
+}
+
+fn front(context: &Transaction<'_>, branch: &str) -> crate::cells::Result<Option<u64>> {
+    let first = context.documents::<u64>(&queue_prefix(branch), None, 1)?;
+    Ok(first.first().map(|(_, pull)| *pull))
 }
 
 fn first(context: &Transaction<'_>, job: &Job) -> crate::cells::Result<bool> {
-    let first = context.documents::<u64>(&queue_prefix(&job.base_ref), None, 1)?;
-    Ok(first.first().is_some_and(|(_, pull)| *pull == job.pull))
-}
-
-fn build_window(
-    context: &Transaction<'_>,
-    job: &Job,
-    limit: usize,
-) -> crate::cells::Result<(Vec<u64>, Option<usize>)> {
-    let pulls: Vec<_> = context
-        .documents::<u64>(&queue_prefix(&job.base_ref), None, limit)?
-        .into_iter()
-        .map(|(_, number)| number)
-        .collect();
-    let position = pulls.iter().position(|pull| *pull == job.pull);
-    Ok((pulls, position))
+    Ok(front(context, &job.base_ref)? == Some(job.pull))
 }
 
 pub(super) fn allows_merge(
@@ -216,7 +297,12 @@ pub(super) fn allows_merge(
         && merge.method == job.method
         && merge.request_id
             == job
-                .publication_id(merge.pull_version, &merge.base_oid, Some(&merge.commit_oid))
+                .publication_id(
+                    merge.pull_version,
+                    &merge.base_oid,
+                    Some(&merge.commit_oid),
+                    priority::revision(context, &job.base_ref)?,
+                )
                 .into_bytes()
         && first(context, &job)?)
 }
@@ -234,29 +320,26 @@ impl Read for Get {
 
     fn execute(context: &mut Transaction<'_>, pull: u64) -> crate::cells::Result<Self::Output> {
         if let Some(job) = context.document::<Job>(&key(ACTIVE, pull))? {
-            let ahead = if job.queue.is_some() {
+            let (ahead, order_revision) = if job.queue.is_some() {
                 let limit = settings::merge_methods::load_for_ref(context, &job.base_ref)?
                     .merge_queue_builds;
-                let (pulls, position) = build_window(context, &job, usize::from(limit))?;
-                position
+                let revision = priority::revision(context, &job.base_ref)?;
+                let pulls = window::pulls(context, &job.base_ref, usize::from(limit))?;
+                let ahead = pulls
+                    .iter()
+                    .position(|pull| *pull == job.pull)
                     .map(|position| {
                         pulls[..position]
                             .iter()
                             .map(|pull| {
-                                context
-                                    .document::<Job>(&key(ACTIVE, *pull))?
-                                    .filter(|entry| {
-                                        entry.queue.is_some() && entry.base_ref == job.base_ref
-                                    })
-                                    .ok_or(crate::cells::Error::Invalid(
-                                        "merge queue entry is missing",
-                                    ))
+                                window::predecessor(context, &job.base_ref, *pull, revision)
                             })
                             .collect::<crate::cells::Result<Vec<_>>>()
                     })
-                    .transpose()?
+                    .transpose()?;
+                (ahead, revision)
             } else {
-                None
+                (None, 0)
             };
             let first = ahead.as_ref().is_some_and(Vec::is_empty);
             return Ok(Some(State {
@@ -264,6 +347,7 @@ impl Read for Get {
                 stopped: None,
                 first,
                 ahead,
+                order_revision,
             }));
         }
         context.document(&key(STOPPED, pull))
@@ -388,19 +472,13 @@ impl Mutation for Edit {
                     return Ok(Rejected(Outcome::Changed));
                 }
                 if queue {
-                    let sequence = context
-                        .document::<u64>(QUEUE_SEQUENCE)?
-                        .unwrap_or(0)
-                        .checked_add(1)
-                        .ok_or(crate::cells::Error::Invalid(
-                            "Merge queue sequence is exhausted",
-                        ))?;
-                    context.put_document(QUEUE_SEQUENCE, &sequence)?;
-                    context.put_document(&queue_key(&job.base_ref, sequence), &job.pull)?;
-                    job.queue = Some(QueueEntry {
-                        sequence,
+                    let queued = QueueEntry {
+                        sequence: allocate_sequence(context)?,
+                        priority: false,
                         testing: None,
-                    });
+                    };
+                    context.put_document(&queue_key(&job.base_ref, &queued), &job.pull)?;
+                    job.queue = Some(queued);
                 }
                 context.put_document(&active, &job)?;
                 context.put_document(&receipt, &true)?;
@@ -426,6 +504,9 @@ impl Mutation for Edit {
                 else {
                     return Ok(Rejected(Outcome::Changed));
                 };
+                if attempt.order_revision != priority::revision(context, &job.base_ref)? {
+                    return Ok(Rejected(Outcome::Changed));
+                }
                 let queue_required = ruleset_queue_required
                     || settings::requires_merge_queue(
                         context,
@@ -433,9 +514,12 @@ impl Mutation for Edit {
                         configured_queue_required,
                     )?;
                 let configured = settings::merge_methods::load_for_ref(context, &job.base_ref)?;
-                let (_, position) =
-                    build_window(context, &job, usize::from(configured.merge_queue_builds))?;
-                if position.is_none() || !job.enabled(&configured, queue_required) {
+                let window = window::pulls(
+                    context,
+                    &job.base_ref,
+                    usize::from(configured.merge_queue_builds),
+                )?;
+                if !window.contains(&pull) || !job.enabled(&configured, queue_required) {
                     return Ok(Rejected(Outcome::Disabled));
                 }
                 let Some(queue) = job.queue.as_mut() else {
@@ -444,7 +528,13 @@ impl Mutation for Edit {
                 queue.testing = Some(attempt);
                 context.put_document(&active, &job)?;
             }
-            Change::Disarm { pull, id, reason } => {
+            Change::Prioritize(input) => return priority::move_front(context, input),
+            Change::Disarm {
+                pull,
+                id,
+                reason,
+                front_revision,
+            } => {
                 let active = key(ACTIVE, pull);
                 let stopped = key(STOPPED, pull);
                 let Some(job) = context.document::<Job>(&active)? else {
@@ -465,6 +555,12 @@ impl Mutation for Edit {
                 if load_pull(context, pull)?.is_some_and(|pull| pull.merge_pending.is_some()) {
                     return Ok(Rejected(Outcome::MergePending));
                 }
+                if let Some(revision) = front_revision
+                    && (revision != priority::revision(context, &job.base_ref)?
+                        || !first(context, &job)?)
+                {
+                    return Ok(Rejected(Outcome::Changed));
+                }
                 if reason == Stop::ChecksTimedOut {
                     let Some(test) = job.queue.as_ref().and_then(|queue| queue.testing.as_ref())
                     else {
@@ -481,7 +577,7 @@ impl Mutation for Edit {
                     }
                 }
                 if let Some(queue) = &job.queue {
-                    context.delete_document(&queue_key(&job.base_ref, queue.sequence))?;
+                    context.delete_document(&queue_key(&job.base_ref, queue))?;
                 }
                 context.delete_document(&active)?;
                 context.put_document(
@@ -491,6 +587,7 @@ impl Mutation for Edit {
                         stopped: Some(reason),
                         first: false,
                         ahead: None,
+                        order_revision: 0,
                     },
                 )?;
             }

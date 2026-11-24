@@ -69,6 +69,10 @@ pub(super) fn routes() -> Router<Arc<Server>> {
             axum::routing::post(cancel),
         )
         .route("/api/organizations/{id}/teams/{team}", get(own))
+        .route(
+            "/api/organizations/{id}/teams/{team}/identity-group",
+            get(identity_group).put(link_identity_group),
+        )
         .route("/api/organizations/{id}/teams/{team}/members", get(members))
         .route(
             "/api/organizations/{id}/teams/{team}/candidates",
@@ -77,6 +81,10 @@ pub(super) fn routes() -> Router<Arc<Server>> {
         .route(
             "/api/organizations/{id}/teams/{team}/members/{person}",
             get(membership),
+        )
+        .route(
+            "/api/organizations/{id}/teams/{team}/review-routing",
+            get(review_routing),
         )
 }
 #[derive(Default, Deserialize)]
@@ -180,6 +188,77 @@ async fn own(
     app::account(&principal)?;
     Ok(Json(view))
 }
+#[derive(Serialize)]
+struct IdentityGroup {
+    id: Uuid,
+    name: String,
+}
+
+#[derive(Serialize)]
+struct IdentityGroupStatus {
+    group: Option<IdentityGroup>,
+    version: u64,
+    enabled: bool,
+    can_link: bool,
+}
+
+async fn group_status(
+    server: &Server,
+    principal: &Principal,
+    id: Uuid,
+    team: Uuid,
+) -> Result<(Uuid, native::sync::Status)> {
+    let actor = actor(server, principal).await?;
+    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    let value = cells
+        .query::<native::sync::GetSync>(target(id)?, None, native::Key { actor, team })
+        .await
+        .map_err(read_error)?
+        .output
+        .ok_or(Error::NotFound)?;
+    app::account(principal)?;
+    Ok((actor, value))
+}
+
+async fn identity_group(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((id, team)): Path<(Uuid, Uuid)>,
+) -> Result<Json<IdentityGroupStatus>> {
+    let (_, state) = group_status(&server, &principal, id, team).await?;
+    Ok(Json(IdentityGroupStatus {
+        group: state.binding.map(|binding| IdentityGroup {
+            id: binding.group,
+            name: binding.name,
+        }),
+        version: state.version,
+        enabled: crate::auth::scim::groups::enabled(&server),
+        can_link: state.can_link,
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LinkIdentityGroup {
+    version: u64,
+    group: Option<Uuid>,
+}
+
+async fn link_identity_group(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((id, team)): Path<(Uuid, Uuid)>,
+    Json(input): Json<LinkIdentityGroup>,
+) -> Result<Json<serde_json::Value>> {
+    let (actor, state) = group_status(&server, &principal, id, team).await?;
+    if !state.can_link {
+        return Err(Error::NotFound);
+    }
+    crate::auth::scim::groups::configure_team(&server, id, team, actor, input.version, input.group)
+        .await?;
+    Ok(Json(serde_json::json!({"applied": true})))
+}
+
 async fn policy(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
@@ -195,6 +274,26 @@ async fn policy(
     app::account(&principal)?;
     Ok(Json(policy))
 }
+async fn review_routing(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((id, team)): Path<(Uuid, Uuid)>,
+) -> Result<Json<native::review_routing::Settings>> {
+    let actor = actor(&server, &principal).await?;
+    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    let settings = cells
+        .query::<native::review_routing::GetSettings>(
+            target(id)?,
+            None,
+            native::Key { actor, team },
+        )
+        .await
+        .map_err(read_error)?
+        .output;
+    app::account(&principal)?;
+    Ok(Json(settings))
+}
+
 enum People {
     Members,
     Candidates,
@@ -252,7 +351,7 @@ async fn people(
     // Directory profiles are public, but their team association is private.
     // Reauthorize in the team owner and require the same roster revision after enrichment.
     let current = cells
-        .query::<native::Get>(target, None, native::Key { actor, team })
+        .query::<native::sync::GetSync>(target, None, native::Key { actor, team })
         .await
         .map_err(read_error)?;
     let current_view = current.output.ok_or(Error::NotFound)?;
@@ -276,7 +375,7 @@ async fn people(
             next: encode(next)?,
             revision,
         },
-        can_manage: current_view.can_manage,
+        can_manage: current_view.can_manage && current_view.binding.is_none(),
     }))
 }
 async fn members(
@@ -387,6 +486,10 @@ async fn save(
         native::Outcome::InvalidDescription => Error::Invalid(
             "Team description must contain at most 1000 characters, without NUL characters",
         ),
+        native::Outcome::InvalidRouting => Error::Invalid("Choose between 1 and 10 reviewers"),
+        native::Outcome::InvalidRoutingExclusions => {
+            Error::Invalid("Choose up to 256 current team members to exclude")
+        }
         native::Outcome::NameTaken => Error::TeamNameConflict,
         native::Outcome::Missing => Error::NotFound,
         native::Outcome::NotMember => Error::Invalid(

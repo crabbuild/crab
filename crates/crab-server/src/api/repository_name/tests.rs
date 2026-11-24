@@ -316,7 +316,7 @@ async fn native_browser_renames_a_repository_from_general_settings() {
             .run(&["find", "role", "button", "click", "--name", name, "--exact"])
             .await;
     };
-    click("Continue to sign in").await;
+    browser.sign_in().await;
     click("Rename repository").await;
     browser
         .run(&["wait", "--text", "New repository name"])

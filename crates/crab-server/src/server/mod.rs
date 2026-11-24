@@ -53,6 +53,7 @@ pub(crate) struct Server {
     pub(crate) local_staging: crate::local_disk::LocalStaging,
     #[cfg(feature = "provider-cdn")]
     pub(crate) lfs_read_cache: Option<crab_cache_store::lfs::LfsPayloadCache>,
+    pub(crate) content_retention: crab_coordination::read_retention_runtime::ReadRetentionSession,
     pub(crate) app_admission: Semaphore,
     pub(crate) maintenance_admission: Arc<Semaphore>,
     pub(crate) cancellation: CancellationToken,
@@ -97,6 +98,7 @@ impl Server {
             local_staging,
             #[cfg(feature = "provider-cdn")]
             lfs_read_cache,
+            content_retention: Default::default(),
             app_admission: Semaphore::new(APP_ADMISSION_CAPACITY),
             maintenance_admission: Arc::new(Semaphore::new(MAINTENANCE_ADMISSION_CAPACITY)),
             cancellation: CancellationToken::new(),
@@ -227,6 +229,7 @@ impl Server {
 
     #[cfg(test)]
     pub(crate) async fn shutdown_runtimes(&self) -> Result<()> {
+        self.content_retention.shutdown().await?;
         #[cfg(test)]
         if let Some(cells) = &self.cell_test_runtime {
             cells.shutdown().await?;
@@ -391,6 +394,7 @@ pub async fn serve(config: Config) -> Result<()> {
         local_staging,
         #[cfg(feature = "provider-cdn")]
         lfs_read_cache,
+        content_retention: Default::default(),
         app_admission: Semaphore::new(APP_ADMISSION_CAPACITY),
         maintenance_admission: Arc::new(Semaphore::new(MAINTENANCE_ADMISSION_CAPACITY)),
         cancellation: cancellation.clone(),
@@ -509,6 +513,11 @@ pub async fn serve(config: Config) -> Result<()> {
         server.receives.wait().await;
         server.transfer_admission.close();
         server.transfer_admission.wait().await;
+        let retention = server
+            .content_retention
+            .shutdown()
+            .await
+            .map_err(crate::Error::from);
         let maintenance = server.finish_maintenance().await;
         let mut background_result = Ok(());
         while let Some(result) = background.join_next().await {
@@ -544,6 +553,7 @@ pub async fn serve(config: Config) -> Result<()> {
         peer_work.wait().await;
         let peers = transport.shutdown().await;
         public_result
+            .and(retention)
             .and(maintenance)
             .and(background_result)
             .and(cells)

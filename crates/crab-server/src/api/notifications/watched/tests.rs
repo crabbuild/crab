@@ -142,10 +142,7 @@ async fn native_browser_edits_and_stops_watching_from_notifications() {
             .run(&["find", "role", role, "click", "--name", name, "--exact"])
             .await;
     };
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    click("button", "Continue to sign in").await;
+    browser.sign_in().await;
     browser
         .run(&["wait", "--text", "Watched repositories"])
         .await;
@@ -359,7 +356,7 @@ async fn native_browser_confirms_bulk_unwatch_for_an_owner() {
             .run(&["find", "role", "button", "click", "--name", name, "--exact"])
             .await;
     };
-    click("Continue to sign in").await;
+    browser.sign_in().await;
     browser.run(&["wait", "--text", "team/library"]).await;
     click("Unwatch all").await;
     browser

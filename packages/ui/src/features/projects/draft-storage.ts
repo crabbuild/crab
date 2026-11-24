@@ -129,7 +129,16 @@ function definition(value: unknown): boolean {
         ["table", "board", "roadmap"].includes(String(view.layout)) &&
         string(view.query) &&
         optionalString(view.status) &&
-        typeof view.hide_closed === "boolean",
+        typeof view.hide_closed === "boolean" &&
+        (view.show_issue_type === undefined ||
+          typeof view.show_issue_type === "boolean") &&
+        (view.issue_type_filter === undefined ||
+          optionalString(view.issue_type_filter)) &&
+        (view.group_by === undefined ||
+          (string(view.group_by) &&
+            /^(?:status|issue_type|field:[0-9a-f-]{36})$/i.test(
+              view.group_by,
+            ))),
     )
   );
 }

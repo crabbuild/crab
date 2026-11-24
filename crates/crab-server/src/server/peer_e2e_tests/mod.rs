@@ -3,7 +3,11 @@
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+mod automation;
+mod process;
+mod protected_pull;
 mod repository_grants;
+mod scim;
 
 use crate::cells::{application::MutationIdentity, repository::*};
 use cellar::{

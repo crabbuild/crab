@@ -205,6 +205,7 @@ async fn linked_work_uses_live_subject_summaries_and_exclusive_pages() {
             version: 1,
             actor: actor(),
             can_triage: false,
+            can_moderate: false,
             title: Some("Renamed".into()),
             body: None,
             state: Some(1),

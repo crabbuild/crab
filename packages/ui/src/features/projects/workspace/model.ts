@@ -1,4 +1,5 @@
 import type { Repository } from "@/lib/api";
+import type { IssueType } from "@/lib/contracts";
 import type { Command, Item, Project } from "../model";
 
 export type LinkedRepository = Pick<Repository, "id" | "owner" | "name">;
@@ -29,6 +30,7 @@ export interface Detail {
   can_manage: boolean;
   repositories: LinkedRepository[];
   restricted_repositories: number;
+  issue_types?: IssueType[];
   lead: { id: string; handle: string; name: string } | null;
 }
 export type WorkspaceCommand =

@@ -95,8 +95,7 @@ fn authorize_ticket(
 
 pub(crate) fn valid_creation(name: &str, description: &str) -> bool {
     crate::config::valid_repository_component(name)
-        && description.chars().count() <= 350
-        && !description.chars().any(char::is_control)
+        && crate::config::valid_repository_description(description)
 }
 
 pub(crate) struct Owners;

@@ -24,13 +24,20 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useProjectCommands, CommandError } from "./commands";
 import type { Project, Field as ProjectField, Layout } from "./model";
 import { useProjectDraft } from "./drafts";
+import { ProjectTypeFilter } from "./issue-type";
+import { ProjectGrouping, selectedGrouping } from "./grouping";
+import type { IssueType } from "@/lib/contracts";
 export function ProjectSettings({
   target,
   project,
+  issueTypes,
+  typeChoices,
   onClose,
 }: {
   target: import("./model").ProjectTarget;
   project: Project;
+  issueTypes: boolean;
+  typeChoices: IssueType[];
   onClose: () => void;
 }) {
   const saved = useProjectDraft(
@@ -44,8 +51,21 @@ export function ProjectSettings({
     },
   );
   const { definition: draft, statuses, archived, version } = saved.value;
-  const setDraft = (definition: Project["definition"]) =>
-    saved.update({ definition });
+  const setDraft = (definition: Project["definition"]) => {
+    const views = definition.views.map((view) =>
+      !view.group_by ||
+      view.group_by ===
+        selectedGrouping(
+          view.layout,
+          definition.fields,
+          issueTypes,
+          view.group_by,
+        )
+        ? view
+        : { ...view, group_by: undefined },
+    );
+    saved.update({ definition: { ...definition, views } });
+  };
   const setStatuses = (statuses: string) => saved.update({ statuses });
   const setArchived = (archived: boolean) => saved.update({ archived });
   const setVersion = (version: number) => saved.update({ version });
@@ -477,6 +497,96 @@ export function ProjectSettings({
                             Hide closed issues and PRs
                           </FieldLabel>
                         </Field>
+                      )}
+                      <Field>
+                        <FieldLabel htmlFor={`${id}-group-${view.id}`}>
+                          {view.layout === "board"
+                            ? "Board columns"
+                            : "Group by"}
+                        </FieldLabel>
+                        <ProjectGrouping
+                          id={`${id}-group-${view.id}`}
+                          layout={view.layout}
+                          label={`${view.layout === "board" ? "Board columns" : "Group by"} for ${view.name}`}
+                          fields={draft.fields}
+                          issueTypes={issueTypes}
+                          groupBy={selectedGrouping(
+                            view.layout,
+                            draft.fields,
+                            issueTypes,
+                            view.group_by,
+                          )}
+                          onChange={(value) =>
+                            setDraft({
+                              ...draft,
+                              views: draft.views.map((current, n) =>
+                                n === i
+                                  ? {
+                                      ...current,
+                                      group_by: selectedGrouping(
+                                        view.layout,
+                                        draft.fields,
+                                        issueTypes,
+                                        value,
+                                      ),
+                                    }
+                                  : current,
+                              ),
+                            })
+                          }
+                        />
+                      </Field>
+                      {issueTypes && (
+                        <>
+                          <Field>
+                            <FieldLabel
+                              htmlFor={`${id}-issue-type-filter-${view.id}`}
+                            >
+                              Issue type filter
+                            </FieldLabel>
+                            <ProjectTypeFilter
+                              id={`${id}-issue-type-filter-${view.id}`}
+                              label={`Issue type filter for ${view.name}`}
+                              types={typeChoices}
+                              value={view.issue_type_filter ?? ""}
+                              onChange={(issueType) =>
+                                setDraft({
+                                  ...draft,
+                                  views: draft.views.map((current, n) =>
+                                    n === i
+                                      ? {
+                                          ...current,
+                                          issue_type_filter: issueType || null,
+                                        }
+                                      : current,
+                                  ),
+                                })
+                              }
+                            />
+                          </Field>
+                          <Field orientation="horizontal">
+                            <Checkbox
+                              id={`${id}-issue-type-${view.id}`}
+                              checked={view.show_issue_type ?? false}
+                              onCheckedChange={(value) =>
+                                setDraft({
+                                  ...draft,
+                                  views: draft.views.map((current, n) =>
+                                    n === i
+                                      ? {
+                                          ...current,
+                                          show_issue_type: value === true,
+                                        }
+                                      : current,
+                                  ),
+                                })
+                              }
+                            />
+                            <FieldLabel htmlFor={`${id}-issue-type-${view.id}`}>
+                              Show issue type in {view.name}
+                            </FieldLabel>
+                          </Field>
+                        </>
                       )}
                       <Button
                         type="button"

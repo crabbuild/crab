@@ -80,12 +80,13 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
         return StatusCode::FORBIDDEN.into_response();
     }
     let git_request = request.uri().path().starts_with("/git/");
-    let signed_webhook = crate::api::webhook_path(request.method(), request.uri().path())
-        || crate::api::ci_git_path(request.method(), request.uri().path());
+    let machine_request = crate::api::webhook_path(request.method(), request.uri().path())
+        || crate::api::ci_git_path(request.method(), request.uri().path())
+        || crate::auth::scim::machine_path(request.uri().path());
     let integration_request = integration_api_path(request.uri().path());
     let token_request = integration_request && request.headers().contains_key("authorization");
     let authentication_started = Instant::now();
-    let mut principal = if signed_webhook {
+    let mut principal = if machine_request {
         Principal::anonymous()
     } else if let Some(grant) = internal_import {
         grant.principal(&server).await
@@ -133,7 +134,7 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
     );
     let backchannel_logout = request.uri().path() == "/auth/backchannel-logout";
     let rejected_mutation = !backchannel_logout
-        && !signed_webhook
+        && !machine_request
         && !anonymous_membership
         && !git_request
         && unsafe_method
@@ -157,7 +158,7 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
     let requested_repository = repository_identity(request.headers());
     let mut authorization_error = None;
     let mut redirect = None;
-    let redirect_kind = if signed_webhook || principal.import_grant().is_some() {
+    let redirect_kind = if machine_request || principal.import_grant().is_some() {
         None
     } else if git_request {
         Some(moved::Kind::Git)
@@ -315,7 +316,7 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
                 "www-authenticate",
                 "Basic realm=\"Crab Git\", charset=\"UTF-8\"",
             )],
-            "Use a Crab Git access token or a repository deploy token",
+            "Use a Crab Git, deploy, or automation token",
         )
             .into_response()
     } else if denied {

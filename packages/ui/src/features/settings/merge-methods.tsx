@@ -161,7 +161,7 @@ function MergeMethodForm({
         (entry.method ||
           entry.builds !== undefined ||
           entry.timeout_minutes !== undefined) &&
-        (entry.builds === undefined || allowedNumber(entry.builds, 8)) &&
+        (entry.builds === undefined || allowedNumber(entry.builds, 100)) &&
         (entry.timeout_minutes === undefined ||
           allowedNumber(entry.timeout_minutes, 720)),
     );
@@ -178,7 +178,10 @@ function MergeMethodForm({
   const builds = Number(queueBuilds);
   const timeout = Number(queueTimeout);
   const valid =
-    allowedNumber(builds, 8) && allowedNumber(timeout, 720) && validOverrides;
+    !repo.can_admin ||
+    (allowedNumber(builds, 100) &&
+      allowedNumber(timeout, 720) &&
+      validOverrides);
   const mutation = useMutation(csrf, repo);
   const changed =
     autoMerge !== (settings.auto_merge ?? false) ||
@@ -273,165 +276,172 @@ function MergeMethodForm({
             </small>
           </span>
         </label>
-        <label className="flex items-start gap-2">
-          <input
-            className="mt-1"
-            type="checkbox"
-            checked={mergeQueue}
-            onChange={({ target }) => setMergeQueue(target.checked)}
-          />
-          <span>
-            Allow merge queue
-            <small className="block text-muted-foreground">
-              Let writers test and merge pull requests in order on branches with
-              required checks.
-            </small>
-          </span>
-        </label>
-        <label className="grid gap-1">
-          Queue merge method
-          <QueueMethodSelect
-            value={queueMethod}
-            onChange={(method) => {
-              if (method) setQueueMethod(method);
-            }}
-          />
-          <small className="text-muted-foreground">
-            Default for branches without a method override. Changing the method
-            removes waiting entries on affected branches.
-          </small>
-        </label>
-        <label className="grid gap-1">
-          Concurrent queue builds
-          <Input
-            type="number"
-            min={1}
-            max={8}
-            step={1}
-            required
-            value={queueBuilds}
-            onChange={({ target }) => setQueueBuilds(target.value)}
-          />
-          <small className="text-muted-foreground">
-            Include changes from earlier queue entries when preparing later
-            candidates for CI.
-          </small>
-        </label>
-        <label className="grid gap-1">
-          Queue check timeout (minutes)
-          <Input
-            type="number"
-            min={1}
-            max={720}
-            step={1}
-            required
-            value={queueTimeout}
-            onChange={({ target }) => setQueueTimeout(target.value)}
-          />
-        </label>
-        <fieldset className="grid gap-3 rounded-md border p-3">
-          <legend className="px-1 text-sm font-medium">
-            Branch queue overrides
-          </legend>
-          <p className="text-sm text-muted-foreground">
-            Use exact branch names. Each unset field inherits the repository
-            default.
-          </p>
-          {overrides.map((entry) => (
-            <div
-              key={entry.id}
-              className="grid gap-2 rounded-md border p-3 sm:grid-cols-2"
-            >
-              <label className="grid gap-1">
-                Branch name
-                <Input
-                  required
-                  maxLength={255}
-                  placeholder="release/stable"
-                  value={entry.branch}
-                  onChange={({ target }) =>
-                    changeOverride(entry.id, { branch: target.value })
-                  }
-                />
-              </label>
-              <label className="grid gap-1">
-                Branch queue method
-                <QueueMethodSelect
-                  inherited
-                  value={entry.method}
-                  onChange={(method) => changeOverride(entry.id, { method })}
-                />
-              </label>
-              <label className="grid gap-1">
-                Branch build limit
-                <Input
-                  type="number"
-                  min={1}
-                  max={8}
-                  step={1}
-                  placeholder={String(builds)}
-                  value={entry.builds}
-                  onChange={({ target }) =>
-                    changeOverride(entry.id, { builds: target.value })
-                  }
-                />
-              </label>
-              <label className="grid gap-1">
-                Branch check timeout (minutes)
-                <Input
-                  type="number"
-                  min={1}
-                  max={720}
-                  step={1}
-                  placeholder={String(timeout)}
-                  value={entry.timeout}
-                  onChange={({ target }) =>
-                    changeOverride(entry.id, { timeout: target.value })
-                  }
-                />
-              </label>
+        {repo.can_admin && (
+          <div className="grid gap-3">
+            <label className="flex items-start gap-2">
+              <input
+                className="mt-1"
+                type="checkbox"
+                checked={mergeQueue}
+                onChange={({ target }) => setMergeQueue(target.checked)}
+              />
+              <span>
+                Allow merge queue
+                <small className="block text-muted-foreground">
+                  Let writers test and merge pull requests in order on branches
+                  with required checks.
+                </small>
+              </span>
+            </label>
+            <label className="grid gap-1">
+              Queue merge method
+              <QueueMethodSelect
+                value={queueMethod}
+                onChange={(method) => {
+                  if (method) setQueueMethod(method);
+                }}
+              />
+              <small className="text-muted-foreground">
+                Default for branches without a method override. Changing the
+                method removes waiting entries on affected branches.
+              </small>
+            </label>
+            <label className="grid gap-1">
+              Concurrent queue builds
+              <Input
+                type="number"
+                min={1}
+                max={100}
+                step={1}
+                required
+                value={queueBuilds}
+                onChange={({ target }) => setQueueBuilds(target.value)}
+              />
+              <small className="text-muted-foreground">
+                Include changes from earlier queue entries when preparing later
+                candidates for CI.
+              </small>
+            </label>
+            <label className="grid gap-1">
+              Queue check timeout (minutes)
+              <Input
+                type="number"
+                min={1}
+                max={720}
+                step={1}
+                required
+                value={queueTimeout}
+                onChange={({ target }) => setQueueTimeout(target.value)}
+              />
+            </label>
+            <fieldset className="grid gap-3 rounded-md border p-3">
+              <legend className="px-1 text-sm font-medium">
+                Branch queue overrides
+              </legend>
+              <p className="text-sm text-muted-foreground">
+                Use exact branch names. Each unset field inherits the repository
+                default.
+              </p>
+              {overrides.map((entry) => (
+                <div
+                  key={entry.id}
+                  className="grid gap-2 rounded-md border p-3 sm:grid-cols-2"
+                >
+                  <label className="grid gap-1">
+                    Branch name
+                    <Input
+                      required
+                      maxLength={255}
+                      placeholder="release/stable"
+                      value={entry.branch}
+                      onChange={({ target }) =>
+                        changeOverride(entry.id, { branch: target.value })
+                      }
+                    />
+                  </label>
+                  <label className="grid gap-1">
+                    Branch queue method
+                    <QueueMethodSelect
+                      inherited
+                      value={entry.method}
+                      onChange={(method) =>
+                        changeOverride(entry.id, { method })
+                      }
+                    />
+                  </label>
+                  <label className="grid gap-1">
+                    Branch build limit
+                    <Input
+                      type="number"
+                      min={1}
+                      max={100}
+                      step={1}
+                      placeholder={String(builds)}
+                      value={entry.builds}
+                      onChange={({ target }) =>
+                        changeOverride(entry.id, { builds: target.value })
+                      }
+                    />
+                  </label>
+                  <label className="grid gap-1">
+                    Branch check timeout (minutes)
+                    <Input
+                      type="number"
+                      min={1}
+                      max={720}
+                      step={1}
+                      placeholder={String(timeout)}
+                      value={entry.timeout}
+                      onChange={({ target }) =>
+                        changeOverride(entry.id, { timeout: target.value })
+                      }
+                    />
+                  </label>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="justify-self-start"
+                    onClick={() =>
+                      setOverrides((current) =>
+                        current.filter(({ id }) => id !== entry.id),
+                      )
+                    }
+                  >
+                    Remove {entry.branch.trim() || "branch"} override
+                  </Button>
+                </div>
+              ))}
+              {!validOverrides && (
+                <p role="status" className="text-sm text-muted-foreground">
+                  Give each override a unique branch name and at least one
+                  setting.
+                </p>
+              )}
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
+                disabled={overrides.length >= 100}
                 className="justify-self-start"
                 onClick={() =>
-                  setOverrides((current) =>
-                    current.filter(({ id }) => id !== entry.id),
-                  )
+                  setOverrides((current) => [
+                    ...current,
+                    {
+                      id: crypto.randomUUID(),
+                      branch: "",
+                      method: "",
+                      builds: "",
+                      timeout: "",
+                    },
+                  ])
                 }
               >
-                Remove {entry.branch.trim() || "branch"} override
+                Add branch override
               </Button>
-            </div>
-          ))}
-          {!validOverrides && (
-            <p role="status" className="text-sm text-muted-foreground">
-              Give each override a unique branch name and at least one setting.
-            </p>
-          )}
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={overrides.length >= 100}
-            className="justify-self-start"
-            onClick={() =>
-              setOverrides((current) => [
-                ...current,
-                {
-                  id: crypto.randomUUID(),
-                  branch: "",
-                  method: "",
-                  builds: "",
-                  timeout: "",
-                },
-              ])
-            }
-          >
-            Add branch override
-          </Button>
-        </fieldset>
+            </fieldset>
+          </div>
+        )}
       </fieldset>
       {!enabled.length && (
         <p role="status">Choose at least one merge method.</p>

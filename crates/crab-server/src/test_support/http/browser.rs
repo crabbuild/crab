@@ -6,6 +6,20 @@ impl Browser {
     pub(crate) fn new(name: &str) -> Self {
         Self(format!("crab-test-{name}-{}", Uuid::now_v7().simple()))
     }
+    pub(crate) async fn sign_in(&self) {
+        self.run(&["wait", "--text", "Continue to sign in"]).await;
+        self.run(&[
+            "find",
+            "role",
+            "link",
+            "click",
+            "--name",
+            "Continue to sign in",
+            "--exact",
+        ])
+        .await;
+    }
+
     pub(crate) async fn run(&self, arguments: &[&str]) -> String {
         let output = tokio::time::timeout(
             Duration::from_secs(45),

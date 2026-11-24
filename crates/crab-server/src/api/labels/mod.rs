@@ -162,9 +162,11 @@ async fn list(
     let repo = app::repository(&server, &principal, &key)?;
     app::actor(&principal)?;
     let labels = catalog(&server, &repo).await?;
+    let current = app::membership(&server, &principal, &repo).await?.principal;
     Ok(Json(json!({
         "items": labels.iter().map(view).collect::<Vec<_>>(),
-        "can_manage": principal.can_write(repo.id),
+        "can_manage": current.can_moderate(repo.id),
+        "can_delete": current.can_write(repo.id),
     })))
 }
 
@@ -175,7 +177,7 @@ async fn create(
     input: std::result::Result<Json<NewLabel>, JsonRejection>,
 ) -> Result<impl IntoResponse> {
     let repo = app::repository(&server, &principal, &key)?;
-    if !principal.can_write(repo.id) {
+    if !principal.can_moderate(repo.id) {
         return Err(Error::LabelPermission);
     }
     let Json(input) = input?;
@@ -219,7 +221,7 @@ async fn edit(
     input: std::result::Result<Json<LabelEdit>, JsonRejection>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name_key))?;
-    if !principal.can_write(repo.id) {
+    if !principal.can_moderate(repo.id) {
         return Err(Error::LabelPermission);
     }
     let Json(input) = input?;

@@ -12,7 +12,7 @@ use super::{Address, Error, Result, directory, organization, repository};
 pub(crate) use cellar::sdk::storage::SqlValue;
 
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
-const MAX_RESULT_BYTES: usize = 2 * 1024 * 1024;
+pub(super) const MAX_RESULT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_DOCUMENT_BYTES: usize = 128 * 1024;
 const MAX_RETRY_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
 // Script and repository class names participate in persisted Cell identities.

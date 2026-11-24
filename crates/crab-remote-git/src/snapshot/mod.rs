@@ -1,7 +1,10 @@
+mod ahead;
 mod blame;
 mod history;
+mod membership;
 mod merge_base;
 pub use blame::SharedBlame;
+pub use membership::CommitMembership;
 
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
@@ -17,6 +20,7 @@ use gix_hash::ObjectId;
 use crate::commit_graph::CommitGraphIndex;
 use crate::objects::{find_tree_entry_index, materialize_tree, parse_blob};
 use crate::state::RepositoryState;
+use crate::traversal::AheadHistoryOrder;
 use crate::{
     ArchiveEntry, ArchiveStream, Blame, BlameRange, BlameUnsupportedReason, Blob, BlobMetadata,
     BudgetDimension, ChangeKind, Commit, CommitSummary, Comparison, ContentClassification,
@@ -70,6 +74,17 @@ impl RemoteGitSnapshot {
         operation.read_commit(self.commit_oid).await
     }
 
+    /// Test whether each candidate is the pinned commit or an ancestor of it.
+    pub async fn commit_membership(
+        &self,
+        candidates: &[ObjectId],
+        operation: &OperationContext,
+    ) -> Result<Vec<bool>> {
+        self.commit_membership_reader(operation)?
+            .contains(candidates)
+            .await
+    }
+
     /// Return commits reachable from this snapshot and not from the base snapshot.
     ///
     /// Every parent is considered, so merge-side commits remain visible while
@@ -98,7 +113,7 @@ impl RemoteGitSnapshot {
     ) -> Result<Page<Commit>> {
         self.ensure_operation(operation)?;
         base.ensure_operation(base_operation)?;
-        let skip = match page.after() {
+        let (skip, order) = match page.after() {
             Some(cursor) => {
                 let decoded = cursor.decode_ahead_history()?;
                 if decoded.start != self.commit_oid || decoded.base != base.commit_oid {
@@ -106,9 +121,9 @@ impl RemoteGitSnapshot {
                         reason: CursorError::ContextMismatch,
                     });
                 }
-                decoded.skip
+                (decoded.skip, decoded.order)
             }
-            None => 0,
+            None => (0, AheadHistoryOrder::Parents),
         };
         if self.commit_oid == base.commit_oid {
             return Ok(Page {
@@ -117,47 +132,78 @@ impl RemoteGitSnapshot {
             });
         }
 
-        let base_ancestors = commit_ancestors(
-            base.commit_oid,
-            base_operation,
-            base.commit_graph.as_deref(),
-        )
-        .await?;
+        enum BaseAncestors<'a> {
+            Indexed(&'a CommitGraphIndex),
+            Walked(HashSet<ObjectId>),
+        }
+        let graph = base.commit_graph.as_deref();
+        // Alpha.1 offsets counted commits in the order of their captured graph.
+        // New offsets follow Git parent order regardless of index readiness.
+        let ordering_graph = match order {
+            AheadHistoryOrder::Legacy => self.commit_graph.as_deref(),
+            AheadHistoryOrder::Parents => None,
+        };
+        let mut prefetched = HashMap::new();
+        let base_ancestors = match graph.filter(|graph| graph.has_ancestor_sets()) {
+            Some(graph) => BaseAncestors::Indexed(graph),
+            None => {
+                let (shared, commits) = ahead::raw_base_ancestry(
+                    self.commit_oid,
+                    base.commit_oid,
+                    operation,
+                    base_operation,
+                    graph,
+                )
+                .await?;
+                prefetched = commits;
+                BaseAncestors::Walked(shared)
+            }
+        };
         let mut pending = vec![self.commit_oid];
         let mut visited = HashSet::new();
         let mut traversed = 0u64;
         let mut items = Vec::new();
+        let mut has_next = false;
         while let Some(oid) = pending.pop() {
             operation.ensure_active()?;
-            if visited.contains(&oid) || base_ancestors.contains(&oid) {
+            if !visited.insert(oid) {
+                continue;
+            }
+            // A shared commit cuts off all of its parents. Resolve membership
+            // against the authorized base even when the head is in a fork.
+            let shared = match &base_ancestors {
+                BaseAncestors::Indexed(graph) => {
+                    graph
+                        .reachable_from_roots(&[oid], &[base.commit_oid], base_operation)
+                        .await?[0]
+                }
+                BaseAncestors::Walked(ancestors) => ancestors.contains(&oid),
+            };
+            if shared {
                 continue;
             }
             if traversed >= skip && items.len() == page.limit() {
-                pending.push(oid);
+                has_next = true;
                 break;
             }
-            visited.insert(oid);
-            operation.charge(BudgetDimension::HistoryCommits, 1).await?;
-            let commit = operation.read_commit(oid).await?;
-            queue_all_parents(
-                &mut pending,
-                &commit,
-                self.commit_graph.as_deref(),
-                operation,
-            )
-            .await?;
+            let commit = match prefetched.remove(&oid) {
+                Some(commit) => commit?,
+                None => ahead::read_commit(oid, operation).await?,
+            };
+            let commit = &commit.value;
+            queue_all_parents(&mut pending, commit, ordering_graph, operation).await?;
             if traversed >= skip {
                 operation
                     .charge(
                         BudgetDimension::ResponseBytes,
-                        commit_response_bytes(&commit),
+                        commit_response_bytes(commit),
                     )
                     .await?;
                 items.try_reserve(1).map_err(|source| Error::Allocation {
                     requested: mem::size_of::<Commit>(),
                     source,
                 })?;
-                items.push(commit);
+                items.push(commit.clone());
             }
             traversed = traversed.checked_add(1).ok_or(Error::LimitExceeded {
                 limit: "history commits",
@@ -165,15 +211,7 @@ impl RemoteGitSnapshot {
                 maximum: u64::MAX,
             })?;
         }
-        while pending
-            .last()
-            .is_some_and(|oid| visited.contains(oid) || base_ancestors.contains(oid))
-        {
-            pending.pop();
-        }
-        let next = if pending.is_empty() {
-            None
-        } else {
+        let next = if has_next {
             let next_skip = skip
                 .checked_add(items.len() as u64)
                 .ok_or(Error::LimitExceeded {
@@ -185,7 +223,10 @@ impl RemoteGitSnapshot {
                 self.commit_oid,
                 base.commit_oid,
                 next_skip,
+                order,
             ))
+        } else {
+            None
         };
         Ok(Page { items, next })
     }
@@ -1795,18 +1836,9 @@ async fn commit_ancestors(
     operation: &OperationContext,
     commit_graph: Option<&CommitGraphIndex>,
 ) -> Result<HashSet<ObjectId>> {
-    let mut pending = vec![root];
-    let mut ancestors = HashSet::new();
-    while let Some(oid) = pending.pop() {
-        operation.ensure_active()?;
-        if !ancestors.insert(oid) {
-            continue;
-        }
-        operation.charge(BudgetDimension::HistoryCommits, 1).await?;
-        let commit = operation.read_commit(oid).await?;
-        queue_all_parents(&mut pending, &commit, commit_graph, operation).await?;
-    }
-    Ok(ancestors)
+    ahead::BaseWalk::new(root)
+        .finish(operation, commit_graph)
+        .await
 }
 
 async fn queue_all_parents(

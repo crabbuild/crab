@@ -975,7 +975,7 @@ async fn native_browser_watches_releases_and_opens_the_published_version() {
             .run(&["find", "role", role, "click", "--name", name, "--exact"])
             .await;
     };
-    click("button", "Continue to sign in").await;
+    browser.sign_in().await;
     click("button", "Watch").await;
     click("checkbox", "New releases").await;
     click("button", "Save preference").await;

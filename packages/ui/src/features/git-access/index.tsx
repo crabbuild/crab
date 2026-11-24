@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import {
   CodeIcon,
   DownloadIcon,
+  KeyIcon,
   TriangleDownIcon,
 } from "@primer/octicons-react";
 import type { Icon } from "@primer/octicons-react";
@@ -80,7 +81,10 @@ export function GitAccess({
       className="git-access"
       onToggle={(event) => onOpenChange(event.currentTarget.open)}
     >
-      <summary>Git access</summary>
+      <summary aria-label="Git access">
+        <KeyIcon className="git-access-icon" aria-hidden="true" />
+        <span className="git-access-label">Git access</span>
+      </summary>
       <div className="panel git-popover">
         <h2>Git access token</h2>
         <p>

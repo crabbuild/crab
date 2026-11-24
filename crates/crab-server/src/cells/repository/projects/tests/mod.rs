@@ -86,6 +86,8 @@ async fn page(cell: &RepositoryCell, project: Uuid) -> ItemPage {
                 status: None,
                 hide_closed: false,
                 default_ref: "refs/heads/main".into(),
+                issue_type: None,
+                group_by: None,
             },
         )
         .await
@@ -363,6 +365,7 @@ async fn hierarchy_reparents_atomically_rejects_cycles_and_counts_live_child_sta
                 version: 1,
                 actor: actor(),
                 can_triage: true,
+                can_moderate: false,
                 title: None,
                 body: None,
                 state: Some(1),
@@ -515,6 +518,8 @@ async fn pages_count_all_matching_work_and_reject_stale_cursors() {
         status: None,
         hide_closed: false,
         default_ref: "refs/heads/main".into(),
+        issue_type: None,
+        group_by: None,
     };
     let next = cell
         .client

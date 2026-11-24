@@ -11,6 +11,7 @@ use bytes::Bytes;
 use crab_cache::LocalCache;
 use crab_cache_store::{CacheConfig as StoreCacheConfig, CacheObserver, CachingStore};
 use crab_git::pointer_detect::PointerKind;
+use crab_read::verify_reconstruction_stream as verified_crab_stream;
 use crab_remote_git::{
     ContentClassification, EntryKind, OperationKind, RemoteGitRuntime, RepositoryIdentity,
     RepositoryOptions, Revision,
@@ -236,83 +237,6 @@ fn hold_permit_with_timeout(
                     drop(permit);
                     let error: s3s::StdError = Box::new(crate::content::ResponseIdleTimeout);
                     Some((Err(error), None))
-                }
-            }
-        },
-    ))
-}
-
-fn verified_crab_stream(
-    stream: crab_read::ReconstructionStream,
-    expected_size: u64,
-    expected_hash: [u8; 32],
-    verify_hash: bool,
-) -> crab_read::ReconstructionStream {
-    use futures_util::StreamExt as _;
-
-    let expected_hash_hex = blake3::Hash::from_bytes(expected_hash).to_hex().to_string();
-    Box::pin(futures_util::stream::try_unfold(
-        (
-            stream,
-            verify_hash.then(blake3::Hasher::new),
-            0_u64,
-            None::<Bytes>,
-            false,
-        ),
-        move |(mut stream, mut hasher, mut received, mut pending, finished)| {
-            let expected_hash_hex = expected_hash_hex.clone();
-            async move {
-                if finished {
-                    return Ok(None);
-                }
-                loop {
-                    match stream.next().await {
-                        Some(Ok(chunk)) if chunk.is_empty() => {}
-                        Some(Ok(chunk)) => {
-                            received = received
-                                .checked_add(chunk.len() as u64)
-                                .filter(|size| *size <= expected_size)
-                                .ok_or_else(|| crab_read::ReadError::CorruptObject {
-                                    path: expected_hash_hex.clone(),
-                                    reason: format!(
-                                        "reconstruction exceeded declared size {expected_size}"
-                                    ),
-                                })?;
-                            if let Some(hasher) = &mut hasher {
-                                hasher.update(&chunk);
-                            }
-                            if let Some(previous) = pending.replace(chunk) {
-                                return Ok(Some((
-                                    previous,
-                                    (stream, hasher, received, pending, false),
-                                )));
-                            }
-                        }
-                        Some(Err(error)) => return Err(error),
-                        None => {
-                            if received != expected_size {
-                                return Err(crab_read::ReadError::CorruptObject {
-                                    path: expected_hash_hex.clone(),
-                                    reason: format!(
-                                        "reconstruction size mismatch: expected {expected_size}, got {received}"
-                                    ),
-                                });
-                            }
-                            if let Some(hasher) = &hasher {
-                                let actual = hasher.finalize();
-                                if actual.as_bytes() != &expected_hash {
-                                    return Err(crab_read::ReadError::HashMismatch {
-                                        requested: expected_hash_hex,
-                                        actual: actual.to_hex().to_string(),
-                                    });
-                                }
-                            }
-                            if let Some(last) = pending.take() {
-                                return Ok(Some((last, (stream, hasher, received, pending, true))));
-                            }
-                            return Ok(None);
-                        }
-                    }
                 }
             }
         },

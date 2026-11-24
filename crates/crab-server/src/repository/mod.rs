@@ -1,6 +1,7 @@
 //! Repository reads, pinned browse snapshots, and maintenance ownership.
 
 pub(crate) mod code_index;
+pub(crate) mod commit_closures;
 pub(crate) mod maintenance;
 pub(crate) mod projection;
 pub(crate) mod settings;
@@ -25,7 +26,9 @@ pub(crate) const BROWSE_PROBE_INTERVAL: Duration = Duration::from_secs(2);
 pub(crate) struct Repository {
     pub(crate) id: Uuid,
     pub(crate) organization: Option<Uuid>,
+    pub(crate) ownership_epoch: u32,
     pub(crate) forked_from: Option<Uuid>,
+    pub(crate) topics: Vec<String>,
     pub(crate) config: RepositoryConfig,
     pub(crate) store: Store,
     pub(crate) layout: StoreLayout<Store>,
@@ -97,7 +100,9 @@ impl Repository {
         Self {
             id,
             organization: None,
+            ownership_epoch: 0,
             forked_from: None,
+            topics: Vec::new(),
             config,
             store: layout.store().clone(),
             edge_reads: None,

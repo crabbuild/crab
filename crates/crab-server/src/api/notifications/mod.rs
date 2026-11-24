@@ -229,6 +229,8 @@ async fn entries(
 #[derive(Serialize)]
 struct Unread {
     unread: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pending_transfers: bool,
 }
 
 async fn unread(
@@ -268,7 +270,10 @@ async fn unread(
         while let Some(current) = accessible.try_next().await? {
             if current {
                 app::account(&principal)?;
-                return Ok(Json(Unread { unread: true }));
+                return Ok(Json(Unread {
+                    unread: true,
+                    pending_transfers: false,
+                }));
             }
         }
         before = page.next;
@@ -277,7 +282,12 @@ async fn unread(
         }
     }
     app::account(&principal)?;
-    Ok(Json(Unread { unread: false }))
+    let pending_transfers =
+        super::repository_transfer::incoming::has_pending(&server, &principal).await?;
+    Ok(Json(Unread {
+        unread: false,
+        pending_transfers,
+    }))
 }
 
 async fn may_read(server: &Server, principal: &Principal, repo: &Repository) -> Result<bool> {

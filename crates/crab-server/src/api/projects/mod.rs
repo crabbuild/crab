@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
 mod history;
+pub(super) mod type_filter;
 
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
@@ -113,9 +114,10 @@ async fn detail(
             .await,
     )?
     .ok_or(Error::NotFound)?;
+    let types = super::organizations::issue_types::active(&server, repo.organization).await?;
     let current = app::membership(&server, &principal, &repo).await?;
     Ok(Json(
-        json!({"project":project,"can_manage":current.principal.can_write(repo.id)}),
+        json!({"project":project,"can_manage":current.principal.can_write(repo.id),"issue_types":types.definitions}),
     ))
 }
 #[derive(Default, Deserialize)]
@@ -127,6 +129,9 @@ struct Filter {
     q: String,
     status: Option<String>,
     hide_closed: bool,
+    issue_type: Option<String>,
+    type_cursor: Option<String>,
+    group_by: Option<projects::grouping::GroupBy>,
 }
 async fn items(
     State(server): State<Arc<Server>>,
@@ -137,6 +142,38 @@ async fn items(
     let key = (owner, name);
     let repo = app::repository(&server, &principal, &key)?;
     let cell = app::repository_cell(&server, &repo)?;
+    let group_by_type = input.group_by == Some(projects::grouping::GroupBy::IssueType);
+    let (type_scope, bound_types, type_cursor) = if input.issue_type.is_some() || group_by_type {
+        use crate::cells::repository::issues::issue_type::search::Filter;
+        let filter = input
+            .issue_type
+            .as_deref()
+            .map(Filter::parse)
+            .transpose()
+            .map_err(Error::Invalid)?;
+        let types = super::organizations::issue_types::active(&server, repo.organization).await?;
+        let scope = type_filter::scope(&repo, filter, &types)?;
+        let cursor = type_filter::cursor((
+            "repository-project-type/1",
+            repo.id,
+            project,
+            &scope,
+            types.version,
+            input.item,
+            &input.q,
+            &input.status,
+            input.hide_closed,
+            input.group_by,
+        ))?;
+        (Some(scope), Some(types), Some(cursor))
+    } else {
+        (None, None, None)
+    };
+    type_filter::validate_cursor(
+        input.after.is_some(),
+        type_cursor.as_deref(),
+        input.type_cursor.as_deref(),
+    )?;
     let page = app::query_output(
         cell.client
             .query::<projects::Items>(
@@ -151,11 +188,21 @@ async fn items(
                     status: input.status,
                     hide_closed: input.hide_closed,
                     default_ref: repo.default_ref().await?,
+                    issue_type: type_scope,
+                    group_by: input.group_by,
                 },
             )
             .await,
     )?
     .ok_or(Error::NotFound)?;
+    let types = if let Some(types) = bound_types {
+        super::discussion_search::issue_types::verify(&server, &repo, Some(&types)).await?;
+        types
+    } else if page.items.iter().any(|row| row.issue_type.is_some()) {
+        super::organizations::issue_types::active(&server, repo.organization).await?
+    } else {
+        Default::default()
+    };
     let selected = crate::api::assignees::Selection::load(
         &server,
         &principal,
@@ -170,10 +217,27 @@ async fn items(
         .map(|row| {
             let mut value = serde_json::to_value(row)?;
             value["assignees"] = json!(selected.view(&row.assignees));
+            let (issue_type, version) = super::organizations::issue_types::project_field(
+                &repo,
+                row.issue_type,
+                &types.definitions,
+                selected.principal.can_triage(repo.id),
+            );
+            value["issue_type"] = json!(issue_type);
+            value["issue_type_version"] = json!(version);
+            if group_by_type {
+                value["issue_type_group"] =
+                    json!(crate::cells::repository::issues::issue_type::group(
+                        row.issue_type.is_some(),
+                        issue_type.map(|definition| definition.id),
+                    ));
+            }
             Ok(value)
         })
         .collect::<std::result::Result<Vec<_>, serde_json::Error>>()?;
     presented["items"] = json!(items);
+    presented["issue_types"] = json!(types.definitions);
+    presented["type_cursor"] = json!(type_cursor);
     Ok(Json(
         json!({"page":presented,"can_manage":selected.principal.can_write(repo.id)}),
     ))

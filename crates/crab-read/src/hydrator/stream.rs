@@ -1,9 +1,11 @@
 use std::{
+    future::Future,
     io::{self, Write},
     pin::Pin,
 };
 
 use bytes::Bytes;
+use crab_metadata::file_index_lookup::SharedFileIndexLookup;
 use futures_util::Stream;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -17,11 +19,29 @@ const OUTPUT_CHANNEL_DEPTH: usize = 1;
 /// Bounded logical-byte stream produced by Xet reconstruction.
 pub type ReconstructionStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + 'static>>;
 
+/// Worker that must be driven until reconstruction and lookup cleanup finish.
+pub type ReconstructionWork = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
 pub(super) fn reconstruct_range(
     hydrator: &ShardHydrator,
     pointer: crab_types::pointer::Pointer,
     range: std::ops::Range<u64>,
 ) -> Result<ReconstructionStream> {
+    if range.start == range.end && range.end <= pointer.size {
+        return Ok(Box::pin(futures_util::stream::empty()));
+    }
+    let (stream, work) = prepare(hydrator, pointer, range, None, CancellationToken::new())?;
+    tokio::spawn(work);
+    Ok(stream)
+}
+
+pub(super) fn prepare(
+    hydrator: &ShardHydrator,
+    pointer: crab_types::pointer::Pointer,
+    range: std::ops::Range<u64>,
+    lookup: Option<SharedFileIndexLookup>,
+    cancellation: CancellationToken,
+) -> Result<(ReconstructionStream, ReconstructionWork)> {
     if range.start > range.end || range.end > pointer.size {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -29,28 +49,33 @@ pub(super) fn reconstruct_range(
         )
         .into());
     }
-    if range.is_empty() {
-        return Ok(Box::pin(futures_util::stream::empty()));
-    }
     let runtime = tokio::runtime::Handle::try_current().map_err(|source| {
         io::Error::other(format!(
             "reconstruction stream requires a Tokio runtime: {source}"
         ))
     })?;
-    let (receive, cancellation) = start_range(hydrator.clone(), pointer, range, runtime);
-    Ok(stream_output(hydrator, receive, cancellation))
+    let cancellation = cancellation.child_token();
+    let (receive, work) = start_range(
+        hydrator.clone(),
+        pointer,
+        range,
+        lookup,
+        cancellation.clone(),
+        runtime,
+    );
+    Ok((stream_output(hydrator, receive, cancellation), work))
 }
 
 fn start_range(
     hydrator: ShardHydrator,
     pointer: crab_types::pointer::Pointer,
     range: std::ops::Range<u64>,
+    lookup: Option<SharedFileIndexLookup>,
+    cancellation: CancellationToken,
     runtime: tokio::runtime::Handle,
-) -> (mpsc::Receiver<Result<Bytes>>, CancellationToken) {
-    let cancellation = CancellationToken::new();
+) -> (mpsc::Receiver<Result<Bytes>>, ReconstructionWork) {
     let (send, receive) = mpsc::channel(OUTPUT_CHANNEL_DEPTH);
-    let operation_cancel = cancellation.clone();
-    tokio::spawn(async move {
+    let work = Box::pin(async move {
         let outcome = hydrator
             .reconstruct_range_writer(
                 &pointer,
@@ -63,17 +88,27 @@ fn start_range(
                         runtime,
                     })
                 },
-                None,
-                &operation_cancel,
+                lookup.as_ref(),
+                &cancellation,
             )
             .await;
-        if let Err(error) = outcome
-            && !operation_cancel.is_cancelled()
-        {
+        let closed = match lookup {
+            Some(lookup) => lookup.close().await,
+            None => Ok(()),
+        };
+        let outcome = match (outcome, closed) {
+            (outcome, Ok(())) => outcome,
+            (Ok(_), Err(error)) => Err(error.into()),
+            (Err(operation), Err(source)) => Err(ReadError::CapturedLookupClose {
+                operation: Box::new(operation),
+                source,
+            }),
+        };
+        if let Err(error) = outcome {
             let _ = send.send(Err(error)).await;
         }
     });
-    (receive, cancellation)
+    (receive, work)
 }
 
 fn stream_output(
@@ -100,6 +135,86 @@ fn stream_output(
                 .await?;
             }
             Ok(bytes.map(|bytes| (bytes, (receive, authority, cancellation, cancel_on_drop))))
+        },
+    ))
+}
+
+/// Verify the byte count and optional whole-file hash before releasing the final chunk.
+///
+/// Consumers can stop at the declared content length without polling stream EOF.
+pub fn verify_reconstruction_stream(
+    stream: ReconstructionStream,
+    expected_size: u64,
+    expected_hash: [u8; 32],
+    verify_hash: bool,
+) -> ReconstructionStream {
+    use futures_util::StreamExt as _;
+
+    let expected_hash_hex = blake3::Hash::from_bytes(expected_hash).to_hex().to_string();
+    Box::pin(futures_util::stream::try_unfold(
+        (
+            stream,
+            verify_hash.then(blake3::Hasher::new),
+            0_u64,
+            None::<Bytes>,
+            false,
+        ),
+        move |(mut stream, mut hasher, mut received, mut pending, finished)| {
+            let expected_hash_hex = expected_hash_hex.clone();
+            async move {
+                if finished {
+                    return Ok(None);
+                }
+                loop {
+                    match stream.next().await {
+                        Some(Ok(chunk)) if chunk.is_empty() => {}
+                        Some(Ok(chunk)) => {
+                            received = received
+                                .checked_add(chunk.len() as u64)
+                                .filter(|size| *size <= expected_size)
+                                .ok_or_else(|| ReadError::CorruptObject {
+                                    path: expected_hash_hex.clone(),
+                                    reason: format!(
+                                        "reconstruction exceeded declared size {expected_size}"
+                                    ),
+                                })?;
+                            if let Some(hasher) = &mut hasher {
+                                hasher.update(&chunk);
+                            }
+                            if let Some(previous) = pending.replace(chunk) {
+                                return Ok(Some((
+                                    previous,
+                                    (stream, hasher, received, pending, false),
+                                )));
+                            }
+                        }
+                        Some(Err(error)) => return Err(error),
+                        None => {
+                            if received != expected_size {
+                                return Err(ReadError::CorruptObject {
+                                    path: expected_hash_hex.clone(),
+                                    reason: format!(
+                                        "reconstruction size mismatch: expected {expected_size}, got {received}"
+                                    ),
+                                });
+                            }
+                            if let Some(hasher) = &hasher {
+                                let actual = hasher.finalize();
+                                if actual.as_bytes() != &expected_hash {
+                                    return Err(ReadError::HashMismatch {
+                                        requested: expected_hash_hex,
+                                        actual: actual.to_hex().to_string(),
+                                    });
+                                }
+                            }
+                            if let Some(last) = pending.take() {
+                                return Ok(Some((last, (stream, hasher, received, pending, true))));
+                            }
+                            return Ok(None);
+                        }
+                    }
+                }
+            }
         },
     ))
 }
@@ -171,12 +286,16 @@ mod tests {
             hydrator.with_read_retention(session.capture().unwrap().retain(lease).unwrap());
         assert!(pointer.size > OUTPUT_CHUNK_BYTES as u64);
         let range = 0..pointer.size;
-        let (receive, cancellation) = start_range(
+        let cancellation = CancellationToken::new();
+        let (receive, work) = start_range(
             hydrator.clone(),
             pointer,
             range,
+            None,
+            cancellation.clone(),
             tokio::runtime::Handle::current(),
         );
+        let worker = tokio::spawn(work);
         wait_for_queued_bytes(&receive).await;
         let mut stream = stream_output(&hydrator, receive, cancellation);
 
@@ -189,6 +308,7 @@ mod tests {
             Some(Err(ReadError::Retention(_)))
         ));
         assert!(stream.next().await.is_none());
+        worker.await.unwrap();
     }
 
     #[tokio::test]
@@ -219,12 +339,16 @@ mod tests {
                 .await;
         for read_before_denial in [false, true] {
             grant.0.store(false, Ordering::SeqCst);
-            let (receive, cancellation) = start_range(
+            let cancellation = CancellationToken::new();
+            let (receive, work) = start_range(
                 hydrator.clone(),
                 pointer.clone(),
                 0..512,
+                None,
+                cancellation.clone(),
                 tokio::runtime::Handle::current(),
             );
+            let worker = tokio::spawn(work);
             wait_for_queued_bytes(&receive).await;
             let mut stream = stream_output(&hydrator, receive, cancellation);
             if read_before_denial {
@@ -242,6 +366,7 @@ mod tests {
                     )
             ));
             assert!(stream.next().await.is_none());
+            worker.await.unwrap();
         }
     }
 

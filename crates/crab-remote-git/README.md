@@ -171,6 +171,11 @@ abandoning the future is not a synchronous drain guarantee.
 | Git LFS pointer | `crab-lfs` verifies and reads the target |
 
 `read_blob` classifies pointers but does not materialize their targets.
+Callers that already proved an object's visibility can use
+`OperationContext::read_object_at_most` to skip larger logical objects. It
+checks the packed root and decodes eligible content from the same bytes.
+The cap applies to the requested result. Delta dependencies still use the
+ordinary read limits.
 An unborn HEAD can coexist with other refs; use `RepositoryRefs::is_empty()`
 to test whether the repository has any refs.
 

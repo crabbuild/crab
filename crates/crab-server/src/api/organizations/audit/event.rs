@@ -14,13 +14,17 @@ use crate::{
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub(in crate::api) enum AuditAction {
     OrganizationCreated,
+    AutomationChanged,
     OrganizationEdited,
     OrganizationMembership,
     OrganizationInvitation,
     RulesetsChanged,
+    RepositoryPropertiesChanged,
+    IssueTypesChanged,
     ProjectChanged,
     TeamCreated,
     TeamEdited,
+    TeamGroupSync,
     TeamDeleted,
     TeamMembership,
     TeamCreationPolicy,
@@ -64,9 +68,9 @@ impl From<organization::Event> for RawEvent {
             id: format!("organization:{}", value.revision),
             occurred_at_ms: value.created_at_ms,
             action: AuditAction::OrganizationCreated,
-            actor: Some(value.actor),
+            actor: value.actor,
             actor_profile: None,
-            operator: false,
+            operator: value.actor.is_none(),
             account: None,
             team: None,
             project: None,
@@ -76,6 +80,20 @@ impl From<organization::Event> for RawEvent {
         use organization::Action;
         event.action = match value.action {
             Action::Created => AuditAction::OrganizationCreated,
+            Action::Automation { identity, action } => {
+                use organization::automation::Audit;
+                let label = match action {
+                    Audit::Created => "Created",
+                    Audit::Edited => "Access edited",
+                    Audit::Enabled => "Enabled",
+                    Audit::Disabled => "Disabled",
+                    Audit::Deleted => "Deleted",
+                    Audit::TokenIssued => "Token issued",
+                    Audit::TokenRevoked => "Token revoked",
+                };
+                event.detail = Some(format!("{label} · {identity}"));
+                AuditAction::AutomationChanged
+            }
             Action::Edited { name, description } => {
                 event.detail = Some(
                     match (name, description) {
@@ -114,6 +132,20 @@ impl From<organization::Event> for RawEvent {
                 event.detail = Some(format!("Revision {version}"));
                 AuditAction::RulesetsChanged
             }
+            Action::RepositoryPropertiesChanged {
+                repository,
+                version,
+            } => {
+                event.detail = Some(match repository {
+                    Some(id) => format!("Repository {id} · Revision {version}"),
+                    None => format!("Definitions · Revision {version}"),
+                });
+                AuditAction::RepositoryPropertiesChanged
+            }
+            Action::IssueTypesChanged { version } => {
+                event.detail = Some(format!("Revision {version}"));
+                AuditAction::IssueTypesChanged
+            }
             Action::ProjectChanged { project } => {
                 event.project = Some(project);
                 AuditAction::ProjectChanged
@@ -125,6 +157,26 @@ impl From<organization::Event> for RawEvent {
             Action::TeamEdited { team } => {
                 event.team = Some(team);
                 AuditAction::TeamEdited
+            }
+            Action::TeamGroupSync {
+                team,
+                group,
+                group_revision,
+                change,
+                updated,
+                removed,
+            } => {
+                use organization::teams::sync::AuditChange;
+                let label = match change {
+                    AuditChange::Linked => "Linked",
+                    AuditChange::Synchronized => "Synchronized",
+                    AuditChange::Unlinked => "Unlinked",
+                };
+                event.team = Some(team);
+                event.detail = Some(format!(
+                    "{label} · Group {group} · Revision {group_revision} · {updated} added or updated · {removed} removed"
+                ));
+                AuditAction::TeamGroupSync
             }
             Action::TeamDeleted { team } => {
                 event.team = Some(team);

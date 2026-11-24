@@ -104,6 +104,7 @@ fn github_authentication_requires_a_secret_and_bounded_endpoints() {
         public_url: Url::parse("http://127.0.0.1:8788").unwrap(),
         client_secret_file: Some("/run/secrets/github-client".into()),
         state_key_file: None,
+        scim_token_file: None,
         github: None,
     });
     assert!(config.validate().is_ok());
@@ -119,6 +120,7 @@ fn github_authentication_requires_a_secret_and_bounded_endpoints() {
         public_url: Url::parse("http://127.0.0.1:8788").unwrap(),
         client_secret_file: Some("/run/secrets/github-client".into()),
         state_key_file: None,
+        scim_token_file: None,
         github: Some(GitHubConfig {
             api_url: "https://api.github.com/api".into(),
             ..GitHubConfig::default()
@@ -322,7 +324,7 @@ fn repository_triage_role_round_trips_without_becoming_write_access() {
 }
 
 #[test]
-fn outbound_receivers_require_one_explicit_https_binding_and_shared_auth() {
+fn outbound_receivers_require_distinct_https_bindings_and_shared_auth() {
     let mut config = local_config("s3://bucket/repositories");
     let destination = WebhookDestination {
         repository: uuid::Uuid::now_v7(),
@@ -337,12 +339,26 @@ fn outbound_receivers_require_one_explicit_https_binding_and_shared_auth() {
         client_id: "fixture-client".into(),
         client_secret_file: None,
         state_key_file: Some("/run/secrets/auth-state".into()),
+        scim_token_file: None,
         github: None,
     });
     assert!(config.validate().is_ok());
-    config.outbound_webhooks.push(destination);
+    config.outbound_webhooks.push(destination.clone());
     assert!(config.validate().is_err());
     config.outbound_webhooks.pop();
+    for index in 1..MAX_OUTBOUND_WEBHOOKS {
+        config.outbound_webhooks.push(WebhookDestination {
+            repository: destination.repository,
+            url: Url::parse(&format!("https://ci.example.test/receiver/{index}")).unwrap(),
+        });
+    }
+    assert!(config.validate().is_ok());
+    config.outbound_webhooks.push(WebhookDestination {
+        repository: destination.repository,
+        url: Url::parse("https://ci.example.test/extra").unwrap(),
+    });
+    assert!(config.validate().is_err());
+    config.outbound_webhooks.truncate(1);
     for url in [
         "http://ci.example.test/events",
         "https://user@ci.example.test/events",

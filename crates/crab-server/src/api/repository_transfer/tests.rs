@@ -11,6 +11,9 @@ use crate::{
     },
 };
 
+const INCOMING: &str = "/api/repository-transfers/incoming";
+const UNREAD: &str = "/api/notifications/unread";
+
 async fn fixture() -> (Harness, Uuid) {
     crate::test_support::server::init_test_tracing();
     let store =
@@ -147,6 +150,13 @@ async fn personal_transfer_requires_consent_and_preserves_repository_data() {
         .unwrap();
     assert_eq!(replay.json::<Value>().await.unwrap()["state"], "pending");
     assert_eq!(h.json(&path, &bob).await["can_accept"], true);
+    let incoming = h.json(INCOMING, &bob).await;
+    assert_eq!(incoming["items"].as_array().unwrap().len(), 1);
+    assert_eq!(incoming["items"][0]["repository"], json!(id));
+    assert_eq!(incoming["items"][0]["can_accept"], true);
+    assert_eq!(incoming["next"], Value::Null);
+    assert_eq!(h.json(UNREAD, &bob).await["pending_transfers"], true);
+    assert_eq!(h.json(INCOMING, &alice).await["items"], json!([]));
     *h.provider.mode.lock().await = "outsider".into();
     let outsider = h.login().await;
     assert_eq!(
@@ -274,6 +284,12 @@ async fn organization_transfer_rechecks_source_and_destination_authority() {
     let target = json!({"kind":"organization","id":organization});
     let (path, _) = propose(&h, &alice, id, target.clone()).await;
     assert_eq!(get(&h, &path, &bob).await.status(), StatusCode::NOT_FOUND);
+    assert_eq!(h.json(INCOMING, &bob).await["items"], json!([]));
+    assert_eq!(
+        h.json(INCOMING, &alice).await["items"][0]["repository"],
+        json!(id)
+    );
+    assert_eq!(h.json(UNREAD, &alice).await["pending_transfers"], true);
     assert_eq!(
         h.write(Method::PUT, &path, &bob, json!({"decision":"accept"}))
             .await
@@ -309,6 +325,7 @@ async fn organization_transfer_rechecks_source_and_destination_authority() {
         .await
         .unwrap();
     assert_eq!(canceled["state"], "cancelled");
+    assert_eq!(h.json(INCOMING, &alice).await["items"], json!([]));
 
     let (path, _) = propose(&h, &bob, id, target).await;
     let accepted: Value = h
@@ -320,6 +337,8 @@ async fn organization_transfer_rechecks_source_and_destination_authority() {
         .await
         .unwrap();
     assert_eq!(accepted["state"], "accepted");
+    assert_eq!(h.json(INCOMING, &alice).await["items"], json!([]));
+    assert_eq!(h.json(UNREAD, &alice).await, json!({"unread":false}));
     let active = h.server.repositories.by_id(id).unwrap();
     assert_eq!(active.organization, Some(organization));
     let lookup = format!("/api/repos?owner={}&name=moved", active.config.owner);
@@ -342,19 +361,38 @@ async fn native_browser_accepts_a_repository_transfer_from_another_account() {
     let bob = member(&h).await;
     let (path, _) = propose(&h, &alice, id, json!({"kind":"account","handle":"bob"})).await;
     let browser = Browser::new("repository-transfer");
-    let link = format!("{}{}", h.origin, path.replacen("/api/", "/-/", 1));
+    let link = format!("{}/-/notifications", h.origin);
     browser.run(&["open", &link]).await;
+    browser.sign_in().await;
     browser
-        .run(&["wait", "--text", "Continue to sign in"])
+        .run(&[
+            "wait",
+            r#"[aria-label="Notifications, pending repository transfers"]"#,
+        ])
         .await;
     browser
         .run(&[
             "find",
             "role",
-            "button",
+            "link",
             "click",
             "--name",
-            "Continue to sign in",
+            "Notifications, pending repository transfers",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", "--text", "Incoming repository transfers"])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "link",
+            "click",
+            "--name",
+            "Review transfer of team/private",
+            "--exact",
         ])
         .await;
     browser.run(&["wait", "input[name=confirm-transfer]"]).await;
@@ -378,6 +416,7 @@ async fn native_browser_accepts_a_repository_transfer_from_another_account() {
         .await;
     browser.run(&["wait", "--text", "moved"]).await;
     assert_eq!(h.json(&path, &bob).await["state"], "accepted");
+    assert_eq!(h.json(INCOMING, &bob).await["items"], json!([]));
     browser.run(&["close"]).await;
     h.close().await;
 }

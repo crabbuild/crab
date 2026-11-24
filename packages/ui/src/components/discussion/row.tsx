@@ -13,6 +13,8 @@ import {
 import type { Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 import { DiscussionCommentCount } from "./list";
+import { BlockedBadge } from "./blocked-badge";
+import { IssueTypeBadge } from "./issue-type-badge";
 import { AssigneeAvatars } from "./metadata";
 import { RelativeTime } from "./time";
 import { Author } from "./author";
@@ -82,6 +84,16 @@ export function DiscussionRow({
           <Link className="issue-link" href={href}>
             {item.title}
           </Link>
+          {item.kind === "issue" && item.blocked && (
+            <span className="ms-2 inline-flex">
+              <BlockedBadge />
+            </span>
+          )}
+          {item.kind === "issue" && item.issue_type && (
+            <span className="ms-2 inline-flex max-w-full">
+              <IssueTypeBadge type={item.issue_type} />
+            </span>
+          )}
           <LabelBadges labels={item.labels} />
         </div>
         <p className="muted">

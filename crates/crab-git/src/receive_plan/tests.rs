@@ -38,6 +38,7 @@ fn policy(_: &str) -> RefPolicy {
     RefPolicy {
         allow_delete: true,
         allow_non_fast_forward: false,
+        inspect_linear_history: false,
     }
 }
 fn incoming(objects: &[(Kind, Vec<u8>)]) -> IncomingPack {
@@ -228,6 +229,7 @@ fn force_and_delete_policy_are_enforced_without_commit_translation() {
     ));
     let force = |_: &str| RefPolicy {
         allow_non_fast_forward: true,
+        inspect_linear_history: false,
         allow_delete: false,
     };
     assert_eq!(

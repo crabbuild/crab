@@ -111,6 +111,46 @@ async function fixture(page: Page) {
   return state;
 }
 
+test("review availability is reachable from account settings and persists on mobile", async ({
+  page,
+}) => {
+  await fixture(page);
+  const until = Date.now() + 3_600_000;
+  let value = {
+    version: 0,
+    busy: false,
+    expires_at_ms: null as number | null,
+  };
+  await page.route("**/api/profile/review-availability", async (route) => {
+    const request = route.request();
+    if (request.method() === "PUT") {
+      expect(request.headers()["x-csrf-token"]).toBe("csrf");
+      expect(request.postDataJSON()).toEqual({
+        version: 0,
+        choice: "one_hour",
+      });
+      value = { version: 1, busy: true, expires_at_ms: until };
+    }
+    return route.fulfill({ json: value });
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/-/profile");
+  await page.getByRole("link", { name: "Review availability" }).click();
+  const status = page.getByLabel("Set status");
+  await status.selectOption("one_hour");
+  await page.getByRole("button", { name: "Save availability" }).click();
+  await expect(page.getByRole("status")).toContainText(
+    "Review availability saved.",
+  );
+  await page.reload();
+  await expect(page.getByText("Current status Busy")).toBeVisible();
+  await expect(page.locator("time")).toHaveAttribute(
+    "datetime",
+    new Date(until).toISOString(),
+  );
+  await expectNoAccessibilityViolations(page);
+});
+
 test("mobile header and footer stay stable while the signed-in session loads", async ({
   page,
 }) => {
@@ -406,7 +446,7 @@ test("account menu keeps sign-out failures recoverable and clears the session af
   await expectNoAccessibilityViolations(page);
   await page.getByRole("menuitem", { name: "Sign out", exact: true }).click();
   await expect(
-    page.getByRole("button", { name: "Continue to sign in", exact: true }),
+    page.getByRole("link", { name: "Continue to sign in", exact: true }),
   ).toBeVisible();
   await expect(account).toHaveCount(0);
 });

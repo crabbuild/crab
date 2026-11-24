@@ -1,10 +1,13 @@
 use super::*;
 use crate::repository::code_index::Row;
 
+pub(super) const COMPLEX_PATHS_PER_PAGE: usize = 4_096;
+
 pub(super) async fn inspect(
     rows: &[Row],
     snapshot: &RemoteGitSnapshot,
     pattern: &Pattern,
+    scope: &Facts,
     window: &Window<'_>,
     operation: &OperationContext,
 ) -> crab_remote_git::Result<Scan> {
@@ -19,33 +22,47 @@ pub(super) async fn inspect(
     });
     let range = &rows[start..];
     let range = &range[..range.partition_point(|row| row.path.as_bytes().starts_with(&prefix))];
-    let limit = if pattern.paths_only {
+    let limit = if !pattern.uses_text {
         window.results
     } else {
         window.paths
     };
-    let mut visited = range.len();
+    // Selective expressions can find no candidates. Advance a bounded path
+    // cursor even on an empty page to cap predicate work across the index.
+    let examined = if pattern.query.bounded {
+        range.len().min(COMPLEX_PATHS_PER_PAGE)
+    } else {
+        range.len()
+    };
+    let mut visited = examined;
     let mut candidates = Vec::new();
-    for (i, row) in range.iter().enumerate() {
-        if !eligible(row, pattern) {
-            continue;
+    let mut skipped = 0;
+    for (i, row) in range.iter().take(examined).enumerate() {
+        let mut facts = pattern.file_facts(row.path.as_bytes(), scope);
+        match pattern.query.evaluate(&facts).0 {
+            Truth::No => continue,
+            Truth::Unknown if row.filter.is_none() => {
+                skipped += 1;
+                continue;
+            }
+            Truth::Unknown => {
+                pattern.index_facts(row, &mut facts);
+                if pattern.query.evaluate(&facts).0 == Truth::No {
+                    continue;
+                }
+            }
+            Truth::Yes => (),
         }
         if candidates.len() == limit {
             visited = i;
             break;
         }
-        candidates.push((i, row));
+        candidates.push((i, row, skipped));
     }
-    let mut page = Page {
-        commit: snapshot.commit_oid().to_string(),
-        items: Vec::new(),
-        scanned: 0,
-        skipped: 0,
-        next: None,
-    };
+    let mut page = Page::for_commit(snapshot.commit_oid());
     let mut verified = 0;
     'verify: for batch in candidates.chunks(FILE_READ_BATCH) {
-        let matches = futures_util::future::try_join_all(batch.iter().map(|(_, row)| async {
+        let matches = futures_util::future::try_join_all(batch.iter().map(|(_, row, _)| async {
             // The persisted artifact only selects candidates. The immutable
             // Git tree still proves each returned path and supplies its text.
             let entry = snapshot
@@ -57,38 +74,24 @@ pub(super) async fn inspect(
                     invariant: "code index path disagreed with the pinned Git tree",
                 });
             }
-            if pattern.paths_only {
-                Ok(Inspection::Match(FileMatches {
-                    path: display_path(entry.path.as_bytes()),
-                    path_hex: encode_hex(entry.path.as_bytes()),
-                    lines: Vec::new(),
-                    more_lines: false,
-                }))
-            } else {
-                file_matches(snapshot, &entry, &pattern.matcher, operation).await
-            }
+            pattern.inspect_entry(&entry, scope, operation).await
         }))
         .await?;
-        if !pattern.paths_only {
-            verified += batch.len();
-        }
-        for ((position, _), result) in batch.iter().zip(matches) {
+        verified += matches.iter().filter(|(_, read)| *read).count();
+        for ((position, _, skipped_before), (result, _)) in batch.iter().zip(matches) {
+            page.skipped += usize::from(matches!(result, Inspection::Skipped));
             if let Inspection::Match(found) = result {
                 page.items.push(found);
                 if page.items.len() == window.results {
                     visited = position + 1;
+                    skipped = *skipped_before;
                     break 'verify;
                 }
             }
         }
     }
     page.scanned = visited;
-    if !pattern.paths_only {
-        page.skipped = range[..visited]
-            .iter()
-            .filter(|row| row.filter.is_none())
-            .count();
-    }
+    page.skipped += skipped;
     let after = visited
         .checked_sub(1)
         .filter(|_| visited < range.len())
@@ -99,17 +102,5 @@ pub(super) async fn inspect(
         after,
         acceleration: Acceleration::Indexed,
         verified,
-    })
-}
-
-fn eligible(row: &Row, pattern: &Pattern) -> bool {
-    if pattern.paths_only {
-        return pattern.matcher.is_match(&display_path(row.path.as_bytes()));
-    }
-    row.filter.as_ref().is_some_and(|mask| {
-        pattern
-            .mask
-            .as_ref()
-            .is_none_or(|query| mask.may_contain(query, pattern.case_sensitive))
     })
 }

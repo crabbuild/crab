@@ -86,6 +86,7 @@ pub(super) async fn list(
         repository,
         principal: current,
         organization_owner,
+        topics,
     } in matches
     {
         let protections = crate::repository::settings::load(&server, &repository).await?;
@@ -96,6 +97,7 @@ pub(super) async fn list(
             "description": repository.config.description,
             "access": if current.can_write(repository.id) { "write" } else { "read" },
             "can_admin": current.can_admin(repository.id),
+            "can_maintain": current.can_maintain(repository.id),
             "can_fork": organization_owner && repository.forked_from.is_none(),
             "protection_version": protections.version,
             "protected_branches": protections.rules,
@@ -104,6 +106,9 @@ pub(super) async fn list(
         });
         if let Some(organization) = repository.organization {
             view["organization_id"] = json!(organization);
+        }
+        if !topics.is_empty() {
+            view["topics"] = json!(topics);
         }
         if let Some(source) = repository
             .forked_from
@@ -118,18 +123,30 @@ pub(super) async fn list(
     if !principal.is_local()
         && repositories
             .iter()
-            .any(|repo| repo.get("organization_id").is_some())
+            .any(|repo| repo.get("organization_id").is_some() || repo.get("topics").is_some())
     {
-        // Settings reads may yield after a change to the organization role.
-        let current: std::collections::HashSet<_> =
+        // Recheck access and topics after potentially slow settings reads.
+        let current: std::collections::HashMap<_, _> =
             visible(&server, &principal, address, selection.organization)
                 .await?
                 .into_iter()
-                .map(|visible| visible.repository.id.to_string())
+                .map(|visible| (visible.repository.id.to_string(), visible.topics))
                 .collect();
-        repositories.retain(|repo| {
-            repo.get("organization_id").is_none()
-                || repo["id"].as_str().is_some_and(|id| current.contains(id))
+        repositories.retain_mut(|repo| {
+            if repo.get("organization_id").is_none() && repo.get("topics").is_none() {
+                return true;
+            }
+            let Some(topics) = repo["id"].as_str().and_then(|id| current.get(id)) else {
+                return false;
+            };
+            if let Some(fields) = repo.as_object_mut() {
+                if topics.is_empty() {
+                    fields.remove("topics");
+                } else {
+                    fields.insert("topics".into(), json!(topics));
+                }
+            }
+            true
         });
     }
     Ok(Json(json!({"repositories":repositories})))
@@ -137,6 +154,7 @@ pub(super) async fn list(
 
 pub(super) struct VisibleRepository {
     pub(super) repository: Arc<crate::repository::Repository>,
+    pub(super) topics: Vec<String>,
     principal: Principal,
     organization_owner: bool,
 }
@@ -169,22 +187,25 @@ pub(super) async fn visible_matching(
     if selected.is_empty() {
         return Ok(Vec::new());
     }
-    let grants = if principal.is_local() {
+    let document = if principal.is_local() {
         None
     } else {
         let catalog = server.catalog().ok_or(app::Error::NotFound)?;
         Some(
             catalog
-                .load()
+                .load_snapshot()
                 .await
                 .map_err(|error| app::Error::Membership(Box::new(error)))?
-                .0
-                .repositories
-                .into_iter()
-                .map(|record| (record.id, record))
-                .collect::<std::collections::HashMap<_, _>>(),
+                .0,
         )
     };
+    let grants = document.as_ref().map(|document| {
+        document
+            .repositories
+            .iter()
+            .map(|record| (record.id, record))
+            .collect::<std::collections::HashMap<_, _>>()
+    });
     let issuer = server
         .auth
         .as_ref()
@@ -196,7 +217,7 @@ pub(super) async fn visible_matching(
                 && let Some(organization) = record.organization_id()
             {
                 let source = record
-                    .access_record(record.forked_from.and_then(|id| grants.get(&id)))
+                    .access_record(record.forked_from.and_then(|id| grants.get(&id).copied()))
                     .map_err(|error| app::Error::Membership(Box::new(error)))?;
                 let include = organizations.entry(organization).or_insert(false);
                 *include |= source
@@ -210,17 +231,22 @@ pub(super) async fn visible_matching(
         crate::repository::access::organization_grants(server, principal, organizations).await?;
     let mut visible = Vec::new();
     for repository in selected {
+        let record = grants
+            .as_ref()
+            .and_then(|grants| grants.get(&repository.id))
+            .copied();
         let current = if let Some(grants) = &grants {
-            let Some(record) = grants.get(&repository.id).filter(|record| {
+            let Some(record) = record.filter(|record| {
                 record.owner == repository.config.owner
                     && record.name == repository.config.name
                     && record.organization_id() == repository.organization
+                    && record.ownership_epoch == repository.ownership_epoch
                     && record.forked_from == repository.forked_from
             }) else {
                 continue;
             };
             let source = record
-                .access_record(record.forked_from.and_then(|id| grants.get(&id)))
+                .access_record(record.forked_from.and_then(|id| grants.get(&id).copied()))
                 .map_err(|error| app::Error::Membership(Box::new(error)))?;
             let mut config = repository.config.clone();
             config.members = source.members.clone();
@@ -250,6 +276,10 @@ pub(super) async fn visible_matching(
             .and_then(|id| organization_grants.get(&id))
             .is_some_and(|grant| grant.owner);
         visible.push(VisibleRepository {
+            topics: record.map_or_else(
+                || repository.topics.clone(),
+                |record| record.topics.names.clone(),
+            ),
             repository,
             principal: current,
             organization_owner,
@@ -541,6 +571,15 @@ mod tests {
             created,
             json!({"id":pending.id,"owner":owner,"name":"first-repo"})
         );
+        h.write(
+            Method::PUT,
+            &format!("/api/repositories/{}/description", pending.id),
+            &alice,
+            json!({"version":0,"description":"An edited description"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
         let recovered: Value = h
             .write(Method::POST, route, &alice, request.clone())
             .await

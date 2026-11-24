@@ -1,12 +1,13 @@
 //! Optional search acceleration for one verified default-branch tree.
 
 mod format;
-pub(crate) use format::{Index, Mask, Row};
+pub(crate) mod symbols;
+pub(crate) use format::{Index, Mask, QueryMask, Row};
 
 use bytes::Bytes;
 use crab_remote_git::{
-    ContentClassification, GitPath, OperationContext, OperationKind, RemoteGitRepository,
-    RemoteGitSnapshot, Revision, TreeListingItem, TreeListingRequest,
+    BudgetDimension, OperationContext, OperationKind, RemoteGitRepository, RemoteGitSnapshot,
+    Revision, TreeListingItem, TreeListingRequest,
 };
 use crab_storage::{ETag, StorageError};
 use gix_hash::ObjectId;
@@ -22,10 +23,11 @@ use uuid::Uuid;
 use super::Repository;
 use crate::server::Server;
 
-const PATH: &str = "v2/derived/code-search-v1";
+const PATH: &str = "v2/derived/code-search-v3";
 const MAX_FILE_BYTES: u64 = 256 * 1024;
 const BUILD_PAGE: usize = 96;
 const BUILD_CONCURRENCY: usize = 8;
+const BUILD_PARSE_JOBS: usize = 4;
 const MAX_INDEX_BYTES: usize = 32 * 1024 * 1024;
 const CACHE_BYTES: usize = 64 * 1024 * 1024;
 
@@ -72,21 +74,32 @@ impl Cache {
 }
 
 pub(crate) async fn text(
-    snapshot: &RemoteGitSnapshot,
-    path: &GitPath,
     oid: ObjectId,
     operation: &OperationContext,
 ) -> crab_remote_git::Result<Option<String>> {
-    let metadata = operation.read_object_metadata(oid).await?;
-    if metadata.size > MAX_FILE_BYTES {
+    // The caller already proved the blob and path through the pinned Git tree.
+    let Some(blob) = operation.read_object_at_most(oid, MAX_FILE_BYTES).await? else {
         return Ok(None);
+    };
+    if blob.kind != gix_object::Kind::Blob {
+        return Err(crab_remote_git::Error::ObjectKind {
+            oid,
+            expected: gix_object::Kind::Blob,
+            actual: blob.kind,
+        });
     }
-    let blob = snapshot.read_blob(path, operation).await?;
-    if blob.metadata.classification != ContentClassification::OrdinaryGit || blob.bytes.contains(&0)
+    operation
+        .charge(BudgetDimension::ResponseBytes, blob.data.len() as u64)
+        .await?;
+    if blob.data.contains(&0)
+        || !matches!(
+            crab_git::classify(&blob.data),
+            crab_git::PointerKind::NotAPointer
+        )
     {
         return Ok(None);
     }
-    Ok(String::from_utf8(blob.bytes.to_vec()).ok())
+    Ok(std::str::from_utf8(&blob.data).ok().map(str::to_owned))
 }
 
 pub(crate) async fn load(
@@ -217,10 +230,17 @@ async fn build(
         .and_then(|index| index.rows.as_ref())
         .into_iter()
         .flatten()
-        .map(|row| (row.oid, &row.filter))
+        // The parser depends on the extension even when a rename keeps the same blob.
+        .map(|row| {
+            (
+                (row.oid, symbols::Syntax::for_path(row.path.as_bytes())),
+                row,
+            )
+        })
         .collect();
     let tree = snapshot.root_tree_oid();
     let mut size = format::OVERHEAD;
+    let mut row_weight = 0;
     let mut after = None;
     let mut rows = Vec::new();
     loop {
@@ -242,13 +262,12 @@ async fn build(
                             invariant: "ungrouped code index received a grouped path",
                         });
                     };
-                    let data = match previous.get(&entry.oid) {
-                        Some(filter) => BuildData::Reused((*filter).clone()),
-                        None => BuildData::Text(
-                            text(snapshot, &entry.path, entry.oid, &operation).await?,
-                        ),
+                    let syntax = symbols::Syntax::for_path(entry.path.as_bytes());
+                    let data = match previous.get(&(entry.oid, syntax)) {
+                        Some(row) => BuildData::Reused(row.filter.clone(), row.symbols.clone()),
+                        None => BuildData::Text(text(entry.oid, &operation).await?),
                     };
-                    Ok((entry.path.clone(), entry.oid, data))
+                    Ok((entry.path.clone(), entry.oid, syntax, data))
                 }))
                 .await?;
                 batch.extend(found);
@@ -257,24 +276,56 @@ async fn build(
         }
         .await;
         let (batch, more) = operation.finish(page).await?;
-        let page = tokio::task::spawn_blocking(move || {
-            batch
-                .into_iter()
-                .map(|(path, oid, data)| Row {
-                    path,
-                    oid,
-                    filter: match data {
-                        BuildData::Reused(filter) => filter,
-                        BuildData::Text(text) => text.as_deref().map(Mask::from_text),
-                    },
-                })
-                .collect::<Vec<_>>()
-        })
+        let partition_size = batch.len().div_ceil(BUILD_PARSE_JOBS).max(1);
+        let mut batch = batch.into_iter();
+        let partitions = std::iter::from_fn(|| {
+            let partition: Vec<_> = batch.by_ref().take(partition_size).collect();
+            (!partition.is_empty()).then_some(partition)
+        });
+        // Run independently admitted partitions in parallel, then assemble
+        // them in tree order so the published index keeps its path cursor.
+        let parsed = futures_util::future::try_join_all(partitions.map(|partition| {
+            let parse_cancel = cancel.clone();
+            server.runtime.run_cpu(cancel, move || {
+                partition
+                    .into_iter()
+                    .map(|(path, oid, syntax, data)| {
+                        if parse_cancel.is_cancelled() {
+                            return Err(crab_remote_git::Error::Cancelled);
+                        }
+                        let (filter, symbols) = match data {
+                            BuildData::Reused(filter, symbols) => (filter, symbols),
+                            BuildData::Text(text) => {
+                                let filter = text.as_deref().map(Mask::from_text);
+                                let symbols =
+                                    syntax.zip(text.as_deref()).and_then(|(syntax, text)| {
+                                        symbols::definitions(syntax, text, &parse_cancel).map(
+                                            |defs| {
+                                                Mask::from_symbols(
+                                                    defs.into_iter()
+                                                        .map(|definition| &text[definition.bytes]),
+                                                )
+                                            },
+                                        )
+                                    });
+                                (filter, symbols)
+                            }
+                        };
+                        Ok(Row {
+                            path,
+                            oid,
+                            filter,
+                            symbols,
+                        })
+                    })
+                    .collect::<crab_remote_git::Result<Vec<_>>>()
+            })
+        }))
         .await?;
+        let page = parsed.into_iter().flatten().collect::<Vec<_>>();
         size += page.iter().map(Row::encoded_size).sum::<usize>();
-        if size > MAX_INDEX_BYTES
-            || size + (rows.len() + page.len()) * size_of::<Row>() > CACHE_BYTES
-        {
+        row_weight += page.len() * size_of::<Row>();
+        if size > MAX_INDEX_BYTES || size + row_weight > CACHE_BYTES {
             return Ok(Index::new(tree, None, format::OVERHEAD));
         }
         after = page
@@ -291,7 +342,7 @@ async fn build(
 }
 
 enum BuildData {
-    Reused(Option<Mask>),
+    Reused(Option<Mask>, Option<Mask>),
     Text(Option<String>),
 }
 

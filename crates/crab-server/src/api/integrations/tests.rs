@@ -392,19 +392,7 @@ async fn native_browser_shows_a_new_github_actions_delivery_after_refresh() {
             &format!("{}/team/private/settings/integrations", h.origin),
         ])
         .await;
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    browser
-        .run(&[
-            "find",
-            "role",
-            "button",
-            "click",
-            "--name",
-            "Continue to sign in",
-        ])
-        .await;
+    browser.sign_in().await;
     browser.run(&["wait", "--text", "Recent deliveries"]).await;
     browser
         .run(&[

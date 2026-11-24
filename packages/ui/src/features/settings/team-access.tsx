@@ -13,14 +13,13 @@ import type {
   TeamAccessUpdate,
   TeamGrant,
 } from "@/lib/contracts";
+import {
+  isRepositoryRole,
+  repositoryRoleLabels,
+  repositoryRoles,
+} from "@/lib/repository-roles";
 import { teamHref } from "../organizations/teams/model";
 import { TeamPicker } from "./team-picker";
-
-const roles = [
-  { value: "read", label: "Read" },
-  { value: "triage", label: "Triage" },
-  { value: "write", label: "Write" },
-] as const;
 
 export function RepositoryTeamSettings({
   repo,
@@ -210,22 +209,20 @@ function GrantEditor({
                   disabled={locked || !name}
                   value={grant.access}
                   onChange={(event) => {
-                    const role = roles.find(
-                      (item) => item.value === event.target.value,
-                    );
-                    if (role)
+                    const role = event.target.value;
+                    if (isRepositoryRole(role))
                       edit(
                         draft.map((item) =>
                           item.team === grant.team
-                            ? { ...item, access: role.value }
+                            ? { ...item, access: role }
                             : item,
                         ),
                       );
                   }}
                 >
-                  {roles.map(({ value, label }) => (
+                  {repositoryRoles.map((value) => (
                     <NativeSelectOption key={value} value={value}>
-                      {label}
+                      {repositoryRoleLabels[value]}
                     </NativeSelectOption>
                   ))}
                 </NativeSelect>
@@ -263,6 +260,8 @@ function GrantEditor({
           <dd>Manage issues and pull requests without pushing code.</dd>
           <dt className="font-medium">Write</dt>
           <dd>Push changes and collaborate on the repository.</dd>
+          <dt className="font-medium">Admin</dt>
+          <dd>Manage repository settings and direct collaborator access.</dd>
         </dl>
       </details>
       {error && (

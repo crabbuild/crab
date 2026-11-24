@@ -787,6 +787,7 @@ async fn prepare_batch(
             policy: move |_: &str| crab_git::receive_plan::RefPolicy {
                 allow_delete: true,
                 allow_non_fast_forward: matches!(policy, WritePolicy::ForceWithLease),
+                inspect_linear_history: false,
             },
         },
     )

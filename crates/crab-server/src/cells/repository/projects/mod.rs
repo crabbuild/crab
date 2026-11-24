@@ -7,11 +7,13 @@ use crate::cells::{
     Error, Result,
     application::{Mutation, MutationResult, Read, SqlValue},
 };
+use grouping::GroupBy;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 mod commands;
+pub(crate) mod grouping;
 pub(crate) mod hierarchy;
 mod history;
 pub(crate) mod preparation;
@@ -20,8 +22,8 @@ mod templates;
 pub(crate) use commands::{Change, Command, Outcome, Request};
 pub(crate) use history::{GetHistory, HistoryQuery};
 pub(crate) use reads::{
-    CandidateQuery, Candidates, GetProject, ItemQuery, Items, ListProjects, Memberships,
-    ProjectQuery, WorkQuery, WorkSummaries,
+    CandidateQuery, Candidates, GetProject, IssueTypeField, ItemQuery, Items, ListProjects,
+    Memberships, ProjectQuery, WorkQuery, WorkSummaries,
 };
 pub(crate) use templates::templates;
 
@@ -41,6 +43,12 @@ pub(crate) struct View {
     pub query: String,
     pub status: Option<String>,
     pub hide_closed: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub show_issue_type: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_type_filter: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_by: Option<GroupBy>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -147,6 +155,17 @@ impl Definition {
                     && text_valid(&v.name, 60, true)
                     && text_valid(&v.query, 256, false)
                     && v.status.as_ref().is_none_or(|s| self.statuses.contains(s))
+                    && v.issue_type_filter.as_deref().is_none_or(|value| {
+                        super::issues::issue_type::search::Filter::parse(value).is_ok()
+                    })
+                    && match v.group_by {
+                        Some(GroupBy::Field(id)) => self.fields.iter().any(|field| {
+                            field.id == id
+                                && (v.layout != Layout::Board
+                                    || matches!(field.definition, FieldKind::Select { .. }))
+                        }),
+                        _ => true,
+                    }
             })
     }
 }

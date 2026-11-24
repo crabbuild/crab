@@ -52,6 +52,16 @@ pub(crate) enum Error {
     CommitNotFound,
     #[error("Only the author can edit this content")]
     Forbidden,
+    #[error("You do not have permission to edit this issue or comment")]
+    IssueEditPermission,
+    #[error("This conversation is locked")]
+    ConversationLocked,
+    #[error("You do not have permission to lock or unlock this conversation")]
+    ConversationLockPermission,
+    #[error("You do not have permission to hide or unhide comments here")]
+    CommentModerationPermission,
+    #[error("Only the author or a repository writer can remove edit history")]
+    EditHistoryPermission,
     #[error("Archived repositories are read-only")]
     Archived,
     #[error("Pull request authors cannot approve or request changes on their own changes")]
@@ -66,6 +76,14 @@ pub(crate) enum Error {
     RepositoryChanged,
     #[error("The repository name or creation request is already in use")]
     RepositoryNameUnavailable,
+    #[error("An organization ruleset protects this repository name")]
+    RepositoryNameProtected,
+    #[error("Repository name changes are temporarily unavailable")]
+    RepositoryNamePublication(#[source] crab_remote::publication::Error),
+    #[error("The repository description changed. Reload the description before saving")]
+    RepositoryDescriptionChanged,
+    #[error("The repository topics changed. Reload the topics before saving")]
+    RepositoryTopicsChanged,
     #[error("Repository creation failed")]
     RepositorySetup(#[source] Box<crate::Error>),
     #[error("This list changed; reload from the first page")]
@@ -94,8 +112,10 @@ pub(crate) enum Error {
     MergeMethodDisabled,
     #[error("Repository merge methods changed")]
     MergeMethodsChanged,
-    #[error("Administrator access is required to manage merge methods")]
+    #[error("Maintain access is required to manage merge methods")]
     MergeSettingsPermission,
+    #[error("Administrator access is required to manage merge queue settings")]
+    MergeQueueSettingsPermission,
     #[error("Git writes are busy")]
     MergeBusy,
     #[error("Write access is required to merge pull requests")]
@@ -104,6 +124,10 @@ pub(crate) enum Error {
     MergePending,
     #[error("Protected branch review requirements are not satisfied")]
     MergeBlocked,
+    #[error("A ruleset restricts updates to the base branch")]
+    MergeUpdatesRestricted,
+    #[error("The base branch requires linear history")]
+    MergeLinearHistory,
     #[error("Required checks are not satisfied on the merge candidate")]
     MergeCandidateChecks,
     #[error("Unresolved review conversations block the merge")]
@@ -126,6 +150,8 @@ pub(crate) enum Error {
     MilestonePermission,
     #[error("Write access is required to manage linked work")]
     LinkPermission,
+    #[error("Triage access is required to manage issue dependencies")]
+    DependencyPermission,
     #[error("Write access is required to manage projects and sub-issues")]
     ProjectPermission,
     #[error("A milestone with this title already exists")]
@@ -140,6 +166,8 @@ pub(crate) enum Error {
     AssigneePermission,
     #[error("Write access is required to manage releases")]
     ReleasePermission,
+    #[error("Invalid release notes YAML")]
+    ReleaseNotesYaml(#[source] serde_yaml::Error),
     #[error("{0}")]
     RefRule(&'static str),
     #[error("A release already exists for this tag or the tag points to another commit")]
@@ -254,6 +282,7 @@ impl IntoResponse for Error {
                     | Self::Membership(_)
                     | Self::IdentityAuthority(_)
                     | Self::TransferPublication(_)
+                    | Self::RepositoryNamePublication(_)
                     | Self::Merge(_)
                     | Self::MergeObject(_)
                     | Self::Release(_)
@@ -325,6 +354,31 @@ impl IntoResponse for Error {
                 StatusCode::FORBIDDEN,
                 "forbidden",
                 "Only the author can edit this content",
+            ),
+            Self::IssueEditPermission => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "You do not have permission to edit this issue or comment",
+            ),
+            Self::ConversationLocked => (
+                StatusCode::LOCKED,
+                "conversation_locked",
+                "This conversation is locked",
+            ),
+            Self::ConversationLockPermission => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "You do not have permission to lock or unlock this conversation",
+            ),
+            Self::CommentModerationPermission => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "You do not have permission to hide or unhide comments here",
+            ),
+            Self::EditHistoryPermission => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Only the author or a repository writer can remove edit history",
             ),
             Self::Archived => (
                 StatusCode::FORBIDDEN,
@@ -404,7 +458,12 @@ impl IntoResponse for Error {
             Self::MergeSettingsPermission => (
                 StatusCode::FORBIDDEN,
                 "forbidden",
-                "Administrator access is required to manage merge methods",
+                "Maintain access is required to manage merge methods",
+            ),
+            Self::MergeQueueSettingsPermission => (
+                StatusCode::FORBIDDEN,
+                "merge_queue_settings_permission",
+                "Administrator access is required to manage merge queue settings",
             ),
             Self::MergeBusy => (
                 StatusCode::TOO_MANY_REQUESTS,
@@ -435,6 +494,16 @@ impl IntoResponse for Error {
                 StatusCode::CONFLICT,
                 "unresolved_conversations",
                 "Resolve all review conversations before merging",
+            ),
+            Self::MergeUpdatesRestricted => (
+                StatusCode::FORBIDDEN,
+                "ruleset_restricts_updates",
+                "A ruleset restricts updates to the base branch",
+            ),
+            Self::MergeLinearHistory => (
+                StatusCode::CONFLICT,
+                "linear_history_required",
+                "The base branch requires linear history. Use squash or rebase",
             ),
             Self::MergeHeadBehind => (
                 StatusCode::CONFLICT,
@@ -477,6 +546,11 @@ impl IntoResponse for Error {
                 "forbidden",
                 "Write access is required to manage linked work",
             ),
+            Self::DependencyPermission => (
+                StatusCode::FORBIDDEN,
+                "dependency_permission",
+                "Triage access is required to manage issue dependencies",
+            ),
             Self::MilestoneConflict => (
                 StatusCode::CONFLICT,
                 "milestone_conflict",
@@ -517,6 +591,11 @@ impl IntoResponse for Error {
                 StatusCode::FORBIDDEN,
                 "forbidden",
                 "Write access is required to manage releases",
+            ),
+            Self::ReleaseNotesYaml(_) => (
+                StatusCode::BAD_REQUEST,
+                "release_notes_yaml",
+                "Use valid YAML with supported changelog fields in the release note configuration",
             ),
             Self::ReleaseConflict => (
                 StatusCode::CONFLICT,
@@ -600,6 +679,26 @@ impl IntoResponse for Error {
                 StatusCode::CONFLICT,
                 "repository_name_unavailable",
                 "The repository name or creation request is already in use",
+            ),
+            Self::RepositoryNameProtected => (
+                StatusCode::FORBIDDEN,
+                "repository_name_protected",
+                "An organization ruleset protects this repository name",
+            ),
+            Self::RepositoryNamePublication(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "repository_name_busy",
+                "Repository name changes are temporarily unavailable. Retry the same submission shortly",
+            ),
+            Self::RepositoryDescriptionChanged => (
+                StatusCode::CONFLICT,
+                "repository_description_changed",
+                "The repository description changed. Reload the description before saving",
+            ),
+            Self::RepositoryTopicsChanged => (
+                StatusCode::CONFLICT,
+                "repository_topics_changed",
+                "The repository topics changed. Reload the topics before saving",
             ),
             Self::RepositorySetup(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -943,6 +1042,11 @@ pub(crate) async fn membership(
             crate::catalog::CatalogError::NotFound => Error::NotFound,
             error => Error::Membership(Box::new(error)),
         })?;
+    // Catalog lookup is case-insensitive. A pinned route from before a
+    // case-only rename must not authorize rules against the old spelling.
+    if snapshot.name != repo.config.name {
+        return Err(Error::NotFound);
+    }
     let current = membership_snapshot(server, principal, repo, snapshot).await?;
     if !current.principal.can_read(repo.id) {
         return Err(Error::NotFound);
@@ -957,7 +1061,10 @@ pub(crate) async fn membership_snapshot(
     snapshot: crate::catalog::MembershipSnapshot,
 ) -> Result<Membership> {
     let organization = snapshot.organization.as_ref().map(|access| access.id);
-    if snapshot.repository_id != repo.id || organization != repo.organization {
+    if snapshot.repository_id != repo.id
+        || organization != repo.organization
+        || snapshot.ownership_epoch != repo.ownership_epoch
+    {
         return Err(Error::NotFound);
     }
     membership_for_config(server, principal, &repo.config, snapshot).await
@@ -989,6 +1096,7 @@ pub(crate) async fn membership_for_config(
         .map_or_else(Vec::new, |access| access.teams);
     let grant = if let Some(organization) = organization
         && !principal.is_deploy()
+        && principal.automation_credential().is_none()
     {
         crate::repository::access::organization_grants(
             server,
@@ -1006,13 +1114,25 @@ pub(crate) async fn membership_for_config(
     let inherited = grant
         .as_ref()
         .and_then(|grant| crate::repository::access::organization_access(grant, &teams));
-    let principal = principal.with_catalog_membership(
-        snapshot.repository_id,
-        &config,
-        issuer,
-        inherited,
-        snapshot.renamed,
-    );
+    let principal = if let Some(credential) = principal.automation_credential() {
+        credential
+            .authorize(
+                server,
+                principal,
+                organization,
+                snapshot.repository_id,
+                snapshot.ownership_epoch,
+            )
+            .await?
+    } else {
+        principal.with_catalog_membership(
+            snapshot.repository_id,
+            &config,
+            issuer,
+            inherited,
+            snapshot.renamed,
+        )
+    };
     let grant = grant.unwrap_or_default();
     let mut review_teams = grant.teams;
     let mut bypass_teams = grant.bypass_teams.clone();
@@ -1100,8 +1220,13 @@ pub(crate) fn search_query(value: Option<&str>) -> Result<Option<String>> {
     Ok(Some(value.to_owned()))
 }
 
+pub(crate) const MAX_TEXT_BODY_BYTES: usize = 64 * 1024;
+
 pub(crate) fn body(value: &str, required: bool) -> Result<()> {
-    if value.len() > 65_536 || value.contains('\0') || (required && value.trim().is_empty()) {
+    if value.len() > MAX_TEXT_BODY_BYTES
+        || value.contains('\0')
+        || (required && value.trim().is_empty())
+    {
         return Err(Error::Invalid(
             "Content must be at most 64 KiB, without NUL characters; comments cannot be empty",
         ));

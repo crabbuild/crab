@@ -2427,6 +2427,94 @@ test("delimited workbenches preserve encoded text and align their headers", asyn
   expect(rangeRequests.some((value) => value.startsWith("bytes="))).toBe(true);
 });
 
+test("Git LFS previews load on request and respect the stored file size", async ({
+  page,
+}) => {
+  const markdown =
+    "# Stored Markdown\n\nThe payload came from Git LFS. [Sibling document](sibling.md)";
+  const names = {
+    "stored.md": markdown.length,
+    "oversized.md": 2 * 1024 * 1024,
+    "large.csv": 51 * 1024 * 1024,
+    "unknown-size.csv": undefined,
+  };
+  const commit = "e".repeat(40);
+  const artifactReads: string[] = [];
+  await page.route(
+    "**/api/repos/team/project/file-preview?*",
+    async (route) => {
+      const path = new URL(route.request().url()).searchParams.get("path_hex");
+      const file = Object.entries(names).find(
+        ([name]) => pathHex(name) === path,
+      );
+      if (!file) return route.fallback();
+      const pointer = `version https://git-lfs.github.com/spec/v1\noid sha256:${"f".repeat(64)}\nsize ${file[1] ?? 100_000_000}\n`;
+      return route.fulfill({
+        json: {
+          oid: pathOid,
+          size: pointer.length,
+          stored_size: file[1],
+          mode: "100644",
+          classification: "LfsPointer",
+          preview: { state: "inline", text: pointer },
+          commit,
+          generation: 1,
+        } satisfies FilePreview,
+      });
+    },
+  );
+  await page.route("**/api/repos/team/project/lfs-content?*", async (route) => {
+    artifactReads.push(route.request().url());
+    return route.fulfill({
+      body: markdown,
+      contentType: "application/octet-stream",
+    });
+  });
+
+  await page.goto("/team/project/blob/main/stored.md");
+  await expect(
+    page.getByRole("button", { name: "Pointer", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  expect(artifactReads).toEqual([]);
+  await page.getByRole("button", { name: "Preview", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Stored Markdown" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Sibling document" }),
+  ).toHaveAttribute("href", `/team/project/blob/${commit}/sibling.md`);
+  await expect(page.getByRole("link", { name: "Raw pointer" })).toHaveAttribute(
+    "href",
+    `/api/repos/team/project/blob?rev=${commit}&path_hex=${pathHex("stored.md")}`,
+  );
+  expect(
+    new Set(artifactReads.map((url) => new URL(url).searchParams.get("rev"))),
+  ).toEqual(new Set([commit]));
+  const previewReads = artifactReads.length;
+
+  for (const [name, limit] of [
+    ["oversized.md", "1.0 MB"],
+    ["large.csv", "50.0 MB"],
+  ]) {
+    await page.goto(`/team/project/blob/main/${name}`);
+    await page.getByRole("button", { name: "Preview", exact: true }).click();
+    await expect(
+      page.getByText(`Preview is limited to ${limit}`),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: "Download Git LFS file" }),
+    ).toBeVisible();
+  }
+  await page.goto("/team/project/blob/main/unknown-size.csv");
+  await expect(
+    page.getByRole("link", { name: "Download Git LFS file" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Preview", exact: true }),
+  ).toHaveCount(0);
+  expect(artifactReads).toHaveLength(previewReads);
+});
+
 test("format-aware previews explore data, office files, media, and databases locally", async ({
   page,
 }) => {
@@ -3086,6 +3174,7 @@ test("code search preserves scope and links each match to the searched commit", 
     (route) => {
       const request = new URL(route.request().url());
       expect(request.searchParams.get("q")).toBe("render");
+      expect(request.searchParams.get("kind")).toBe("symbol");
       expect(request.searchParams.get("path")).toBe("src");
       expect(request.searchParams.get("rev")).toBe("refs/heads/main");
       expect(request.searchParams.get("case_sensitive")).toBe("true");
@@ -3113,9 +3202,9 @@ test("code search preserves scope and links each match to the searched commit", 
               lines: [
                 {
                   line: cursor ? 7 : 2,
-                  before: "export const ",
+                  before: "export function ",
                   matched: "render",
-                  after: " = 1",
+                  after: "() {}",
                 },
               ],
             },
@@ -3131,10 +3220,11 @@ test("code search preserves scope and links each match to the searched commit", 
     .click();
   const form = page.getByRole("search", { name: "Search repository code" });
   await form.getByLabel("Search text").fill("render");
+  await form.getByLabel("Search in").selectOption("symbol");
   await form.getByLabel("Directory (optional)").fill("src");
   await form.getByRole("checkbox", { name: "Match case" }).check();
   await form.getByRole("button", { name: "Search", exact: true }).click();
-  await expect(page).toHaveURL(/code-search\?.*q=render/);
+  await expect(page).toHaveURL(/code-search\?.*kind=symbol/);
   const results = page.getByRole("region", { name: "Code search results" });
   await expect(
     results.getByText("1 matching file", { exact: false }),

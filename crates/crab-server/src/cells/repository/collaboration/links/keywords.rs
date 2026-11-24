@@ -5,7 +5,7 @@ use crate::cells::repository::{
 
 const MAX_REFERENCES: usize = 32;
 
-pub(super) fn numbers(body: &str) -> Vec<u64> {
+pub(crate) fn numbers(body: &str) -> Vec<u64> {
     if !body.contains('#') {
         return Vec::new();
     }

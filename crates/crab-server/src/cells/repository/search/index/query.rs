@@ -45,6 +45,10 @@ pub(crate) struct SearchInput {
     pub people: Vec<super::super::people::Binding>,
     pub assignees: Vec<super::super::assignees::Binding>,
     pub review_context: Option<super::super::reviews::status::Context>,
+    #[serde(default)]
+    pub review_teams: super::super::reviews::teams::Bindings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_types: Option<super::super::issue_types::Binding>,
 }
 impl Default for SearchInput {
     fn default() -> Self {
@@ -57,6 +61,8 @@ impl Default for SearchInput {
             people: Vec::new(),
             assignees: Vec::new(),
             review_context: None,
+            review_teams: Default::default(),
+            issue_types: None,
         }
     }
 }
@@ -66,6 +72,11 @@ impl SearchInput {
             return Err("Discussion page size must be 1–50");
         }
         Query::parse(self.query.as_deref())?;
+        if self.issue_types.as_ref().is_some_and(|types| {
+            types.organization.is_nil() || types.names.len() > 25 || types.version > MAX_NUMBER
+        }) {
+            return Err("Issue type search scope is invalid");
+        }
         if let Some(cursor) = self.before.as_deref() {
             Cursor::decode(cursor)?;
         }
@@ -91,6 +102,7 @@ pub(crate) struct Page<T> {
     pub assigned_to_me: bool,
     pub review_requested_from_me: bool,
     pub navigation: super::super::navigation::StateNavigation,
+    pub lock_filter: super::super::navigation::LockFilter,
     pub labels: Vec<LabelSummary>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -127,6 +139,8 @@ struct Cursor {
     query: String,
     key: Key,
     subject: Subject,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expires_at_ms: Option<u64>,
 }
 impl Cursor {
     fn decode(value: &str) -> Result<Self, &'static str> {
@@ -149,6 +163,9 @@ impl Cursor {
                 .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
             || matches!(cursor.key, Key::Rank(rank) if !rank.is_finite() || rank < 0.0)
             || matches!(cursor.key, Key::Integer(key) if key > MAX_NUMBER)
+            || cursor
+                .expires_at_ms
+                .is_some_and(|expiry| expiry == 0 || expiry > MAX_NUMBER)
         {
             return Err("Discussion cursor fields are invalid");
         }
@@ -170,22 +187,32 @@ struct Candidate {
     metrics: Metrics,
 }
 
-#[derive(Default)]
 struct Bindings<'a> {
     values: Vec<SqlValue>,
     people: &'a [super::super::people::Binding],
     assignees: &'a [super::super::assignees::Binding],
     review: Option<super::super::reviews::status::Bound>,
+    review_teams: &'a super::super::reviews::teams::Bindings,
+    issue_types: &'a Option<super::super::issue_types::Binding>,
+    archived: bool,
+    now_ms: i64,
 }
 impl<'a> Bindings<'a> {
     fn new(
         input: &'a SearchInput,
         prepared: Option<&super::super::reviews::status::Prepared>,
+        archived: bool,
+        now_ms: i64,
     ) -> crate::cells::Result<Self> {
         let mut values = Self {
             people: &input.people,
             assignees: &input.assignees,
-            ..Self::default()
+            review: None,
+            values: Vec::new(),
+            review_teams: &input.review_teams,
+            issue_types: &input.issue_types,
+            archived,
+            now_ms,
         };
         if let Some(prepared) = prepared {
             values.review = Some(super::super::reviews::status::Bound::new(
@@ -211,6 +238,29 @@ impl<'a> Bindings<'a> {
             .identity?;
         Some(self.bind(SqlValue::Blob(identity.to_vec())))
     }
+
+    fn issue_type_matches(&mut self, name: Option<&str>) -> Option<String> {
+        let types = self.issue_types.as_ref()?;
+        let ids = match name {
+            Some(name) => vec![*types.names.get(name)?],
+            None => types.names.values().copied().collect(),
+        };
+        if ids.is_empty() {
+            return None;
+        }
+        let organization = SqlValue::Blob(types.organization.as_bytes().to_vec());
+        let epoch = SqlValue::Integer(i64::from(types.ownership_epoch));
+        let organization = self.bind(organization);
+        let epoch = self.bind(epoch);
+        let ids = ids
+            .into_iter()
+            .map(|id| self.bind(SqlValue::Blob(id.as_bytes().to_vec())))
+            .collect::<Vec<_>>()
+            .join(",");
+        Some(format!(
+            "SELECT issue FROM repository_issue_type_index WHERE organization = {organization} AND ownership_epoch = {epoch} AND type_id IN ({ids})"
+        ))
+    }
 }
 
 pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
@@ -223,6 +273,11 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
     let generation = ensure_ready(context)?;
     let revision = revision(context)?;
     let query = Query::parse(input.query.as_deref()).map_err(crate::cells::Error::Invalid)?;
+    let archived = query
+        .needs_lock_state()
+        .then(|| crate::cells::repository::settings::archived(context))
+        .transpose()?;
+    let now_ms = crate::cells::repository::timestamp(context.now_ms())?;
     let review = if query.needs_review_source() {
         Some(super::super::reviews::status::prepare(
             context,
@@ -240,6 +295,10 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         .map_err(crate::cells::Error::Invalid)?;
     query
         .validate_assignees(&input.assignees)
+        .map_err(crate::cells::Error::Invalid)?;
+    input
+        .review_teams
+        .validate(&query)
         .map_err(crate::cells::Error::Invalid)?;
     let identity = context.sql(&SqlBatch {
         statements: vec![statement(
@@ -262,9 +321,12 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         input.sort,
         input.direction,
         &query.expression,
+        archived,
         &input.people,
         &input.assignees,
         &input.review_context,
+        &input.review_teams,
+        &input.issue_types,
         review.as_ref().map(|prepared| &prepared.approvals),
     ))?)
     .to_hex()
@@ -280,10 +342,16 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
             || cursor.revision != revision
             || cursor.query != digest
             || (input.sort == Sort::Relevance) != matches!(cursor.key, Key::Rank(_))
+            || cursor.expires_at_ms.is_some_and(|expiry| expiry <= now_ms)
     }) {
         return Err(crate::cells::Error::StaleSearch);
     }
-    let mut bindings = Bindings::new(&input, review.as_ref())?;
+    let mut bindings = Bindings::new(
+        &input,
+        review.as_ref(),
+        archived.unwrap_or(false),
+        context.now_ms(),
+    )?;
     let kind_clause = kind_filter(subject_kind, &mut bindings);
     // Each counter describes its navigation query, even when the current query
     // selects only closed work. Rows and both targets share this native snapshot.
@@ -320,7 +388,12 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         .ok_or(crate::cells::Error::Invalid(
             "discussion count exceeds its range",
         ))?;
-    let mut bindings = Bindings::new(&input, review.as_ref())?;
+    let mut bindings = Bindings::new(
+        &input,
+        review.as_ref(),
+        archived.unwrap_or(false),
+        context.now_ms(),
+    )?;
     let kind_clause = kind_filter(subject_kind, &mut bindings);
     let predicate = expression(&query.expression, &mut bindings)?;
     let filter = format!("{kind_clause} AND ({predicate})");
@@ -427,6 +500,13 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
                 query: digest,
                 key: last.key.clone(),
                 subject: last.subject,
+                // The earliest expiry can change typed or negated lock predicates
+                // without a write. Do not seek through a different result set.
+                expires_at_ms: if archived == Some(false) {
+                    locks::next_expiry(context)?
+                } else {
+                    None
+                },
             }
             .encode()?,
         )
@@ -469,6 +549,7 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         assigned_to_me: query.assigned_to_me(),
         review_requested_from_me: query.review_requested_from_me(),
         navigation,
+        lock_filter: query.lock_filter(),
         labels,
     })
 }
@@ -531,10 +612,28 @@ fn scoped_expression(
             Term::ReviewStatus(super::super::reviews::status::Status::None) => super::super::reviews::status::UNREVIEWED.into(),
             Term::ReviewStatus(super::super::reviews::status::Status::ChangesRequested) => super::super::reviews::status::CHANGES_REQUESTED.into(),
             Term::ReviewStatus(status)=> bindings.review.as_ref().ok_or(crate::cells::Error::Invalid("Review source was not bound"))?.predicate(*status),
-            Term::Reviewer { kind, name } => bindings.person(name).map_or_else(|| "0".into(), |value| {
-                let predicate = kind.predicate();
-                format!("d.kind = 1 AND EXISTS (SELECT 1 FROM discussion_index_reviewers r WHERE r.pull = d.number AND r.identity = {value} AND ({predicate}))")
-            }),
+            Term::Reviewer { kind, name } => {
+                use super::super::reviews::Kind;
+                let direct = bindings.person(name).map_or_else(|| "0".into(), |value| {
+                    let predicate = kind.predicate();
+                    format!("d.kind = 1 AND EXISTS (SELECT 1 FROM discussion_index_reviewers r WHERE r.pull = d.number AND r.identity = {value} AND ({predicate}))")
+                });
+                if *kind == Kind::ReviewRequested && name == "@me" && !bindings.review_teams.mine.is_empty() {
+                    let teams = bindings.text(&serde_json::to_string(&bindings.review_teams.mine)?);
+                    let team = format!("EXISTS (SELECT 1 FROM discussion_index_team_requests t WHERE t.document=d.rowid AND t.team IN (SELECT value FROM json_each({teams})))");
+                    format!("(({direct}) OR (d.kind=1 AND {team}))")
+                } else {
+                    direct
+                }
+            }
+            Term::TeamReviewRequested(name) => {
+                if let Some(team) = bindings.review_teams.named(name) {
+                    let value = bindings.text(&team.to_string());
+                    format!("d.kind=1 AND EXISTS (SELECT 1 FROM discussion_index_team_requests t WHERE t.document=d.rowid AND t.team={value})")
+                } else {
+                    "0".into()
+                }
+            }
             Term::Milestone(title) => {
                 let value = bindings.text(title);
                 format!("EXISTS (SELECT 1 FROM discussion_index_milestones dm JOIN discussion_index_milestone_catalog m ON m.number = dm.milestone WHERE dm.document = d.rowid AND m.title_key = {value})")
@@ -547,9 +646,26 @@ fn scoped_expression(
             Term::Kind(subject_kind) => format!("d.kind = {}",kind(*subject_kind)),
             Term::Unmerged => "d.kind = 1 AND d.state <> 2".into(),
             Term::Draft(draft) => format!("d.kind = 1 AND d.draft = {}",u8::from(*draft)),
+            Term::Locked(locked) => {
+                if bindings.archived {
+                    u8::from(*locked).to_string()
+                } else {
+                    let now = bindings.bind(SqlValue::Integer(bindings.now_ms));
+                    let negate = if *locked { "" } else { "NOT " };
+                    format!("{negate}EXISTS (SELECT 1 FROM discussion_index_locks l WHERE l.document=d.rowid AND (l.expires_at_ms IS NULL OR l.expires_at_ms > {now}))")
+                }
+            }
             Term::Missing(Metadata::Label) => "NOT EXISTS (SELECT 1 FROM discussion_index_labels dl JOIN repository_labels l ON l.number = dl.label WHERE dl.document = d.rowid AND l.deleted_version IS NULL)".into(),
             Term::Missing(Metadata::Assignee) => "NOT EXISTS (SELECT 1 FROM discussion_index_assignees a WHERE a.document = d.rowid)".into(),
             Term::Missing(Metadata::Milestone) => "NOT EXISTS (SELECT 1 FROM discussion_index_milestones m WHERE m.document = d.rowid)".into(),
+            Term::IssueType(name) => bindings.issue_type_matches(Some(name)).map_or_else(
+                || "0".into(),
+                |matches| format!("d.kind = 0 AND d.number IN ({matches})"),
+            ),
+            Term::Missing(Metadata::IssueType) => bindings.issue_type_matches(None).map_or_else(
+                || "d.kind = 0".into(),
+                |matches| format!("d.kind = 0 AND d.number NOT IN ({matches})"),
+            ),
         }
     })
 }

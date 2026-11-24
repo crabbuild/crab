@@ -4,7 +4,7 @@ import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Field, FieldLabel } from "@/components/ui/field";
+import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
   NativeSelect,
@@ -37,12 +37,14 @@ export default function WorkspaceCodeSearch({ url }: { url: URL }) {
   if (organization) params.set("organization", organization);
   const q = url.searchParams.get("q")?.trim() ?? "";
   const directory = url.searchParams.get("directory") ?? "";
-  const paths = url.searchParams.get("kind") === "path";
+  const mode = url.searchParams.get("kind");
+  const kind =
+    mode === "content" || mode === "path" || mode === "symbol" ? mode : "any";
   const caseSensitive = url.searchParams.get("case_sensitive") === "true";
   const scope = params.toString();
   if (q) params.set("q", q);
   if (directory) params.set("directory", directory);
-  if (paths) params.set("kind", "path");
+  if (kind !== "any") params.set("kind", kind);
   if (caseSensitive) params.set("case_sensitive", "true");
   const [attempt, setAttempt] = useState(0);
   const search = params.toString();
@@ -81,7 +83,9 @@ export default function WorkspaceCodeSearch({ url }: { url: URL }) {
             .trim()
             .replace(/\/+$/, "");
           if (path) selected.set("directory", path);
-          if (values.get("kind") === "path") selected.set("kind", "path");
+          const kind = values.get("kind");
+          if (kind === "content" || kind === "path" || kind === "symbol")
+            selected.set("kind", kind);
           if (values.has("case_sensitive"))
             selected.set("case_sensitive", "true");
           const href = `/-/code-search?${selected}`;
@@ -89,7 +93,7 @@ export default function WorkspaceCodeSearch({ url }: { url: URL }) {
           else navigate(href);
         }}
       >
-        <div className="flex flex-wrap items-end gap-3">
+        <div className="flex flex-wrap items-start gap-3">
           <Field className="min-w-52 flex-1">
             <FieldLabel htmlFor="workspace-search-text">Search text</FieldLabel>
             <Input
@@ -97,16 +101,22 @@ export default function WorkspaceCodeSearch({ url }: { url: URL }) {
               name="q"
               type="search"
               required
-              maxLength={128}
+              maxLength={512}
+              aria-describedby="workspace-search-qualifiers"
               defaultValue={q}
             />
+            <FieldDescription id="workspace-search-qualifiers">
+              Combine terms with <code>AND</code>, <code>OR</code>, or{" "}
+              <code>NOT</code>. Use <code>/pattern/</code> for regex or quotes
+              for an exact phrase.
+            </FieldDescription>
           </Field>
-          <Button type="submit">
+          <Button className="mt-6" type="submit">
             <SearchIcon data-icon="inline-start" />
             Search
           </Button>
           {q && (
-            <Button asChild variant="ghost">
+            <Button asChild className="mt-6" variant="ghost">
               <Link href={form}>Clear search</Link>
             </Button>
           )}
@@ -117,12 +127,16 @@ export default function WorkspaceCodeSearch({ url }: { url: URL }) {
             <NativeSelect
               id="workspace-search-kind"
               name="kind"
-              defaultValue={paths ? "path" : "content"}
+              defaultValue={kind}
             >
+              <NativeSelectOption value="any">
+                Contents and paths
+              </NativeSelectOption>
               <NativeSelectOption value="content">
                 File contents
               </NativeSelectOption>
               <NativeSelectOption value="path">File paths</NativeSelectOption>
+              <NativeSelectOption value="symbol">Symbols</NativeSelectOption>
             </NativeSelect>
           </Field>
           <Field className="min-w-44 flex-1">
@@ -179,7 +193,7 @@ function WorkspaceResults({ search }: { search: string }) {
             <p role="status" className="text-sm text-muted-foreground">
               {scanned} {scanned === 1 ? "path" : "paths"} scanned on this page
               {skipped > 0 &&
-                ` · ${skipped} files skipped (large, binary, or stored separately)`}
+                ` · ${skipped} files skipped (size, format, or parsing limits)`}
             </p>
             <ul
               className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground"

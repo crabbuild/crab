@@ -118,6 +118,7 @@ const DELTA_PREFETCH_BATCH_SIZE: usize = 50_000;
 const MATERIALIZE_CHUNK_SIZE: usize = 256;
 // Small hashes stay inline; larger bodies must yield the async executor.
 const INLINE_CHECKSUM_BYTES: usize = 64 * 1024;
+const REQUESTED_OBJECT_SIZE: &str = "requested object bytes";
 // Large object batches are cheaper to resolve from the immutable pack indexes
 // than from one metadata point read per OID. Small reads retain the catalog
 // path because loading an index would cost more than the lookup it replaces.
@@ -151,6 +152,7 @@ struct PackedRangePlan {
 
 struct DeltaReadState {
     max_object_bytes: u64,
+    root_size_limit: Option<u64>,
     remaining_depth: usize,
     ancestors: HashSet<PackedEntryKey>,
     replan: Arc<AtomicBool>,
@@ -795,11 +797,53 @@ impl RemoteGitReader {
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<GitObject> {
+        self.read_selected(session, requested, None, budget, cancellation)
+            .await
+    }
+
+    pub(crate) async fn read_with_session_at_most(
+        self: &Arc<Self>,
+        session: &GitObjectLocatorSession,
+        requested: gix_hash::ObjectId,
+        maximum: u64,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<GitObject>> {
+        match self
+            .read_selected(session, requested, Some(maximum), budget, cancellation)
+            .await
+        {
+            Err(Error::LimitExceeded {
+                limit: REQUESTED_OBJECT_SIZE,
+                ..
+            }) => Ok(None),
+            result => result.map(Some),
+        }
+    }
+
+    async fn read_selected(
+        self: &Arc<Self>,
+        session: &GitObjectLocatorSession,
+        requested: gix_hash::ObjectId,
+        root_size_limit: Option<u64>,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<GitObject> {
         let key = crate::runtime::ObjectCacheKey::new(&self.identity, self.generation, requested);
+        let cached_limit = if root_size_limit.is_some() {
+            u64::MAX
+        } else {
+            self.limits.max_object_bytes
+        };
         if let Some(object) = self
-            .verified_cached_object(&key, self.limits.max_object_bytes, cancellation)
+            .verified_cached_object(&key, cached_limit, cancellation)
             .await?
         {
+            if let Some(maximum) = root_size_limit {
+                let size = object.data.len() as u64;
+                check_limit(REQUESTED_OBJECT_SIZE, size, maximum)?;
+                check_limit("decoded object bytes", size, self.limits.max_object_bytes)?;
+            }
             if object.kind == gix_object::Kind::Blob {
                 self.store
                     .observe_verified_git_cache_hit(requested.as_bytes());
@@ -813,6 +857,20 @@ impl RemoteGitReader {
             let locator = self
                 .locate(session, requested, budget, cancellation)
                 .await?;
+            if root_size_limit.is_some() {
+                // A size-capped root can be skipped before verifying its OID.
+                // Only the pinned origin entry may make that admission decision.
+                return self
+                    .read_origin_locator(
+                        session,
+                        (requested, locator),
+                        self.limits.max_object_bytes,
+                        root_size_limit,
+                        budget,
+                        cancellation,
+                    )
+                    .await;
+            }
             self.read_resolved_locator(
                 session,
                 requested,
@@ -2035,12 +2093,13 @@ impl RemoteGitReader {
     async fn read_origin_locator(
         self: &Arc<Self>,
         session: &GitObjectLocatorSession,
-        requested: gix_hash::ObjectId,
-        locator: GitObjectLocator,
+        root: (gix_hash::ObjectId, GitObjectLocator),
         max_object_bytes: u64,
+        root_size_limit: Option<u64>,
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<GitObject> {
+        let (requested, locator) = root;
         let replan = Arc::new(AtomicBool::new(false));
         let result = self
             .read_from_locator(
@@ -2050,6 +2109,7 @@ impl RemoteGitReader {
                 None,
                 DeltaReadState {
                     max_object_bytes,
+                    root_size_limit,
                     remaining_depth: self.limits.max_delta_depth,
                     ancestors: HashSet::new(),
                     replan: replan.clone(),
@@ -2094,6 +2154,7 @@ impl RemoteGitReader {
             None,
             DeltaReadState {
                 max_object_bytes,
+                root_size_limit,
                 remaining_depth: self.limits.max_delta_depth,
                 ancestors: HashSet::new(),
                 replan: Arc::new(AtomicBool::new(false)),
@@ -2133,9 +2194,13 @@ impl RemoteGitReader {
                     stage: CorruptionStage::Delta,
                 });
             }
-            let packed = match first_entry.take() {
-                Some(entry) => entry,
-                None => {
+            let packed = match (first_entry.take(), delta.root_size_limit.take()) {
+                (Some(entry), _) => entry,
+                (None, Some(maximum)) => {
+                    self.read_capped_entry(oid, locator, maximum, budget, cancellation)
+                        .await?
+                }
+                (None, None) => {
                     self.read_packed_entry(
                         oid,
                         locator,
@@ -2660,6 +2725,64 @@ impl RemoteGitReader {
                     &token,
                     &resident,
                 )
+            })
+            .await
+    }
+
+    async fn read_capped_entry(
+        &self,
+        oid: gix_hash::ObjectId,
+        locator: GitObjectLocator,
+        maximum: u64,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<PackedEntry> {
+        // The compressed entry is bounds- and CRC-checked once. Keep it for
+        // decoding after the size check so selecting an eligible root needs no
+        // second storage read.
+        let bytes = self
+            .fetch_packed_entry(oid, locator, budget, cancellation)
+            .await?;
+        let pack_offset = locator.location.pack_offset;
+        let entry = gix_pack::data::Entry::from_bytes(&bytes, pack_offset, 20)
+            .map_err(|source| Error::PackEntry { oid, source })?;
+        if entry.header.as_kind().is_some() {
+            check_limit(REQUESTED_OBJECT_SIZE, entry.decompressed_size, maximum)?;
+        }
+        let max_inflated = self.limits.max_inflated_entry_bytes;
+        let max_object = self.limits.max_object_bytes;
+        let inflated =
+            packed_entry_allocation_bytes(oid, pack_offset, &bytes, max_inflated, max_object)?;
+        budget
+            .charge(BudgetDimension::InflatedBytes, inflated)
+            .await?;
+        let token = cancellation.clone();
+        let resident = Arc::clone(&self.runtime.resident);
+        self.runtime
+            .run_cpu(cancellation, move || {
+                let packed = inflate_entry(
+                    oid,
+                    pack_offset,
+                    bytes,
+                    max_inflated,
+                    max_object,
+                    &token,
+                    &resident,
+                )?;
+                if packed.header.as_kind().is_none() {
+                    let instructions = delta::parse(&packed.inflated, usize::MAX)
+                        .map_err(|error| map_delta_error(error, oid))?;
+                    if instructions.result_size as u64 > maximum {
+                        delta::validate(&instructions, || token.is_cancelled())
+                            .map_err(|error| map_delta_error(error, oid))?;
+                        check_limit(
+                            REQUESTED_OBJECT_SIZE,
+                            instructions.result_size as u64,
+                            maximum,
+                        )?;
+                    }
+                }
+                Ok(packed)
             })
             .await
     }

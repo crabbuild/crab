@@ -12,7 +12,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
-    api::{assignees::Selection, labels, profiles::attribution::Authors, reactions},
+    api::{
+        assignees::Selection, labels, organizations::issue_types, profiles::attribution::Authors,
+        reactions,
+    },
     app::{self, Error, Result, actor, body, number, repository, title},
     auth::Principal,
     cells::repository::collaboration::Target,
@@ -44,6 +47,10 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .route(
             "/api/repos/{owner}/{name}/issues/{number}",
             get(detail).patch(edit),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/issues/{number}/type",
+            axum::routing::put(issue_types::assign),
         )
         .route(
             "/api/repos/{owner}/{name}/issues/{number}/comments",
@@ -111,7 +118,10 @@ async fn list(
     let repo = repository(&server, &principal, &key)?;
     let routed = crate::app::repository_cell(&server, &repo)?;
     let mut input = params.input("is:issue is:open")?;
-    super::discussion_search::resolve_people(&server, &principal, &repo, &mut input).await?;
+    let review_teams =
+        super::discussion_search::resolve_people(&server, &principal, &repo, &mut input).await?;
+    let type_scope =
+        super::discussion_search::issue_types::bind(&server, &repo, &mut input).await?;
     let review_source = input
         .review_context
         .as_ref()
@@ -141,6 +151,19 @@ async fn list(
         }),
     )
     .await?;
+    let unfiltered_types;
+    let types =
+        if let Some(scope) = &type_scope {
+            &scope.definitions[..]
+        } else if page.items.iter().any(
+            |item| matches!(item, DiscussionSummary::Issue(issue) if issue.issue_type.is_some()),
+        ) {
+            unfiltered_types = issue_types::active(&server, repo.organization).await?;
+            &unfiltered_types.definitions[..]
+        } else {
+            &[]
+        };
+    super::discussion_search::issue_types::verify(&server, &repo, type_scope.as_ref()).await?;
     let assignees = Selection::load(
         &server,
         &principal,
@@ -155,16 +178,23 @@ async fn list(
         .items
         .iter()
         .map(|item| match item {
-            DiscussionSummary::Issue(issue) => {
-                Ok(view::summary(&authors, issue, &page.labels, &assignees))
-            }
+            DiscussionSummary::Issue(issue) => Ok(view::summary(
+                &authors,
+                issue,
+                &page.labels,
+                &assignees,
+                issue_types::visible(&repo, issue.issue_type, types),
+            )),
             DiscussionSummary::Pull(pull) => {
                 super::pulls::pull_list_view(&authors, pull, &page.labels, &assignees, &rollups)
             }
         })
         .collect::<Result<Vec<_>>>()?;
+    if let Some(bound) = review_teams {
+        bound.verify(&server, &principal, &repo).await?;
+    }
     Ok(Json(
-        json!({"repository_id":repo.id,"can_bulk_edit":assignees.principal.can_triage(repo.id),"items":items,"next":page.next,"counts":page.counts,"matching":page.matching,"navigation":page.navigation,"authored_by_me":page.authored_by_me,"assigned_to_me":page.assigned_to_me,"review_requested_from_me":page.review_requested_from_me}),
+        json!({"repository_id":repo.id,"can_bulk_edit":assignees.principal.can_triage(repo.id),"items":items,"next":page.next,"counts":page.counts,"matching":page.matching,"navigation":page.navigation,"lock_filter":page.lock_filter,"authored_by_me":page.authored_by_me,"assigned_to_me":page.assigned_to_me,"review_requested_from_me":page.review_requested_from_me}),
     ))
 }
 
@@ -320,15 +350,16 @@ async fn edit(
         .map(|value| labels::validate_selection(value, &labels))
         .transpose()?;
     // Assignment eligibility and caller role must share the final current roster.
-    let (can_triage, assignees) = if let Some(ids) = input.assignee_ids {
+    let (editor, assignees) = if let Some(ids) = input.assignee_ids {
         let roster = crate::api::members::roster::Roster::load(&server, &principal, &repo).await?;
         if !roster.membership.principal.can_triage(repo.id) {
             return Err(Error::AssigneePermission);
         }
-        (true, Some(Selection::validate(&roster, ids)?))
+        let assignees = Selection::validate(&roster, ids)?;
+        (roster.membership.principal, Some(assignees))
     } else {
         let permissions = app::membership(&server, &principal, &repo).await?;
-        (permissions.principal.can_triage(repo.id), None)
+        (permissions.principal, None)
     };
     let routed = app::repository_cell(&server, &repo)?;
     let committed = routed
@@ -340,7 +371,8 @@ async fn edit(
                 state_reason: input.state_reason,
                 number: number(id)?,
                 actor: crate::cells::repository::RepositoryAuthor::from(&author),
-                can_triage,
+                can_triage: editor.can_triage(repo.id),
+                can_moderate: editor.can_moderate(repo.id),
                 version: input.version,
                 title,
                 body: input.body,
@@ -362,7 +394,7 @@ async fn edit(
         UpdateIssueOutcome::Archived => return Err(Error::Archived),
         UpdateIssueOutcome::Updated(issue) => issue,
         UpdateIssueOutcome::NotFound => return Err(Error::NotFound),
-        UpdateIssueOutcome::Forbidden => return Err(Error::Forbidden),
+        UpdateIssueOutcome::Forbidden => return Err(Error::IssueEditPermission),
         UpdateIssueOutcome::LabelForbidden => return Err(Error::LabelPermission),
         UpdateIssueOutcome::LabelInvalid => {
             return Err(Error::Invalid(
@@ -392,23 +424,30 @@ async fn rendered(
             .query::<GetIssueDetail>(&routed.target, minimum, id)
             .await,
     )?;
-    let issue = detail.issue.ok_or(Error::NotFound)?;
-    let lifecycle = detail
-        .lifecycle
-        .ok_or(Error::CellContract("Issue lifecycle is missing"))?;
+    let issue = detail.issue.as_ref().ok_or(Error::NotFound)?;
     let reaction = reactions::one(server, repo, &author, Target::Issue { number: id }).await?;
     let authors = Authors::load(server, principal, std::iter::once(&issue.author)).await?;
+    let types = if principal.can_triage(repo.id) || detail.issue_type.selection.is_some() {
+        issue_types::active(server, repo.organization)
+            .await?
+            .definitions
+    } else {
+        Vec::new()
+    };
     let assignees = Selection::load(server, principal, repo, issue.assignees.iter()).await?;
-    Ok(Json(view::issue(
-        &authors,
-        &issue,
-        &lifecycle,
-        &author,
-        &detail.labels.labels,
-        &assignees,
-        assignees.principal.can_triage(repo.id),
-        &reaction,
-    )))
+    let mut issue = view::issue(
+        &authors, issue, &detail, &author, &assignees, repo.id, &reaction,
+    )?;
+    issue["issue_type"] = json!(issue_types::visible(
+        repo,
+        detail.issue_type.selection,
+        &types
+    ));
+    if repo.organization.is_some() && assignees.principal.can_triage(repo.id) {
+        issue["issue_types"] = json!(types);
+        issue["issue_type_version"] = json!(detail.issue_type.version);
+    }
+    Ok(Json(issue))
 }
 
 async fn comments(
@@ -454,12 +493,12 @@ async fn comments(
         items.iter().map(|comment| &comment.author),
     )
     .await?;
-    app::membership(&server, &principal, &repo).await?;
+    let editor = app::membership(&server, &principal, &repo).await?;
     Ok(Json(json!({
         "items": items
             .iter()
             .zip(reactions)
-            .map(|(comment, reactions)| view::comment(&authors, comment, &author, &reactions))
+            .map(|(comment, reactions)| view::comment(&authors, comment, &author, editor.principal.can_moderate(repo.id), &reactions))
             .collect::<Vec<_>>(),
         "next": next,
     })))
@@ -482,6 +521,7 @@ async fn comment(
     let Json(input) = input?;
     let author = actor(&principal)?;
     body(&input.body, true)?;
+    let membership = app::membership(&server, &principal, &repo).await?;
     let routed = app::repository_cell(&server, &repo)?;
     let output = crate::app::command_output(
         routed
@@ -490,6 +530,8 @@ async fn comment(
                 &routed.target,
                 crate::app::mutation_identity()?,
                 CreateCommentInput {
+                    can_post_locked: membership.principal.can_moderate(repo.id),
+                    can_mark_duplicate: membership.principal.can_write(repo.id),
                     submission_id: app::submission_id(&input.request_id)?,
                     issue: number(id)?,
                     author: crate::cells::repository::RepositoryAuthor::from(&author),
@@ -500,6 +542,7 @@ async fn comment(
     )?;
     let comment = match output {
         CreateCommentOutcome::Archived => return Err(Error::Archived),
+        CreateCommentOutcome::Locked => return Err(Error::ConversationLocked),
         CreateCommentOutcome::Created(comment) => comment,
         CreateCommentOutcome::IssueNotFound => return Err(Error::NotFound),
         CreateCommentOutcome::RequestConflict => return Err(Error::RequestConflict),
@@ -518,7 +561,7 @@ async fn comment(
     app::membership(&server, &principal, &repo).await?;
     Ok((
         StatusCode::CREATED,
-        Json(view::comment(&authors, &comment, &author, &reaction)),
+        Json(view::comment(&authors, &comment, &author, false, &reaction)),
     ))
 }
 
@@ -555,8 +598,14 @@ async fn comment_detail(
     )
     .await?;
     let authors = Authors::load(&server, &principal, std::iter::once(&comment.author)).await?;
-    app::membership(&server, &principal, &repo).await?;
-    Ok(Json(view::comment(&authors, &comment, &author, &reaction)))
+    let editor = app::membership(&server, &principal, &repo).await?;
+    Ok(Json(view::comment(
+        &authors,
+        &comment,
+        &author,
+        editor.principal.can_moderate(repo.id),
+        &reaction,
+    )))
 }
 
 #[derive(Deserialize)]
@@ -576,6 +625,7 @@ async fn edit_comment(
     let Json(input) = input?;
     let author = actor(&principal)?;
     body(&input.body, true)?;
+    let editor = app::membership(&server, &principal, &repo).await?;
     let routed = app::repository_cell(&server, &repo)?;
     let output = crate::app::command_output(
         routed
@@ -589,6 +639,7 @@ async fn edit_comment(
                         number: number(comment)?,
                     },
                     actor: crate::cells::repository::RepositoryAuthor::from(&author),
+                    can_moderate: editor.principal.can_moderate(repo.id),
                     version: input.version,
                     body: input.body,
                 },
@@ -597,9 +648,10 @@ async fn edit_comment(
     )?;
     let comment = match output {
         UpdateCommentOutcome::Archived => return Err(Error::Archived),
+        UpdateCommentOutcome::Locked => return Err(Error::ConversationLocked),
         UpdateCommentOutcome::Updated(comment) => comment,
         UpdateCommentOutcome::NotFound => return Err(Error::NotFound),
-        UpdateCommentOutcome::Forbidden => return Err(Error::Forbidden),
+        UpdateCommentOutcome::Forbidden => return Err(Error::IssueEditPermission),
         UpdateCommentOutcome::Conflict => return Err(Error::Conflict),
     };
     let reaction = reactions::one(
@@ -613,8 +665,14 @@ async fn edit_comment(
     )
     .await?;
     let authors = Authors::load(&server, &principal, std::iter::once(&comment.author)).await?;
-    app::membership(&server, &principal, &repo).await?;
-    Ok(Json(view::comment(&authors, &comment, &author, &reaction)))
+    let editor = app::membership(&server, &principal, &repo).await?;
+    Ok(Json(view::comment(
+        &authors,
+        &comment,
+        &author,
+        editor.principal.can_moderate(repo.id),
+        &reaction,
+    )))
 }
 
 #[cfg(test)]

@@ -2,6 +2,7 @@ use super::*;
 use crate::cells::repository::collaboration::{
     Target,
     activity::{self, Action},
+    locks,
 };
 
 pub(crate) struct CreatePullComment;
@@ -56,7 +57,20 @@ impl Mutation for CreatePullComment {
                 record,
             )));
         }
-        let record = append_comment(context, input.pull, &input.author, &input.body)?;
+        if locks::blocked(
+            context,
+            Target::Pull { number: input.pull },
+            input.can_post_locked,
+        )? {
+            return Ok(MutationResult::Rejected(CreatePullCommentOutcome::Locked));
+        }
+        let record = append_comment(
+            context,
+            input.pull,
+            &input.author,
+            &input.body,
+            input.can_mark_duplicate,
+        )?;
         context.query("INSERT INTO repository_pull_comment_submissions(pull_number, request_id, payload_digest, comment_number) VALUES (?, ?, ?, ?)", &[integer(record.pull)?, SqlValue::Blob(input.submission_id.to_vec()), SqlValue::Blob(digest.as_bytes().to_vec()), integer(record.number)?])?;
         Ok(MutationResult::Success(CreatePullCommentOutcome::Created(
             record,
@@ -71,6 +85,7 @@ pub(in crate::cells::repository) fn append_comment(
     pull: u64,
     author: &RepositoryAuthor,
     body: &str,
+    can_mark_duplicate: bool,
 ) -> crate::cells::Result<PullCommentRecord> {
     let number = next_child_number(context, "repository_pull_comment_sequences", pull)?;
     let now = timestamp(context.now_ms())?;
@@ -94,6 +109,9 @@ pub(in crate::cells::repository) fn append_comment(
     super::super::search::contributions::project(context, target, &record.author, &record.body)?;
     let source = activity::append(context, target, &record.author, Action::Created)?;
     crate::cells::repository::collaboration::body_written(context, &source, None, &record.body)?;
+    if can_mark_duplicate {
+        crate::cells::repository::collaboration::duplicates::from_comment(context, &source, body)?;
+    }
     Ok(record)
 }
 
@@ -124,6 +142,15 @@ impl Mutation for UpdatePullComment {
             return Ok(MutationResult::Rejected(
                 UpdatePullCommentOutcome::Forbidden,
             ));
+        }
+        if locks::blocked(
+            context,
+            Target::Pull {
+                number: record.pull,
+            },
+            input.can_post_locked,
+        )? {
+            return Ok(MutationResult::Rejected(UpdatePullCommentOutcome::Locked));
         }
         if record.version != input.version {
             return Ok(MutationResult::Rejected(UpdatePullCommentOutcome::Conflict));

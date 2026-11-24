@@ -13,25 +13,40 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
+use code_index::symbols::Syntax;
 use crab_remote_git::{
     EntryKind, Error, GitPath, OperationContext, OperationKind, RemoteGitSnapshot, Revision,
     TreeListingItem, TreeListingRequest,
 };
 use gix_hash::ObjectId;
-use regex::{Regex, RegexBuilder};
+use qualifiers::{Facts, QueryPlan, Truth};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::{sync::Arc, time::Duration};
+use std::{ops::Range, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+mod evaluate;
 mod indexed;
+mod qualifiers;
 pub(super) mod workspace;
 
 const PAGE_ENTRIES: usize = 128;
 const FILE_READ_BATCH: usize = 8;
 const MAX_MATCH_LINES: usize = 6;
+const MAX_HIGHLIGHT_CHARS: usize = 128;
 const MAX_CURSOR_PATH: usize = 8 * 1024;
 const CURSOR_HEADER: usize = 20 + 32;
+
+#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Kind {
+    #[default]
+    Any,
+    Content,
+    Path,
+    Symbol,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -41,6 +56,8 @@ pub(super) struct Parameters {
     path: Option<String>,
     #[serde(default)]
     case_sensitive: bool,
+    #[serde(default)]
+    kind: Kind,
     cursor: Option<String>,
     limit: Option<usize>,
 }
@@ -52,6 +69,18 @@ struct Page {
     scanned: usize,
     skipped: usize,
     next: Option<String>,
+}
+
+impl Page {
+    fn for_commit(commit: ObjectId) -> Self {
+        Self {
+            commit: commit.to_string(),
+            items: Vec::new(),
+            scanned: 0,
+            skipped: 0,
+            next: None,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -86,10 +115,16 @@ pub(super) async fn search(
     if !(1..=40).contains(&limit) {
         return Err(ApiError::Input("limit must be between 1 and 40").into_response());
     }
-    let pattern = Pattern::new(terms, path, params.case_sensitive, false)
+    let pattern = Pattern::new(terms, path, params.case_sensitive, params.kind)
         .map_err(IntoResponse::into_response)?;
-    let context = serde_json::to_vec(&(terms, params.rev.as_deref(), path, params.case_sensitive))
-        .map_err(|error| ApiError::Json(error).into_response())?;
+    let context = serde_json::to_vec(&(
+        terms,
+        params.rev.as_deref(),
+        path,
+        params.case_sensitive,
+        params.kind,
+    ))
+    .map_err(|error| ApiError::Json(error).into_response())?;
     let fingerprint = blake3::hash(&context);
     let tokens = Tokens {
         key: &server.cursor_key,
@@ -113,7 +148,12 @@ pub(super) async fn search(
             paths: PAGE_ENTRIES,
             results: limit,
             duration: Duration::from_secs(20),
-            use_index: false,
+            use_index: pattern.has_symbols
+                || params.rev.as_deref().is_none_or(|revision| {
+                    revision == "HEAD"
+                        || revision.strip_prefix("refs/heads/").unwrap_or(revision)
+                            == repo.config.default_branch
+                }),
         },
         &cancellation,
     )
@@ -148,40 +188,26 @@ fn acquire(server: &Server) -> std::result::Result<read_admission::Admission, Re
 }
 
 struct Pattern {
-    matcher: Regex,
+    query: Arc<QueryPlan>,
     directory: GitPath,
-    paths_only: bool,
-    case_sensitive: bool,
-    mask: Option<code_index::Mask>,
+    uses_text: bool,
+    has_symbols: bool,
 }
 
 impl Pattern {
-    fn new(
-        terms: &str,
-        path: &str,
-        case_sensitive: bool,
-        paths_only: bool,
-    ) -> Result<Self, ApiError> {
-        if terms.is_empty() || terms.chars().count() > 128 || terms.chars().any(char::is_control) {
-            return Err(ApiError::Input("Enter 1–128 characters to search for"));
-        }
+    fn new(terms: &str, path: &str, case_sensitive: bool, kind: Kind) -> Result<Self, ApiError> {
+        let query = QueryPlan::parse(terms, kind, case_sensitive)?;
         if path.len() > 1024
             || path.chars().any(char::is_control)
             || path.split('/').any(|part| matches!(part, "." | ".."))
         {
             return Err(ApiError::Input("Enter a repository directory path"));
         }
-        let directory = GitPath::new(path.as_bytes().to_vec())?;
-        let matcher = RegexBuilder::new(&regex::escape(terms))
-            .case_insensitive(!case_sensitive)
-            .build()
-            .map_err(|_| ApiError::Input("The search term could not be compiled"))?;
         Ok(Self {
-            matcher,
-            directory,
-            paths_only,
-            case_sensitive,
-            mask: code_index::Mask::query(terms, case_sensitive),
+            uses_text: query.leaves.iter().any(qualifiers::Predicate::uses_text),
+            has_symbols: query.leaves.iter().any(qualifiers::Predicate::uses_symbols),
+            query: Arc::new(query),
+            directory: GitPath::new(path.as_bytes().to_vec())?,
         })
     }
 }
@@ -228,7 +254,7 @@ async fn scan_repository(
     limits.max_fetched_bytes = limits.max_fetched_bytes.min(192 * 1024 * 1024);
     limits.max_inflated_bytes = limits.max_inflated_bytes.min(128 * 1024 * 1024);
     limits.max_response_bytes = 40 * 1024 * 1024;
-    let kind = if pattern.paths_only {
+    let kind = if !pattern.uses_text {
         OperationKind::Tree
     } else {
         OperationKind::Content
@@ -239,11 +265,22 @@ async fn scan_repository(
     let found = async {
         let snapshot = repository.snapshot(&revision, &operation).await?;
         let mut acceleration = Acceleration::Scanning;
+        let scope = pattern.repository_facts(repo);
+        if pattern.query.evaluate(&scope).0 == Truth::No {
+            let commit = snapshot.commit_oid();
+            return Ok(Scan {
+                commit,
+                result: Page::for_commit(commit),
+                after: None,
+                acceleration,
+                verified: 0,
+            });
+        }
         if window.use_index {
             match code_index::load(server, repo, snapshot.root_tree_oid()).await {
                 Ok(Some(index)) => {
                     if let Some(rows) = &index.rows {
-                        return indexed::inspect(rows, &snapshot, pattern, &window, &operation).await;
+                        return indexed::inspect(rows, &snapshot, pattern, &scope, &window, &operation).await;
                     }
                     acceleration = Acceleration::Limited;
                 }
@@ -251,7 +288,7 @@ async fn scan_repository(
                 Err(error) => tracing::debug!(repository_id = %repo.id, ?error, "Code search index could not be read"),
             }
         }
-        let mut scan = inspect(&snapshot, pattern, &window, &operation).await?;
+        let mut scan = inspect(&snapshot, pattern, &scope, &window, &operation).await?;
         scan.acceleration = acceleration;
         Ok(scan)
     }
@@ -268,6 +305,7 @@ enum Inspection {
 async fn inspect(
     snapshot: &RemoteGitSnapshot,
     pattern: &Pattern,
+    scope: &Facts,
     window: &Window<'_>,
     operation: &OperationContext,
 ) -> crab_remote_git::Result<Scan> {
@@ -293,34 +331,14 @@ async fn inspect(
     )?;
     let listings = snapshot.list_tree_blobs(&request, operation).await?;
     let entries = listings.items;
-    let mut result = Page {
-        commit: snapshot.commit_oid().to_string(),
-        items: Vec::new(),
-        scanned: 0,
-        skipped: 0,
-        next: None,
-    };
+    let mut result = Page::for_commit(snapshot.commit_oid());
     let mut examined = 0;
     let mut verified = 0;
     'scan: for batch in entries.chunks(FILE_READ_BATCH) {
         let found = futures_util::future::try_join_all(batch.iter().map(|item| async move {
             match item {
                 TreeListingItem::Blob(entry) => {
-                    if pattern.paths_only {
-                        let path = display_path(entry.path.as_bytes());
-                        if pattern.matcher.is_match(&path) {
-                            Ok(Inspection::Match(FileMatches {
-                                path,
-                                path_hex: encode_hex(entry.path.as_bytes()),
-                                lines: Vec::new(),
-                                more_lines: false,
-                            }))
-                        } else {
-                            Ok(Inspection::NoMatch)
-                        }
-                    } else {
-                        file_matches(snapshot, entry, &pattern.matcher, operation).await
-                    }
+                    pattern.inspect_entry(entry, scope, operation).await
                 }
                 TreeListingItem::CommonPrefix(_) => Err(Error::InternalInvariant {
                     invariant: "ungrouped code search received a grouped path",
@@ -328,10 +346,8 @@ async fn inspect(
             }
         }))
         .await?;
-        if !pattern.paths_only {
-            verified += found.len();
-        }
-        for found in found {
+        verified += found.iter().filter(|(_, read)| *read).count();
+        for (found, _) in found {
             examined += 1;
             result.scanned += 1;
             match found {
@@ -360,47 +376,104 @@ async fn inspect(
     })
 }
 
-async fn file_matches(
-    snapshot: &RemoteGitSnapshot,
-    entry: &crab_remote_git::TreeEntry,
+fn expression_matches(
+    text: &str,
     matcher: &Regex,
-    operation: &OperationContext,
-) -> crab_remote_git::Result<Inspection> {
-    let Some(text) = code_index::text(snapshot, &entry.path, entry.oid, operation).await? else {
-        return Ok(Inspection::Skipped);
-    };
-    let mut hits = text.lines().enumerate().filter_map(|(index, line)| {
-        let found = matcher.find(line)?;
-        Some(excerpt(index + 1, line, found))
-    });
-    let lines: Vec<_> = hits.by_ref().take(MAX_MATCH_LINES).collect();
-    if lines.is_empty() {
-        return Ok(Inspection::NoMatch);
+    cancel: &CancellationToken,
+) -> Option<(Vec<Excerpt>, bool)> {
+    let mut excerpts = Vec::new();
+    let mut number = 1;
+    let mut line_start = 0;
+    while line_start <= text.len() {
+        if cancel.is_cancelled() {
+            return None;
+        }
+        let Some(found) = matcher.find_at(text, line_start) else {
+            break;
+        };
+        let mut advance = 0;
+        for (offset, _) in text[line_start..found.start()].match_indices('\n') {
+            advance = offset + 1;
+            number += 1;
+        }
+        line_start += advance;
+        loop {
+            if excerpts.len() == MAX_MATCH_LINES {
+                return Some((excerpts, true));
+            }
+            let end = text[line_start..]
+                .find('\n')
+                .map_or(text.len(), |offset| line_start + offset);
+            let line = text[line_start..end].trim_end_matches('\r');
+            let start = found.start().saturating_sub(line_start).min(line.len());
+            let stop = found.end().saturating_sub(line_start).min(line.len());
+            excerpts.push(excerpt(number, line, start..stop));
+
+            // Advance by line even for a zero-width match. At most seven
+            // searches are needed to fill these excerpts and detect more.
+            line_start = end + 1;
+            number += 1;
+            if line_start >= found.end() {
+                break;
+            }
+        }
     }
-    Ok(Inspection::Match(FileMatches {
-        path: display_path(entry.path.as_bytes()),
-        path_hex: encode_hex(entry.path.as_bytes()),
-        lines,
-        more_lines: hits.next().is_some(),
-    }))
+    Some((excerpts, false))
 }
 
-fn excerpt(number: usize, text: &str, found: regex::Match<'_>) -> Excerpt {
-    let before = &text[..found.start()];
+fn symbol_matches(
+    definitions: &[code_index::symbols::Definition],
+    text: &str,
+    matcher: &Regex,
+) -> (Vec<Excerpt>, bool) {
+    let mut lines: Vec<Excerpt> = Vec::new();
+    for symbol in definitions {
+        let Some(found) = matcher.find(&text[symbol.bytes.clone()]) else {
+            continue;
+        };
+        if lines.last().is_some_and(|last| last.line == symbol.line) {
+            continue;
+        }
+        if lines.len() == MAX_MATCH_LINES {
+            return (lines, true);
+        }
+        let start = text[..symbol.bytes.start]
+            .rfind('\n')
+            .map_or(0, |offset| offset + 1);
+        let end = text[symbol.bytes.end..]
+            .find('\n')
+            .map_or(text.len(), |offset| symbol.bytes.end + offset);
+        let column = symbol.bytes.start - start;
+        lines.push(excerpt(
+            symbol.line,
+            text[start..end].trim_end_matches('\r'),
+            column + found.start()..column + found.end(),
+        ));
+    }
+    (lines, false)
+}
+
+fn excerpt(number: usize, text: &str, found: Range<usize>) -> Excerpt {
+    let before = &text[..found.start];
     let from = before
         .char_indices()
         .rev()
         .nth(79)
         .map_or(0, |(index, _)| index);
-    let after = &text[found.end()..];
+    let after = &text[found.end..];
     let to = after
         .char_indices()
         .nth(120)
         .map_or(after.len(), |(index, _)| index);
+    let matched = &text[found];
+    let marked = matched.char_indices().nth(MAX_HIGHLIGHT_CHARS).map_or_else(
+        || matched.to_owned(),
+        |(end, _)| format!("{}…", &matched[..end]),
+    );
     Excerpt {
         line: number,
         before: format!("{}{}", if from > 0 { "…" } else { "" }, &before[from..]),
-        matched: found.as_str().into(),
+        matched: marked,
         after: format!(
             "{}{}",
             &after[..to],
@@ -457,7 +530,8 @@ impl Tokens<'_> {
 
     fn signature(&self, payload: &[u8]) -> blake3::Hash {
         let mut hash = blake3::Hasher::new_keyed(self.key);
-        hash.update(b"crab-code-search-v1\0");
+        // Boolean expressions changed the meaning of whitespace and qualifiers.
+        hash.update(b"crab-code-search-v4\0");
         hash.update(self.repository.as_bytes());
         hash.update(payload);
         hash.finalize()

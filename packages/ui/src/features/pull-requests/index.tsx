@@ -1,3 +1,5 @@
+import { CommentVisibilityProvider } from "@/components/discussion/conversation/comment-visibility";
+import { ConversationLockProvider } from "@/components/discussion/conversation/lock";
 import { type Refs, type Repository } from "@/lib/api";
 import type { CodeThemes } from "@/lib/code-theme";
 import { repoHref, repositoryRoute } from "@/lib/repository-route";
@@ -6,6 +8,7 @@ import { Link } from "@/components/navigation/link";
 import { NewPull } from "./create";
 import { PullDetail } from "./detail";
 import { PullList } from "./list";
+import { MergeQueue } from "./merge-queue";
 
 export function PullRequests({
   repo,
@@ -22,7 +25,10 @@ export function PullRequests({
   theme: "light" | "dark";
   codeThemes: CodeThemes;
 }) {
-  const pull = repositoryRoute(url)?.pull;
+  const route = repositoryRoute(url);
+  if (route?.action === "queue")
+    return <MergeQueue repo={repo} refs={refs} url={url} csrf={csrf} />;
+  const pull = route?.pull;
   if (pull === "new")
     return repo.archived ? (
       <div className="notice">
@@ -51,15 +57,22 @@ export function PullRequests({
         </div>
       );
     return (
-      <PullDetail
-        key={number}
+      <ConversationLockProvider
+        key={`${repo.id}:${number}`}
         repo={repo}
-        number={number}
-        url={url}
-        csrf={csrf}
-        theme={theme}
-        codeThemes={codeThemes}
-      />
+        target={`pulls/${number}`}
+      >
+        <CommentVisibilityProvider>
+          <PullDetail
+            repo={repo}
+            number={number}
+            url={url}
+            csrf={csrf}
+            theme={theme}
+            codeThemes={codeThemes}
+          />
+        </CommentVisibilityProvider>
+      </ConversationLockProvider>
     );
   }
   return <PullList repo={repo} url={url} csrf={csrf} />;

@@ -29,8 +29,10 @@ export interface Repository {
   owner: string;
   name: string;
   description: string;
+  topics?: string[];
   access: "read" | "write";
   can_admin: boolean;
+  can_maintain?: boolean;
   organization_id?: string;
   archive_version: number;
   archived: boolean;
@@ -403,6 +405,7 @@ export async function gitImportStatus(
 export function useRequest<T>(
   url: string | null,
   repositoryId?: string,
+  load = request<T>,
 ): Loaded<T> & { retry: () => void } {
   const [attempt, setAttempt] = useState(0);
   const retry = useCallback(() => setAttempt((value) => value + 1), []);
@@ -418,7 +421,7 @@ export function useRequest<T>(
       return;
     }
     setState({ loading: true, url, repositoryId });
-    request<T>(url, controller.signal, repositoryId)
+    load(url, controller.signal, repositoryId)
       .then((result) => {
         if (!controller.signal.aborted)
           setState({ ...result, loading: false, url, repositoryId });
@@ -433,7 +436,7 @@ export function useRequest<T>(
           });
       });
     return () => controller.abort();
-  }, [url, repositoryId, attempt]);
+  }, [url, repositoryId, attempt, load]);
   // Never paint the preceding route's data while the new effect is pending.
   return {
     ...(state.url === url && state.repositoryId === repositoryId

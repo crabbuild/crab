@@ -131,6 +131,7 @@ fn apply_item(
                 version: item.version,
                 actor: input.actor.clone(),
                 can_triage: input.can_triage,
+                can_moderate: false,
                 title: None,
                 body: None,
                 state: state.map(|state| u8::from(state == State::Closed)),

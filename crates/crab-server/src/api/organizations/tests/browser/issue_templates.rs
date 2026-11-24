@@ -112,20 +112,7 @@ body:
     browser
         .run(&["open", &format!("{}/team/private/issues/new", h.origin)])
         .await;
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    browser
-        .run(&[
-            "find",
-            "role",
-            "button",
-            "click",
-            "--name",
-            "Continue to sign in",
-            "--exact",
-        ])
-        .await;
+    browser.sign_in().await;
     browser
         .run(&["wait", "--text", "Choose how to open an issue"])
         .await;
@@ -328,10 +315,7 @@ async fn native_browser_inherits_issue_templates_and_rechecks_source_access() {
             .run(&["find", "role", role, "click", "--name", name, "--exact"])
             .await;
     };
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    click("button", "Continue to sign in").await;
+    browser.sign_in().await;
     browser.run(&["wait", "--text", "Templates from"]).await;
     click("link", "Use Shared issue report").await;
     browser

@@ -64,6 +64,7 @@ async fn review(cell: &RepositoryCell, name: &str, state: ReviewState) -> PullRe
     let CreatePullReviewOutcome::Created(review) = write::<CreatePullReview>(
         cell,
         CreatePullReviewInput {
+            can_post_locked: false,
             base_revision: None,
             review_teams: Vec::new(),
             pull: 1,
@@ -261,6 +262,7 @@ async fn protected_branch_policy_versions_and_invalid_states_leave_no_dismissal(
                 require_conversation_resolution: false,
                 require_up_to_date: false,
                 require_merge_queue: false,
+                require_linear_history: false,
                 required_checks: vec![],
                 required_integrations: vec![],
             }],
@@ -474,6 +476,7 @@ async fn original_review_receipts_replay_without_restoring_a_dismissed_decision(
     let cell = cell(&server);
     seed(&cell).await;
     let input = CreatePullReviewInput {
+        can_post_locked: false,
         base_revision: None,
         review_teams: Vec::new(),
         pull: 1,
@@ -574,6 +577,7 @@ async fn persisted_protections_override_the_configured_seed_in_both_directions()
                 require_conversation_resolution: false,
                 require_up_to_date: false,
                 require_merge_queue: false,
+                require_linear_history: false,
                 required_checks: vec![],
                 required_integrations: vec![],
             }],

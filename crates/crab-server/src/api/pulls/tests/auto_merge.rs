@@ -185,7 +185,7 @@ async fn queue_publishes_tested_squash_and_rebase_history_and_expires_stale_meth
         save_method(0, method).await.error_for_status().unwrap();
         h.write(Method::PUT, &format!("{REPO}/settings/branch-protections"), &alice, json!({
             "expected_version":0,"rules":[{"branch":"main","required_approvals":0,"required_checks":["ci"],
-                "require_merge_queue":true}],
+                "require_merge_queue":true,"require_linear_history":true}],
         })).await.error_for_status().unwrap();
         let credential: Value = h
             .write(
@@ -340,7 +340,7 @@ async fn grouped_checks_build_in_a_bounded_window_rebuild_after_removal_and_publ
     let alice = h.login().await;
     let settings = format!("{REPO}/settings/merge-methods");
     let write = async |method, path: &str, input| h.write(method, path, &alice, input).await;
-    for invalid in [0, 9] {
+    for invalid in [0, 101] {
         let response = write(
             Method::PUT,
             &settings,
@@ -499,6 +499,61 @@ async fn grouped_checks_build_in_a_bounded_window_rebuild_after_removal_and_publ
         format!("{base}\trefs/heads/main")
     );
 
+    // Both entries already have candidates. Move the second to the front,
+    // then restore the first and replay the first move to model a lost reply.
+    let promote = async |entry: &(String, Uuid), request_id: Uuid| {
+        write(
+            Method::PUT,
+            &format!("{}/merge-queue/priority", entry.0),
+            json!({"request_id":request_id,"queue_id":entry.1}),
+        )
+        .await
+    };
+    let first_move = Uuid::now_v7();
+    promote(second, first_move)
+        .await
+        .error_for_status()
+        .unwrap();
+    assert_eq!(
+        h.json(&format!("{}/auto-merge", second.0), &alice).await["request"]["first"],
+        true
+    );
+    assert!(matches!(
+        super::super::candidate::require_check_target(
+            &h.server,
+            &repo,
+            1,
+            gix_hash::ObjectId::from_hex(first_tip.as_bytes()).unwrap(),
+        )
+        .await,
+        Err(crate::app::Error::CommitNotFound)
+    ));
+    let promoted = wait_for_candidate(&second.0, &base, false).await;
+    assert_ne!(promoted, obsolete);
+
+    promote(first, Uuid::now_v7())
+        .await
+        .error_for_status()
+        .unwrap();
+    promote(second, first_move)
+        .await
+        .error_for_status()
+        .unwrap();
+    assert_eq!(
+        promote(first, first_move).await.status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        h.json(&format!("{}/auto-merge", first.0), &alice).await["request"]["first"],
+        true
+    );
+    let rebuilt = wait_for_candidate(&first.0, &base, false).await;
+    assert_ne!(rebuilt, first_tip);
+    assert_eq!(
+        git(&["ls-remote", remote.as_str(), "refs/heads/main"]).await,
+        format!("{base}\trefs/heads/main")
+    );
+
     write(
         Method::DELETE,
         &format!("{}/auto-merge", first.0),
@@ -513,6 +568,7 @@ async fn grouped_checks_build_in_a_bounded_window_rebuild_after_removal_and_publ
     ));
     let second_tip = wait_for_candidate(&second.0, &base, false).await;
     assert_ne!(second_tip, obsolete);
+    assert_ne!(second_tip, promoted);
     git(&["fetch", remote.as_str(), "refs/crab/merge-queue/2"]).await;
     assert_eq!(git(&["show", "FETCH_HEAD:README.md"]).await, "base");
     let third_tip = wait_for_candidate(&third.0, &second_tip, true).await;
@@ -673,6 +729,7 @@ async fn branch_queue_overrides_isolate_methods_build_limits_and_check_deadlines
                             version,
                             base_oid: base.clone(),
                             previous_oid: None,
+                            order_revision: 0,
                         },
                         configured_queue_required: false,
                         ruleset_queue_required: false,
@@ -692,6 +749,7 @@ async fn branch_queue_overrides_isolate_methods_build_limits_and_check_deadlines
                             pull: number,
                             id: request,
                             reason: Stop::ChecksTimedOut,
+                            front_revision: Some(0),
                         },
                     )
                     .await,
@@ -755,6 +813,136 @@ async fn branch_queue_overrides_isolate_methods_build_limits_and_check_deadlines
     assert_eq!(
         git(&["rev-list", "--parents", "-1", "FETCH_HEAD"]).await,
         format!("{stable_sha} {base}")
+    );
+    assert_eq!(
+        git(&["ls-remote", remote.as_str(), "refs/heads/main"]).await,
+        format!("{base}\trefs/heads/main")
+    );
+    worker.abort();
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn queue_builds_a_checked_candidate_past_the_previous_capacity() {
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    let write = async |method, path: &str, input| h.write(method, path, &alice, input).await;
+    let token: Value = write(
+        Method::POST,
+        "/api/git-token",
+        json!({"owner":"team","repository":"private","access":"write"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let mut remote = url::Url::parse(&format!("{}/git/team/private.git", h.origin)).unwrap();
+    remote.set_username("crab").unwrap();
+    remote.set_password(token["token"].as_str()).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    git::push_review_branches(path, remote.as_str()).await;
+    let git = async |args: &[&str]| git::success(path, args).await;
+    let base = git(&["rev-parse", "main"]).await;
+    for number in 1..=10 {
+        let branch = format!("topic-{number}");
+        git(&["checkout", "-b", &branch, "main"]).await;
+        std::fs::write(path.join(&branch), &branch).unwrap();
+        git(&["add", &branch]).await;
+        git(&["commit", "-m", &branch]).await;
+    }
+    git(&["push", remote.as_str(), "--all"]).await;
+
+    write(
+        Method::PUT,
+        &format!("{REPO}/settings/merge-methods"),
+        json!({"expected_version":0,"enabled":["merge_commit"],"merge_queue_builds":100}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    write(
+        Method::PUT,
+        &format!("{REPO}/settings/branch-protections"),
+        json!({"expected_version":0,"rules":[{"branch":"main","required_approvals":0,
+            "required_checks":["ci"],"require_merge_queue":true}]}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let status = async |commit: &str| {
+        write(
+            Method::POST,
+            &format!("{REPO}/statuses/{commit}"),
+            json!({
+                "request_id":Uuid::now_v7(), "state":"success", "context":"ci",
+            }),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    };
+    for number in 1..=10 {
+        let branch = format!("topic-{number}");
+        let head = git(&["rev-parse", &branch]).await;
+        status(&head).await;
+        let created: Value = write(
+            Method::POST,
+            &format!("{REPO}/pulls"),
+            json!({
+                "request_id":Uuid::now_v7(), "title":branch, "body":"",
+                "base_ref":"refs/heads/main", "head_ref":format!("refs/heads/{branch}"),
+            }),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(created["number"], number);
+        write(
+            Method::PUT,
+            &format!("{REPO}/pulls/{number}/auto-merge"),
+            json!({
+                "request_id":Uuid::now_v7(), "version":created["version"], "base_oid":base,
+                "head_oid":head, "queue":true, "method":"merge_commit",
+            }),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    }
+
+    let worker = tokio::spawn(crate::api::auto_merge::run(Arc::clone(&h.server)));
+    let candidate = tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            let candidate = h
+                .json(&format!("{REPO}/pulls/10/merge-candidate"), &alice)
+                .await["candidate"]
+                .clone();
+            if candidate["current"] == true {
+                break candidate;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(candidate["grouped"], true);
+    let tested = candidate["commit"].as_str().unwrap();
+    status(tested).await;
+    git(&["fetch", remote.as_str(), "refs/crab/merge-queue/10"]).await;
+    assert_eq!(git(&["rev-parse", "FETCH_HEAD"]).await, tested);
+    assert_eq!(
+        git(&["ls-tree", "--name-only", "FETCH_HEAD"])
+            .await
+            .lines()
+            .filter(|path| path.starts_with("topic-"))
+            .count(),
+        10
     );
     assert_eq!(
         git(&["ls-remote", remote.as_str(), "refs/heads/main"]).await,

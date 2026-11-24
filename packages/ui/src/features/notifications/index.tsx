@@ -20,8 +20,10 @@ import { navigate, useRequest } from "@/lib/api";
 
 import {
   bulkActions,
+  INBOX_CHANGED,
   isBulkAction,
   notificationIntent,
+  refreshNotificationBadge,
   type Action,
   type Address,
   type BulkAction,
@@ -31,6 +33,9 @@ import {
   type UnsubscribeStatus,
 } from "./actions";
 import { EmailNotifications } from "./email";
+import { IncomingTransfers, transfersHref } from "./incoming-transfers";
+
+export { refreshNotificationBadge } from "./actions";
 
 type InboxPage = { items: Notice[]; next: string | null };
 
@@ -79,20 +84,15 @@ type Notice = NoticeState &
     reason: Reason;
   };
 
-const INBOX_CHANGED = "crab-inbox-changed";
-
-export function refreshNotificationBadge() {
-  window.dispatchEvent(new Event(INBOX_CHANGED));
-}
-
 export function NotificationLink({ current }: { current: boolean }) {
-  const { data, error, retry } = useRequest<{ unread: boolean }>(
+  type Attention = { unread: boolean; pending_transfers?: boolean };
+  const { data, error, retry } = useRequest<Attention>(
     "/api/notifications/unread",
   );
-  const [unread, setUnread] = useState(false);
+  const [attention, setAttention] = useState<Attention>();
   useEffect(() => {
-    if (data) setUnread(data.unread);
-    if (error) setUnread(false);
+    if (data) setAttention(data);
+    if (error) setAttention(undefined);
   }, [data, error]);
   useEffect(() => {
     function refresh() {
@@ -107,17 +107,23 @@ export function NotificationLink({ current }: { current: boolean }) {
       window.removeEventListener(INBOX_CHANGED, refresh);
     };
   }, [retry]);
-  const label = unread ? "Notifications, unread" : "Notifications";
+  const unread = Boolean(attention?.unread);
+  const transfers = Boolean(attention?.pending_transfers);
+  const label = unread
+    ? "Notifications, unread"
+    : transfers
+      ? "Notifications, pending repository transfers"
+      : "Notifications";
   return (
     <Button variant="ghost" size="icon-lg" className="relative" asChild>
       <Link
-        href="/-/notifications"
+        href={transfers ? transfersHref() : "/-/notifications"}
         aria-label={label}
         aria-current={current ? "page" : undefined}
         title={label}
       >
         <BellIcon aria-hidden="true" />
-        {unread && (
+        {(unread || transfers) && (
           <span
             className="absolute top-1 right-1 size-2 rounded-full bg-primary"
             aria-hidden="true"
@@ -165,6 +171,7 @@ export function Notifications({
   repositories: Address[];
 }) {
   const tab = url.searchParams.get("tab");
+  const transfers = tab === "transfers";
   const view = isView(tab) ? tab : "unread";
   const repository = url.searchParams.get("repository") ?? "";
   const selectedReason = url.searchParams.get("reason");
@@ -185,16 +192,26 @@ export function Notifications({
               <Button
                 key={item}
                 asChild
-                variant={view === item ? "secondary" : "ghost"}
+                variant={!transfers && view === item ? "secondary" : "ghost"}
               >
                 <Link
                   href={inboxHref(item, repository, reason)}
-                  aria-current={view === item ? "page" : undefined}
+                  aria-current={
+                    !transfers && view === item ? "page" : undefined
+                  }
                 >
                   {views[item].label}
                 </Link>
               </Button>
             ))}
+          <Button asChild variant={transfers ? "secondary" : "ghost"}>
+            <Link
+              href={transfersHref()}
+              aria-current={transfers ? "page" : undefined}
+            >
+              Repository transfers
+            </Link>
+          </Button>
         </nav>
       </div>
       <div className="flex flex-wrap gap-2">
@@ -206,25 +223,30 @@ export function Notifications({
         </Button>
         {csrf && <EmailNotifications csrf={csrf} />}
       </div>
-      {view === "done" && (
+      {transfers && (
+        <IncomingTransfers before={url.searchParams.get("before")} />
+      )}
+      {!transfers && view === "done" && (
         <p className="text-sm text-muted-foreground">
           Done shows the last 90 days. Bookmarks remain in Saved until you
           unsave them.
         </p>
       )}
-      {repository && (
+      {!transfers && repository && (
         <Link className="w-fit underline" href={inboxHref(view, "", reason)}>
           Clear repository filter
         </Link>
       )}
-      <NotificationList
-        key={inboxHref(view, repository, reason)}
-        csrf={csrf}
-        view={view}
-        repository={repository}
-        reason={reason}
-        repositories={repositories}
-      />
+      {!transfers && (
+        <NotificationList
+          key={inboxHref(view, repository, reason)}
+          csrf={csrf}
+          view={view}
+          repository={repository}
+          reason={reason}
+          repositories={repositories}
+        />
+      )}
     </section>
   );
 }

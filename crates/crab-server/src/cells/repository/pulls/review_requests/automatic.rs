@@ -25,6 +25,8 @@ impl Plan {
 pub(crate) struct TeamRecipients {
     pub team: Uuid,
     pub recipients: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<routing::Plan>,
 }
 
 pub(in crate::cells::repository::pulls) fn apply(
@@ -92,7 +94,13 @@ pub(in crate::cells::repository::pulls) fn apply(
                 state: State::Requested,
                 code_owner: true,
             });
-            notified.extend(team.recipients);
+            // The team stays attached to its CODEOWNERS request. Individual
+            // assignment and delivery do not change who can satisfy the rule.
+            let recipients = match team.routing {
+                Some(plan) => routing::assign(context, pull, actor, team.team, plan, true)?,
+                None => team.recipients,
+            };
+            notified.extend(recipients);
         }
         if current.len() != before {
             context.put_document(&teams::key(pull.number), &current)?;

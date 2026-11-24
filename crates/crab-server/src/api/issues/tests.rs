@@ -4,6 +4,8 @@ use axum::http::header;
 use serde_json::Value;
 use serde_json::json;
 
+mod moderation;
+
 const ROOT: &str = "/api/repos/team/private/issues";
 fn nonce(id: usize) -> String {
     format!("00000000-0000-4000-8000-{id:012}")
@@ -218,6 +220,16 @@ async fn membership_author_ownership_and_csrf_protect_all_mutations() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let comments = format!("{path}/comments");
+    let (status, original) = write(
+        &h,
+        &alice,
+        "POST",
+        &comments,
+        json!({"request_id":nonce(2),"body":"Original author’s comment"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
     *h.provider.mode.lock().await = "member".into();
     let bob = h.login().await;
     assert_eq!(h.json(&path, &bob).await["can_edit"], false);
@@ -233,21 +245,21 @@ async fn membership_author_ownership_and_csrf_protect_all_mutations() {
         .0,
         StatusCode::FORBIDDEN
     );
-    let comments = format!("{path}/comments");
-    let comment = write(
+    let (status, comment) = write(
         &h,
         &bob,
         "POST",
         &comments,
         json!({"request_id":nonce(3),"body":"Another team member can join the discussion"}),
     )
-    .await
-    .1;
-    let comment_path = format!("{comments}/{}", comment["number"]);
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(comment["author"]["name"], "Bob");
+    let comment_path = format!("{comments}/{}", original["number"]);
     assert_eq!(
         write(
             &h,
-            &alice,
+            &bob,
             "PATCH",
             &comment_path,
             json!({"version":1,"body":"not my comment"})

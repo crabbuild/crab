@@ -2,7 +2,7 @@ import { compareFileItems } from "@/features/repository/tree/sort";
 import { type Change } from "@/lib/api";
 import type { FileTreeRowDecorationContext, GitStatus } from "@pierre/trees";
 import { FileTree, useFileTree } from "@pierre/trees/react";
-import { useEffect, useMemo, useRef } from "react";
+import { useLayoutEffect, useMemo, useRef } from "react";
 import type { DiffReviewState } from "./model";
 
 function changeStatus(kind: string): GitStatus {
@@ -28,6 +28,17 @@ export function ChangeTree({
   );
   const pathsRef = useRef(paths);
   pathsRef.current = paths;
+  const treeInput = useMemo(
+    () => ({
+      paths: changes.map((change) => change.path),
+      gitStatus: changes.map((change) => ({
+        path: change.path,
+        status: changeStatus(change.kind),
+      })),
+    }),
+    [changes],
+  );
+  const previousInput = useRef(treeInput);
   const select = useRef(onSelect);
   select.current = onSelect;
   const fileSummary = review?.fileSummary;
@@ -43,6 +54,8 @@ export function ChangeTree({
   );
   const fileSummariesRef = useRef(fileSummaries);
   fileSummariesRef.current = fileSummaries;
+  const partial = useRef(review?.fileSummaryPartial);
+  partial.current = review?.fileSummaryPartial;
   const syncingSelection = useRef(false);
   const renderRowDecoration = useRef(
     ({ item }: FileTreeRowDecorationContext) => {
@@ -50,7 +63,8 @@ export function ChangeTree({
       const change = pathsRef.current.get(item.path);
       const stats = fileSummariesRef.current.get(change?.path_hex ?? "");
       if (!stats || stats.total === 0) return null;
-      const label = `${stats.total} ${stats.total === 1 ? "thread" : "threads"}`;
+      const count = `${stats.total} ${stats.total === 1 ? "thread" : "threads"}`;
+      const label = partial.current ? `${count} loaded` : count;
       return {
         text: label,
         title: `${label}; ${stats.open} open, ${stats.resolved} resolved${stats.outdated ? `, ${stats.outdated} outdated` : ""}`,
@@ -58,11 +72,7 @@ export function ChangeTree({
     },
   ).current;
   const { model } = useFileTree({
-    paths: changes.map((change) => change.path),
-    gitStatus: changes.map((change) => ({
-      path: change.path,
-      status: changeStatus(change.kind),
-    })),
+    ...treeInput,
     initialExpansion: "open",
     initialSelectedPaths: selected ? [selected] : [],
     flattenEmptyDirectories: false,
@@ -89,19 +99,25 @@ export function ChangeTree({
       ),
     onSelectionChange(selectedPaths) {
       if (syncingSelection.current) return;
-      const change = paths.get(selectedPaths[0] ?? "");
+      const change = pathsRef.current.get(selectedPaths[0] ?? "");
       if (change) select.current(change);
     },
   });
-  useEffect(() => {
-    if (!selected || model.getSelectedPaths()[0] === selected) return;
+  useLayoutEffect(() => {
     syncingSelection.current = true;
-    for (const path of model.getSelectedPaths()) {
-      if (path !== selected) model.getItem(path)?.deselect();
+    if (previousInput.current !== treeInput) {
+      model.resetPaths(treeInput.paths);
+      model.setGitStatus(treeInput.gitStatus);
+      previousInput.current = treeInput;
     }
-    model.getItem(selected)?.select();
+    if (selected && model.getSelectedPaths()[0] !== selected) {
+      for (const path of model.getSelectedPaths()) {
+        if (path !== selected) model.getItem(path)?.deselect();
+      }
+      model.getItem(selected)?.select();
+    }
     syncingSelection.current = false;
-  }, [model, selected]);
+  }, [model, selected, treeInput]);
   return (
     <div className="change-tree-shell">
       <header className="change-tree-header">

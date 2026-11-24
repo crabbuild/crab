@@ -18,6 +18,7 @@ use crate::cells::records::{RecordDecoder, RecordEncoder, StoredRecord};
 
 use crate::cells::application::{Mutation, MutationResult, Read, Transaction};
 
+pub(crate) use checks::required as required_checks;
 pub(crate) use checks::{
     CheckAnnotationRecord, CheckOutputRecord, CheckReportInput, CheckRunDetail, CheckRunKey,
     CheckRunRecord, CheckStepRecord, CheckSubmissionKey, CreateCheckRun, CreateCheckRunInput,
@@ -29,21 +30,25 @@ pub(crate) mod integrations;
 pub(crate) mod webhooks;
 pub(crate) use issues::{ListComments, UpdateComment, UpdateIssue};
 pub(crate) use labels::{CreateLabel, DeleteLabel, ListLabels, UpdateLabel};
+#[cfg(test)]
+pub(crate) use pulls::SeedHistoricalMerges;
 pub(crate) use pulls::auto_merge as pull_auto_merge;
 pub(crate) use pulls::base as pull_base;
 pub(crate) use pulls::head as pull_head;
 pub(crate) use pulls::pending_reviews;
 pub(crate) use pulls::review_dismissals;
+pub(crate) use pulls::review_threads::suggestions;
 pub(crate) use pulls::review_threads::{
     CountUnresolvedConversations, CreatePullReviewReply, CreatePullReviewReplyInput,
     CreatePullReviewReplyOutcome, CreatePullReviewThread, CreatePullReviewThreadInput,
     CreatePullReviewThreadOutcome, GetPullReviewReply, GetPullReviewReplySubmission,
-    GetPullReviewThread, GetPullReviewThreadSubmission, ListPullReviewReplies,
+    GetPullReviewThread, GetPullReviewThreadSubmission, GetReviewNavigation, ListPullReviewReplies,
     ListPullReviewThreads, PullReviewReplyKey, PullReviewReplyListInput, PullReviewReplyRecord,
     PullReviewReplySubmissionKey, PullReviewThreadKey, PullReviewThreadListInput,
     PullReviewThreadRecord, PullReviewThreadSide, PullReviewThreadSubmissionKey,
-    UpdatePullReviewReply, UpdatePullReviewReplyInput, UpdatePullReviewReplyOutcome,
-    UpdatePullReviewThread, UpdatePullReviewThreadInput, UpdatePullReviewThreadOutcome,
+    ReviewNavigationInput, UpdatePullReviewReply, UpdatePullReviewReplyInput,
+    UpdatePullReviewReplyOutcome, UpdatePullReviewThread, UpdatePullReviewThreadInput,
+    UpdatePullReviewThreadOutcome,
 };
 pub(crate) use pulls::viewed;
 pub(crate) use pulls::{
@@ -51,14 +56,15 @@ pub(crate) use pulls::{
     CreatePullCommentInput, CreatePullCommentOutcome, CreatePullInput, CreatePullOutcome,
     CreatePullReview, CreatePullReviewInput, CreatePullReviewOutcome, GetPull, GetPullComment,
     GetPullMergeSubmission, GetPullReview, GetPullReviewSubmission, GetPullSubmission,
-    ListPullComments, ListPullReviews, ListPulls, MergeMethod, MergeReviewers, PullChildKey,
-    PullChildListInput, PullCommentRecord, PullMerge, PullMergeTransition, PullReadiness,
-    PullRecord, PullReviewRecord, PullState, PullSubmissionKey, PullSummary,
-    RejectStalePullComparison, ReservePullMerge, ReservePullMergeInput, ReservePullMergeOutcome,
-    ReviewState, SetPullReadiness, SetPullReadinessInput, SetPullReadinessOutcome,
-    TransitionPullMerge, TransitionPullMergeInput, TransitionPullMergeOutcome, UpdatePull,
-    UpdatePullComment, UpdatePullCommentInput, UpdatePullCommentOutcome, UpdatePullInput,
-    UpdatePullOutcome, UpdatePullReview, UpdatePullReviewInput, UpdatePullReviewOutcome,
+    ListMergedPullsForRelease, ListPullComments, ListPullReviews, ListPulls, MergeMethod,
+    MergeReviewers, MergedPullForRelease, PullChildKey, PullChildListInput, PullCommentRecord,
+    PullMerge, PullMergeTransition, PullReadiness, PullRecord, PullReviewRecord, PullState,
+    PullSubmissionKey, PullSummary, RejectStalePullComparison, ReservePullMerge,
+    ReservePullMergeInput, ReservePullMergeOutcome, ReviewState, SetPullReadiness,
+    SetPullReadinessInput, SetPullReadinessOutcome, TransitionPullMerge, TransitionPullMergeInput,
+    TransitionPullMergeOutcome, UpdatePull, UpdatePullComment, UpdatePullCommentInput,
+    UpdatePullCommentOutcome, UpdatePullInput, UpdatePullOutcome, UpdatePullReview,
+    UpdatePullReviewInput, UpdatePullReviewOutcome,
 };
 pub(crate) use pulls::{
     GetPullDetail, GetPullLifecycleStatus, PreparePullLifecycle, PullLifecycle, review_requests,

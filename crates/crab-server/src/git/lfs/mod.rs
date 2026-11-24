@@ -206,16 +206,21 @@ pub(crate) struct Size {
 }
 
 fn pointer(oid: &str, size: u64, store: &crab_storage::Store) -> Result<LfsPointer> {
-    if size > crab_storage::multipart::upload_limits(store.bucket_identity().cloud).max_object_size
-    {
-        return Err(Error::TooLarge);
-    }
+    validate_size(size, store)?;
     if oid.len() != 64 {
         return Err(Error::Request("Expected a SHA-256 object ID"));
     }
     Ok(LfsPointer::parse(
         format!("version {LFS_VERSION_URL}\noid sha256:{oid}\nsize {size}\n").as_bytes(),
     )?)
+}
+
+pub(crate) fn validate_size(size: u64, store: &crab_storage::Store) -> Result<()> {
+    if size > crab_storage::multipart::upload_limits(store.bucket_identity().cloud).max_object_size
+    {
+        return Err(Error::TooLarge);
+    }
+    Ok(())
 }
 
 fn repository(
@@ -365,9 +370,19 @@ pub(crate) async fn download(
 ) -> Result<Response> {
     let entry = repository(&server, &principal, &owner, &name, false)?;
     let pointer = pointer(&oid, size.size, &entry.store)?;
+    download_object(&server, &entry, &pointer, method, &headers).await
+}
+
+pub(crate) async fn download_object(
+    server: &Server,
+    entry: &Repository,
+    pointer: &LfsPointer,
+    method: Method,
+    headers: &HeaderMap,
+) -> Result<Response> {
     let etag = format!("\"{}\"", crab_git::lfs_pointer::hex_encode(&pointer.oid));
     let range = if method == Method::GET {
-        requested_range(&headers, pointer.size, &etag)?
+        requested_range(headers, pointer.size, &etag)?
     } else {
         None
     };

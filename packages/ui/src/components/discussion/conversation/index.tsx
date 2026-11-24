@@ -1,5 +1,5 @@
-import { useEffect, useRef, type ReactNode } from "react";
-import type { Repository } from "@/lib/api";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { endpoint, type Repository } from "@/lib/api";
 import { RequestWidget } from "@/components/request/result";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -11,6 +11,50 @@ import { ReviewCard } from "./review";
 import { useConversation } from "./history";
 import { entryId, entryKey, type Comment } from "./model";
 import { useContributionFocus, useDiscussionPermalink } from "../permalink";
+import { useMutation } from "../mutations";
+
+function UndoDuplicate({
+  repo,
+  csrf,
+  target,
+  event,
+  onSaved,
+}: {
+  repo: Repository;
+  csrf: string;
+  target: { kind: "issue" | "pull"; number: number };
+  event: number;
+  onSaved: () => void;
+}) {
+  const mutation = useMutation(csrf, repo);
+  const [undone, setUndone] = useState(false);
+  if (undone) return null;
+  return (
+    <span className="ms-2 inline-flex flex-wrap items-center gap-2">
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        aria-label="Undo duplicate mark"
+        disabled={mutation.pending || mutation.conflict}
+        onClick={async () => {
+          const result = await mutation.run<{ undone: boolean }>(
+            endpoint(repo, `duplicates/${target.kind}/${target.number}/undo`),
+            "PUT",
+            { event },
+          );
+          if (result?.undone) {
+            setUndone(true);
+            onSaved();
+          }
+        }}
+      >
+        {mutation.pending ? "Undoing…" : "Undo"}
+      </Button>
+      {mutation.error && <span role="alert">{mutation.error}</span>}
+    </span>
+  );
+}
 
 export function Conversation({
   repo,
@@ -130,7 +174,21 @@ export function Conversation({
                     event={entry.value}
                     hidden={hidden}
                     href={`${href}#${entryId(entry)}`}
-                  />
+                  >
+                    {entry.value.action.kind === "duplicate_marked" &&
+                      entry.value.number === history.undoDuplicateEvent &&
+                      (entry.value.target.kind === "issue" ||
+                        entry.value.target.kind === "pull") &&
+                      !repo.archived && (
+                        <UndoDuplicate
+                          repo={repo}
+                          csrf={csrf}
+                          target={entry.value.target}
+                          event={entry.value.number}
+                          onSaved={history.refresh}
+                        />
+                      )}
+                  </ActivityItem>
                 </OverlayVisibility>
               );
             // Keep loaded editors mounted while moving between bounded windows.
@@ -145,13 +203,18 @@ export function Conversation({
                       target={target}
                       href={href}
                       csrf={csrf}
+                      refresh={history.retry}
                       onSaved={(value) =>
                         history.upsert({ kind: "comment", value })
                       }
                     />
                   ) : (
                     <ReviewCard
-                      onSaved={() => {
+                      onEdited={(value) =>
+                        history.upsert({ kind: "review", value })
+                      }
+                      onVisibilityChanged={history.retry}
+                      onDismissed={() => {
                         history.refresh();
                         onChanged?.();
                       }}

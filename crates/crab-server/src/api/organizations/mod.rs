@@ -15,7 +15,7 @@ use crate::{
     app::{self, Error, Result},
     auth::Principal,
     cells::{
-        Address,
+        Address, CellClient,
         directory::{ActorSummary, LookupProfiles},
         organization::{
             self, Caller, ChangeMember, ChangeOutcome, Edit, EditInput, GetOrganization,
@@ -26,8 +26,11 @@ use crate::{
 };
 
 pub(super) mod audit;
+pub(super) mod automation;
 pub(super) mod invitations;
+pub(super) mod issue_types;
 mod projects;
+pub(super) mod properties;
 pub(super) mod repository_access;
 mod rulesets;
 pub(super) mod teams;
@@ -72,6 +75,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .merge(invitations::routes())
         .merge(audit::routes())
+        .merge(automation::routes())
         .merge(repository_access::routes())
         .merge(teams::routes())
         .route("/api/organizations/{id}", get(own).patch(edit))
@@ -83,6 +87,8 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .layer(axum::extract::DefaultBodyLimit::max(8192))
         .merge(projects::routes())
         .merge(rulesets::routes())
+        .merge(properties::organization_routes())
+        .merge(issue_types::routes().layer(axum::extract::DefaultBodyLimit::max(32 * 1024)))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
 pub(in crate::api) async fn actor(server: &Server, principal: &Principal) -> Result<Uuid> {
@@ -342,4 +348,17 @@ fn target(id: Uuid) -> Result<Address> {
         return Err(Error::Invalid("Organization ID is invalid"));
     }
     Ok(Address::Organization(id))
+}
+
+async fn require_owner(cells: &CellClient, address: Address, owner: Uuid) -> Result<()> {
+    let role = cells
+        .query::<GetOrganization>(address, None, Caller { actor: owner })
+        .await
+        .map_err(read_error)?
+        .output
+        .map(|result| result.role);
+    if role != Some(Role::Owner) {
+        return Err(Error::NotFound);
+    }
+    Ok(())
 }

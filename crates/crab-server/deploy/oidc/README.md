@@ -89,6 +89,53 @@ consistently; `localhost` is a different configured origin. The embedded UI can
 instead use `public_url = "http://127.0.0.1:8788/"`; its callback is also registered.
 These addresses assume Crab and the browser run on the host, outside Docker.
 
+### Create a local test account
+
+Choose **Sign up** on the Crab sign-in page. Enter an email, username, password,
+and password confirmation. Use **New repository** or **Import from Git**
+to start in your personal namespace. For a shared private repository, send the
+**Your user ID** value to an administrator who can grant access in **Settings →
+Members**. Existing fixture accounts still use the credentials above.
+
+Fresh fixture imports enable registration. For an existing development realm,
+open its Keycloak admin console and enable **Realm settings → Login → User
+registration**. Under **Realm settings → User profile**, make `firstName` and
+`lastName` optional and order `email` before `username` to match the fixture.
+Set the email field's `inputType` annotation to `html5-email` for an email keyboard
+on touch devices.
+The Crab theme keeps optional name fields in the account profile.
+Registration and credentials belong to the configured identity
+provider. Each deployment configures its own provider’s enrollment policy.
+Crab offers direct OIDC signup when discovery advertises the standard
+`create` prompt. Restart Crab after changing the provider’s enrollment policy
+to refresh discovery.
+
+Compose mounts the Crab login theme, logo, and application theme tokens for
+the shared single-column layout.
+For an existing development realm, select **crab** under **Realm settings →
+Themes → Login theme** after installing those theme resources. The theme extends
+Keycloak’s credential forms and uses the browser’s light or dark preference.
+
+### Sign in with GitHub
+
+Keep Crab configured for OIDC so the same realm can support passwords, registration,
+and GitHub. In **Identity providers → Add provider → GitHub**, copy the redirect URI
+shown by Keycloak. For this fixture, use the alias `github` and register a
+[GitHub OAuth App](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app)
+with the authorization callback URL
+`http://127.0.0.1:18080/realms/crab-dev/broker/github/endpoint`.
+
+Enter the OAuth app client ID and client secret in Keycloak. Keep the provider
+enabled and visible on the login page. Keep **Store Tokens** and **Trust Email**
+off and use Keycloak’s default first broker login flow, which verifies ownership
+before linking an existing account. Leave repository scopes unset.
+
+In Crab, choose **Continue to sign in**, then **Sign in with GitHub**. After
+authorization, Keycloak may ask you to complete your profile. It returns you to
+Crab with your Keycloak account. You can create or import a repository there.
+Private repositories on either service require access on that service. For
+GitHub-only deployments, see [Crab’s direct GitHub OAuth configuration](../../REFERENCE.md#team-sign-in).
+
 ## Exercise permissions
 
 As Alice, open the repository's **Settings → Members**, add `/crab-writers` with

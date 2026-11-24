@@ -91,6 +91,7 @@ pub(super) fn refresh(context: &Transaction<'_>, subject: Subject) -> crate::cel
     if subject.kind == SubjectKind::Pull {
         let (base, head, merged) =
             crate::cells::repository::pulls::review_source(context, subject.number)?;
+        super::super::reviews::teams::project(context, subject.number, id, &mut statements)?;
         // NULL identifies a link captured by a completed publication. Active
         // references follow the default branch supplied by the read handler.
         let binding = if state == 2 {

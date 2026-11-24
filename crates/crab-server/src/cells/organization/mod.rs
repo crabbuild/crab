@@ -15,9 +15,12 @@ pub(in crate::cells) const CLASS: &str = "Organization";
 pub(in crate::cells) const NAMESPACE: &str = "ORGANIZATIONS";
 pub(crate) const MAX_VERSION: u64 = 9_007_199_254_740_991;
 
+pub(crate) mod automation;
 mod commands;
 mod invitations;
+pub(crate) mod issue_types;
 pub(crate) mod projects;
+pub(crate) mod properties;
 mod reads;
 pub(crate) mod repositories;
 pub(crate) mod rulesets;
@@ -161,7 +164,18 @@ fn record(context: &Transaction<'_>) -> Result<Option<Organization>> {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Action {
     Created,
+    Automation {
+        identity: Uuid,
+        action: automation::Audit,
+    },
     RulesetsChanged {
+        version: u64,
+    },
+    RepositoryPropertiesChanged {
+        repository: Option<Uuid>,
+        version: u64,
+    },
+    IssueTypesChanged {
         version: u64,
     },
     ProjectChanged {
@@ -172,6 +186,14 @@ pub(crate) enum Action {
     },
     TeamEdited {
         team: Uuid,
+    },
+    TeamGroupSync {
+        team: Uuid,
+        group: Uuid,
+        group_revision: u64,
+        change: teams::sync::AuditChange,
+        updated: u64,
+        removed: u64,
     },
     TeamDeleted {
         team: Uuid,
@@ -204,12 +226,15 @@ pub(crate) enum Action {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Event {
     pub revision: u64,
-    pub actor: Uuid,
+    pub actor: Option<Uuid>,
     pub action: Action,
     pub created_at_ms: u64,
 }
 const EVENTS: &str = "organization/v1/events/";
 fn advance(context: &Transaction<'_>, actor: Uuid, action: Action) -> Result<()> {
+    append_event(context, Some(actor), action)
+}
+fn append_event(context: &Transaction<'_>, actor: Option<Uuid>, action: Action) -> Result<()> {
     let result = context.query("UPDATE organization_identity SET app_revision = app_revision + 1 WHERE singleton = 1 AND app_revision < 9007199254740991 RETURNING app_revision", &[])?;
     let Some([value]) = result.rows.first().map(Vec::as_slice) else {
         return Err(Error::Invalid("organization revision limit reached"));
@@ -293,8 +318,16 @@ pub(in crate::cells) fn authorize(
     if projects::handles(operation, mutation) {
         return projects::authorize(context, operation, mutation, input);
     }
+    if mutation && operation == teams::sync::SyncGroup::ID {
+        // Only the durable SCIM reconciler submits this native operation.
+        // Owner link edits check active ownership inside the same transaction.
+        return Ok(());
+    }
     if teams::handles(operation, mutation) {
         return teams::authorize(context, operation, mutation, input);
+    }
+    if mutation && operation == properties::SetValues::ID {
+        return properties::authorize_save(context, input);
     }
     let owner = match (operation, mutation) {
         // The private repository reads use catalog-bound team IDs. The public
@@ -302,10 +335,17 @@ pub(in crate::cells) fn authorize(
         (
             repositories::Owners::ID
             | RepositoryTeamsForActor::ID
+            | teams::review_routing::ReviewRoster::ID
             | RepositoryTeamRoster::ID
             | RepositoryTeamNames::ID
             | CodeOwnerTeams::ID
-            | rulesets::Applicable::ID,
+            | rulesets::Applicable::ID
+            | rulesets::NameProtection::ID
+            | properties::GetValues::ID
+            | properties::search::MatchRepositories::ID
+            | properties::search::Fields::ID
+            | issue_types::Active::ID
+            | automation::Verify::ID,
             false,
         ) => return Ok(()),
         (GetOrganization::ID | ListMembers::ID, false) => false,
@@ -314,7 +354,11 @@ pub(in crate::cells) fn authorize(
             | ListActivity::ID
             | ListInvitations::ID
             | rulesets::Get::ID
-            | InspectMemberRepositoryRoles::ID,
+            | properties::GetSchema::ID
+            | properties::GetSelection::ID
+            | issue_types::Get::ID
+            | InspectMemberRepositoryRoles::ID
+            | automation::List::ID,
             false,
         )
         | (
@@ -325,7 +369,11 @@ pub(in crate::cells) fn authorize(
             | CancelInvitation::ID
             | repositories::AuthorizeCreation::ID
             | repositories::AuthorizeImportPublication::ID
-            | rulesets::Replace::ID,
+            | rulesets::Replace::ID
+            | properties::SetSchema::ID
+            | properties::SetSelection::ID
+            | issue_types::Replace::ID
+            | automation::Change::ID,
             true,
         ) => true,
         // Invitations belong to the organization. Their recipient can inspect
@@ -382,14 +430,23 @@ pub(in crate::cells) fn dispatch_read(
         projects::List::ID => invoke_read::<projects::List>(context, input),
         projects::Get::ID => invoke_read::<projects::Get>(context, input),
         projects::Items::ID => invoke_read::<projects::Items>(context, input),
+        projects::TypeSources::ID => invoke_read::<projects::TypeSources>(context, input),
         teams::GetPreparation::ID => invoke_read::<teams::GetPreparation>(context, input),
         teams::List::ID => invoke_read::<teams::List>(context, input),
+        teams::ResolveReviewTeams::ID => invoke_read::<teams::ResolveReviewTeams>(context, input),
         teams::Get::ID => invoke_read::<teams::Get>(context, input),
+        teams::sync::GetSync::ID => invoke_read::<teams::sync::GetSync>(context, input),
         teams::Members::ID => invoke_read::<teams::Members>(context, input),
         teams::GetMembership::ID => invoke_read::<teams::GetMembership>(context, input),
         teams::Candidates::ID => invoke_read::<teams::Candidates>(context, input),
         teams::GetPolicy::ID => invoke_read::<teams::GetPolicy>(context, input),
         RepositoryTeamsForActor::ID => invoke_read::<RepositoryTeamsForActor>(context, input),
+        teams::review_routing::ReviewRoster::ID => {
+            invoke_read::<teams::review_routing::ReviewRoster>(context, input)
+        }
+        teams::review_routing::GetSettings::ID => {
+            invoke_read::<teams::review_routing::GetSettings>(context, input)
+        }
         RepositoryTeamRoster::ID => invoke_read::<RepositoryTeamRoster>(context, input),
         RepositoryTeamNames::ID => invoke_read::<RepositoryTeamNames>(context, input),
         CodeOwnerTeams::ID => invoke_read::<CodeOwnerTeams>(context, input),
@@ -398,8 +455,20 @@ pub(in crate::cells) fn dispatch_read(
         }
         rulesets::Get::ID => invoke_read::<rulesets::Get>(context, input),
         rulesets::Applicable::ID => invoke_read::<rulesets::Applicable>(context, input),
+        rulesets::NameProtection::ID => invoke_read::<rulesets::NameProtection>(context, input),
+        properties::GetSchema::ID => invoke_read::<properties::GetSchema>(context, input),
+        issue_types::Get::ID => invoke_read::<issue_types::Get>(context, input),
+        issue_types::Active::ID => invoke_read::<issue_types::Active>(context, input),
+        properties::GetValues::ID => invoke_read::<properties::GetValues>(context, input),
+        properties::search::MatchRepositories::ID => {
+            invoke_read::<properties::search::MatchRepositories>(context, input)
+        }
+        properties::search::Fields::ID => invoke_read::<properties::search::Fields>(context, input),
+        properties::GetSelection::ID => invoke_read::<properties::GetSelection>(context, input),
         repositories::Owners::ID => invoke_read::<repositories::Owners>(context, input),
         teams::MentionMembers::ID => invoke_read::<teams::MentionMembers>(context, input),
+        automation::List::ID => invoke_read::<automation::List>(context, input),
+        automation::Verify::ID => invoke_read::<automation::Verify>(context, input),
         GetOrganization::ID => invoke_read::<GetOrganization>(context, input),
         ListMembers::ID => invoke_read::<ListMembers>(context, input),
         GetMember::ID => invoke_read::<GetMember>(context, input),
@@ -429,6 +498,7 @@ pub(in crate::cells) fn dispatch_mutation(
         teams::tests::FailedStep::ID => invoke_mutation::<teams::tests::FailedStep>(context, input),
         teams::Prepare::ID => invoke_mutation::<teams::Prepare>(context, input),
         teams::Change::ID => invoke_mutation::<teams::Change>(context, input),
+        teams::sync::SyncGroup::ID => invoke_mutation::<teams::sync::SyncGroup>(context, input),
         teams::Cancel::ID => invoke_mutation::<teams::Cancel>(context, input),
         Bootstrap::ID => invoke_mutation::<Bootstrap>(context, input),
         repositories::AuthorizeCreation::ID => {
@@ -438,6 +508,11 @@ pub(in crate::cells) fn dispatch_mutation(
             invoke_mutation::<repositories::AuthorizeImportPublication>(context, input)
         }
         rulesets::Replace::ID => invoke_mutation::<rulesets::Replace>(context, input),
+        properties::SetSchema::ID => invoke_mutation::<properties::SetSchema>(context, input),
+        issue_types::Replace::ID => invoke_mutation::<issue_types::Replace>(context, input),
+        properties::SetValues::ID => invoke_mutation::<properties::SetValues>(context, input),
+        properties::SetSelection::ID => invoke_mutation::<properties::SetSelection>(context, input),
+        automation::Change::ID => invoke_mutation::<automation::Change>(context, input),
         Edit::ID => invoke_mutation::<Edit>(context, input),
         ChangeMember::ID => invoke_mutation::<ChangeMember>(context, input),
         Invite::ID => invoke_mutation::<Invite>(context, input),

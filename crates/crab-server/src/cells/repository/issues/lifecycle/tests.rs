@@ -68,6 +68,7 @@ fn update(issue: &IssueRecord, state: Option<u8>, reason: Option<Reason>) -> Upd
         number: issue.number,
         actor: actor(),
         can_triage: false,
+        can_moderate: false,
         version: issue.version,
         title: None,
         body: None,
@@ -161,6 +162,7 @@ async fn reasons_dates_history_and_receipt_replay_share_the_issue_transaction() 
         Action::IssueClosed {
             reason: Reason::Completed,
             pull: None,
+            commit: None,
         }
     ));
     let reopened = changed(&cell, update(&closed, Some(0), None)).await;

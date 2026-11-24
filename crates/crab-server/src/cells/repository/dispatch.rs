@@ -5,7 +5,7 @@ use super::collaboration::milestones::{
 use super::collaboration::reactions::{GetReactions, SetReaction};
 use super::collaboration::{
     attachments,
-    links::{GetLink, ListLinks, SetLink},
+    links::{GetLink, ListLinks, SetLink, commits as commit_closures},
     mention_settings, mentions, watches,
 };
 use super::*;
@@ -39,11 +39,15 @@ pub(in crate::cells) fn dispatch_mutation(
         || id == issues::lifecycle::tests::Historical::ID
         || id == pulls::lifecycle::tests::Historical::ID;
     #[cfg(test)]
-    let maintenance = maintenance || id == projection::tests::Historical::ID;
+    let maintenance = maintenance
+        || id == projection::tests::Historical::ID
+        || id == search::index::tests::IndexFixture::ID;
     if !maintenance {
         search::index::ensure_ready(context)?;
     }
     let result = match id {
+        #[cfg(test)]
+        SeedHistoricalMerges::ID => invoke_mutation::<SeedHistoricalMerges>(context, input),
         attachments::Reserve::ID => invoke_mutation::<attachments::Reserve>(context, input),
         attachments::Finish::ID => invoke_mutation::<attachments::Finish>(context, input),
         attachments::Expire::ID => invoke_mutation::<attachments::Expire>(context, input),
@@ -101,11 +105,31 @@ pub(in crate::cells) fn dispatch_mutation(
             invoke_mutation::<collaboration::submissions::preparation::Prepare>(context, input)
         }
         issues::pins::SetPins::ID => invoke_mutation::<issues::pins::SetPins>(context, input),
+        issues::issue_type::Set::ID => invoke_mutation::<issues::issue_type::Set>(context, input),
         collaboration::bulk::Edit::ID => {
             invoke_mutation::<collaboration::bulk::Edit>(context, input)
         }
         collaboration::state::ChangeState::ID => {
             invoke_mutation::<collaboration::state::ChangeState>(context, input)
+        }
+        collaboration::edit_history::Redact::ID => {
+            invoke_mutation::<collaboration::edit_history::Redact>(context, input)
+        }
+        collaboration::dependencies::Set::ID => {
+            invoke_mutation::<collaboration::dependencies::Set>(context, input)
+        }
+        collaboration::duplicates::Undo::ID => {
+            invoke_mutation::<collaboration::duplicates::Undo>(context, input)
+        }
+        collaboration::minimization::Set::ID => {
+            invoke_mutation::<collaboration::minimization::Set>(context, input)
+        }
+        #[cfg(test)]
+        search::index::tests::IndexFixture::ID => {
+            invoke_mutation::<search::index::tests::IndexFixture>(context, input)
+        }
+        collaboration::locks::Set::ID => {
+            invoke_mutation::<collaboration::locks::Set>(context, input)
         }
         #[cfg(test)]
         search::reviews::status::tests::PreviousFormat::ID => {
@@ -167,6 +191,8 @@ pub(in crate::cells) fn dispatch_mutation(
         }
         <SetPullReadiness as Mutation>::ID => invoke_mutation::<SetPullReadiness>(context, input),
         <SetLink as Mutation>::ID => invoke_mutation::<SetLink>(context, input),
+        commit_closures::Reserve::ID => invoke_mutation::<commit_closures::Reserve>(context, input),
+        commit_closures::Resolve::ID => invoke_mutation::<commit_closures::Resolve>(context, input),
         <SetReaction as Mutation>::ID => invoke_mutation::<SetReaction>(context, input),
         <CreateMilestone as Mutation>::ID => invoke_mutation::<CreateMilestone>(context, input),
         <EditMilestone as Mutation>::ID => invoke_mutation::<EditMilestone>(context, input),
@@ -208,6 +234,8 @@ pub(in crate::cells) fn dispatch_mutation(
         webhooks::Claim::ID => invoke_mutation::<webhooks::Claim>(context, input),
         webhooks::Finish::ID => invoke_mutation::<webhooks::Finish>(context, input),
         webhooks::Retry::ID => invoke_mutation::<webhooks::Retry>(context, input),
+        webhooks::sync::Reserve::ID => invoke_mutation::<webhooks::sync::Reserve>(context, input),
+        webhooks::sync::Advance::ID => invoke_mutation::<webhooks::sync::Advance>(context, input),
         integrations::Edit::ID => invoke_mutation::<integrations::Edit>(context, input),
         integrations::Record::ID => invoke_mutation::<integrations::Record>(context, input),
         integrations::dispatches::Reserve::ID => {
@@ -307,6 +335,9 @@ pub(in crate::cells) fn dispatch_read(
         projects::GetHistory::ID => invoke_read::<projects::GetHistory>(context, input),
         projects::Candidates::ID => invoke_read::<projects::Candidates>(context, input),
         projects::WorkSummaries::ID => invoke_read::<projects::WorkSummaries>(context, input),
+        issues::issue_type::search::Match::ID => {
+            invoke_read::<issues::issue_type::search::Match>(context, input)
+        }
         projects::Items::ID => invoke_read::<projects::Items>(context, input),
         projects::Memberships::ID => invoke_read::<projects::Memberships>(context, input),
         projects::hierarchy::GetHierarchy::ID => {
@@ -375,6 +406,19 @@ pub(in crate::cells) fn dispatch_read(
         <collaboration::conversation::ListConversation as Read>::ID => {
             invoke_read::<collaboration::conversation::ListConversation>(context, input)
         }
+        collaboration::edit_history::List::ID => {
+            invoke_read::<collaboration::edit_history::List>(context, input)
+        }
+        collaboration::edit_history::Get::ID => {
+            invoke_read::<collaboration::edit_history::Get>(context, input)
+        }
+        collaboration::dependencies::List::ID => {
+            invoke_read::<collaboration::dependencies::List>(context, input)
+        }
+        collaboration::dependencies::Get::ID => {
+            invoke_read::<collaboration::dependencies::Get>(context, input)
+        }
+        collaboration::locks::Get::ID => invoke_read::<collaboration::locks::Get>(context, input),
         <collaboration::activity::ListActivity as Read>::ID => {
             invoke_read::<collaboration::activity::ListActivity>(context, input)
         }
@@ -412,6 +456,9 @@ pub(in crate::cells) fn dispatch_read(
         }
         pull_auto_merge::Get::ID => invoke_read::<pull_auto_merge::Get>(context, input),
         pull_auto_merge::Pending::ID => invoke_read::<pull_auto_merge::Pending>(context, input),
+        pull_auto_merge::list::List::ID => {
+            invoke_read::<pull_auto_merge::list::List>(context, input)
+        }
         <GetRepositoryLifecycle as Read>::ID => {
             invoke_read::<GetRepositoryLifecycle>(context, input)
         }
@@ -423,6 +470,8 @@ pub(in crate::cells) fn dispatch_read(
         webhooks::View::ID => invoke_read::<webhooks::View>(context, input),
         webhooks::HasWork::ID => invoke_read::<webhooks::HasWork>(context, input),
         webhooks::Current::ID => invoke_read::<webhooks::Current>(context, input),
+        webhooks::sync::Next::ID => invoke_read::<webhooks::sync::Next>(context, input),
+        commit_closures::Next::ID => invoke_read::<commit_closures::Next>(context, input),
         integrations::List::ID => invoke_read::<integrations::List>(context, input),
         integrations::dispatches::Get::ID => {
             invoke_read::<integrations::dispatches::Get>(context, input)
@@ -431,18 +480,22 @@ pub(in crate::cells) fn dispatch_read(
         integrations::DeliveryHistory::ID => {
             invoke_read::<integrations::DeliveryHistory>(context, input)
         }
-        integrations::ReadRequirements::ID => {
-            invoke_read::<integrations::ReadRequirements>(context, input)
-        }
+        required_checks::Get::ID => invoke_read::<required_checks::Get>(context, input),
         <GetPullSubmission as Read>::ID => invoke_read::<GetPullSubmission>(context, input),
         <review_requests::GetReviewRequest as Read>::ID => {
             invoke_read::<review_requests::GetReviewRequest>(context, input)
+        }
+        review_requests::routing::ReadHistory::ID => {
+            invoke_read::<review_requests::routing::ReadHistory>(context, input)
         }
         <reviewers::ListReviewers as Read>::ID => {
             invoke_read::<reviewers::ListReviewers>(context, input)
         }
 
         <ListPulls as Read>::ID => invoke_read::<ListPulls>(context, input),
+        <ListMergedPullsForRelease as Read>::ID => {
+            invoke_read::<ListMergedPullsForRelease>(context, input)
+        }
         <GetPullComment as Read>::ID => invoke_read::<GetPullComment>(context, input),
         <ListPullComments as Read>::ID => invoke_read::<ListPullComments>(context, input),
         <GetPullReview as Read>::ID => invoke_read::<GetPullReview>(context, input),
@@ -454,6 +507,13 @@ pub(in crate::cells) fn dispatch_read(
             invoke_read::<CountUnresolvedConversations>(context, input)
         }
         <GetPullReviewThread as Read>::ID => invoke_read::<GetPullReviewThread>(context, input),
+        <suggestions::PrepareSuggestions as Read>::ID => {
+            invoke_read::<suggestions::PrepareSuggestions>(context, input)
+        }
+        <suggestions::VerifySuggestionVersions as Read>::ID => {
+            invoke_read::<suggestions::VerifySuggestionVersions>(context, input)
+        }
+        <GetReviewNavigation as Read>::ID => invoke_read::<GetReviewNavigation>(context, input),
         <ListPullReviewThreads as Read>::ID => invoke_read::<ListPullReviewThreads>(context, input),
         <GetPullReviewThreadSubmission as Read>::ID => {
             invoke_read::<GetPullReviewThreadSubmission>(context, input)

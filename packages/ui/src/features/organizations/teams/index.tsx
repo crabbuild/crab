@@ -20,12 +20,14 @@ export function Teams({
   actor,
   owner,
   url,
+  csrf,
   commands,
 }: {
   id: string;
   actor: string;
   owner: boolean;
   url: URL;
+  csrf: string;
   commands: Commands;
 }) {
   const team = url.searchParams.get("team");
@@ -36,6 +38,8 @@ export function Teams({
       actor={actor}
       team={team}
       url={url}
+      csrf={csrf}
+      owner={owner}
       commands={commands}
     />
   ) : (

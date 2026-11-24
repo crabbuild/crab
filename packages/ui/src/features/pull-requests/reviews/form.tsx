@@ -100,7 +100,7 @@ export function ReviewChanges({
   const rejected =
     !!attempt &&
     (mutation.rejected ||
-      [400, 403, 404, 409, 413, 422].some(
+      [400, 403, 404, 409, 413, 422, 423].some(
         (status) => status === mutation.status,
       ));
   const requiresSummary = !count && draft?.state !== "approved";

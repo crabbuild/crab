@@ -54,8 +54,16 @@ def prepare(cmd, root, origin, size, env):
         ["git", "show", "HEAD:large.bin"], cwd=source, env=client_env, text=True
     )
     assert f"oid sha256:{oid}\nsize {size}\n" in pointer
+    commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=source, env=client_env, text=True
+    ).strip()
     git("push", "origin", "main")
-    return {"bytes": size, "sha256": oid, "activity_timeout_seconds": ACTIVITY_TIMEOUT_SECONDS}
+    return {
+        "commit": commit,
+        "bytes": size,
+        "sha256": oid,
+        "activity_timeout_seconds": ACTIVITY_TIMEOUT_SECONDS,
+    }
 
 
 def verify(cmd, root, origin, content, phase, env):
@@ -94,3 +102,23 @@ def verify_resume(root, origin, content):
                 output.write(chunk)
     assert (destination.stat().st_size, digest(destination)) == (size, oid)
     destination.unlink()
+
+
+def verify_file_view_range(root, origin, content):
+    size = content["bytes"]
+    start = max(0, size - 64 * 1024)
+    path_hex = b"large.bin".hex()
+    url = origin + f"/api/repos/team/large-files/lfs-content?rev={content['commit']}&path_hex={path_hex}"
+    etag = f'"{content["sha256"]}"'
+    request = urllib.request.Request(url, headers={
+        "Range": f"bytes={start}-",
+        "If-Range": etag,
+    })
+    with urllib.request.urlopen(request, timeout=ACTIVITY_TIMEOUT_SECONDS) as response:
+        assert response.status == 206
+        assert response.headers["ETag"] == etag
+        assert response.headers["Content-Range"] == f"bytes {start}-{size - 1}/{size}"
+        assert response.headers["Content-Disposition"] == "attachment"
+        with (root / "large-file-source" / "large.bin").open("rb") as source:
+            source.seek(start)
+            assert response.read() == source.read()

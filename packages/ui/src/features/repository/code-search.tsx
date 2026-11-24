@@ -4,8 +4,12 @@ import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Field, FieldLabel } from "@/components/ui/field";
+import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import {
+  NativeSelect,
+  NativeSelectOption,
+} from "@/components/ui/native-select";
 import {
   endpoint,
   navigate,
@@ -38,6 +42,9 @@ export default function RepositoryCodeSearch({
 }) {
   const q = url.searchParams.get("q")?.trim() ?? "";
   const directory = url.searchParams.get("directory") ?? "";
+  const mode = url.searchParams.get("kind");
+  const kind =
+    mode === "content" || mode === "symbol" || mode === "path" ? mode : "any";
   const caseSensitive = url.searchParams.get("case") === "true";
   const at =
     url.searchParams.get("at") || refs.head?.name || refs.refs[0]?.name;
@@ -46,6 +53,7 @@ export default function RepositoryCodeSearch({
     q,
     directory,
     at: revision,
+    kind,
     case: caseSensitive ? "true" : undefined,
   };
   const [attempt, setAttempt] = useState(0);
@@ -61,12 +69,14 @@ export default function RepositoryCodeSearch({
             directory={directory}
             revision={revision}
             caseSensitive={caseSensitive}
-            onSearch={(terms, path, selected, matchCase) => {
+            kind={kind}
+            onSearch={(terms, path, selected, matchCase, mode) => {
               const href = repoHref(repo, {
                 view: "code-search",
                 q: terms,
                 directory: path,
                 at: selected,
+                kind: mode === "any" ? undefined : mode,
                 case: matchCase ? "true" : undefined,
               });
               if (href === `${url.pathname}${url.search}`)
@@ -82,6 +92,7 @@ export default function RepositoryCodeSearch({
                 q,
                 path: directory || undefined,
                 rev: revision,
+                kind: kind === "any" ? undefined : kind,
                 case_sensitive: caseSensitive ? "true" : undefined,
               })}
             />
@@ -102,6 +113,7 @@ function SearchForm({
   directory,
   revision,
   caseSensitive,
+  kind,
   onSearch,
 }: {
   refs: Refs;
@@ -109,11 +121,13 @@ function SearchForm({
   directory: string;
   revision: string;
   caseSensitive: boolean;
+  kind: "any" | "content" | "path" | "symbol";
   onSearch: (
     q: string,
     path: string,
     revision: string,
     caseSensitive: boolean,
+    kind: string,
   ) => void;
 }) {
   const [terms, setTerms] = useState(q);
@@ -133,26 +147,46 @@ function SearchForm({
             path.trim().replace(/\/+$/, ""),
             selected,
             matchCase,
+            String(new FormData(event.currentTarget).get("kind") ?? "any"),
           );
       }}
     >
-      <div className="flex flex-wrap items-end gap-3">
+      <div className="flex flex-wrap items-start gap-3">
         <Field className="min-w-56 flex-1">
           <FieldLabel htmlFor="code-search-term">Search text</FieldLabel>
           <Input
             id="code-search-term"
             type="search"
             required
-            maxLength={128}
+            maxLength={512}
+            aria-describedby="code-search-qualifiers"
             value={terms}
             onChange={(event) => setTerms(event.target.value)}
           />
+          <FieldDescription id="code-search-qualifiers">
+            Combine terms with <code>AND</code>, <code>OR</code>, or{" "}
+            <code>NOT</code>. Use <code>/pattern/</code> for regex or quotes for
+            an exact phrase.
+          </FieldDescription>
         </Field>
-        <Button type="submit" disabled={!terms.trim()}>
+        <Button className="mt-6" type="submit" disabled={!terms.trim()}>
           <SearchIcon data-icon="inline-start" /> Search
         </Button>
       </div>
       <div className="flex flex-wrap items-end gap-3">
+        <Field className="w-auto">
+          <FieldLabel htmlFor="code-search-kind">Search in</FieldLabel>
+          <NativeSelect id="code-search-kind" name="kind" defaultValue={kind}>
+            <NativeSelectOption value="any">
+              Contents and paths
+            </NativeSelectOption>
+            <NativeSelectOption value="content">
+              File contents
+            </NativeSelectOption>
+            <NativeSelectOption value="path">File paths</NativeSelectOption>
+            <NativeSelectOption value="symbol">Symbols</NativeSelectOption>
+          </NativeSelect>
+        </Field>
         <Field className="w-auto">
           <FieldLabel asChild>
             <span>Revision</span>
@@ -255,15 +289,15 @@ function Matches({
       </p>
       {skipped > 0 && (
         <p className="text-sm text-muted-foreground">
-          Skipped {skipped} {skipped === 1 ? "file" : "files"} with large,
-          binary, or separately stored content.
+          Skipped {skipped} {skipped === 1 ? "file" : "files"} because of size,
+          format, or parsing limits.
         </p>
       )}
       {files.length === 0 && (
         <p>
           {next
             ? "No matches in the files scanned so far."
-            : "No matching text found."}
+            : "No matches found."}
         </p>
       )}
       {files.map((file) => (

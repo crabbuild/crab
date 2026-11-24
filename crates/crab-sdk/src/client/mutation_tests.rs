@@ -143,6 +143,7 @@ async fn fixture(
                         policy: |_: &str| crab_git::receive_plan::RefPolicy {
                             allow_delete: true,
                             allow_non_fast_forward: false,
+                            inspect_linear_history: false,
                         },
                     },
                 )

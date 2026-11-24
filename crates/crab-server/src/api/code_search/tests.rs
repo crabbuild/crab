@@ -3,6 +3,8 @@ use crate::test_support::{git, http::Harness};
 use reqwest::Method;
 use serde_json::{Value, json};
 
+mod corpus;
+
 #[tokio::test]
 async fn code_search_pins_its_pages_and_requires_current_repository_access() {
     let h = Harness::new(false).await;
@@ -100,6 +102,21 @@ async fn code_search_pins_its_pages_and_requires_current_repository_access() {
         .await;
     assert_eq!(sensitive["items"], json!([]));
 
+    let repo = h.server.repositories.values()[0].clone();
+    code_index::reconcile(&h.server, &repo, &h.server.cancellation)
+        .await
+        .unwrap();
+    let indexed = h
+        .json("/api/code-search?directory=src&q=CAF%C3%89.*", &reader)
+        .await;
+    assert_eq!(indexed["indexed_repositories"], 1);
+    assert_eq!(indexed["groups"][0]["commit"], head);
+    assert_eq!(indexed["skipped"], 2);
+    let hits = indexed["groups"][0]["files"].as_array().unwrap();
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0]["path"], "src/nested/a.rs");
+    assert_eq!(hits[1]["path"], "src/z.rs");
+
     let catalog = h.server.catalog().unwrap();
     let mut access = catalog.membership("team", "private").await.unwrap().members;
     access.retain(|member| member.subject != "bob-id");
@@ -178,11 +195,11 @@ async fn workspace_search_pins_current_repository_and_invalidates_pages_after_re
         "team",
         "private",
         (0..24)
-            .map(|index| (format!("src/file-{index:02}.rs"), "let Café = 1;\n".into()))
+            .map(|index| (format!("src/file-{index:02}.rs"), "fn Café() {}\n".into()))
             .chain((0..12).map(|index| {
                 (
                     format!("src/neutral-{index:02}.rs"),
-                    "ordinary text\n".into(),
+                    "fn neutral() { Café(); }\n".into(),
                 )
             }))
             .chain([("config/manifest.toml".into(), "limited path match\n".into())]),
@@ -194,7 +211,7 @@ async fn workspace_search_pins_current_repository_and_invalidates_pages_after_re
         "team",
         "library",
         [
-            ("src/library.rs".into(), "let Café = 2;\n".into()),
+            ("src/library.rs".into(), "fn Café() {}\n".into()),
             ("config/manifest.yml".into(), String::new()),
         ],
     )
@@ -207,7 +224,7 @@ async fn workspace_search_pins_current_repository_and_invalidates_pages_after_re
         [
             (
                 "src/restricted.rs".into(),
-                "let Café = \"PRIVATE_ONLY\";\n".into(),
+                "fn Café() { /* PRIVATE_ONLY */ }\n".into(),
             ),
             ("config/manifest.txt".into(), String::new()),
         ],
@@ -253,7 +270,7 @@ async fn workspace_search_pins_current_repository_and_invalidates_pages_after_re
     assert_eq!(exhausted["groups"], json!([]));
     assert_eq!(exhausted["next"], Value::Null);
 
-    let query = "/api/code-search?q=CAF%C3%89&directory=src";
+    let query = "/api/code-search?q=CAF%C3%89&directory=src&kind=symbol";
     let first = h.json(query, &reader).await;
     assert_eq!(first["groups"][0]["commit"], head);
     assert_eq!(first["groups"][0]["files"].as_array().unwrap().len(), 20);
@@ -274,6 +291,14 @@ async fn workspace_search_pins_current_repository_and_invalidates_pages_after_re
     );
     assert_eq!(
         status(&format!("{cursor_request}&case_sensitive=true"), &reader).await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        status(
+            &cursor_request.replace("kind=symbol", "kind=content"),
+            &reader
+        )
+        .await,
         StatusCode::BAD_REQUEST
     );
     let protections = "/api/repos/team/private/settings/branch-protections";
@@ -359,18 +384,313 @@ async fn workspace_search_organization_scope_follows_the_current_catalog() {
         .await;
     assert_eq!(result["groups"].as_array().unwrap().len(), 1);
     assert_eq!(result["groups"][0]["id"], created["id"]);
+    for scope in [owner.to_owned(), organization.to_string()] {
+        let result = h.json(&format!("{root}+org%3A{scope}"), &alice).await;
+        assert_eq!(result["groups"].as_array().unwrap().len(), 1);
+        assert_eq!(result["groups"][0]["id"], created["id"]);
+    }
     *h.provider.mode.lock().await = "member".into();
     let reader = h.login().await;
     let result = h
         .json(&format!("{root}&organization={organization}"), &reader)
         .await;
     assert_eq!(result["groups"], json!([]));
+    assert_eq!(
+        h.json(&format!("{root}+org%3A{owner}"), &reader).await["groups"],
+        json!([])
+    );
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn code_search_qualifiers_filter_pinned_results_without_widening_access() {
+    let h = Harness::new(false).await;
+    h.add_repository("restricted").await;
+    let alice = h.login().await;
+    let (_, _, head) = searchable_repository(
+        &h,
+        &alice,
+        "team",
+        "private",
+        [
+            ("src/direct.rs".into(), "fn qualified_needle() {}\n".into()),
+            (
+                "src/nested/code.rs".into(),
+                "fn qualified_needle() {}\n".into(),
+            ),
+            (
+                "src/elsewhere.py".into(),
+                "def qualified_needle(): pass\n".into(),
+            ),
+            (
+                "docs/src/example.rs".into(),
+                "fn qualified_needle() {}\n".into(),
+            ),
+            (
+                "docs/release notes.md".into(),
+                "repo:team/restricted\n".into(),
+            ),
+        ],
+    )
+    .await;
+    searchable_repository(
+        &h,
+        &alice,
+        "team",
+        "restricted",
+        [("src/hidden.rs".into(), "fn qualified_needle() {}\n".into())],
+    )
+    .await;
+    let catalog = h.server.catalog().unwrap();
+    let mut members = catalog
+        .membership("team", "restricted")
+        .await
+        .unwrap()
+        .members;
+    members.retain(|member| member.subject != "bob-id");
+    catalog
+        .set_members("team", "restricted", members, true)
+        .await
+        .unwrap();
+    *h.provider.mode.lock().await = "member".into();
+    let reader = h.login().await;
+    let qualified =
+        "q=repo%3ATEAM%2Fprivate+language%3ARust+path%3A%2Fsrc%2F**%2F*+symbol%3Aqualified_needle";
+    let private = h
+        .server
+        .repositories
+        .get(&("team".into(), "private".into()))
+        .unwrap();
+    for indexed in [false, true] {
+        if indexed {
+            code_index::reconcile(&h.server, &private, &h.server.cancellation)
+                .await
+                .unwrap();
+        }
+        let result = h
+            .json(&format!("/api/code-search?{qualified}"), &reader)
+            .await;
+        assert_eq!(result["indexed_repositories"], usize::from(indexed));
+        assert_eq!(result["groups"].as_array().unwrap().len(), 1);
+        let group = &result["groups"][0];
+        assert_eq!(group["commit"], head);
+        let files = group["files"].as_array().unwrap();
+        assert_eq!(
+            files
+                .iter()
+                .map(|hit| hit["path"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["src/direct.rs", "src/nested/code.rs"]
+        );
+        assert_eq!(files[0]["lines"][0]["matched"], "qualified_needle");
+    }
+
+    let hidden = h
+        .json(
+            "/api/code-search?q=repo%3Ateam%2Frestricted+symbol%3Aqualified_needle",
+            &reader,
+        )
+        .await;
+    let absent = h
+        .json(
+            "/api/code-search?q=repo%3Ateam%2Fmissing+symbol%3Aqualified_needle",
+            &reader,
+        )
+        .await;
+    assert_eq!(hidden, absent);
+    assert_eq!(hidden["groups"], json!([]));
+
+    let query = "/api/repos/team/private/code-search?q=path%3A%22release+notes%22+content%3A%22repo%3Ateam%2Frestricted%22";
+    let literal = h.json(query, &reader).await;
+    assert_eq!(literal["items"][0]["path"], "docs/release notes.md");
+    assert_eq!(
+        literal["items"][0]["lines"][0]["matched"],
+        "repo:team/restricted"
+    );
+
+    let endpoint = "/api/repos/team/private/code-search?limit=1";
+    let first = h.json(&format!("{endpoint}&{qualified}"), &reader).await;
+    let cursor = first["next"].as_str().unwrap();
+    let response = h
+        .http
+        .get(format!(
+            "{}{endpoint}&q=path%3Adocs&cursor={cursor}",
+            h.origin
+        ))
+        .header(reqwest::header::COOKIE, &reader)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn code_search_expressions_match_pinned_contents_paths_and_definitions() {
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    let (_, _, head) = searchable_repository(
+        &h,
+        &alice,
+        "team",
+        "private",
+        [
+            ("src/retry.rs".into(), "fn retry_12() {}\n".into()),
+            (
+                "src/reference.rs".into(),
+                "fn caller() { retry_12(); }\n".into(),
+            ),
+            (
+                "docs/deploy.txt".into(),
+                "before\nphase 42\nstatus OK\nafter\n/retry_12/\n".into(),
+            ),
+            ("docs/retry.rs".into(), "fn retry_67() {}\n".into()),
+        ],
+    )
+    .await;
+    let query = |endpoint: &str, q: &str| {
+        let mut params = url::form_urlencoded::Serializer::new(String::new());
+        params.append_pair("q", q);
+        format!("{endpoint}?{}", params.finish())
+    };
+    let repository = "/api/repos/team/private/code-search";
+    let contents = h
+        .json(
+            &query(repository, r"content:/phase [0-9]+\nstatus [A-Z]+/"),
+            &alice,
+        )
+        .await;
+    assert_eq!(contents["commit"], head);
+    assert_eq!(contents["items"].as_array().unwrap().len(), 1);
+    assert_eq!(contents["items"][0]["path"], "docs/deploy.txt");
+    let lines = contents["items"][0]["lines"].as_array().unwrap();
+    assert_eq!(
+        lines
+            .iter()
+            .map(|line| (&line["line"], &line["matched"]))
+            .collect::<Vec<_>>(),
+        [
+            (&json!(2), &json!("phase 42")),
+            (&json!(3), &json!("status OK"))
+        ]
+    );
+
+    let quoted = h
+        .json(&query(repository, r#"content:"/retry_12/""#), &alice)
+        .await;
+    assert_eq!(quoted["items"].as_array().unwrap().len(), 1);
+    assert_eq!(quoted["items"][0]["lines"][0]["matched"], "/retry_12/");
+
+    let workspace = "/api/code-search";
+    let repo = h
+        .server
+        .repositories
+        .get(&("team".into(), "private".into()))
+        .unwrap();
+    code_index::reconcile(&h.server, &repo, &h.server.cancellation)
+        .await
+        .unwrap();
+    let paths = h
+        .json(
+            &query(workspace, r"path:/^src\/(retry|reference)\.rs$/"),
+            &alice,
+        )
+        .await;
+    assert_eq!(paths["indexed_repositories"], 1);
+    assert_eq!(paths["groups"][0]["files"].as_array().unwrap().len(), 2);
+    assert_eq!(paths["groups"][0]["files"][0]["lines"], json!([]));
+
+    let symbols = h
+        .json(
+            &query(workspace, r"symbol:/^(absent|retry_[0-9]+)$/ path:/^src\//"),
+            &alice,
+        )
+        .await;
+    assert_eq!(symbols["groups"][0]["commit"], head);
+    assert_eq!(symbols["groups"][0]["files"].as_array().unwrap().len(), 1);
+    assert_eq!(symbols["groups"][0]["files"][0]["path"], "src/retry.rs");
+    assert_eq!(
+        symbols["groups"][0]["files"][0]["lines"][0]["matched"],
+        "retry_12"
+    );
+
+    let malformed = h
+        .http
+        .get(format!("{}{}", h.origin, query(repository, r"/(?=phase)/")))
+        .header(reqwest::header::COOKIE, &alice)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+    h.close().await;
+}
+
+#[test]
+fn expression_excerpts_bound_zero_width_and_long_matches() {
+    let cancel = CancellationToken::new();
+    let lines = "zero\n".repeat(8);
+    let (matches, more) =
+        expression_matches(&lines, &Regex::new("(?m)^").unwrap(), &cancel).unwrap();
+    assert_eq!(matches.len(), MAX_MATCH_LINES);
+    assert!(more && matches.iter().all(|line| line.matched.is_empty()));
+
+    let line = "é".repeat(MAX_HIGHLIGHT_CHARS + 70);
+    let (matches, more) = expression_matches(&line, &Regex::new("é+").unwrap(), &cancel).unwrap();
+    assert_eq!(
+        matches[0].matched,
+        format!("{}…", "é".repeat(MAX_HIGHLIGHT_CHARS))
+    );
+    assert!(!more);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn indexed_expression_continues_after_an_empty_bounded_page() {
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    let (_, _, head) = searchable_repository(
+        &h,
+        &alice,
+        "team",
+        "private",
+        (0..indexed::COMPLEX_PATHS_PER_PAGE)
+            .map(|number| (format!("src/a-{number:05}.txt"), "fixture\n".into()))
+            .chain([("src/z-report.txt".into(), "report\n".into())]),
+    )
+    .await;
+    let repo = h
+        .server
+        .repositories
+        .get(&("team".into(), "private".into()))
+        .unwrap();
+    code_index::reconcile(&h.server, &repo, &h.server.cancellation)
+        .await
+        .unwrap();
+    for (expression, verified) in [
+        (r"path:/z-report\.txt$/", 0),
+        ("content:/rep(?:ort|lay)/", 1),
+    ] {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("q", expression)
+            .finish();
+        let query = format!("/api/code-search?{query}");
+        let first = h.json(&query, &alice).await;
+        assert_eq!(first["indexed_repositories"], 1);
+        assert_eq!(first["scanned"], indexed::COMPLEX_PATHS_PER_PAGE);
+        assert_eq!(first["verified"], 0);
+        assert_eq!(first["groups"], json!([]));
+        let after = first["next"].as_str().unwrap();
+        let second = h.json(&format!("{query}&cursor={after}"), &alice).await;
+        assert_eq!(second["groups"][0]["commit"], head);
+        assert_eq!(second["groups"][0]["files"][0]["path"], "src/z-report.txt");
+        assert_eq!(second["verified"], verified);
+        assert_eq!(second["next"], Value::Null);
+    }
     h.close().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires agent-browser and the built embedded UI with native Git"]
-async fn native_browser_finds_code_across_repositories_and_opens_the_exact_line() {
+async fn native_browser_finds_symbols_across_repositories_and_opens_the_definition() {
     let h = Harness::new(false).await;
     h.add_repository("library").await;
     let alice = h.login().await;
@@ -383,7 +703,7 @@ async fn native_browser_finds_code_across_repositories_and_opens_the_exact_line(
             name,
             [(
                 format!("{name}.rs"),
-                "header\nlet workspace_needle = true;\n".into(),
+                "// workspace_needle\nfn workspace_needle() {}\n".into(),
             )],
         )
         .await;
@@ -395,19 +715,7 @@ async fn native_browser_finds_code_across_repositories_and_opens_the_exact_line(
     }
     let browser = crate::test_support::http::browser::Browser::new("workspace-code-search");
     browser.run(&["open", &h.origin]).await;
-    browser
-        .run(&["wait", "--text", "Continue to sign in"])
-        .await;
-    browser
-        .run(&[
-            "find",
-            "role",
-            "button",
-            "click",
-            "--name",
-            "Continue to sign in",
-        ])
-        .await;
+    browser.sign_in().await;
     browser.run(&["wait", "a[href='/-/code-search']"]).await;
     browser
         .run(&[
@@ -421,6 +729,9 @@ async fn native_browser_finds_code_across_repositories_and_opens_the_exact_line(
         .await;
     browser.run(&["wait", "#workspace-search-text"]).await;
     browser
+        .run(&["select", "#workspace-search-kind", "symbol"])
+        .await;
+    browser
         .run(&["fill", "#workspace-search-text", "workspace_needle"])
         .await;
     browser
@@ -431,6 +742,21 @@ async fn native_browser_finds_code_across_repositories_and_opens_the_exact_line(
     browser.run(&["wait", "--text", "private.rs"]).await;
     browser
         .run(&["wait", "--text", "Index used for 2 repositories"])
+        .await;
+    browser
+        .run(&[
+            "fill",
+            "#workspace-search-text",
+            "repo:team/library language:rust path:*.rs symbol:/^workspace_(needle|hook)$/",
+        ])
+        .await;
+    browser
+        .run(&[
+            "find", "role", "button", "click", "--name", "Search", "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", "--text", "Index used for 1 repository"])
         .await;
     let link = format!("a[href*='/blob/{head}/library.rs'][href$='#L2']");
     browser.run(&["wait", &link]).await;
@@ -455,7 +781,7 @@ async fn persistent_code_index_prunes_a_sparse_search_and_refreshes_after_public
             .map(|i| {
                 (
                     format!("src/part-{i:03}.rs"),
-                    "let ordinary = 2026;\n".into(),
+                    "fn ordinary() { stable_unique_search_symbol(); }\n".into(),
                 )
             })
             .chain([
@@ -465,7 +791,8 @@ async fn persistent_code_index_prunes_a_sparse_search_and_refreshes_after_public
                 ),
                 (
                     "src/target.rs".into(),
-                    "let stable_unique_search_target = 42;\n".into(),
+                    "fn stable_unique_search_symbol() { let stable_unique_search_target = 42; }\n"
+                        .into(),
                 ),
             ]),
     )
@@ -489,11 +816,55 @@ async fn persistent_code_index_prunes_a_sparse_search_and_refreshes_after_public
         before.elapsed()
     );
     assert_eq!(page["scanned"], 514);
-    assert_eq!(page["verified"], 2);
+    assert_eq!(page["verified"], 1);
     assert_eq!(page["groups"][0]["commit"], head);
     assert_eq!(page["groups"][0]["files"][0]["path"], "src/target.rs");
     assert_eq!(page["indexed_repositories"], 1);
     assert_eq!(page["next"], Value::Null);
+
+    let duplicates = h
+        .json(
+            "/api/code-search?q=content%3Aordinary+AND+%28path%3Asrc%2Fpart-000.rs+OR+path%3Asrc%2Fpart-001.rs%29",
+            &alice,
+        )
+        .await;
+    let hits = duplicates["groups"][0]["files"].as_array().unwrap();
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0]["path"], "src/part-000.rs");
+    assert_eq!(hits[1]["path"], "src/part-001.rs");
+
+    let expression = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair(
+            "q",
+            r"content:/(?:const|let)\s+stable_unique_search_target\s*=/",
+        )
+        .append_pair("directory", "src")
+        .finish();
+    let before = std::time::Instant::now();
+    let regex = h
+        .json(&format!("/api/code-search?{expression}"), &alice)
+        .await;
+    eprintln!("regex examined 514 index rows in {:?}", before.elapsed());
+    assert_eq!(regex["scanned"], 514);
+    assert_eq!(regex["verified"], 1);
+    assert_eq!(regex["groups"][0]["files"][0]["path"], "src/target.rs");
+    assert_eq!(regex["next"], Value::Null);
+
+    let symbols = h
+        .json(
+            "/api/code-search?q=stable_unique_search_symbol&kind=symbol",
+            &alice,
+        )
+        .await;
+    assert_eq!(symbols["verified"], 1);
+    assert_eq!(symbols["groups"][0]["files"][0]["path"], "src/target.rs");
+    assert_eq!(
+        symbols["groups"][0]["files"][0]["lines"][0]["before"],
+        "fn "
+    );
+    let by_revision = h.json(&format!("/api/repos/team/private/code-search?q=stable_unique_search_symbol&kind=symbol&rev={head}"), &alice).await;
+    assert_eq!(by_revision["commit"], head);
+    assert_eq!(by_revision["items"].as_array().unwrap().len(), 1);
 
     let unicode = h.json("/api/code-search?q=kelvin", &alice).await;
     assert_eq!(
@@ -501,6 +872,18 @@ async fn persistent_code_index_prunes_a_sparse_search_and_refreshes_after_public
         "Kelvin"
     );
     assert_eq!(unicode["indexed_repositories"], 1);
+    assert_eq!(unicode["verified"], 1);
+    let inline = h
+        .json(
+            "/api/code-search?q=%2F%28%3Fi%29kelvin%2F&case_sensitive=true",
+            &alice,
+        )
+        .await;
+    assert_eq!(
+        inline["groups"][0]["files"][0]["lines"][0]["matched"],
+        "Kelvin"
+    );
+    assert_eq!(inline["verified"], 1);
     let short = h.json("/api/code-search?q=42&directory=src", &alice).await;
     assert_eq!(short["verified"], 32);
     assert!(short["next"].is_string());
@@ -539,5 +922,137 @@ async fn persistent_code_index_prunes_a_sparse_search_and_refreshes_after_public
     let absent = h.json(query, &alice).await;
     assert_eq!(absent["groups"], json!([]));
     assert_eq!(absent["next"], Value::Null);
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn boolean_code_search_agrees_between_git_and_the_index_and_respects_scope() {
+    let h = Harness::new(false).await;
+    h.add_repository("restricted").await;
+    let alice = h.login().await;
+    let (_, _, head) = searchable_repository(
+        &h,
+        &alice,
+        "team",
+        "private",
+        [
+            ("docs/ops.txt", "phase 1\nstatus OK\n"),
+            (
+                "src/emit.rs",
+                "fn emit_once() {}\nsource_marker\nrecovered\n",
+            ),
+            ("src/excluded.rs", "fn emit_once() {}\nstatus DROP\n"),
+            ("src/reference.rs", "fn caller() { emit_once(); }\n"),
+            ("src/name_only.rs", "another value\n"),
+            ("src/binary", "\0source_marker"),
+            ("tests/emit.rs", "fn emit_once() {}\n"),
+        ]
+        .map(|(path, contents)| (path.to_owned(), contents.to_owned())),
+    )
+    .await;
+    searchable_repository(
+        &h,
+        &alice,
+        "team",
+        "restricted",
+        [("src/hidden.rs".into(), "fn emit_once() {}\n".into())],
+    )
+    .await;
+    let catalog = h.server.catalog().unwrap();
+    let mut members = catalog
+        .membership("team", "restricted")
+        .await
+        .unwrap()
+        .members;
+    members.retain(|member| member.subject != "bob-id");
+    catalog
+        .set_members("team", "restricted", members, true)
+        .await
+        .unwrap();
+    *h.provider.mode.lock().await = "member".into();
+    let reader = h.login().await;
+    let repo = h
+        .server
+        .repositories
+        .get(&("team".into(), "private".into()))
+        .unwrap();
+    let query = |route: &str, expression: &str| {
+        let parameters = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("q", expression)
+            .finish();
+        format!("{route}?{parameters}")
+    };
+    let expression = r#"repo:team/restricted OR (repo:team/private (symbol:emit_once OR content:/phase [0-9]+\nstatus OK/) NOT (path:tests/ OR content:"status DROP"))"#;
+    let mut original = None;
+    for indexed in [false, true] {
+        if indexed {
+            code_index::reconcile(&h.server, &repo, &h.server.cancellation)
+                .await
+                .unwrap();
+        }
+        let page = h
+            .json(&query("/api/code-search", expression), &reader)
+            .await;
+        assert_eq!(page["indexed_repositories"], usize::from(indexed));
+        let groups = page["groups"].as_array().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0]["name"], "private");
+        assert_eq!(groups[0]["commit"], head);
+        let files = groups[0]["files"].as_array().unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0]["path"], "docs/ops.txt");
+        assert_eq!(files[0]["lines"][1]["line"], 2);
+        assert_eq!(files[1]["path"], "src/emit.rs");
+        assert_eq!(files[1]["lines"][0]["matched"], "emit_once");
+        if let Some(before) = original.replace(groups[0]["files"].clone()) {
+            assert_eq!(before, groups[0]["files"]);
+        }
+    }
+
+    let repository = "/api/repos/team/private/code-search";
+    let words = h
+        .json(&query(repository, "source_marker recovered"), &reader)
+        .await;
+    assert_eq!(words["items"].as_array().unwrap().len(), 1);
+    assert_eq!(words["items"][0]["lines"][0]["matched"], "source_marker");
+    assert_eq!(words["items"][0]["lines"][1]["matched"], "recovered");
+    let phrase = h
+        .json(&query(repository, r#""source_marker recovered""#), &reader)
+        .await;
+    assert_eq!(phrase["items"], json!([]));
+
+    let by_path = h
+        .json(&query(repository, "name_only OR content:missing"), &reader)
+        .await;
+    assert_eq!(by_path["items"][0]["path"], "src/name_only.rs");
+    assert_eq!(by_path["items"][0]["lines"], json!([]));
+    let content = h
+        .json(&query(repository, "content:name_only"), &reader)
+        .await;
+    assert_eq!(content["items"], json!([]));
+
+    let negative = h
+        .json(
+            &query("/api/code-search", "path:binary AND NOT content:missing"),
+            &reader,
+        )
+        .await;
+    assert_eq!(negative["groups"], json!([]));
+    assert_eq!(negative["skipped"], 1);
+
+    for invalid in [
+        "source_marker OR",
+        "(source_marker",
+        "source_marker AND OR recovered",
+    ] {
+        let response = h
+            .http
+            .get(format!("{}{}", h.origin, query(repository, invalid)))
+            .header(reqwest::header::COOKIE, &reader)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{invalid}");
+    }
     h.close().await;
 }

@@ -89,6 +89,12 @@ pub(super) fn map_receive(error: ReceiveError) -> Error {
         ReceiveError::Settings(error) if matches!(**error, Error::MergeBlocked) => {
             Error::MergeBlocked
         }
+        ReceiveError::Settings(error) if matches!(**error, Error::MergeUpdatesRestricted) => {
+            Error::MergeUpdatesRestricted
+        }
+        ReceiveError::Settings(error) if matches!(**error, Error::MergeLinearHistory) => {
+            Error::MergeLinearHistory
+        }
         ReceiveError::Settings(error) if matches!(**error, Error::AutoMergeDisabled) => {
             Error::AutoMergeDisabled
         }
@@ -556,6 +562,8 @@ pub(super) async fn finish_locked(
                     mapped,
                     Error::MergeConflict
                         | Error::MergeBlocked
+                        | Error::MergeUpdatesRestricted
+                        | Error::MergeLinearHistory
                         | Error::MergeCandidateChecks
                         | Error::MergeQueued
                         | Error::MergeQueueRequired
@@ -666,12 +674,12 @@ async fn execute(
         .transpose()?
         .map(|oid| oid.to_string());
     if tested_candidate_oid.is_some()
-        && (input.method != MergeMethod::MergeCommit
+        && (!input.method.supports_queue()
             || !input.bypass_rulesets.is_empty()
             || !input.message.is_empty())
     {
         return Err(Error::Invalid(
-            "A tested candidate requires the original merge commit and branch rules",
+            "A tested candidate requires its original method, commit, and branch rules",
         ));
     }
     let actor = app::actor(&principal)?;
@@ -808,6 +816,7 @@ pub(super) async fn admit(
     )
     .await?;
     report.require_queue(target)?;
+    report.require_method(candidate.method)?;
     if !matches!(target, MergeCheckTarget::Queue(_)) {
         super::merge_methods::require(server, repo, candidate.method).await?;
     }

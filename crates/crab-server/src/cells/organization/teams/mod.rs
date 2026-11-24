@@ -12,6 +12,7 @@ mod commands;
 mod preparation;
 mod reads;
 pub(crate) mod repository_access;
+pub(crate) mod sync;
 pub(super) use access::{authorize, handles};
 pub(crate) use commands::{Cancel, Change, Command, Outcome, Request};
 pub use preparation::OrganizationTeamState;
@@ -22,8 +23,10 @@ pub(crate) use reads::{
     MentionMembers, MentionMembersInput, MentionRoster, Page, QueryCursor, Summary,
 };
 pub(crate) use repository_access::{
-    GetRepositoryTeamAccess, RepositoryTeamAccess, RepositoryTeams,
+    GetRepositoryTeamAccess, RepositoryTeamAccess, RepositoryTeams, ResolveReviewTeams,
 };
+
+pub(crate) mod review_routing;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

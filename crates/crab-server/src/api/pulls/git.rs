@@ -9,6 +9,40 @@ use crate::{
     server::Server,
 };
 
+pub(super) async fn committed_branch_edit(
+    repository: &Repository,
+    plan_id: &str,
+    branch: Option<&str>,
+    previous: Option<&str>,
+) -> Result<Option<String>> {
+    let receipt = crab_metadata::capsule_protocol::resolve_capsule_plan_receipt(
+        &repository.store,
+        &repository.layout,
+        plan_id,
+    )
+    .await
+    .map_err(|error| super::merge::map_receive(error.into()))?;
+    let Some(receipt) = receipt else {
+        return Ok(None);
+    };
+    let [edit] = receipt.transaction().edits() else {
+        return Err(Error::CellContract(
+            "Branch publication receipt has unexpected ref edits",
+        ));
+    };
+    // A replay can arrive after the pull's head branch has been switched or
+    // deleted. The request-bound receipt remains proof of the original edit.
+    let expected = edit.ref_name().starts_with("refs/heads/")
+        && branch.is_none_or(|branch| branch == edit.ref_name())
+        && edit.expected_old() == previous;
+    edit.new_oid()
+        .filter(|_| expected)
+        .map(|commit| Some(commit.to_owned()))
+        .ok_or(Error::CellContract(
+            "Branch publication receipt has an unexpected ref",
+        ))
+}
+
 pub(super) async fn head_contains_base(
     view: &crab_read::capsule_protocol::CapsuleRepositoryView,
     head_ref: &str,
@@ -56,6 +90,27 @@ pub(super) fn fork_repository(
                 .is_some_and(|source| source.id == upstream.id)
         })
         .ok_or(Error::NotFound)
+}
+
+pub(in crate::api) async fn review_head(
+    server: &Server,
+    upstream: &Repository,
+    fork: Option<Uuid>,
+    head_ref: &str,
+    merged_head: Option<String>,
+) -> Result<Option<String>> {
+    // A merged review follows the recorded source even if its ref disappears.
+    if merged_head.is_some() {
+        return Ok(merged_head);
+    }
+    match fork {
+        None => Ok(upstream.ref_oid(head_ref).await?),
+        Some(id) => match fork_repository(server, upstream, id) {
+            Ok(source) => Ok(source.ref_oid(head_ref).await?),
+            Err(Error::NotFound) => Ok(None),
+            Err(error) => Err(error),
+        },
+    }
 }
 
 pub(super) struct PullGit {

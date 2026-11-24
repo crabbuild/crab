@@ -34,6 +34,11 @@ that must renew across requests. It returns the exact view digest and native
 claim after the same barrier checks. `load_retained_pointer_catalog` holds a read
 pin while verifying that the locally opened catalog matches the issuer's digest.
 
+`ArtifactPointer` binds a selected Git pointer's hash and logical size to a
+captured catalog. `CapturedArtifact` prepares its retained stream using private
+staging for metadata. The caller keeps staging alive until the worker closes the
+lookup and releases the transfer.
+
 ## Why it exists
 
 Several product surfaces need the same read guarantees: fetch, hydrate, path

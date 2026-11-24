@@ -31,6 +31,7 @@ async fn replica(h: &Harness, host: &Host) -> (Arc<Server>, String, tokio::task:
             client_id: "crab-browser".into(),
             client_secret_file: None,
             state_key_file: None,
+            scim_token_file: None,
             github: None,
         },
         &root,
@@ -239,28 +240,23 @@ async fn organization_team_removal_revokes_existing_browser_git_and_lfs_access_a
         .await
         .unwrap()
         .revision;
-    for grant in [
-        json!({"team":team,"access":"admin"}),
-        json!({"team":Uuid::now_v7(),"access":"write"}),
-    ] {
-        let denied = write(
-            &h,
-            &origin_a,
-            &alice,
-            Method::PUT,
-            team_access,
-            json!({"expected_revision":revision,"teams":[grant]}),
-        )
-        .await;
-        assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
-    }
+    let denied = write(
+        &h,
+        &origin_a,
+        &alice,
+        Method::PUT,
+        team_access,
+        json!({"expected_revision":revision,"teams":[{"team":Uuid::now_v7(),"access":"admin"}]}),
+    )
+    .await;
+    assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
     write(
         &h,
         &origin_a,
         &alice,
         Method::PUT,
         team_access,
-        json!({"expected_revision":revision,"teams":[{"team":team,"access":"write"}]}),
+        json!({"expected_revision":revision,"teams":[{"team":team,"access":"admin"}]}),
     )
     .await
     .error_for_status()
@@ -285,6 +281,9 @@ async fn organization_team_removal_revokes_existing_browser_git_and_lfs_access_a
         [
             h.http
                 .get(format!("{origin}/api/repos/team/private/labels"))
+                .header("cookie", &bob),
+            h.http
+                .get(format!("{origin}/api/repos/team/private/members"))
                 .header("cookie", &bob),
             h.http
                 .get(format!(
@@ -317,6 +316,7 @@ async fn organization_team_removal_revokes_existing_browser_git_and_lfs_access_a
             .await
             .unwrap();
         assert_eq!(visible["repositories"][0]["access"], "write");
+        assert_eq!(visible["repositories"][0]["can_admin"], true);
         assert_eq!(
             visible["repositories"][0]["organization_id"],
             json!(organization)
@@ -331,6 +331,20 @@ async fn organization_team_removal_revokes_existing_browser_git_and_lfs_access_a
             .unwrap()
             .status(),
         StatusCode::NOT_FOUND
+    );
+    let current = catalog.membership("team", "private").await.unwrap();
+    assert_eq!(
+        write(
+            &h,
+            &origin_b,
+            &bob,
+            Method::PUT,
+            team_access,
+            json!({"expected_revision":current.revision,"teams":[]})
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND,
     );
     write(&h, &origin_a, &alice, Method::POST, &commands,
         json!({"request_id":Uuid::now_v7(),"command":{"kind":"member","team":team,"member":member,"version":1,"role":null}}))
@@ -410,6 +424,75 @@ async fn organization_team_removal_revokes_existing_browser_git_and_lfs_access_a
     assert_eq!(
         checkout(&origin_b).send().await.unwrap().status(),
         StatusCode::UNAUTHORIZED
+    );
+    let automation = format!("{org_path}/automation");
+    let identity: Value = write(
+        &h,
+        &origin_a,
+        &alice,
+        Method::POST,
+        &automation,
+        json!({"expected_version":0,"edit":{
+            "kind":"create","name":"Central CI",
+            "grants":[{"repository":repo.id,"access":"read"}],
+        }}),
+    )
+    .await
+    .error_for_status()
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let identity = &identity["identity"];
+    let issued: Value = write(
+        &h,
+        &origin_a,
+        &alice,
+        Method::POST,
+        &automation,
+        json!({"expected_version":1,"edit":{"kind":"issue","identity":identity,"hours":1}}),
+    )
+    .await
+    .error_for_status()
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let token = issued["token"].as_str().unwrap();
+    let automation_checkout = |origin: &str| {
+        h.http
+            .get(format!(
+                "{origin}/git/team/private.git/info/refs?service=git-upload-pack"
+            ))
+            .header("Git-Protocol", "version=2")
+            .basic_auth("crab", Some(token))
+    };
+    assert_eq!(
+        automation_checkout(&origin_b)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    write(
+        &h,
+        &origin_a,
+        &alice,
+        Method::POST,
+        &automation,
+        json!({"expected_version":2,"edit":{"kind":"enabled","identity":identity,"enabled":false}}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert_eq!(
+        automation_checkout(&origin_b)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED,
     );
     for task in [task_a, task_b] {
         task.abort();

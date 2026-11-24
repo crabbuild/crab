@@ -2,6 +2,7 @@ use super::*;
 use crate::cells::repository::collaboration::{
     Target,
     activity::{self, Action},
+    locks,
 };
 
 pub(crate) struct CreatePullReviewThread;
@@ -50,6 +51,15 @@ impl Mutation for CreatePullReviewThread {
             ))?;
             return Ok(MutationResult::Success(
                 CreatePullReviewThreadOutcome::Created(Box::new(record)),
+            ));
+        }
+        if locks::blocked(
+            context,
+            Target::Pull { number: input.pull },
+            input.can_post_locked,
+        )? {
+            return Ok(MutationResult::Rejected(
+                CreatePullReviewThreadOutcome::Locked,
             ));
         }
         let state = pull_state(context, input.pull)?;
@@ -167,6 +177,17 @@ impl Mutation for UpdatePullReviewThread {
             ));
         };
         if input.body.is_some() || input.suggested_text.is_some() {
+            if locks::blocked(
+                context,
+                Target::Pull {
+                    number: input.key.pull,
+                },
+                input.can_post_locked,
+            )? {
+                return Ok(MutationResult::Rejected(
+                    UpdatePullReviewThreadOutcome::Locked,
+                ));
+            }
             if !same_author(&record.author, &input.actor) {
                 return Ok(MutationResult::Rejected(
                     UpdatePullReviewThreadOutcome::Forbidden,
@@ -211,6 +232,7 @@ impl Mutation for UpdatePullReviewThread {
                 .suggested_text
                 .as_ref()
                 .is_some_and(|value| value != &record.suggested_text);
+        let previous_suggestion = edited.then(|| record.suggested_text.clone()).flatten();
         let now = timestamp(context.now_ms())?;
         let previous_body = input
             .body
@@ -241,6 +263,12 @@ impl Mutation for UpdatePullReviewThread {
         };
         if edited {
             let source = activity::append(context, target, &input.actor, Action::Updated)?;
+            crate::cells::repository::collaboration::edit_history::record(
+                context,
+                &source,
+                previous_body.as_deref().unwrap_or(&record.body),
+                previous_suggestion.as_deref(),
+            )?;
             if let Some(previous) = previous_body.as_deref() {
                 crate::cells::repository::collaboration::body_written(
                     context,
@@ -331,6 +359,15 @@ impl Mutation for CreatePullReviewReply {
                 CreatePullReviewReplyOutcome::Created(record),
             ));
         }
+        if locks::blocked(
+            context,
+            Target::Pull { number: input.pull },
+            input.can_post_locked,
+        )? {
+            return Ok(MutationResult::Rejected(
+                CreatePullReviewReplyOutcome::Locked,
+            ));
+        }
         let number = next_reply_number(context, input.pull, input.thread)?;
         let now = timestamp(context.now_ms())?;
         let record = PullReviewReplyRecord {
@@ -414,6 +451,17 @@ impl Mutation for UpdatePullReviewReply {
         if !same_author(&record.author, &input.actor) {
             return Ok(MutationResult::Rejected(
                 UpdatePullReviewReplyOutcome::Forbidden,
+            ));
+        }
+        if locks::blocked(
+            context,
+            Target::Pull {
+                number: input.key.pull,
+            },
+            input.can_post_locked,
+        )? {
+            return Ok(MutationResult::Rejected(
+                UpdatePullReviewReplyOutcome::Locked,
             ));
         }
         if record.version != input.version {

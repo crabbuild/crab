@@ -16,12 +16,14 @@ use object_store::{
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 #[derive(Clone, Copy, Debug)]
 enum Fault {
+    PlanReceiptRead,
     LostMarkerReply,
     LostMarkerReadback,
     RejectedMarker,
@@ -35,7 +37,8 @@ struct FaultStore {
     inner: Arc<dyn ObjectStore>,
     marker_prefix: String,
     root_path: String,
-    committed: std::sync::atomic::AtomicBool,
+    committed: AtomicBool,
+    fail_plan_receipt: AtomicBool,
     head_path: String,
     cancel: CancellationToken,
     fault: Fault,
@@ -95,6 +98,14 @@ impl ObjectStore for FaultStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
+        if matches!(self.fault, Fault::PlanReceiptRead)
+            && self.fail_plan_receipt.load(Ordering::SeqCst)
+            && self.committed.load(Ordering::SeqCst)
+            && location.as_ref().contains("/v2/plans/")
+            && location.as_ref().ends_with("/terminal.json")
+        {
+            return Err(disconnected());
+        }
         if matches!(self.fault, Fault::LostMarkerReadback)
             && self.committed.load(std::sync::atomic::Ordering::SeqCst)
             && location.as_ref().starts_with(&self.marker_prefix)
@@ -262,6 +273,7 @@ async fn prepared_artifacts_preserve_plan_attribution_through_compaction() {
                                 policy: |_: &str| crab_git::receive_plan::RefPolicy {
                                     allow_delete: true,
                                     allow_non_fast_forward: false,
+                                    inspect_linear_history: false,
                                 },
                             },
                         )
@@ -410,6 +422,166 @@ async fn native_receive_replays_an_identical_wire_request_from_its_receipt() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires stock Git and agent-browser Chromium with the embedded UI built"]
+async fn commit_issue_closure_recovers_from_a_committed_default_ref_receipt() {
+    use crate::test_support::{
+        git::{success, with_http_token},
+        http::{Harness, browser::Browser},
+    };
+    use reqwest::Method;
+    use serde_json::{Value, json};
+
+    const ROOT: &str = "/api/repos/team/private";
+    let backing = Arc::new(FaultStore {
+        inner: Arc::new(object_store::memory::InMemory::new()),
+        marker_prefix: "test/v2/transactions/committed/".into(),
+        root_path: String::new(),
+        head_path: String::new(),
+        committed: AtomicBool::new(false),
+        fail_plan_receipt: AtomicBool::new(false),
+        cancel: CancellationToken::new(),
+        fault: Fault::PlanReceiptRead,
+    });
+    let h = Harness::new_with_store(false, false, Store::new(backing.clone())).await;
+    h.initialize_directory().await;
+    let alice = h.login().await;
+    h.write(
+        Method::PUT,
+        &format!("{ROOT}/settings/branch-protections"),
+        &alice,
+        json!({"expected_version":0,"rules":[]}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    for title in ["Close from stock Git", "Close from browser commit"] {
+        h.write(
+            Method::POST,
+            &format!("{ROOT}/issues"),
+            &alice,
+            json!({
+                "request_id":uuid::Uuid::now_v7(),"title":title,"body":""
+            }),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    }
+    let credential: Value = h
+        .write(
+            Method::POST,
+            "/api/git-token",
+            &alice,
+            json!({
+                "owner":"team", "repository":"private", "access":"write"
+            }),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = credential["token"].as_str().unwrap();
+    let remote = format!("{}/git/team/private.git", h.origin);
+    let checkout = tempfile::tempdir().unwrap();
+    let path = checkout.path();
+    success(
+        path,
+        &["init", "--initial-branch=main", "--object-format=sha1", "."],
+    )
+    .await;
+    success(path, &["commit", "--allow-empty", "-m", "Initial commit"]).await;
+    assert!(with_http_token(path, token, &["push", &remote, "main"]).await);
+    success(path, &["switch", "-c", "topic"]).await;
+    success(
+        path,
+        &["commit", "--allow-empty", "-m", "Fixes #1 and `fixes #2`."],
+    )
+    .await;
+    let closing = success(path, &["rev-parse", "HEAD"]).await;
+    success(path, &["commit", "--allow-empty", "-m", "Follow-up commit"]).await;
+    let tip = success(path, &["rev-parse", "HEAD"]).await;
+    assert!(with_http_token(path, token, &["push", &remote, "topic"]).await);
+    let issue = format!("{ROOT}/issues/1");
+    assert_eq!(h.json(&issue, &alice).await["state"], "open");
+
+    backing.committed.store(false, Ordering::SeqCst);
+    backing.fail_plan_receipt.store(true, Ordering::SeqCst);
+    let _acknowledged = with_http_token(path, token, &["push", &remote, "topic:main"]).await;
+    let repo = h
+        .server
+        .repositories
+        .get(&("team".into(), "private".into()))
+        .unwrap();
+    assert_eq!(
+        repo.ref_oid("refs/heads/main").await.unwrap().as_deref(),
+        Some(tip.as_str())
+    );
+    assert_eq!(h.json(&issue, &alice).await["state"], "open");
+    backing.fail_plan_receipt.store(false, Ordering::SeqCst);
+
+    let issue_two = format!("{ROOT}/issues/2");
+    assert_eq!(h.json(&issue_two, &alice).await["state"], "open");
+    let written: Value = h
+        .write(
+            Method::POST,
+            &format!("{ROOT}/contents"),
+            &alice,
+            json!({
+                "branch":"refs/heads/main", "expected_head":tip, "path_hex":"726561646d652e6d64",
+                "content":"Changed in the browser.\n", "message":"Resolves: #2"
+            }),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let activity = h.json(&format!("{issue_two}/activity"), &alice).await;
+    assert_eq!(activity["items"][0]["action"]["commit"], written["commit"]);
+    assert_eq!(h.json(&issue, &alice).await["state"], "open");
+
+    crate::repository::commit_closures::recover(&h.server, &repo)
+        .await
+        .unwrap();
+    let closed = h.json(&issue, &alice).await;
+    assert_eq!(closed["state_reason"], "completed");
+    let activity = h.json(&format!("{issue}/activity"), &alice).await;
+    assert_eq!(
+        activity["items"][0]["action"],
+        json!({"kind":"issue_closed","reason":"completed","commit":closing})
+    );
+    assert_eq!(activity["items"][0]["actor"]["name"], "Alice");
+
+    let browser = Browser::new("commit-issue-closure");
+    browser
+        .run(&["open", &format!("{}/team/private/issues/1", h.origin)])
+        .await;
+    browser.sign_in().await;
+    browser.run(&["wait", "--fn", &format!(
+        "[...document.querySelectorAll('.conversation-activity')].some(event => event.textContent.includes('closed as completed') && event.querySelector('a[href=\"/team/private/commit/{closing}\"]')?.textContent === '{}')", &closing[..7]
+    )]).await;
+    drop(browser);
+
+    h.write(
+        Method::PATCH,
+        &issue,
+        &alice,
+        json!({"version":closed["version"],"state":"open"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    crate::repository::commit_closures::recover(&h.server, &repo)
+        .await
+        .unwrap();
+    assert_eq!(h.json(&issue, &alice).await["state"], "open");
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn receive_faults_preserve_exact_commit_outcomes_and_repair_on_restart() {
     let (body, oid) = body().await;
     for fault in FAULTS {
@@ -500,7 +672,8 @@ async fn exercise(mut server: Arc<Server>, fault: Fault, body: &[u8], oid: &str)
             inner: Arc::clone(origin.inner()),
             marker_prefix: format!("{}/", repo.layout.capsule_committed_transactions_prefix()),
             root_path: repo.layout.capsule_root_path().to_string(),
-            committed: std::sync::atomic::AtomicBool::new(false),
+            committed: AtomicBool::new(false),
+            fail_plan_receipt: AtomicBool::new(false),
             head_path: repo
                 .layout
                 .capsule_ref_head_path(&crab_metadata::capsule_protocol::capsule_ref_name_key(

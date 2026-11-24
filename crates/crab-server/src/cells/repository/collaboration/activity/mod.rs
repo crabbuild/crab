@@ -28,6 +28,21 @@ pub(crate) enum Action {
         number: u64,
         title: String,
     },
+    DependencyChanged {
+        number: u64,
+        title: String,
+        active: bool,
+    },
+    DuplicateMarked {
+        number: u64,
+        subject_kind: super::SubjectKind,
+        title: String,
+    },
+    DuplicateUnmarked {
+        number: u64,
+        subject_kind: super::SubjectKind,
+        title: String,
+    },
     Created,
     Drafted,
     ReadyForReview,
@@ -48,12 +63,25 @@ pub(crate) enum Action {
     TeamReviewRequested,
     TeamReviewRequestCancelled,
     CodeOwnerReviewsRequested,
+    MergeQueuePrioritized,
     Updated,
+    Locked {
+        reason: Option<super::locks::Reason>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expires_at_ms: Option<u64>,
+    },
+    Unlocked,
+    CommentHidden {
+        reason: super::minimization::Reason,
+    },
+    CommentRestored,
     Closed,
     IssueClosed {
         reason: crate::cells::repository::issues::lifecycle::Reason,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pull: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commit: Option<String>,
     },
     IssueCloseReasonChanged {
         from: Option<crate::cells::repository::issues::lifecycle::Reason>,
@@ -90,9 +118,23 @@ pub(crate) enum Action {
 impl Action {
     pub(super) fn related_subject(&self) -> Option<Subject> {
         match self {
+            Self::DuplicateMarked {
+                number,
+                subject_kind,
+                ..
+            }
+            | Self::DuplicateUnmarked {
+                number,
+                subject_kind,
+                ..
+            } => Some(Subject {
+                kind: *subject_kind,
+                number: *number,
+            }),
             Self::IssueLinked { number, .. }
             | Self::IssueUnlinked { number, .. }
             | Self::ParentAssigned { number, .. }
+            | Self::DependencyChanged { number, .. }
             | Self::ParentRemoved { number, .. } => Some(Subject {
                 kind: super::SubjectKind::Issue,
                 number: *number,
@@ -102,6 +144,34 @@ impl Action {
     }
 
     fn validate(&self, target: Target) -> crate::cells::Result<()> {
+        if let Self::DuplicateMarked {
+            number,
+            subject_kind,
+            title,
+        }
+        | Self::DuplicateUnmarked {
+            number,
+            subject_kind,
+            title,
+        } = self
+        {
+            validate_number(*number)?;
+            validate_title(title)?;
+            if matches!(target, Target::Issue { .. } | Target::Pull { .. })
+                && *subject_kind == target.subject().kind
+                && *number != target.subject().number
+            {
+                return Ok(());
+            }
+            return Err(crate::cells::Error::Invalid(
+                "duplicate action does not match its discussion",
+            ));
+        }
+        if matches!(self, Self::CommentHidden { .. } | Self::CommentRestored)
+            && super::minimization::supports(target)
+        {
+            return Ok(());
+        }
         let valid = match target {
             Target::Issue { .. } => matches!(
                 self,
@@ -109,8 +179,11 @@ impl Action {
                     | Self::ProjectRemoved { .. }
                     | Self::ParentAssigned { .. }
                     | Self::ParentRemoved { .. }
+                    | Self::DependencyChanged { .. }
                     | Self::Created
                     | Self::Updated
+                    | Self::Locked { .. }
+                    | Self::Unlocked
                     | Self::Closed
                     | Self::Reopened
                     | Self::Pinned
@@ -126,6 +199,8 @@ impl Action {
                     | Self::ProjectRemoved { .. }
                     | Self::Created
                     | Self::Updated
+                    | Self::Locked { .. }
+                    | Self::Unlocked
                     | Self::Closed
                     | Self::Reopened
                     | Self::Merged
@@ -138,6 +213,7 @@ impl Action {
                     | Self::TeamReviewRequested
                     | Self::TeamReviewRequestCancelled
                     | Self::CodeOwnerReviewsRequested
+                    | Self::MergeQueuePrioritized
                     | Self::IssueLinked { .. }
                     | Self::IssueUnlinked { .. }
                     | Self::MilestoneAssigned { .. }
@@ -164,6 +240,7 @@ impl Action {
         | Self::IssueLinked { number, title }
         | Self::IssueUnlinked { number, title }
         | Self::ParentAssigned { number, title }
+        | Self::DependencyChanged { number, title, .. }
         | Self::ParentRemoved { number, title } = self
         {
             validate_number(*number)?;
@@ -203,6 +280,18 @@ impl Action {
         } = self
         {
             validate_number(*pull)?;
+        }
+        if let Self::IssueClosed {
+            pull,
+            commit: Some(commit),
+            reason,
+        } = self
+            && (pull.is_some()
+                || *reason != super::super::issues::lifecycle::Reason::Completed
+                || commit.len() != 40
+                || gix_hash::ObjectId::from_hex(commit.as_bytes()).is_err())
+        {
+            return Err(crate::cells::Error::Invalid("invalid closing commit"));
         }
         if !valid {
             return Err(crate::cells::Error::Invalid(

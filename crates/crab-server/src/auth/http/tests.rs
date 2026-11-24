@@ -6,6 +6,23 @@ use serde_json::json;
 use std::sync::atomic::Ordering;
 
 #[tokio::test]
+async fn signup_requires_an_advertised_registration_prompt() {
+    let h = Harness::new(false).await;
+    assert_eq!(h.json("/api/session", "").await["can_sign_up"], false);
+    let refused = h
+        .http
+        .get(format!("{}/auth/login?sign_up=true", h.origin))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    assert!(!refused.headers().contains_key(header::SET_COOKIE));
+    let cookie = h.login().await;
+    assert_eq!(h.json("/api/session", &cookie).await["authenticated"], true);
+    h.close().await;
+}
+
+#[tokio::test]
 async fn browser_sign_in_enforces_membership_csrf_logout_and_rotated_signing_keys() {
     let h = Harness::new(false).await;
     assert_eq!(h.json("/api/session", "").await["authenticated"], false);

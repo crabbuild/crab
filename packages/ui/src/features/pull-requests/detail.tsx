@@ -1,11 +1,16 @@
+import {
+  ConversationLockControl,
+  useConversationLock,
+} from "@/components/discussion/conversation/lock";
 import { mergeMethod } from "./merge-methods";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { OverlayVisibility } from "@/components/ui/use-overlay-state";
 import { useSubmission } from "@/components/discussion/hooks";
 import { Author } from "@/components/discussion/author";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
 import { PullChecks } from "./candidate-checks";
 import { ChangeBase } from "./change-base";
+import { EditPullRequest } from "./edit";
 import type { CodeThemes } from "@/lib/code-theme";
 import { DiscussionMetadata } from "@/components/discussion/metadata";
 import { repoHref, repositoryRoute } from "@/lib/repository-route";
@@ -57,6 +62,7 @@ export function PullDetail({
   theme: "light" | "dark";
   codeThemes: CodeThemes;
 }) {
+  const conversationLock = useConversationLock();
   const [reviewDraft, setReviewDraft] = useState<ReviewDraft>();
   const reviewSubmission = useSubmission();
   // Draft and submission identity outlive tab changes and metadata refreshes.
@@ -65,15 +71,17 @@ export function PullDetail({
   const pull = useRequest<PullRequest>(path);
   const [current, setCurrent] = useState<PullRequest>();
   const [epoch, setEpoch] = useState(0);
+  const accept = useCallback((incoming: PullRequest) => {
+    setCurrent((old) =>
+      old && old.version > incoming.version ? old : incoming,
+    );
+  }, []);
   useEffect(() => {
-    const incoming = pull.data;
-    if (incoming)
-      setCurrent((old) =>
-        old && old.version > incoming.version ? old : incoming,
-      );
-  }, [pull.data]);
+    if (pull.data) accept(pull.data);
+  }, [pull.data, accept]);
   function refresh() {
     pull.retry();
+    conversationLock?.refresh();
     setEpoch((value) => value + 1);
   }
   const data = current ?? pull.data;
@@ -132,9 +140,17 @@ export function PullDetail({
             </Alert>
           )}
           <div className="pull-title">
-            <h2>
-              {data.title} <span className="muted">#{data.number}</span>
-            </h2>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <h2>
+                {data.title} <span className="muted">#{data.number}</span>
+              </h2>
+              <EditPullRequest
+                repo={repo}
+                pull={data}
+                csrf={csrf}
+                accept={accept}
+              />
+            </div>
             <div className="pull-summary">
               <PullBadge pull={data} />
               {data.merge ? (
@@ -180,6 +196,12 @@ export function PullDetail({
               )}
             </div>
           </div>
+          <ConversationLockControl
+            repo={repo}
+            target={`pulls/${number}`}
+            csrf={csrf}
+            onChanged={() => setEpoch((value) => value + 1)}
+          />
           <nav className="pull-tabs" aria-label="Pull request">
             <Link
               className={tab === "conversation" ? "active" : ""}
@@ -276,7 +298,11 @@ export function PullDetail({
                   pull={data}
                   csrf={csrf}
                   refresh={refresh}
-                  disabled={pull.loading || Boolean(pull.error)}
+                  disabled={
+                    pull.loading ||
+                    Boolean(pull.error) ||
+                    conversationLock?.lock?.can_post === false
+                  }
                   draft={reviewDraft}
                   onDraft={setReviewDraft}
                   submission={reviewSubmission}
@@ -332,6 +358,7 @@ export function PullDetail({
                     csrf={csrf}
                     onSaved={refresh}
                     allowIssueClosure={data.state !== "merged"}
+                    reviewerRefresh={epoch}
                   />
                 </div>
               </div>

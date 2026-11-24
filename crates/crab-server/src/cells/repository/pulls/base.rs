@@ -161,6 +161,7 @@ impl Mutation for Retarget {
                 to: pull.base_ref.clone(),
             },
         )?;
+        webhooks::sync::route_changed(context, pull.number)?;
         webhooks::pull(context, &pull, webhooks::PullAction::Edited)?;
         if !pull.draft {
             review_requests::automatic::apply(

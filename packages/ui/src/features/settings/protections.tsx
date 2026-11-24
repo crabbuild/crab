@@ -39,6 +39,7 @@ export function BranchProtectionSettings({
   const [requireResolution, setRequireResolution] = useState(false);
   const [requireUpToDate, setRequireUpToDate] = useState(false);
   const [requireQueue, setRequireQueue] = useState(false);
+  const [requireLinearHistory, setRequireLinearHistory] = useState(false);
   const [checks, setChecks] = useState("");
   const [integrations, setIntegrations] = useState<string[]>([]);
   const [chooseIntegrations, setChooseIntegrations] = useState(false);
@@ -73,6 +74,7 @@ export function BranchProtectionSettings({
     setRequireResolution(Boolean(rule?.require_conversation_resolution));
     setRequireUpToDate(Boolean(rule?.require_up_to_date));
     setRequireQueue(Boolean(rule?.require_merge_queue));
+    setRequireLinearHistory(Boolean(rule?.require_linear_history));
     setChecks(rule?.required_checks.join("\n") ?? "");
     setIntegrations(rule?.required_integrations ?? []);
     setChooseIntegrations(!!rule?.required_integrations?.length);
@@ -143,6 +145,7 @@ export function BranchProtectionSettings({
       ...(requireResolution ? { require_conversation_resolution: true } : {}),
       ...(requireUpToDate ? { require_up_to_date: true } : {}),
       ...(requireQueue ? { require_merge_queue: true } : {}),
+      ...(requireLinearHistory ? { require_linear_history: true } : {}),
       required_checks: requiredChecks,
       ...(integrations.length ? { required_integrations: integrations } : {}),
     };
@@ -209,6 +212,9 @@ export function BranchProtectionSettings({
                     <p>Conversation resolution required</p>
                   )}
                   {rule.require_merge_queue && <p>Merge queue required</p>}
+                  {rule.require_linear_history && (
+                    <p>Linear history required</p>
+                  )}
                   {rule.require_up_to_date && !rule.require_merge_queue && (
                     <p>Up-to-date head branch required</p>
                   )}
@@ -372,8 +378,17 @@ export function BranchProtectionSettings({
             </label>
             <p className="settings-help-inline">
               Require every pull request to pass checks in the queue. Configure
-              at least one required check and enable merge commits.
+              at least one required check and a compatible queue merge method.
             </p>
+            <label className="flex items-center gap-2">
+              <Checkbox
+                checked={requireLinearHistory}
+                onCheckedChange={(checked) =>
+                  setRequireLinearHistory(checked === true)
+                }
+              />
+              Require linear history
+            </label>
             <label htmlFor="protection-checks">Required status checks</label>
             <textarea
               id="protection-checks"

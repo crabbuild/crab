@@ -5,6 +5,7 @@ use crate::cells::repository::collaboration::{
 };
 
 pub(crate) mod automatic;
+pub(crate) mod routing;
 pub(crate) mod teams;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -32,10 +33,14 @@ fn prefix(pull: u64) -> String {
 }
 
 pub(crate) fn reviewer_id(reviewer: &RepositoryAuthor) -> String {
+    reviewer_identity_id(&reviewer.issuer, &reviewer.subject)
+}
+
+fn reviewer_identity_id(issuer: &str, subject: &str) -> String {
     let mut hash = blake3::Hasher::new();
     hash.update(b"crab.pull-reviewer.v1\0");
-    hash_text(&mut hash, &reviewer.issuer);
-    hash_text(&mut hash, &reviewer.subject);
+    hash_text(&mut hash, issuer);
+    hash_text(&mut hash, subject);
     hash.finalize().to_hex().to_string()
 }
 

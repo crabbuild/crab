@@ -56,6 +56,8 @@ fn reply_view(
         "author": authors.view(&reply.author),
         "body": reply.body,
         "reactions": reactions,
+        "has_edit_history": reactions.has_edit_history,
+        "minimization": reactions.minimization,
         "version": reply.version,
         "created_at": reply.created_at,
         "updated_at": reply.updated_at,
@@ -166,6 +168,7 @@ async fn create_reply(
     let reply = storage::create_reply(
         &server,
         repo,
+        &principal,
         pull.number,
         thread,
         storage::NewPullReviewReply {
@@ -243,6 +246,7 @@ async fn edit_reply(
     let reply = storage::update_reply(
         &server,
         repo,
+        &principal,
         pull.number,
         app::number(thread)?,
         app::number(reply)?,

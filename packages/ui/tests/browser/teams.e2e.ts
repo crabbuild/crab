@@ -4,6 +4,7 @@ import {
   selectDarkTheme,
 } from "./accessibility";
 import type {
+  ReviewRoutingSettings,
   TeamMember,
   TeamPolicy,
   TeamSubmission,
@@ -16,9 +17,12 @@ const root = `/-/organizations/${id}`;
 async function fixture(page: Page, local = false) {
   const state: {
     teams: TeamView[];
+    syncEnabled: boolean;
+    groups: Map<string, { id: string; name: string }>;
     members: Map<string, TeamMember[]>;
     writes: { body: TeamSubmission; cancel: boolean; path: string }[];
     policy: TeamPolicy;
+    reviewRouting: Map<string, ReviewRoutingSettings>;
     lost: boolean;
     denied: boolean;
     revoked: boolean;
@@ -26,9 +30,12 @@ async function fixture(page: Page, local = false) {
     account: string;
   } = {
     teams: [],
+    syncEnabled: false,
+    groups: new Map(),
     members: new Map(),
     writes: [],
     policy: { version: 1, member_creation: true },
+    reviewRouting: new Map(),
     lost: false,
     denied: false,
     revoked: false,
@@ -185,6 +192,21 @@ async function fixture(page: Page, local = false) {
             });
           state.teams.find((view) => view.team.id === target)!.team.version +=
             1;
+        } else if (command.kind === "review_routing") {
+          state.reviewRouting.set(target, {
+            version: command.version + 1,
+            algorithm: command.algorithm,
+            reviewers: command.reviewers,
+            excluded:
+              command.excluded ??
+              state.reviewRouting.get(target)?.excluded ??
+              [],
+            options: command.options ??
+              state.reviewRouting.get(target)?.options ?? {
+                count_existing: false,
+                keep_team: false,
+              },
+          });
         } else if (command.kind === "delete")
           state.teams = state.teams.filter((view) => view.team.id !== target);
         else
@@ -206,6 +228,25 @@ async function fixture(page: Page, local = false) {
         status: 404,
         json: { error: { message: "Team not found" } },
       });
+    const routingTeam = new RegExp(
+      `^${base}/teams/([^/]+)/review-routing$`,
+    ).exec(path)?.[1];
+    if (routingTeam) {
+      if (!state.teams.some((view) => view.team.id === routingTeam))
+        return route.fulfill({
+          status: 404,
+          json: { error: { message: "Team not found" } },
+        });
+      return route.fulfill({
+        json: state.reviewRouting.get(routingTeam) ?? {
+          version: 0,
+          algorithm: "disabled",
+          reviewers: 1,
+          excluded: [],
+          options: { count_existing: false, keep_team: false },
+        },
+      });
+    }
     if (path === `${base}/teams/policy`)
       return route.fulfill({ json: state.policy });
     if (path === `${base}/teams`)
@@ -229,7 +270,7 @@ async function fixture(page: Page, local = false) {
         },
       });
     const match = new RegExp(
-      `^${base}/teams/([^/]+)(?:/(members|candidates))?$`,
+      `^${base}/teams/([^/]+)(?:/(members|candidates|identity-group))?$`,
     ).exec(path);
     if (match) {
       const team = match[1],
@@ -240,6 +281,38 @@ async function fixture(page: Page, local = false) {
           json: { error: { message: "Team not found" } },
         });
       if (!match[2]) return route.fulfill({ json: view });
+      if (match[2] === "identity-group") {
+        if (request.method() === "PUT") {
+          expect(request.headers()["x-csrf-token"]).toBe("csrf");
+          const input = request.postDataJSON() as {
+            group: string | null;
+            version: number;
+          };
+          expect(input.version).toBe(view.team.version);
+          view.team.version += 1;
+          if (input.group) {
+            state.groups.set(team, {
+              id: input.group,
+              name: "Release engineers",
+            });
+            state.members.set(team, [
+              { actor: bob, role: "member", version: 1, profile: profile(bob) },
+            ]);
+          } else {
+            state.groups.delete(team);
+            state.members.set(team, []);
+          }
+          return route.fulfill({ json: { applied: true } });
+        }
+        return route.fulfill({
+          json: {
+            group: state.groups.get(team) ?? null,
+            version: view.team.version,
+            can_link: true,
+            enabled: state.syncEnabled,
+          },
+        });
+      }
       const members = state.members.get(team)!;
       const items =
         match[2] === "members"
@@ -254,7 +327,12 @@ async function fixture(page: Page, local = false) {
                 },
             );
       return route.fulfill({
-        json: { items, next: null, revision: 1, can_manage: true },
+        json: {
+          items,
+          next: null,
+          revision: 1,
+          can_manage: !state.groups.has(team),
+        },
       });
     }
     return route.fulfill({
@@ -272,6 +350,38 @@ async function create(page: Page, name = "Platform") {
     .fill("Repository maintainers");
   await page.getByRole("button", { name: "Create team", exact: true }).click();
 }
+test("organization owners link and unlink a provisioned group from team settings", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  state.syncEnabled = true;
+  await page.goto(`${root}?tab=teams`);
+  await create(page);
+  await page.getByRole("link", { name: "Open team", exact: true }).click();
+  const nav = page.getByRole("navigation", { name: "Team", exact: true });
+  await nav.getByRole("link", { name: "Settings" }).click();
+  const group = page.getByRole("region", { name: "Identity provider group" });
+  await group
+    .getByLabel("SCIM group ID")
+    .fill("01900000-0000-7000-8000-000000000018");
+  await group
+    .getByRole("button", { name: "Link group and replace roster" })
+    .click();
+  await expect(group.getByText("Release engineers")).toBeVisible();
+  await nav.getByRole("link", { name: "Members" }).click();
+  await expect(
+    page.getByRole("link", { name: "Bob", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Add a member" })).toHaveCount(
+    0,
+  );
+  await nav.getByRole("link", { name: "Settings" }).click();
+  await group.getByRole("button", { name: "Unlink group" }).click();
+  await group.getByRole("button", { name: "Clear roster and unlink" }).click();
+  await expect(group.getByLabel("SCIM group ID")).toBeVisible();
+  await expectNoAccessibilityViolations(page);
+});
+
 for (const mobile of [false, true])
   test(`native team controls support membership, conflict review and deletion ${mobile ? "on mobile" : "on desktop"}`, async ({
     page,
@@ -338,6 +448,34 @@ for (const mobile of [false, true])
     await expect(
       page.getByRole("heading", { name: "My draft", exact: true }),
     ).toBeVisible();
+    await page.getByLabel("Assignment method").selectOption({
+      label: "Load balance",
+    });
+    await page.getByLabel("Reviewers per request").fill("2");
+    const excluded = page.getByRole("checkbox", {
+      name: "Bob (@bob)",
+      exact: true,
+    });
+    await excluded.check();
+    const countExisting = page.getByRole("checkbox", {
+      name: "Count existing review requests",
+    });
+    const keepTeam = page.getByRole("checkbox", {
+      name: "Keep the team requested after assignment",
+    });
+    await countExisting.check();
+    await keepTeam.check();
+    await page.getByRole("button", { name: "Save review assignment" }).click();
+    await expect(
+      page.getByRole("status", { name: "Team submission result" }),
+    ).toContainText("Update review assignment completed.");
+    await expect(page.getByLabel("Assignment method")).toHaveValue(
+      "fewest_open",
+    );
+    await expect(page.getByLabel("Reviewers per request")).toHaveValue("2");
+    await expect(excluded).toBeChecked();
+    await expect(countExisting).toBeChecked();
+    await expect(keepTeam).toBeChecked();
     await expectNoAccessibilityViolations(page);
     expect(
       await page.evaluate(

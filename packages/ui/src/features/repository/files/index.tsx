@@ -113,13 +113,37 @@ export function FileView({
   const state = useRequest<FilePreviewContent>(
     endpoint(repo, "file-preview", { rev, path_hex: path }),
   );
+  const storedFile =
+    state.data?.classification === "LfsPointer"
+      ? { label: "Git LFS", route: "lfs-content", commit: state.data.commit }
+      : state.data?.classification === "CrabPointer"
+        ? { label: "Crab", route: "crab-content", commit: state.data.commit }
+        : null;
+  const payloadSize = storedFile ? state.data?.stored_size : state.data?.size;
+  const fileParams = { rev: storedFile?.commit ?? rev, path_hex: path };
+  const rawUrl = endpoint(repo, "blob", fileParams);
+  const contentUrl = storedFile
+    ? endpoint(repo, storedFile.route, fileParams)
+    : rawUrl;
+  const downloadLabel = storedFile
+    ? `Download ${storedFile.label} file`
+    : "Download raw file";
+  const copyLabel = storedFile ? "Copy pointer" : "Copy file contents";
+  const copiedLabel = storedFile ? "Pointer copied" : "File contents copied";
   const previewState = state.data?.preview.state;
   const text =
     state.data?.preview.state === "inline" ? state.data.preview.text : null;
   const [presentation, setView] = useState<"code" | "preview">(
     previewFirst ? "preview" : "code",
   );
-  const view = blameView ? "blame" : presentation;
+  const [storedPreviewUrl, setStoredPreviewUrl] = useState<string | null>(null);
+  const view = storedFile
+    ? storedPreviewUrl === contentUrl
+      ? "preview"
+      : "code"
+    : blameView
+      ? "blame"
+      : presentation;
   const [blamePaneWidth, setBlamePaneWidth] = useState(
     DEFAULT_BLAME_PANE_WIDTH,
   );
@@ -280,10 +304,12 @@ export function FileView({
     [codeThemes, symbolLanguage, theme],
   );
   const activePreview: PreviewDescriptor | null =
-    preview ??
-    (state.data && state.data.preview.state !== "inline"
-      ? { kind: "generic", label: "File inspector" }
-      : null);
+    payloadSize === undefined
+      ? null
+      : (preview ??
+        (!storedFile && state.data && state.data.preview.state !== "inline"
+          ? { kind: "generic", label: "File inspector" }
+          : null));
   const symbols =
     view === "code" && symbolsOpen && symbolLanguage && text !== null ? (
       <CodeSymbolsPanel
@@ -318,6 +344,12 @@ export function FileView({
                       next !== "blame"
                     )
                       return;
+                    if (storedFile) {
+                      setStoredPreviewUrl(
+                        next === "preview" ? contentUrl : null,
+                      );
+                      return;
+                    }
                     setView(next === "blame" ? "code" : next);
                     if (blameView || next === "blame")
                       navigate(
@@ -336,7 +368,7 @@ export function FileView({
                     aria-pressed={view === "code"}
                     aria-checked={undefined}
                   >
-                    {text === null ? "Info" : "Code"}
+                    {storedFile ? "Pointer" : text === null ? "Info" : "Code"}
                   </ToggleGroupItem>
                   {activePreview && (
                     <ToggleGroupItem
@@ -361,10 +393,17 @@ export function FileView({
                     )}
                 </ToggleGroup>
                 <span className="file-metadata muted">
-                  {content.preview.state !== "inline"
-                    ? unavailablePreview[content.preview.state].title
-                    : `${content.preview.text === "" ? 0 : content.preview.text.split("\n").length - Number(content.preview.text.endsWith("\n"))} lines`}{" "}
-                  <span aria-hidden="true">·</span> {formatSize(content.size)}
+                  {storedFile?.label ??
+                    (content.preview.state !== "inline"
+                      ? unavailablePreview[content.preview.state].title
+                      : `${content.preview.text === "" ? 0 : content.preview.text.split("\n").length - Number(content.preview.text.endsWith("\n"))} lines`)}
+                  {payloadSize !== undefined && (
+                    <>
+                      {" "}
+                      <span aria-hidden="true">·</span>{" "}
+                      {formatSize(payloadSize)}
+                    </>
+                  )}
                 </span>
               </div>
               <div className="file-actions">
@@ -388,15 +427,11 @@ export function FileView({
                     </Button>
                   )}
                 <Button asChild variant="outline" size="sm">
-                  <a href={endpoint(repo, "blob", { rev, path_hex: path })}>
-                    Raw
-                  </a>
+                  <a href={rawUrl}>{storedFile ? "Raw pointer" : "Raw"}</a>
                 </Button>
                 {text !== null && (
                   <Button
-                    aria-label={
-                      copied ? "File contents copied" : "Copy file contents"
-                    }
+                    aria-label={copied ? copiedLabel : copyLabel}
                     size="icon-sm"
                     onClick={async () => {
                       try {
@@ -413,10 +448,10 @@ export function FileView({
                 )}
                 <Button asChild variant="outline" size="icon-sm">
                   <a
-                    href={endpoint(repo, "blob", { rev, path_hex: path })}
+                    href={contentUrl}
                     download={name.split("/").pop()}
-                    aria-label="Download raw file"
-                    title="Download raw file"
+                    aria-label={downloadLabel}
+                    title={downloadLabel}
                   >
                     <DownloadIcon data-icon="inline-start" />
                   </a>
@@ -465,16 +500,12 @@ export function FileView({
             </div>
           </div>
           <div className="file-body">
-            {content.classification !== "OrdinaryGit" && (
-              <div className="file-note">
-                Git object classification: {content.classification}. Downloads
-                contain the exact stored Git blob.
-              </div>
-            )}
             {view === "blame" && (blame.loading || blame.error) && (
               <Result state={blame}>{() => null}</Result>
             )}
-            {view === "preview" && activePreview ? (
+            {view === "preview" &&
+            activePreview &&
+            payloadSize !== undefined ? (
               <Suspense
                 fallback={
                   <div className="file-preview-notice" role="status">
@@ -483,15 +514,17 @@ export function FileView({
                 }
               >
                 <FilePreview
+                  key={contentUrl}
                   descriptor={activePreview}
                   repo={repo}
-                  rev={rev}
-                  revision={revision}
+                  rev={fileParams.rev}
+                  revision={storedFile?.commit ?? revision}
                   directory={parentHex(path)}
                   name={name}
-                  text={text}
-                  size={content.size}
-                  blobUrl={endpoint(repo, "blob", { rev, path_hex: path })}
+                  text={storedFile ? null : text}
+                  size={payloadSize}
+                  blobUrl={contentUrl}
+                  stored={storedFile !== null}
                   theme={theme}
                   codeThemes={codeThemes}
                 />

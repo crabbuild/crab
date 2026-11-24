@@ -1,3 +1,8 @@
+use super::super::{
+    collaboration::{SubjectState, dependencies},
+    issues::issue_type,
+    settings,
+};
 use super::*;
 
 pub(crate) struct WorkSummaries;
@@ -6,11 +11,23 @@ pub(crate) struct WorkSummaries;
 pub(crate) struct WorkQuery {
     pub subjects: Vec<Subject>,
     pub default_ref: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_issue_type: bool,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct IssueTypeField {
+    pub selection: Option<issue_type::Selection>,
+    pub editable_version: Option<u64>,
 }
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct WorkDetails {
     pub work: SubjectSummary,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_type: Option<IssueTypeField>,
     pub assignees: Vec<super::super::assignments::Assignee>,
     pub progress: Option<hierarchy::Progress>,
     pub parent: Option<SubjectSummary>,
@@ -22,10 +39,16 @@ fn work_details(
     subject: Subject,
     assignees: Vec<super::super::assignments::Assignee>,
     default_ref: &str,
+    issue_type_writable: Option<bool>,
 ) -> Result<Option<WorkDetails>> {
     let Some(work) = subject.summary(context)? else {
         return Ok(None);
     };
+    let blocked = dependencies::blocked(
+        context,
+        subject.number,
+        subject.kind == SubjectKind::Issue && work.state == SubjectState::Open,
+    )?;
     let (progress, parent) = if subject.kind == SubjectKind::Issue {
         (
             Some(hierarchy::progress(context, subject.number)?),
@@ -44,6 +67,16 @@ fn work_details(
     } else {
         (None, None)
     };
+    let issue_type = issue_type_writable
+        .filter(|_| subject.kind == SubjectKind::Issue)
+        .map(|writable| {
+            let assignment = issue_type::load(context, subject.number)?;
+            Ok::<_, Error>(IssueTypeField {
+                selection: assignment.selection,
+                editable_version: writable.then_some(assignment.version),
+            })
+        })
+        .transpose()?;
     let page = super::super::collaboration::links::ListLinks::execute(
         context,
         super::super::collaboration::links::Query {
@@ -56,6 +89,8 @@ fn work_details(
     .ok_or(Error::Invalid("project links source is missing"))?;
     Ok(Some(WorkDetails {
         work,
+        blocked,
+        issue_type,
         assignees,
         progress,
         parent,
@@ -73,6 +108,10 @@ impl Read for WorkSummaries {
             return Err(Error::Invalid("work lookup is limited to 50 subjects"));
         }
         preparation::ensure_ready(context)?;
+        let issue_type_writable = input
+            .include_issue_type
+            .then(|| settings::archived(context).map(|archived| !archived))
+            .transpose()?;
         input
             .subjects
             .into_iter()
@@ -93,7 +132,13 @@ impl Read for WorkSummaries {
                     SqlValue::Blob(bytes) => super::super::assignments::decode(bytes)?,
                     _ => return Err(Error::Invalid("project source assignments are invalid")),
                 };
-                work_details(context, subject, assignees, &input.default_ref)
+                work_details(
+                    context,
+                    subject,
+                    assignees,
+                    &input.default_ref,
+                    issue_type_writable,
+                )
             })
             .collect()
     }
@@ -159,6 +204,10 @@ pub(crate) struct ItemQuery {
     pub status: Option<String>,
     pub hide_closed: bool,
     pub default_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_type: Option<issue_type::search::Scope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_by: Option<GroupBy>,
 }
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -166,6 +215,10 @@ pub(crate) struct Row {
     pub version: u64,
     pub item: Item,
     pub work: Option<SubjectSummary>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_type: Option<IssueTypeField>,
     pub assignees: Vec<super::super::assignments::Assignee>,
     pub progress: Option<hierarchy::Progress>,
     pub parent: Option<SubjectSummary>,
@@ -180,6 +233,8 @@ pub(crate) struct ItemPage {
     pub items: Vec<Row>,
     pub next: Option<Uuid>,
     pub counts: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_counts: Option<BTreeMap<String, u64>>,
     pub total: u64,
 }
 pub(crate) struct Items;
@@ -196,6 +251,16 @@ impl Read for Items {
         let Some(project) = load(context, input.project)? else {
             return Ok(None);
         };
+        let group_by_type = input.group_by == Some(GroupBy::IssueType);
+        let show_issue_type = group_by_type
+            || project
+                .definition
+                .views
+                .iter()
+                .any(|view| view.show_issue_type);
+        let issue_type_writable = show_issue_type
+            .then(|| settings::archived(context).map(|archived| !archived))
+            .transpose()?;
         if input
             .status
             .as_ref()
@@ -211,8 +276,21 @@ impl Read for Items {
         if input.after.is_some() && input.revision != Some(revision) {
             return Err(Error::StaleSearch);
         }
-        let predicate = "FROM repository_project_items p LEFT JOIN repository_issues i ON p.kind=0 AND p.number=i.number LEFT JOIN repository_pulls r ON p.kind=1 AND p.number=r.number WHERE p.project=? AND (? IS NULL OR p.id=?) AND (? IS NULL OR p.status=?) AND (?=0 OR COALESCE(i.state,r.state,0)=0) AND instr(lower(COALESCE(i.title,r.title,json_extract(p.data,'$.title'))),lower(?))>0";
-        let mut args = vec![
+        if group_by_type && input.issue_type.is_none() {
+            return Err(Error::Invalid(
+                "Project issue type grouping needs a repository scope",
+            ));
+        }
+        let (join, mut args) = input
+            .issue_type
+            .as_ref()
+            .map(|scope| scope.join(context))
+            .transpose()?
+            .unwrap_or_default();
+        let mut predicate = format!(
+            "FROM repository_project_items p LEFT JOIN repository_issues i ON p.kind=0 AND p.number=i.number LEFT JOIN repository_pulls r ON p.kind=1 AND p.number=r.number {join} WHERE p.project=? AND (? IS NULL OR p.id=?) AND (? IS NULL OR p.status=?) AND (?=0 OR COALESCE(i.state,r.state,0)=0) AND instr(lower(COALESCE(i.title,r.title,json_extract(p.data,'$.title'))),lower(?))>0"
+        );
+        args.extend([
             id(project.id),
             input.item.map(id).unwrap_or(SqlValue::Null),
             input.item.map(id).unwrap_or(SqlValue::Null),
@@ -228,7 +306,12 @@ impl Read for Items {
                 .unwrap_or(SqlValue::Null),
             SqlValue::Integer(i64::from(input.hide_closed)),
             SqlValue::Text(input.query),
-        ];
+        ]);
+        if let Some(scope) = input.issue_type {
+            let (condition, value) = scope.filter();
+            predicate.push_str(&format!(" AND ({condition})"));
+            args.extend(value);
+        }
         let count = context.query(
             &format!("SELECT p.status,COUNT(*) {predicate} GROUP BY p.status"),
             &args,
@@ -238,6 +321,16 @@ impl Read for Items {
             .iter()
             .map(|r| Ok((result_text(r, 0)?, result_u64_from_row(r, 1)?)))
             .collect::<Result<BTreeMap<_, _>>>()?;
+        let issue_type_counts = group_by_type.then(|| {
+            context.query(
+                &format!("SELECT it.type_id,i.number IS NOT NULL,COUNT(*) {predicate} GROUP BY it.type_id,i.number IS NOT NULL"),
+                &args,
+            )?.rows.iter().map(|row| {
+                let issue_type = issue_type::search::type_id(&row[0])?;
+                let has_type_field = result_u64_from_row(row, 1)? == 1;
+                Ok((issue_type::group(has_type_field, issue_type), result_u64_from_row(row, 2)?))
+            }).collect::<Result<BTreeMap<_,_>>>()
+        }).transpose()?;
         args.push(id(input.after.unwrap_or(Uuid::nil())));
         let rows = context.query(
             &format!("SELECT p.data,COALESCE(i.assignees,r.assignees) {predicate} AND p.id>? ORDER BY p.id LIMIT 51"),
@@ -260,8 +353,14 @@ impl Read for Items {
             };
             let details = if let Some(subject) = entry.subject {
                 Some(
-                    work_details(context, subject, assignees, &input.default_ref)?
-                        .ok_or(Error::Invalid("project source is missing"))?,
+                    work_details(
+                        context,
+                        subject,
+                        assignees,
+                        &input.default_ref,
+                        issue_type_writable,
+                    )?
+                    .ok_or(Error::Invalid("project source is missing"))?,
                 )
             } else {
                 None
@@ -274,6 +373,8 @@ impl Read for Items {
                     .unwrap_or_default(),
                 item: entry,
                 work: details.as_ref().map(|details| details.work.clone()),
+                blocked: details.as_ref().is_some_and(|details| details.blocked),
+                issue_type: details.as_ref().and_then(|details| details.issue_type),
                 progress: details
                     .as_ref()
                     .and_then(|details| details.progress.clone()),
@@ -291,12 +392,27 @@ impl Read for Items {
             None
         };
         let total = counts.values().sum();
+        let group_counts = match input.group_by {
+            Some(GroupBy::Status) => Some(counts.clone()),
+            Some(GroupBy::IssueType) => issue_type_counts,
+            Some(GroupBy::Field(field)) => Some(grouping::field_counts(
+                context,
+                &project.definition,
+                field,
+                "$.values",
+                &predicate,
+                &args[..args.len() - 1],
+                items.iter().map(|row| &row.item),
+            )?),
+            None => None,
+        };
         Ok(Some(ItemPage {
             project,
             revision,
             items,
             next,
             counts,
+            group_counts,
             total,
         }))
     }
@@ -342,7 +458,7 @@ impl Read for Candidates {
     type Input = CandidateQuery;
     type Output = Vec<SubjectSummary>;
     fn execute(context: &mut Transaction<'_>, input: CandidateQuery) -> Result<Self::Output> {
-        preparation::ensure_ready(context)?;
+        // The shared picker reads only canonical discussion metadata and search.
         if !text_valid(&input.q, 256, false) {
             return Err(Error::Invalid("invalid work search"));
         }

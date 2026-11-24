@@ -49,6 +49,8 @@ pub(super) struct Input {
     pub base_oid: String,
     pub head_oid: String,
     pub previous_oid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<MergeMethod>,
 }
 
 #[derive(Deserialize)]
@@ -95,6 +97,7 @@ struct Candidate {
 pub(super) struct QueueBase {
     pub reference: String,
     pub oid: String,
+    pub order_revision: u64,
 }
 
 pub(super) async fn prospective_base(
@@ -110,6 +113,7 @@ pub(super) async fn prospective_base(
     let mut base = QueueBase {
         reference: state.job.base_ref.clone(),
         oid: live_base.to_owned(),
+        order_revision: state.order_revision,
     };
     if ahead.is_empty() {
         return Ok(Some(base));
@@ -118,57 +122,66 @@ pub(super) async fn prospective_base(
         super::merge_methods::load_for_ref(server, repo, &state.job.base_ref),
         settings::requires_merge_queue(server, repo, &state.job.base_ref),
     )?;
-    for job in ahead {
-        if !job.enabled(&configured, required) {
+    let mut oids = Vec::with_capacity(ahead.len());
+    for prior in ahead {
+        if !prior.settings.enabled(&configured, required)
+            || (!prior.ready && prior.publishing.is_none())
+        {
             return Ok(None);
         }
-        let Some(pull) = storage::pull(server, repo, job.pull).await? else {
+        let Some(tip) = branch_tip(git, &merge_candidate_ref(prior.pull)) else {
             return Ok(None);
         };
-        let Some(candidate) = read_candidate(server, git, job.pull)
-            .await?
-            .filter(|candidate| {
-                candidate.source == Source::captured(repo, &pull, Some(job.id))
-                    && candidate.method == job.method
-                    && candidate.head.to_string() == job.head_oid
-            })
-        else {
-            return Ok(None);
-        };
-        let tip = candidate.oid.to_string();
-        if base.reference == job.base_ref
-            && tip == base.oid
-            && pull
-                .merge
-                .as_ref()
-                .or(pull.merge_pending.as_ref())
-                .is_some_and(|record| record.tested_candidate && record.commit_oid == tip)
+        oids.push(crate::api::statuses::parse_oid(&tip)?);
+    }
+    // This is one pinned snapshot and one read budget, even for the largest
+    // prefix. The reader batches locator and pack access in request order.
+    let operation = git
+        .operation(OperationKind::Commit, &server.cancellation)
+        .await
+        .map_err(crate::Error::from)?;
+    let result = operation.read_objects(&oids).await;
+    let objects = operation.finish(result).await.map_err(crate::Error::from)?;
+    if objects.len() != ahead.len() {
+        return Err(Error::CellContract(
+            "Incomplete merge queue candidate prefix",
+        ));
+    }
+    for ((prior, oid), object) in ahead.iter().zip(oids).zip(objects) {
+        let candidate = decode_candidate(oid, &object)?;
+        let source = &candidate.source;
+        if source.repository != repo.id
+            || source.pull != prior.pull
+            || source.base_ref != state.job.base_ref
+            || source.head_ref != prior.head_ref
+            || source.head_repository != prior.head_repository
+            || source.comparison_revision != prior.comparison_revision
+            || source.queue != Some(prior.candidate_id)
+            || candidate.method != prior.settings.method
+            || candidate.head.to_string() != prior.head_oid
         {
-            // Git may already have published the predecessor while the Cell
-            // still owns its queue entry. The live base already includes it.
+            return Ok(None);
+        }
+        let tip = candidate.oid.to_string();
+        if base.reference == state.job.base_ref
+            && tip == base.oid
+            && prior.publishing.as_deref() == Some(tip.as_str())
+        {
+            // The branch can already contain a predecessor whose Cell
+            // completion still needs to recover the publication receipt.
             continue;
         }
-        if pull.state != PullState::Open
-            || pull.draft
-            || pull.base_ref != job.base_ref
-            || pull.head_ref != job.head_ref
-            || pull.head_repository != job.head_repository
-            || pull
-                .retargeted_base
-                .as_ref()
-                .map(|revision| revision.revision)
-                != job.comparison_revision
+        if !prior.ready
             || candidate.base.to_string() != base.oid
-            || live_tips(server, repo, git, &pull)
+            || live_head(server, repo, git, prior.head_repository, &prior.head_ref)
                 .await?
-                .is_none_or(|(_, head)| head != job.head_oid)
+                .as_deref()
+                != Some(prior.head_oid.as_str())
         {
             return Ok(None);
         }
-        base = QueueBase {
-            reference: merge_candidate_ref(job.pull),
-            oid: tip,
-        };
+        base.reference = merge_candidate_ref(prior.pull);
+        base.oid = tip;
     }
     Ok(Some(base))
 }
@@ -229,6 +242,10 @@ async fn read_candidate(
         .map_err(crate::Error::from)?;
     let result = operation.read_object(oid).await;
     let object = operation.finish(result).await.map_err(crate::Error::from)?;
+    decode_candidate(oid, &object).map(Some)
+}
+
+fn decode_candidate(oid: ObjectId, object: &crab_remote_git::RemoteGitObject) -> Result<Candidate> {
     if object.kind != Kind::Commit {
         return Err(Error::CellContract("Expected a candidate commit"));
     }
@@ -246,19 +263,18 @@ async fn read_candidate(
             )?,
             _ => return Err(Error::CellContract("Expected a single-parent candidate")),
         };
-        if comparison.source.queue.is_none()
-            || !matches!(comparison.method, MergeMethod::Squash | MergeMethod::Rebase)
+        if !comparison.method.preserves_linear_history()
             || (comparison.method == MergeMethod::Squash && parent != base)
         {
             return Err(Error::CellContract("Invalid linear merge candidate"));
         }
-        return Ok(Some(Candidate {
+        return Ok(Candidate {
             oid,
             base,
             head,
             source: comparison.source,
             method: comparison.method,
-        }));
+        });
     }
     let parents: Vec<_> = commit.parents().collect();
     let [base, head] = parents.as_slice() else {
@@ -270,13 +286,13 @@ async fn read_candidate(
         .split_once(TRAILER)
         .and_then(|(_, source)| serde_json::from_str(source).ok())
         .ok_or(Error::CellContract("Missing merge candidate comparison"))?;
-    Ok(Some(Candidate {
+    Ok(Candidate {
         oid,
         base: *base,
         head: *head,
         source,
         method: MergeMethod::MergeCommit,
-    }))
+    })
 }
 
 fn eligible(pull: &PullRequest) -> bool {
@@ -292,16 +308,28 @@ async fn live_tips(
     let Some(base) = branch_tip(git, &pull.base_ref) else {
         return Ok(None);
     };
-    let head = if let Some(id) = pull.head_repository {
-        match git::fork_repository(server, repo, id) {
-            Ok(fork) => fork.ref_oid(&pull.head_ref).await?,
-            Err(Error::NotFound) => None,
-            Err(error) => return Err(error),
-        }
-    } else {
-        branch_tip(git, &pull.head_ref)
+    Ok(
+        live_head(server, repo, git, pull.head_repository, &pull.head_ref)
+            .await?
+            .map(|head| (base, head)),
+    )
+}
+
+async fn live_head(
+    server: &Server,
+    repo: &Repository,
+    git: &RemoteGitRepository,
+    head_repository: Option<Uuid>,
+    head_ref: &str,
+) -> Result<Option<String>> {
+    let Some(id) = head_repository else {
+        return Ok(branch_tip(git, head_ref));
     };
-    Ok(head.map(|head| (base, head)))
+    match git::fork_repository(server, repo, id) {
+        Ok(fork) => Ok(fork.ref_oid(head_ref).await?),
+        Err(Error::NotFound) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn is_current(
@@ -327,6 +355,15 @@ pub(super) async fn verify_comparison(
     tested_oid: &str,
     queued: bool,
 ) -> Result<()> {
+    let queue = if queued {
+        let active = auto_merge::active_queue(server, repo, pull.number)
+            .await?
+            .filter(|state| state.first)
+            .ok_or(Error::MergeConflict)?;
+        Some(active.job.candidate_id(active.order_revision))
+    } else {
+        None
+    };
     let candidate = read_candidate(server, repository, pull.number)
         .await?
         .filter(|candidate| {
@@ -334,7 +371,7 @@ pub(super) async fn verify_comparison(
                 && candidate.base.to_string() == input.base_oid
                 && candidate.head.to_string() == input.head_oid
                 && candidate.method == input.method
-                && candidate.source.queue.is_some() == queued
+                && candidate.source.queue == queue
                 && candidate.source == Source::captured(repo, pull, candidate.source.queue)
         });
     if candidate.is_none() {
@@ -367,6 +404,9 @@ async fn promotion_status(
         },
     )
     .await?;
+    if !report.permits_method(candidate.method) {
+        return Ok(("pull_blocked", vec![]));
+    }
     if candidate.source.queue.is_none()
         && !super::merge_methods::load(server, repo)
             .await?
@@ -380,9 +420,12 @@ async fn promotion_status(
         Ok(()) => "ready",
         Err(Error::MergeCandidateChecks) if checks.is_empty() => "checks_unconfigured",
         Err(Error::MergeCandidateChecks) => "checks_pending",
-        Err(Error::MergeBlocked | Error::MergeUnresolvedConversations | Error::MergeHeadBehind) => {
-            "pull_blocked"
-        }
+        Err(
+            Error::MergeBlocked
+            | Error::MergeUpdatesRestricted
+            | Error::MergeUnresolvedConversations
+            | Error::MergeHeadBehind,
+        ) => "pull_blocked",
         Err(error) => return Err(error),
     };
     Ok((
@@ -408,7 +451,9 @@ async fn detail(
     let candidate = read_candidate(&server, &repository, number).await?;
     let tips = live_tips(&server, &repo, &repository, &pull).await?;
     let queued = auto_merge::active_queue(&server, &repo, number).await?;
-    let queue = queued.as_ref().map(|state| state.job.id);
+    let queue = queued
+        .as_ref()
+        .map(|state| state.job.candidate_id(state.order_revision));
     let queue_required = settings::requires_merge_queue(&server, &repo, &pull.base_ref).await?;
     let queue_current = match &queued {
         Some(state) => state.job.enabled(
@@ -417,11 +462,22 @@ async fn detail(
         ),
         None => !queue_required,
     };
-    let preview = tips
-        .as_ref()
-        .filter(|(base, head)| {
-            base != head && writable && eligible(&pull) && !queue_required && queue.is_none()
-        })
+    let preview_tips = tips.as_ref().filter(|(base, head)| {
+        base != head && writable && eligible(&pull) && !queue_required && queue.is_none()
+    });
+    let linear_required = (preview_tips.is_some() || candidate.is_some())
+        && super::requires_linear_history(&server, &repo, &pull.base_ref).await?;
+    let preview_method = if preview_tips.is_some() && linear_required {
+        super::merge_methods::load(&server, &repo)
+            .await?
+            .enabled
+            .into_iter()
+            .find(|method| method.preserves_linear_history())
+    } else {
+        None
+    };
+    let preview = preview_tips
+        .filter(|_| !linear_required || preview_method.is_some())
         .map(|(base, head)| Input {
             request_id: Uuid::now_v7(),
             version: pull.version,
@@ -430,6 +486,7 @@ async fn detail(
             previous_oid: candidate
                 .as_ref()
                 .map(|candidate| candidate.oid.to_string()),
+            method: preview_method,
         });
     let effective = match (&queued, &tips) {
         (Some(state), Some((base, _))) if candidate.is_some() && queue_current => {
@@ -443,6 +500,7 @@ async fn detail(
     let current = candidate.as_ref().is_some_and(|candidate| {
         queue_current
             && candidate.source.queue == queue
+            && (!linear_required || candidate.method.preserves_linear_history())
             && queued
                 .as_ref()
                 .is_none_or(|state| candidate.method == state.job.method)
@@ -523,15 +581,16 @@ pub(super) async fn queue_commit(
     git: &PullGit,
     pull: &PullRequest,
     job: &Job,
-    (base, head): (&str, &str),
+    base: &QueueBase,
 ) -> Result<Option<String>> {
     Ok(read_candidate(server, &git.base, pull.number)
         .await?
         .filter(|candidate| {
-            candidate.source == Source::captured(repo, pull, Some(job.id))
+            candidate.source
+                == Source::captured(repo, pull, Some(job.candidate_id(base.order_revision)))
                 && candidate.method == job.method
-                && candidate.base.to_string() == base
-                && candidate.head.to_string() == head
+                && candidate.base.to_string() == base.oid
+                && candidate.head.to_string() == job.head_oid
         })
         .map(|candidate| candidate.oid.to_string()))
 }
@@ -546,8 +605,15 @@ pub(super) async fn stage(
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<ObjectId> {
     let job = plan.map(|(job, _)| job);
-    let queue = job.map(|job| job.id);
-    let method = job.map_or(MergeMethod::MergeCommit, |job| job.method);
+    let queue = plan.map(|(job, base)| job.candidate_id(base.order_revision));
+    let method = job.map_or(input.method.unwrap_or(MergeMethod::MergeCommit), |job| {
+        job.method
+    });
+    if !method.supports_queue() || (job.is_some() && input.method.is_some()) {
+        return Err(Error::Invalid(
+            "Use the merge method from the candidate comparison",
+        ));
+    }
     if !principal.can_write(repo.id) {
         return Err(Error::MergePermission);
     }
@@ -621,6 +687,14 @@ pub(super) async fn stage(
         .ok_or(Error::NotFound)?;
     if queue.is_none() && settings::requires_merge_queue(server, repo, &pull.base_ref).await? {
         return Err(Error::MergeQueueRequired);
+    }
+    if !method.preserves_linear_history()
+        && super::requires_linear_history(server, repo, &pull.base_ref).await?
+    {
+        return Err(Error::MergeLinearHistory);
+    }
+    if queue.is_none() && input.method.is_some() {
+        super::merge_methods::require(server, repo, method).await?;
     }
     if settings::load_lifecycle(server, repo).await?.archived {
         return Err(Error::Archived);
@@ -805,9 +879,15 @@ pub(crate) async fn authorize_merge_candidate(
     if queue_required && queue.is_none() {
         return Err(ReceiveError::Settings(Box::new(Error::MergeQueueRequired)));
     }
+    if let CandidatePublication::Prepare { method, .. } = candidate
+        && !method.preserves_linear_history()
+        && super::requires_linear_history(server, repo, &pull.base_ref).await?
+    {
+        return Err(ReceiveError::Settings(Box::new(Error::MergeLinearHistory)));
+    }
     let allowed = match (queue, active) {
         (None, None) => true,
-        (Some(id), Some(state)) if state.job.id == id => {
+        (Some(id), Some(state)) if state.job.candidate_id(state.order_revision) == id => {
             let CandidatePublication::Prepare {
                 method,
                 build_ref,
@@ -893,7 +973,10 @@ pub(in crate::api) async fn require_check_target(
     };
     if candidate.oid != oid
         || (active.is_none() && queue_required)
-        || candidate.source.queue != active.as_ref().map(|state| state.job.id)
+        || candidate.source.queue
+            != active
+                .as_ref()
+                .map(|state| state.job.candidate_id(state.order_revision))
         || !is_current(&candidate, repo, &pull, effective.as_deref(), Some(&head))
     {
         return Err(Error::CommitNotFound);

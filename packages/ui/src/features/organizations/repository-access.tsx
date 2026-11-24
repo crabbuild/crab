@@ -14,16 +14,10 @@ import {
 } from "@/components/ui/dialog";
 import { Empty, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { useRequest } from "@/lib/api";
-import type { MemberRepositoryAccess, RepositoryAccess } from "@/lib/contracts";
+import type { MemberRepositoryAccess } from "@/lib/contracts";
 import { repoHref } from "@/lib/repository-route";
+import { repositoryRoleLabels as roleLabels } from "@/lib/repository-roles";
 import { teamHref } from "./teams/model";
-
-const roleLabels: Record<RepositoryAccess, string> = {
-  admin: "Admin",
-  write: "Write",
-  triage: "Triage",
-  read: "Read",
-};
 
 export function MemberAccess({
   organization,
@@ -81,13 +75,20 @@ function AccessList({
         )}
       </div>
       <Result state={state} timingLabel="Member repository access">
-        {({ account, items, next }) => (
+        {({ account, managed, items, next }) => (
           <>
+            {managed && (
+              <div>
+                <Badge variant="outline">
+                  Provisioned by identity provider
+                </Badge>
+              </div>
+            )}
             {account !== "active" && (
               <Alert>
                 <AlertDescription>
                   {account === "suspended"
-                    ? "Sign-in is blocked for this account. Its configured grants are shown below."
+                    ? "Sign-in and user Git credentials are blocked for this account. Its configured grants are shown below."
                     : "This member’s identity provider is unavailable on this server."}
                 </AlertDescription>
               </Alert>

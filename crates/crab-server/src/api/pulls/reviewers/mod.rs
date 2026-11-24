@@ -70,12 +70,19 @@ async fn list(
             .await,
     )?
     .ok_or(Error::NotFound)?;
-    let head = if let Some(head) = page.merged_head {
-        Some(head)
-    } else if page.items.iter().all(|reviewer| reviewer.review.is_none()) {
-        None
+    let head = if page.merged_head.is_some()
+        || page.items.iter().any(|reviewer| reviewer.review.is_some())
+    {
+        super::review_head(
+            &server,
+            &repo,
+            page.head_repository,
+            &page.head_ref,
+            page.merged_head,
+        )
+        .await?
     } else {
-        repo.ref_oid(&page.head_ref).await?
+        None
     };
     let actors: Vec<_> = page
         .items
@@ -91,6 +98,17 @@ async fn list(
         .collect();
     let authors = Authors::load(&server, &principal, actors.into_iter()).await?;
     let roster = Roster::load(&server, &principal, &repo).await?;
+    let membership = &roster.membership;
+    let eligible = if page.open
+        && page
+            .items
+            .iter()
+            .any(|reviewer| reviewer.decision.is_some())
+    {
+        Some(membership.merge_reviewers(&server).await?)
+    } else {
+        None
+    };
     let author_id = roster.candidate(&page.author).map(|candidate| candidate.id);
     let candidates: Vec<_> = roster
         .items
@@ -128,6 +146,9 @@ async fn list(
                 .decision
                 .as_ref()
                 .map(|review| review_view(review, head.as_deref()));
+            let merge_eligible = decision.as_ref().and(eligible.as_ref()).map(|eligible| {
+                eligible.contains(&reviewer.author.issuer, &reviewer.author.subject)
+            });
             json!({
                 "id": reviewer.id,
                 "reviewer": author,
@@ -135,10 +156,10 @@ async fn list(
                 "request": request,
                 "review": review,
                 "decision": decision,
+                "merge_eligible": merge_eligible,
             })
         })
         .collect();
-    let membership = &roster.membership;
     let can_manage = page.open && !page.merge_pending && membership.principal.can_triage(repo.id);
     let teams = super::review_requests::teams::views(
         &server, &principal, &repo, membership, page.teams, can_manage,

@@ -929,6 +929,36 @@ pub async fn prepare_capsule(
     cancel: &CancellationToken,
     options: Options<impl Fn(&str) -> RefPolicy + Send + 'static>,
 ) -> Result<Prepared> {
+    prepare_capsule_with_commit_observer(
+        repository,
+        visibility,
+        space,
+        input,
+        updates,
+        visibility_bases,
+        cancel,
+        options,
+        None,
+    )
+    .await
+}
+
+/// Validate an incoming graph and optionally observe new commits on one ref.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Keep the preparation inputs explicit while letting callers select commit observation"
+)]
+pub async fn prepare_capsule_with_commit_observer(
+    repository: RemoteGitRepository,
+    visibility: GitVisibilityIndex,
+    space: ScratchSpace,
+    input: Option<BufReader<File>>,
+    updates: Vec<RefUpdate>,
+    visibility_bases: BTreeMap<String, (String, ObjectId)>,
+    cancel: &CancellationToken,
+    options: Options<impl Fn(&str) -> RefPolicy + Send + 'static>,
+    mut commit_observer: Option<(String, Box<receive_plan::CommitObserver<'static>>)>,
+) -> Result<Prepared> {
     let base: BTreeMap<_, _> = repository
         .refs()
         .entries
@@ -1007,30 +1037,41 @@ pub async fn prepare_capsule(
                 let Some(new) = update.new else {
                     continue;
                 };
-                source.prior = match visibility_bases.get(&update.name) {
-                    Some((name, tip)) if base.get(name) == Some(tip) => Some((name.clone(), *tip)),
-                    Some(_) => {
-                        return Err(Error::Request(
-                            "Visibility base changed during receive admission; retry",
-                        ));
+                let observer = commit_observer
+                    .as_mut()
+                    .filter(|(reference, _)| reference == &update.name);
+                if let Some((name, tip)) = visibility_bases.get(&update.name)
+                    && base.get(name) != Some(tip)
+                {
+                    return Err(Error::Request(
+                        "Visibility base changed during receive admission; retry",
+                    ));
+                }
+                source.prior = match (observer.is_some(), visibility_bases.get(&update.name)) {
+                    // Commit observation compares with this exact ref. A graph
+                    // borrowed from another ref can include newly published commits.
+                    (true, _) => update.old.map(|old| (update.name.clone(), old)),
+                    (false, Some((name, tip))) => Some((name.clone(), *tip)),
+                    (false, None) => {
+                        update
+                            .old
+                            .map(|old| (update.name.clone(), old))
+                            .or_else(|| {
+                                // New refs at an existing tip can reuse that exact
+                                // committed ref closure instead of walking the graph.
+                                base.iter()
+                                    .find(|(name, tip)| **tip == new && source.contains_ref(name))
+                                    .map(|(name, tip)| (name.clone(), *tip))
+                            })
                     }
-                    None => update
-                        .old
-                        .map(|old| (update.name.clone(), old))
-                        .or_else(|| {
-                            // New refs at an existing tip can reuse that exact
-                            // committed ref closure instead of walking the graph.
-                            base.iter()
-                                .find(|(name, tip)| **tip == new && source.contains_ref(name))
-                                .map(|(name, tip)| (name.clone(), *tip))
-                        }),
                 };
-                let proof = receive_plan::plan_visibility(
+                let proof = receive_plan::plan_visibility_with_commits(
                     &incoming,
                     new,
                     &mut source,
                     options.graph,
                     || cancel.is_cancelled(),
+                    observer.map(|(_, observe)| observe.as_mut()),
                 )?;
                 let evidence = match proof {
                     RefVisibility::Additive { added, .. }

@@ -17,7 +17,7 @@ export function Result<T>({
       <div className="notice error" role="alert">
         <strong>Unable to load this view</strong>
         <p>{state.error}</p>
-        <Button variant="outline" onClick={state.retry}>
+        <Button type="button" variant="outline" onClick={state.retry}>
           Try again
         </Button>
       </div>

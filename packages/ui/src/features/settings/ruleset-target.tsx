@@ -1,19 +1,35 @@
 import { useState } from "react";
 import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { useRequest, type Repository } from "@/lib/api";
+import {
+  PropertyInput,
+  type PropertyDefinition,
+} from "@/features/organizations/property-fields";
+
+type Condition = ({ property: string } | { system: "fork" | "name" }) & {
+  value: string | boolean | null;
+  exclude?: boolean;
+};
+
+const systemNames = { fork: "Repository type", name: "Repository name" };
 
 export type RepositoryTarget =
   | { kind: "all" }
   | { kind: "selected"; ids: string[] }
-  | { kind: "name"; include: string[]; exclude: string[] };
+  | { kind: "name"; include: string[]; exclude: string[]; protected?: boolean }
+  | { kind: "properties"; conditions: Condition[] };
 
 export const allRepositories = { kind: "all" } satisfies RepositoryTarget;
 
 export function RepositoryTargetSummary({
   target,
+  definitions = [],
 }: {
   target: RepositoryTarget;
+  definitions?: PropertyDefinition[];
 }) {
   switch (target.kind) {
     case "all":
@@ -35,7 +51,31 @@ export function RepositoryTargetSummary({
               · Exclude <code>{target.exclude.join(", ")}</code>
             </>
           )}
+          {target.protected && <> · Renaming restricted</>}
         </p>
+      );
+    case "properties":
+      return (
+        <ul className="text-sm">
+          {target.conditions.map((condition, index) => (
+            <li className="break-words" key={index}>
+              <strong>
+                {"system" in condition
+                  ? systemNames[condition.system]
+                  : (definitions.find((item) => item.id === condition.property)
+                      ?.name ?? "Repository property")}
+              </strong>{" "}
+              {condition.exclude ? "excludes" : "matches"}{" "}
+              <code>
+                {"system" in condition && condition.system === "fork"
+                  ? condition.value === true
+                    ? "Fork"
+                    : "Source repository"
+                  : String(condition.value)}
+              </code>
+            </li>
+          ))}
+        </ul>
       );
   }
 }
@@ -44,10 +84,12 @@ export function RepositoryTargetEditor({
   organization,
   target,
   onChange,
+  definitions = [],
 }: {
   organization: string;
   target: RepositoryTarget;
   onChange: (target: RepositoryTarget) => void;
+  definitions?: PropertyDefinition[];
 }) {
   const [search, setSearch] = useState("");
   const choices = useRequest<{ repositories: Repository[] }>(
@@ -88,6 +130,9 @@ export function RepositoryTargetEditor({
               case "selected":
                 onChange({ kind: "selected", ids: [] });
                 break;
+              case "properties":
+                onChange({ kind: "properties", conditions: [] });
+                break;
               default:
                 onChange(allRepositories);
             }
@@ -96,6 +141,7 @@ export function RepositoryTargetEditor({
           <option value="all">All repositories</option>
           <option value="selected">Selected repositories</option>
           <option value="name">Matching repository names</option>
+          <option value="properties">Matching repository properties</option>
         </select>
       </label>
       {target.kind === "name" && (
@@ -123,6 +169,19 @@ export function RepositoryTargetEditor({
                 onChange({ ...target, exclude: lines(event.target.value) });
               }}
             />
+          </label>
+          <label className="flex items-center gap-2 sm:col-span-2">
+            <input
+              type="checkbox"
+              checked={!!target.protected}
+              onChange={(event) =>
+                onChange({
+                  ...target,
+                  protected: event.target.checked || undefined,
+                })
+              }
+            />
+            Prevent renaming of target repositories
           </label>
         </div>
       )}
@@ -189,6 +248,182 @@ export function RepositoryTargetEditor({
           </Result>
           <RepositoryTargetSummary target={target} />
         </>
+      )}
+      {target.kind === "properties" && (
+        <div className="grid gap-3">
+          <p className="text-sm text-muted-foreground">
+            Repositories must match every condition.
+          </p>
+          {!definitions.length && (
+            <Link href={`/-/organizations/${organization}?tab=properties`}>
+              Manage property definitions
+            </Link>
+          )}
+          {target.conditions.map((condition, index) => {
+            const definition =
+              "property" in condition
+                ? definitions.find((item) => item.id === condition.property)
+                : undefined;
+            const change = (replacement: Condition) =>
+              onChange({
+                ...target,
+                conditions: target.conditions.map((item, position) =>
+                  position === index ? replacement : item,
+                ),
+              });
+            return (
+              <fieldset
+                key={index}
+                className="grid gap-2 rounded-md border p-3"
+              >
+                <legend>Condition {index + 1}</legend>
+                <label className="grid gap-1">
+                  Property
+                  <select
+                    className={styles}
+                    value={
+                      "system" in condition
+                        ? `system:${condition.system}`
+                        : condition.property
+                    }
+                    onChange={(event) => {
+                      const key = event.target.value;
+                      const next = { value: null, exclude: condition.exclude };
+                      if (key === "system:fork")
+                        change({ ...next, system: "fork" });
+                      else if (key === "system:name")
+                        change({ ...next, system: "name" });
+                      else change({ ...next, property: key });
+                    }}
+                  >
+                    <option value="">Choose a property</option>
+                    <optgroup label="Built-in properties">
+                      <option value="system:fork">Repository type</option>
+                      <option value="system:name">Repository name</option>
+                    </optgroup>
+                    {definitions.length > 0 && (
+                      <optgroup label="Custom properties">
+                        {definitions.map(({ id, name }) => (
+                          <option key={id} value={id}>
+                            {name}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                  </select>
+                </label>
+                {definition && (
+                  <PropertyInput
+                    label="Matching value"
+                    definition={
+                      definition.kind === "multi_select"
+                        ? { ...definition, kind: "single_select" }
+                        : definition
+                    }
+                    value={condition.value}
+                    unset="Specify a value"
+                    onChange={(next) =>
+                      change({
+                        ...condition,
+                        value: Array.isArray(next) ? null : next,
+                      })
+                    }
+                  />
+                )}
+                {"system" in condition &&
+                  (condition.system === "fork" ? (
+                    <label className="grid gap-1">
+                      Matching value
+                      <select
+                        className={styles}
+                        value={
+                          condition.value === null
+                            ? ""
+                            : String(condition.value)
+                        }
+                        onChange={(event) =>
+                          change({
+                            ...condition,
+                            value:
+                              event.target.value === ""
+                                ? null
+                                : event.target.value === "true",
+                          })
+                        }
+                      >
+                        <option value="">Choose a repository type</option>
+                        <option value="false">Source repository</option>
+                        <option value="true">Fork</option>
+                      </select>
+                    </label>
+                  ) : (
+                    <label className="grid gap-1">
+                      Matching value
+                      <Input
+                        placeholder="release-*"
+                        value={
+                          typeof condition.value === "string"
+                            ? condition.value
+                            : ""
+                        }
+                        onChange={(event) =>
+                          change({
+                            ...condition,
+                            value: event.target.value || null,
+                          })
+                        }
+                      />
+                    </label>
+                  ))}
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={!!condition.exclude}
+                    onChange={(event) =>
+                      change({
+                        ...condition,
+                        exclude: event.target.checked || undefined,
+                      })
+                    }
+                  />
+                  Exclude repositories with this value
+                </label>
+                <Button
+                  className="justify-self-start"
+                  type="button"
+                  variant="outline"
+                  onClick={() =>
+                    onChange({
+                      ...target,
+                      conditions: target.conditions.filter(
+                        (_, position) => position !== index,
+                      ),
+                    })
+                  }
+                >
+                  Remove condition
+                </Button>
+              </fieldset>
+            );
+          })}
+          <Button
+            className="justify-self-start"
+            type="button"
+            variant="outline"
+            disabled={target.conditions.length >= 20}
+            onClick={() =>
+              onChange({
+                ...target,
+                conditions: [
+                  ...target.conditions,
+                  { property: "", value: null },
+                ],
+              })
+            }
+          >
+            Add condition
+          </Button>
+        </div>
       )}
     </fieldset>
   );

@@ -295,7 +295,7 @@ async fn native_browser_saves_completes_and_restores_an_inbox_conversation() {
             .run(&["find", "role", role, "click", "--name", name, "--exact"])
             .await;
     };
-    click("button", "Continue to sign in").await;
+    browser.sign_in().await;
     browser.run(&["wait", "--text", title]).await;
     click("button", "Save").await;
     browser.run(&["wait", "--text", "Unsave"]).await;

@@ -13,6 +13,7 @@ import { useReturnFocus, useSubmission } from "../hooks";
 import { useMutation } from "../mutations";
 import { Link } from "@/components/navigation/link";
 import { Button } from "@/components/ui/button";
+import { useConversationLock } from "./lock";
 import type { Comment } from "./model";
 
 export interface StateChange {
@@ -166,7 +167,7 @@ export function CommentComposer({
 }: {
   comment: ReturnType<typeof useCommentSubmission>;
   id: string;
-  actions?: (change: ChangeState) => ReactNode;
+  actions?: (change: ChangeState, withComment: boolean) => ReactNode;
   onStateChanged?: () => void;
   readOnly?: boolean;
   busy?: boolean;
@@ -174,6 +175,9 @@ export function CommentComposer({
   href: string;
   onCreated: (comment: Comment) => void;
 }) {
+  const lockedForViewer =
+    useConversationLock()?.lock?.can_post === false && !readOnly;
+  const cannotPost = readOnly || lockedForViewer;
   const form = useRef<HTMLFormElement>(null);
   const completed = useRef(onCreated);
   useLayoutEffect(() => {
@@ -187,7 +191,7 @@ export function CommentComposer({
     if (saved.stateChanged) onStateChanged?.();
   }
   const change: ChangeState = async (input, mode) =>
-    complete(await comment.submitState(input, mode));
+    complete(await comment.submitState(input, lockedForViewer ? "omit" : mode));
   const editor = useReturnFocus<HTMLTextAreaElement>(
     comment.pending && comment.intent === "comment",
   );
@@ -198,7 +202,7 @@ export function CommentComposer({
       className={cn("discussion-compose", className)}
       onSubmit={async (event) => {
         event.preventDefault();
-        if (!readOnly) complete(await comment.submit());
+        if (!cannotPost) complete(await comment.submit());
       }}
     >
       <h3>Add a comment</h3>
@@ -209,13 +213,18 @@ export function CommentComposer({
         label="Comment"
         value={comment.body}
         onChange={comment.change}
-        disabled={comment.pending}
+        disabled={cannotPost || comment.pending}
         required
       />
       <Failure message={comment.error} />
       {readOnly && (
         <p className="text-sm text-muted-foreground">
           This repository is archived. Your draft remains here to copy.
+        </p>
+      )}
+      {lockedForViewer && (
+        <p className="text-sm text-muted-foreground">
+          Posting is restricted while this conversation is locked.
         </p>
       )}
       {comment.recovering && (
@@ -241,11 +250,11 @@ export function CommentComposer({
         </Link>
       )}
       <div className="discussion-actions">
-        {actions?.(change)}
+        {actions?.(change, !cannotPost && Boolean(comment.body.trim()))}
         <Button
           type="submit"
           disabled={
-            readOnly ||
+            cannotPost ||
             busy ||
             comment.pending ||
             comment.intent === "state" ||

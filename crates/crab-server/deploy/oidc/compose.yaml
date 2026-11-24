@@ -11,4 +11,10 @@ services:
       KC_BOOTSTRAP_ADMIN_PASSWORD: local-admin
     volumes:
       - ./crab-dev-realm.json:/opt/keycloak/data/import/crab-dev-realm.json:ro
+      - ./themes/crab/login/theme.properties:/opt/keycloak/themes/crab/login/theme.properties:ro
+      - ./themes/crab/login/messages:/opt/keycloak/themes/crab/login/messages:ro
+      - ./themes/crab/login/resources/css/crab.css:/opt/keycloak/themes/crab/login/resources/css/crab.css:ro
+      - ../../../../packages/ui/src/styles/theme.css:/opt/keycloak/themes/crab/login/resources/css/theme.css:ro
+      - ./themes/crab/login/resources/fonts:/opt/keycloak/themes/crab/login/resources/fonts:ro
+      - ../../../../packages/web/crab.optimized.svg:/opt/keycloak/themes/crab/login/resources/img/crab-mark.svg:ro
     mem_limit: 1g

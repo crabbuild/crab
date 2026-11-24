@@ -137,6 +137,8 @@ pub(crate) struct PullReviewReplyListInput {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreatePullReviewThreadInput {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_post_locked: bool,
     pub pull: u64,
     pub submission_id: [u8; 16],
     pub author: RepositoryAuthor,
@@ -154,6 +156,7 @@ pub(crate) struct CreatePullReviewThreadInput {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum CreatePullReviewThreadOutcome {
+    Locked,
     Archived,
     MergePending,
     Created(Box<PullReviewThreadRecord>),
@@ -165,6 +168,8 @@ pub(crate) enum CreatePullReviewThreadOutcome {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct UpdatePullReviewThreadInput {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_post_locked: bool,
     pub key: PullReviewThreadKey,
     pub actor: RepositoryAuthor,
     pub can_resolve: bool,
@@ -176,6 +181,7 @@ pub(crate) struct UpdatePullReviewThreadInput {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum UpdatePullReviewThreadOutcome {
+    Locked,
     Archived,
     MergePending,
     Updated(Box<PullReviewThreadRecord>),
@@ -187,6 +193,8 @@ pub(crate) enum UpdatePullReviewThreadOutcome {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreatePullReviewReplyInput {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_post_locked: bool,
     pub pull: u64,
     pub thread: u64,
     pub submission_id: [u8; 16],
@@ -196,6 +204,7 @@ pub(crate) struct CreatePullReviewReplyInput {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum CreatePullReviewReplyOutcome {
+    Locked,
     Archived,
     Created(PullReviewReplyRecord),
     ThreadNotFound,
@@ -205,6 +214,8 @@ pub(crate) enum CreatePullReviewReplyOutcome {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct UpdatePullReviewReplyInput {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_post_locked: bool,
     pub key: PullReviewReplyKey,
     pub actor: RepositoryAuthor,
     pub version: u64,
@@ -213,12 +224,18 @@ pub(crate) struct UpdatePullReviewReplyInput {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum UpdatePullReviewReplyOutcome {
+    Locked,
     Archived,
     Updated(PullReviewReplyRecord),
     NotFound,
     Forbidden,
     Conflict,
 }
+
+mod navigation;
+pub(crate) use navigation::{GetReviewNavigation, ReviewNavigationInput};
+
+pub(crate) mod suggestions;
 
 mod operations;
 pub(crate) use operations::{

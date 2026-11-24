@@ -29,7 +29,7 @@ pub(crate) async fn run(server: Arc<Server>) -> crate::Result<()> {
             let repo = &repos[(start + index) % repos.len()];
             let result = pending(&server, repo, pages.get(&repo.id).copied()).await;
             match result {
-                Ok(page) => {
+                Ok(mut page) => {
                     let before = page
                         .last()
                         .filter(|_| page.len() == cell::PAGE)
@@ -39,6 +39,7 @@ pub(crate) async fn run(server: Arc<Server>) -> crate::Result<()> {
                     } else {
                         pages.remove(&repo.id);
                     }
+                    page.sort_by_key(Job::sweep_order);
                     jobs.extend(page.into_iter().map(|job| (repo, job)));
                 }
                 Err(error) => {
@@ -88,7 +89,7 @@ async fn reconcile(
         .await?
         .ok_or(Error::NotFound)?;
     let pending = match &pull.merge_pending {
-        Some(pending) if matches_attempt(job, pending) => Some(pending),
+        Some(pending) if matches_attempt(&state, pending) => Some(pending),
         Some(_) => return Ok(()),
         None => None,
     };
@@ -204,7 +205,7 @@ async fn reconcile(
     let candidate = NewPullMerge {
         author: actor,
         request_id: job
-            .publication_id(pull.version, &base_oid, None)
+            .publication_id(pull.version, &base_oid, None, 0)
             .to_string(),
         method: job.method,
         pull_version: pull.version,
@@ -218,6 +219,8 @@ async fn reconcile(
         Ok(record) => record,
         Err(
             Error::MergeBlocked
+            | Error::MergeLinearHistory
+            | Error::MergeUpdatesRestricted
             | Error::MergeUnresolvedConversations
             | Error::MergeHeadBehind
             | Error::DraftPull,

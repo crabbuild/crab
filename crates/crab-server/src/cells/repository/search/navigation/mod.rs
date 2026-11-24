@@ -84,7 +84,49 @@ pub(crate) enum StateNavigation {
     },
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LockFilter {
+    pub any: Choice,
+    pub locked: Choice,
+    pub unlocked: Choice,
+}
+
 impl Query {
+    pub(super) fn lock_filter(&self) -> LockFilter {
+        fn value(expression: &Expression) -> Option<bool> {
+            match expression {
+                Expression::Term {
+                    value: Term::Locked(locked),
+                    ..
+                } => Some(*locked),
+                Expression::Not(inner) => value(inner).map(|locked| !locked),
+                _ => None,
+            }
+        }
+        let (base, removed) = split_globals(self, |term| value(term).is_some());
+        let selected =
+            |locked| !removed.is_empty() && removed.iter().all(|term| value(term) == Some(locked));
+        let choice = |locked| Choice {
+            query: destination(&conjunction(
+                base.clone(),
+                Expression::Term {
+                    value: Term::Locked(locked),
+                    source: if locked { "is:locked" } else { "is:unlocked" }.into(),
+                },
+            )),
+            selected: selected(locked),
+        };
+        LockFilter {
+            any: Choice {
+                query: destination(&base),
+                selected: removed.is_empty(),
+            },
+            locked: choice(true),
+            unlocked: choice(false),
+        }
+    }
+
     pub(super) fn state_navigation(&self) -> (Expression, StateNavigation) {
         let Some(selected) = global_state(&self.expression).ok().flatten() else {
             return (self.expression.clone(), StateNavigation::Results);

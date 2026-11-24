@@ -27,6 +27,41 @@ mod provider;
 pub(crate) mod storage_proxy;
 pub(crate) use provider::{KEY_ONE, KEY_TWO, Provider, start_provider};
 
+pub(crate) const TEST_SCIM_TOKEN: &str = "crab-fixture-user-provisioning-token-only";
+
+pub(crate) fn rustfs_store(fixture: &str) -> Store {
+    let required = |name| std::env::var(name).unwrap_or_else(|_| panic!("missing {name}"));
+    let endpoint = required("CRAB_HTTP_CELL_TEST_ENDPOINT");
+    assert_eq!(Url::parse(&endpoint).unwrap().host_str(), Some("127.0.0.1"));
+    let store = crab_storage::build_explicit_store(
+        &required("CRAB_HTTP_CELL_TEST_BUCKET"),
+        crab_storage::ObjectStoreCredentials::Aws {
+            access_key_id: required("AWS_ACCESS_KEY_ID"),
+            secret_access_key: required("AWS_SECRET_ACCESS_KEY"),
+            session_token: None,
+            region: "us-east-1".into(),
+        },
+        Some(&endpoint),
+        true,
+    )
+    .unwrap();
+    let prefix = format!(
+        "{}/{fixture}-{}",
+        required("CRAB_HTTP_CELL_TEST_PREFIX"),
+        Uuid::now_v7()
+    );
+    Store::new(Arc::new(object_store::prefix::PrefixStore::new(
+        Arc::clone(store.inner()),
+        prefix,
+    )))
+}
+
+#[derive(Default)]
+struct TestAuthFiles {
+    state_key: Option<std::path::PathBuf>,
+    scim_token: Option<std::path::PathBuf>,
+}
+
 type TestGitHubActions = Box<dyn FnOnce(Uuid) -> crate::api::GitHubActions + Send>;
 
 pub(crate) struct Harness {
@@ -38,6 +73,7 @@ pub(crate) struct Harness {
     pub(crate) drop_next_fork_sync_reply: Arc<AtomicBool>,
     pub(crate) drop_next_merge_reply: Arc<AtomicBool>,
     pub(crate) drop_next_branch_update_reply: Arc<AtomicBool>,
+    pub(crate) drop_next_suggestion_reply: Arc<AtomicBool>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -49,19 +85,30 @@ pub(crate) async fn github_workflow_delivery(
     signed: &Value,
     body: &Value,
 ) -> StatusCode {
+    github_workflow_request(&h.http, url, secret, delivery, signed, body)
+        .send()
+        .await
+        .unwrap()
+        .status()
+}
+
+pub(crate) fn github_workflow_request(
+    client: &reqwest::Client,
+    url: &str,
+    secret: &str,
+    delivery: Uuid,
+    signed: &Value,
+    body: &Value,
+) -> reqwest::RequestBuilder {
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
     mac.update(&serde_json::to_vec(signed).unwrap());
     let signature = blake3::Hash::from_bytes(mac.finalize().into_bytes().into());
-    h.http
+    client
         .post(url)
         .header("x-github-event", "workflow_run")
         .header("x-github-delivery", delivery.to_string())
         .header("x-hub-signature-256", format!("sha256={signature}"))
         .json(body)
-        .send()
-        .await
-        .unwrap()
-        .status()
 }
 
 impl Harness {
@@ -220,7 +267,7 @@ impl Harness {
             github,
             store,
             catalog_prefix,
-            None,
+            TestAuthFiles::default(),
             None,
             None,
             None,
@@ -244,7 +291,10 @@ impl Harness {
             false,
             store,
             catalog_prefix,
-            Some(file.path().to_owned()),
+            TestAuthFiles {
+                state_key: Some(file.path().to_owned()),
+                ..Default::default()
+            },
             github_actions,
             None,
             None,
@@ -256,25 +306,67 @@ impl Harness {
 
     pub(crate) async fn with_notification_email(github: bool, endpoint: Url) -> Self {
         let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
-        let harness =
-            Self::configured(github, github, store, "", None, None, Some(endpoint), None).await;
+        let harness = Self::configured(
+            github,
+            github,
+            store,
+            "",
+            TestAuthFiles::default(),
+            None,
+            Some(endpoint),
+            None,
+        )
+        .await;
         harness.initialize_directory().await;
         harness
     }
 
-    pub(crate) async fn with_webhook_receiver(endpoint: Url) -> Self {
+    pub(crate) async fn with_webhook_receivers(
+        endpoints: impl IntoIterator<Item = Url>,
+        repository: Option<Uuid>,
+    ) -> Self {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), [42_u8; 32]).unwrap();
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let catalog_prefix = if repository.is_some() {
+            "webhook-fork"
+        } else {
+            ""
+        };
+        let harness = Self::configured(
+            false,
+            false,
+            store,
+            catalog_prefix,
+            TestAuthFiles {
+                state_key: Some(file.path().to_owned()),
+                ..Default::default()
+            },
+            None,
+            None,
+            Some((endpoints.into_iter().collect(), repository)),
+        )
+        .await;
+        harness.initialize_directory().await;
+        harness
+    }
+
+    pub(crate) async fn scim() -> Self {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), format!("{TEST_SCIM_TOKEN}\n")).unwrap();
         let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
         let harness = Self::configured(
             false,
             false,
             store,
             "",
-            Some(file.path().to_owned()),
+            TestAuthFiles {
+                scim_token: Some(file.path().to_owned()),
+                ..Default::default()
+            },
             None,
             None,
-            Some(endpoint),
+            None,
         )
         .await;
         harness.initialize_directory().await;
@@ -286,10 +378,10 @@ impl Harness {
         github: bool,
         store: Store,
         catalog_prefix: &str,
-        state_key_file: Option<std::path::PathBuf>,
+        auth_files: TestAuthFiles,
         github_actions: Option<TestGitHubActions>,
         email_endpoint: Option<Url>,
-        webhook_endpoint: Option<Url>,
+        webhook_endpoints: Option<(Vec<Url>, Option<Uuid>)>,
     ) -> Self {
         let (provider, provider_task) = start_provider(0).await;
         provider.confidential.store(confidential, Ordering::SeqCst);
@@ -309,7 +401,8 @@ impl Harness {
                 public_url: Url::parse(&origin).unwrap(),
                 client_id: "crab-browser".into(),
                 client_secret_file: secret_file.as_ref().map(|file| file.path().to_owned()),
-                state_key_file,
+                state_key_file: auth_files.state_key,
+                scim_token_file: None,
                 github: Some(crate::GitHubConfig {
                     authorize_url: format!("{}/github/authorize", provider.issuer),
                     token_url: format!("{}/github/token", provider.issuer),
@@ -323,7 +416,8 @@ impl Harness {
                 public_url: Url::parse(&origin).unwrap(),
                 client_id: "crab-browser".into(),
                 client_secret_file: secret_file.as_ref().map(|file| file.path().to_owned()),
-                state_key_file,
+                state_key_file: auth_files.state_key,
+                scim_token_file: auth_files.scim_token,
                 github: None,
             }
         };
@@ -335,6 +429,7 @@ impl Harness {
             require_conversation_resolution: false,
             require_up_to_date: false,
             require_merge_queue: false,
+            require_linear_history: false,
             required_checks: vec!["ci/test".into()],
             required_integrations: vec![],
         }];
@@ -416,12 +511,15 @@ impl Harness {
             server.cursor_key = [7; 32];
             server.auth = Some(auth);
             server.github_actions = github_actions.map(|configure| configure(record.id));
-            server.webhook_sender = webhook_endpoint.map(|url| {
-                crate::server::webhooks::Sender::new(&[crate::WebhookDestination {
-                    repository: record.id,
-                    url,
-                }])
-                .unwrap()
+            server.webhook_sender = webhook_endpoints.map(|(urls, repository)| {
+                let destinations: Vec<_> = urls
+                    .into_iter()
+                    .map(|url| crate::WebhookDestination {
+                        repository: repository.unwrap_or(record.id),
+                        url,
+                    })
+                    .collect();
+                crate::server::webhooks::Sender::new(&destinations).unwrap()
             });
             server.email = email_endpoint.map(|endpoint| {
                 crate::server::email::Sender::with_endpoint(
@@ -440,16 +538,19 @@ impl Harness {
         let drop_next_fork_sync_reply = Arc::new(AtomicBool::new(false));
         let drop_next_merge_reply = Arc::new(AtomicBool::new(false));
         let drop_next_branch_update_reply = Arc::new(AtomicBool::new(false));
+        let drop_next_suggestion_reply = Arc::new(AtomicBool::new(false));
         let app = router(Arc::clone(&server)).layer(axum::middleware::from_fn({
             let drop_import = Arc::clone(&drop_next_import_reply);
             let drop_sync = Arc::clone(&drop_next_fork_sync_reply);
             let drop_merge = Arc::clone(&drop_next_merge_reply);
             let drop_branch_update = Arc::clone(&drop_next_branch_update_reply);
+            let drop_suggestion = Arc::clone(&drop_next_suggestion_reply);
             move |request: axum::extract::Request, next: axum::middleware::Next| {
                 let drop_import = Arc::clone(&drop_import);
                 let drop_sync = Arc::clone(&drop_sync);
                 let drop_merge = Arc::clone(&drop_merge);
                 let drop_branch_update = Arc::clone(&drop_branch_update);
+                let drop_suggestion = Arc::clone(&drop_suggestion);
                 async move {
                     let is_import = request.method() == axum::http::Method::POST
                         && request.uri().path().ends_with("/git-receive-pack")
@@ -460,10 +561,13 @@ impl Harness {
                         && request.uri().path().ends_with("/merge");
                     let is_branch_update = request.method() == axum::http::Method::POST
                         && request.uri().path().ends_with("/update-branch");
+                    let is_suggestion = request.method() == axum::http::Method::POST
+                        && request.uri().path().ends_with("/suggestions");
                     let mut response = next.run(request).await;
                     if response.status().is_success()
                         && (is_branch_update && drop_branch_update.swap(false, Ordering::SeqCst)
-                            || is_merge && drop_merge.swap(false, Ordering::SeqCst))
+                            || is_merge && drop_merge.swap(false, Ordering::SeqCst)
+                            || is_suggestion && drop_suggestion.swap(false, Ordering::SeqCst))
                     {
                         // Deliver the headers so Chromium cannot retry an
                         // interrupted connection before the app sees the loss.
@@ -501,6 +605,7 @@ impl Harness {
             drop_next_fork_sync_reply,
             drop_next_merge_reply,
             drop_next_branch_update_reply,
+            drop_next_suggestion_reply,
             tasks: vec![task, provider_task],
         }
     }

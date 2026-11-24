@@ -1,0 +1,93 @@
+.sign-in-page,
+.sign-in {
+  display: grid;
+  min-width: 0;
+  gap: var(--sign-in-section-gap);
+}
+
+.sign-in-page {
+  align-content: start;
+  width: min(var(--sign-in-form-width), calc(100% - 2rem));
+  margin-inline: auto;
+  padding-block: var(--sign-in-top-gap) 2rem;
+  outline: none;
+}
+
+.sign-in-logo {
+  display: grid;
+  place-items: center;
+  justify-self: center;
+  width: var(--sign-in-brand-size);
+  height: var(--sign-in-brand-size);
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 0.5rem);
+  background: var(--muted);
+}
+
+.sign-in-logo .brand-mark {
+  width: var(--sign-in-mark-size);
+  height: var(--sign-in-mark-size);
+}
+
+.sign-in-content[data-slot="card"] {
+  --card-spacing: var(--sign-in-panel-padding);
+  gap: var(--sign-in-section-gap);
+}
+
+.sign-in-header h1 {
+  margin: 0;
+  font: var(--sign-in-heading);
+  letter-spacing: var(--sign-in-heading-tracking);
+  text-align: center;
+  text-wrap: balance;
+}
+
+.sign-in-appearance {
+  justify-self: center;
+}
+
+.sign-in-actions {
+  display: grid;
+  gap: 0.625rem;
+}
+
+.sign-in-action {
+  width: 100%;
+  min-height: var(--sign-in-action-height);
+}
+
+.sign-in-help {
+  margin-top: var(--sign-in-section-gap);
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+  color: var(--muted-foreground);
+  line-height: 1.55;
+}
+
+.sign-in-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.625rem;
+  margin: 0 0 1rem;
+  padding: 0.75rem;
+  border: 1px solid var(--destructive-border);
+  border-radius: var(--radius-md);
+  background: var(--destructive-muted);
+  color: var(--destructive-muted-foreground);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.sign-in-error svg {
+  flex: none;
+  width: 1rem;
+  height: 1rem;
+  margin-top: 0.15rem;
+}
+
+@media (forced-colors: active) {
+  .sign-in-action:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+}

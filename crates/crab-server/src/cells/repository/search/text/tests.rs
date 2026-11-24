@@ -158,6 +158,8 @@ async fn field_search_covers_all_contribution_bodies_and_keeps_edits_deletion_an
             write::<CreateComment>(
                 &cell,
                 CreateCommentInput {
+                    can_mark_duplicate: false,
+                    can_post_locked: false,
                     submission_id: *Uuid::now_v7().as_bytes(),
                     issue: 1,
                     author: actor(),
@@ -172,6 +174,8 @@ async fn field_search_covers_all_contribution_bodies_and_keeps_edits_deletion_an
         write::<CreatePullComment>(
             &cell,
             CreatePullCommentInput {
+                can_mark_duplicate: false,
+                can_post_locked: false,
                 submission_id: *Uuid::now_v7().as_bytes(),
                 pull: 1,
                 author: actor(),
@@ -185,6 +189,7 @@ async fn field_search_covers_all_contribution_bodies_and_keeps_edits_deletion_an
         write::<CreatePullReview>(
             &cell,
             CreatePullReviewInput {
+                can_post_locked: false,
                 base_revision: None,
                 review_teams: Vec::new(),
                 submission_id: *Uuid::now_v7().as_bytes(),
@@ -202,6 +207,7 @@ async fn field_search_covers_all_contribution_bodies_and_keeps_edits_deletion_an
         write::<CreatePullReviewThread>(
             &cell,
             CreatePullReviewThreadInput {
+                can_post_locked: false,
                 submission_id: *Uuid::now_v7().as_bytes(),
                 pull: 1,
                 author: actor(),
@@ -224,6 +230,7 @@ async fn field_search_covers_all_contribution_bodies_and_keeps_edits_deletion_an
         write::<CreatePullReviewReply>(
             &cell,
             CreatePullReviewReplyInput {
+                can_post_locked: false,
                 submission_id: *Uuid::now_v7().as_bytes(),
                 pull: 1,
                 thread: 1,
@@ -313,6 +320,7 @@ async fn field_search_covers_all_contribution_bodies_and_keeps_edits_deletion_an
                 },
                 actor: actor(),
                 version: 1,
+                can_moderate: false,
                 body: "replacementissueword".into(),
             }
         )
@@ -323,6 +331,7 @@ async fn field_search_covers_all_contribution_bodies_and_keeps_edits_deletion_an
         write::<UpdatePullComment>(
             &cell,
             UpdatePullCommentInput {
+                can_post_locked: false,
                 key: PullChildKey { pull: 1, number: 1 },
                 actor: actor(),
                 version: 1,
@@ -336,6 +345,7 @@ async fn field_search_covers_all_contribution_bodies_and_keeps_edits_deletion_an
         write::<UpdatePullReview>(
             &cell,
             UpdatePullReviewInput {
+                can_post_locked: false,
                 key: PullChildKey { pull: 1, number: 1 },
                 actor: actor(),
                 version: 1,
@@ -349,6 +359,7 @@ async fn field_search_covers_all_contribution_bodies_and_keeps_edits_deletion_an
         write::<UpdatePullReviewThread>(
             &cell,
             UpdatePullReviewThreadInput {
+                can_post_locked: false,
                 key: PullReviewThreadKey { pull: 1, number: 1 },
                 actor: actor(),
                 version: 1,
@@ -365,6 +376,7 @@ async fn field_search_covers_all_contribution_bodies_and_keeps_edits_deletion_an
         write::<UpdatePullReviewReply>(
             &cell,
             UpdatePullReviewReplyInput {
+                can_post_locked: false,
                 key: PullReviewReplyKey {
                     pull: 1,
                     thread: 1,

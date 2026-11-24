@@ -28,8 +28,11 @@ async fn write<M: Mutation>(cell: &RepositoryCell, input: M::Input) -> M::Output
         .output
 }
 async fn seed(cell: &RepositoryCell) {
+    seed_with_owners(cell, Default::default()).await;
+}
+async fn seed_with_owners(cell: &RepositoryCell, code_owner_requests: automatic::Plan) {
     let input = CreatePullInput {
-        code_owner_requests: Default::default(),
+        code_owner_requests,
         metadata: Default::default(),
         draft: false,
         submission_id: *Uuid::now_v7().as_bytes(),
@@ -58,13 +61,16 @@ fn request(subject: &str, version: u64, requested: bool) -> Selection {
     }
 }
 async fn page(cell: &RepositoryCell) -> super::super::reviewers::Page {
+    page_for(cell, 1).await
+}
+async fn page_for(cell: &RepositoryCell, pull: u64) -> super::super::reviewers::Page {
     use super::super::reviewers::{ListReviewers, Query};
     cell.client
         .query::<ListReviewers>(
             &cell.target,
             None,
             Query {
-                pull: 1,
+                pull,
                 after: None,
                 limit: 50,
             },
@@ -91,6 +97,7 @@ async fn stored(cell: &RepositoryCell, subject: &str) -> Request {
 }
 fn review(subject: &str, state: ReviewState) -> CreatePullReviewInput {
     CreatePullReviewInput {
+        can_post_locked: false,
         base_revision: None,
         review_teams: Vec::new(),
         pull: 1,
@@ -426,4 +433,199 @@ async fn request_changes_invalidate_merge_admission_and_pending_merges_freeze_re
     );
     assert_eq!(stored(&cell, "Bob").await.state, State::Requested);
     fixtures::close(&server).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn team_assignment_rotates_once_and_balances_outstanding_open_reviews() {
+    use crate::cells::organization::teams::review_routing::Algorithm;
+    use teams::{SetTeamReviewRequest, TeamOutcome, TeamSelection};
+
+    let server = fixtures::fixture().await;
+    let cell = cell(&server);
+    let team = Uuid::now_v7();
+    let request_team = |pull, algorithm| TeamSelection {
+        pull,
+        version: 1,
+        team,
+        actor: author("Alice"),
+        recipients: Some(Vec::new()),
+        routing: Some(routing::Plan {
+            algorithm,
+            reviewers: 1,
+            candidates: vec![author("Alice"), author("Bob"), author("Carol")],
+            count_existing: None,
+            keep_team: false,
+            other_workload: Default::default(),
+            other_rotation: Default::default(),
+        }),
+    };
+    seed(&cell).await;
+    let input = request_team(1, Algorithm::RoundRobin);
+    assert!(matches!(
+        write::<SetTeamReviewRequest>(&cell, input).await,
+        TeamOutcome::Applied
+    ));
+    let first = page_for(&cell, 1).await;
+    assert_eq!(first.items.len(), 1);
+    assert!(first.teams.is_empty());
+    assert_eq!(first.version, 2);
+    assert!(first.items[0].author.subject == "Bob" || first.items[0].author.subject == "Carol");
+
+    // Retrying the same author and PR version recovers even when routing
+    // configuration has changed since the response was lost.
+    let mut retry = request_team(1, Algorithm::FewestOpen);
+    retry.routing.as_mut().unwrap().reviewers = 3;
+    assert!(matches!(
+        write::<SetTeamReviewRequest>(&cell, retry).await,
+        TeamOutcome::Applied
+    ));
+    assert_eq!(page_for(&cell, 1).await.items, first.items);
+    assert_eq!(page_for(&cell, 1).await.version, first.version);
+
+    seed(&cell).await;
+    let input = request_team(2, Algorithm::RoundRobin);
+    assert!(matches!(
+        write::<SetTeamReviewRequest>(&cell, input).await,
+        TeamOutcome::Applied
+    ));
+    let second = page_for(&cell, 2).await;
+    assert_eq!(second.items.len(), 1);
+    assert_ne!(
+        second.items[0].author.subject,
+        first.items[0].author.subject
+    );
+
+    // Give the member next in rotation an extra open request. Fewest-open
+    // should pick the other member even though they were assigned more recently.
+    seed(&cell).await;
+    let mut extra = request(&first.items[0].author.subject, 1, true);
+    extra.pull = 3;
+    assert!(matches!(
+        write::<SetReviewRequest>(&cell, extra).await,
+        Outcome::Applied(_)
+    ));
+
+    seed(&cell).await;
+    let input = request_team(4, Algorithm::FewestOpen);
+    assert!(matches!(
+        write::<SetTeamReviewRequest>(&cell, input).await,
+        TeamOutcome::Applied
+    ));
+    let balanced = page_for(&cell, 4).await;
+    assert_eq!(balanced.items.len(), 1);
+    assert_eq!(
+        balanced.items[0].author.subject,
+        second.items[0].author.subject
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn team_assignment_counts_pending_requests_and_retains_the_team() {
+    use crate::cells::organization::teams::review_routing::Algorithm;
+    use teams::{SetTeamReviewRequest, TeamOutcome, TeamSelection};
+
+    let server = fixtures::fixture().await;
+    let cell = cell(&server);
+    seed(&cell).await;
+    assert!(matches!(
+        write::<SetReviewRequest>(&cell, request("Bob", 1, true)).await,
+        Outcome::Applied(_)
+    ));
+    let team = Uuid::now_v7();
+    let request_team = || TeamSelection {
+        pull: 1,
+        version: 2,
+        actor: author("Alice"),
+        team,
+        recipients: Some(Vec::new()),
+        routing: Some(routing::Plan {
+            algorithm: Algorithm::RoundRobin,
+            reviewers: 2,
+            // Bob is already requested and unavailable for a new assignment.
+            candidates: vec![author("Carol"), author("Dave")],
+            count_existing: Some(vec!["Bob".into(), "Bob".into(), "Eve".into()]),
+            keep_team: true,
+            other_workload: Default::default(),
+            other_rotation: Default::default(),
+        }),
+    };
+    assert!(matches!(
+        write::<SetTeamReviewRequest>(&cell, request_team()).await,
+        TeamOutcome::Applied
+    ));
+    let routed = page_for(&cell, 1).await;
+    assert_eq!(routed.items.len(), 2);
+    assert_eq!(routed.teams[0].team, team);
+    let mut cancel = request_team();
+    cancel.version = routed.version;
+    cancel.recipients = None;
+    cancel.routing = None;
+    assert!(matches!(
+        write::<SetTeamReviewRequest>(&cell, cancel).await,
+        TeamOutcome::Applied
+    ));
+    assert!(matches!(
+        write::<SetTeamReviewRequest>(&cell, request_team()).await,
+        TeamOutcome::Applied
+    ));
+    let after_retry = page_for(&cell, 1).await;
+    assert!(after_retry.teams.is_empty());
+    assert_eq!(after_retry.items, routed.items);
+    assert_eq!(after_retry.version, routed.version + 1);
+    fixtures::close(&server).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn routed_code_owner_requests_keep_the_team_and_deduplicate_people() {
+    use crate::cells::organization::teams::review_routing::Algorithm;
+
+    let server = fixtures::fixture().await;
+    let cell = cell(&server);
+    let team = Uuid::now_v7();
+    seed_with_owners(
+        &cell,
+        automatic::Plan {
+            people: vec![author("Bob")],
+            teams: vec![automatic::TeamRecipients {
+                team,
+                recipients: Vec::new(),
+                routing: Some(routing::Plan {
+                    algorithm: Algorithm::RoundRobin,
+                    reviewers: 2,
+                    candidates: vec![
+                        author("Alice"),
+                        author("Bob"),
+                        author("Carol"),
+                        author("Carol"),
+                    ],
+                    count_existing: None,
+                    keep_team: false,
+                    other_workload: Default::default(),
+                    other_rotation: Default::default(),
+                }),
+            }],
+        },
+    )
+    .await;
+    let view = page_for(&cell, 1).await;
+    assert_eq!(
+        view.teams,
+        vec![teams::TeamRequest {
+            team,
+            code_owner: true,
+            state: State::Requested
+        }]
+    );
+    let mut reviewers = view
+        .items
+        .iter()
+        .map(|item| {
+            let request = item.request.as_ref().unwrap();
+            assert!(request.code_owner);
+            assert_eq!(request.state, State::Requested);
+            request.reviewer.subject.as_str()
+        })
+        .collect::<Vec<_>>();
+    reviewers.sort_unstable();
+    assert_eq!(reviewers, ["Bob", "Carol"]);
 }

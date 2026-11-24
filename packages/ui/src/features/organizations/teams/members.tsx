@@ -301,6 +301,7 @@ export function TeamPages({
   return (
     <nav aria-label="Team pagination" className="flex justify-center gap-2">
       <Button
+        type="button"
         variant="outline"
         disabled={!after}
         onClick={() => onPage(undefined)}
@@ -308,6 +309,7 @@ export function TeamPages({
         First page
       </Button>
       <Button
+        type="button"
         variant="outline"
         disabled={!next}
         onClick={() => onPage(next ?? undefined)}

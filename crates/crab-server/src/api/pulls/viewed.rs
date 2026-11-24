@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     Extension, Json, Router,
-    extract::{Path, State, rejection::JsonRejection},
+    extract::{Path, Query, State, rejection::JsonRejection},
     routing::get,
 };
 use serde::Deserialize;
@@ -11,7 +11,8 @@ use crate::{
     app::{self, Error, Result},
     auth::Principal,
     cells::repository::viewed::{
-        GetViewedFiles, SetViewedFile, SetViewedInput, SetViewedOutcome, ViewedFiles, ViewedKey,
+        GetViewedFiles, GetViewedOutcome, SetViewedFile, SetViewedInput, SetViewedOutcome,
+        ViewedCursor, ViewedFiles, ViewedKey, ViewedQuery, ViewedVersion,
     },
     server::Server,
 };
@@ -23,28 +24,52 @@ pub(super) fn routes() -> Router<Arc<Server>> {
     )
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PageQuery {
+    version: Option<u64>,
+    after: Option<String>,
+}
+
 async fn list(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path((owner, name, number)): Path<(String, String, u64)>,
+    Query(query): Query<PageQuery>,
 ) -> Result<Json<ViewedFiles>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let actor = app::actor(&principal)?;
     let cell = app::repository_cell(&server, &repo)?;
+    let cursor = match (query.version, query.after) {
+        (None, None) => None,
+        (Some(version), Some(after)) => Some(ViewedCursor { version, after }),
+        _ => {
+            return Err(Error::Invalid(
+                "Viewed progress needs both version and after",
+            ));
+        }
+    };
     let saved = app::query_output(
         cell.client
             .query::<GetViewedFiles>(
                 &cell.target,
                 None,
-                ViewedKey {
-                    pull: app::number(number)?,
-                    actor: (&actor).into(),
+                ViewedQuery {
+                    target: ViewedKey {
+                        pull: app::number(number)?,
+                        actor: (&actor).into(),
+                    },
+                    cursor,
                 },
             )
             .await,
     )?;
     app::membership(&server, &principal, &repo).await?;
-    Ok(Json(saved.ok_or(Error::NotFound)?))
+    match saved {
+        GetViewedOutcome::Page(page) => Ok(Json(page)),
+        GetViewedOutcome::NotFound => Err(Error::NotFound),
+        GetViewedOutcome::Changed => Err(Error::PageChanged),
+    }
 }
 
 #[derive(Deserialize)]
@@ -60,7 +85,7 @@ async fn set(
     Extension(principal): Extension<Principal>,
     Path((owner, name, number)): Path<(String, String, u64)>,
     input: std::result::Result<Json<Input>, JsonRejection>,
-) -> Result<Json<ViewedFiles>> {
+) -> Result<Json<ViewedVersion>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let actor = app::actor(&principal)?;
     let Json(input) = input?;

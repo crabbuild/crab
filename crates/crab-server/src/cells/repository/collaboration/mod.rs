@@ -9,11 +9,16 @@ pub(crate) mod attachments;
 pub(crate) mod bulk;
 pub(crate) mod conversation;
 pub(crate) mod creation;
+pub(crate) mod dependencies;
+pub(crate) mod duplicates;
+pub(crate) mod edit_history;
 pub(crate) mod lifecycle;
 pub(crate) mod links;
+pub(crate) mod locks;
 pub(crate) mod mention_settings;
 pub(crate) mod mentions;
 pub(crate) mod milestones;
+pub(crate) mod minimization;
 pub(crate) mod reactions;
 pub(crate) mod state;
 pub(crate) mod submissions;
@@ -29,6 +34,12 @@ pub(in crate::cells::repository) fn body_written(
 ) -> crate::cells::Result<()> {
     if previous == Some(body) {
         return Ok(());
+    }
+    // Inline threads record body and suggestion together in their writer.
+    if let Some(previous) = previous
+        && !matches!(source.target, Target::PullThread { .. })
+    {
+        edit_history::record(context, source, previous, None)?;
     }
     // Body side effects commit with the same native write and its receipt.
     attachments::claim(context, source.target, &source.actor, body)?;

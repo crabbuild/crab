@@ -8,6 +8,7 @@ use crate::{Commit, CursorError, EntryKind, EntryMode, Error, GitPath, Result, T
 const CURSOR_VERSION: u8 = 1;
 const PATH_HISTORY_CURSOR_VERSION: u8 = 2;
 const HISTORY_SEEK_CURSOR_VERSION: u8 = 2;
+const AHEAD_HISTORY_PARENT_ORDER_VERSION: u8 = 2;
 const DIRECTORY_CURSOR_KIND: u8 = 1;
 const HISTORY_CURSOR_KIND: u8 = 2;
 const PATH_HISTORY_CURSOR_KIND: u8 = 3;
@@ -198,9 +199,18 @@ impl PageCursor {
         Self(Bytes::from(bytes))
     }
 
-    pub(crate) fn ahead_history(start: ObjectId, base: ObjectId, skip: u64) -> Self {
+    pub(crate) fn ahead_history(
+        start: ObjectId,
+        base: ObjectId,
+        skip: u64,
+        order: AheadHistoryOrder,
+    ) -> Self {
+        let version = match order {
+            AheadHistoryOrder::Legacy => CURSOR_VERSION,
+            AheadHistoryOrder::Parents => AHEAD_HISTORY_PARENT_ORDER_VERSION,
+        };
         let mut bytes = Vec::with_capacity(AHEAD_HISTORY_CURSOR_BYTES);
-        bytes.extend_from_slice(&[CURSOR_VERSION, AHEAD_HISTORY_CURSOR_KIND]);
+        bytes.extend_from_slice(&[version, AHEAD_HISTORY_CURSOR_KIND]);
         bytes.extend_from_slice(start.as_bytes());
         bytes.extend_from_slice(base.as_bytes());
         bytes.extend_from_slice(&skip.to_be_bytes());
@@ -208,15 +218,19 @@ impl PageCursor {
     }
 
     pub(crate) fn decode_ahead_history(&self) -> Result<AheadHistoryCursor> {
-        if self.0.len() != AHEAD_HISTORY_CURSOR_BYTES
-            || self.0[..2] != [CURSOR_VERSION, AHEAD_HISTORY_CURSOR_KIND]
-        {
+        if self.0.len() != AHEAD_HISTORY_CURSOR_BYTES || self.0[1] != AHEAD_HISTORY_CURSOR_KIND {
             return Err(malformed_cursor());
         }
+        let order = match self.0[0] {
+            CURSOR_VERSION => AheadHistoryOrder::Legacy,
+            AHEAD_HISTORY_PARENT_ORDER_VERSION => AheadHistoryOrder::Parents,
+            _ => return Err(malformed_cursor()),
+        };
         Ok(AheadHistoryCursor {
             start: object_id(&self.0[2..22])?,
             base: object_id(&self.0[22..42])?,
             skip: u64::from_be_bytes(array(&self.0[42..50])?),
+            order,
         })
     }
 
@@ -310,6 +324,13 @@ pub(crate) struct AheadHistoryCursor {
     pub(crate) start: ObjectId,
     pub(crate) base: ObjectId,
     pub(crate) skip: u64,
+    pub(crate) order: AheadHistoryOrder,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum AheadHistoryOrder {
+    Legacy,
+    Parents,
 }
 
 pub(crate) struct PathHistoryCursor<'a> {

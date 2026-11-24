@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { expectNoAccessibilityViolations } from "./accessibility";
 
-test("an administrator can share a durable offer and the recipient can confirm it", async ({
+test("an administrator creates an offer that the recipient can find and confirm", async ({
   page,
 }) => {
   const repository = "01900000-0000-7000-8000-000000000021";
@@ -40,7 +40,14 @@ test("an administrator can share a durable offer and the recipient can confirm i
         },
       });
     if (pathname === "/api/notifications/unread")
-      return route.fulfill({ json: { unread: false } });
+      return route.fulfill({
+        json: {
+          unread: false,
+          pending_transfers: recipient && !accepted,
+        },
+      });
+    if (pathname === "/api/notifications")
+      return route.fulfill({ json: { items: [], next: null } });
     if (pathname === "/api/repos")
       return route.fulfill({
         json: {
@@ -75,6 +82,10 @@ test("an administrator can share a durable offer and the recipient can confirm i
       expect(request.postDataJSON()).toEqual(proposal);
       return route.fulfill({ json: offer() });
     }
+    if (pathname === "/api/repository-transfers/incoming")
+      return route.fulfill({
+        json: { items: recipient && !accepted ? [offer()] : [], next: null },
+      });
     if (pathname === `/api/repository-transfers/${id}`) {
       if (request.method() === "PUT") {
         expect(recipient).toBe(true);
@@ -111,7 +122,17 @@ test("an administrator can share a durable offer and the recipient can confirm i
   ).toHaveAttribute("href", link);
 
   recipient = true;
-  await page.goto(link);
+  await page.goto("/-/notifications");
+  await page
+    .getByRole("link", { name: "Notifications, pending repository transfers" })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "Incoming repository transfers" }),
+  ).toBeVisible();
+  await expectNoAccessibilityViolations(page);
+  await page
+    .getByRole("link", { name: "Review transfer of team/before" })
+    .click();
   const accept = page.getByRole("button", { name: "Accept transfer" });
   await expect(accept).toBeDisabled();
   await expectNoAccessibilityViolations(page);
@@ -125,4 +146,8 @@ test("an administrator can share a durable offer and the recipient can confirm i
   ).toHaveAttribute("href", `/account-bob/moved?repository_id=${repository}`);
   await page.reload();
   await expect(page.getByText("Transfer accepted")).toBeVisible();
+  await page.goto("/-/notifications?tab=transfers");
+  await expect(
+    page.getByText("No pending repository transfers."),
+  ).toBeVisible();
 });

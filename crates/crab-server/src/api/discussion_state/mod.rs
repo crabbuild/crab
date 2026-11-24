@@ -114,6 +114,12 @@ async fn change(
                     subject,
                     actor: (&author).into(),
                     can_triage: membership.principal.can_triage(repo.id),
+                    can_mark_duplicate: membership.principal.can_write(repo.id),
+                    can_post_locked: super::discussion_target::can_manage(
+                        &membership.principal,
+                        repo.id,
+                        subject.kind,
+                    ),
                     version: input.version,
                     state: input.state,
                     reason: input.reason,
@@ -125,6 +131,9 @@ async fn change(
     .map_err(IntoResponse::into_response)?;
     let comment = match output {
         Outcome::Applied(comment) => comment,
+        Outcome::Rejected(state::Rejection::Locked) => {
+            return Err(rejected(Error::ConversationLocked).into());
+        }
         Outcome::Rejected(state::Rejection::Archived) => {
             return Err(rejected(Error::Archived).into());
         }
@@ -173,7 +182,7 @@ async fn change(
             .map_err(IntoResponse::into_response)?;
         match comment {
             state::Comment::Issue(value) => {
-                issues::view::comment(&authors, &value, &author, &reaction)
+                issues::view::comment(&authors, &value, &author, false, &reaction)
             }
             state::Comment::Pull(value) => pulls::comments::comment_view(
                 &authors,

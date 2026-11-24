@@ -1,7 +1,7 @@
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { repoHref } from "@/lib/repository-route";
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 
 import {
   DownloadIcon,
@@ -13,6 +13,7 @@ import {
   endpoint,
   navigate,
   useRequest,
+  type Ref,
   type Refs,
   type Repository,
 } from "@/lib/api";
@@ -29,6 +30,7 @@ import {
 } from "./api";
 import { Result } from "@/components/request/result";
 import { short } from "@/lib/format";
+import { ReleaseNotesGenerator } from "./generate-notes";
 
 function ReleaseNotesFields({
   title,
@@ -38,6 +40,7 @@ function ReleaseNotesFields({
   setTitle,
   setBody,
   setPrerelease,
+  generator,
 }: {
   title: string;
   body: string;
@@ -46,6 +49,7 @@ function ReleaseNotesFields({
   setTitle: (value: string) => void;
   setBody: (value: string) => void;
   setPrerelease: (value: boolean) => void;
+  generator?: ReactNode;
 }) {
   return (
     <>
@@ -60,6 +64,7 @@ function ReleaseNotesFields({
           required
           disabled={pending}
         />
+        {generator}
         <Editor
           attachments={false}
           id="release-notes"
@@ -227,11 +232,13 @@ function ReleaseAssetsEditor({
 function EditReleaseForm({
   repo,
   release,
+  tags,
   csrf,
   onPublished,
 }: {
   repo: Repository;
   release: Release;
+  tags: Ref[];
   csrf: string;
   onPublished: () => void;
 }) {
@@ -305,6 +312,20 @@ function EditReleaseForm({
         setTitle={setTitle}
         setBody={setBody}
         setPrerelease={setPrerelease}
+        generator={
+          release.draft && (
+            <ReleaseNotesGenerator
+              repo={repo}
+              tag={release.tag_name}
+              tags={tags}
+              target={release.target_oid}
+              pending={pending}
+              append={(notes) =>
+                setBody((current) => appendNotes(current, notes))
+              }
+            />
+          )
+        }
       />
       <ReleaseAssetsEditor
         repo={repo}
@@ -356,11 +377,13 @@ function EditReleaseForm({
 export function EditRelease({
   repo,
   tag,
+  refs,
   csrf,
   onPublished,
 }: {
   repo: Repository;
   tag: string;
+  refs: Refs;
   csrf: string;
   onPublished: () => void;
 }) {
@@ -374,12 +397,17 @@ export function EditRelease({
           key={`${current.number}:${current.version}`}
           repo={repo}
           release={current}
+          tags={refs.refs.filter((ref) => ref.name.startsWith("refs/tags/"))}
           csrf={csrf}
           onPublished={onPublished}
         />
       )}
     </Result>
   );
+}
+
+function appendNotes(current: string, notes: string) {
+  return current.trim() ? `${current.trimEnd()}\n\n${notes}` : notes;
 }
 
 export function NewRelease({
@@ -538,6 +566,21 @@ export function NewRelease({
         setTitle={setTitle}
         setBody={setBody}
         setPrerelease={setPrerelease}
+        generator={
+          target && (
+            <ReleaseNotesGenerator
+              key={`${repo.id}:${target}:${existingTag?.name ?? ""}`}
+              repo={repo}
+              tag={tag.trim()}
+              tags={tags}
+              target={target}
+              pending={pending}
+              append={(notes) =>
+                setBody((current) => appendNotes(current, notes))
+              }
+            />
+          )
+        }
       />
       <Failure message={error} />
       <div className="release-form-actions">

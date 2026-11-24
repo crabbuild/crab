@@ -2,10 +2,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 mod accounts;
+pub(crate) mod automation;
 mod backchannel_logout;
 pub(crate) mod deploy_tokens;
 mod git_tokens;
 mod http;
+pub(crate) mod scim;
 mod state;
 mod transport;
 pub(crate) use accounts::AccountState;
@@ -28,7 +30,7 @@ use openidconnect::{ClientSecret, Nonce, PkceCodeVerifier};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{Mutex, Semaphore};
-use transport::discover;
+use transport::{DiscoveredOidc, discover};
 
 mod oidc;
 use oidc::Client;
@@ -174,6 +176,7 @@ struct AuthState {
     store: Store,
     prefix: String,
     account_prefix: String,
+    require_provisioning: bool,
     pending_checks: Arc<Mutex<HashMap<Key, futures_util::future::WeakShared<SessionCheck>>>>,
 }
 
@@ -243,12 +246,14 @@ pub(crate) struct Authentication {
     config: OidcConfig,
     secret: Option<ClientSecret>,
     http: reqwest::Client,
-    client: Option<(Client, bool)>,
+    oidc: Option<DiscoveredOidc>,
     sessions: Mutex<HashMap<Key, Arc<Session>>>,
     git_tokens: Mutex<HashMap<Key, Arc<GitToken>>>,
     state: AuthState,
     cursor_key: [u8; 32],
     webhook_key: Option<[u8; 32]>,
+    scim_key: Option<blake3::Hash>,
+    scim_admission: Semaphore,
     admission: Semaphore,
     logout_admission: Semaphore,
 }
@@ -258,10 +263,28 @@ impl Authentication {
         config: OidcConfig,
         root: &crate::storage_root::StorageRoot,
     ) -> Result<Self, AuthError> {
+        if config.scim_token_file.is_some() && config.provider != AuthProvider::Oidc {
+            return Err(AuthError::Invalid);
+        }
+        let scim_key = config
+            .scim_token_file
+            .as_ref()
+            .map(|path| {
+                let secret = std::fs::read_to_string(path).map_err(AuthError::provider)?;
+                let secret = secret.trim_end_matches(['\r', '\n']);
+                if !(32..=512).contains(&secret.len())
+                    || !secret.bytes().all(|byte| byte.is_ascii_graphic())
+                {
+                    return Err(AuthError::Invalid);
+                }
+                Ok(blake3::hash(secret.as_bytes()))
+            })
+            .transpose()?;
         let state = AuthState {
             store: root.store.clone(),
             prefix: root.path(".crab/http-server/v1/auth").to_string(),
             account_prefix: root.path(".crab/http-server/v1/accounts").to_string(),
+            require_provisioning: scim_key.is_some(),
             pending_checks: Arc::default(),
         };
         let secret = config
@@ -300,7 +323,7 @@ impl Authentication {
             .timeout(Duration::from_secs(10))
             .build()
             .map_err(AuthError::provider)?;
-        let client = match config.provider {
+        let oidc = match config.provider {
             AuthProvider::Oidc => Some(discover(&config, secret.clone(), &http).await?),
             AuthProvider::GitHub => None,
         };
@@ -308,15 +331,21 @@ impl Authentication {
             config,
             secret,
             http,
-            client,
+            oidc,
             sessions: Mutex::new(HashMap::new()),
             git_tokens: Mutex::new(HashMap::new()),
             state,
             cursor_key,
             webhook_key,
+            scim_key,
+            scim_admission: Semaphore::new(4),
             admission: Semaphore::new(8),
             logout_admission: Semaphore::new(4),
         })
+    }
+
+    fn can_sign_up(&self) -> bool {
+        self.oidc.as_ref().is_some_and(|oidc| oidc.can_sign_up)
     }
 
     pub(crate) fn is_oidc(&self) -> bool {
