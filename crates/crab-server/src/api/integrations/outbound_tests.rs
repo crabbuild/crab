@@ -11,6 +11,7 @@ use crate::test_support::{
 };
 
 mod discussion;
+mod reviews;
 mod synchronize;
 
 const PATH: &str = "/api/repos/team/private/settings/webhooks";

@@ -24,9 +24,18 @@ const eventOptions = [
   ["pull_request", "Pull requests"],
   ["issues", "Issues"],
   ["issue_comment", "Issue and pull request comments"],
+  ["pull_request_review", "Pull request reviews"],
 ] as const;
 type WebhookEvent = (typeof eventOptions)[number][0];
 type Subscription = { id: string } & Record<WebhookEvent, boolean>;
+
+const deliveryLabels: Record<WebhookEvent, string> = {
+  push: "Push",
+  pull_request: "Pull request",
+  issues: "Issue",
+  issue_comment: "Comment",
+  pull_request_review: "Review",
+};
 
 type Delivery = {
   id: string;
@@ -35,6 +44,7 @@ type Delivery = {
   issue: number | null;
   pull: number | null;
   comment: number | null;
+  review: { number: number; commit_oid: string } | null;
   head_change: { before: string | null; after: string } | null;
   queued_at: number;
   status: "queued" | "sending" | "delivered" | "failed" | "cancelled";
@@ -229,6 +239,14 @@ export function OutboundWebhooks({
                   {deliveries.map((delivery) => {
                     const number = delivery.pull ?? delivery.issue;
                     const issue = delivery.pull === null;
+                    const anchor = delivery.review
+                      ? `#pullrequestreview-${delivery.review.number}`
+                      : delivery.comment != null
+                        ? `#issuecomment-${delivery.comment}`
+                        : "";
+                    const commit =
+                      delivery.review?.commit_oid ??
+                      delivery.head_change?.after;
                     const href =
                       number == null
                         ? null
@@ -243,11 +261,14 @@ export function OutboundWebhooks({
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <div className="grid gap-1">
                             <strong className="text-sm capitalize">
-                              {delivery.event === "push"
-                                ? "Push"
-                                : delivery.action === "synchronize"
-                                  ? "Pull request head updated"
-                                  : `${delivery.event === "issues" ? "Issue" : delivery.event === "issue_comment" ? "Comment" : "Pull request"} ${delivery.action?.replaceAll("_", " ") ?? ""}`}
+                              {delivery.action === "synchronize"
+                                ? "Pull request head updated"
+                                : [
+                                    deliveryLabels[delivery.event],
+                                    delivery.action?.replaceAll("_", " "),
+                                  ]
+                                    .filter(Boolean)
+                                    .join(" ")}
                             </strong>
                             <span className="text-sm text-muted-foreground">
                               <span className="capitalize">
@@ -275,24 +296,22 @@ export function OutboundWebhooks({
                         </div>
                         {href && (
                           <Link
-                            href={
-                              delivery.comment == null
-                                ? href
-                                : `${href}#issuecomment-${delivery.comment}`
-                            }
+                            href={`${href}${anchor}`}
                             className="w-fit text-sm underline underline-offset-2"
                           >
                             {issue ? "Issue" : "Pull request"} #{number}
                             {delivery.comment != null &&
                               ` · Comment #${delivery.comment}`}
+                            {delivery.review &&
+                              ` · Review #${delivery.review.number}`}
                           </Link>
                         )}
-                        {delivery.head_change && (
+                        {commit && (
                           <p className="text-sm">
-                            Head commit{" "}
-                            <code title={delivery.head_change.after}>
-                              {short(delivery.head_change.after)}
-                            </code>
+                            {delivery.review
+                              ? "Reviewed commit"
+                              : "Head commit"}{" "}
+                            <code title={commit}>{short(commit)}</code>
                           </p>
                         )}
                         <Disclosure
@@ -351,6 +370,7 @@ function EventsForm({
     pull_request: subscription?.pull_request ?? true,
     issues: subscription?.issues ?? false,
     issue_comment: subscription?.issue_comment ?? false,
+    pull_request_review: subscription?.pull_request_review ?? false,
   });
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();

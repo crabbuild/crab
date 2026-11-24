@@ -5128,7 +5128,8 @@ has exactly one approved receiver.
 
 Crab POSTs a JSON object with `repository` (the stable UUID), `delivery` (the
 delivery UUID), `occurred_at_ms`, and `data`. `X-Crab-Event` is `push`,
-`pull_request`, `issues`, or `issue_comment`. `X-Crab-Delivery` is the delivery UUID. Verify the raw bytes
+`pull_request`, `issues`, `issue_comment`, or `pull_request_review`.
+`X-Crab-Delivery` is the delivery UUID. Verify the raw bytes
 with the configured secret and `X-Hub-Signature-256` (`sha256=` plus the
 hex-encoded HMAC-SHA256), then deduplicate by delivery UUID before processing.
 [Webhook signature guidance](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries)
@@ -5159,10 +5160,21 @@ hex-encoded HMAC-SHA256), then deduplicate by delivery UUID before processing.
   comments and comments submitted with a close or reopen. Use the subject and
   comment revision to reconcile current state through the authorized API.
   Discussion bodies and private account identifiers are excluded from payloads.
+- `pull_request_review` contains `data.action` (`submitted`, `edited`, or
+  `dismissed`), the pull and review numbers, the review `version`, the exact
+  reviewed `commit_oid`, and the original `decision`. Subscribe using **Pull
+  request reviews**. The event covers published standalone and batched reviews,
+  summary edits, and explicit dismissals. Draft saves and retries of a committed
+  submission do not enqueue deliveries. Base and head changes that expire
+  approvals are reported through the corresponding `pull_request` event.
+  The payload excludes review text and dismissal reasons. Delivery history
+  shows the reviewed commit and links directly to the review.
+  [GitHub review event](https://docs.github.com/en/webhooks/webhook-events-and-payloads#pull_request_review)
 
 Existing subscriptions keep their event selection. The settings command
-accepts the optional booleans `issues` and `issue_comment` (both default to
-`false`). Upgrade all server replicas before enabling either new event.
+accepts the optional booleans `issues`, `issue_comment`, and
+`pull_request_review`, each defaulting to `false`. Upgrade all server replicas
+before enabling a newly supported event.
 
 A branch update emits one synchronization event per subscribed receiver for
 each open PR already tracking that repository and branch when publication

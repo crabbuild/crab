@@ -130,7 +130,10 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
   scoped to the operator's repository, workflow, and branch binding. Candidate
   checkout and check results use the exact queued SHA. Signed outbound Git and
   PR webhooks include exact head changes on open PRs, including updates from
-  private forks. Live GitHub qualification remains open.
+  private forks. Review subscriptions deliver signed events for published
+  reviews, summary edits, and explicit dismissals with the reviewed commit
+  and exact review revision. Private draft saves generate no delivery.
+  Live GitHub qualification remains open.
 - Repository admins can configure fast-forward, merge commit, squash and rebase.
   Squash and rebase use the protected merge and retry path. Rebase compares the
   final tree with the three-way merge result before publishing.

@@ -85,22 +85,26 @@ async fn settings(
         .map(|delivery| {
         use hooks::Event;
         let event = delivery.event.name();
-        let (action, subject, comment, head_change) = match delivery.event {
-            Event::Push { .. } => (Value::Null, None, None, None),
+        let (action, subject, comment, head_change, review) = match delivery.event {
+            Event::Push { .. } => (Value::Null, None, None, None, Value::Null),
             Event::PullRequest { action, number, head_change, .. } => {
-                (json!(action), Some(Subject {kind: SubjectKind::Pull, number}), None, head_change)
+                (json!(action), Some(Subject {kind: SubjectKind::Pull, number}), None, head_change, Value::Null)
             }
             Event::Issues { action, number, .. } => (
-                json!(action), Some(Subject {kind: SubjectKind::Issue, number}), None, None,
+                json!(action), Some(Subject {kind: SubjectKind::Issue, number}), None, None, Value::Null,
             ),
             Event::IssueComment { action, subject, comment, .. } => (
-                json!(action), Some(subject), Some(comment), None,
+                json!(action), Some(subject), Some(comment), None, Value::Null,
+            ),
+            Event::PullRequestReview { action, pull, review, commit_oid, .. } => (
+                json!(action), Some(Subject { kind: SubjectKind::Pull, number: pull }), None, None,
+                json!({"number":review,"commit_oid":commit_oid}),
             ),
         };
         let issue = subject.filter(|value| value.kind == SubjectKind::Issue).map(|value| value.number);
         let pull = subject.filter(|value| value.kind == SubjectKind::Pull).map(|value| value.number);
         json!({
-            "id":delivery.id,"event":event,"action":action,"issue":issue,"pull":pull,"comment":comment,"head_change":head_change,"queued_at":delivery.queued_at,
+            "id":delivery.id,"event":event,"action":action,"issue":issue,"pull":pull,"comment":comment,"review":review,"head_change":head_change,"queued_at":delivery.queued_at,
             "status":delivery.status,"attempts":delivery.attempts,"http_status":delivery.http_status,
             "version":delivery.version,"recent_attempts":delivery.recent_attempts,
             "can_redeliver":active && current == Some(&delivery.subscription) && matches!(delivery.status, hooks::Status::Failed | hooks::Status::Delivered),
@@ -110,6 +114,7 @@ async fn settings(
         json!({
             "id":hook.id,"push":hook.push,"pull_request":hook.pull_request,
             "issues":hook.issues,"issue_comment":hook.issue_comment,
+            "pull_request_review":hook.pull_request_review,
         })
     });
     let receivers: Vec<_> = receivers
@@ -133,6 +138,8 @@ enum Change {
         issues: bool,
         #[serde(default)]
         issue_comment: bool,
+        #[serde(default)]
+        pull_request_review: bool,
     },
     Disable {
         expected: Uuid,
@@ -203,26 +210,25 @@ async fn change(
             pull_request,
             issues,
             issue_comment,
+            pull_request_review,
         } => {
             if !approved.is_some_and(|map| map.contains_key(&destination)) {
                 return Err(Error::NotFound);
             }
-            if !(push || pull_request || issues || issue_comment) || id.is_nil() {
+            let subscription = hooks::Subscription {
+                id,
+                destination: destination.clone(),
+                push,
+                pull_request,
+                issues,
+                issue_comment,
+                pull_request_review,
+            };
+            if !subscription.has_events() || id.is_nil() {
                 return Err(Error::Invalid("Choose at least one webhook event"));
             }
             let secret = webhooks::secret(&server, repo.id, id).ok_or(Error::NotFound)?;
-            (
-                expected,
-                Some(hooks::Subscription {
-                    id,
-                    destination: destination.clone(),
-                    push,
-                    pull_request,
-                    issues,
-                    issue_comment,
-                }),
-                Some(secret),
-            )
+            (expected, Some(subscription), Some(secret))
         }
         Change::Disable { expected } => (Some(expected), None, None),
         Change::Redeliver { .. } => return Err(Error::PageChanged),

@@ -1,7 +1,7 @@
 use super::{
     collaboration::{Subject, next_version, state::State},
     issues::lifecycle::Reason,
-    pulls::PullRecord,
+    pulls::{PullRecord, PullReviewRecord, ReviewState},
     *,
 };
 use crate::config::MAX_OUTBOUND_WEBHOOKS;
@@ -28,6 +28,18 @@ pub(crate) struct Subscription {
     pub issues: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub issue_comment: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pull_request_review: bool,
+}
+
+impl Subscription {
+    pub(crate) fn has_events(&self) -> bool {
+        self.push
+            || self.pull_request
+            || self.issues
+            || self.issue_comment
+            || self.pull_request_review
+    }
 }
 
 fn subscriptions(context: &Transaction<'_>) -> crate::cells::Result<Vec<(String, Subscription)>> {
@@ -74,6 +86,14 @@ pub(crate) enum CommentAction {
     Edited,
 }
 
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReviewAction {
+    Submitted,
+    Edited,
+    Dismissed,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub(crate) enum Event {
@@ -109,6 +129,14 @@ pub(crate) enum Event {
         comment: u64,
         version: u64,
     },
+    PullRequestReview {
+        action: ReviewAction,
+        pull: u64,
+        review: u64,
+        version: u64,
+        commit_oid: String,
+        decision: ReviewState,
+    },
 }
 
 impl Event {
@@ -118,6 +146,7 @@ impl Event {
             Self::PullRequest { .. } => "pull_request",
             Self::Issues { .. } => "issues",
             Self::IssueComment { .. } => "issue_comment",
+            Self::PullRequestReview { .. } => "pull_request_review",
         }
     }
 
@@ -127,6 +156,7 @@ impl Event {
             Self::PullRequest { .. } => hook.pull_request,
             Self::Issues { .. } => hook.issues,
             Self::IssueComment { .. } => hook.issue_comment,
+            Self::PullRequestReview { .. } => hook.pull_request_review,
         }
     }
 }
@@ -271,6 +301,25 @@ pub(super) fn comment(
     )
 }
 
+pub(super) fn review(
+    context: &Transaction<'_>,
+    record: &PullReviewRecord,
+    version: u64,
+    action: ReviewAction,
+) -> crate::cells::Result<()> {
+    enqueue_event(
+        context,
+        Event::PullRequestReview {
+            action,
+            pull: record.pull,
+            review: record.number,
+            version,
+            commit_oid: record.commit_oid.clone(),
+            decision: record.state,
+        },
+    )
+}
+
 fn enqueue_event(context: &Transaction<'_>, event: Event) -> crate::cells::Result<()> {
     for (_, hook) in subscriptions(context)?
         .into_iter()
@@ -375,7 +424,7 @@ impl Mutation for Configure {
                 || next.id.is_nil()
                 || active.iter().any(|(_, hook)| hook.id == next.id)
                 || (current.is_none() && active.len() >= MAX_OUTBOUND_WEBHOOKS)
-                || !(next.push || next.pull_request || next.issues || next.issue_comment)
+                || !next.has_events()
                 || next.destination != input.destination
                 || next.destination.len() != 64
                 || blake3::Hash::from_hex(&next.destination).is_err()
