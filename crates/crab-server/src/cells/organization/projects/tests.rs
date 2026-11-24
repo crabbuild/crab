@@ -101,6 +101,15 @@ fn work(repository: Uuid) -> Item {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn project_issue_alarm_recovers_the_repository_receipt_after_restart() {
+    recover_project_issue(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn project_draft_conversion_recovers_the_repository_receipt_after_restart() {
+    recover_project_issue(true).await;
+}
+
+async fn recover_project_issue(convert_draft: bool) {
     use crate::cells::{
         repository::{RepositoryAuthor, projects::organization_issue as source},
         runtime::test_node,
@@ -122,6 +131,28 @@ async fn project_issue_alarm_recovers_the_repository_receipt_after_restart() {
     let mut item = work(repository).item;
     item.subject = None;
     item.title = "Restore a pending issue".into();
+    item.priority = 2;
+    if convert_draft {
+        assert!(matches!(
+            write::<Change>(
+                client,
+                organization,
+                request(
+                    owner,
+                    Command::Item {
+                        project,
+                        version: 0,
+                        repository: None,
+                        item: item.clone(),
+                    }
+                )
+            )
+            .await
+            .unwrap(),
+            Outcome::Applied { .. }
+        ));
+    }
+    let item_id = item.id;
     let submission = Request {
         source_epoch: Some(0),
         ..request(
@@ -131,6 +162,7 @@ async fn project_issue_alarm_recovers_the_repository_receipt_after_restart() {
                 repository,
                 item,
                 type_id: None,
+                draft_version: convert_draft.then_some(1),
             },
         )
     };
@@ -140,6 +172,25 @@ async fn project_issue_alarm_recovers_the_repository_receipt_after_restart() {
             .unwrap(),
         Outcome::PendingIssue { .. }
     ));
+    if convert_draft {
+        assert!(matches!(
+            write::<Change>(
+                client,
+                organization,
+                request(
+                    owner,
+                    Command::Remove {
+                        project,
+                        version: 1,
+                        item: item_id,
+                    }
+                )
+            )
+            .await
+            .unwrap(),
+            Outcome::Rejected { .. }
+        ));
+    }
     let source_reply = client
         .command::<source::Publish>(
             repository,
@@ -166,12 +217,11 @@ async fn project_issue_alarm_recovers_the_repository_receipt_after_restart() {
         .await
         .unwrap();
     assert_eq!(source_reply.output, source::Outcome::Created { number: 1 });
-    assert!(
-        items(client, organization, owner, project)
-            .await
-            .items
-            .is_empty()
-    );
+    let before = items(client, organization, owner, project).await;
+    assert_eq!(before.items.len(), usize::from(convert_draft));
+    if let Some(row) = before.items.first() {
+        assert_eq!(row.record.item.subject, None);
+    }
     let NodeOutcome::Stopped(report) = started.node.shutdown(ShutdownMode::Preserve).await.unwrap()
     else {
         panic!("Native node did not drain");
@@ -184,16 +234,23 @@ async fn project_issue_alarm_recovers_the_repository_receipt_after_restart() {
     let row = tokio::time::timeout(std::time::Duration::from_secs(45), async {
         loop {
             let page = items(&restored.client, organization, owner, project).await;
-            if let Some(row) = page.items.into_iter().next() {
-                break row.record;
+            if let Some(row) = page
+                .items
+                .into_iter()
+                .find(|row| row.record.item.subject.is_some())
+            {
+                break row;
             }
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         }
     })
     .await
     .expect("The restored Organization Cell alarm did not link the issue");
-    assert_eq!(row.repository, Some(repository));
-    assert_eq!(row.item.subject.unwrap().number, 1);
+    assert_eq!(row.record.repository, Some(repository));
+    assert_eq!(row.record.item.subject.unwrap().number, 1);
+    assert_eq!(row.record.item.id, item_id);
+    assert_eq!(row.record.item.priority, 2);
+    assert_eq!(row.version, if convert_draft { 2 } else { 1 });
     assert!(matches!(
         write::<Change>(&restored.client, organization, submission).await.unwrap(),
         Outcome::Applied { project: Some(saved), .. } if saved == project

@@ -119,6 +119,7 @@ export type WorkspaceCommand =
       repository: string;
       item: Item;
       type_id: string | null;
+      draft_version?: number;
     }
   | {
       kind: "planning";

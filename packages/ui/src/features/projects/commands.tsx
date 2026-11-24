@@ -177,8 +177,8 @@ export function ProjectCommandsProvider({
           value.outcome !== "item_conflict")
       )
         throw new Error("The server acknowledgement was invalid.");
+      const command = captured.body.command;
       if (value.outcome === "item_conflict") {
-        const command = captured.body.command;
         const target =
           command.kind === "bulk_fields"
             ? command.items.some((edit) => edit.item === value.item)
@@ -202,7 +202,6 @@ export function ProjectCommandsProvider({
       const applied =
         value.outcome === "applied" || value.outcome === "issue_already_linked";
       if (applied) {
-        const command = captured.body.command;
         const expected =
           command.kind === "parent" ||
           command.kind === "sub_issue" ||
@@ -230,16 +229,23 @@ export function ProjectCommandsProvider({
         setGeneration((previous) => previous + 1);
       }
       if (activeAccount.current !== captured.account) return;
-      if (applied && captured.draft) clearDraft(captured.draft);
+      const keptDraft =
+        value.outcome === "issue_already_linked" &&
+        command.kind === "create_issue" &&
+        "draft_version" in command;
+      if (applied && !keptDraft && captured.draft) clearDraft(captured.draft);
       removeProjectIntent(captured);
       current.current = null;
       setIntent(null);
       if (value.outcome === "rejected") setError(value.reason);
       if (value.outcome === "issue_already_linked")
         setNotice({
-          title: "Issue added to Project",
-          message:
-            "The issue was already added to this Project. Its current planning fields were kept.",
+          title: keptDraft
+            ? "Issue already in Project"
+            : "Issue added to Project",
+          message: keptDraft
+            ? "The issue already has a Project item. Your draft was kept."
+            : "The issue was already added to this Project. Its current planning fields were kept.",
         });
       if (
         value.outcome === "applied" &&

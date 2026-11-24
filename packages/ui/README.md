@@ -441,8 +441,10 @@ Adding the moved issue again keeps its existing Project placement and shows an
 already-linked message.
 
 Shared projects link existing work, create issues in writable organization
-repositories, and support draft notes. Draft conversion, title/state saved
-filters and custom project templates remain repository-scoped. Linking does
+repositories, and support draft notes. Open a saved draft note and choose
+**Convert to issue** to publish it in a linked repository while keeping its
+planning fields and item identity. Title/state saved filters and custom
+project templates remain repository-scoped. Linking does
 not migrate repository projects. Workflow
 automation and cross-organization/personal project discovery are
 separate features. Preparation and API contracts are in

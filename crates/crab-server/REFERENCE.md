@@ -3154,8 +3154,14 @@ In an organization Project, choose **New issue** when adding work, or
 **Create issue in** on an issue-type group. Choose a linked repository
 owned by the organization where you have Write access. The editor keeps
 the selected issue type and planning fields in its recovery draft.
+Open a saved draft note and select **Convert to issue** to publish it in
+one of those repositories. The issue replaces the draft in the same
+Project row with its planning fields intact.
 Organization Project `create_issue` commands take `project`, `repository`,
-`item` (a new item with no subject), and an optional `type_id`.
+`item` (with no subject), and an optional `type_id`. Include `draft_version`
+with the saved item's current revision to convert it. The revision stays
+reserved until the destination returns a receipt. Rejection or cancellation
+before publication releases the reservation and leaves the saved draft intact.
 The server reserves the Project item, commits the issue and type in the
 repository, and then links the issue. Retry an interrupted submission with
 the same request ID to recover the original result. **Cancel if not

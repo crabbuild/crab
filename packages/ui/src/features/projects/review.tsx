@@ -178,17 +178,21 @@ export function ProjectItemReview({
                 )}
                 {can_manage && !page.project.archived && (
                   <div className="flex flex-wrap gap-2">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={() => {
-                        onReviewed(page.project, saved, false);
-                        commands.clearError();
-                        setOpen(false);
-                      }}
-                    >
-                      Keep my draft against this revision
-                    </Button>
+                    {!saved.restricted &&
+                      (draft.subject !== null ||
+                        saved.item.subject === null) && (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={() => {
+                            onReviewed(page.project, saved, false);
+                            commands.clearError();
+                            setOpen(false);
+                          }}
+                        >
+                          Keep my draft against this revision
+                        </Button>
+                      )}
                     <Button
                       type="button"
                       variant="outline"

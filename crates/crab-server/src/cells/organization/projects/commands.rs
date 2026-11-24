@@ -80,6 +80,8 @@ pub(crate) enum Command {
         repository: Uuid,
         item: planning::Item,
         type_id: Option<Uuid>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        draft_version: Option<u64>,
     },
     Remove {
         project: Uuid,
@@ -241,17 +243,22 @@ impl Mutation for Change {
         Ok(MutationResult::Success(outcome))
     }
 }
-pub(super) fn apply(
+fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResult<Outcome>> {
+    apply_command(context, input, &input.command, false)
+}
+
+pub(super) fn apply_published_issue(
     context: &mut Transaction<'_>,
     input: &Request,
 ) -> Result<MutationResult<Outcome>> {
-    apply_command(context, input, &input.command)
+    apply_command(context, input, &input.command, true)
 }
 
 fn apply_command(
     context: &mut Transaction<'_>,
     input: &Request,
     command: &Command,
+    finalizing_issue: bool,
 ) -> Result<MutationResult<Outcome>> {
     if let Command::SetDefaultAccess {
         version,
@@ -582,8 +589,11 @@ fn apply_command(
                     version: current,
                 }));
             }
+            // Only the durable source receipt can attach an issue to an
+            // existing draft. Ordinary edits keep their original source.
             if old.as_ref().is_some_and(|old| {
-                old.repository != *repository || old.item.subject != next.subject
+                (old.repository != *repository || old.item.subject != next.subject)
+                    && !(finalizing_issue && old.repository.is_none() && old.item.subject.is_none())
             }) {
                 return Ok(rejected(
                     "An existing project item's source cannot be replaced",
@@ -642,7 +652,7 @@ fn apply_command(
                 repository: *repository,
                 item: next.clone(),
             };
-            context.query("INSERT INTO organization_project_items(project,id,repository,kind,number,status,data) VALUES(?,?,?,?,?,?,?) ON CONFLICT(project,id) DO UPDATE SET status=excluded.status,data=excluded.data",&[blob(project_id),blob(next.id),repository_value,kind,number,SqlValue::Text(next.status.clone()),SqlValue::Text(serde_json::to_string(&data)?)])?;
+            context.query("INSERT INTO organization_project_items(project,id,repository,kind,number,status,data) VALUES(?,?,?,?,?,?,?) ON CONFLICT(project,id) DO UPDATE SET repository=excluded.repository,kind=excluded.kind,number=excluded.number,status=excluded.status,data=excluded.data",&[blob(project_id),blob(next.id),repository_value,kind,number,SqlValue::Text(next.status.clone()),SqlValue::Text(serde_json::to_string(&data)?)])?;
             ledger::advance_item(context, project_id, next.id)?;
             event_target = ledger::Target::Item {
                 id: next.id,
@@ -659,25 +669,15 @@ fn apply_command(
                 .transpose()?;
             after = Some(history::item_snapshot(next)?);
         }
-        Command::CreateIssue {
-            repository,
-            item,
-            type_id,
-            ..
-        } => {
-            return issue_creation::reserve(
-                context,
-                input,
-                &project,
-                pending,
-                *repository,
-                item,
-                *type_id,
-            );
+        Command::CreateIssue { .. } => {
+            return issue_creation::reserve(context, input, &project, pending);
         }
         Command::Remove {
             item: id, version, ..
         } => {
+            if pending.contains_key(id) {
+                return Ok(rejected("This item has a pending issue submission"));
+            }
             let old = item(context, project_id, *id)?;
             let current = ledger::item_version(context, project_id, *id)?;
             let Some(old) = old.filter(|_| current == *version) else {
@@ -782,7 +782,7 @@ fn apply_bulk(
             repository: entry.repository,
             item,
         };
-        match apply_command(context, input, &command)? {
+        match apply_command(context, input, &command, false)? {
             MutationResult::Success(Outcome::Applied { version: next, .. }) => version = next,
             outcome => return Ok(outcome),
         }

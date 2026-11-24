@@ -562,6 +562,9 @@ current repository access and ownership. Linking from a repository shares the
 organization policy lease with ownership and repository grant changes.
 The Project's default issue repository shares that lease. Its link and the
 ownership-bound choice commit in the same native transaction.
+Draft conversion reserves its item revision against edits and removal.
+Only the destination issue receipt can replace its source and advance the
+item revision in the Organization Cell.
 Project access cannot authorize a linked repository. Both project scopes share
 canonical source metadata in `cells/repository/projects/reads.rs`; never copy
 source titles/states into organization records or treat project access as a

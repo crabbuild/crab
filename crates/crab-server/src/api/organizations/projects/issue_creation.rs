@@ -38,6 +38,7 @@ pub(super) async fn submit(
                 repository,
                 ref item,
                 type_id,
+                ..
             } = input.command
             else {
                 return Err(Error::Invalid("Expected an issue creation command"));

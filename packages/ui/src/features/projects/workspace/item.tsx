@@ -104,6 +104,10 @@ export function WorkspaceItemEditor({
     mode === "issue" ? repository : undefined,
   );
   const canWriteIssue = writable.some((repo) => repo.id === repository);
+  const canConvertDraft =
+    wasExisting &&
+    item.subject === null &&
+    (writable.length > 0 || mode === "issue");
   const setItem = (item: Item) => saved.update({ item });
   const setMode = (mode: string) => {
     if (mode === "existing" || mode === "draft") saved.update({ mode });
@@ -188,6 +192,7 @@ export function WorkspaceItemEditor({
                     repository,
                     item: { ...item, subject: null, title: item.title.trim() },
                     type_id: issueType ?? null,
+                    ...(wasExisting ? { draft_version: version } : {}),
                   }
                 : {
                     kind: "item",
@@ -224,16 +229,24 @@ export function WorkspaceItemEditor({
           ) : (
             <fieldset disabled={commands.locked}>
               <FieldGroup>
-                {!wasExisting ? (
+                {!wasExisting || canConvertDraft ? (
                   <Tabs value={mode} onValueChange={setMode}>
                     <TabsList aria-label="Work source">
-                      <TabsTrigger value="existing">
-                        Issue or pull request
-                      </TabsTrigger>
-                      {(writable.length > 0 || mode === "issue") && (
-                        <TabsTrigger value="issue">New issue</TabsTrigger>
+                      {wasExisting ? (
+                        <TabsTrigger value="draft">Draft note</TabsTrigger>
+                      ) : (
+                        <TabsTrigger value="existing">
+                          Issue or pull request
+                        </TabsTrigger>
                       )}
-                      <TabsTrigger value="draft">Draft note</TabsTrigger>
+                      {(writable.length > 0 || mode === "issue") && (
+                        <TabsTrigger value="issue">
+                          {wasExisting ? "Convert to issue" : "New issue"}
+                        </TabsTrigger>
+                      )}
+                      {!wasExisting && (
+                        <TabsTrigger value="draft">Draft note</TabsTrigger>
+                      )}
                     </TabsList>
                     <TabsContent value="existing">
                       <FieldGroup className="pt-4">
@@ -388,11 +401,16 @@ export function WorkspaceItemEditor({
                         )}
                       </FieldGroup>
                     </TabsContent>
-                    <TabsContent value="draft" className="pt-4">
-                      <p className="text-sm text-muted-foreground">
-                        Capture work before it has an issue. Draft notes belong
-                        to this project.
-                      </p>
+                    <TabsContent
+                      value="draft"
+                      className={wasExisting ? undefined : "pt-4"}
+                    >
+                      {!wasExisting && (
+                        <p className="text-sm text-muted-foreground">
+                          Capture work before it has an issue. Draft notes
+                          belong to this project.
+                        </p>
+                      )}
                     </TabsContent>
                   </Tabs>
                 ) : picked ? (
@@ -546,14 +564,17 @@ export function WorkspaceItemEditor({
             target={{ organization }}
             project={detail.project.id}
             draft={item}
-            onReviewed={(project, saved, useSaved) => {
-              setVersion(saved.version);
+            onReviewed={(project, current, useSaved) => {
+              setVersion(current.version);
               setDefinition(project.definition);
               if (useSaved) {
-                setItem(saved.item);
-                setRepository(saved.repository?.id ?? "");
-                setPicked(saved.work);
-                setMode(saved.item.subject ? "existing" : "draft");
+                saved.update({
+                  item: current.item,
+                  repository: current.repository?.id ?? "",
+                  work: current.work,
+                  mode: current.item.subject ? "existing" : "draft",
+                  restricted: !!current.restricted,
+                });
               }
             }}
           />
@@ -586,10 +607,10 @@ export function WorkspaceItemEditor({
               >
                 {commands.pending
                   ? "Saving…"
-                  : wasExisting
-                    ? "Save item"
-                    : mode === "issue"
-                      ? "Create issue"
+                  : mode === "issue"
+                    ? "Create issue"
+                    : wasExisting
+                      ? "Save item"
                       : "Add to project"}
               </Button>
             )}
