@@ -8,6 +8,7 @@ mod access;
 mod commands;
 mod history;
 mod issue_creation;
+mod policy;
 mod reads;
 use crate::cells::planning as ledger;
 pub(crate) use access::{AccessRole, AccessTarget, GetAccess};
@@ -15,6 +16,7 @@ pub(crate) use commands::{AttachmentCheck, Change, Command, Outcome, Request};
 pub(crate) use history::{GetHistory, HistoryQuery};
 pub(in crate::cells) use issue_creation::due;
 pub(crate) use issue_creation::{ResolveInput, ResolveIssue};
+pub(crate) use policy::{GetDefaultAccess, Preview as DefaultAccessPreview};
 pub(crate) use reads::{
     BulkSourceQuery, BulkSources, Get, GetAttachmentSources, Items, ItemsQuery, List, ListQuery,
     MatchedItems, ProjectKey, Sources, SourcesQuery, View, WorkSource,
@@ -203,6 +205,7 @@ pub(in crate::cells::organization) fn handles(operation: u32, mutation: bool) ->
                 | GetAttachmentSources::ID
                 | BulkSources::ID
                 | GetAccess::ID
+                | GetDefaultAccess::ID
         )
     }
 }
@@ -243,7 +246,12 @@ pub(in crate::cells::organization) fn authorize(
         if request.cancel && membership.is_some() {
             return Ok(());
         }
-        if !membership.is_some_and(|member| member.active) {
+        let Some(membership) = membership.filter(|member| member.active) else {
+            return Err(Error::AccessDenied);
+        };
+        if matches!(request.command, Command::SetDefaultAccess { .. })
+            && membership.role != Role::Owner
+        {
             return Err(Error::AccessDenied);
         }
         if let Some(id) = request.command.project() {
@@ -261,7 +269,9 @@ pub(in crate::cells::organization) fn authorize(
         }
         return Ok(());
     }
-    if !membership.is_some_and(|member| member.active) {
+    if !membership.is_some_and(|member| {
+        member.active && (operation != GetDefaultAccess::ID || member.role == Role::Owner)
+    }) {
         return Err(Error::AccessDenied);
     }
     if !matches!(operation, Get::ID | Items::ID | GetAccess::ID)

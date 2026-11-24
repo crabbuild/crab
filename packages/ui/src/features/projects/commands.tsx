@@ -206,7 +206,8 @@ export function ProjectCommandsProvider({
         const expected =
           command.kind === "parent" ||
           command.kind === "sub_issue" ||
-          command.kind === "reorder_sub_issue"
+          command.kind === "reorder_sub_issue" ||
+          command.kind === "set_default_access"
             ? null
             : command.kind === "create" || command.kind === "copy"
               ? command.id

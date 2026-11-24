@@ -4,6 +4,7 @@ const MAX_GRANTS: usize = 100;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS), ts(rename = "ProjectAccessRole"))]
 pub(crate) enum AccessRole {
     None,
     #[default]
@@ -30,14 +31,15 @@ struct MemberGrant {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Policy {
-    base: AccessRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    base: Option<AccessRole>,
     members: BTreeMap<Uuid, MemberGrant>,
     teams: BTreeMap<Uuid, AccessRole>,
 }
 
 impl Policy {
     pub(super) fn is_default(&self) -> bool {
-        self.base == AccessRole::Read && self.members.is_empty() && self.teams.is_empty()
+        self.base.is_none() && self.members.is_empty() && self.teams.is_empty()
     }
 
     pub(super) fn valid(&self) -> bool {
@@ -56,17 +58,26 @@ impl Policy {
         context: &Transaction<'_>,
         administrator: Uuid,
         target: AccessTarget,
-        role: AccessRole,
+        role: Option<AccessRole>,
+        default_version: Option<u64>,
     ) -> Result<Option<&'static str>> {
-        match target {
-            AccessTarget::Base => self.base = role,
-            AccessTarget::Member { id } if role == AccessRole::None => {
+        match (target, role) {
+            (AccessTarget::Base, role) => {
+                if role.is_none() && default_version != Some(policy::load(context)?.version) {
+                    return Ok(Some(
+                        "The organization default changed. Refresh before using it.",
+                    ));
+                }
+                self.base = role;
+            }
+            (_, None) => return Ok(Some("Choose a role for this collaborator")),
+            (AccessTarget::Member { id }, Some(AccessRole::None)) => {
                 self.members.remove(&id);
             }
-            AccessTarget::Team { id } if role == AccessRole::None => {
+            (AccessTarget::Team { id }, Some(AccessRole::None)) => {
                 self.teams.remove(&id);
             }
-            AccessTarget::Member { id } => {
+            (AccessTarget::Member { id }, Some(role)) => {
                 actor(id)?;
                 if !member(context, id)?.is_some_and(|member| member.active) {
                     return Ok(Some("Choose an active organization member"));
@@ -79,7 +90,7 @@ impl Policy {
                     },
                 );
             }
-            AccessTarget::Team { id } => {
+            (AccessTarget::Team { id }, Some(role)) => {
                 if teams::view(context, administrator, id)?.is_none() {
                     return Ok(Some("Choose an available organization team"));
                 }
@@ -95,6 +106,7 @@ pub(super) struct Viewer {
     epoch: u64,
     owner: bool,
     teams: Vec<Uuid>,
+    default_role: AccessRole,
 }
 
 impl Viewer {
@@ -111,6 +123,7 @@ impl Viewer {
             person,
             epoch: epoch(context, person)?,
             owner,
+            default_role: policy::load(context)?.role,
             teams: if include_teams && !owner {
                 teams::active_ids(context, person)?
             } else {
@@ -129,7 +142,7 @@ impl Viewer {
             .members
             .get(&self.person)
             .filter(|grant| grant.epoch == self.epoch)
-            .map_or(policy.base, |grant| grant.role);
+            .map_or(policy.base.unwrap_or(self.default_role), |grant| grant.role);
         self.teams
             .iter()
             .filter_map(|id| policy.teams.get(id))
@@ -150,6 +163,9 @@ pub(crate) struct GrantView {
 pub(crate) struct AccessView {
     pub version: u64,
     pub base: AccessRole,
+    pub base_override: Option<AccessRole>,
+    pub default_role: AccessRole,
+    pub default_version: u64,
     pub grants: Vec<GrantView>,
 }
 
@@ -168,6 +184,7 @@ impl Read for GetAccess {
             return Err(Error::AccessDenied);
         }
         let policy = project.access;
+        let default = super::policy::load(context)?;
         let mut grants = Vec::new();
         for (id, grant) in policy.members {
             let active = member(context, id)?.is_some_and(|member| member.active)
@@ -191,7 +208,10 @@ impl Read for GetAccess {
         }
         Ok(Some(AccessView {
             version: project.version,
-            base: policy.base,
+            base: policy.base.unwrap_or(default.role),
+            base_override: policy.base,
+            default_role: default.role,
+            default_version: default.version,
             grants,
         }))
     }

@@ -1,4 +1,4 @@
-use super::{actor, issue_types, read_error};
+use super::{actor, issue_types, read_error, target};
 use crate::{
     api::write::ResponseError,
     app::{self, Error, Result},
@@ -35,6 +35,10 @@ mod work;
 pub(super) fn routes() -> Router<Arc<Server>> {
     Router::new()
         .route("/api/organizations/{id}/projects", get(list))
+        .route(
+            "/api/organizations/{id}/project-policy",
+            get(default_access),
+        )
         .route("/api/organizations/{id}/projects/commands", post(change))
         .route("/api/organizations/{id}/projects/cancel", post(cancel))
         .route("/api/organizations/{id}/projects/{project}", get(detail))
@@ -59,6 +63,25 @@ pub(super) fn routes() -> Router<Arc<Server>> {
             get(candidates),
         )
         .layer(axum::extract::DefaultBodyLimit::max(96 * 1024))
+}
+async fn default_access(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<projects::DefaultAccessPreview>> {
+    let actor = actor(&server, &principal).await?;
+    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    let preview = cells
+        .query::<projects::GetDefaultAccess>(
+            target(id)?,
+            None,
+            crate::cells::organization::Caller { actor },
+        )
+        .await
+        .map_err(read_error)?
+        .output;
+    app::account(&principal)?;
+    Ok(Json(preview))
 }
 async fn access(
     State(server): State<Arc<Server>>,

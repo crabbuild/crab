@@ -408,9 +408,12 @@ from the owned Calendar, Popover and Select. Dates remain nullable `YYYY-MM-DD`
 civil dates; selecting or clearing a date never converts it through UTC. Start
 and target controls constrain each other, and the native API validates ranges.
 
-Current organization members can read and create projects; the creator in their
-current membership incarnation and organization owners manage them. Project
-access grants no source repository access. Inaccessible work is redacted, and
+Current organization members can create Projects. Organization owners set the
+default access in **Settings** → **Project policy**. Project administrators can
+inherit that default or set a base role and individual or team grants in
+**Manage access**. The creator in their original membership incarnation and
+organization owners retain administrative access. Project access grants no
+source repository access. Inaccessible work is redacted, and
 repository UUIDs prevent name reuse from redirecting project references. Source
 permissions are refreshed after enrichment; native organization authority is
 checked again before returning a composed response.
@@ -424,8 +427,8 @@ already-linked message.
 
 Shared projects link existing work and support draft notes. Source creation,
 draft conversion, title/state saved filters and custom project templates remain
-repository-scoped. Linking does not migrate repository projects or grant team
-access. Workflow automation and cross-organization/personal project discovery are
+repository-scoped. Linking does not migrate repository projects. Workflow
+automation and cross-organization/personal project discovery are
 separate features. Preparation and API contracts are in
 `crates/crab-server/CELLAR.md`; browser proof is
 `tests/browser/project-workspaces.e2e.ts`.

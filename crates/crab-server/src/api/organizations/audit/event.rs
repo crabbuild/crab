@@ -29,6 +29,7 @@ pub(in crate::api) enum AuditAction {
     TeamMembership,
     TeamCreationPolicy,
     RepositoryPolicyChanged,
+    ProjectPolicyChanged,
     RepositoryRegistered,
     RepositoryAccessChanged,
     RepositoryTransferredIn,
@@ -82,6 +83,16 @@ impl From<organization::Event> for RawEvent {
         event.action = match value.action {
             Action::Created => AuditAction::OrganizationCreated,
             Action::RepositoryPolicyChanged => AuditAction::RepositoryPolicyChanged,
+            Action::ProjectPolicyChanged {
+                before,
+                after,
+                affected_projects,
+            } => {
+                event.detail = Some(format!(
+                    "{before:?} → {after:?} · {affected_projects} Projects"
+                ));
+                AuditAction::ProjectPolicyChanged
+            }
             Action::Automation { identity, action } => {
                 use organization::automation::Audit;
                 let label = match action {

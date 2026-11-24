@@ -28,7 +28,15 @@ pub(crate) enum Command {
         project: Uuid,
         version: u64,
         target: AccessTarget,
+        #[serde(deserialize_with = "Option::<AccessRole>::deserialize")]
+        role: Option<AccessRole>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default_version: Option<u64>,
+    },
+    SetDefaultAccess {
+        version: u64,
         role: AccessRole,
+        scope: String,
     },
     Planning {
         project: Uuid,
@@ -66,7 +74,7 @@ pub(crate) enum Command {
 impl Command {
     pub(super) fn project(&self) -> Option<Uuid> {
         match self {
-            Self::Create { .. } => None,
+            Self::Create { .. } | Self::SetDefaultAccess { .. } => None,
             Self::Edit { project, .. }
             | Self::ColumnLimit { project, .. }
             | Self::ReorderViews { project, .. }
@@ -86,6 +94,7 @@ impl Command {
             | Self::ColumnLimit { version, .. }
             | Self::ReorderViews { version, .. }
             | Self::SetAccess { version, .. }
+            | Self::SetDefaultAccess { version, .. }
             | Self::Planning { version, .. }
             | Self::Repository { version, .. }
             | Self::Item { version, .. }
@@ -220,6 +229,22 @@ fn apply_command(
     input: &Request,
     command: &Command,
 ) -> Result<MutationResult<Outcome>> {
+    if let Command::SetDefaultAccess {
+        version,
+        role,
+        scope,
+    } = command
+    {
+        return match policy::change(context, input.actor, *version, *role, scope)? {
+            Some(version) => Ok(MutationResult::Success(Outcome::Applied {
+                project: None,
+                version,
+            })),
+            None => Ok(rejected(
+                "The default role or affected Projects changed. Review the current settings before saving.",
+            )),
+        };
+    }
     if let Command::BulkFields { project, items } = command {
         return apply_bulk(context, input, *project, items);
     }
@@ -366,10 +391,16 @@ fn apply_command(
                 return Ok(rejected("Include each saved Project view exactly once"));
             }
         }
-        Command::SetAccess { target, role, .. } => {
-            if let Some(reason) = project
-                .access
-                .change(context, input.actor, *target, *role)?
+        Command::SetAccess {
+            target,
+            role,
+            default_version,
+            ..
+        } => {
+            if let Some(reason) =
+                project
+                    .access
+                    .change(context, input.actor, *target, *role, *default_version)?
             {
                 return Ok(rejected(reason));
             }
@@ -568,7 +599,7 @@ fn apply_command(
             };
             before = Some(history::item_snapshot(&old.item)?);
         }
-        Command::Create { .. } | Command::BulkFields { .. } => {
+        Command::Create { .. } | Command::BulkFields { .. } | Command::SetDefaultAccess { .. } => {
             return Err(Error::Invalid("project create reached item dispatch"));
         }
     }

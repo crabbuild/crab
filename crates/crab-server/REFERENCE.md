@@ -2979,9 +2979,14 @@ Both Project command endpoints accept `reorder_views` with `project`,
 `version`, and `order`, a list containing every saved view UUID exactly once.
 The command updates the view order and records it in Project history.
 
+Organization owners can change **Default Project access** under organization
+**Settings** → **Project policy**. It starts at **Read**. The confirmation shows
+how many existing Projects inherit the default. The change also applies to new
+Projects. Projects with explicit base roles keep them.
+
 In an organization Project, **Manage access** lets Project administrators set
-the base role and grant **Read**, **Write**, or **Admin** to current members and
-teams. The base role starts at **Read**. Setting it to **No access** hides the
+an explicit base role, select **Organization default**, or grant **Read**,
+**Write**, or **Admin** to current members and teams. **No access** hides the
 Project from members without a grant. A current direct grant takes precedence
 over the base role. Active team memberships can add access. Organization
 owners and the creator's original membership retain administrative access.
@@ -2990,12 +2995,20 @@ access and opening or archiving the Project. Linked issues and PRs still follow
 their repository permissions.
 
 Project admins can call `GET /api/organizations/{id}/projects/{project}/access`
-to read the base role, grants, and Project version. Post `set_access` to the
-organization Project command endpoint with `project`, `version`, `target`
-(`{kind:"base"}`, `{kind:"member",id}`, or `{kind:"team",id}`) and `role`
-(`none`, `read`, `write`, or `admin`). `none` removes a member or team grant.
+to read the effective base role, optional override, organization default and
+its version, grants, and Project version. Post `set_access` to the organization
+Project command endpoint with `project`, `version`, `target` (`{kind:"base"}`,
+`{kind:"member",id}`, or `{kind:"team",id}`) and `role` (`none`, `read`, `write`,
+or `admin`). For a base role, pass `role: null` and the displayed `default_version`
+to inherit the current default. `none` removes a member or team grant.
 A Project supports up to 100 explicit grants. A grant to a member expires when
 that membership ends. Team grants check the active roster on every operation.
+
+Organization owners can call `GET /api/organizations/{id}/project-policy` for
+the current `role`, `version`, `affected_projects` count, and opaque `scope`.
+Submit `set_default_access` with the new `role` and the displayed `version`
+and `scope`. A different set of inheriting Projects or changed default requires
+a fresh confirmation. A successful change appears in the organization audit log.
 Upgrade all serving peers before saving Project access policies.
 
 With source repository triage access, drag an issue to another type group in

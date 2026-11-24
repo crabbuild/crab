@@ -1,5 +1,5 @@
 import type { Repository } from "@/lib/api";
-import type { IssueType } from "@/lib/contracts";
+import type { IssueType, ProjectAccessRole } from "@/lib/contracts";
 import type { Command, Item, Project } from "../model";
 
 export type LinkedRepository = Pick<Repository, "id" | "owner" | "name"> & {
@@ -36,12 +36,21 @@ export interface Detail {
   issue_types?: IssueType[];
   lead: { id: string; handle: string; name: string } | null;
 }
-export type AccessRole = "none" | "read" | "write" | "admin";
+export type AccessRole = ProjectAccessRole;
+export const projectAccessRoles = {
+  none: "No access",
+  read: "Read",
+  write: "Write",
+  admin: "Admin",
+} satisfies Record<AccessRole, string>;
 export type GrantTarget = { kind: "member" | "team"; id: string };
 export type AccessTarget = { kind: "base" } | GrantTarget;
 export interface ProjectAccessView {
   version: number;
   base: AccessRole;
+  base_override: AccessRole | null;
+  default_role: AccessRole;
+  default_version: number;
   grants: {
     target: GrantTarget;
     role: AccessRole;
@@ -67,7 +76,14 @@ export type WorkspaceCommand =
       project: string;
       version: number;
       target: AccessTarget;
+      role: AccessRole | null;
+      default_version?: number;
+    }
+  | {
+      kind: "set_default_access";
+      version: number;
       role: AccessRole;
+      scope: string;
     }
   | {
       kind: "create_issue";

@@ -41,6 +41,7 @@ import { OrganizationIssueTypes } from "./issue-types";
 import { organizationHref } from "./directory";
 import { TeamPicker } from "@/features/settings/team-picker";
 import { RepositoryPolicySettings } from "./repository-policy";
+import { ProjectPolicySettings } from "./project-policy";
 export { OrganizationInvitation } from "./invitations";
 
 const adminTabs = [
@@ -234,6 +235,7 @@ export function OrganizationPage({
                     }}
                   />
                   <RepositoryPolicySettings organization={id} csrf={csrf} />
+                  <ProjectPolicySettings organization={id} />
                 </div>
               ) : (
                 <div className="notice error" role="alert">

@@ -8,6 +8,7 @@ import type {
   MemberRepositoryAccess,
   OrganizationMembership,
   Organization,
+  OrganizationProjectPolicy,
   OrganizationRole,
 } from "@/lib/contracts";
 
@@ -24,6 +25,7 @@ async function fixture(page: Page) {
     writes: unknown[];
     fail: boolean;
     metadataVisible: boolean;
+    projectPolicy: OrganizationProjectPolicy;
     policy: {
       version: number;
       member_creation: boolean;
@@ -51,6 +53,12 @@ async function fixture(page: Page) {
     writes: [],
     fail: false,
     metadataVisible: true,
+    projectPolicy: {
+      version: 0,
+      role: "read",
+      affected_projects: 1,
+      scope: "fixture-scope",
+    },
     policy: { version: 0, member_creation: false, baseline: null },
   };
   await page.route("**/api/**", async (route) => {
@@ -86,6 +94,29 @@ async function fixture(page: Page) {
         });
     }
     const base = `/api/organizations/${id}`;
+    if (path === `${base}/project-policy`)
+      return route.fulfill({ json: state.projectPolicy });
+    if (path === `${base}/projects/commands` && method === "POST") {
+      const { command } = request.postDataJSON();
+      expect(command.kind).toBe("set_default_access");
+      const { version, scope } = state.projectPolicy;
+      if (command.version !== version || command.scope !== scope)
+        return route.fulfill({
+          json: {
+            outcome: "rejected",
+            reason:
+              "The default role or affected Projects changed. Review the current settings before saving.",
+          },
+        });
+      state.projectPolicy = {
+        ...state.projectPolicy,
+        role: command.role,
+        version: version + 1,
+      };
+      return route.fulfill({
+        json: { outcome: "applied", project: null, version: version + 1 },
+      });
+    }
     if (path === `${base}/repository-policy`) {
       if (method === "PUT") {
         const input = request.postDataJSON();
@@ -236,6 +267,48 @@ test("organization owners save repository policy from settings", async ({
     baseline: "read",
   });
   await expectNoAccessibilityViolations(page);
+});
+
+test("organization Project policy requires a new confirmation when the inheriting set changes", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  await page.goto(`${root}?tab=settings`);
+  const access = page.getByRole("combobox", { name: "Default Project access" });
+  const review = page.getByRole("button", { name: "Review change" });
+  const dialog = page.getByRole("dialog", {
+    name: "Change default Project access?",
+  });
+  const confirm = dialog.getByRole("button", {
+    name: "Change default to No access",
+  });
+
+  await access.click();
+  await page.getByRole("option", { name: "No access", exact: true }).click();
+  await review.click();
+  await expect(dialog).toContainText("This affects 1 existing Project");
+  expect(state.writes).toHaveLength(0);
+  state.projectPolicy = {
+    ...state.projectPolicy,
+    affected_projects: 2,
+    scope: "updated-scope",
+  };
+  await confirm.click();
+  await expect(
+    page.getByRole("region", { name: "Project policy" }).getByRole("alert"),
+  ).toContainText("affected Projects changed");
+  await expect(access).toHaveText("Read");
+  expect(state.projectPolicy.role).toBe("read");
+
+  await access.click();
+  await page.getByRole("option", { name: "No access", exact: true }).click();
+  await review.click();
+  await expect(dialog).toContainText("This affects 2 existing Projects");
+  await confirm.click();
+  await expect.poll(() => state.projectPolicy.role).toBe("none");
+  await expect(access).toHaveText("No access");
+  await expect(access).toBeEnabled();
+  await expect(review).toBeDisabled();
 });
 
 test("owners see identity-provider management and blocked access in People", async ({

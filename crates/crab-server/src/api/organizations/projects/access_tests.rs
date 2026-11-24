@@ -192,6 +192,201 @@ async fn project_grants_follow_active_membership_and_hide_private_projects() {
     h.close().await;
 }
 
+#[tokio::test]
+async fn organization_project_policy_binds_confirmation_to_the_inheriting_set() {
+    let h = Harness::new(false).await;
+    let (organization, _, member) = bootstrap(&h).await;
+    let alice = h.login().await;
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    let root = format!("/api/organizations/{organization}");
+    join(&h, &root, &alice, &bob, member, 0).await;
+    let (first, second) = (Uuid::now_v7(), Uuid::now_v7());
+    for (id, name) in [(first, "First plan"), (second, "Second plan")] {
+        assert_eq!(
+            project_command(
+                &h,
+                &root,
+                &alice,
+                json!({"kind":"create","id":id,"name":name,"template":"board"})
+            )
+            .await["outcome"],
+            "applied"
+        );
+    }
+    let base = |project: Uuid, version: u64, role: Value, default_version: Option<u64>| {
+        json!({
+            "kind":"set_access","project":project,"version":version,"target":{"kind":"base"},"role":role,"default_version":default_version
+        })
+    };
+    assert_eq!(
+        project_command(&h, &root, &alice, base(second, 1, json!("read"), None)).await["outcome"],
+        "applied"
+    );
+    let policy = format!("{root}/project-policy");
+    assert_eq!(
+        h.http
+            .get(format!("{}{policy}", h.origin))
+            .header("cookie", &bob)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let stale = h.json(&policy, &alice).await;
+    assert_eq!(stale["affected_projects"], 1);
+    assert_eq!(
+        project_command(&h, &root, &alice, base(first, 1, json!("read"), None)).await["outcome"],
+        "applied"
+    );
+    assert_eq!(
+        project_command(&h, &root, &alice, base(second, 2, Value::Null, Some(0))).await["outcome"],
+        "applied"
+    );
+    let current = h.json(&policy, &alice).await;
+    assert_eq!(current["affected_projects"], stale["affected_projects"]);
+    assert_ne!(current["scope"], stale["scope"]);
+    let change = |displayed: &Value| json!({"kind":"set_default_access","version":displayed["version"],"role":"none","scope":displayed["scope"]});
+    assert_eq!(
+        project_command(&h, &root, &alice, change(&stale)).await["outcome"],
+        "rejected"
+    );
+    let submission = json!({"request_id":Uuid::now_v7(), "command":change(&current)});
+    let path = format!("{root}/projects/commands");
+    assert_eq!(
+        h.write(Method::POST, &path, &bob, submission.clone())
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    for _ in 0..2 {
+        let receipt = h
+            .write(Method::POST, &path, &alice, submission.clone())
+            .await
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(
+            receipt,
+            json!({"outcome":"applied","project":null,"version":1})
+        );
+    }
+    let third = Uuid::now_v7();
+    assert_eq!(
+        project_command(
+            &h,
+            &root,
+            &alice,
+            json!({"kind":"create","id":third,"name":"New plan","template":"table"})
+        )
+        .await["outcome"],
+        "applied"
+    );
+    let listing = h.json(&format!("{root}/projects"), &bob).await;
+    assert_eq!(listing["items"].as_array().unwrap().len(), 1);
+    assert_eq!(listing["items"][0]["id"], json!(first));
+    for id in [second, third] {
+        let read = h
+            .http
+            .get(format!("{}{root}/projects/{id}", h.origin))
+            .header("cookie", &bob)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(read.status(), StatusCode::NOT_FOUND);
+    }
+    assert_eq!(
+        project_command(&h, &root, &alice, base(first, 2, Value::Null, Some(0))).await["outcome"],
+        "rejected"
+    );
+    assert_eq!(
+        project_command(&h, &root, &alice, base(first, 2, Value::Null, Some(1))).await["outcome"],
+        "applied"
+    );
+    assert_eq!(
+        h.json(&format!("{root}/projects"), &bob).await["items"],
+        json!([])
+    );
+    let audit = h
+        .json(
+            &format!("{root}/audit-log?action=project_policy_changed"),
+            &alice,
+        )
+        .await;
+    assert_eq!(audit["items"].as_array().unwrap().len(), 1);
+    assert_eq!(audit["items"][0]["action"], "project_policy_changed");
+    assert!(
+        audit["items"][0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("Read → None")
+    );
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires agent-browser and the built embedded UI"]
+async fn native_browser_confirms_the_organization_project_default_and_affected_count() {
+    use crate::test_support::http::browser::Browser;
+    let h = Harness::new(false).await;
+    let (organization, _, _) = bootstrap(&h).await;
+    let alice = h.login().await;
+    let root = format!("/api/organizations/{organization}");
+    let (project, _) = create(&h, &root, &alice).await;
+    let browser = Browser::new("project-default-access");
+    browser.run(&["set", "viewport", "1280", "900"]).await;
+    browser
+        .run(&[
+            "open",
+            &format!("{}/-/organizations/{organization}?tab=settings", h.origin),
+        ])
+        .await;
+    browser.sign_in().await;
+    let selector = "[aria-label='Default Project access']";
+    browser.run(&["wait", selector]).await;
+    browser.choose_select(selector, "none").await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Review change",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", "--text", "This affects 1 existing Project"])
+        .await;
+    assert_eq!(
+        h.json(&format!("{root}/project-policy"), &alice).await["role"],
+        "read"
+    );
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Change default to No access",
+            "--exact",
+        ])
+        .await;
+    browser.run(&["wait", "--fn", "document.querySelector('[aria-label=\"Default Project access\"]')?.textContent.trim() === 'No access' && [...document.querySelectorAll('button')].some(button => button.textContent.trim() === 'Review change' && button.disabled)"]).await;
+    let detail = h
+        .json(&format!("{root}/projects/{project}/access"), &alice)
+        .await;
+    assert_eq!(detail["base"], "none");
+    assert_eq!(detail["base_override"], Value::Null);
+    drop(browser);
+    h.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires agent-browser and the built embedded UI"]
 async fn native_browser_grants_an_organization_team_project_write_access() {

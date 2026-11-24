@@ -15,6 +15,7 @@ import type { OrganizationMembers, TeamListing } from "@/lib/contracts";
 import { short } from "@/lib/format";
 import { CommandError, useProjectCommands } from "../commands";
 import { projectEndpoint, type Project } from "../model";
+import { projectAccessRoles } from "./model";
 import type {
   AccessRole,
   AccessTarget,
@@ -23,7 +24,6 @@ import type {
 } from "./model";
 
 const grantRoles = { read: "Read", write: "Write", admin: "Admin" };
-const baseRoles = { none: "No access", ...grantRoles };
 
 export function ProjectAccess({
   organization,
@@ -45,13 +45,19 @@ export function ProjectAccess({
       resource.retry();
     }
   }, [commands.generation, resource.retry]);
-  async function save(version: number, target: AccessTarget, role: AccessRole) {
+  async function save(
+    version: number,
+    target: AccessTarget,
+    role: AccessRole | null,
+    defaultVersion?: number,
+  ) {
     const outcome = await commands.submitOrganization(organization, {
       kind: "set_access",
       project: project.id,
       version,
       target,
       role,
+      ...(role === null ? { default_version: defaultVersion } : {}),
     });
     if (outcome?.outcome === "rejected") resource.retry();
   }
@@ -75,11 +81,16 @@ export function ProjectAccess({
           {(data) => (
             <div className="grid gap-5">
               <BaseRole
-                key={`base-${data.version}`}
+                key={`base-${data.version}-${data.default_version}`}
                 access={data}
                 disabled={commands.locked}
                 onSave={(role) =>
-                  void save(data.version, { kind: "base" }, role)
+                  void save(
+                    data.version,
+                    { kind: "base" },
+                    role,
+                    data.default_version,
+                  )
                 }
               />
               <AddGrant
@@ -159,31 +170,36 @@ function BaseRole({
 }: {
   access: ProjectAccessView;
   disabled: boolean;
-  onSave: (role: AccessRole) => void;
+  onSave: (role: AccessRole | null) => void;
 }) {
-  const [role, setRole] = useState(access.base);
+  const [role, setRole] = useState(access.base_override);
   return (
     <form
       className="grid gap-2 border-b pb-4"
       onSubmit={(event) => {
         event.preventDefault();
-        if (role !== access.base) onSave(role);
+        if (role !== access.base_override) onSave(role);
       }}
     >
-      <h3 className="text-sm font-medium">Default organization access</h3>
+      <h3 className="text-sm font-medium">Access for organization members</h3>
       <div className="flex flex-wrap items-center gap-2">
         <FieldSelect
           label="Base role"
-          options={baseRoles}
-          value={role}
+          options={{
+            inherit: `Organization default (${projectAccessRoles[access.default_role]})`,
+            ...projectAccessRoles,
+          }}
+          value={role ?? "inherit"}
           disabled={disabled}
-          onValueChange={(value) => setRole(value as AccessRole)}
+          onValueChange={(value) =>
+            setRole(value === "inherit" ? null : (value as AccessRole))
+          }
         />
         <Button
           type="submit"
           size="sm"
           variant="outline"
-          disabled={disabled || role === access.base}
+          disabled={disabled || role === access.base_override}
         >
           Save base role
         </Button>

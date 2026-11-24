@@ -210,6 +210,11 @@ pub(crate) enum Action {
         member_creation: bool,
     },
     RepositoryPolicyChanged,
+    ProjectPolicyChanged {
+        before: projects::AccessRole,
+        after: projects::AccessRole,
+        affected_projects: usize,
+    },
     Edited {
         name: bool,
         description: bool,
@@ -465,6 +470,7 @@ pub(in crate::cells) fn dispatch_read(
         projects::GetPreparation::ID => invoke_read::<projects::GetPreparation>(context, input),
         projects::GetHistory::ID => invoke_read::<projects::GetHistory>(context, input),
         projects::GetAccess::ID => invoke_read::<projects::GetAccess>(context, input),
+        projects::GetDefaultAccess::ID => invoke_read::<projects::GetDefaultAccess>(context, input),
         projects::List::ID => invoke_read::<projects::List>(context, input),
         development::List::ID => invoke_read::<development::List>(context, input),
         development::Get::ID => invoke_read::<development::Get>(context, input),
