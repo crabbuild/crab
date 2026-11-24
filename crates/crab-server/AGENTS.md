@@ -142,6 +142,9 @@ Capsule plan. Retry reads its durable branch receipt before checking live tips.
 `git/receive/recent_pushes.rs` records candidates before Git publication.
 `api/pulls/recent_pushes.rs` checks committed receipts and live ref transactions
 before offering comparison links. Intent recording is advisory for Git receive.
+`pulls/branch.rs` owns open-comparison lookup by repository-qualified head and
+base. PR creation checks it inside the Cell transaction and records duplicate
+rejections through the existing submission ledger.
 `pulls/viewed.rs` owns actor-scoped review progress,
 bound to stable comparison file identities. Browse projection reads and
 writes belong to `projection/`. `dispatch.rs` alone decodes operation IDs. `search/` owns the shared issue/PR

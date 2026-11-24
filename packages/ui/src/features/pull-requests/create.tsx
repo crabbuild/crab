@@ -112,6 +112,22 @@ export function NewPull({
   const comparison = usePullComparison(headRepo, base, head, fork && repo.id);
   const preview = comparison.data;
   const canSubmit = Boolean(preview && preview.base !== preview.commit);
+  const openComparison = useRequest<{ pull_number: number | null }>(
+    canCreate && comparable
+      ? endpoint(repo, "pulls/open-comparison", {
+          base_ref: base,
+          head_ref: head,
+          head_repository: fork?.repo.id,
+        })
+      : null,
+    repo.id,
+  );
+  const existingPull =
+    creation.recovering || creation.pending
+      ? undefined
+      : (creation.existingPull ??
+        openComparison.data?.pull_number ??
+        undefined);
   const requestedTemplate = url.searchParams.get("template");
   const templates = useRequest<PullTemplates>(
     canCreate && comparable ? endpoint(repo, "pulls/templates") : null,
@@ -200,6 +216,36 @@ export function NewPull({
         </div>
       ) : (
         <>
+          {existingPull && (
+            <div className="notice flex flex-wrap items-center gap-2">
+              {!creation.existingPull && (
+                <p role="status">
+                  A pull request is already open for these branches.
+                </p>
+              )}
+              <Button asChild variant="outline" size="sm">
+                <Link
+                  href={repoHref(repo, {
+                    view: "pulls",
+                    pull: String(existingPull),
+                    repository_id: repo.id,
+                  })}
+                >
+                  View pull request #{existingPull}
+                </Link>
+              </Button>
+              {!creation.locked && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={openComparison.retry}
+                >
+                  Check again
+                </Button>
+              )}
+            </div>
+          )}
           {canCreate && (!fork || canSubmit || creation.locked) && (
             <>
               <h3>
@@ -263,11 +309,12 @@ export function NewPull({
                 onReview={() => {
                   creation.review();
                   comparison.retry();
+                  openComparison.retry();
                 }}
                 onSubmit={(event) => {
                   event.preventDefault();
                   if (
-                    (!canSubmit || awaitingDescription) &&
+                    (!canSubmit || awaitingDescription || existingPull) &&
                     !creation.recovering
                   )
                     return;
@@ -297,6 +344,7 @@ export function NewPull({
                       creation.rejected ||
                       !title.trim() ||
                       awaitingDescription ||
+                      Boolean(existingPull) ||
                       (!canSubmit && !creation.recovering)
                     }
                   >

@@ -320,6 +320,9 @@ pub(in crate::cells) fn dispatch_read(
         pull_branch::HasPullForPush::ID => {
             invoke_read::<pull_branch::HasPullForPush>(context, input)
         }
+        pull_branch::FindOpenComparison::ID => {
+            invoke_read::<pull_branch::FindOpenComparison>(context, input)
+        }
         attachments::Get::ID => invoke_read::<attachments::Get>(context, input),
         attachments::Due::ID => invoke_read::<attachments::Due>(context, input),
         mentions::Pending::ID => invoke_read::<mentions::Pending>(context, input),

@@ -41,6 +41,7 @@ mod git;
 pub(super) use git::review_head;
 mod merge;
 mod merge_methods;
+mod open_comparison;
 mod readiness;
 mod recent_pushes;
 pub(in crate::api) mod reopen;
@@ -113,6 +114,10 @@ fn same_author(left: &Identity, right: &Identity) -> bool {
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .route("/api/repos/{owner}/{name}/pulls", get(list).post(create))
+        .route(
+            "/api/repos/{owner}/{name}/pulls/open-comparison",
+            get(open_comparison::find),
+        )
         .route(
             "/api/repos/{owner}/{name}/pulls/recent-pushes",
             get(recent_pushes::list),
@@ -993,6 +998,12 @@ async fn create(
     };
     let pull = match result {
         Err(Error::CreationRejected(reason)) => {
+            if matches!(
+                reason,
+                crate::cells::repository::collaboration::creation::Failure::ExistingPull(_)
+            ) {
+                app::membership(&server, &principal, &repo).await?;
+            }
             return Ok(super::write::rejected(Error::CreationRejected(reason)));
         }
         other => other?,

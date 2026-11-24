@@ -69,6 +69,7 @@ pub(crate) enum Failure {
     Assignees,
     Milestone,
     ComparisonChanged,
+    ExistingPull(u64),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

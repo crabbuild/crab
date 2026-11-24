@@ -3851,6 +3851,20 @@ base tip and head from that preview when creating the pull request. If either
 tip changes before submission, the API rejects the request before creating a
 pull, and **Review inputs** refreshes the comparison while keeping the draft.
 
+The composer checks for an open or draft PR for the selected source repository,
+head branch, and base branch. **View pull request** opens that review. The
+Repository Cell repeats the same check when creating a PR, so concurrent
+submissions can create only one new review for that comparison. Different base
+branches and forks are independent. A comparison becomes available when it has
+no open PR.
+
+`GET .../pulls/open-comparison` accepts `base_ref`, `head_ref`, and optional
+`head_repository`, and returns a nullable `pull_number`. A duplicate creation
+returns HTTP 409 with error code `open_pull_exists`, the existing
+`error.pull_number`, and the terminal write rejection marker. Repeating that
+submission recovers its original decision, including after the other PR closes.
+The browser preserves the draft and links to the existing review.
+
 The opt-in real-change fixture takes the base, head and common-ancestor trees
 from pinned Next.js and Neovim commits and publishes them as short divergent
 histories. It checks every changed path, mode and object ID against stock Git,

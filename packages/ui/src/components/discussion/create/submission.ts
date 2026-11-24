@@ -67,6 +67,7 @@ export function useCreateSubmission<T>({
     pending: mutation.pending,
     locked: Boolean(attempt),
     error: validation ?? mutation.error,
+    existingPull: mutation.existingPull,
     recovering: Boolean(attempt && mutation.error && !mutation.rejected),
     rejected: Boolean(attempt && mutation.rejected),
     review() {

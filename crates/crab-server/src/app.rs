@@ -779,6 +779,11 @@ impl IntoResponse for Error {
                     "comparison_changed",
                     "A branch moved or was deleted. Review the updated comparison before creating the pull request",
                 ),
+                crate::cells::repository::collaboration::creation::Failure::ExistingPull(_) => (
+                    StatusCode::CONFLICT,
+                    "open_pull_exists",
+                    "A pull request is already open for these branches",
+                ),
             },
             Self::ReviewIndexPending => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -856,11 +861,14 @@ impl IntoResponse for Error {
             ),
         };
 
-        (
-            status,
-            Json(json!({"error":{"code":code,"message":message}})),
-        )
-            .into_response()
+        let mut error = json!({"code":code,"message":message});
+        if let Self::CreationRejected(
+            crate::cells::repository::collaboration::creation::Failure::ExistingPull(number),
+        ) = self
+        {
+            error["pull_number"] = json!(number);
+        }
+        (status, Json(json!({"error": error}))).into_response()
     }
 }
 

@@ -68,6 +68,18 @@ fn write_pull(
         base_oid: input.base_oid.clone(),
         head_oid: input.head_oid.clone(),
     });
+    // Creation is one Cell transaction. The committed index and the new
+    // pull's projection advance together, so concurrent authors see one winner.
+    let rejection = match rejection {
+        Some(reason) => Some(reason),
+        None => branch::open_for_comparison(
+            context,
+            &input.base_ref,
+            &input.head_ref,
+            input.head_repository,
+        )?
+        .map(creation::Failure::ExistingPull),
+    };
     match input.metadata.resolve(
         context,
         SubjectKind::Pull,
