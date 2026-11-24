@@ -34,6 +34,10 @@ import {
 } from "./actions";
 import { EmailNotifications } from "./email";
 import { IncomingTransfers, transfersHref } from "./incoming-transfers";
+import {
+  OrganizationDirectory,
+  organizationInvitationsHref,
+} from "@/features/organizations/directory";
 
 export { refreshNotificationBadge } from "./actions";
 
@@ -172,6 +176,8 @@ export function Notifications({
 }) {
   const tab = url.searchParams.get("tab");
   const transfers = tab === "transfers";
+  const invitations = tab === "organization-invitations";
+  const discussions = !transfers && !invitations;
   const view = isView(tab) ? tab : "unread";
   const repository = url.searchParams.get("repository") ?? "";
   const selectedReason = url.searchParams.get("reason");
@@ -192,12 +198,12 @@ export function Notifications({
               <Button
                 key={item}
                 asChild
-                variant={!transfers && view === item ? "secondary" : "ghost"}
+                variant={discussions && view === item ? "secondary" : "ghost"}
               >
                 <Link
                   href={inboxHref(item, repository, reason)}
                   aria-current={
-                    !transfers && view === item ? "page" : undefined
+                    discussions && view === item ? "page" : undefined
                   }
                 >
                   {views[item].label}
@@ -210,6 +216,14 @@ export function Notifications({
               aria-current={transfers ? "page" : undefined}
             >
               Repository transfers
+            </Link>
+          </Button>
+          <Button asChild variant={invitations ? "secondary" : "ghost"}>
+            <Link
+              href={organizationInvitationsHref}
+              aria-current={invitations ? "page" : undefined}
+            >
+              Organization invitations
             </Link>
           </Button>
         </nav>
@@ -226,18 +240,19 @@ export function Notifications({
       {transfers && (
         <IncomingTransfers before={url.searchParams.get("before")} />
       )}
-      {!transfers && view === "done" && (
+      {invitations && <OrganizationDirectory invitations />}
+      {discussions && view === "done" && (
         <p className="text-sm text-muted-foreground">
           Done shows the last 90 days. Bookmarks remain in Saved until you
           unsave them.
         </p>
       )}
-      {!transfers && repository && (
+      {discussions && repository && (
         <Link className="w-fit underline" href={inboxHref(view, "", reason)}>
           Clear repository filter
         </Link>
       )}
-      {!transfers && (
+      {discussions && (
         <NotificationList
           key={inboxHref(view, repository, reason)}
           csrf={csrf}

@@ -286,14 +286,17 @@ The header's avatar menu opens profile settings and the personal repository
 catalog. It also offers sign-out for SSO sessions. Git access has a separate
 header control.
 
-Organization foundation pages live in `src/features/organizations/` at
-`/-/organizations/{uuid}` and `/-/organizations/{uuid}/invitation`. The first owner
+Organization pages live in `src/features/organizations/`. Browser links use
+`/-/organizations/{name-slug}--{uuid}` and the same address with `/invitation`
+for an offer. The first owner
 is explicitly bootstrapped through the server's private management CLI; opening a
 page never creates authority. People, pending invitations, recipient decisions
 and profile settings use native organization APIs with version checks. Public
-username search selects stable accounts; invitations currently use a manually
-shared link, with no email delivery. Organization discovery and owner-name routing
-are still separate work.
+username search selects stable accounts. **Your organizations** in the account
+menu includes live memberships and pending invitations, even for organizations
+with no repositories. Invitation recipients can open their offers from
+**Notifications → Organization invitations** or a shared link. Configured
+email delivery uses the recipient's verified address and opt-in.
 
 The **Personal** catalog at
 `/-/repositories/personal` lists repositories in the signed-in account's
@@ -302,6 +305,8 @@ namespace. A user profile's **Repositories** tab at
 `/-/users/{actor}/repositories` lists repositories in that user's namespace
 that the viewer can read. The home catalog's **All accessible** view includes
 personal, organization, and operator-managed repositories the account can read.
+Its owner picker chooses Personal or an eligible organization for new
+repositories and imports.
 
 Open an organization's **Teams** tab to manage team members and settings.
 A team's **Repositories** tab lists readable repositories with a grant for that
@@ -309,7 +314,10 @@ team, including forks that inherit the grant. Organization owners can open
 **Manage team access** from an organization or team repository row to grant,
 change, or revoke a role in that repository. Team and individual edits use the
 same catalog revision. Reload team access after a conflict to see current grants
-before editing again.
+before editing again. Organization owners can grant access directly from a
+team's **Repositories** tab and configure member creation and baseline roles
+under **Settings → Repository policy**. The People tab filters active members
+by name, role, and visible team. Owners can also search invitation history.
 
 The pull request **Reviewers** picker searches people and visible teams with
 repository access. Team rows show pending requests or link to the submitted

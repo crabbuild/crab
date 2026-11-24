@@ -1,4 +1,5 @@
 use super::*;
+use crate::RepositoryAccess;
 use crate::catalog::MAX_TEAM_GRANTS;
 use std::collections::BTreeMap;
 
@@ -15,6 +16,8 @@ pub(crate) struct RepositoryActor {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ActorTeams {
     pub owner: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline: Option<RepositoryAccess>,
     pub teams: Vec<Uuid>,
     #[serde(default)]
     pub bypass_teams: Vec<Uuid>,
@@ -34,9 +37,11 @@ impl Read for RepositoryTeamsForActor {
             return Ok(ActorTeams::default());
         };
         let owner = organization.role == OrganizationRole::Owner;
+        let baseline = super::super::repository_policy::load(context)?.baseline;
         if !input.include_teams {
             return Ok(ActorTeams {
                 owner,
+                baseline,
                 teams: Vec::new(),
                 bypass_teams: Vec::new(),
             });
@@ -55,6 +60,7 @@ impl Read for RepositoryTeamsForActor {
         }
         Ok(ActorTeams {
             owner,
+            baseline,
             teams,
             bypass_teams,
         })
@@ -151,6 +157,7 @@ fn active_team_rows(
 #[serde(deny_unknown_fields)]
 pub(crate) struct MemberRepositoryRoles {
     pub(crate) owner: bool,
+    pub(crate) baseline: Option<RepositoryAccess>,
     pub(crate) teams: BTreeMap<Uuid, String>,
 }
 
@@ -176,6 +183,7 @@ impl Read for InspectMemberRepositoryRoles {
             .collect::<Result<_>>()?;
         Ok(Some(MemberRepositoryRoles {
             owner: target.role == OrganizationRole::Owner,
+            baseline: super::super::repository_policy::load(context)?.baseline,
             teams,
         }))
     }
@@ -186,6 +194,7 @@ impl Read for InspectMemberRepositoryRoles {
 pub(crate) struct RepositoryRoster {
     pub owners: Vec<Uuid>,
     pub members: Vec<(Uuid, Uuid)>,
+    pub baseline: Option<(RepositoryAccess, Vec<Uuid>)>,
 }
 
 pub(crate) struct RepositoryTeamRoster;
@@ -198,7 +207,31 @@ impl Read for RepositoryTeamRoster {
     fn execute(context: &mut Transaction<'_>, teams: Self::Input) -> Result<Self::Output> {
         let owners = super::super::repositories::Owners::execute(context, ())?;
         let members = team_members(context, teams)?;
-        Ok(RepositoryRoster { owners, members })
+        let baseline = if let Some(access) =
+            super::super::repository_policy::load(context)?.baseline
+        {
+            let rows = context.query(
+                "SELECT actor FROM organization_members WHERE active=1 AND role='member' ORDER BY actor LIMIT ?",
+                &[SqlValue::Integer((MAX_TEAM_ACCESS_ROWS + 1) as i64)],
+            )?;
+            enforce_row_budget(rows.rows.len())?;
+            let members = rows
+                .rows
+                .iter()
+                .map(|row| match row.as_slice() {
+                    [actor] => uuid(actor),
+                    _ => Err(Error::Invalid("invalid organization baseline roster")),
+                })
+                .collect::<Result<_>>()?;
+            Some((access, members))
+        } else {
+            None
+        };
+        Ok(RepositoryRoster {
+            owners,
+            members,
+            baseline,
+        })
     }
 }
 

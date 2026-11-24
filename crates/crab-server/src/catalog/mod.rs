@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    BranchProtection, RepositoryConfig, RepositoryGroup, RepositoryMember,
+    BranchProtection, RepositoryAccess, RepositoryConfig, RepositoryGroup, RepositoryMember,
     storage_root::StorageRoot,
 };
 
@@ -586,7 +586,17 @@ impl CatalogStore {
         actor: MembershipActor,
         members: Vec<RepositoryMember>,
     ) -> Result<CatalogRecord, CatalogError> {
-        let (owner, organization) = namespace.catalog_owner(&members)?;
+        if matches!(&namespace, BrowserNamespace::Organization(_))
+            && !members.is_empty()
+            && (members.len() != 1
+                || members[0].subject != actor.subject
+                || members[0].access != RepositoryAccess::Admin)
+        {
+            return Err(CatalogError::Invalid(
+                "Organization creation can grant Admin only to its creator",
+            ));
+        }
+        let (owner, organization) = namespace.catalog_owner(&[])?;
         let mut hash = blake3::Hasher::new_derive_key("crab browser repository creation v1");
         hash.update(owner.as_bytes());
         hash.update(request.as_bytes());

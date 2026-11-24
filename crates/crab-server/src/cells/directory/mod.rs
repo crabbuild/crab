@@ -24,6 +24,7 @@ pub(crate) use search::{
     validate_handle_prefix,
 };
 pub(crate) mod notifications;
+pub(crate) mod organizations;
 mod profiles;
 pub(crate) mod review_availability;
 pub(crate) mod saved_replies;
@@ -267,6 +268,7 @@ pub(in crate::cells) fn dispatch_read(
         saved_replies::ListSavedReplies::ID => {
             invoke_read::<saved_replies::ListSavedReplies>(context, input)
         }
+        organizations::Candidates::ID => invoke_read::<organizations::Candidates>(context, input),
         _ => Err(Error::Invalid("unknown directory query")),
     }
 }
@@ -282,6 +284,9 @@ pub(in crate::cells) fn dispatch_mutation(
         }
         MigrateDirectory::ID => invoke_mutation::<MigrateDirectory>(context, input),
         RegisterAccounts::ID => invoke_mutation::<RegisterAccounts>(context, input),
+        organizations::RecordCandidate::ID => {
+            invoke_mutation::<organizations::RecordCandidate>(context, input)
+        }
         CreateProfile::ID => invoke_mutation::<CreateProfile>(context, input),
         EditProfile::ID => invoke_mutation::<EditProfile>(context, input),
         review_availability::SetAvailability::ID => {
@@ -302,6 +307,9 @@ pub(in crate::cells) fn dispatch_mutation(
         }
         notifications::email::QueueTransferMail::ID => {
             invoke_mutation::<notifications::email::QueueTransferMail>(context, input)
+        }
+        notifications::email::QueueInvitationMail::ID => {
+            invoke_mutation::<notifications::email::QueueInvitationMail>(context, input)
         }
         notifications::SetState::ID => invoke_mutation::<notifications::SetState>(context, input),
         notifications::SweepFiling::ID => {

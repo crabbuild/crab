@@ -9,6 +9,62 @@ use uuid::Uuid;
 const SETTINGS: &str = "/api/notifications/email";
 const REPOSITORY: &str = "/api/repos/team/private";
 
+#[tokio::test]
+async fn organization_invitation_mail_requires_a_current_offer_and_opt_in() {
+    let (endpoint, messages, receiver) = test_provider().await;
+    let h = Harness::with_notification_email(false, endpoint).await;
+    let (organization, _, actor) = crate::test_support::http::organizations::bootstrap(&h).await;
+    let alice = h.login().await;
+    let bob = member(&h, "bob@example.test", true).await;
+    let settings = h.json(SETTINGS, &bob).await;
+    save(&h, &bob, true, &settings["version"]).await;
+    let path = format!("/api/organizations/{organization}/invitations/{actor}");
+    let cells = h.server.cells().unwrap();
+    h.write(
+        Method::PUT,
+        &path,
+        &alice,
+        json!({"version":0,"role":"member"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert!(
+        invitations::reconcile(&cells, None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    h.write(Method::DELETE, &path, &alice, json!({"version":1}))
+        .await
+        .error_for_status()
+        .unwrap();
+    assert!(tick(&h).await);
+    assert!(messages.lock().await.is_empty());
+    h.write(
+        Method::PUT,
+        &path,
+        &alice,
+        json!({"version":2,"role":"member"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    invitations::reconcile(&cells, None).await.unwrap();
+    invitations::reconcile(&cells, None).await.unwrap();
+    assert!(tick(&h).await);
+    assert!(!tick(&h).await);
+    let sent = messages.lock().await;
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].1["to"], json!(["bob@example.test"]));
+    let text = sent[0].1["text"].as_str().unwrap();
+    assert!(text.contains("tab=organization-invitations"));
+    assert!(!text.contains("Crab engineering") && !text.contains(&organization.to_string()));
+    drop(sent);
+    receiver.abort();
+    h.close().await;
+}
+
 type Messages = Arc<Mutex<Vec<(String, Value)>>>;
 
 async fn test_provider() -> (Url, Messages, JoinHandle<()>) {

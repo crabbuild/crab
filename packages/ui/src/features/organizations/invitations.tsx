@@ -20,24 +20,34 @@ import { useRequest } from "@/lib/api";
 import type {
   ActorSummary,
   InvitationOffer,
+  InvitationState,
   InvitationView,
   OrganizationPage,
   OrganizationRole,
 } from "@/lib/contracts";
 import { MutationError } from "./feedback";
+import { organizationHref, organizationInvitationsHref } from "./directory";
 
 export function Invitations({
   endpoint,
   id,
   csrf,
+  filters,
 }: {
   endpoint: string;
   id: string;
   csrf: string;
+  filters?: { q: string; role: string; status: InvitationState };
 }) {
   const [after, setAfter] = useState<string>();
+  const params = new URLSearchParams(after ? { after } : {});
+  if (filters) {
+    params.set("status", filters.status);
+    if (filters.q) params.set("q", filters.q);
+    if (filters.role !== "all") params.set("role", filters.role);
+  }
   const offers = useRequest<OrganizationPage<InvitationOffer>>(
-    `${endpoint}/invitations?${new URLSearchParams(after ? { after } : {})}`,
+    `${endpoint}/invitations?${params}`,
   );
   const [notice, setNotice] = useState("");
   const refresh = () => {
@@ -47,7 +57,9 @@ export function Invitations({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-lg font-semibold">Pending invitations</h2>
+        <h2 className="text-lg font-semibold">
+          {filters ? "Organization invitations" : "Pending invitations"}
+        </h2>
         <div className="flex gap-2">
           <Button variant="outline" onClick={refresh}>
             Refresh invitations
@@ -57,7 +69,7 @@ export function Invitations({
             csrf={csrf}
             onInvited={() => {
               setNotice(
-                "Invitation created. Share the invitation link with the invitee.",
+                "Invitation created. It appears in the invitee’s notifications.",
               );
               refresh();
             }}
@@ -76,7 +88,9 @@ export function Invitations({
           <>
             {data.items.length === 0 ? (
               <p className="py-8 text-center text-sm text-muted-foreground">
-                No pending invitations.
+                {filters
+                  ? "No invitations match these filters."
+                  : "No pending invitations."}
               </p>
             ) : (
               <ul className="divide-y rounded-lg border">
@@ -161,8 +175,8 @@ function InviteDialog({
         <DialogHeader>
           <DialogTitle>Invite a member</DialogTitle>
           <DialogDescription>
-            Choose a registered username and their organization role. Repository
-            access is managed separately.
+            Choose a registered username and the role they should have in this
+            organization.
           </DialogDescription>
         </DialogHeader>
         {open && (
@@ -341,8 +355,10 @@ function OfferRow({
           </strong>
           <p className="mt-1 break-all text-sm text-muted-foreground">
             {item.profile ? `@${item.profile.handle}` : value.recipient} ·{" "}
-            {value.role} · {value.state === "expired" ? "Expired" : "Expires"}{" "}
-            {timestamp(value.expires_at_ms)}
+            {value.role} · <span className="capitalize">{value.state}</span>
+            {value.state === "pending" && (
+              <> · Expires {timestamp(value.expires_at_ms)}</>
+            )}
           </p>
         </div>
         <div className="flex gap-2">
@@ -355,13 +371,15 @@ function OfferRow({
               Retry invitation
             </Button>
           )}
-          <Button
-            variant="outline"
-            disabled={mutation.pending}
-            onClick={() => void change(true)}
-          >
-            Cancel invitation
-          </Button>
+          {(value.state === "pending" || value.state === "expired") && (
+            <Button
+              variant="outline"
+              disabled={mutation.pending}
+              onClick={() => void change(true)}
+            >
+              Cancel invitation
+            </Button>
+          )}
         </div>
       </div>
       <MutationError error={mutation.error} />
@@ -431,9 +449,14 @@ export function OrganizationInvitation({
             )}
             {organization && invitation?.state === "accepted" && (
               <Button asChild variant="outline">
-                <Link href={`/-/organizations/${id}`}>View organization</Link>
+                <Link href={organizationHref(organization)}>
+                  View organization
+                </Link>
               </Button>
             )}
+            <Link href={organizationInvitationsHref} className="w-fit text-sm">
+              Back to organization invitations
+            </Link>
             <MutationError error={mutation.error} />
             <Button variant="ghost" onClick={own.retry}>
               Reload current data

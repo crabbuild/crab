@@ -16,6 +16,7 @@ import { TeamMembers } from "./members";
 import { IdentityGroupSettings } from "./identity-group";
 import { useTeamRead } from "./read";
 import { TeamReviewRouting } from "./review-routing";
+import { RepositoryGrant } from "./repository-grant";
 
 export function TeamDetail({
   organization,
@@ -36,6 +37,10 @@ export function TeamDetail({
 }) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [grantSaved, setGrantSaved] = useState<{
+    name: string;
+    count: number;
+  }>();
   const state = useTeamRead<TeamView>(
     `/api/organizations/${organization}/teams/${team}`,
     commands.generation,
@@ -158,16 +163,24 @@ export function TeamDetail({
                     Team repositories
                   </h3>
                   {owner && (
-                    <Button asChild variant="outline" size="sm">
-                      <Link
-                        href={`/-/organizations/${organization}?tab=repositories`}
-                      >
-                        Browse organization repositories
-                      </Link>
-                    </Button>
+                    <RepositoryGrant
+                      organization={organization}
+                      team={team}
+                      csrf={csrf}
+                      onSaved={(name) =>
+                        setGrantSaved((previous) => ({
+                          name,
+                          count: (previous?.count ?? 0) + 1,
+                        }))
+                      }
+                    />
                   )}
                 </div>
+                {grantSaved && (
+                  <p role="status">Team access saved for {grantSaved.name}.</p>
+                )}
                 <BrowseRepositories
+                  key={grantSaved?.count}
                   url={url}
                   scope={{ kind: "team", organization, team }}
                 />

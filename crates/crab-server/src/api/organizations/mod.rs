@@ -6,7 +6,6 @@ use axum::{
     middleware,
     routing::get,
 };
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -16,10 +15,10 @@ use crate::{
     auth::Principal,
     cells::{
         Address, CellClient,
-        directory::{ActorSummary, LookupProfiles},
+        directory::ActorSummary,
         organization::{
-            self, Caller, ChangeMember, ChangeOutcome, Edit, EditInput, GetOrganization,
-            ListMembers, MemberChange, Page, PageCursor, PageQuery, Role,
+            self, Caller, ChangeMember, ChangeOutcome, Collection, Edit, EditInput, FindMembers,
+            GetOrganization, MemberChange, Role,
         },
     },
     server::Server,
@@ -27,11 +26,14 @@ use crate::{
 
 pub(super) mod audit;
 pub(super) mod automation;
+mod discovery;
 pub(super) mod invitations;
 pub(super) mod issue_types;
+mod people;
 mod projects;
 pub(super) mod properties;
 pub(super) mod repository_access;
+mod repository_policy;
 mod rulesets;
 pub(super) mod teams;
 
@@ -41,6 +43,7 @@ pub(super) struct OrganizationView {
     organization: organization::Organization,
     actor: Uuid,
     role: Role,
+    can_create: bool,
 }
 
 #[derive(Serialize)]
@@ -77,7 +80,9 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .merge(audit::routes())
         .merge(automation::routes())
         .merge(repository_access::routes())
+        .merge(repository_policy::routes())
         .merge(teams::routes())
+        .route("/api/organizations", get(discovery::list))
         .route("/api/organizations/{id}", get(own).patch(edit))
         .route("/api/organizations/{id}/members", get(members))
         .route(
@@ -110,16 +115,19 @@ async fn own(
 ) -> Result<Json<OrganizationView>> {
     let actor = actor(&server, &principal).await?;
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
-    let view = cells
-        .query::<GetOrganization>(target(id)?, None, Caller { actor })
+    let landing = cells
+        .query::<organization::discovery::GetLanding>(target(id)?, None, Caller { actor })
         .await
         .map_err(read_error)?
-        .output
-        .ok_or(Error::NotFound)?;
+        .output;
+    let Some(organization::discovery::Landing::Member { view, can_create }) = landing else {
+        return Err(Error::NotFound);
+    };
     app::account(&principal)?;
     Ok(Json(OrganizationView {
         organization: view.organization,
         role: view.role,
+        can_create,
         actor,
     }))
 }
@@ -165,101 +173,30 @@ fn applied<T>(outcome: ChangeOutcome<T>) -> Result<T> {
         )),
     }
 }
-#[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct MemberParameters {
-    after: Option<String>,
-    limit: Option<u8>,
-}
-fn decode(value: &str) -> Result<PageCursor> {
-    if value.len() > 512 {
-        return Err(Error::Invalid("Organization member cursor is invalid"));
-    }
-    let bytes = URL_SAFE_NO_PAD
-        .decode(value)
-        .map_err(|_| Error::Invalid("Organization member cursor is invalid"))?;
-    serde_json::from_slice(&bytes)
-        .map_err(|_| Error::Invalid("Organization member cursor is invalid"))
-}
 async fn members(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path(id): Path<Uuid>,
-    Query(params): Query<MemberParameters>,
+    Query(params): Query<people::Parameters>,
 ) -> Result<Json<OrganizationMembers>> {
-    let actor = actor(&server, &principal).await?;
-    let after = params.after.as_deref().map(decode).transpose()?;
-    let limit = params.limit.unwrap_or(30);
-    if !(1..=50).contains(&limit) {
-        return Err(Error::Invalid(
-            "Choose an organization member page size from 1 to 50",
-        ));
-    }
-    let cells = server.cells().ok_or(Error::CellUnavailable)?;
-    let page = cells
-        .query::<ListMembers>(
-            target(id)?,
-            None,
-            PageQuery {
-                actor,
-                after,
-                limit,
-            },
-        )
-        .await
-        .map_err(read_error)?
-        .output;
-    let Page::Page {
-        items,
-        next,
-        revision,
-    } = page
-    else {
-        return Err(Error::PageChanged);
-    };
-    let profiles = app::query_output(
-        cells
-            .query::<LookupProfiles>(
-                Address::Directory,
-                None,
-                items.iter().map(|member| member.actor).collect(),
-            )
-            .await,
-    )?;
-    if profiles.len() != items.len() {
-        return Err(Error::CellContract(
-            "Organization profile lookup returned an invalid result count",
-        ));
-    }
-    // Public profile lookup is a separate authority. Recheck organization access
-    // before returning its roster or management controls after that await.
-    let current = cells
-        .query::<GetOrganization>(target(id)?, None, Caller { actor })
-        .await
-        .map_err(read_error)?
-        .output
-        .ok_or(Error::NotFound)?;
-    app::account(&principal)?;
-    let items = items
-        .into_iter()
-        .zip(profiles)
-        .map(|(member, profile)| OrganizationMembership {
+    let (page, role) = people::page::<FindMembers, _, _>(
+        &server,
+        &principal,
+        id,
+        Collection::Members,
+        params,
+        |member| member.actor,
+        |member, profile| OrganizationMembership {
             actor: member.actor,
             role: member.role,
             version: member.version,
             profile,
-        })
-        .collect();
-    let next = next
-        .map(|cursor| serde_json::to_vec(&cursor).map(|bytes| URL_SAFE_NO_PAD.encode(bytes)))
-        .transpose()?;
-    Ok(Json(OrganizationMembers {
-        page: OrganizationPage {
-            items,
-            next,
-            revision,
         },
-        can_manage: current.role == Role::Owner,
+    )
+    .await?;
+    Ok(Json(OrganizationMembers {
+        page,
+        can_manage: role == Role::Owner,
     }))
 }
 #[derive(Deserialize)]

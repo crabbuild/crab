@@ -30,6 +30,7 @@ pub(super) enum DeliveryError {
 
 type Result<T> = std::result::Result<T, DeliveryError>;
 
+mod invitations;
 mod transfers;
 
 const IDLE: Duration = Duration::from_secs(5);
@@ -43,6 +44,7 @@ pub(crate) struct Sender {
     from: String,
     text: String,
     transfer_text: String,
+    invitation_text: String,
 }
 
 #[derive(Serialize)]
@@ -88,6 +90,9 @@ impl Sender {
         let transfers = public
             .join("/-/notifications?tab=transfers")
             .map_err(|error| crate::Error::Maintenance(Box::new(error)))?;
+        let invitations = public
+            .join("/-/notifications?tab=organization-invitations")
+            .map_err(|error| crate::Error::Maintenance(Box::new(error)))?;
         Ok(Self {
             client,
             endpoint,
@@ -99,11 +104,16 @@ impl Sender {
             transfer_text: format!(
                 "You have a repository transfer offer in Crab.\n\nOpen your notifications: {transfers}\n"
             ),
+            invitation_text: format!(
+                "You have an organization invitation in Crab.\n\nOpen your notifications: {invitations}\n"
+            ),
         })
     }
 
     async fn send(&self, job: &Job, to: &str) -> Option<u64> {
-        let (subject, text) = if job.transfer.is_some() {
+        let (subject, text) = if job.invitation.is_some() {
+            ("New organization invitation in Crab", &self.invitation_text)
+        } else if job.transfer.is_some() {
             ("New repository transfer in Crab", &self.transfer_text)
         } else {
             ("New activity in Crab", &self.text)
@@ -154,6 +164,7 @@ pub(super) async fn run(server: Arc<Server>) -> crate::Result<()> {
     tokio::join!(
         run_delivery(&server, &cells, sender),
         transfers::run(&server, &cells),
+        invitations::run(&server, &cells),
     );
     Ok(())
 }
@@ -255,6 +266,15 @@ async fn can_deliver(server: &Server, cells: &CellClient, job: &Job) -> Result<b
     if let Some(source) = job.transfer {
         return Ok(!auth.account_state(&identity.subject).await?.suspended
             && transfers::still_pending(server, job.repository, source, identity).await?);
+    }
+    if let Some(source) = job.invitation {
+        return Ok(!auth.account_state(&identity.subject).await?.suspended
+            && invitations::pending(cells, source.organization, job.id.actor)
+                .await?
+                .is_some_and(|current| {
+                    current.version == source.version
+                        && current.created_at_ms == source.created_at_ms
+                }));
     }
     let Some(repo) = server.repositories.by_id(job.repository) else {
         return Ok(false);

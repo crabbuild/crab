@@ -108,6 +108,12 @@ current delivery authority and sends generic inbox links with durable
 provider idempotency keys. `server/email/transfers.rs` discovers committed
 personal transfer offers from the catalog. Directory receipts fence replay,
 and the sender checks the exact pending offer again before delivery.
+`cells/directory/organizations.rs` stores account-to-organization candidates
+before bootstrap or invitation commits. Live Organization Cell reads own
+disclosure and email eligibility. Discovery starts with fresh organization
+state. `cells/organization/repository_policy.rs` owns repository creation and
+baseline access policy. Git publication and policy writes share the existing
+organization ruleset lease.
 `cells/repository/integrations.rs` owns GitHub Actions connections, delivery
 receipts, bounded accepted-delivery history, and workflow attempt ordering. It
 reads active providers and their exact-commit results from one snapshot for merge

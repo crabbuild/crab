@@ -25,6 +25,8 @@ import type {
   OrganizationMembers,
   OrganizationRole,
   OrganizationView,
+  InvitationState,
+  Team,
 } from "@/lib/contracts";
 import { Teams } from "./teams";
 import type { Commands } from "./teams/commands";
@@ -36,6 +38,9 @@ import { OrganizationAutomation } from "./automation";
 import { OrganizationRulesets } from "@/features/settings/rulesets";
 import { OrganizationRepositoryProperties } from "./repository-properties";
 import { OrganizationIssueTypes } from "./issue-types";
+import { organizationHref } from "./directory";
+import { TeamPicker } from "@/features/settings/team-picker";
+import { RepositoryPolicySettings } from "./repository-policy";
 export { OrganizationInvitation } from "./invitations";
 
 const adminTabs = [
@@ -66,7 +71,7 @@ export function OrganizationPage({
   return (
     <section className="mx-auto w-full max-w-6xl p-4 sm:p-8">
       <Result state={own} timingLabel="Organization">
-        {({ organization, role, actor }) => (
+        {({ organization, role, actor, can_create }) => (
           <>
             <header className="mb-6 flex min-w-0 flex-wrap items-start gap-4">
               <Building2Icon
@@ -119,7 +124,7 @@ export function OrganizationPage({
                   variant={tab === key ? "secondary" : "ghost"}
                 >
                   <Link
-                    href={`/-/organizations/${id}?tab=${key}`}
+                    href={organizationHref(organization, `?tab=${key}`)}
                     aria-current={tab === key ? "page" : undefined}
                   >
                     <Icon data-icon="inline-start" />
@@ -128,7 +133,7 @@ export function OrganizationPage({
                 </Button>
               ))}
               <Button asChild variant="ghost">
-                <Link href={`/-/organizations/${id}/projects`}>
+                <Link href={organizationHref(organization, "/projects")}>
                   <FolderKanbanIcon data-icon="inline-start" />
                   Projects
                 </Link>
@@ -151,7 +156,7 @@ export function OrganizationPage({
                     variant={tab === key ? "secondary" : "ghost"}
                   >
                     <Link
-                      href={`/-/organizations/${id}?tab=${key}`}
+                      href={organizationHref(organization, `?tab=${key}`)}
                       aria-current={tab === key ? "page" : undefined}
                     >
                       {label}
@@ -171,7 +176,8 @@ export function OrganizationPage({
                   id={id}
                   name={organization.name}
                   actor={actor}
-                  canCreate={role === "owner"}
+                  canCreate={role === "owner" || can_create}
+                  owner={role === "owner"}
                   url={url}
                   csrf={csrf}
                 />
@@ -216,16 +222,19 @@ export function OrganizationPage({
               ) : role === "owner" && tab === "audit" ? (
                 <OrganizationAuditLog id={id} url={url} />
               ) : role === "owner" && tab === "settings" ? (
-                <Settings
-                  key={organization.version}
-                  organization={organization}
-                  csrf={csrf}
-                  endpoint={endpoint}
-                  onSaved={() => {
-                    setNotice("Organization updated.");
-                    own.retry();
-                  }}
-                />
+                <div className="grid gap-8">
+                  <Settings
+                    key={organization.version}
+                    organization={organization}
+                    csrf={csrf}
+                    endpoint={endpoint}
+                    onSaved={() => {
+                      setNotice("Organization updated.");
+                      own.retry();
+                    }}
+                  />
+                  <RepositoryPolicySettings organization={id} csrf={csrf} />
+                </div>
               ) : (
                 <div className="notice error" role="alert">
                   <p>This organization page is unavailable.</p>
@@ -255,8 +264,18 @@ function People({
   onChanged: (message: string) => void;
 }) {
   const [after, setAfter] = useState<string>();
+  const [query, setQuery] = useState("");
+  const [q, setQ] = useState("");
+  const [role, setRole] = useState("all");
+  const [team, setTeam] = useState<Team>();
+  const [status, setStatus] = useState<"active" | InvitationState>("active");
+  const invites = owner && status !== "active";
+  const params = new URLSearchParams(after ? { after } : {});
+  if (q) params.set("q", q);
+  if (role !== "all") params.set("role", role);
+  if (team) params.set("team", team.id);
   const members = useRequest<OrganizationMembers>(
-    `${endpoint}/members?${new URLSearchParams(after ? { after } : {})}`,
+    invites ? null : `${endpoint}/members?${params}`,
   );
   const refresh = () => {
     setAfter(undefined);
@@ -264,68 +283,165 @@ function People({
   };
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-lg font-semibold">Organization members</h2>
-        <div className="flex flex-wrap gap-2">
-          <Button variant="outline" onClick={refresh}>
-            Refresh members
+      <div className="flex flex-wrap items-end gap-3">
+        <form
+          role="search"
+          aria-label="People search"
+          className="flex items-end gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            setAfter(undefined);
+            setQ(query.trim());
+          }}
+        >
+          <Field className="min-w-0">
+            <FieldLabel htmlFor="people-search">Find people</FieldLabel>
+            <Input
+              id="people-search"
+              type="search"
+              value={query}
+              maxLength={100}
+              placeholder="Name or username"
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </Field>
+          <Button type="submit" variant="outline">
+            Search
           </Button>
-          {owner && (
-            <Button asChild>
-              <Link href={`/-/organizations/${id}?tab=invitations`}>
-                Invite people
-              </Link>
-            </Button>
-          )}
-        </div>
-      </div>
-      <Result state={members} timingLabel="Organization members">
-        {(data) => (
-          <>
-            {data.items.length ? (
-              <ul className="divide-y rounded-lg border">
-                {data.items.map((member) => (
-                  <MemberRow
-                    key={`${member.actor}:${member.version}`}
-                    member={member}
-                    organization={id}
-                    canManage={data.can_manage}
-                    endpoint={endpoint}
-                    csrf={csrf}
-                    onChanged={(message) => {
-                      onChanged(message);
-                      refresh();
-                    }}
-                  />
-                ))}
-              </ul>
-            ) : (
-              <p
-                role="status"
-                className="rounded-lg border p-6 text-center text-sm text-muted-foreground"
-              >
-                No members on this page.
-              </p>
-            )}
-            <div className="flex gap-2">
-              <Button
-                variant="outline"
-                disabled={!after}
-                onClick={() => setAfter(undefined)}
-              >
-                First page
-              </Button>
-              <Button
-                variant="outline"
-                disabled={!data.next}
-                onClick={() => setAfter(data.next ?? undefined)}
-              >
-                Next page
-              </Button>
-            </div>
-          </>
+        </form>
+        <Field className="w-auto">
+          <FieldLabel htmlFor="people-role">Role</FieldLabel>
+          <FieldSelect
+            id="people-role"
+            label="Organization role"
+            value={role}
+            options={{ all: "All roles", member: "Member", owner: "Owner" }}
+            onValueChange={(value) => {
+              setAfter(undefined);
+              setRole(value);
+            }}
+          />
+        </Field>
+        {owner && (
+          <Field className="w-auto">
+            <FieldLabel htmlFor="people-status">Membership status</FieldLabel>
+            <FieldSelect
+              id="people-status"
+              label="Membership status"
+              value={status}
+              options={{
+                active: "Active members",
+                pending: "Pending invitations",
+                expired: "Expired invitations",
+                accepted: "Accepted invitations",
+                declined: "Declined invitations",
+                cancelled: "Cancelled invitations",
+              }}
+              onValueChange={(value) => {
+                setAfter(undefined);
+                setStatus(value as typeof status);
+              }}
+            />
+          </Field>
         )}
-      </Result>
+        {!invites &&
+          (team ? (
+            <Button
+              variant="outline"
+              onClick={() => {
+                setAfter(undefined);
+                setTeam(undefined);
+              }}
+            >
+              Clear team filter · {team.name}
+            </Button>
+          ) : (
+            <TeamPicker
+              organization={id}
+              filter
+              selected={new Set()}
+              disabled={false}
+              onSelect={(value) => {
+                setAfter(undefined);
+                setTeam(value);
+              }}
+            />
+          ))}
+      </div>
+      {invites ? (
+        <Invitations
+          key={JSON.stringify([q, role, status])}
+          endpoint={endpoint}
+          id={id}
+          csrf={csrf}
+          filters={{ q, role, status }}
+        />
+      ) : (
+        <>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="text-lg font-semibold">Organization members</h2>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" onClick={refresh}>
+                Refresh members
+              </Button>
+              {owner && (
+                <Button asChild>
+                  <Link href={`/-/organizations/${id}?tab=invitations`}>
+                    Invite people
+                  </Link>
+                </Button>
+              )}
+            </div>
+          </div>
+          <Result state={members} timingLabel="Organization members">
+            {(data) => (
+              <>
+                {data.items.length ? (
+                  <ul className="divide-y rounded-lg border">
+                    {data.items.map((member) => (
+                      <MemberRow
+                        key={`${member.actor}:${member.version}`}
+                        member={member}
+                        organization={id}
+                        canManage={data.can_manage}
+                        endpoint={endpoint}
+                        csrf={csrf}
+                        onChanged={(message) => {
+                          onChanged(message);
+                          refresh();
+                        }}
+                      />
+                    ))}
+                  </ul>
+                ) : (
+                  <p
+                    role="status"
+                    className="rounded-lg border p-6 text-center text-sm text-muted-foreground"
+                  >
+                    No members on this page.
+                  </p>
+                )}
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    disabled={!after}
+                    onClick={() => setAfter(undefined)}
+                  >
+                    First page
+                  </Button>
+                  <Button
+                    variant="outline"
+                    disabled={!data.next}
+                    onClick={() => setAfter(data.next ?? undefined)}
+                  >
+                    Next page
+                  </Button>
+                </div>
+              </>
+            )}
+          </Result>
+        </>
+      )}
     </div>
   );
 }

@@ -18,6 +18,54 @@ async function session(page: Page) {
   );
 }
 
+test("the owner picker scopes creation and import to the selected organization", async ({
+  page,
+}) => {
+  await session(page);
+  const id = "01900000-0000-7000-8000-000000000010";
+  await page.route("**/api/organizations", (route) =>
+    route.fulfill({
+      json: {
+        next: null,
+        items: [
+          {
+            kind: "member",
+            actor: "actor-id",
+            role: "owner",
+            can_create: true,
+            organization: { id, name: "Crab engineering", description: "" },
+          },
+        ],
+      },
+    }),
+  );
+  await page.route(
+    `**/api/organizations/${id}/repositories/creation`,
+    (route) =>
+      route.fulfill({
+        json: {
+          owner: `org-${id.replaceAll("-", "")}`,
+          default_branch: "main",
+        },
+      }),
+  );
+  await page.route("**/api/repos?*", (route) =>
+    route.fulfill({ json: { repositories: [], next: null } }),
+  );
+  await page.goto("/");
+  await page.getByRole("button", { name: "Owner · Personal" }).click();
+  await page.getByRole("button", { name: "Crab engineering" }).click();
+  await page.getByRole("button", { name: "New repository" }).click();
+  await expect(page.getByRole("dialog")).toContainText(
+    "owned by Crab engineering",
+  );
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "Import from Git" }).click();
+  await expect(page.getByLabel("Organization", { exact: true })).toHaveValue(
+    "Crab engineering",
+  );
+});
+
 test("personal import retries namespace resolution before submitting", async ({
   page,
 }) => {
@@ -179,12 +227,16 @@ test("a reloaded import resumes the same job with a fresh source token", async (
         },
       }),
   );
-  await page.route("**/api/repos/team/repo/refs", (route) =>
+  await page.route("**/api/repos/creation", (route) =>
+    route.fulfill({ json: { owner, default_branch: "main" } }),
+  );
+  await page.route(`**/api/repos/${owner}/repo/refs`, (route) =>
     route.fulfill({ json: { head: null, default_branch: "main", refs: [] } }),
   );
   await page.route("**/api/imports/git", (route) => {
     const input = route.request().postDataJSON();
     expect(input.token).toBe("fixture-token");
+    expect(input.owner).toBe(owner);
     saved = {
       id: input.request_id,
       source: input.source,
@@ -243,7 +295,7 @@ test("a reloaded import resumes the same job with a fresh source token", async (
   await page
     .getByLabel("Git source")
     .fill("https://github.com/example/repo.git");
-  await page.getByLabel("Crab owner").fill("team");
+  await expect(page.getByLabel("Personal namespace")).toHaveValue(owner);
   await page.getByLabel("Source token").fill("fixture-token");
   await page.getByRole("button", { name: "Start import", exact: true }).click();
   await expect(page.getByText("Queued for import")).toBeVisible();
@@ -252,11 +304,11 @@ test("a reloaded import resumes the same job with a fresh source token", async (
   await expect(
     page.getByText("The import worker stopped reporting progress."),
   ).toBeVisible();
-  await expect(page.getByText("team/repo", { exact: true })).toBeVisible();
+  await expect(page.getByText(`${owner}/repo`, { exact: true })).toBeVisible();
   await expect(page.getByLabel("Source token")).toHaveValue("");
   const savedImport = await page.evaluate(() =>
     sessionStorage.getItem(
-      'crab:git-import:["https://accounts.example","alice"]',
+      'crab:git-import:personal:["https://accounts.example","alice"]',
     ),
   );
   expect(savedImport).toBe(saved!.id);
@@ -266,6 +318,6 @@ test("a reloaded import resumes the same job with a fresh source token", async (
   await page
     .getByRole("button", { name: "Resume import", exact: true })
     .click();
-  await expect(page).toHaveURL("/team/repo");
+  await expect(page).toHaveURL(`/${owner}/repo`);
   await expect(page.locator(".global-repository h1")).toContainText("repo");
 });

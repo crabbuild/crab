@@ -20,12 +20,12 @@ impl Mutation for AuthorizeCreation {
     const CLASS: &'static str = CLASS;
     const ID: u32 = 40;
     type Input = Creation;
-    type Output = Authorized;
+    type Output = CreationOutcome;
 
     fn execute(
         context: &mut Transaction<'_>,
         input: Creation,
-    ) -> Result<MutationResult<Authorized>> {
+    ) -> Result<MutationResult<CreationOutcome>> {
         if input.request_id.is_nil() || !valid_creation(&input.name, &input.description) {
             return Err(Error::Invalid("invalid repository creation request"));
         }
@@ -36,8 +36,33 @@ impl Mutation for AuthorizeCreation {
             input.description,
         ))?)
         .as_bytes();
-        authorize_ticket(context, &key, digest)
+        // Keep the original ticket digest. A later promotion must not change
+        // which direct grant an already authorized reservation carries.
+        let creator = format!("{key}/member-creator");
+        let grant_creator = if let Some(existing) = context.document::<[u8; 32]>(&key)? {
+            if existing != digest {
+                return Ok(MutationResult::Rejected(CreationOutcome::Conflict));
+            }
+            context.document::<bool>(&creator)?.unwrap_or(false)
+        } else {
+            let member_creating =
+                member(context, input.actor)?.is_some_and(|member| member.role == Role::Member);
+            context.put_document(&key, &digest)?;
+            if member_creating {
+                context.put_document(&creator, &true)?;
+            }
+            member_creating
+        };
+        Ok(MutationResult::Success(CreationOutcome::Accepted {
+            grant_creator,
+        }))
     }
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) enum CreationOutcome {
+    Accepted { grant_creator: bool },
+    Conflict,
 }
 
 #[derive(Deserialize, Serialize)]

@@ -227,13 +227,15 @@ removal or disclose current organization metadata to a former member. Their
 recipient can still inspect the historical invitation status. Immutable activity entries share the command's SQL/KV transaction;
 no-ops and rejected operations append nothing.
 
-Invitations currently target registered accounts, with public-username search and
-a shareable acceptance link. There is no email delivery, organization owner-name
-registry/discovery, nested teams, organization deletion, personal-owner namespace, or
-repository/project grant inheritance yet. The native authority is groundwork for
-those features, not a claim of complete organization or Projects parity. There
-is no distributed transaction between Organization and Repository Cells; native
-repository authority fencing/cutover remains separate work.
+Invitations target registered accounts. Before bootstrap or an invitation can
+commit, the Directory records a candidate edge from the account to the
+organization. Discovery and delivery recheck live membership or an unexpired
+offer in the Organization Cell. Candidate edges grant no access. This feature
+starts with fresh organization state, including organizations with no
+repositories. The email worker reconciles committed pending offers and binds
+delivery to the exact version and the verified recipient's opt-in.
+Nested teams, organization deletion, and cross-authority repository/project
+fencing remain separate work.
 
 ### Standalone teams
 

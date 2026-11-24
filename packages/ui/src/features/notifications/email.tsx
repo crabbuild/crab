@@ -35,8 +35,8 @@ export function EmailNotifications({ csrf }: { csrf: string }) {
         <DialogHeader>
           <DialogTitle>Email notifications</DialogTitle>
           <DialogDescription>
-            Receive email about inbox activity and personal repository transfer
-            offers.
+            Receive email about inbox activity, organization invitations, and
+            personal repository transfer offers.
           </DialogDescription>
         </DialogHeader>
         {open && <EmailSettings csrf={csrf} />}

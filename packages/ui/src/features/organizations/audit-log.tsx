@@ -38,6 +38,7 @@ const actions: Record<AuditAction, string> = {
   team_deleted: "Team deleted",
   team_membership: "Team membership changed",
   team_creation_policy: "Team creation policy changed",
+  repository_policy_changed: "Repository policy changed",
   repository_registered: "Repository registered",
   repository_access_changed: "Repository access changed",
   repository_transferred_in: "Repository transferred in",

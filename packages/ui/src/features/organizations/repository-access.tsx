@@ -134,6 +134,11 @@ function AccessList({
                     )}
                     <ul className="grid gap-1 text-muted-foreground">
                       {repo.organization_owner && <li>Organization owner</li>}
+                      {repo.baseline && (
+                        <li>
+                          Organization baseline · {roleLabels[repo.baseline]}
+                        </li>
+                      )}
                       {repo.direct && (
                         <li>Direct grant · {roleLabels[repo.direct]}</li>
                       )}

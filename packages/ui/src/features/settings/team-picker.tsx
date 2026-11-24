@@ -20,31 +20,37 @@ export function TeamPicker({
   selected,
   disabled,
   onSelect,
+  filter = false,
 }: {
   organization: string;
   selected: ReadonlySet<string>;
   disabled: boolean;
   onSelect: (team: Team) => void;
+  filter?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
         <Button disabled={disabled}>
-          <PlusIcon data-icon="inline-start" /> Add team
+          {!filter && <PlusIcon data-icon="inline-start" />}
+          {filter ? "Filter by team" : "Add team"}
         </Button>
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Add a team</DialogTitle>
+          <DialogTitle>{filter ? "Filter by team" : "Add a team"}</DialogTitle>
           <DialogDescription>
-            Choose a team from the owning organization.
+            {filter
+              ? "Show organization members on the selected team."
+              : "Choose a team from the owning organization."}
           </DialogDescription>
         </DialogHeader>
         {open && (
           <TeamChoices
             organization={organization}
             selected={selected}
+            filter={filter}
             onSelect={(team) => {
               onSelect(team);
               setOpen(false);
@@ -60,10 +66,12 @@ function TeamChoices({
   organization,
   selected,
   onSelect,
+  filter,
 }: {
   organization: string;
   selected: ReadonlySet<string>;
   onSelect: (team: Team) => void;
+  filter: boolean;
 }) {
   const [query, setQuery] = useState("");
   const [search, setSearch] = useState("");
@@ -107,10 +115,7 @@ function TeamChoices({
           First page
         </Button>
       )}
-      <Result
-        state={listing}
-        timingLabel="Teams available for repository grants"
-      >
+      <Result state={listing} timingLabel="Organization teams">
         {({ items, next }) => (
           <div className="flex flex-col gap-3">
             {items.length ? (
@@ -134,10 +139,10 @@ function TeamChoices({
                       <Button
                         size="sm"
                         variant="outline"
-                        aria-label={`Add ${team.name}`}
+                        aria-label={`${filter ? "Select" : "Add"} ${team.name}`}
                         onClick={() => onSelect(team)}
                       >
-                        Add
+                        {filter ? "Select" : "Add"}
                       </Button>
                     )}
                   </li>
