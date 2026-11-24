@@ -3,7 +3,7 @@ use std::{fs::OpenOptions, io::Write as _, time::Duration};
 use axum::http::{StatusCode, header};
 use reqwest::{Client, Method, Response};
 use serde_json::{Value, json};
-use tokio::{io::AsyncWriteExt, net::TcpStream, process::Command};
+use tokio::process::Command;
 use uuid::Uuid;
 
 use super::process::{
@@ -108,27 +108,24 @@ impl<'a> BrowserSession<'a> {
             .await
             .unwrap()
     }
+}
 
-    async fn unread_merge_reply(&self, origin: &str, body: &Value) -> TcpStream {
-        let host = origin.strip_prefix("http://127.0.0.1:").unwrap();
-        let mut connection = TcpStream::connect(("127.0.0.1", host.parse::<u16>().unwrap()))
-            .await
-            .unwrap();
-        let body = serde_json::to_string(body).unwrap();
-        let request = format!(
-            "POST {MERGE} HTTP/1.1\r\nHost: 127.0.0.1:{host}\r\nOrigin: {origin}\r\nCookie: {}\r\nX-Csrf-Token: {}\r\nX-Crab-Repository-Id: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            self.cookie,
-            self.csrf,
-            self.repository,
-            body.len(),
-        );
-        connection.write_all(request.as_bytes()).await.unwrap();
-        connection
-    }
+async fn browser(origin: &str, action: &str, head: &str) -> String {
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packages/ui/tests/qualification/protected-pull.mjs");
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        run(Command::new("node")
+            .arg(script)
+            .args([origin, action, head])
+            .kill_on_drop(true)),
+    )
+    .await
+    .expect("Chromium qualification did not finish")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires a built crab-server and an isolated RustFS bucket"]
+#[ignore = "requires a built crab-server, Chromium and an isolated RustFS bucket"]
 async fn rustfs_protected_pull_enforces_exact_review_and_app_check_then_recovers_on_peer() {
     let fixture = ProcessFixture::new("protected-pull").await;
     let client = &fixture.client;
@@ -153,8 +150,7 @@ async fn rustfs_protected_pull_enforces_exact_review_and_app_check_then_recovers
         provision(client, a, subject).await;
     }
     let alice = BrowserSession::new(client, repository, a).await;
-    *fixture.provider.mode.lock().await = "member".into();
-    let bob = BrowserSession::new(client, repository, a).await;
+    let author_mode = fixture.provider.mode.lock().await.clone();
     let token = json_response(
         alice
             .write(
@@ -198,23 +194,10 @@ async fn rustfs_protected_pull_enforces_exact_review_and_app_check_then_recovers
     alice.write(a, Method::PUT, &format!("{ROOT}/settings/branch-protections"),
         json!({"expected_version":0,"rules":[{"branch":"main","required_approvals":1,"required_integrations":[connection]}]}))
         .await.error_for_status().unwrap();
-    let created = json_response(
-        alice
-            .write(
-                a,
-                Method::POST,
-                &format!("{ROOT}/pulls"),
-                json!({
-                    "request_id":Uuid::now_v7(),"title":"Protect the deploy branch","body":"",
-                    "base_ref":"refs/heads/main","head_ref":"refs/heads/feature",
-                    "expected":{"base_oid":base,"head_oid":old_head},
-                }),
-            )
-            .await,
-        StatusCode::CREATED,
-    )
-    .await;
-    assert_eq!(created["number"], 1);
+    browser(a, "create", &old_head).await;
+    let created = alice.get(a, PULL).await;
+    assert_eq!(created["base_oid"], base);
+    assert_eq!(created["head_oid"], old_head);
     let second_process = fixture.start(second).await;
 
     let set_reviewer = async |access: &str| {
@@ -237,9 +220,9 @@ async fn rustfs_protected_pull_enforces_exact_review_and_app_check_then_recovers
             .unwrap();
     };
     let approve = async |oid: &str| {
-        bob.write(b, Method::POST, &format!("{PULL}/reviews"), json!({
-            "request_id":Uuid::now_v7(),"state":"approved","body":"Reviewed this commit","commit_oid":oid,
-        })).await.error_for_status().unwrap();
+        *fixture.provider.mode.lock().await = "member".into();
+        browser(b, "review", oid).await;
+        *fixture.provider.mode.lock().await = author_mode.clone();
     };
     let app_report = async |oid: &str, run: u64, installation: u64| {
         let payload = json!({
@@ -289,6 +272,7 @@ async fn rustfs_protected_pull_enforces_exact_review_and_app_check_then_recovers
     assert_eq!(untrusted["merge_requirements"]["approvals"], 1);
     assert_eq!(untrusted["merge_requirements"]["checks_satisfied"], false);
     merge_error(merge_input(&untrusted), "merge_blocked").await;
+    browser(b, "waiting", &old_head).await;
 
     app_report(&old_head, 12, 42).await;
     let ready = alice.get(b, PULL).await;
@@ -302,6 +286,7 @@ async fn rustfs_protected_pull_enforces_exact_review_and_app_check_then_recovers
     assert_eq!(revoked["merge_requirements"]["approvals"], 0);
     assert_eq!(revoked["merge_requirements"]["checks_satisfied"], true);
     merge_error(merge_input(&revoked), "merge_blocked").await;
+    browser(b, "revoked", &old_head).await;
 
     set_reviewer("write").await;
     let head = commit("base\nreviewed\nupdated\n", "Advance reviewed branch").await;
@@ -333,10 +318,7 @@ async fn rustfs_protected_pull_enforces_exact_review_and_app_check_then_recovers
         !direct.status.success(),
         "the protected branch requires a PR"
     );
-    let merge = merge_input(&approved);
-    // Keep the response unread and observe publication through the other
-    // process. The caller only knows the original request, not its result.
-    let unread_reply = alice.unread_merge_reply(a, &merge).await;
+    let merge: Value = serde_json::from_str(&browser(a, "publish", &head).await).unwrap();
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             let observed =
@@ -350,7 +332,6 @@ async fn rustfs_protected_pull_enforces_exact_review_and_app_check_then_recovers
     })
     .await
     .expect("peer must advertise the committed merge");
-    drop(unread_reply);
     fixture.handoff(first, first_process).await;
 
     let recovered = json_response(
@@ -367,6 +348,7 @@ async fn rustfs_protected_pull_enforces_exact_review_and_app_check_then_recovers
     .await;
     assert_eq!(replay["merged_at"], recovered["merged_at"]);
     assert_eq!(replay["merge"], recovered["merge"]);
+    browser(b, "merged", &head).await;
     run(git_authenticated(token)
         .current_dir(&source)
         .args(["fetch", &remote_b, "main"]))

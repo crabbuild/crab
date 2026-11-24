@@ -228,6 +228,7 @@ jobs:
         run: |
           npm ci --prefix packages/ui
           npm run build --prefix packages/ui
+          npm exec --prefix packages/ui -- playwright install --with-deps chromium
 
       - name: Verify server and browser contracts
         run: npm run contracts:check --prefix packages/ui
