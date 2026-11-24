@@ -1,5 +1,6 @@
 pub(crate) mod audit;
 pub(crate) mod description;
+pub(crate) mod outside_removal;
 mod read;
 mod rename;
 pub(crate) mod topics;
@@ -135,7 +136,7 @@ pub struct CatalogDocument {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     organization_audit_heads: BTreeMap<Uuid, audit::Position>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_membership_audit: Option<MembershipAuditEvent>,
+    pub(crate) pending_membership_audit: Option<audit::AccessAudit>,
 }
 
 /// Revision-bound replacement of direct members and OIDC group grants.
@@ -222,27 +223,14 @@ impl CatalogDocument {
             ));
         }
         if let Some(event) = &self.pending_membership_audit {
-            if event.repository_version != self.version
+            if event.position().revision != self.version
                 || !event.valid()
                 || !self.valid_pending_scopes(event)
-                || !self
-                    .repositories
-                    .iter()
-                    .any(|record| record.id == event.repository_id)
-                || event.previous != self.membership_audit_head
+                || event.previous() != self.membership_audit_head.as_deref()
             {
                 return Err(CatalogError::Invalid("membership audit event is invalid"));
             }
-            let record = self
-                .repositories
-                .iter()
-                .find(|record| record.id == event.repository_id)
-                .ok_or(CatalogError::Invalid("audit repository is missing"))?;
-            if record.membership_digest()? != event.new_members_digest {
-                return Err(CatalogError::Invalid(
-                    "membership audit digest does not match",
-                ));
-            }
+            event.validate_catalog(self)?;
         }
         if self
             .membership_audit_head
@@ -921,7 +909,7 @@ impl CatalogStore {
                     .store
                     .get_with_etag_bounded(&path, MAX_CATALOG_BYTES)
                     .await?;
-                if serde_json::from_slice::<MembershipAuditEvent>(&body)? != event {
+                if serde_json::from_slice::<audit::AccessAudit>(&body)? != event {
                     return Err(CatalogError::Invalid("immutable membership audit differs"));
                 }
             }
@@ -930,10 +918,10 @@ impl CatalogStore {
         // Catalog roots are portable backup units. Persisting a root-qualified
         // key here would make an otherwise byte-exact restore prefix-dependent.
         document.membership_audit_head = Some(relative_path);
-        for scope in &event.organizations {
+        for (organization, _) in event.organizations() {
             document
                 .organization_audit_heads
-                .insert(scope.organization, position);
+                .insert(organization, position);
         }
         document.pending_membership_audit = None;
         document.validate(&self.root)?;

@@ -789,6 +789,20 @@ bounded batch and may return a continuation with fewer rows. Changes to the
 organization or catalog invalidate the continuation. Repository role edits
 use the existing revision-bound access editor and audit trail.
 
+Select up to 50 people and choose **Remove from all repositories**. The preview
+counts every direct grant and affected repository across the organization, even
+when a search or page shows only some of them. The confirmation removes the
+selected people’s direct grants in one catalog update and records the removal
+in the organization audit log. Signed group grants retain their own lifecycle.
+
+Post the list’s opaque `collaborator` identifiers as `{collaborators}` to
+`/api/organizations/{id}/outside-collaborators/removal-preview`. Review the
+returned `impact` and `repository_names` and submit the returned `plan` to
+`POST /api/organizations/{id}/outside-collaborators/removals`. A membership
+or catalog change requires a fresh preview. Resubmit the same plan after a
+lost reply to recover its committed result, including after server restart.
+Upgrade all serving peers before using bulk removal.
+
 Upgrade serving replicas together before starting organization-owned
 creation. Existing catalog entries keep their previous ownership and grants.
 

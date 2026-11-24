@@ -230,7 +230,13 @@ export function OrganizationPage({
                     </nav>
                   )}
                   {role === "owner" && outside ? (
-                    <OutsideCollaborators endpoint={endpoint} url={url} />
+                    <OutsideCollaborators
+                      key={`${id}:${actor}`}
+                      endpoint={endpoint}
+                      url={url}
+                      csrf={csrf}
+                      actor={actor}
+                    />
                   ) : (
                     <People
                       id={id}

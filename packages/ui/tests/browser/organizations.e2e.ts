@@ -326,6 +326,7 @@ test("owners can find outside repository collaborators and open the access edito
           items: query.get("q")
             ? [
                 {
+                  collaborator: "visiting-engineer",
                   name: "Visiting engineer",
                   profile: null,
                   owner: "team",
@@ -383,6 +384,113 @@ test("owners can find outside repository collaborators and open the access edito
     page.getByRole("link", { name: "Outside collaborators", exact: true }),
   ).toHaveCount(0);
   expect(reads).toBe(ownerReads);
+});
+
+test("bulk outside removal reviews the exact effect and recovers a lost reply after reload", async ({
+  page,
+}) => {
+  await fixture(page);
+  const base = `/api/organizations/${id}/outside-collaborators`;
+  const person = "a".repeat(64);
+  const plan = {
+    organization_revision: 1,
+    catalog_revision: 6,
+    collaborators: [person],
+    confirmation: "b".repeat(64),
+  };
+  const impact = { collaborators: 1, grants: 2, repositories: 2 };
+  const calls: unknown[] = [];
+  let committed = false;
+  await page.route(`**${base}/removal-preview`, async (route) => {
+    expect(route.request().postDataJSON()).toEqual({ collaborators: [person] });
+    await route.fulfill({
+      json: { plan, impact, repository_names: ["library", "tools"] },
+    });
+  });
+  await page.route(`**${base}/removals`, async (route) => {
+    calls.push(route.request().postDataJSON());
+    if (committed) return route.fulfill({ json: impact });
+    committed = true;
+    await route.abort();
+  });
+  await page.route(new RegExp(`${base}(?:\\?.*)?$`), (route) =>
+    route.fulfill({
+      json: {
+        items: committed
+          ? []
+          : ["library", "tools"].map((repository) => ({
+              collaborator: person,
+              repository,
+              owner: "team",
+              repository_id: repository,
+              name: "Visiting engineer",
+              profile: null,
+              access: "read",
+            })),
+        next: null,
+        revision: 1,
+      },
+    }),
+  );
+  await page.goto(`${root}?tab=people&people=outside`);
+  await page
+    .getByRole("checkbox", { name: "Select Visiting engineer from library" })
+    .check();
+  await expect(
+    page.getByRole("checkbox", { name: "Select Visiting engineer from tools" }),
+  ).toBeChecked();
+  await page
+    .getByRole("button", { name: "Remove from all repositories" })
+    .click();
+  const dialog = page.getByRole("dialog", {
+    name: "Remove outside collaborators?",
+  });
+  await expect(dialog).toContainText(
+    "Remove 2 direct grants for 1 collaborator across 2 repositories.",
+  );
+  await expect(
+    dialog.getByRole("list", { name: "Affected repositories" }),
+  ).toContainText("tools");
+  expect(calls).toEqual([]);
+  await dialog
+    .getByRole("button", { name: "Remove outside collaborators" })
+    .click();
+  await expect(page.getByRole("alert")).toContainText("The response was lost");
+  await page.reload();
+  await page.getByRole("button", { name: "Retry removal" }).click();
+  await expect(
+    page.getByText("Removed 2 direct grants across 2 repositories."),
+  ).toBeVisible();
+  expect(calls).toEqual([plan, plan]);
+  await page.reload();
+  await expect(
+    page.getByText("No matching outside collaborator grants."),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry removal" })).toHaveCount(
+    0,
+  );
+});
+
+test("audit filters submit the selected action with a repository name", async ({
+  page,
+}) => {
+  await fixture(page);
+  await page.route(`**/api/organizations/${id}/audit-log*`, (route) =>
+    route.fulfill({ json: { items: [], next: null } }),
+  );
+  await page.goto(root);
+  await page.getByRole("link", { name: "Audit log", exact: true }).click();
+  const action = page.locator("#audit-action");
+  await action.click();
+  await page
+    .getByRole("option", { name: "Repository access changed", exact: true })
+    .click();
+  await page.locator("#audit-repository").fill("library");
+  await expect(action).toHaveText("Repository access changed");
+  await page.getByRole("button", { name: "Apply filters" }).click();
+  await expect(page).toHaveURL(
+    /action=repository_access_changed.*repository=library/,
+  );
 });
 
 test("owners see identity-provider management and blocked access in People", async ({

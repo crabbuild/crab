@@ -116,7 +116,7 @@ export type ProjectAccessRole = "none" | "read" | "write" | "admin";
 export type OrganizationProjectPolicy = { version: number, role: ProjectAccessRole, affected_projects: number, scope: string, };
 
 // prettier-ignore
-export type AuditAction = "organization_created" | "automation_changed" | "organization_edited" | "organization_membership" | "organization_invitation" | "rulesets_changed" | "repository_properties_changed" | "issue_types_changed" | "project_changed" | "team_created" | "team_edited" | "team_group_sync" | "team_deleted" | "team_membership" | "team_creation_policy" | "repository_policy_changed" | "project_policy_changed" | "repository_registered" | "repository_access_changed" | "repository_transferred_in" | "repository_transferred_out";
+export type AuditAction = "organization_created" | "automation_changed" | "organization_edited" | "organization_membership" | "organization_invitation" | "rulesets_changed" | "repository_properties_changed" | "issue_types_changed" | "project_changed" | "team_created" | "team_edited" | "team_group_sync" | "team_deleted" | "team_membership" | "team_creation_policy" | "repository_policy_changed" | "project_policy_changed" | "repository_registered" | "repository_access_changed" | "outside_collaborators_removed" | "repository_transferred_in" | "repository_transferred_out";
 
 // prettier-ignore
 export type AuditRepository = { id: string, name: string, };
@@ -155,7 +155,16 @@ export type AccessRepository = { id: string, owner: string, name: string, access
 export type MemberRepositoryAccess = { account: MemberAccessAccount, managed: boolean, items: Array<AccessRepository>, next: string | null, };
 
 // prettier-ignore
-export type OutsideCollaboratorGrant = { name: string, profile: ActorSummary | null, owner: string, repository: string, repository_id: string, access: RepositoryAccess, };
+export type OutsideCollaboratorGrant = { collaborator: string, name: string, profile: ActorSummary | null, owner: string, repository: string, repository_id: string, access: RepositoryAccess, };
+
+// prettier-ignore
+export type OutsideRemovalImpact = { collaborators: number, repositories: number, grants: number, };
+
+// prettier-ignore
+export type OutsideRemovalPlan = { organization_revision: number, catalog_revision: number, collaborators: Array<string>, confirmation: string, };
+
+// prettier-ignore
+export type OutsideRemovalPreview = { plan: OutsideRemovalPlan, impact: OutsideRemovalImpact, repository_names: Array<string>, };
 
 // prettier-ignore
 export type InvitationOffer = { invitation: Invitation, profile: ActorSummary | null, };

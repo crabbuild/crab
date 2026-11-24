@@ -166,7 +166,7 @@ async fn pending_audit_survives_crash_and_later_mutation_keeps_chain() {
         .await
         .unwrap();
     document.membership_audit_head = None;
-    document.pending_membership_audit = Some(event.clone());
+    document.pending_membership_audit = Some(event.clone().into());
     assert!(catalog.write_document(&document, etag).await.unwrap());
     let mut member = admin();
     member.name = "Alice renamed".into();
@@ -821,10 +821,14 @@ async fn organization_audit_retains_each_side_of_a_transfer_and_survives_root_re
         .await
         .unwrap();
     assert_eq!(
-        (outgoing.action, outgoing.name.as_str(), outgoing.previous),
+        (
+            outgoing.action,
+            outgoing.repository.unwrap().1,
+            outgoing.previous
+        ),
         (
             audit::Action::TransferredOut,
-            "project",
+            "project".into(),
             Some(former_history)
         )
     );
@@ -833,8 +837,16 @@ async fn organization_audit_retains_each_side_of_a_transfer_and_survives_root_re
         .await
         .unwrap();
     assert_eq!(
-        (incoming.action, incoming.name.as_str(), incoming.previous),
-        (audit::Action::TransferredIn, "renamed-on-transfer", None)
+        (
+            incoming.action,
+            incoming.repository.unwrap().1,
+            incoming.previous
+        ),
+        (
+            audit::Action::TransferredIn,
+            "renamed-on-transfer".into(),
+            None
+        )
     );
     let old = restored
         .organization_audit_entry(&snapshot, former, former_history)

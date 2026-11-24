@@ -4,7 +4,7 @@ use axum::{
     Extension, Json, Router,
     extract::{Path, Query, State},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -17,7 +17,7 @@ use crate::{
     auth::Principal,
     catalog::RepositoryApplicationState::CellReady,
     cells::{
-        Address,
+        Address, CellClient,
         directory::{ActorSummary, IdentityKey, LookupAccounts, LookupProfiles},
         organization::{Caller, GetOrganization, InspectMemberships, MembershipInspection, Role},
     },
@@ -25,9 +25,21 @@ use crate::{
 };
 
 const SCAN_LIMIT: usize = 100;
+mod removal;
+#[cfg(test)]
+pub(in crate::api) use removal::{RemovalPlan, RemovalPreview};
 
 pub(super) fn routes() -> Router<Arc<Server>> {
-    Router::new().route("/api/organizations/{id}/outside-collaborators", get(list))
+    Router::new()
+        .route("/api/organizations/{id}/outside-collaborators", get(list))
+        .route(
+            "/api/organizations/{id}/outside-collaborators/removal-preview",
+            post(removal::preview),
+        )
+        .route(
+            "/api/organizations/{id}/outside-collaborators/removals",
+            post(removal::remove),
+        )
 }
 
 #[derive(Deserialize)]
@@ -42,12 +54,39 @@ struct Parameters {
 #[derive(Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub(in crate::api) struct OutsideCollaboratorGrant {
+    collaborator: String,
     name: String,
     profile: Option<ActorSummary>,
     owner: String,
     repository: String,
     repository_id: Uuid,
     access: RepositoryAccess,
+}
+
+async fn owner_revision(cells: &CellClient, address: Address, caller: Uuid) -> Result<u64> {
+    let view = cells
+        .query::<GetOrganization>(address, None, Caller { actor: caller })
+        .await
+        .map_err(read_error)?
+        .output
+        .filter(|view| view.role == Role::Owner)
+        .ok_or(Error::NotFound)?;
+    Ok(view.organization.version)
+}
+
+fn collaborator_key(
+    server: &Server,
+    organization: Uuid,
+    issuer: &str,
+    subject: &str,
+) -> blake3::Hash {
+    let mut key = blake3::Hasher::new_keyed(&server.cursor_key);
+    key.update(b"crab-server.outside-collaborator.v1");
+    key.update(organization.as_bytes());
+    key.update(&(issuer.len() as u64).to_le_bytes());
+    key.update(issuer.as_bytes());
+    key.update(subject.as_bytes());
+    key.finalize()
 }
 
 async fn list(
@@ -72,14 +111,7 @@ async fn list(
     };
     let caller = actor(&server, &principal).await?;
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
-    let view = cells
-        .query::<GetOrganization>(address, None, Caller { actor: caller })
-        .await
-        .map_err(read_error)?
-        .output
-        .filter(|view| view.role == Role::Owner)
-        .ok_or(Error::NotFound)?;
-    let revision = view.organization.version;
+    let revision = owner_revision(&cells, address, caller).await?;
     let issuer = server.auth.as_ref().ok_or(Error::NotFound)?.issuer();
     let catalog = server.catalog().ok_or(Error::NotFound)?;
     let (snapshot, etag) = catalog
@@ -127,11 +159,7 @@ async fn list(
     let mut batch: Vec<_> = snapshot
         .repositories
         .iter()
-        .filter(|repo| {
-            repo.application == CellReady
-                && repo.organization_id() == Some(id)
-                && repo.forked_from.is_none()
-        })
+        .filter(|repo| repo.application == CellReady && repo.owns_direct_grants(id))
         .flat_map(|repo| {
             let repo_matches = search.is_empty() || repo.name.to_lowercase().contains(search);
             repo.members
@@ -208,6 +236,9 @@ async fn list(
             continue;
         }
         items.push(OutsideCollaboratorGrant {
+            collaborator: collaborator_key(&server, id, issuer, &grant.subject)
+                .to_hex()
+                .to_string(),
             name: grant.name.clone(),
             profile: account.and_then(|id| profiles.get(&id).cloned()),
             owner: repo.owner.clone(),

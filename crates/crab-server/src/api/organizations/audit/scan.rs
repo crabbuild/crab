@@ -72,6 +72,7 @@ pub(super) async fn search(
                 action,
                 AuditAction::RepositoryRegistered
                     | AuditAction::RepositoryAccessChanged
+                    | AuditAction::OutsideCollaboratorsRemoved
                     | AuditAction::RepositoryTransferredIn
                     | AuditAction::RepositoryTransferredOut
             )

@@ -227,7 +227,10 @@ team memberships. Its native read shares the same team-epoch predicate as
 repository authorization. The public view omits provider identity and claims.
 `api/organizations/outside_collaborators.rs` checks direct catalog grants
 against current Organization membership, with both revisions bound to the
-continuation. Repository settings own grant changes.
+continuation. `catalog/outside_removal.rs` commits confirmed organization-wide
+revocations and their audit receipt in one catalog CAS. Membership changes,
+invitation decisions, and ref publication share the organization policy lease
+with this write. Repository settings own changes to individual grants.
 `api/organizations/audit/` pages and exports owner-only audit history from
 immutable Organization events and catalog membership events. `catalog/audit.rs`
 records event-time scope and chain links in the catalog CAS outbox. Never

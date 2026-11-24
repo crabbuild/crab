@@ -113,7 +113,10 @@ async fn native_browser_filters_and_downloads_the_organization_audit_log() {
     browser.run(&["open", &url]).await;
     browser.sign_in().await;
     browser
-        .run(&["wait", "[aria-label='Organization'] a[href$='tab=audit']"])
+        .run(&[
+            "wait",
+            "[aria-label='Organization administration'] a[href$='tab=audit']",
+        ])
         .await;
     browser
         .run(&[
@@ -127,10 +130,8 @@ async fn native_browser_filters_and_downloads_the_organization_audit_log() {
         ])
         .await;
     browser.run(&["wait", "[aria-label='Audit events']"]).await;
-    browser
-        .run(&["select", "#audit-action", "repository_access_changed"])
-        .await;
     browser.run(&["fill", "#audit-repository", "library"]).await;
+    choose_action(&browser, "repository_access_changed").await;
     browser
         .run(&[
             "find",
@@ -159,6 +160,19 @@ async fn native_browser_filters_and_downloads_the_organization_audit_log() {
         .await;
     browser.run(&["close"]).await;
     f.h.close().await;
+}
+
+pub(super) async fn choose_action(browser: &Browser, value: &str) {
+    browser.run(&["wait", "#audit-action"]).await;
+    browser.run(&["click", "#audit-action"]).await;
+    let value = serde_json::to_string(value).unwrap();
+    let option = format!("[role=option][data-value={value}]");
+    browser.run(&["wait", &option]).await;
+    // Keyboard selection works for options below the visible menu viewport.
+    browser.run(&["focus", &option]).await;
+    browser.run(&["press", "Enter"]).await;
+    let submitted = format!("document.querySelector('select[name=action]')?.value === {value}");
+    browser.run(&["wait", "--fn", &submitted]).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

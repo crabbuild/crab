@@ -1,6 +1,8 @@
 use super::{repositories::repository_write, *};
 use crate::test_support::http::{browser::Browser, organizations::bootstrap};
 
+mod removal;
+
 pub(super) struct AccessFixture {
     pub(super) h: Harness,
     pub(super) organization: Uuid,

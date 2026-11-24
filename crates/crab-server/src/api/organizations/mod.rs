@@ -238,7 +238,7 @@ async fn save_member(
     Json(input): Json<MemberRequest>,
 ) -> Result<Json<Value>> {
     change_member(
-        &server,
+        server,
         &principal,
         id,
         member,
@@ -253,33 +253,38 @@ async fn remove_member(
     Path((id, member)): Path<(Uuid, Uuid)>,
     Json(input): Json<Version>,
 ) -> Result<Json<Value>> {
-    change_member(&server, &principal, id, member, input.version, None).await
+    change_member(server, &principal, id, member, input.version, None).await
 }
 async fn change_member(
-    server: &Server,
+    server: Arc<Server>,
     principal: &Principal,
     id: Uuid,
     member: Uuid,
     version: u64,
     role: Option<Role>,
 ) -> Result<Json<Value>> {
-    let actor = actor(server, principal).await?;
-    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    let actor = actor(&server, principal).await?;
     app::account(principal)?;
-    let value = app::command_output(
-        cells
-            .command::<ChangeMember>(
-                target(id)?,
-                app::mutation_identity()?,
-                MemberChange {
-                    actor,
-                    member,
-                    version,
-                    role,
-                },
-            )
-            .await,
-    )?;
+    // A member cannot change roles between an outside grant revocation's
+    // Organization eligibility check and Catalog publication.
+    let value = properties::policy_write(server, id, move |server, address, _| async move {
+        let cells = server.cells().ok_or(Error::CellUnavailable)?;
+        app::command_output(
+            cells
+                .command::<ChangeMember>(
+                    address,
+                    app::mutation_identity()?,
+                    MemberChange {
+                        actor,
+                        member,
+                        version,
+                        role,
+                    },
+                )
+                .await,
+        )
+    })
+    .await?;
     Ok(Json(serde_json::to_value(applied(value)?)?))
 }
 fn target(id: Uuid) -> Result<Address> {
