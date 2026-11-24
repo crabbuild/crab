@@ -8,6 +8,8 @@ use super::super::{
 };
 use super::{PREFIX, Target};
 
+pub(crate) mod transfer;
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Kind {
@@ -82,15 +84,16 @@ pub(crate) struct Query {
 
 type Counts = BTreeMap<Kind, u64>;
 
-pub(in crate::cells::repository) fn has_reactions(
-    context: &Transaction<'_>,
-    target: Target,
-) -> crate::cells::Result<bool> {
-    Ok(!counts(context, target)?.is_empty())
+fn counts_key(target: Target) -> String {
+    format!("{}counts", target_prefix(target))
 }
 
-fn counts_key(target: Target) -> String {
-    format!("{PREFIX}/reactions/{}/counts", target.key())
+fn target_prefix(target: Target) -> String {
+    format!("{PREFIX}/reactions/{}/", target.key())
+}
+
+fn actor_suffix(digest: blake3::Hash, kind: Kind) -> String {
+    format!("actors/{}/{}", digest, kind.key())
 }
 
 fn member_key(
@@ -102,10 +105,9 @@ fn member_key(
     // membership, and the reaction ledger need not store private identity claims.
     let digest = blake3::hash(&serde_json::to_vec(&(&actor.issuer, &actor.subject))?);
     Ok(format!(
-        "{PREFIX}/reactions/{}/actors/{}/{}",
-        target.key(),
-        digest.to_hex(),
-        kind.key()
+        "{}{}",
+        target_prefix(target),
+        actor_suffix(digest, kind)
     ))
 }
 

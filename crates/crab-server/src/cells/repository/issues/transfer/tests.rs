@@ -189,6 +189,9 @@ async fn staging_preserves_order_and_replays_without_creating_an_issue() {
                     activity_count += 1;
                 }
             }
+            Records::Reactions { page } => {
+                assert_eq!((page.after, page.next), (None, None));
+            }
             Records::Issue { .. } => panic!("expected an issue transfer page"),
         }
         next = frame.records.next();
@@ -200,7 +203,7 @@ async fn staging_preserves_order_and_replays_without_creating_an_issue() {
     }
     assert_eq!(staged_comments, original);
     assert_eq!(activity_count, 19);
-    assert_eq!(frames, 6);
+    assert_eq!(frames, 7);
 
     // A fresh transport identity exercises the permanent staging receipt.
     let replay = ready(capture(&origin, head()).await);

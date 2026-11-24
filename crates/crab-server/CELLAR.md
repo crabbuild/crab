@@ -516,6 +516,11 @@ target Cell. Labels match by name, and a milestone matches by title and due
 date. Historical events with source-local references remain in their source
 frames to avoid resolving their numbers in the destination repository.
 
+Reaction frames page through the issue and comment ledgers in key order. They
+retain opaque actor membership keys, derive destination counts, and compare
+those counts with the source snapshot. Publication keeps a viewer's ability to
+remove an existing reaction after the issue moves.
+
 Issue bodies and comments carry manifests for linked published attachments in
 the source repository. The receiver reserves the transfer-specific attachment
 IDs before the worker writes their bytes. A staged frame advances only with a
@@ -547,8 +552,8 @@ The browser HTTP workflow checks both repository grants and the shared owner.
 It reserves and verifies attachment copies before preparing. Preparation
 previews publication and its search projections in a rolled-back transaction.
 Approval and retirement run under the policy leases used for repository
-ownership changes. The source refuses captures with retained edit history,
-reactions, or repository-local relationships that require a different
+ownership changes. The source refuses captures with retained edit history
+or repository-local relationships that require a different
 publication format. The HTTP coordinator also checks organization Project
 placements in the owning organization.
 

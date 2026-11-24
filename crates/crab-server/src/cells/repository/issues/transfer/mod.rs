@@ -11,7 +11,8 @@ use crate::cells::{
         attachments::{self, Upload},
         dependencies, duplicates, edit_history, links, locks,
         milestones::GetAssignment,
-        minimization, reactions,
+        minimization,
+        reactions::transfer as reactions,
     },
 };
 
@@ -36,6 +37,7 @@ pub(crate) struct Source {
 #[serde(tag = "section", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Cursor {
     Comments { before: Option<u64> },
+    Reactions { after: Option<reactions::Position> },
     Activity { before: Option<u64> },
 }
 
@@ -63,6 +65,9 @@ pub(crate) enum Records {
         before: Option<u64>,
         items: Vec<Comment>,
         next: Option<u64>,
+    },
+    Reactions {
+        page: reactions::Page,
     },
     Activity {
         before: Option<u64>,
@@ -103,7 +108,7 @@ impl Records {
         let (attachments, comments): (&[Upload], &[Comment]) = match self {
             Self::Issue { header } => (&header.attachments, &[]),
             Self::Comments { items, .. } => (&[], items),
-            Self::Activity { .. } => (&[], &[]),
+            Self::Reactions { .. } | Self::Activity { .. } => (&[], &[]),
         };
         attachments
             .iter()
@@ -114,6 +119,7 @@ impl Records {
         match self {
             Self::Issue { .. } => None,
             Self::Comments { before, .. } => Some(Cursor::Comments { before: *before }),
+            Self::Reactions { page } => Some(Cursor::Reactions { after: page.after }),
             Self::Activity { before, .. } => Some(Cursor::Activity { before: *before }),
         }
     }
@@ -126,7 +132,11 @@ impl Records {
             } => Some(Cursor::Comments {
                 before: Some(*before),
             }),
-            Self::Comments { next: None, .. } => Some(Cursor::Activity { before: None }),
+            Self::Comments { next: None, .. } => Some(Cursor::Reactions { after: None }),
+            Self::Reactions { page } => Some(match page.next {
+                Some(after) => Cursor::Reactions { after: Some(after) },
+                None => Cursor::Activity { before: None },
+            }),
             Self::Activity { next, .. } => next.map(|before| Cursor::Activity {
                 before: Some(before),
             }),
@@ -137,6 +147,10 @@ impl Records {
         match self.cursor() {
             None => "issue".into(),
             Some(Cursor::Comments { before }) => format!("comments/{:016x}", before.unwrap_or(0)),
+            Some(Cursor::Reactions { after: None }) => "reactions".into(),
+            Some(Cursor::Reactions { after: Some(after) }) => {
+                format!("reactions/{}", after.address())
+            }
             Some(Cursor::Activity { before }) => format!("activity/{:016x}", before.unwrap_or(0)),
         }
     }
@@ -194,6 +208,7 @@ impl Records {
                     items.iter().map(|item| item.number),
                 )?;
             }
+            Self::Reactions { page } => page.validate()?,
         }
         Ok(())
     }
@@ -270,10 +285,6 @@ pub(crate) enum CaptureOutcome {
 
 pub(crate) struct Capture;
 
-fn has_discussion_history(context: &Transaction<'_>, target: Target) -> Result<bool> {
-    Ok(edit_history::exists(context, target)? || reactions::has_reactions(context, target)?)
-}
-
 fn has_linked_work(context: &Transaction<'_>, subject: Subject) -> Result<bool> {
     if dependencies::has_edges(context, subject.number)?
         || duplicates::current(context, subject)?.is_some()
@@ -333,7 +344,7 @@ impl Read for Capture {
         };
         let records = match input {
             CaptureInput::Start { .. } => {
-                if has_discussion_history(context, Target::Issue { number })? {
+                if edit_history::exists(context, Target::Issue { number })? {
                     return Ok(CaptureOutcome::DiscussionHistory);
                 }
                 if has_linked_work(context, subject)? {
@@ -385,7 +396,7 @@ impl Read for Capture {
                     return Err(Error::Invalid("Issue transfer comment target is missing"));
                 };
                 for record in &items {
-                    if has_discussion_history(
+                    if edit_history::exists(
                         context,
                         Target::IssueComment {
                             issue: number,
@@ -422,6 +433,12 @@ impl Read for Capture {
                     next,
                 }
             }
+            CaptureInput::Continue {
+                cursor: Cursor::Reactions { after },
+                ..
+            } => Records::Reactions {
+                page: reactions::capture(context, number, after)?,
+            },
             CaptureInput::Continue {
                 cursor: Cursor::Activity { before },
                 ..

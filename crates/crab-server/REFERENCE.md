@@ -2480,11 +2480,12 @@ Every route prefix is `/api/repos/{owner}/{name}`. Browser mutations require the
 Open an issue and choose **Transfer issue** in its sidebar. The picker shows
 repositories under the same owner where you have Moderate access or higher.
 You need that access in both repositories. The move preserves the issue,
-comments, assignees, and discussion attachments. Labels match by name.
+comments, assignees, reactions on the issue and comments, and discussion
+attachments. Labels match by name.
 Milestones match by title and due date. The original URL continues to work.
 
 Current transfer support covers open issues. Crab keeps the source issue in
-place when it detects reactions, retained edit history, or linked work that
+place when it detects retained edit history or linked work that
 the destination cannot preserve.
 
 `GET /api/repos/{owner}/{name}/issues/{number}/transfer` lists up to 30 eligible

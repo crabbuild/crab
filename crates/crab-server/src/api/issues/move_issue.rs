@@ -34,6 +34,9 @@ use crate::{
     server::Server,
 };
 
+#[cfg(test)]
+mod reactions_tests;
+
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct Search {
@@ -245,7 +248,7 @@ impl Transfer<'_> {
                 }
                 CaptureOutcome::DiscussionHistory => {
                     return Err(Error::Invalid(
-                        "This issue has reactions or edit history that Crab cannot transfer yet",
+                        "This issue has edit history that Crab cannot transfer yet",
                     ));
                 }
                 CaptureOutcome::LinkedWork => {

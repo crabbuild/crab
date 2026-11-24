@@ -653,9 +653,16 @@ fn install(context: &mut Transaction<'_>, reservation: &Reservation, count: u64)
     let mut last = 0;
     let mut activity_from = count + 1;
     for ordinal in 2..=count {
-        let Records::Comments { items, .. } = frame(context, reservation, ordinal)? else {
-            activity_from = ordinal;
-            break;
+        let items = match frame(context, reservation, ordinal)? {
+            Records::Comments { items, .. } => items,
+            Records::Reactions { page } => {
+                reactions::install(context, number, page)?;
+                continue;
+            }
+            Records::Activity { .. } | Records::Issue { .. } => {
+                activity_from = ordinal;
+                break;
+            }
         };
         for item in items {
             let mut comment = item.record;
