@@ -30,6 +30,11 @@ export interface Work {
 }
 export type Layout = "table" | "board" | "roadmap";
 export type GroupBy = "status" | "issue_type" | `field:${string}`;
+export type ProjectItemSelection =
+  | Row
+  | "new"
+  | { draft: string }
+  | { initialItem: Item };
 export interface View {
   id: string;
   name: string;

@@ -162,3 +162,110 @@ async fn native_browser_moves_work_between_field_groups() {
         .run(&["wait", ".project-board-column[aria-label='Core'] article"])
         .await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires agent-browser and built embedded UI; uses real OIDC/native Cells"]
+async fn native_browser_adds_work_in_project_groups() {
+    let (h, alice, org, repo, key) = fixture().await;
+    let repository = format!("/api/repos/{key}/projects");
+    let board = Uuid::now_v7();
+    submit(
+        &h,
+        &alice,
+        &repository,
+        Some(repo),
+        json!({
+            "kind":"create","id":board,"name":"Empty release board","template":"kanban"
+        }),
+    )
+    .await;
+    let workspace = format!("{org}/projects");
+    let table = project_with_issue(&h, &alice, &workspace, repo, true, false).await;
+    let (team, _) = define_group_fields(&h, &alice, &workspace, table, None).await;
+    let browser = Browser::new("add-to-project-group");
+    let click = async |role: &str, name: &str| {
+        browser
+            .run(&["find", "role", role, "click", "--name", name, "--exact"])
+            .await;
+    };
+    let title = async |title: &str| {
+        browser
+            .run(&["find", "label", "Title", "fill", title, "--exact"])
+            .await;
+    };
+
+    let board_url = format!("{}/{key}/projects/{board}", h.origin);
+    browser.run(&["open", &board_url]).await;
+    browser.sign_in().await;
+    browser.run(&["set", "viewport", "1400", "1000"]).await;
+    browser.run(&["wait", ".project-board"]).await;
+    click("button", "Add work to Done").await;
+    browser.run(&["wait", "[role=dialog]"]).await;
+    for mode in ["Draft note", "Create an issue"] {
+        click("combobox", "Add").await;
+        click("option", mode).await;
+    }
+    title("Publish release checklist").await;
+    click("button", "Add to project").await;
+    browser
+        .run(&["wait", ".project-board-column[aria-label='Done'] article"])
+        .await;
+    let local = h.json(&format!("{repository}/{board}/items"), &alice).await;
+    let created = &local["page"]["items"][0];
+    assert_eq!(created["item"]["status"], "Done");
+    assert_eq!(created["work"]["title"], "Publish release checklist");
+    assert_eq!(created["work"]["subject"]["kind"], "issue");
+
+    let organization = org.rsplit('/').next().unwrap();
+    let table_url = format!(
+        "{}/-/organizations/{organization}/projects/{table}?group_by=field:{team}",
+        h.origin
+    );
+    let shared_items = format!("{workspace}/{table}/items");
+    browser.run(&["open", &table_url]).await;
+    browser.run(&["wait", "table.project-table"]).await;
+    click("button", "Add work to Core").await;
+    browser.run(&["wait", "[role=dialog]"]).await;
+    click("tab", "Draft note").await;
+    title("Core rollout notes").await;
+    click("button", "Cancel").await;
+    browser
+        .run(&["wait", "--fn", "!document.querySelector('[role=dialog]')"])
+        .await;
+    assert_eq!(h.json(&shared_items, &alice).await["page"]["total"], 1);
+
+    click("button", "Add work to Edge").await;
+    browser.run(&["wait", "[role=dialog]"]).await;
+    click("tab", "Draft note").await;
+    title("Edge rollout notes").await;
+    click("button", "Add to project").await;
+    browser.run(&["wait", "--fn", "document.querySelector('.project-table tbody[aria-label=\"Edge\"]')?.textContent.includes('Edge rollout notes')"]).await;
+    browser.run(&["open", &table_url]).await;
+    browser.run(&["wait", "table.project-table"]).await;
+    click("button", "Resume item draft").await;
+    browser.run(&["wait", "--fn", "document.querySelector('[role=dialog] input[id$=\"-title\"]')?.value === 'Core rollout notes'"]).await;
+    click("button", "Add to project").await;
+    browser.run(&["wait", "--fn", "document.querySelector('.project-table tbody[aria-label=\"Core\"]')?.textContent.includes('Core rollout notes')"]).await;
+
+    click("tab", "Roadmap").await;
+    browser.run(&["wait", ".project-roadmap"]).await;
+    click("combobox", "Group by").await;
+    click("option", "Team").await;
+    browser
+        .run(&["wait", ".project-roadmap [aria-label='Core']"])
+        .await;
+    click("button", "Add work to Core").await;
+    browser.run(&["wait", "[role=dialog]"]).await;
+    click("tab", "Draft note").await;
+    title("Core delivery timeline").await;
+    click("button", "Add to project").await;
+    browser.run(&["wait", "--fn", "document.querySelector('.project-roadmap [aria-label=\"Core\"]')?.textContent.includes('Core delivery timeline')"]).await;
+
+    let shared = h
+        .json(&format!("{shared_items}?group_by=field:{team}"), &alice)
+        .await;
+    assert_eq!(
+        shared["page"]["group_counts"],
+        json!({"":1,"Core":2,"Edge":1})
+    );
+}

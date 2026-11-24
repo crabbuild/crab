@@ -110,19 +110,26 @@ export function ItemEditor({
   project,
   row,
   draftItem,
+  initialItem,
   onClose,
 }: {
   repo: Repository;
   project: Project;
   row?: Row;
   draftItem?: string;
+  initialItem?: Item;
   onClose: () => void;
 }) {
   const saved = useProjectDraft(
-    { target: { repo }, project: project.id, item: row?.item.id ?? draftItem },
+    {
+      target: { repo },
+      project: project.id,
+      item: row?.item.id ?? draftItem ?? initialItem?.id,
+    },
     {
       kind: "item",
-      item: row?.item ?? blankItem(project.definition.statuses[0]),
+      item:
+        row?.item ?? initialItem ?? blankItem(project.definition.statuses[0]),
       mode: row ? (row.item.subject ? "existing" : "draft") : "issue",
       parent: "",
       repository: repo.id,
@@ -143,8 +150,7 @@ export function ItemEditor({
     existing: wasExisting,
   } = saved.value;
   const setItem = (item: Item) => saved.update({ item });
-  const setMode = (mode: "issue" | "existing" | "draft") =>
-    saved.update({ mode });
+  const setMode = (mode: "existing" | "draft") => saved.update({ mode });
   const setParent = (parent: string) => saved.update({ parent });
   const setPicked = (work: Work | null) => saved.update({ work });
   const setVersion = (version: number) => saved.update({ version });
@@ -224,12 +230,12 @@ export function ItemEditor({
                         value !== "draft"
                       )
                         return;
-                      setMode(value);
-                      setItem({
-                        ...blankItem(project.definition.statuses[0]),
-                        id: item.id,
+                      saved.update({
+                        mode: value,
+                        item: { ...item, subject: null, title: "", body: "" },
+                        parent: "",
+                        work: null,
                       });
-                      setPicked(null);
                     }}
                     options={{
                       issue: "Create an issue",

@@ -119,6 +119,24 @@ export function projectGroups(page: ItemPage, grouping: GroupBy) {
 }
 
 export type ChangeProjectItem = (row: Row, edit: (item: Item) => Item) => void;
+type ProjectOwnedGroup = Exclude<GroupBy, "issue_type">;
+export type AddProjectGroupItem = (
+  group: ProjectOwnedGroup,
+  key: string,
+) => void;
+
+export function applyProjectGroup(
+  item: Item,
+  group: ProjectOwnedGroup,
+  key: string,
+): Item {
+  if (group === "status") return { ...item, status: key };
+  const field = group.slice("field:".length);
+  const values = { ...item.values };
+  if (key) values[field] = key;
+  else delete values[field];
+  return { ...item, values };
+}
 
 export function useProjectGroupMove(
   grouping: GroupBy | undefined,
@@ -146,18 +164,8 @@ export function useProjectGroupMove(
 
   async function move(row: Row, key: string) {
     if (!grouping) return;
-    if (grouping === "status") {
-      editItem?.(row, (item) => ({ ...item, status: key }));
-      return;
-    }
-    if (grouping.startsWith("field:")) {
-      const field = grouping.slice("field:".length);
-      editItem?.(row, (item) => {
-        const values = { ...item.values };
-        if (key) values[field] = key;
-        else delete values[field];
-        return { ...item, values };
-      });
+    if (grouping !== "issue_type") {
+      editItem?.(row, (item) => applyProjectGroup(item, grouping, key));
       return;
     }
     const source = row.repository ?? repo;

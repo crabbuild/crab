@@ -36,23 +36,28 @@ export function WorkspaceItemEditor({
   detail,
   row,
   draftItem,
+  initialItem,
   onClose,
 }: {
   organization: string;
   detail: Detail;
   row?: Row;
   draftItem?: string;
+  initialItem?: Item;
   onClose: () => void;
 }) {
   const saved = useProjectDraft(
     {
       target: { organization },
       project: detail.project.id,
-      item: row?.item.id ?? draftItem,
+      item: row?.item.id ?? draftItem ?? initialItem?.id,
     },
     {
       kind: "item",
-      item: row?.item ?? blankItem(detail.project.definition.statuses[0]),
+      item:
+        row?.item ??
+        initialItem ??
+        blankItem(detail.project.definition.statuses[0]),
       mode: row
         ? row.work
           ? "existing"
@@ -443,6 +448,7 @@ export function WorkspaceItemEditor({
               </Button>
             )}
             <Button
+              type="button"
               variant="outline"
               disabled={commands.locked}
               onClick={onClose}
