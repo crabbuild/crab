@@ -484,6 +484,9 @@ pub(in crate::cells) fn dispatch_read(
         pull_base::stacked::Inspect::ID => {
             invoke_read::<pull_base::stacked::Inspect>(context, input)
         }
+        pull_base::stacked::Resolve::ID => {
+            invoke_read::<pull_base::stacked::Resolve>(context, input)
+        }
         viewed::GetViewedFiles::ID => invoke_read::<viewed::GetViewedFiles>(context, input),
         pending_reviews::Get::ID => invoke_read::<pending_reviews::Get>(context, input),
         deploy_tokens::List::ID => invoke_read::<deploy_tokens::List>(context, input),

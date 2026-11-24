@@ -14,8 +14,15 @@ use super::branch_restore::{open_pull, remote};
 const ROOT: &str = "/api/repos/team/private";
 const BRANCH: &str = "/api/repos/team/private/pulls/1/head-branch";
 
-async fn child(h: &Harness, writer: &str, path: &Path, remote: &str, name: &str) -> Value {
-    git::success(path, &["switch", "-c", name, "feature"]).await;
+async fn child(
+    h: &Harness,
+    writer: &str,
+    path: &Path,
+    remote: &str,
+    base: &str,
+    name: &str,
+) -> Value {
+    git::success(path, &["switch", "-c", name, base]).await;
     std::fs::write(path.join(format!("{name}.txt")), "A change above feature\n").unwrap();
     git::success(path, &["add", "."]).await;
     git::success(path, &["commit", "-m", "Add a stacked change"]).await;
@@ -25,7 +32,7 @@ async fn child(h: &Harness, writer: &str, path: &Path, remote: &str, name: &str)
         &format!("{ROOT}/pulls"),
         writer,
         json!({
-            "request_id":Uuid::now_v7(), "title":name, "body":"", "base_ref":"refs/heads/feature",
+            "request_id":Uuid::now_v7(), "title":name, "body":"", "base_ref":format!("refs/heads/{base}"),
             "head_ref":format!("refs/heads/{name}"),
         }),
     )
@@ -58,9 +65,13 @@ async fn merge(h: &Harness, writer: &str, parent: Value, automatic: bool) {
         .error_for_status()
         .unwrap();
     }
+    confirm_merge(h, writer, parent).await;
+}
+
+async fn confirm_merge(h: &Harness, writer: &str, parent: Value) {
     h.write(
         Method::POST,
-        &format!("{ROOT}/pulls/1/merge"),
+        &format!("{ROOT}/pulls/{}/merge", parent["number"]),
         writer,
         json!({
             "request_id":Uuid::now_v7(),"version":parent["version"],"method":"fast_forward",
@@ -85,12 +96,28 @@ async fn stacked_branch_deletion_fences_dependents_and_replays_the_original_resu
     let checkout = tempfile::tempdir().unwrap();
     let path = checkout.path();
     let (head, parent) = open_pull(&h, &writer, remote.as_str(), path).await;
-    let first = child(&h, &writer, path, remote.as_str(), "second-layer").await;
+    let first = child(
+        &h,
+        &writer,
+        path,
+        remote.as_str(),
+        "feature",
+        "second-layer",
+    )
+    .await;
     merge(&h, &writer, parent, false).await;
     let preview = h.json(BRANCH, &writer).await["branch"].clone();
     assert_eq!(preview["retarget"]["pulls"], json!([2]));
     assert_eq!(preview["retarget"]["base_ref"], "refs/heads/main");
-    let second = child(&h, &writer, path, remote.as_str(), "another-layer").await;
+    let second = child(
+        &h,
+        &writer,
+        path,
+        remote.as_str(),
+        "feature",
+        "another-layer",
+    )
+    .await;
     let stale = h
         .write(Method::POST, BRANCH, &writer, deletion(preview))
         .await;
@@ -168,7 +195,7 @@ async fn stacked_deletion_resumes_when_git_publication_fails_after_the_cell_comm
     let checkout = tempfile::tempdir().unwrap();
     let path = checkout.path();
     let (head, parent) = open_pull(&h, &writer, remote.as_str(), path).await;
-    child(&h, &writer, path, remote.as_str(), "follow-up").await;
+    child(&h, &writer, path, remote.as_str(), "feature", "follow-up").await;
     merge(&h, &writer, parent, false).await;
     let selected = deletion(h.json(BRANCH, &writer).await["branch"].clone());
     fail_intent(true);
@@ -207,7 +234,7 @@ async fn automatic_cleanup_retargets_a_stack_before_deleting_its_base_ref() {
     let checkout = tempfile::tempdir().unwrap();
     let path = checkout.path();
     let (_, parent) = open_pull(&h, &writer, remote.as_str(), path).await;
-    child(&h, &writer, path, remote.as_str(), "follow-up").await;
+    child(&h, &writer, path, remote.as_str(), "feature", "follow-up").await;
     merge(&h, &writer, parent, true).await;
     let repo = &h.server.repositories.values()[0];
     let pending = automatic::pending(&h.server, repo, None)
@@ -235,7 +262,7 @@ async fn native_browser_previews_and_retargets_a_stacked_pull_when_deleting_its_
     let checkout = tempfile::tempdir().unwrap();
     let path = checkout.path();
     let (_, parent) = open_pull(&h, &writer, remote.as_str(), path).await;
-    child(&h, &writer, path, remote.as_str(), "follow-up").await;
+    child(&h, &writer, path, remote.as_str(), "feature", "follow-up").await;
     merge(&h, &writer, parent, false).await;
     let browser = Browser::new("stacked-delete");
     browser
@@ -267,6 +294,220 @@ async fn native_browser_previews_and_retargets_a_stacked_pull_when_deleting_its_
     assert_eq!(
         h.json(&format!("{ROOT}/pulls/2"), &writer).await["base_ref"],
         "refs/heads/main"
+    );
+    drop(browser);
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn git_push_retargets_independent_stacks_and_retries_before_the_ref_commit() {
+    let (store, fail_intent) = crate::git::receive::fault_plan_intent();
+    let h = Harness::new_with_store(false, false, store).await;
+    h.initialize_directory().await;
+    let writer = h.login().await;
+    let remote = remote(&h, &writer).await;
+    let checkout = tempfile::tempdir().unwrap();
+    let path = checkout.path();
+    let (feature, parent) = open_pull(&h, &writer, remote.as_str(), path).await;
+    let first = child(&h, &writer, path, remote.as_str(), "feature", "layer-one").await;
+    merge(&h, &writer, parent, false).await;
+    git::success(path, &["fetch", remote.as_str(), "main"]).await;
+    git::success(path, &["branch", "-f", "main", "FETCH_HEAD"]).await;
+    let peer = child(&h, &writer, path, remote.as_str(), "main", "peer").await;
+    let second = child(&h, &writer, path, remote.as_str(), "peer", "layer-two").await;
+    let peer_oid = peer["head_oid"].as_str().unwrap().to_owned();
+    confirm_merge(&h, &writer, peer).await;
+    let first_url = format!("{ROOT}/pulls/{}", first["number"]);
+    let second_url = format!("{ROOT}/pulls/{}", second["number"]);
+
+    let conflicting = git::git(
+        path,
+        &[
+            "push",
+            "--atomic",
+            remote.as_str(),
+            "--delete",
+            "feature",
+            "layer-one",
+        ],
+    )
+    .await;
+    assert!(!conflicting.status.success());
+    assert!(
+        String::from_utf8_lossy(&conflicting.stderr)
+            .contains("replacement base or dependent heads")
+    );
+    assert_eq!(
+        h.json(&first_url, &writer).await["base_ref"],
+        "refs/heads/feature"
+    );
+    assert_eq!(
+        h.json(&second_url, &writer).await["base_ref"],
+        "refs/heads/peer"
+    );
+
+    let delete = [
+        "push",
+        "--atomic",
+        remote.as_str(),
+        "--delete",
+        "feature",
+        "peer",
+    ];
+    fail_intent(true);
+    assert!(!git::git(path, &delete).await.status.success());
+    let moved_first = h.json(&first_url, &writer).await;
+    let moved_second = h.json(&second_url, &writer).await;
+    assert_eq!(moved_first["base_ref"], "refs/heads/main");
+    assert_eq!(moved_second["base_ref"], "refs/heads/main");
+    let repo = &h.server.repositories.values()[0];
+    assert_eq!(
+        repo.ref_oid("refs/heads/feature").await.unwrap(),
+        Some(feature)
+    );
+    assert_eq!(
+        repo.ref_oid("refs/heads/peer").await.unwrap(),
+        Some(peer_oid)
+    );
+
+    fail_intent(false);
+    git::success(path, &delete).await;
+    assert_eq!(repo.ref_oid("refs/heads/feature").await.unwrap(), None);
+    assert_eq!(repo.ref_oid("refs/heads/peer").await.unwrap(), None);
+    assert_eq!(
+        h.json(&first_url, &writer).await["version"],
+        moved_first["version"]
+    );
+    assert_eq!(
+        h.json(&second_url, &writer).await["version"],
+        moved_second["version"]
+    );
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn generic_deletion_requires_an_explicit_pull_when_merge_destinations_disagree() {
+    let h = Harness::new(false).await;
+    let writer = h.login().await;
+    let remote = remote(&h, &writer).await;
+    let checkout = tempfile::tempdir().unwrap();
+    let path = checkout.path();
+    let (feature, parent) = open_pull(&h, &writer, remote.as_str(), path).await;
+    git::success(
+        path,
+        &["push", remote.as_str(), "main:refs/heads/alternate"],
+    )
+    .await;
+    let another: Value = h
+        .write(
+            Method::POST,
+            &format!("{ROOT}/pulls"),
+            &writer,
+            json!({
+                "request_id":Uuid::now_v7(), "title":"Merge into alternate", "body":"",
+                "base_ref":"refs/heads/alternate", "head_ref":"refs/heads/feature",
+            }),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let child = child(&h, &writer, path, remote.as_str(), "feature", "follow-up").await;
+    merge(&h, &writer, parent, false).await;
+    confirm_merge(&h, &writer, another).await;
+    let preview = h
+        .http
+        .get(format!(
+            "{}{ROOT}/branches/deletion?name=feature&expected_oid={feature}",
+            h.origin
+        ))
+        .header("cookie", &writer)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(preview.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        preview.json::<Value>().await.unwrap()["error"]["code"],
+        "stacked_deletion_blocked"
+    );
+    let git = git::git(path, &["push", remote.as_str(), "--delete", "feature"]).await;
+    assert!(!git.status.success());
+    assert!(
+        String::from_utf8_lossy(&git.stderr)
+            .contains("Delete it from the intended merged pull request")
+    );
+    let child_url = format!("{ROOT}/pulls/{}", child["number"]);
+    assert_eq!(
+        h.json(&child_url, &writer).await["base_ref"],
+        "refs/heads/feature"
+    );
+    let explicit = deletion(h.json(BRANCH, &writer).await["branch"].clone());
+    h.write(Method::POST, BRANCH, &writer, explicit)
+        .await
+        .error_for_status()
+        .unwrap();
+    assert_eq!(
+        h.json(&child_url, &writer).await["base_ref"],
+        "refs/heads/main"
+    );
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires agent-browser and the built embedded UI"]
+async fn native_browser_branch_list_previews_and_moves_stacked_pulls() {
+    let h = Harness::new(false).await;
+    let writer = h.login().await;
+    let remote = remote(&h, &writer).await;
+    let checkout = tempfile::tempdir().unwrap();
+    let path = checkout.path();
+    let (_, parent) = open_pull(&h, &writer, remote.as_str(), path).await;
+    child(&h, &writer, path, remote.as_str(), "feature", "follow-up").await;
+    merge(&h, &writer, parent, false).await;
+    let browser = Browser::new("refs-stack");
+    browser
+        .run(&["open", &format!("{}/team/private/branches", h.origin)])
+        .await;
+    browser.sign_in().await;
+    browser
+        .run(&["wait", "button[aria-label='Delete feature']"])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Delete feature",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", "--text", "Pull request #2 will move to main"])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Delete branch",
+            "--exact",
+        ])
+        .await;
+    browser.run(&["wait", "--fn", "![...document.querySelectorAll('button')].some(x => x.getAttribute('aria-label') === 'Delete feature')"]).await;
+    assert_eq!(
+        h.json(&format!("{ROOT}/pulls/2"), &writer).await["base_ref"],
+        "refs/heads/main"
+    );
+    assert!(
+        git::success(path, &["ls-remote", remote.as_str(), "refs/heads/feature"])
+            .await
+            .is_empty()
     );
     drop(browser);
     h.close().await;

@@ -98,6 +98,71 @@ impl Read for Inspect {
 }
 
 #[derive(Deserialize, Serialize)]
+pub(crate) struct ResolveInput {
+    pub reference: String,
+    pub old_oid: String,
+    pub plan: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) enum Resolution {
+    Unrelated,
+    Ambiguous,
+    Stack {
+        parent: u64,
+        base: String,
+        view: View,
+    },
+}
+
+pub(crate) struct Resolve;
+impl Read for Resolve {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
+    const ID: u32 = 451;
+    type Input = ResolveInput;
+    type Output = Resolution;
+
+    fn execute(
+        context: &mut Transaction<'_>,
+        input: Self::Input,
+    ) -> crate::cells::Result<Self::Output> {
+        let reference = input.reference;
+        let view = Inspect::execute(
+            context,
+            Query {
+                reference: reference.clone(),
+                plan: input.plan,
+            },
+        )?;
+        if view.dependents.is_empty() && view.applied.is_none() {
+            return Ok(Resolution::Unrelated);
+        }
+        // A byte-exact local head excludes same-named fork heads. Require one
+        // destination across merged PRs that actually consumed this commit.
+        let routes = context.query(
+            "SELECT s.base_ref, MAX(d.number)
+             FROM discussion_index_pull_sources s JOIN discussion_index d ON d.rowid = s.document
+             WHERE d.kind = 1 AND d.state = ? AND s.head_ref = ? AND s.merged_head_oid = ?
+             GROUP BY s.base_ref ORDER BY s.base_ref LIMIT 2",
+            &[
+                SqlValue::Integer(i64::from(PullState::Merged.code())),
+                SqlValue::Blob(reference.into_bytes()),
+                SqlValue::Text(input.old_oid),
+            ],
+        )?;
+        match routes.rows.as_slice() {
+            [] => Ok(Resolution::Unrelated),
+            [route] => Ok(Resolution::Stack {
+                parent: result_u64_from_row(route, 1)?,
+                base: result_text(route, 0)?,
+                view,
+            }),
+            _ => Ok(Resolution::Ambiguous),
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
 pub(crate) struct Batch {
     pub parent: u64,
     pub plan: String,
@@ -109,50 +174,62 @@ pub(crate) struct Apply;
 impl Mutation for Apply {
     const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 450;
-    type Input = Batch;
+    type Input = Vec<Batch>;
     type Output = bool;
 
     fn execute(
         context: &mut Transaction<'_>,
-        input: Batch,
+        batches: Self::Input,
     ) -> crate::cells::Result<MutationResult<bool>> {
-        let Some(parent) = load_pull(context, input.parent)?.filter(|pull| {
-            pull.state == PullState::Merged
-                && pull.head_repository.is_none()
-                && pull.merge.is_some()
-        }) else {
-            return Ok(MutationResult::Rejected(false));
-        };
-        let key = receipt(&input.plan)?;
-        let current = dependents(context, &parent.head_ref)?;
-        if let Some(previous) = context.document::<String>(&key)? {
-            return if previous == input.token && current.is_empty() {
-                Ok(MutationResult::Success(true))
-            } else {
-                Ok(MutationResult::Rejected(false))
-            };
-        }
-        if current.is_empty()
-            || !eligible(&parent.base_ref, &current)
-            || token(&parent.base_ref, &current)? != input.token
-            || current.len() != input.changes.len()
+        if batches.is_empty()
+            || batches
+                .iter()
+                .map(|batch| batch.changes.len())
+                .sum::<usize>()
+                > LIMIT
         {
             return Ok(MutationResult::Rejected(false));
         }
-        for (child, change) in current.iter().zip(input.changes) {
-            if change.pull != child.number
-                || change.change.version != child.version
-                || change.change.base_ref != parent.base_ref
-                || !matches!(
-                    Retarget::execute(context, change)?,
-                    MutationResult::Success(Outcome::Saved)
-                )
-            {
-                // Returning rejection rolls back all earlier retargets in this batch.
+        for input in batches {
+            if !apply(context, input)? {
                 return Ok(MutationResult::Rejected(false));
             }
         }
-        context.put_document(&key, &input.token)?;
         Ok(MutationResult::Success(true))
     }
+}
+
+fn apply(context: &mut Transaction<'_>, input: Batch) -> crate::cells::Result<bool> {
+    let Some(parent) = load_pull(context, input.parent)?.filter(|pull| {
+        pull.state == PullState::Merged && pull.head_repository.is_none() && pull.merge.is_some()
+    }) else {
+        return Ok(false);
+    };
+    let key = receipt(&input.plan)?;
+    let current = dependents(context, &parent.head_ref)?;
+    if let Some(previous) = context.document::<String>(&key)? {
+        return Ok(previous == input.token && current.is_empty());
+    }
+    if current.is_empty()
+        || !eligible(&parent.base_ref, &current)
+        || token(&parent.base_ref, &current)? != input.token
+        || current.len() != input.changes.len()
+    {
+        return Ok(false);
+    }
+    for (child, change) in current.iter().zip(input.changes) {
+        if change.pull != child.number
+            || change.change.version != child.version
+            || change.change.base_ref != parent.base_ref
+            || !matches!(
+                Retarget::execute(context, change)?,
+                MutationResult::Success(Outcome::Saved)
+            )
+        {
+            // Returning rejection rolls back all earlier retargets in this batch.
+            return Ok(false);
+        }
+    }
+    context.put_document(&key, &input.token)?;
+    Ok(true)
 }

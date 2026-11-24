@@ -4173,14 +4173,22 @@ protection and rulesets. The repository's default branch cannot be deleted.
 
 When the merged pull request's head and base are in the same repository,
 **Delete branch** on the pull request and automatic deletion move eligible open
-pull requests from that branch to the merged pull request's base. The confirmation lists the affected pull
-requests and the new base. Manual and automatic deletion lease the relevant
+pull requests from that branch to the merged pull request's base. The confirmation
+lists the affected pull requests and the new base. Manual and automatic deletion lease the relevant
 refs, including any dependent fork heads, and save the new comparisons as one
 repository transaction before publishing the deletion. Base changes use the
 same review invalidation and CODEOWNERS behavior as a manual base change.
 The branch is kept if the batch would leave an invalid comparison or contains
 more than 16 dependent pull requests. For a closed unmerged pull request or
 a merged pull request from a fork, a branch used as a base is kept.
+
+From the **Branches** page, the delete confirmation shows the same impact
+when merged pull requests for the exact branch and commit agree on the new base.
+Stock Git can delete these branches with `git push origin --delete <branch>`.
+One atomic push can remove several independent branches and move up to 16
+dependent pull requests in a single repository transaction. Push changes to a
+replacement base or dependent head separately. If matching merges point to
+different bases, use **Delete branch** on the intended merged pull request.
 
 Repository administrators can enable **Automatically delete head branches**
 in **Settings** under **Pull request merge methods**. Use the setting in the
@@ -4210,6 +4218,11 @@ under the Git ref lease. Retrying a recorded request recovers its result
 without repeating the ref edit or retargeting the same pull requests again.
 For a private fork, use the fork's repository route and include the PR's
 repository UUID as `upstream` in the query string.
+
+`GET /api/repos/{owner}/{name}/branches/deletion?name=…&expected_oid=…`
+returns `retarget: null` for an ordinary deletion or the matched pull request
+number, version, destination, dependent numbers, and confirmation token. Submit
+a stacked deletion through the returned pull request's `head-branch` action.
 
 Reopening a closed pull request requires both branch names to exist, including
 the exact source repository for a fork head. Conversation, bulk, and direct

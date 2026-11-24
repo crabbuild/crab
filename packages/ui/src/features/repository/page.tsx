@@ -307,19 +307,36 @@ export function RepositoryPage({
       }),
     );
   }
-  async function deleteBranch(name: string, expectedOid: string) {
-    const response = await fetch(endpoint(repo, "branches"), {
-      method: "DELETE",
+  async function deleteBranch(
+    name: string,
+    expectedOid: string,
+    retarget: import("./refs").BranchRetarget | null,
+    requestId: string,
+  ) {
+    const path = retarget ? `pulls/${retarget.pull}/head-branch` : "branches";
+    const response = await fetch(endpoint(repo, path), {
+      method: retarget ? "POST" : "DELETE",
       headers: {
         Accept: "application/json",
         "Content-Type": "application/json",
         "X-CSRF-Token": csrf,
         "X-Crab-Repository-Id": repo.id,
       },
-      body: JSON.stringify({
-        name: name.replace(/^refs\/heads\//, ""),
-        expected_oid: expectedOid,
-      }),
+      body: JSON.stringify(
+        retarget
+          ? {
+              action: "delete",
+              request_id: requestId,
+              version: retarget.version,
+              repository_id: repo.id,
+              head_oid: expectedOid,
+              retarget_token: retarget.token,
+            }
+          : {
+              name: name.replace(/^refs\/heads\//, ""),
+              expected_oid: expectedOid,
+            },
+      ),
     });
     if (response.status === 401)
       window.dispatchEvent(new Event("crab-session-expired"));

@@ -7,15 +7,24 @@ use tokio_util::sync::CancellationToken;
 use super::*;
 use crate::cells::repository::{pull_base, pull_base::stacked as cell};
 
+pub(crate) mod native;
+
 #[derive(Serialize)]
-pub(super) struct Preview {
+pub(crate) struct Preview {
     base_ref: String,
     pulls: Vec<u64>,
     token: String,
 }
 
+struct Destination {
+    reference: String,
+    parent: u64,
+    base: String,
+    plan: String,
+}
+
 pub(crate) struct Stack {
-    replacement: String,
+    destination: Destination,
     dependents: Vec<cell::Dependent>,
     token: String,
     forks: BTreeMap<Uuid, (Arc<Repository>, BTreeSet<String>)>,
@@ -68,18 +77,24 @@ pub(super) async fn preview(
     pull: &PullRequest,
 ) -> Result<Option<Preview>> {
     let view = inspect(server, source, &pull.head_ref, None).await?;
+    preview_dependents(source, &pull.base_ref, view).await
+}
+
+async fn preview_dependents(
+    source: &Repository,
+    base: &str,
+    view: cell::View,
+) -> Result<Option<Preview>> {
     if view.dependents.is_empty() {
         return Ok(None);
     }
-    if !cell::eligible(&pull.base_ref, &view.dependents)
-        || source.ref_oid(&pull.base_ref).await?.is_none()
-    {
+    if !cell::eligible(base, &view.dependents) || source.ref_oid(base).await?.is_none() {
         return Err(Error::PullBranchInUse);
     }
     Ok(Some(Preview {
-        base_ref: pull.base_ref.clone(),
+        base_ref: base.to_owned(),
         pulls: view.dependents.iter().map(|child| child.number).collect(),
-        token: cell::token(&pull.base_ref, &view.dependents).map_err(Error::Cell)?,
+        token: cell::token(base, &view.dependents).map_err(Error::Cell)?,
     }))
 }
 
@@ -100,6 +115,22 @@ pub(crate) async fn plan(
         PullBranchBinding::Manual { retarget_token, .. } => Some(retarget_token.as_deref()),
         PullBranchBinding::Automatic { .. } => None,
     };
+    let destination = Destination {
+        reference: pull.head_ref,
+        parent: pull.number,
+        base: pull.base_ref,
+        plan: edit.plan_id.clone(),
+    };
+    build(server, source, destination, view, expected)
+}
+
+fn build(
+    server: &Server,
+    source: &Repository,
+    destination: Destination,
+    view: cell::View,
+    expected: Option<Option<&str>>,
+) -> Result<Option<Stack>> {
     if let Some(applied) = view.applied {
         // The Cell can have committed even when the Git marker or its reply
         // was lost. The original intent may continue after the batch moved.
@@ -109,7 +140,7 @@ pub(crate) async fn plan(
             return Err(Error::PullBranchChanged);
         }
         return Ok(Some(Stack {
-            replacement: pull.base_ref,
+            destination,
             dependents: Vec::new(),
             token: applied,
             forks: BTreeMap::new(),
@@ -122,10 +153,10 @@ pub(crate) async fn plan(
             Err(Error::PullBranchChanged)
         };
     }
-    if expected == Some(None) || !cell::eligible(&pull.base_ref, &view.dependents) {
+    if expected == Some(None) || !cell::eligible(&destination.base, &view.dependents) {
         return Err(Error::PullBranchInUse);
     }
-    let token = cell::token(&pull.base_ref, &view.dependents).map_err(Error::Cell)?;
+    let token = cell::token(&destination.base, &view.dependents).map_err(Error::Cell)?;
     if expected.flatten().is_some_and(|expected| expected != token) {
         return Err(Error::PullBranchChanged);
     }
@@ -141,7 +172,7 @@ pub(crate) async fn plan(
         }
     }
     Ok(Some(Stack {
-        replacement: pull.base_ref,
+        destination,
         dependents: view.dependents,
         token,
         forks,
@@ -150,35 +181,12 @@ pub(crate) async fn plan(
 
 impl Stack {
     pub(crate) fn local_refs(&self) -> impl Iterator<Item = String> + '_ {
-        std::iter::once(self.replacement.clone()).chain(
+        std::iter::once(self.destination.base.clone()).chain(
             self.dependents
                 .iter()
                 .filter(|child| child.fork.is_none())
                 .map(|child| child.head.clone()),
         )
-    }
-
-    pub(crate) async fn lease_forks(
-        &self,
-        options: LeaseOptions,
-        cancel: &CancellationToken,
-        leases: &mut Vec<PublicationLeases>,
-    ) -> Result<()> {
-        // The caller already owns the base repository's sorted refs. Match
-        // bulk reopen by admitting fork heads in stable repository UUID order.
-        for (fork, refs) in self.forks.values() {
-            leases.push(
-                acquire_leases(
-                    &fork.store,
-                    &fork.layout,
-                    refs.iter().cloned(),
-                    options,
-                    cancel,
-                )
-                .await?,
-            );
-        }
-        Ok(())
     }
 
     pub(super) async fn apply(
@@ -190,14 +198,41 @@ impl Stack {
         edit: &PullBranchPublication,
         cancel: &CancellationToken,
     ) -> Result<()> {
-        if !can_retarget(pull) || pull.base_ref != self.replacement || source.id != edit.upstream.id
+        if !can_retarget(pull)
+            || pull.base_ref != self.destination.base
+            || source.id != edit.upstream.id
         {
             return Err(Error::PullBranchChanged);
         }
-        let current = inspect(server, source, &pull.head_ref, Some(edit.plan_id.clone())).await?;
+        let batch = self.prepare(server, source, principal, cancel).await?;
+        persist(
+            server,
+            source,
+            principal,
+            batch.into_iter().collect(),
+            cancel,
+        )
+        .await
+    }
+
+    async fn prepare(
+        &self,
+        server: &Server,
+        source: &Repository,
+        principal: &Principal,
+        cancel: &CancellationToken,
+    ) -> Result<Option<cell::Batch>> {
+        let destination = &self.destination;
+        let current = inspect(
+            server,
+            source,
+            &destination.reference,
+            Some(destination.plan.clone()),
+        )
+        .await?;
         if current.applied.as_deref() == Some(&self.token) && current.dependents.is_empty() {
-            return if source.ref_oid(&self.replacement).await?.is_some() {
-                Ok(())
+            return if source.ref_oid(&destination.base).await?.is_some() {
+                Ok(None)
             } else {
                 Err(Error::PullBranchInUse)
             };
@@ -211,7 +246,7 @@ impl Stack {
         let base = source
             .open_current(server, RepositoryOptions::default(), cancel)
             .await?;
-        let base_oid = branch_tip(&base, &self.replacement).ok_or(Error::PullBranchInUse)?;
+        let base_oid = branch_tip(&base, &destination.base).ok_or(Error::PullBranchInUse)?;
         let mut forks = BTreeMap::new();
         for (id, (locked, _)) in &self.forks {
             let current = super::super::git::fork_repository(server, source, *id)?;
@@ -272,7 +307,7 @@ impl Stack {
             let mut request_id = [0; 16];
             let mut digest = blake3::Hasher::new();
             digest.update(b"crab.stacked-base-request.v1\0");
-            digest.update(edit.plan_id.as_bytes());
+            digest.update(destination.plan.as_bytes());
             digest.update(&child.number.to_be_bytes());
             request_id.copy_from_slice(&digest.finalize().as_bytes()[..16]);
             changes.push(pull_base::Input {
@@ -283,41 +318,73 @@ impl Stack {
                 change: pull_base::Change {
                     request_id: Uuid::from_bytes(request_id),
                     version: child.version,
-                    base_ref: self.replacement.clone(),
+                    base_ref: destination.base.clone(),
                     base_oid: base_oid.clone(),
                     head_oid: head,
                 },
                 code_owner_requests: owners,
             });
         }
-        if cancel.is_cancelled() {
-            return Err(Error::MergeBusy);
-        }
-        if !app::membership(server, principal, source)
-            .await?
-            .principal
-            .can_write(source.id)
-        {
-            return Err(Error::BranchUpdatePermission);
-        }
-        let routed = app::repository_cell(server, source)?;
-        if !app::command_output(
-            routed
-                .client
-                .command::<cell::Apply>(
-                    &routed.target,
-                    app::mutation_identity()?,
-                    cell::Batch {
-                        parent: edit.pull,
-                        plan: edit.plan_id.clone(),
-                        token: self.token.clone(),
-                        changes,
-                    },
-                )
-                .await,
-        )? {
-            return Err(Error::PullBranchChanged);
-        }
-        Ok(())
+        Ok(Some(cell::Batch {
+            parent: destination.parent,
+            plan: destination.plan.clone(),
+            token: self.token.clone(),
+            changes,
+        }))
     }
+}
+
+async fn persist(
+    server: &Server,
+    source: &Repository,
+    principal: &Principal,
+    batches: Vec<cell::Batch>,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    if batches.is_empty() {
+        return Ok(());
+    }
+    if cancel.is_cancelled() {
+        return Err(Error::MergeBusy);
+    }
+    if !app::membership(server, principal, source)
+        .await?
+        .principal
+        .can_write(source.id)
+    {
+        return Err(Error::BranchUpdatePermission);
+    }
+    let routed = app::repository_cell(server, source)?;
+    if !app::command_output(
+        routed
+            .client
+            .command::<cell::Apply>(&routed.target, app::mutation_identity()?, batches)
+            .await,
+    )? {
+        return Err(Error::PullBranchChanged);
+    }
+    Ok(())
+}
+
+pub(crate) async fn lease_forks(
+    stacks: &[&Stack],
+    options: LeaseOptions,
+    cancel: &CancellationToken,
+    leases: &mut Vec<PublicationLeases>,
+) -> Result<()> {
+    let mut forks: BTreeMap<_, (_, BTreeSet<_>)> = BTreeMap::new();
+    for stack in stacks {
+        for (id, (fork, refs)) in &stack.forks {
+            forks
+                .entry(*id)
+                .or_insert_with(|| (fork, BTreeSet::new()))
+                .1
+                .extend(refs.iter().cloned());
+        }
+    }
+    // The caller owns the local refs first. Admit each fork once in UUID order.
+    for (fork, refs) in forks.into_values() {
+        leases.push(acquire_leases(&fork.store, &fork.layout, refs, options, cancel).await?);
+    }
+    Ok(())
 }

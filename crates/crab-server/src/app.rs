@@ -100,6 +100,8 @@ pub(crate) enum Error {
     PullBranchChanged,
     #[error("An open pull request still uses the branch")]
     PullBranchInUse,
+    #[error("{0}")]
+    StackedDeletionBlocked(&'static str),
     #[error("The pull request has a missing branch")]
     PullBranchesUnavailable,
     #[error("Pull request branch edit failed")]
@@ -438,6 +440,9 @@ impl IntoResponse for Error {
                 "pull_branch_in_use",
                 "An open pull request still uses this branch.",
             ),
+            Self::StackedDeletionBlocked(message) => {
+                (StatusCode::CONFLICT, "stacked_deletion_blocked", *message)
+            }
             Self::PullBranchesUnavailable => (
                 StatusCode::CONFLICT,
                 "pull_branches_unavailable",

@@ -365,6 +365,11 @@ and session migration paths are supported.
   boundary for manual and automatic deletion. The merge transaction promotes
   cleanup to pending work after Git publication. The worker rechecks the source
   setting generation and visible ref transaction under Git publication leases.
+  `head_branch/stacked/` reuses the base change transaction for stacked pulls.
+  Stock Git and the branch list resolve a base only from same-repository merges
+  of the branch and exact commit being deleted. The branch list uses the
+  existing pull request deletion action with its confirmed impact. Git pushes
+  lease the combined ref set and commit all dependent comparisons together.
 - `api/catalog_browse/` ranks and pages catalog matches. Reuse `api/catalog.rs`
   for current direct, group, organization, and fork grants and topic metadata. Browse reads
   lifecycle settings only for the result page and rechecks access before

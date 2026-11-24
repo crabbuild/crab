@@ -122,12 +122,24 @@ struct ReceiveInput {
     publication: Publication,
     visibility_bases: BTreeMap<String, (String, gix_hash::ObjectId)>,
     defer_readiness: bool,
+    wire: bool,
 }
 
 struct PublishAttempt {
     directory: Arc<crate::local_disk::StagingDirectory>,
     plan_id: Option<String>,
     stack: Option<crate::api::stacked_pulls::Stack>,
+    native_deletions: Option<crate::api::stacked_pulls::native::Deletions>,
+}
+
+impl PublishAttempt {
+    fn stacks(&self) -> impl Iterator<Item = &crate::api::stacked_pulls::Stack> {
+        self.stack.iter().chain(
+            self.native_deletions
+                .iter()
+                .flat_map(crate::api::stacked_pulls::native::Deletions::stacks),
+        )
+    }
 }
 
 pub(super) async fn run(
@@ -181,6 +193,7 @@ pub(super) async fn run(
             publication: Publication::NativePush,
             visibility_bases: BTreeMap::new(),
             defer_readiness,
+            wire: true,
         },
         cancel,
     )
@@ -212,6 +225,7 @@ pub(crate) async fn publish_existing_objects(
             publication,
             visibility_bases: BTreeMap::new(),
             defer_readiness: false,
+            wire: false,
         },
         cancel,
     )
@@ -329,6 +343,7 @@ pub(super) async fn publish_pack(
             publication: publication.kind,
             visibility_bases,
             defer_readiness: false,
+            wire: false,
         },
         cancel,
     )
@@ -369,13 +384,60 @@ async fn run_request(
     } else {
         None
     };
+    let native_deletions = if matches!(input.publication, Publication::NativePush)
+        && !input.defer_readiness
+        && server.cells().is_some()
+        && request
+            .updates
+            .iter()
+            .any(|update| update.new.is_none() && update.name.starts_with("refs/heads/"))
+    {
+        let plan = input.plan_id.as_deref().filter(|_| input.wire);
+        if let Some(plan) = plan
+            && committed_plan(&entry, &request.updates, plan).await?
+        {
+            let mut bytes = Vec::new();
+            if request.report_status {
+                receive_wire::report(&mut bytes, &request.updates, None, None)?;
+            }
+            return Ok(bytes);
+        }
+        match crate::api::stacked_pulls::native::plan(server, &entry, &request.updates, plan).await
+        {
+            Ok(deletions) => Some(deletions),
+            Err(error) => return report_rejection(&request, error.into()),
+        }
+    } else {
+        None
+    };
+    let plan_id = input.plan_id.clone().or_else(|| {
+        if sends_publication_webhook(server, principal, &entry, &request.updates)
+            || tracks_issue_closures(server, principal, &request.updates)
+        {
+            // A ref can be deleted and recreated with identical old and new
+            // OIDs. Give an unplanned write its own receipt for this operation.
+            Some(
+                blake3::hash(uuid::Uuid::now_v7().as_bytes())
+                    .to_hex()
+                    .to_string(),
+            )
+        } else {
+            None
+        }
+    });
+    let attempt = PublishAttempt {
+        directory: Arc::new(directory),
+        plan_id: plan_id.clone(),
+        stack,
+        native_deletions,
+    };
     let names: Vec<_> = request
         .updates
         .iter()
         .map(|update| update.name.clone())
         .chain(
-            stack
-                .iter()
+            attempt
+                .stacks()
                 .flat_map(crate::api::stacked_pulls::Stack::local_refs),
         )
         .chain(match &input.publication {
@@ -443,26 +505,6 @@ async fn run_request(
     let entry = entry.as_ref();
     let request = &request;
     let defer_readiness = input.defer_readiness;
-    let plan_id = input.plan_id.clone().or_else(|| {
-        if sends_publication_webhook(server, principal, entry, &request.updates)
-            || tracks_issue_closures(server, principal, &request.updates)
-        {
-            // A ref can be deleted and recreated with identical old and new
-            // OIDs. Give an unplanned write its own receipt for this operation.
-            Some(
-                blake3::hash(uuid::Uuid::now_v7().as_bytes())
-                    .to_hex()
-                    .to_string(),
-            )
-        } else {
-            None
-        }
-    });
-    let attempt = PublishAttempt {
-        directory: Arc::new(directory),
-        plan_id: plan_id.clone(),
-        stack,
-    };
     let publish_destination = |cancel: CancellationToken| async move {
         crab_remote::publication::with_leases(
             &entry.store,
@@ -474,10 +516,15 @@ async fn run_request(
                 let run = |cancel| async move {
                     let mut fork_leases = Vec::new();
                     let result = async {
-                        if let Some(stack) = &attempt.stack {
-                            stack
-                                .lease_forks(LeaseOptions::renewing(TTL), &cancel, &mut fork_leases)
-                                .await?;
+                        let stacks = attempt.stacks().collect::<Vec<_>>();
+                        if !stacks.is_empty() {
+                            crate::api::stacked_pulls::lease_forks(
+                                &stacks,
+                                LeaseOptions::renewing(TTL),
+                                &cancel,
+                                &mut fork_leases,
+                            )
+                            .await?;
                         }
                         // The prepared capsule future is large on debug Tokio workers.
                         Box::pin(publish_attempt(
@@ -565,19 +612,38 @@ async fn run_request(
         }
         None => publish(cancel.child_token()).await,
     };
-    if request.report_status {
-        let reason = match &result {
-            Err(ReceiveError::Protected) => Some("protected branch requires a pull request"),
-            Err(ReceiveError::RefRule(message)) => Some(*message),
-            _ => None,
-        };
-        if let Some(reason) = reason {
-            let mut bytes = Vec::new();
-            receive_wire::report(&mut bytes, &request.updates, None, Some(reason))?;
-            return Ok(bytes);
-        }
+    match result {
+        Ok(bytes) => Ok(bytes),
+        Err(error) => report_rejection(request, error),
     }
-    result
+}
+
+fn report_rejection(
+    request: &receive_wire::ReceiveRequest,
+    error: ReceiveError,
+) -> Result<Vec<u8>> {
+    let reason = match &error {
+        ReceiveError::Protected => Some("protected branch requires a pull request"),
+        ReceiveError::RefRule(message) => Some(*message),
+        ReceiveError::Settings(error) => match error.as_ref() {
+            crate::app::Error::StackedDeletionBlocked(message) => Some(*message),
+            crate::app::Error::PullBranchInUse => {
+                Some("an open pull request still uses the branch")
+            }
+            crate::app::Error::PullBranchChanged => {
+                Some("the stacked pull requests changed; retry the push")
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(reason) = reason.filter(|_| request.report_status) {
+        let mut bytes = Vec::new();
+        receive_wire::report(&mut bytes, &request.updates, None, Some(reason))?;
+        Ok(bytes)
+    } else {
+        Err(error)
+    }
 }
 
 fn sends_publication_webhook(
@@ -594,6 +660,7 @@ struct RefMutation<'a> {
     updates: &'a [crab_git::receive_plan::RefUpdate],
     publication: &'a Publication,
     stack: Option<&'a crate::api::stacked_pulls::Stack>,
+    native_deletions: Option<&'a crate::api::stacked_pulls::native::Deletions>,
     has_branch: bool,
     initial_head: Option<(crab_write::capsule_protocol::RootSnapshot, String, String)>,
     closing_ref: Option<&'a crab_git::receive_plan::RefUpdate>,
@@ -898,6 +965,7 @@ async fn publish_attempt(
         updates: &request.updates,
         publication: &input.publication,
         stack: attempt.stack.as_ref(),
+        native_deletions: attempt.native_deletions.as_ref(),
         has_branch,
         initial_head,
         closing_ref,
@@ -1400,6 +1468,9 @@ async fn commit_authorized(
             cancel,
         )
         .await?;
+    }
+    if let Some(deletions) = mutation.native_deletions {
+        Box::pin(deletions.apply(server, entry, &current.principal, cancel)).await?;
     }
     if let Some(plan) = plan_id
         && sends_publication_webhook(server, principal, entry, mutation.updates)
