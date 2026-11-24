@@ -298,6 +298,7 @@ export function TeamPages({
   next: string | null;
   onPage: (value: string | undefined) => void;
 }) {
+  if (!after && !next) return null;
   return (
     <nav aria-label="Team pagination" className="flex justify-center gap-2">
       <Button

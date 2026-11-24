@@ -491,7 +491,7 @@ for (const mobile of [false, true])
     await expect(
       page.getByRole("status", { name: "Team submission result" }),
     ).toContainText("Delete team completed.");
-    await page.getByRole("link", { name: "All teams", exact: false }).click();
+    await expect(page).toHaveURL(/[?&]tab=teams(?:&powerbar=1)?$/);
     await expect(
       page.getByText("No teams to show.", { exact: false }),
     ).toBeVisible();

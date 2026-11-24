@@ -2,14 +2,10 @@ import { useState } from "react";
 import {
   Building2Icon,
   SettingsIcon,
-  ShieldCheckIcon,
   UsersIcon,
   FolderKanbanIcon,
   BookMarkedIcon,
-  FileClockIcon,
-  BotIcon,
-  ListFilterIcon,
-  TagIcon,
+  NetworkIcon,
 } from "lucide-react";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
@@ -42,6 +38,16 @@ import { OrganizationRepositoryProperties } from "./repository-properties";
 import { OrganizationIssueTypes } from "./issue-types";
 export { OrganizationInvitation } from "./invitations";
 
+const adminTabs = [
+  { key: "settings", label: "Settings" },
+  { key: "invitations", label: "Invitations" },
+  { key: "rulesets", label: "Rulesets" },
+  { key: "properties", label: "Properties" },
+  { key: "issue-types", label: "Issue types" },
+  { key: "automation", label: "Automation" },
+  { key: "audit", label: "Audit log" },
+];
+
 export function OrganizationPage({
   id,
   url,
@@ -62,30 +68,42 @@ export function OrganizationPage({
       <Result state={own} timingLabel="Organization">
         {({ organization, role, actor }) => (
           <>
-            <header className="mb-6 flex min-w-0 items-center gap-4">
+            <header className="mb-6 flex min-w-0 flex-wrap items-start gap-4">
               <Building2Icon
                 className="size-12 shrink-0 rounded-lg border p-2 text-muted-foreground"
                 aria-hidden="true"
               />
-              <div className="min-w-0 break-words">
-                <h1 className="text-2xl font-semibold tracking-tight">
-                  {organization.name}
-                </h1>
-                <p className="mt-1 text-sm text-muted-foreground">
-                  {organization.description || "Organization"}
-                </p>
+              <div className="min-w-0 flex-1 basis-48">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h1
+                    dir="auto"
+                    className="min-w-0 wrap-anywhere text-2xl font-semibold tracking-tight"
+                  >
+                    {organization.name}
+                  </h1>
+                  <Badge variant="outline">
+                    {role === "owner"
+                      ? "Organization owner"
+                      : "Organization member"}
+                  </Badge>
+                </div>
+                {organization.description && (
+                  <p
+                    dir="auto"
+                    className="mt-1 whitespace-pre-wrap wrap-anywhere text-sm text-muted-foreground"
+                  >
+                    {organization.description}
+                  </p>
+                )}
               </div>
+              <Button variant="outline" size="sm" onClick={own.retry}>
+                Refresh organization
+              </Button>
             </header>
             <nav
               aria-label="Organization"
-              className="mb-6 flex flex-wrap gap-2 border-b pb-3"
+              className="flex flex-wrap gap-2 border-b pb-3"
             >
-              <Button asChild variant="ghost">
-                <Link href={`/-/organizations/${id}/projects`}>
-                  <FolderKanbanIcon data-icon="inline-start" />
-                  Projects
-                </Link>
-              </Button>
               {[
                 {
                   key: "repositories",
@@ -93,46 +111,7 @@ export function OrganizationPage({
                   icon: BookMarkedIcon,
                 },
                 { key: "people", label: "People", icon: UsersIcon },
-                { key: "teams", label: "Teams", icon: UsersIcon },
-                ...(role === "owner"
-                  ? [
-                      {
-                        key: "invitations",
-                        label: "Invitations",
-                        icon: UsersIcon,
-                      },
-                      {
-                        key: "rulesets",
-                        label: "Rulesets",
-                        icon: ShieldCheckIcon,
-                      },
-                      {
-                        key: "properties",
-                        label: "Properties",
-                        icon: ListFilterIcon,
-                      },
-                      {
-                        key: "issue-types",
-                        label: "Issue types",
-                        icon: TagIcon,
-                      },
-                      {
-                        key: "automation",
-                        label: "Automation",
-                        icon: BotIcon,
-                      },
-                      {
-                        key: "audit",
-                        label: "Audit log",
-                        icon: FileClockIcon,
-                      },
-                      {
-                        key: "settings",
-                        label: "Settings",
-                        icon: SettingsIcon,
-                      },
-                    ]
-                  : []),
+                { key: "teams", label: "Teams", icon: NetworkIcon },
               ].map(({ key, label, icon: Icon }) => (
                 <Button
                   key={key}
@@ -148,73 +127,114 @@ export function OrganizationPage({
                   </Link>
                 </Button>
               ))}
-              <Button variant="outline" onClick={own.retry}>
-                Refresh organization
+              <Button asChild variant="ghost">
+                <Link href={`/-/organizations/${id}/projects`}>
+                  <FolderKanbanIcon data-icon="inline-start" />
+                  Projects
+                </Link>
               </Button>
             </nav>
-            {notice && (
-              <p role="status" className="mb-4 text-sm">
-                {notice}
-              </p>
+            {role === "owner" && (
+              <nav
+                aria-label="Organization administration"
+                className="flex flex-wrap items-center gap-1 border-b py-2"
+              >
+                <SettingsIcon
+                  aria-hidden="true"
+                  className="mx-2 size-4 text-muted-foreground"
+                />
+                {adminTabs.map(({ key, label }) => (
+                  <Button
+                    asChild
+                    key={key}
+                    size="sm"
+                    variant={tab === key ? "secondary" : "ghost"}
+                  >
+                    <Link
+                      href={`/-/organizations/${id}?tab=${key}`}
+                      aria-current={tab === key ? "page" : undefined}
+                    >
+                      {label}
+                    </Link>
+                  </Button>
+                ))}
+              </nav>
             )}
-            {tab === "repositories" ? (
-              <OrganizationRepositories
-                id={id}
-                name={organization.name}
-                actor={actor}
-                canCreate={role === "owner"}
-                url={url}
-                csrf={csrf}
-              />
-            ) : tab === "teams" ? (
-              <Teams
-                id={id}
-                actor={actor}
-                owner={role === "owner"}
-                url={url}
-                csrf={csrf}
-                commands={commands}
-              />
-            ) : tab === "people" ? (
-              <People
-                id={id}
-                endpoint={endpoint}
-                csrf={csrf}
-                onChanged={(message) => {
-                  setNotice(message);
-                  own.retry();
-                }}
-              />
-            ) : role === "owner" && tab === "invitations" ? (
-              <Invitations endpoint={endpoint} id={id} csrf={csrf} />
-            ) : role === "owner" && tab === "rulesets" ? (
-              <OrganizationRulesets key={id} organization={id} csrf={csrf} />
-            ) : role === "owner" && tab === "properties" ? (
-              <OrganizationRepositoryProperties
-                key={id}
-                organization={id}
-                csrf={csrf}
-              />
-            ) : role === "owner" && tab === "issue-types" ? (
-              <OrganizationIssueTypes key={id} organization={id} csrf={csrf} />
-            ) : role === "owner" && tab === "automation" ? (
-              <OrganizationAutomation organization={id} csrf={csrf} />
-            ) : role === "owner" && tab === "audit" ? (
-              <OrganizationAuditLog id={id} url={url} />
-            ) : role === "owner" && tab === "settings" ? (
-              <Settings
-                key={organization.version}
-                organization={organization}
-                csrf={csrf}
-                endpoint={endpoint}
-                onSaved={() => {
-                  setNotice("Organization updated.");
-                  own.retry();
-                }}
-              />
-            ) : (
-              <p>Page not found.</p>
-            )}
+            <div className="mt-6">
+              {notice && (
+                <p role="status" className="mb-4 text-sm">
+                  {notice}
+                </p>
+              )}
+              {tab === "repositories" ? (
+                <OrganizationRepositories
+                  id={id}
+                  name={organization.name}
+                  actor={actor}
+                  canCreate={role === "owner"}
+                  url={url}
+                  csrf={csrf}
+                />
+              ) : tab === "teams" ? (
+                <Teams
+                  id={id}
+                  actor={actor}
+                  owner={role === "owner"}
+                  url={url}
+                  csrf={csrf}
+                  commands={commands}
+                />
+              ) : tab === "people" ? (
+                <People
+                  id={id}
+                  endpoint={endpoint}
+                  csrf={csrf}
+                  owner={role === "owner"}
+                  onChanged={(message) => {
+                    setNotice(message);
+                    own.retry();
+                  }}
+                />
+              ) : role === "owner" && tab === "invitations" ? (
+                <Invitations endpoint={endpoint} id={id} csrf={csrf} />
+              ) : role === "owner" && tab === "rulesets" ? (
+                <OrganizationRulesets key={id} organization={id} csrf={csrf} />
+              ) : role === "owner" && tab === "properties" ? (
+                <OrganizationRepositoryProperties
+                  key={id}
+                  organization={id}
+                  csrf={csrf}
+                />
+              ) : role === "owner" && tab === "issue-types" ? (
+                <OrganizationIssueTypes
+                  key={id}
+                  organization={id}
+                  csrf={csrf}
+                />
+              ) : role === "owner" && tab === "automation" ? (
+                <OrganizationAutomation organization={id} csrf={csrf} />
+              ) : role === "owner" && tab === "audit" ? (
+                <OrganizationAuditLog id={id} url={url} />
+              ) : role === "owner" && tab === "settings" ? (
+                <Settings
+                  key={organization.version}
+                  organization={organization}
+                  csrf={csrf}
+                  endpoint={endpoint}
+                  onSaved={() => {
+                    setNotice("Organization updated.");
+                    own.retry();
+                  }}
+                />
+              ) : (
+                <div className="notice error" role="alert">
+                  <p>This organization page is unavailable.</p>
+                  <Link href={`/-/organizations/${id}`}>
+                    Back to organization
+                  </Link>
+                </div>
+              )}
+            </div>
           </>
         )}
       </Result>
@@ -225,11 +245,13 @@ function People({
   id,
   endpoint,
   csrf,
+  owner,
   onChanged,
 }: {
   id: string;
   endpoint: string;
   csrf: string;
+  owner: boolean;
   onChanged: (message: string) => void;
 }) {
   const [after, setAfter] = useState<string>();
@@ -244,29 +266,47 @@ function People({
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-lg font-semibold">Organization members</h2>
-        <Button variant="outline" onClick={refresh}>
-          Refresh members
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" onClick={refresh}>
+            Refresh members
+          </Button>
+          {owner && (
+            <Button asChild>
+              <Link href={`/-/organizations/${id}?tab=invitations`}>
+                Invite people
+              </Link>
+            </Button>
+          )}
+        </div>
       </div>
       <Result state={members} timingLabel="Organization members">
         {(data) => (
           <>
-            <ul className="divide-y rounded-lg border">
-              {data.items.map((member) => (
-                <MemberRow
-                  key={`${member.actor}:${member.version}`}
-                  member={member}
-                  organization={id}
-                  canManage={data.can_manage}
-                  endpoint={endpoint}
-                  csrf={csrf}
-                  onChanged={(message) => {
-                    onChanged(message);
-                    refresh();
-                  }}
-                />
-              ))}
-            </ul>
+            {data.items.length ? (
+              <ul className="divide-y rounded-lg border">
+                {data.items.map((member) => (
+                  <MemberRow
+                    key={`${member.actor}:${member.version}`}
+                    member={member}
+                    organization={id}
+                    canManage={data.can_manage}
+                    endpoint={endpoint}
+                    csrf={csrf}
+                    onChanged={(message) => {
+                      onChanged(message);
+                      refresh();
+                    }}
+                  />
+                ))}
+              </ul>
+            ) : (
+              <p
+                role="status"
+                className="rounded-lg border p-6 text-center text-sm text-muted-foreground"
+              >
+                No members on this page.
+              </p>
+            )}
             <div className="flex gap-2">
               <Button
                 variant="outline"

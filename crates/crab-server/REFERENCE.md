@@ -767,8 +767,10 @@ creation. Existing catalog entries keep their previous ownership and grants.
 
 ### Find a repository
 
-The home page and an organization's **Repositories** tab search repositories
-you can read. Search treats words case-insensitively and matches the name,
+The home page's **All accessible** view searches every repository you can read.
+Choose **Personal** to search your own namespace, or open an organization's
+**Repositories** tab to search that organization's repositories. Search treats
+words case-insensitively and matches the name,
 qualified owner/name, or description. Exact names and name prefixes appear
 before description matches. The organization tab keeps the search scoped to
 that organization. Search terms and the current page are in the URL.
@@ -784,6 +786,20 @@ access. If a continuation has gone stale, start from the first page.
 Exact `owner` plus `name` lookups return the repository detail needed by
 repository pages and settings. Search and exact lookup options are mutually
 exclusive.
+
+`GET /api/repos/personal` searches the current account's personal namespace.
+`GET /api/actors/{actor}/repositories` searches a public profile's personal
+namespace. The viewer needs read access to each returned repository in either
+view. The server resolves the namespace from the Directory identity and keeps
+it stable across profile changes.
+
+`GET /api/organizations/{id}/teams/{team}/repositories` requires visibility
+of the team and returns readable repositories with a grant for that team. The
+response includes `team_access` per row, including source grants inherited by
+forks. `can_manage_team_access` appears on directly managed rows for current
+organization owners. Use the existing repository Team access settings to edit
+grants. The scoped endpoints share `q`, `after`, and `limit` and bind their
+continuations to the viewer, search, and repository scope.
 
 ### Rename a repository
 

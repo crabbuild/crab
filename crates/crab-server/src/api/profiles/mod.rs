@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     Extension, Json, Router,
-    extract::{Path, State, rejection::JsonRejection},
+    extract::{Path, Query, State, rejection::JsonRejection},
     http::StatusCode,
     middleware,
     routing::get,
@@ -10,6 +10,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::catalog_browse::{self, Scope, Search};
 use crate::{
     app::{self, Result},
     auth::Principal,
@@ -17,7 +18,7 @@ use crate::{
         Address,
         directory::{
             self, ActorProfile, CreateProfile, CreateProfileInput, EditProfile, EditProfileInput,
-            GetActor, GetOwnProfile, ProfileOutcome,
+            GetActor, GetOwnProfile, LookupIdentities, ProfileOutcome,
         },
     },
     server::Server,
@@ -37,6 +38,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .route("/api/profile", get(own).post(create).patch(edit))
         .route("/api/actors/{id}", get(actor))
+        .route("/api/actors/{id}/repositories", get(repositories))
         .route(
             "/api/profile/review-availability",
             get(review_availability::get).put(review_availability::put),
@@ -77,6 +79,37 @@ async fn actor(
         .ok_or(app::Error::NotFound)?;
     app::account(&principal)?;
     Ok(Json(profile))
+}
+
+async fn repositories(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path(id): Path<Uuid>,
+    Query(search): Query<Search>,
+) -> Result<Json<serde_json::Value>> {
+    let viewer = app::account(&principal)?;
+    let cells = server.cells().ok_or(app::Error::CellUnavailable)?;
+    // Only profiles that already expose a public actor can be used here.
+    app::query_output(cells.query::<GetActor>(Address::Directory, None, id).await)?
+        .ok_or(app::Error::NotFound)?;
+    let identities = app::query_output(
+        cells
+            .query::<LookupIdentities>(Address::Directory, None, vec![id])
+            .await,
+    )?;
+    let [Some(identity)] = identities.as_slice() else {
+        return Err(app::Error::CellContract(
+            "Profile has no Directory identity",
+        ));
+    };
+    let owner = if principal.is_local() && *identity == viewer {
+        "local".into()
+    } else {
+        crate::catalog::personal_namespace(&identity.issuer, &identity.subject)
+    };
+    let page = catalog_browse::list(&server, &principal, Scope::Personal(owner), search).await?;
+    app::account(&principal)?;
+    Ok(page)
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

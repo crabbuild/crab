@@ -1,4 +1,5 @@
 use super::*;
+use crate::auth::Identity;
 use crate::catalog::topics::valid_topic;
 use crate::cells::organization::properties::search::{MAX_TERMS, Term};
 
@@ -165,7 +166,7 @@ impl Query {
         &self,
         server: &Server,
         actor: &Identity,
-        organization: Option<Uuid>,
+        scope: &Scope,
     ) -> blake3::Hasher {
         let mut digest = blake3::Hasher::new_keyed(&server.cursor_key);
         digest.update(b"crab-server.repository-browse.v1");
@@ -176,7 +177,18 @@ impl Query {
         ] {
             hash_field(&mut digest, value);
         }
-        digest.update(organization.unwrap_or_default().as_bytes());
+        digest.update(scope.organization().unwrap_or_default().as_bytes());
+        match scope {
+            Scope::Personal(owner) => {
+                digest.update(b"personal\0");
+                hash_field(&mut digest, owner.as_bytes());
+            }
+            Scope::Team { team, .. } => {
+                digest.update(b"team\0");
+                digest.update(team.as_bytes());
+            }
+            _ => {}
+        }
         for term in &self.terms {
             hash_field(&mut digest, term.name.as_bytes());
             hash_field(&mut digest, term.value.as_bytes());

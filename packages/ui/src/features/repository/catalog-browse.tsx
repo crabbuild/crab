@@ -6,6 +6,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { navigate, useRequest, type Repository } from "@/lib/api";
+import type { RepositoryAccess } from "@/lib/contracts";
+import { repositoryRoleLabels } from "@/lib/repository-roles";
 import { repoHref } from "@/lib/repository-route";
 import { RepositoryPropertyFilters } from "./catalog-property-filters";
 import { RepositoryStateFilters } from "./catalog-state-filters";
@@ -16,26 +18,57 @@ type Entry = Pick<
   "id" | "owner" | "name" | "description" | "archived" | "topics"
 >;
 type Page = {
-  repositories: (Entry & { fork: boolean })[];
+  repositories: (Entry & {
+    fork: boolean;
+    team_access?: RepositoryAccess;
+    can_manage_team_access?: boolean;
+  })[];
   next: string | null;
 };
 
-export function BrowseRepositories({
-  url,
-  organization,
-  subject,
-}: {
-  url: URL;
-  organization?: string;
-  subject?: string;
-}) {
+type Scope =
+  | { kind: "all"; subject?: string }
+  | { kind: "personal" }
+  | { kind: "profile"; actor: string }
+  | { kind: "organization"; organization: string; owner: boolean }
+  | { kind: "team"; organization: string; team: string };
+
+function catalogPath(scope: Scope) {
+  switch (scope.kind) {
+    case "personal":
+      return "/api/repos/personal";
+    case "profile":
+      return `/api/actors/${encodeURIComponent(scope.actor)}/repositories`;
+    case "team":
+      return `/api/organizations/${encodeURIComponent(scope.organization)}/teams/${encodeURIComponent(scope.team)}/repositories`;
+    default:
+      return "/api/repos";
+  }
+}
+
+const emptyText = {
+  personal: "You don’t have any personal repositories yet.",
+  profile: "No repositories owned by this user are visible to you.",
+  organization: "No repositories are visible to you in this organization.",
+  team: "No repositories with team access are visible to you.",
+};
+
+export function BrowseRepositories({ url, scope }: { url: URL; scope: Scope }) {
   const query = url.searchParams.get("q") ?? "";
   const after = url.searchParams.get("after");
   const params = new URLSearchParams({ limit: "32" });
   if (query) params.set("q", query);
   if (after) params.set("after", after);
-  if (organization) params.set("organization", organization);
-  const page = useRequest<Page>(`/api/repos?${params}`);
+  const organization =
+    scope.kind === "organization" || scope.kind === "team"
+      ? scope.organization
+      : undefined;
+  if (scope.kind === "organization")
+    params.set("organization", scope.organization);
+  const page = useRequest<Page>(`${catalogPath(scope)}?${params}`);
+  const scoped = scope.kind !== "all";
+  const RepositoryHeading =
+    scope.kind === "team" ? "h4" : scope.kind === "organization" ? "h3" : "h2";
   const searchInput = useRef<HTMLInputElement>(null);
 
   function href(search: string, next?: string) {
@@ -74,7 +107,7 @@ export function BrowseRepositories({
           key={query}
           ref={searchInput}
           type="search"
-          className="max-w-md flex-1"
+          className="min-w-36 max-w-md flex-1"
           name="q"
           aria-label="Search repositories"
           placeholder={
@@ -109,36 +142,76 @@ export function BrowseRepositories({
           }}
         />
       )}
-      <Result state={page} timingLabel="Repository search">
+      <Result state={page} timingLabel="Repositories">
         {({ repositories, next }) => (
           <>
             {repositories.length ? (
               <ul
-                className={
-                  organization ? "divide-y rounded-lg border" : "repo-cards"
-                }
+                className={scoped ? "divide-y rounded-lg border" : "repo-cards"}
                 aria-label="Repository results"
               >
                 {repositories.map((repo) => (
                   <li
                     key={repo.id}
-                    className={organization ? "p-4" : "panel repo-card"}
+                    className={scoped ? "min-w-0 p-4" : "panel repo-card"}
                   >
-                    <div className="repo-card-heading">
-                      <RepoIcon size={18} aria-hidden="true" />
-                      <h2>
+                    <div
+                      className={
+                        scoped
+                          ? "flex flex-wrap items-center gap-2"
+                          : "repo-card-heading"
+                      }
+                    >
+                      <RepoIcon
+                        size={18}
+                        className="shrink-0 text-muted-foreground"
+                        aria-hidden="true"
+                      />
+                      <RepositoryHeading
+                        className={
+                          scoped
+                            ? "min-w-0 wrap-anywhere text-base font-semibold"
+                            : undefined
+                        }
+                      >
                         <Link href={repoHref(repo)}>
-                          {!organization && <>{repo.owner} / </>}
+                          {!scoped && <>{repo.owner} / </>}
                           <strong>{repo.name}</strong>
                         </Link>
-                      </h2>
+                      </RepositoryHeading>
                       {repo.archived && (
                         <Badge variant="outline">Archived</Badge>
                       )}
                       {repo.fork && <Badge variant="outline">Fork</Badge>}
+                      {repo.team_access && (
+                        <Badge variant="secondary">
+                          {repositoryRoleLabels[repo.team_access]}
+                        </Badge>
+                      )}
+                      {(repo.can_manage_team_access ||
+                        (scope.kind === "organization" &&
+                          scope.owner &&
+                          !repo.fork)) && (
+                        <Button
+                          asChild
+                          variant="ghost"
+                          size="sm"
+                          className="sm:ms-auto"
+                        >
+                          <Link
+                            href={repoHref(repo, {
+                              view: "settings",
+                              section: "team-access",
+                            })}
+                            aria-label={`Manage team access for ${repo.name}`}
+                          >
+                            Manage team access
+                          </Link>
+                        </Button>
+                      )}
                     </div>
                     {repo.description && (
-                      <p className="muted mt-1 break-words">
+                      <p dir="auto" className="muted mt-1 wrap-anywhere">
                         {repo.description}
                       </p>
                     )}
@@ -157,9 +230,12 @@ export function BrowseRepositories({
               <p role="status" className="notice">
                 No repositories match this search.
               </p>
-            ) : organization ? (
-              <p className="rounded-lg border p-6 text-center text-sm text-muted-foreground">
-                No repositories are visible to you in this organization.
+            ) : scope.kind !== "all" ? (
+              <p
+                role="status"
+                className="rounded-lg border p-6 text-center text-sm text-muted-foreground"
+              >
+                {emptyText[scope.kind]}
               </p>
             ) : (
               <div className="notice">
@@ -168,9 +244,9 @@ export function BrowseRepositories({
                   Create a repository, import one from Git, or ask an
                   administrator for access.
                 </p>
-                {subject && (
-                  <p className="muted">
-                    Your user ID: <code>{subject}</code>
+                {scope.subject && (
+                  <p className="muted wrap-anywhere">
+                    Your user ID: <code>{scope.subject}</code>
                   </p>
                 )}
               </div>
