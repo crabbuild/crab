@@ -27,6 +27,12 @@ export interface Properties {
 export interface WorkspaceProject extends Project {
   properties: Properties;
 }
+export interface WorkspaceListing {
+  items: WorkspaceProject[];
+  next: string | null;
+  revision: number;
+  can_create: boolean;
+}
 export interface Detail {
   project: WorkspaceProject;
   can_manage: boolean;
@@ -79,6 +85,12 @@ export type WorkspaceCommand =
       target: AccessTarget;
       role: AccessRole | null;
       default_version?: number;
+    }
+  | {
+      kind: "link_team";
+      project: string;
+      version: number;
+      team: string;
     }
   | {
       kind: "set_default_access";

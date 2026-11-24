@@ -555,6 +555,8 @@ new membership incarnation. Guest writes and qualification changes share the
 organization policy lease used by repository access updates and transfers.
 `projects/policy.rs` owns the organization default and binds confirmation to
 the exact set of inheriting Projects.
+Team Project listings and linking use the same Project policy and call the
+team owner for visibility and current maintainer authority.
 Project access cannot authorize a linked repository. Both project scopes share
 canonical source metadata in `cells/repository/projects/reads.rs`; never copy
 source titles/states into organization records or treat project access as a

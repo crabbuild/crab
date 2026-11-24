@@ -3,6 +3,7 @@ use crate::test_support::http::{Harness, organizations::bootstrap};
 use reqwest::{Method, StatusCode};
 
 mod outside;
+mod team_projects;
 
 async fn join(h: &Harness, root: &str, alice: &str, bob: &str, member: Uuid, version: u64) {
     let offer = h
@@ -465,6 +466,62 @@ async fn native_browser_grants_an_organization_team_project_write_access() {
         .run(&["wait", "--text", "No explicit grants."])
         .await;
     assert_eq!(h.json(&path, &alice).await["grants"], json!([]));
+    browser
+        .run(&[
+            "open",
+            &format!(
+                "{}/-/organizations/{organization}?tab=teams&team={team}",
+                h.origin
+            ),
+        ])
+        .await;
+    browser
+        .run(&["click", "nav[aria-label='Team'] a[href$='view=projects']"])
+        .await;
+    browser.run(&["wait", "--text", "No linked projects"]).await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Link a project",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&[
+            "fill",
+            "[aria-label='Find a project to link']",
+            "Release triage",
+        ])
+        .await;
+    browser
+        .run(&[
+            "find", "role", "button", "click", "--name", "Search", "--exact",
+        ])
+        .await;
+    browser
+        .choose_select("[aria-label='Project']", &project.to_string())
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Link project",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", "--fn", "document.querySelector('a.workspace-project-link')?.textContent.includes('Release triage')"])
+        .await;
+    assert_eq!(h.json(&path, &alice).await["grants"][0]["role"], "read");
+    browser.run(&["reload"]).await;
+    browser.run(&["wait", "a.workspace-project-link"]).await;
     drop(browser);
     h.close().await;
 }

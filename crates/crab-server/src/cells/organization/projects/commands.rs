@@ -33,6 +33,11 @@ pub(crate) enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         default_version: Option<u64>,
     },
+    LinkTeam {
+        project: Uuid,
+        version: u64,
+        team: Uuid,
+    },
     SetDefaultAccess {
         version: u64,
         role: AccessRole,
@@ -79,6 +84,7 @@ impl Command {
             | Self::ColumnLimit { project, .. }
             | Self::ReorderViews { project, .. }
             | Self::SetAccess { project, .. }
+            | Self::LinkTeam { project, .. }
             | Self::Planning { project, .. }
             | Self::Repository { project, .. }
             | Self::Item { project, .. }
@@ -94,6 +100,7 @@ impl Command {
             | Self::ColumnLimit { version, .. }
             | Self::ReorderViews { version, .. }
             | Self::SetAccess { version, .. }
+            | Self::LinkTeam { version, .. }
             | Self::SetDefaultAccess { version, .. }
             | Self::Planning { version, .. }
             | Self::Repository { version, .. }
@@ -406,6 +413,26 @@ fn apply_command(
                 *role,
                 *default_version,
                 input.eligible_outside,
+            )? {
+                return Ok(rejected(reason));
+            }
+        }
+        Command::LinkTeam { team, .. } => {
+            // The team page only adds Read; keep any role assigned by a
+            // Project administrator through Manage access.
+            if project.access.has_team(*team) {
+                return Ok(MutationResult::Success(Outcome::Applied {
+                    project: Some(project_id),
+                    version: project.version,
+                }));
+            }
+            if let Some(reason) = project.access.change(
+                context,
+                input.actor.id(),
+                AccessTarget::Team { id: *team },
+                Some(AccessRole::Read),
+                None,
+                None,
             )? {
                 return Ok(rejected(reason));
             }

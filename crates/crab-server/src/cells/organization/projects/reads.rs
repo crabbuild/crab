@@ -101,6 +101,10 @@ pub(crate) struct ListQuery {
     pub search: String,
     pub after: Option<Uuid>,
     pub revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub linkable: bool,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Listing {
@@ -125,6 +129,16 @@ impl Read for List {
                 "project page changed; reload the first page",
             ));
         }
+        if let Some(team) = input.team {
+            let team = teams::view(context, input.actor.id(), team)?.ok_or(Error::AccessDenied)?;
+            if input.linkable && !team.can_manage {
+                return Err(Error::AccessDenied);
+            }
+        } else if input.linkable {
+            return Err(Error::Invalid(
+                "Choose a team before searching for linkable Projects",
+            ));
+        }
         let viewer = access::Viewer::load(context, input.actor, true)?;
         let search = SqlValue::Text(input.search.to_lowercase());
         let mut after = input.after.unwrap_or(Uuid::nil());
@@ -138,7 +152,17 @@ impl Read for List {
                 if project.id != after {
                     return Err(Error::Invalid("organization project record is invalid"));
                 }
-                if viewer.role(&project) != AccessRole::None {
+                let role = viewer.role(&project);
+                let matches = match input.team {
+                    Some(team) if input.linkable => {
+                        role == AccessRole::Admin
+                            && !project.access.has_team(team)
+                            && !project.archived
+                    }
+                    Some(team) => role != AccessRole::None && project.access.has_team(team),
+                    None => role != AccessRole::None,
+                };
+                if matches {
                     items.push(project);
                     if items.len() > 30 {
                         break;
@@ -159,7 +183,7 @@ impl Read for List {
             },
             items,
             revision: organization.version,
-            can_create: viewer.member(),
+            can_create: input.team.is_none() && viewer.member(),
         })
     }
 }

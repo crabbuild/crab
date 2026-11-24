@@ -420,6 +420,12 @@ Repository UUIDs prevent name reuse from redirecting project references. Source
 permissions are refreshed after enrichment, and native organization authority
 is checked again before returning a composed response.
 
+A team's **Projects** tab uses that same library and only shows readable
+Projects with an explicit grant for the team. **Link a project** uses the
+current Project revision and the standard submission journal to grant team
+Read access. Organization owners and team maintainers with Project Admin
+access can use the picker.
+
 When a linked issue moves, its row opens the current issue while planning edits
 retain the stored project item and its history. A reader needs access to the
 repositories along the transfer path to see the work. Filter by repository

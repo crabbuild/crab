@@ -182,6 +182,8 @@ struct Collection {
     search: String,
     after: Option<Uuid>,
     revision: Option<u64>,
+    team: Option<Uuid>,
+    linkable: bool,
 }
 fn public_project(project: &projects::Project) -> Value {
     // Creator membership incarnations protect writes inside the native Cell;
@@ -206,6 +208,8 @@ async fn list(
                 search: input.search,
                 after: input.after,
                 revision: input.revision,
+                team: input.team,
+                linkable: input.linkable,
             },
         )
         .await

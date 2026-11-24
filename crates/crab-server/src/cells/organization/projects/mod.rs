@@ -259,6 +259,14 @@ pub(in crate::cells::organization) fn authorize(
                 return Err(Error::AccessDenied);
             };
             let required = match request.command {
+                Command::LinkTeam { team, .. } => {
+                    if !teams::view(context, who.actor.id(), team)?
+                        .is_some_and(|team| team.can_manage)
+                    {
+                        return Err(Error::AccessDenied);
+                    }
+                    AccessRole::Admin
+                }
                 Command::SetAccess {
                     target: AccessTarget::Team { .. },
                     ..

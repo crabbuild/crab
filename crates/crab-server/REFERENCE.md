@@ -3062,6 +3062,19 @@ and `scope`. A different set of inheriting Projects or changed default requires
 a fresh confirmation. A successful change appears in the organization audit log.
 Upgrade all serving peers before using Project access policies or guest links.
 
+Open **Teams** → a team → **Projects** to search its linked Projects and browse
+the active and archived lists. The list requires current access to both the
+team and the Project. An organization owner, or a maintainer who also has
+Project Admin access, can choose **Link a project**. Linking an active Project
+adds a Read grant for the team. Existing Write and Admin grants remain in
+effect. Manage or remove the grant under **Manage access** on the Project.
+
+`GET /api/organizations/{id}/projects?team={team}` scopes the Project
+collection to that team. Add `linkable=true` to search unlinked active Projects
+the caller can administer. Submit `link_team` to the standard Project command
+endpoint with `project`, `version`, and `team`. Current team and Project roles
+are checked in the same native transaction as the grant and its receipt.
+
 With source repository triage access, drag an issue to another type group in
 a table or board, or use the **Change issue type** control in any layout.
 Moving to **No type** clears the assignment. The item retains its Project
@@ -5645,8 +5658,8 @@ submission controller lives above application routing, so lost acknowledgements
 can recover after navigation or organization removal without retargeting the
 write. New native/HTTP tests live beside their team owners; responsive,
 accessibility, conflict and recovery scenarios live in
-`packages/ui/tests/browser/teams.e2e.ts`. Hierarchy, autocomplete and Projects
-remain separate work.
+`packages/ui/tests/browser/teams.e2e.ts`. Team Project listings and linking
+reuse the organization Project collection and access policy.
 
 Current team qualification: 13 native/HTTP team checks, all 476 native regressions
 (six existing opt-in qualifications ignored), 13 CLI checks, 164 browser scenarios,

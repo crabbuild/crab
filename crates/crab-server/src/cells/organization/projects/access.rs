@@ -75,6 +75,10 @@ pub(super) struct Policy {
 }
 
 impl Policy {
+    pub(super) fn has_team(&self, team: Uuid) -> bool {
+        self.teams.contains_key(&team)
+    }
+
     pub(super) fn is_default(&self) -> bool {
         self.base.is_none()
             && self.members.is_empty()
