@@ -561,9 +561,8 @@ It reserves and verifies attachment copies before preparing. Preparation
 previews publication and its search projections in a rolled-back transaction.
 Approval and retirement run under the policy leases used for repository
 ownership changes. The source refuses captures with repository-local
-relationships that require a different publication format. The HTTP
-coordinator also checks organization Project
-placements in the owning organization.
+relationships that require a different publication format. Organization
+Project placements follow the durable source address across moves.
 
 ## Reviewer search preparation
 
@@ -1437,6 +1436,23 @@ before returning rows. Inaccessible sources expose only a redacted project row,
 without source UUID/name/number, title or body. Project counts describe planning
 membership, including redacted rows; they make no source-access or merge claims.
 There is no distributed transaction or grant inheritance between Cells.
+
+When a stored issue has moved, the project row reads and displays its current
+published work through the issue redirect chain. It rechecks the original and
+intermediate grants as well as the final repository grant. The row's planning
+item and `source_repository` retain the stored address so edits use the same
+item ID, revision, and history. New placements still require a live source.
+The repository filter and its counts use the published location. The filter
+picker includes readable destinations even when they are outside the Project's
+linked repository list. Filtered pages batch location reads by Repository Cell
+and recheck their revisions and grants before returning counts or a cursor.
+
+When a manager adds an issue, admission resolves the Project's saved placements
+and any still-pending issue publications through their durable receipts. The
+Organization Cell checks the observed Project version before recording the
+result. A stale comparison can retry the same request. Adding an equivalent
+address returns the existing placement outcome without exposing restricted
+source addresses or replacing the item's fields.
 
 For `create_issue`, the Organization Cell reserves a new item under the
 actor and payload digest. The reservation pins the linked repository and

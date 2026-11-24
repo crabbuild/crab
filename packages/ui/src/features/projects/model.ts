@@ -84,6 +84,7 @@ export interface Item {
 export interface Row {
   version: number;
   repository?: Pick<Repository, "id" | "owner" | "name"> | null;
+  source_repository?: string | null;
   restricted?: boolean;
   blocked?: boolean;
   issue_type?: IssueType | null;

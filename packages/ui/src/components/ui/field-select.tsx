@@ -14,6 +14,7 @@ export function FieldSelect({
   onValueChange,
   id,
   disabled,
+  onOpenChange,
 }: {
   label: string;
   value: string;
@@ -21,9 +22,15 @@ export function FieldSelect({
   onValueChange: (value: string) => void;
   id?: string;
   disabled?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }) {
   return (
-    <Select value={value} onValueChange={onValueChange} disabled={disabled}>
+    <Select
+      value={value}
+      onValueChange={onValueChange}
+      disabled={disabled}
+      onOpenChange={onOpenChange}
+    >
       <SelectTrigger id={id} aria-label={label}>
         <SelectValue />
       </SelectTrigger>

@@ -45,7 +45,7 @@ const views = [
     hide_closed: false,
   },
 ];
-async function fixture(page: Page) {
+async function fixture(page: Page, movedIssue = false) {
   let project: WorkspaceProject = {
     id: projectId,
     definition: {
@@ -76,6 +76,25 @@ async function fixture(page: Page) {
   const decisions = new Map<string, Outcome>();
   const submissions: { request_id: string; command: WorkspaceCommand }[] = [];
   let lose = false;
+  const movedItem = "01900000-0000-7000-8000-000000000030";
+  if (movedIssue) {
+    linked.add(repositories[0].id);
+    revisions.set(movedItem, 1);
+    items.push({
+      repository: repositories[0].id,
+      item: {
+        id: movedItem,
+        subject: { kind: "issue", number: 1 },
+        title: "",
+        body: "",
+        status: "Todo",
+        priority: 0,
+        start: null,
+        end: null,
+        values: {},
+      },
+    });
+  }
   function work(repository: string): Work {
     return {
       subject: { kind: "issue", number: 1 },
@@ -167,6 +186,18 @@ async function fixture(page: Page) {
             "Issue publication requires the native Project browser fixture",
           );
         } else if (
+          movedIssue &&
+          command.kind === "item" &&
+          command.version === 0 &&
+          command.repository === repositories[1].id &&
+          command.item.subject?.number === 9
+        ) {
+          outcome = {
+            outcome: "issue_already_linked",
+            project: project.id,
+            version: project.version,
+          };
+        } else if (
           (command.kind === "item" || command.kind === "remove") &&
           command.version !==
             (revisions.get(
@@ -249,42 +280,72 @@ async function fixture(page: Page) {
           lead: { id: actor, name: "Alice", handle: "alice" },
         },
       });
-    if (path === `${root}/${project.id}/candidates`)
+    if (path === `${root}/${project.id}/candidates`) {
+      const repository = url.searchParams.get("repository")!;
+      const candidate =
+        movedIssue && repository === repositories[1].id
+          ? {
+              ...work(repositories[0].id),
+              subject: { kind: "issue", number: 9 },
+            }
+          : work(repository);
       return route.fulfill({
-        json: { items: [work(url.searchParams.get("repository")!)] },
+        json: { items: [candidate] },
+      });
+    }
+    if (path === `${root}/${project.id}/filter-repositories`)
+      return route.fulfill({
+        json: {
+          items: repositories.filter(
+            (repo) =>
+              linked.has(repo.id) ||
+              (movedIssue && repo.id === repositories[1].id),
+          ),
+        },
       });
     if (path === `${root}/${project.id}/items`) {
       const repository = url.searchParams.get("repository");
       const status = url.searchParams.get("status");
+      const repositoryMatches = (row: (typeof items)[number]) =>
+        !repository ||
+        (row.item.id === movedItem ? repositories[1].id : row.repository) ===
+          repository;
       const matching = items.filter(
         (row) =>
-          (!repository || row.repository === repository) &&
+          repositoryMatches(row) &&
           (!url.searchParams.has("item") ||
             row.item.id === url.searchParams.get("item")) &&
           (!status || row.item.status === status),
       );
       const counts: Record<string, number> = {};
-      for (const row of items.filter(
-        (row) => !repository || row.repository === repository,
-      ))
+      for (const row of items.filter(repositoryMatches))
         counts[row.item.status] = (counts[row.item.status] ?? 0) + 1;
       return route.fulfill({
         json: {
           page: {
             project,
-            items: matching.map((row) => ({
-              version: revisions.get(row.item.id),
-              item: row.item,
-              repository:
-                repositories.find((repo) => repo.id === row.repository) ?? null,
-              work: row.repository ? work(row.repository) : null,
-              blocked: row.repository === repositories[0].id,
-              assignees: [],
-              parent: null,
-              progress: null,
-              links: [],
-              more_links: false,
-            })),
+            items: matching.map((row) => {
+              const moved = row.item.id === movedItem;
+              const current = row.repository ? work(row.repository) : null;
+              return {
+                version: revisions.get(row.item.id),
+                item: row.item,
+                repository: moved
+                  ? repositories[1]
+                  : (repositories.find((repo) => repo.id === row.repository) ??
+                    null),
+                source_repository: row.repository,
+                work: moved
+                  ? { ...current, subject: { kind: "issue", number: 9 } }
+                  : current,
+                blocked: row.repository === repositories[0].id,
+                assignees: [],
+                parent: null,
+                progress: null,
+                links: [],
+                more_links: false,
+              };
+            }),
             counts,
             total: matching.length,
             next: null,
@@ -422,6 +483,95 @@ test("one project coordinates matching issue numbers across repositories with pl
   expect(
     await page.evaluate(() => document.documentElement.scrollWidth),
   ).toBeLessThanOrEqual(390);
+});
+
+test("moved work links to its current issue and saves planning edits against its original placement", async ({
+  page,
+}) => {
+  const state = await fixture(page, true);
+  await page.goto(`${home}/${projectId}`);
+  const work = page.getByRole("link", { name: "Ship API", exact: true });
+  await expect(work).toHaveAttribute("href", "/team/client/issues/9");
+  await page
+    .getByRole("button", { name: "Edit Ship API", exact: true })
+    .click();
+  const editor = page.getByRole("dialog", {
+    name: "Project item",
+    exact: true,
+  });
+  await editor
+    .getByRole("combobox", { name: "Item status", exact: true })
+    .click();
+  await page.getByRole("option", { name: "Done", exact: true }).click();
+  await editor.getByRole("button", { name: "Save item", exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  expect(state.submissions.at(-1)?.command).toMatchObject({
+    kind: "item",
+    repository: repositories[0].id,
+    version: 1,
+    item: { status: "Done", subject: { kind: "issue", number: 1 } },
+  });
+  await expect(work).toHaveAttribute("href", "/team/client/issues/9");
+  const filter = page.getByRole("combobox", {
+    name: "Filter by repository",
+    exact: true,
+  });
+  const discovery = page.waitForResponse((response) =>
+    new URL(response.url()).pathname.endsWith("/filter-repositories"),
+  );
+  await filter.click();
+  expect((await discovery).ok()).toBe(true);
+  await page.getByRole("option", { name: "team/client", exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`repository=${repositories[1].id}`));
+  await expect(work).toBeVisible();
+  await filter.click();
+  await page.getByRole("option", { name: "team/server", exact: true }).click();
+  await expect(work).toHaveCount(0);
+});
+
+test("adding moved work again acknowledges the existing Project placement", async ({
+  page,
+}) => {
+  const state = await fixture(page, true);
+  await page.goto(`${home}/${projectId}`);
+  await page.getByRole("button", { name: "Manage", exact: true }).click();
+  const linking = page.getByRole("dialog", {
+    name: "Link repositories",
+    exact: true,
+  });
+  await linking.getByLabel("team/client", { exact: true }).click();
+  await expect(
+    linking.getByLabel("team/client", { exact: true }),
+  ).toBeChecked();
+  await linking.getByRole("button", { name: "Done", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Add work", exact: true })
+    .first()
+    .click();
+  const editor = page.getByRole("dialog", {
+    name: "Add work to project",
+    exact: true,
+  });
+  await editor
+    .getByRole("combobox", { name: "Source repository", exact: true })
+    .click();
+  await page.getByRole("option", { name: "team/client", exact: true }).click();
+  await editor
+    .getByRole("button", { name: "Ship API #9", exact: true })
+    .click();
+  await editor
+    .getByRole("button", { name: "Add to project", exact: true })
+    .click();
+  await expect(editor).toHaveCount(0);
+  await expect(
+    page.getByText(
+      "The issue was already added to this Project. Its current planning fields were kept.",
+    ),
+  ).toBeVisible();
+  expect(state.items).toHaveLength(1);
+  await expect(
+    page.getByRole("link", { name: "Ship API", exact: true }),
+  ).toHaveAttribute("href", "/team/client/issues/9");
 });
 
 test("a same-item conflict shows the saved edit and keeps the local draft for an explicit retry", async ({

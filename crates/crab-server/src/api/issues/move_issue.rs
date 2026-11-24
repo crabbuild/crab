@@ -15,9 +15,8 @@ use crate::{
     app::{self, Error, Result},
     auth::Principal,
     cells::{
-        Address, RepositoryCell,
+        RepositoryCell,
         directory::IdentityKey,
-        organization::projects::HasIssueItem,
         repository::{
             GetIssue,
             issues::transfer::{
@@ -341,22 +340,6 @@ impl Transfer<'_> {
         cancellation: &[CancellationToken],
     ) -> Result<()> {
         self.authorize().await?;
-        if let Some(organization) = self.source.organization {
-            let cells = self.server.cells().ok_or(Error::CellUnavailable)?;
-            if app::query_output(
-                cells
-                    .query::<HasIssueItem>(
-                        Address::Organization(organization),
-                        None,
-                        (self.source.id, source.issue),
-                    )
-                    .await,
-            )? {
-                return Err(Error::Invalid(
-                    "This issue has an organization Project placement that Crab cannot transfer yet",
-                ));
-            }
-        }
         if cancellation.iter().any(CancellationToken::is_cancelled) {
             return Err(Error::MergeBusy);
         }

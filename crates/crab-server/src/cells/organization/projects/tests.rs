@@ -74,6 +74,7 @@ fn request(actor: Uuid, command: Command) -> Request {
         command,
         cancel: false,
         source_allowed: true,
+        attachment: None,
         source_epoch: None,
     }
 }
@@ -247,7 +248,6 @@ async fn items(
                 after: None,
                 version: None,
                 status: None,
-                repository: None,
                 item: None,
                 matched: None,
                 group_by: None,
@@ -258,6 +258,73 @@ async fn items(
         .output
         .unwrap()
 }
+
+#[tokio::test]
+async fn stale_attachment_source_checks_do_not_consume_the_submission() {
+    let (server, organization, owner, project) = setup().await;
+    let client = &server.cells().unwrap();
+    let first = Uuid::now_v7();
+    let second = Uuid::now_v7();
+    link(client, organization, owner, project, 1, first).await;
+    link(client, organization, owner, project, 2, second).await;
+    let checked = |repository| Request {
+        attachment: Some(AttachmentCheck {
+            project_version: 3,
+            already_linked: false,
+        }),
+        ..request(
+            owner,
+            Command::Item {
+                project,
+                version: 0,
+                repository: Some(repository),
+                item: work(repository).item,
+            },
+        )
+    };
+    let mut second_attempt = checked(second);
+    assert!(matches!(
+        write::<Change>(client, organization, checked(first))
+            .await
+            .unwrap(),
+        Outcome::Applied { version: 4, .. }
+    ));
+    assert!(matches!(
+        write::<Change>(client, organization, second_attempt.clone()).await,
+        Err(Error::StaleSearch)
+    ));
+    second_attempt.attachment = Some(AttachmentCheck {
+        project_version: 4,
+        already_linked: true,
+    });
+    let expected = Outcome::IssueAlreadyLinked {
+        project,
+        version: 4,
+    };
+    assert_eq!(
+        write::<Change>(client, organization, second_attempt.clone())
+            .await
+            .unwrap(),
+        expected
+    );
+    second_attempt.source_allowed = false;
+    second_attempt.attachment = None;
+    assert_eq!(
+        write::<Change>(client, organization, second_attempt)
+            .await
+            .unwrap(),
+        expected
+    );
+    assert_eq!(
+        items(client, organization, owner, project)
+            .await
+            .items
+            .len(),
+        1
+    );
+    fixtures::close(&server).await;
+}
+
 #[tokio::test]
 async fn same_issue_number_in_two_repositories_is_distinct_work() {
     let (server, organization, owner, project) = setup().await;

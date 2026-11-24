@@ -536,6 +536,8 @@ source grants with bounded current work enrichment. Both project scopes share
 canonical source metadata in `cells/repository/projects/reads.rs`; never copy
 source titles/states into organization records or treat project access as a
 repository grant. Private preparation is `cells prepare-organization-projects`.
+`api/organizations/projects/work.rs` resolves moved issues at their published
+location and keeps their stored project address for planning edits.
 The browser workspace lives under `packages/ui/src/features/projects/workspace/`;
 its shared submission controller retains the original organization/account/body.
 

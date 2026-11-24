@@ -50,7 +50,13 @@ import { ProjectProperties } from "./forms";
 import { ProjectLibrary } from "./library";
 import { WorkspaceItemEditor } from "./item";
 import { Repositories } from "./repositories";
-import { statuses, health, workspaceHref, type Detail } from "./model";
+import {
+  statuses,
+  health,
+  workspaceHref,
+  type Detail,
+  type LinkedRepository,
+} from "./model";
 
 export function OrganizationProjects({
   organization,
@@ -186,6 +192,12 @@ function PlanningWorkspace({
     url.searchParams.get("issue_type") ?? selected.issue_type_filter ?? "";
   const repository = url.searchParams.get("repository") ?? "";
   const after = url.searchParams.get("after") ?? undefined;
+  const [loadRepositories, setLoadRepositories] = useState(false);
+  const repositoryChoices = useRequest<{ items: LinkedRepository[] }>(
+    loadRepositories
+      ? projectEndpoint({ organization }, `${project.id}/filter-repositories`)
+      : null,
+  );
   const resource = useRequest<{ page: ItemPage; can_manage: boolean }>(
     projectEndpoint({ organization }, `${project.id}/items`, {
       status: !overview && status ? status : undefined,
@@ -201,6 +213,15 @@ function PlanningWorkspace({
         ? (url.searchParams.get("version") ?? undefined)
         : undefined,
     }),
+  );
+  const filterRepositories = new Map(
+    [
+      ...detail.repositories,
+      ...(repositoryChoices.data?.items ?? []),
+      ...(resource.data?.page.items.flatMap((row) =>
+        row.repository ? [row.repository] : [],
+      ) ?? []),
+    ].map((repo) => [repo.id, `${repo.owner}/${repo.name}`]),
   );
   function filters(values: Record<string, string | undefined>) {
     const next = new URL(url);
@@ -241,7 +262,7 @@ function PlanningWorkspace({
     }
     const item = edit(row.item);
     const checkpoint = checkpointDraft(commands.account, scope, {
-      ...itemDraft(project, row, row.repository?.id ?? ""),
+      ...itemDraft(project, row, row.source_repository ?? ""),
       item,
     });
     await commands.submitOrganization(
@@ -250,7 +271,7 @@ function PlanningWorkspace({
         kind: "item",
         project: project.id,
         version: row.version,
-        repository: row.repository?.id ?? null,
+        repository: row.source_repository ?? null,
         item,
       },
       checkpoint,
@@ -481,12 +502,12 @@ function PlanningWorkspace({
                           value={repository || "all"}
                           options={{
                             all: "All repositories",
-                            ...Object.fromEntries(
-                              detail.repositories.map((repo) => [
-                                repo.id,
-                                `${repo.owner}/${repo.name}`,
-                              ]),
-                            ),
+                            ...Object.fromEntries(filterRepositories),
+                          }}
+                          onOpenChange={(open) => {
+                            if (!open) return;
+                            if (loadRepositories) repositoryChoices.retry();
+                            else setLoadRepositories(true);
                           }}
                           onValueChange={(value) =>
                             filters({
@@ -494,6 +515,14 @@ function PlanningWorkspace({
                             })
                           }
                         />
+                        {repositoryChoices.error && (
+                          <Button
+                            variant="outline"
+                            onClick={repositoryChoices.retry}
+                          >
+                            Retry loading repositories
+                          </Button>
+                        )}
                         <FieldSelect
                           label="Filter by status"
                           value={status ? `status:${status}` : "all"}

@@ -77,7 +77,16 @@ pub(crate) struct Request {
     // It is excluded from the digest so a lost reply can recover after revocation.
     pub source_allowed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment: Option<AttachmentCheck>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_epoch: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AttachmentCheck {
+    pub project_version: u64,
+    pub already_linked: bool,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
@@ -385,6 +394,25 @@ pub(super) fn apply(
                 return Ok(rejected(
                     "An existing project item's source cannot be replaced",
                 ));
+            }
+            if *version == 0
+                && next.subject.is_some_and(|subject| {
+                    subject.kind == crate::cells::repository::collaboration::SubjectKind::Issue
+                })
+                && let Some(check) = &input.attachment
+            {
+                // A placement could have been added through an older address
+                // after the coordinator sampled the Project. A stale check
+                // must roll back without saving a terminal request outcome.
+                if check.project_version != project.version {
+                    return Err(Error::StaleSearch);
+                }
+                if check.already_linked {
+                    return Ok(MutationResult::Rejected(Outcome::IssueAlreadyLinked {
+                        project: project_id,
+                        version: project.version,
+                    }));
+                }
             }
             if old.is_none() && !issue_creation::has_room(context, project_id, &pending)? {
                 return Ok(rejected("This project has reached its 5,000-item limit"));

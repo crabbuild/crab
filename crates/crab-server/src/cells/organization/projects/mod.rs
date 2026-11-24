@@ -9,13 +9,13 @@ mod history;
 mod issue_creation;
 mod reads;
 use crate::cells::planning as ledger;
-pub(crate) use commands::{Change, Command, Outcome, Request};
+pub(crate) use commands::{AttachmentCheck, Change, Command, Outcome, Request};
 pub(crate) use history::{GetHistory, HistoryQuery};
 pub(in crate::cells) use issue_creation::due;
 pub(crate) use issue_creation::{ResolveInput, ResolveIssue};
 pub(crate) use reads::{
-    Get, HasIssueItem, Items, ItemsQuery, List, ListQuery, MatchedItems, ProjectKey, TypeSources,
-    TypeSourcesQuery, View,
+    Get, GetAttachmentSources, Items, ItemsQuery, List, ListQuery, MatchedItems, ProjectKey,
+    Sources, SourcesQuery, View, WorkSource,
 };
 
 const READY: &str = "organization/projects/v1/ready";
@@ -198,8 +198,8 @@ pub(in crate::cells::organization) fn handles(operation: u32, mutation: bool) ->
                 | Get::ID
                 | Items::ID
                 | GetHistory::ID
-                | TypeSources::ID
-                | HasIssueItem::ID
+                | Sources::ID
+                | GetAttachmentSources::ID
         )
     }
 }
@@ -209,11 +209,6 @@ pub(in crate::cells::organization) fn authorize(
     mutation: bool,
     input: &Value,
 ) -> Result<()> {
-    if !mutation && operation == HasIssueItem::ID {
-        // The trusted issue transfer coordinator checks placement without
-        // exposing the organization Projects or their item contents.
-        return Ok(());
-    }
     if mutation && operation == ResolveIssue::ID {
         // The private resolver only settles an accepted reservation with the
         // bound repository result. It cannot create a new Project write.

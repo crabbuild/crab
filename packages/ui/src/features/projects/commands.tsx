@@ -190,11 +190,15 @@ export function ProjectCommandsProvider({
             : command.kind === "create" || command.kind === "copy"
               ? command.id
               : command.project;
+        const addsExistingIssue =
+          command.kind === "item" &&
+          command.version === 0 &&
+          command.item.subject?.kind === "issue";
         if (
           value.project !== expected ||
           (value.outcome === "issue_already_linked" &&
             (!("organization" in captured.target) ||
-              command.kind !== "create_issue")) ||
+              (command.kind !== "create_issue" && !addsExistingIssue))) ||
           !Number.isSafeInteger(value.version) ||
           value.version < 0
         )

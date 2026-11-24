@@ -32,7 +32,7 @@ use crate::{
 mod move_issue;
 mod pins;
 mod templates;
-mod transferred;
+pub(in crate::api) mod transferred;
 pub(super) mod view;
 
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {

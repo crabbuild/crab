@@ -72,7 +72,7 @@ export function WorkspaceItemEditor({
             ? "existing"
             : "draft",
       repository:
-        row?.repository?.id ??
+        row?.source_repository ??
         (initialIssueType !== undefined
           ? writable[0]?.id
           : detail.repositories[0]?.id) ??
@@ -187,7 +187,10 @@ export function WorkspaceItemEditor({
                     item: {
                       ...item,
                       subject:
-                        mode === "existing" ? (picked?.subject ?? null) : null,
+                        mode === "existing"
+                          ? ((wasExisting ? item.subject : picked?.subject) ??
+                            null)
+                          : null,
                       title: mode === "existing" ? "" : item.title.trim(),
                       body: mode === "existing" ? "" : item.body,
                     },

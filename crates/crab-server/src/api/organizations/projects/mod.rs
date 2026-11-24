@@ -17,13 +17,18 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
+use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc};
 use uuid::Uuid;
 mod history;
 mod issue_creation;
+#[cfg(test)]
+mod moved_tests;
+mod placements;
 mod type_filter;
+mod work;
 
 pub(super) fn routes() -> Router<Arc<Server>> {
     Router::new()
@@ -38,6 +43,10 @@ pub(super) fn routes() -> Router<Arc<Server>> {
         .route(
             "/api/organizations/{id}/projects/{project}/items",
             get(items),
+        )
+        .route(
+            "/api/organizations/{id}/projects/{project}/filter-repositories",
+            get(filter_repositories),
         )
         .route(
             "/api/organizations/{id}/projects/{project}/candidates",
@@ -194,6 +203,54 @@ struct Filter {
     type_cursor: Option<String>,
     group_by: Option<source::grouping::GroupBy>,
 }
+
+async fn filter_repositories(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((organization, selected)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Value>> {
+    let actor = actor(&server, &principal).await?;
+    let locations = placements::resolve(
+        &server,
+        &principal,
+        organization,
+        projects::SourcesQuery {
+            actor,
+            project: selected,
+            item: None,
+            include_pulls: false,
+        },
+    )
+    .await?;
+    let view = project(&server, organization, actor, selected).await?;
+    if view.project.version != locations.project_version {
+        return Err(Error::PageChanged);
+    }
+    let candidates = view
+        .repositories
+        .into_iter()
+        .chain(locations.rows.iter().map(|row| row.repository.id))
+        .collect::<std::collections::BTreeSet<_>>();
+    locations.verify(&server, &principal).await?;
+    let mut options: Vec<_> = stream::iter(candidates)
+        .map(|id| accessible(&server, &principal, id))
+        .buffer_unordered(8)
+        .try_filter_map(futures_util::future::ok)
+        .try_collect()
+        .await?;
+    let current = project(&server, organization, actor, selected).await?;
+    app::account(&principal)?;
+    if current.project.version != locations.project_version {
+        return Err(Error::PageChanged);
+    }
+    options.sort_unstable_by(|a, b| {
+        (&a.config.owner, &a.config.name).cmp(&(&b.config.owner, &b.config.name))
+    });
+    Ok(Json(
+        json!({"items":options.iter().map(|repo| repository(repo)).collect::<Vec<_>>()}),
+    ))
+}
+
 async fn items(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
@@ -214,7 +271,6 @@ async fn items(
                 after: input.after,
                 version: input.version,
                 status: input.status,
-                repository: input.repository,
                 item: input.item,
                 group_by: input.group_by,
                 matched: type_scope.as_ref().map(|filter| filter.matched.clone()),
@@ -239,124 +295,57 @@ async fn items(
             grouped.entry(repo).or_default().push(subject);
         }
     }
-    let mut work = BTreeMap::new();
-    let mut repositories = BTreeMap::new();
-    let mut types = type_scope.as_ref().and_then(|filter| {
-        filter
-            .types
-            .as_ref()
-            .map(|schema| schema.definitions.clone())
-    });
-    for (repository_id, subjects) in grouped {
-        let Some(repo) = accessible(&server, &principal, repository_id).await? else {
-            continue;
-        };
-        // A grant acquired after classification belongs to a later snapshot.
-        // Keep the row's type in the same scope as its group count.
-        let include_issue_type = show_issue_type
-            && repo.organization == Some(id)
-            && type_scope
-                .as_ref()
-                .is_none_or(|filter| filter.contains_source(&repo));
-        let cell = app::repository_cell(&server, &repo)?;
-        let found = app::query_output(
-            cell.client
-                .query::<source::WorkSummaries>(
-                    &cell.target,
-                    None,
-                    source::WorkQuery {
-                        subjects: subjects.clone(),
-                        default_ref: repo.default_ref().await?,
-                        include_issue_type,
-                    },
-                )
-                .await,
-        )?;
-        if found.len() != subjects.len() {
-            return Err(Error::CellContract(
-                "Project work lookup returned an invalid result count",
-            ));
-        }
-        let loaded_types =
-            if types.is_none() && found.iter().flatten().any(|row| row.issue_type.is_some()) {
-                Some(issue_types::active(&server, Some(id)).await?.definitions)
-            } else {
-                None
-            };
-        let selection = match crate::api::assignees::Selection::load(
-            &server,
-            &principal,
-            &repo,
-            found
-                .iter()
-                .flatten()
-                .flat_map(|details| details.assignees.iter()),
-        )
-        .await
-        {
-            Ok(selection) => selection,
-            Err(Error::NotFound) => continue,
-            Err(error) => return Err(error),
-        };
-        // Recheck the pinned source. A transferred repository must not publish
-        // an issue type resolved against its former organization.
-        let current = match app::membership(&server, &principal, &repo).await {
-            Ok(current) => current,
-            Err(Error::NotFound) => continue,
-            Err(error) => return Err(error),
-        };
-        types = types.or(loaded_types);
-        for (subject, summary) in subjects.into_iter().zip(found) {
-            if let Some(summary) = summary {
-                let assignees = selection.view(&summary.assignees);
-                let (issue_type, version) = issue_types::project_field(
-                    &repo,
-                    summary.issue_type,
-                    types.as_deref().unwrap_or_default(),
-                    current.principal.can_triage(repo.id),
-                );
-                work.insert(
-                    (repository_id, subject.kind as u8, subject.number),
-                    (summary, assignees, issue_type.cloned(), version),
-                );
-            }
-        }
-        repositories.insert(repository_id, repository(&repo));
+    let mut sources = work::Scope {
+        server: &server,
+        principal: &principal,
+        organization: id,
+        show_issue_type,
+        type_scope: type_scope.as_ref(),
     }
-    let rows=page.items.into_iter().map(|entry|{
-        let record = entry.record;
-        let mut item=record.item;
-        let summary=record.repository.and_then(|repo|item.subject.and_then(|subject|work.get(&(repo,subject.kind as u8,subject.number))));
-        let restricted=item.subject.is_some() && summary.is_none();
-        if restricted { item.subject=None;item.title="Private or unavailable item".into();item.body.clear(); }
-        json!({
-            "item": item,
-            "version": entry.version,
-            "repository": if restricted { None } else { record.repository.and_then(|id| repositories.get(&id)) },
-            "restricted": restricted,
-            "work": summary.map(|(details, ..)| &details.work),
-            "blocked": summary.is_some_and(|(details, ..)| details.blocked),
-            "issue_type": summary.and_then(|(_, _, issue_type, _)| issue_type.as_ref()),
-            "issue_type_version": summary.and_then(|(_, _, _, version)| *version),
-            "issue_type_group": group_by_type.then(|| crate::cells::repository::issues::issue_type::group(
-                summary.is_some_and(|(details, ..)| details.issue_type.is_some()),
-                summary.and_then(|(_, _, issue_type, _)| issue_type.as_ref().map(|definition| definition.id)),
-            )),
-            "assignees": summary.map(|(_, assignees, ..)| assignees).cloned().unwrap_or_default(),
-            "parent": summary.and_then(|(details, ..)| details.parent.as_ref()),
-            "progress": summary.and_then(|(details, ..)| details.progress.as_ref()),
-            "links": summary.map(|(details, ..)| details.links.as_slice()).unwrap_or_default(),
-            "more_links": summary.is_some_and(|(details, ..)| details.more_links),
-        })
-    }).collect::<Vec<_>>();
-    let current = project(&server, id, actor, selected).await?;
+    .load(grouped)
+    .await?;
     if let Some(filter) = &type_scope {
         filter.verify(&server, &principal, id).await?;
     }
+    sources.recheck_moves(&server).await?;
+    let current = project(&server, id, actor, selected).await?;
     app::account(&principal)?;
     if current.project.version != page.view.project.version {
         return Err(Error::PageChanged);
     }
+    let rows = page.items.into_iter().map(|entry| {
+        let record = entry.record;
+        let mut item = record.item;
+        let summary = record.repository.and_then(|repo| item.subject.and_then(|subject| sources.find(repo, subject)));
+        let restricted = item.subject.is_some() && summary.is_none();
+        if restricted {
+            item.subject = None;
+            item.title = "Private or unavailable item".into();
+            item.body.clear();
+        }
+        let details = summary.map(|row| &row.details);
+        let issue_type = summary.and_then(|row| row.issue_type.as_ref());
+        json!({
+            "item": item,
+            "version": entry.version,
+            "repository": summary.map(|row| repository(&row.repository)),
+            "source_repository": summary.and(record.repository),
+            "restricted": restricted,
+            "work": details.map(|details| &details.work),
+            "blocked": details.is_some_and(|details| details.blocked),
+            "issue_type": issue_type,
+            "issue_type_version": summary.and_then(|row| row.type_version),
+            "issue_type_group": group_by_type.then(|| crate::cells::repository::issues::issue_type::group(
+                details.is_some_and(|details| details.issue_type.is_some()),
+                issue_type.map(|definition| definition.id),
+            )),
+            "assignees": summary.map(|row| row.assignees.as_slice()).unwrap_or_default(),
+            "parent": details.and_then(|details| details.parent.as_ref()),
+            "progress": details.and_then(|details| details.progress.as_ref()),
+            "links": details.map(|details| details.links.as_slice()).unwrap_or_default(),
+            "more_links": details.is_some_and(|details| details.more_links),
+        })
+    }).collect::<Vec<_>>();
     let mut issue_type_counts = type_scope
         .as_ref()
         .and_then(|filter| filter.issue_type_counts.clone());
@@ -372,7 +361,7 @@ async fn items(
         }
     }
     Ok(Json(
-        json!({"page":{"project":public_project(&current.project),"items":rows,"next":page.next,"counts":page.counts,"total":page.total,"revision":page.view.project.version,"issue_types":types.unwrap_or_default(),"type_cursor":type_scope.map(|filter| filter.cursor),"group_counts":issue_type_counts.or(page.group_counts)},"can_manage":current.can_manage}),
+        json!({"page":{"project":public_project(&current.project),"items":rows,"next":page.next,"counts":page.counts,"total":page.total,"revision":page.view.project.version,"issue_types":sources.types.unwrap_or_default(),"type_cursor":type_scope.map(|filter| filter.cursor),"group_counts":issue_type_counts.or(page.group_counts)},"can_manage":current.can_manage}),
     ))
 }
 #[derive(Deserialize)]
@@ -438,49 +427,100 @@ async fn submit(
             .await
             .map(Json);
     }
-    let cells = server.cells().ok_or(Error::CellUnavailable)?;
-    let source_allowed = if cancel {
-        false
+    let first = submit_change(&server, &principal, id, actor, &input, cancel).await;
+    // A competing planning write can invalidate the address check before it
+    // reaches the Organization Cell. The same request remains safe to retry.
+    let output = match first {
+        Err(Error::Cell(crate::cells::Error::StaleSearch)) => {
+            submit_change(&server, &principal, id, actor, &input, cancel).await?
+        }
+        result => result?,
+    };
+    if output == projects::Outcome::RequestConflict {
+        return Err(Error::Conflict);
+    }
+    Ok(Json(output))
+}
+
+async fn submit_change(
+    server: &Server,
+    principal: &Principal,
+    id: Uuid,
+    actor: Uuid,
+    input: &Submission,
+    cancel: bool,
+) -> Result<projects::Outcome> {
+    use crate::cells::repository::{
+        collaboration::SubjectKind, issues::transfer::publication::Destination,
+    };
+    let (source_allowed, attachment) = if cancel {
+        (false, None)
     } else {
         match &input.command {
-            Command::Repository { repository, .. } => accessible(&server, &principal, *repository)
-                .await?
-                .is_some(),
+            Command::Repository { repository, .. } => (
+                accessible(server, principal, *repository).await?.is_some(),
+                None,
+            ),
             Command::Item {
+                project,
                 repository: Some(repository),
                 item,
-                ..
+                version,
             } => {
-                if let Some(repo) = accessible(&server, &principal, *repository).await? {
-                    let cell = app::repository_cell(&server, &repo)?;
-                    let subjects = item.subject.into_iter().collect::<Vec<_>>();
-                    let summaries = app::query_output(
-                        cell.client
-                            .query::<source::WorkSummaries>(
-                                &cell.target,
-                                None,
-                                source::WorkQuery {
-                                    subjects,
-                                    default_ref: repo.default_ref().await?,
-                                    include_issue_type: false,
-                                },
-                            )
-                            .await,
-                    )?;
-                    summaries.len() == 1
-                        && summaries[0].is_some()
-                        && accessible(&server, &principal, *repository)
-                            .await?
-                            .is_some()
-                } else {
-                    false
+                match item.subject {
+                    Some(subject) if *version == 0 && subject.kind == SubjectKind::Issue => {
+                        app::number(subject.number)?;
+                        let attachment =
+                            if accessible(server, principal, *repository).await?.is_some() {
+                                match placements::check_attachment(
+                                    server,
+                                    id,
+                                    projects::ProjectKey {
+                                        actor,
+                                        project: *project,
+                                    },
+                                    Destination {
+                                        repository: *repository,
+                                        number: subject.number,
+                                    },
+                                )
+                                .await
+                                {
+                                    Ok(attachment) => attachment,
+                                    Err(Error::NotFound) => None,
+                                    Err(error) => return Err(error),
+                                }
+                            } else {
+                                None
+                            };
+                        // Sample the Project before the final live-source read:
+                        // concurrent old and new addresses cannot both pass the
+                        // Organization version fence for the same placement.
+                        let allowed = attachment.is_some()
+                            && work::can_use_source(server, principal, *repository, subject, false)
+                                .await?;
+                        (allowed, attachment.filter(|_| allowed))
+                    }
+                    Some(subject) => (
+                        work::can_use_source(
+                            server,
+                            principal,
+                            *repository,
+                            subject,
+                            *version != 0,
+                        )
+                        .await?,
+                        None,
+                    ),
+                    None => (false, None),
                 }
             }
-            _ => true,
+            _ => (true, None),
         }
     };
-    app::account(&principal)?;
-    let output = app::command_output(
+    app::account(principal)?;
+    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    app::command_output(
         cells
             .command::<projects::Change>(
                 Address::Organization(id),
@@ -488,18 +528,15 @@ async fn submit(
                 Request {
                     actor,
                     request_id: input.request_id,
-                    command: input.command,
+                    command: input.command.clone(),
                     cancel,
                     source_allowed,
+                    attachment,
                     source_epoch: None,
                 },
             )
             .await,
-    )?;
-    if output == projects::Outcome::RequestConflict {
-        return Err(Error::Conflict);
-    }
-    Ok(Json(output))
+    )
 }
 async fn change(
     State(server): State<Arc<Server>>,

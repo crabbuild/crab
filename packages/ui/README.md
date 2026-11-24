@@ -405,6 +405,13 @@ repository UUIDs prevent name reuse from redirecting project references. Source
 permissions are refreshed after enrichment; native organization authority is
 checked again before returning a composed response.
 
+When a linked issue moves, its row opens the current issue while planning edits
+retain the stored project item and its history. A reader needs access to the
+repositories along the transfer path to see the work. Filter by repository
+includes published destinations and counts relocated work there.
+Adding the moved issue again keeps its existing Project placement and shows an
+already-linked message.
+
 Shared projects link existing work and support draft notes. Source creation,
 draft conversion, title/state saved filters and custom project templates remain
 repository-scoped. Linking does not migrate repository projects or grant team

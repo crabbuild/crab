@@ -24,7 +24,7 @@ pub(crate) use commands::{Change, Command, Outcome, Request};
 pub(crate) use history::{GetHistory, HistoryQuery};
 pub(crate) use reads::{
     CandidateQuery, Candidates, GetProject, IssueTypeField, ItemQuery, Items, ListProjects,
-    Memberships, ProjectQuery, WorkQuery, WorkSummaries,
+    Memberships, ProjectQuery, WorkDetails, WorkQuery, WorkSummaries,
 };
 pub(crate) use templates::templates;
 

@@ -52,6 +52,7 @@ pub(super) async fn submit(
                 actor,
                 request_id: input.request_id,
                 source_allowed: repo.is_some(),
+                attachment: None,
                 source_epoch: repo.as_ref().map(|repo| repo.ownership_epoch),
                 cancel,
                 command: input.command.clone(),

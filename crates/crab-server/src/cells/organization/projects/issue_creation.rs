@@ -76,7 +76,7 @@ pub(in crate::cells) fn due(context: &Transaction<'_>) -> Result<Option<PendingI
 
 #[derive(Deserialize, Serialize)]
 pub(super) struct Reservation {
-    request_id: Uuid,
+    pub(super) request_id: Uuid,
     pub(super) repository: Uuid,
     item: planning::Item,
 }
@@ -299,6 +299,7 @@ fn link(
             actor,
             request_id,
             source_allowed: true,
+            attachment: None,
             source_epoch: None,
             cancel: false,
         },

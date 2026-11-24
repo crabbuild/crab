@@ -362,6 +362,48 @@ impl Read for GetLocation {
     }
 }
 
+pub(crate) struct GetLocations;
+
+impl Read for GetLocations {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
+    const ID: u32 = 460;
+    type Input = Vec<u64>;
+    type Output = Vec<Location>;
+
+    fn execute(context: &mut Transaction<'_>, numbers: Vec<u64>) -> Result<Self::Output> {
+        if numbers.len() > 5_000 {
+            return Err(Error::Invalid(
+                "Issue location lookup exceeds 5,000 numbers",
+            ));
+        }
+        if numbers.is_empty() {
+            return Ok(Vec::new());
+        }
+        for &number in &numbers {
+            validate_number(number)?;
+        }
+        let present = context.query(
+            "SELECT number FROM repository_issues WHERE number IN (SELECT value FROM json_each(?))",
+            &[SqlValue::Text(serde_json::to_string(&numbers)?)],
+        )?.rows.iter().map(|row| result_u64_from_row(row, 0)).collect::<Result<std::collections::BTreeSet<_>>>()?;
+        // Live issues and moved records are mutually exclusive. Only non-live
+        // numbers need an individual lookup in the transfer ledger.
+        numbers
+            .into_iter()
+            .map(|number| {
+                if present.contains(&number) {
+                    return Ok(Location::Present);
+                }
+                Ok(
+                    moved(context, number)?.map_or(Location::Missing, |decision| Location::Moved {
+                        destination: decision.destination(),
+                    }),
+                )
+            })
+            .collect()
+    }
+}
+
 pub(crate) struct HasReservations;
 
 impl Read for HasReservations {
