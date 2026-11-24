@@ -163,6 +163,7 @@ async fn reasons_dates_history_and_receipt_replay_share_the_issue_transaction() 
             reason: Reason::Completed,
             pull: None,
             commit: None,
+            external_commit: None,
         }
     ));
     let reopened = changed(&cell, update(&closed, Some(0), None)).await;

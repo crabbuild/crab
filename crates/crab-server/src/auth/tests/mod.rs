@@ -42,6 +42,7 @@ async fn expired_sessions_are_rejected_and_https_cookies_cannot_be_shadowed() {
         owner: "team".into(),
         repository: "private".into(),
         access: RepositoryAccess::Write,
+        close_related_issues: false,
         revoked: AtomicBool::new(false),
     }));
     assert!(!principal.authenticated());
@@ -258,6 +259,7 @@ async fn shared_state_crosses_replica_boundaries_and_consumes_flows_once() {
                 owner: "team".into(),
                 repository: "private".into(),
                 access: RepositoryAccess::Write,
+                close_related_issues: false,
                 revoked: AtomicBool::new(false),
             }),
         )
@@ -309,6 +311,7 @@ async fn detached_git_token_stays_revoked_across_replicas_when_cleanup_is_interr
                 owner: "team".into(),
                 repository: "private".into(),
                 access: RepositoryAccess::Read,
+                close_related_issues: false,
                 revoked: AtomicBool::new(false),
             }),
         )
@@ -449,6 +452,7 @@ async fn identity_revocation_crosses_replicas_and_deletes_derived_tokens() {
                     owner: "team".into(),
                     repository: "private".into(),
                     access: RepositoryAccess::Read,
+                    close_related_issues: false,
                     revoked: AtomicBool::new(false),
                 }),
             )
@@ -596,6 +600,7 @@ async fn token_attachment_racing_revocation_cannot_leave_a_usable_credential() {
             owner: "team".into(),
             repository: "private".into(),
             access: RepositoryAccess::Read,
+            close_related_issues: false,
             revoked: AtomicBool::new(false),
         });
         let (_, removed) = tokio::join!(

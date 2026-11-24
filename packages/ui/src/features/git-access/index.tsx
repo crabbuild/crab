@@ -3,6 +3,7 @@ import { Input } from "@/components/ui/input";
 import { FieldSelect } from "@/components/ui/field-select";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   CodeIcon,
   DownloadIcon,
@@ -34,6 +35,7 @@ export function GitAccess({
   const [token, setToken] = useState<GitToken>();
   const [selected, setSelected] = useState("");
   const [access, setAccess] = useState<"read" | "write">("read");
+  const [closeRelatedIssues, setCloseRelatedIssues] = useState(false);
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState<string>();
   const credentialKey =
@@ -43,6 +45,8 @@ export function GitAccess({
   );
   const requestedAccess =
     repository?.access === "write" && !repository.archived ? access : "read";
+  const canCloseRelatedIssues =
+    requestedAccess === "write" && !!repository?.organization_id;
   async function change(method: "POST" | "DELETE") {
     if (method === "POST" && !repository) return;
     setPending(true);
@@ -61,6 +65,9 @@ export function GitAccess({
                 owner: repository.owner,
                 repository: repository.name,
                 access: requestedAccess,
+                ...(canCloseRelatedIssues && closeRelatedIssues
+                  ? { close_related_issues: true }
+                  : {}),
               })
             : undefined,
       });
@@ -115,6 +122,7 @@ export function GitAccess({
           onValueChange={(nextValue) => {
             setSelected(nextValue);
             setAccess("read");
+            setCloseRelatedIssues(false);
             setToken(undefined);
             setMessage(undefined);
           }}
@@ -133,6 +141,7 @@ export function GitAccess({
           disabled={pending || !repository}
           onValueChange={(nextValue) => {
             setAccess(nextValue === "write" ? "write" : "read");
+            setCloseRelatedIssues(false);
             setToken(undefined);
             setMessage(undefined);
           }}
@@ -143,6 +152,27 @@ export function GitAccess({
               : []),
           ]}
         />
+        {canCloseRelatedIssues && (
+          <label
+            htmlFor="git-token-close-related-issues"
+            className="flex items-start gap-2"
+          >
+            <Checkbox
+              id="git-token-close-related-issues"
+              checked={closeRelatedIssues}
+              disabled={pending}
+              onCheckedChange={(checked) => {
+                setCloseRelatedIssues(checked === true);
+                setToken(undefined);
+                setMessage(undefined);
+              }}
+            />
+            <span>
+              Allow commit messages to close issues in this organization where
+              you have write access
+            </span>
+          </label>
+        )}
         {repositories.length === 0 && (
           <p>No repositories available for a token.</p>
         )}

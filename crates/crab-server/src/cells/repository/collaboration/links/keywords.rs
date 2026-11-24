@@ -7,7 +7,7 @@ const MAX_REFERENCES: usize = 32;
 
 pub(crate) mod projection;
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 pub(crate) struct Qualified {
     pub owner: String,
     pub repository: String,
@@ -21,7 +21,11 @@ pub(crate) fn numbers(body: &str) -> Vec<u64> {
 }
 
 pub(crate) fn qualified(body: &str) -> Vec<Qualified> {
-    references(body, MAX_CLOSING_ISSUES, |address, issue| {
+    qualified_with_limit(body, MAX_CLOSING_ISSUES)
+}
+
+pub(crate) fn qualified_with_limit(body: &str, limit: usize) -> Vec<Qualified> {
+    references(body, limit, |address, issue| {
         let (owner, repository) = address.split_once('/')?;
         if !crate::config::valid_repository_component(owner)
             || !crate::config::valid_repository_component(repository)

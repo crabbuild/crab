@@ -175,6 +175,21 @@ impl Principal {
         )
     }
 
+    // Only publication can exchange an opted-in Git credential for the
+    // issuing account's live grant on a specific issue repository.
+    pub(crate) fn related_issue_writer(&self, origin: Uuid, related: Uuid) -> Option<Self> {
+        if !self.can_write(origin) {
+            return None;
+        }
+        match &self.credential {
+            Credential::Git(token) if token.close_related_issues && token.active() => {
+                Some(Self::user(Arc::clone(&token.session)).scoped_to_repository(Some(related)))
+            }
+            Credential::AutoMerge(actor) => Some(Self::auto_merge(related, actor.clone())),
+            _ => self.related_read(origin, related),
+        }
+    }
+
     pub(crate) fn related_catalog(&self, origin: Uuid) -> Option<Self> {
         if !self.can_read(origin) {
             return None;

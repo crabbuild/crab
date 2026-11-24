@@ -1952,6 +1952,12 @@ git config --global 'credential.https://git.example.com.useHttpPath' true
 The response contains the secret, target, permission, and remaining session
 lifetime. Shared storage retains only token hashes.
 
+A write token for an organization repository can opt in to closing related
+issues with Git commit messages. Select the option under **Git access** or
+send `"close_related_issues": true` when generating the token. Crab checks
+the account's current Write access on each issue repository before publishing
+the default branch. The option grants no other access to those repositories.
+
 Token rules:
 
 - Scope binds one owner, repository, and `read` or `write` permission
@@ -2660,14 +2666,20 @@ edit. The `linked-issues/{issue}` edit route addresses the manual link.
 Default-branch changes and PR retargeting affect the active links.
 Completed merges retain the captured links and the issue's closure event.
 
-The same keywords in a commit message close repository-local issues when that
-commit becomes reachable from the default branch through Crab Server. This
-includes Git pushes, browser commits and the commits actually published by a
-pull request merge. A topic branch push leaves the issue open. The issue
-timeline links to the exact closing commit and identifies the authenticated
-publisher. Crab verifies the committed ref receipt before applying closure
-and recovers pending closures after an interruption. A ref publication can
-contain up to 100 distinct closing issue references across its new commits.
+The same keywords in a commit message close issues when the commit becomes
+reachable from the default branch through Crab Server. Use `Fixes #123` in
+the same repository or `Fixes owner/repository#123` for another repository
+in the same organization where the publisher has Write access. This covers
+Git pushes, browser commits and the commits actually published by a pull
+request merge. Git credentials require the explicit token option for qualified
+references. A topic branch push leaves the issue open.
+
+The issue timeline identifies the authenticated publisher and links to the
+exact closing commit for readers with access to the source repository.
+Commit messages alone create no pull request relationship in either sidebar.
+Crab verifies the committed ref receipt before applying closures and recovers
+pending closures after an interruption. A ref publication can contain up to
+100 distinct commit-message closing references across its new commits.
 
 Before serving existing repositories, deploy all peers and run
 `cells rebuild-search --owner OWNER --name REPO` to prepare discussion index

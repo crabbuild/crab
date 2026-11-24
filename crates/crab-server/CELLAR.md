@@ -575,13 +575,16 @@ current repository grants before exposing the destination. The owning
 organization's policy lease serializes edits with issue retirement and
 repository ownership changes.
 
-Default-branch merge publication captures opted-in cross-repository links
-with the merging account's current issue Write grants. The commit-closure
-outbox records stable issue origins and observed state versions under the exact
-Git plan. Delivery follows any committed issue move and uses a native version
-check before closing the issue. A late retry therefore preserves a newer
-close or reopen. Recovery verifies the same Git receipt and reacquires the
-owning organization's policy lease before applying the saved closure.
+Default-branch publication captures qualified commit references and eligible
+cross-repository PR links with the publishing account's current issue Write
+grants. The commit-closure outbox records stable issue origins and observed
+state versions under the exact Git plan. Commit-driven closures also record
+the source repository and commit. Delivery follows committed issue moves and
+uses a native version check before closing the issue. A late retry therefore
+preserves a newer close or reopen. Recovery verifies the same Git receipt and
+reacquires the owning organization's policy lease before applying the saved
+closure. Activity readers need an independent grant on the source repository
+to receive the commit link.
 
 Qualified description references enqueue their reverse-index update in the
 pull write transaction. The Organization Cell replaces the previous targets

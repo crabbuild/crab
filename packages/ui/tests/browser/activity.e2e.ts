@@ -75,11 +75,24 @@ function event(number: number, kind: "created" | "closed"): ActivityEvent {
   };
 }
 
-test("repository activity retains pages through errors and supports refresh and milestone links", async ({
+test("repository activity retains pages through errors and links to the closing commit", async ({
   page,
 }) => {
   const unexpected = await repository(page);
-  const events: ActivityEvent[] = [event(2, "closed"), event(1, "created")];
+  const commit = "a".repeat(40);
+  const sourceId = "00000000-0000-4000-8000-000000000100";
+  const events: ActivityEvent[] = [
+    {
+      ...event(2, "closed"),
+      action: {
+        kind: "issue_closed",
+        reason: "completed",
+        commit,
+        commit_repository: { id: sourceId, owner: "team", name: "service" },
+      },
+    },
+    event(1, "created"),
+  ];
   let failOlder = true;
   await page.route("**/api/repos/team/project/activity?**", async (route) => {
     const before = new URL(route.request().url()).searchParams.get("before");
@@ -105,6 +118,12 @@ test("repository activity retains pages through errors and supports refresh and 
   const panel = page.getByRole("region", { name: "Activity", exact: true });
   await expect(panel.locator("li")).toHaveCount(1);
   await expect(panel).toContainText("Alice closed");
+  await expect(
+    panel.getByRole("link", { name: commit.slice(0, 7) }),
+  ).toHaveAttribute(
+    "href",
+    `/team/service/commit/${commit}?repository_id=${sourceId}`,
+  );
   await panel.getByRole("button", { name: "Load older activity" }).click();
   await expect(panel.getByRole("alert")).toContainText(
     "Activity storage unavailable",

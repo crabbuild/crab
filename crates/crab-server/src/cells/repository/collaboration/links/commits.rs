@@ -5,6 +5,7 @@ use crate::cells::{
     Result,
     repository::{
         GetRepositoryLifecycle,
+        collaboration::activity::ExternalCommit,
         issues::{
             self,
             transfer::publication::{self, Destination},
@@ -49,10 +50,12 @@ pub(crate) struct PublishedDescription {
     pub issues: Vec<Destination>,
 }
 
-#[derive(Clone, Copy, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
 pub(crate) struct CapturedIssue {
     pub origin: Destination,
     pub state_version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_commit: Option<ExternalCommit>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -101,9 +104,15 @@ impl Mutation for Reserve {
             ));
         }
         if let Some(cross) = &input.cross {
+            let commit_closures = cross
+                .issues
+                .iter()
+                .filter(|issue| issue.external_commit.is_some())
+                .count();
             if cross.organization.is_nil()
                 || (cross.issues.is_empty() && cross.description.is_none())
-                || cross.issues.len() > 2 * MAX_CLOSING_ISSUES
+                || input.issues.len() + commit_closures > MAX_CLOSURES
+                || cross.issues.len() - commit_closures > 2 * MAX_CLOSING_ISSUES
             {
                 return Err(crate::cells::Error::Invalid(
                     "invalid cross-repository issue closure",
@@ -124,7 +133,12 @@ impl Mutation for Reserve {
                 }
             }
             for issue in &cross.issues {
-                if issue.origin.repository.is_nil() {
+                if issue.origin.repository.is_nil()
+                    || issue
+                        .external_commit
+                        .as_ref()
+                        .is_some_and(|commit| !commit.valid())
+                {
                     return Err(crate::cells::Error::Invalid(
                         "invalid closing issue repository",
                     ));
@@ -242,12 +256,11 @@ impl Mutation for CloseCross {
         {
             return Ok(MutationResult::Rejected(true));
         }
-        issues::close_linked_issue(
-            context,
-            number,
+        let source = input.captured.external_commit.as_ref().map_or(
             issues::ClosingSource::ExternalPull,
-            &input.actor,
-        )?;
+            issues::ClosingSource::ExternalCommit,
+        );
+        issues::close_linked_issue(context, number, source, &input.actor)?;
         Ok(MutationResult::Success(true))
     }
 }

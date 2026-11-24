@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use axum::{
     Extension, Json, Router,
@@ -8,6 +8,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::{
     api::profiles::attribution::Authors,
@@ -15,8 +16,9 @@ use crate::{
     auth::Principal,
     cells::repository::collaboration::{
         Subject, SubjectKind,
-        activity::{ListActivity, Query as ActivityQuery},
+        activity::{Action, Event, ListActivity, Query as ActivityQuery},
     },
+    repository::Repository,
     server::Server,
 };
 
@@ -80,21 +82,80 @@ async fn page(
         page.items.iter().map(|event| &event.actor),
     )
     .await?;
+    let sources = CommitSources::load(server, principal, &repo, page.items.iter()).await?;
     app::membership(server, principal, &repo).await?;
     let items = page
         .items
         .iter()
-        .map(|event| view(&authors, event))
+        .map(|event| view(&authors, &sources, event))
         .collect::<Vec<_>>();
     Ok(Json(json!({"items":items,"next":page.next})))
 }
 
-pub(in crate::api) fn view(
-    authors: &Authors,
-    event: &crate::cells::repository::collaboration::activity::Event,
-) -> Value {
+pub(in crate::api) struct CommitSources(BTreeMap<Uuid, Option<Arc<Repository>>>);
+
+impl CommitSources {
+    pub(in crate::api) async fn load<'a>(
+        server: &Server,
+        principal: &Principal,
+        repo: &Repository,
+        events: impl Iterator<Item = &'a Event>,
+    ) -> Result<Self> {
+        let mut sources = BTreeMap::new();
+        for event in events {
+            let Action::IssueClosed {
+                external_commit: Some(commit),
+                ..
+            } = &event.action
+            else {
+                continue;
+            };
+            let std::collections::btree_map::Entry::Vacant(entry) =
+                sources.entry(commit.repository)
+            else {
+                continue;
+            };
+            let source = match (
+                server.repositories.by_id(commit.repository),
+                principal.related_read(repo.id, commit.repository),
+            ) {
+                (Some(source), Some(reader)) => {
+                    match app::membership(server, &reader, &source).await {
+                        Ok(grant) if grant.principal.can_read(source.id) => Some(source),
+                        Ok(_) | Err(Error::NotFound) => None,
+                        Err(error) => return Err(error),
+                    }
+                }
+                _ => None,
+            };
+            entry.insert(source);
+        }
+        Ok(Self(sources))
+    }
+}
+
+pub(in crate::api) fn view(authors: &Authors, sources: &CommitSources, event: &Event) -> Value {
+    let mut action = json!(event.action);
+    // The recorded commit belongs to an independently protected repository.
+    // Always remove the native field before presenting either timeline.
+    if let Some(fields) = action.as_object_mut()
+        && fields.remove("external_commit").is_some()
+        && let Action::IssueClosed {
+            external_commit: Some(commit),
+            ..
+        } = &event.action
+        && let Some(Some(repo)) = sources.0.get(&commit.repository)
+    {
+        fields.insert("commit".into(), json!(commit.oid));
+        fields.insert(
+            "commit_repository".into(),
+            json!({
+                "id":repo.id,"owner":repo.config.owner,"name":repo.config.name
+            }),
+        );
+    }
     json!({"number":event.number,"target":event.target,"title":event.title,
-    "actor":authors.view(&event.actor),"action":event.action,"created_at":event.created_at})
+    "actor":authors.view(&event.actor),"action":action,"created_at":event.created_at})
 }
 
 async fn repository(

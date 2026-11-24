@@ -71,6 +71,7 @@ export type Action =
       reason: "completed" | "not_planned";
       pull?: number;
       commit?: string;
+      commit_repository?: { id: string; owner: string; name: string };
     }
   | {
       kind: "issue_close_reason_changed";

@@ -57,6 +57,7 @@ fn oidc_groups_union_exact_current_grants_without_exceeding_the_token_scope() {
         owner: config.owner.clone(),
         repository: config.name.clone(),
         access: RepositoryAccess::Read,
+        close_related_issues: false,
         revoked: AtomicBool::new(false),
     }));
     let scoped = git.with_membership(id, &config, "https://identity.example", None);
@@ -116,6 +117,7 @@ fn repository_administration_stays_out_of_write_scoped_git_tokens() {
         owner: repository.owner.clone(),
         repository: repository.name.clone(),
         access: RepositoryAccess::Write,
+        close_related_issues: false,
         revoked: AtomicBool::new(false),
     }));
     let git = git.with_membership(
@@ -171,6 +173,7 @@ fn triage_manages_collaboration_without_code_write_or_repository_administration(
         owner: "team".into(),
         repository: "private".into(),
         access: RepositoryAccess::Read,
+        close_related_issues: false,
         revoked: AtomicBool::new(false),
     }));
     assert!(
@@ -223,6 +226,7 @@ fn a_write_token_cannot_raise_a_triage_member_to_code_write_access() {
         owner: "team".into(),
         repository: "private".into(),
         access: RepositoryAccess::Write,
+        close_related_issues: false,
         revoked: AtomicBool::new(false),
     }));
     let id = Uuid::from_u128(1);
@@ -266,6 +270,7 @@ fn a_token_cannot_resolve_new_scope_for_a_repository_that_reuses_its_name() {
         owner: "team".into(),
         repository: "private".into(),
         access: RepositoryAccess::Write,
+        close_related_issues: false,
         revoked: AtomicBool::new(false),
     }));
     let replacement = Uuid::from_u128(2);

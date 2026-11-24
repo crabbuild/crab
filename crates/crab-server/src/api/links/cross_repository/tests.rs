@@ -9,6 +9,7 @@ use crate::{
 };
 use reqwest::{Method, StatusCode, header};
 
+mod commit_messages;
 mod keywords;
 
 struct Repo {

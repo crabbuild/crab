@@ -146,6 +146,16 @@ async fn page(
         })
         .collect();
     let authors = Authors::load(server, principal, actors.into_iter()).await?;
+    let sources = activity::CommitSources::load(
+        server,
+        principal,
+        &repo,
+        page.items.iter().filter_map(|entry| match entry {
+            Entry::Activity(event) => Some(event),
+            _ => None,
+        }),
+    )
+    .await?;
     let grant = app::membership(server, principal, &repo).await?;
     let can_dismiss = pulls::reviews::dismissal_allowed(
         server,
@@ -163,7 +173,9 @@ async fn page(
         .into_iter()
         .map(|entry| {
             if let Entry::Activity(event) = entry {
-                return Ok(json!({"kind":"activity","value":activity::view(&authors,&event)}));
+                return Ok(
+                    json!({"kind":"activity","value":activity::view(&authors,&sources,&event)}),
+                );
             }
             let reaction = reactions.next().ok_or(Error::CellContract(
                 "Conversation reaction count is invalid",

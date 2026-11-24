@@ -1,5 +1,5 @@
 use crab_metadata::capsule_protocol::resolve_capsule_plan_receipt;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::development_references;
 use crate::{
@@ -10,10 +10,16 @@ use crate::{
         organization::development as graph,
         repository::{
             RepositoryAuthor,
-            collaboration::links::commits::{
-                CapturedIssue, CloseCross, Cross, CrossClosure, DeliverCross, Next,
-                OpenStateVersion, Publication, PublishedDescription, Reservation, Reserve,
-                Resolution, Resolve,
+            collaboration::{
+                activity::ExternalCommit,
+                links::{
+                    commits::{
+                        CapturedIssue, CloseCross, Cross, CrossClosure, DeliverCross, Next,
+                        OpenStateVersion, Publication, PublishedDescription, Reservation, Reserve,
+                        Resolution, Resolve,
+                    },
+                    keywords::Qualified,
+                },
             },
             issues::transfer::publication::{Destination, GetLocation, Location},
         },
@@ -53,35 +59,49 @@ pub(crate) async fn capture(
     server: &Server,
     repo: &Repository,
     principal: &Principal,
-    pull: u64,
+    pull: Option<u64>,
+    commits: BTreeMap<Qualified, String>,
 ) -> Result<Option<CrossClosure>> {
     let Some(organization) = repo.organization else {
         return Ok(None);
     };
-    let cell = server.cells().ok_or(Error::CellUnavailable)?;
-    let links = app::query_output(
-        cell.query::<graph::List>(
-            Address::Organization(organization),
-            None,
-            graph::Side::Pull(Destination {
-                repository: repo.id,
-                number: pull,
-            }),
-        )
-        .await,
-    )?;
-    let described = match development_references::snapshot(server, repo, pull).await? {
-        Some(view) => development_references::targets(server, repo, view.references, true).await?,
-        None => Vec::new(),
+    if pull.is_none() && commits.is_empty() {
+        return Ok(None);
+    }
+    let (links, described) = if let Some(pull) = pull {
+        let cell = server.cells().ok_or(Error::CellUnavailable)?;
+        let links = app::query_output(
+            cell.query::<graph::List>(
+                Address::Organization(organization),
+                None,
+                graph::Side::Pull(Destination {
+                    repository: repo.id,
+                    number: pull,
+                }),
+            )
+            .await,
+        )?;
+        let described = match development_references::snapshot(server, repo, pull).await? {
+            Some(view) => {
+                development_references::targets(server, repo, view.references, true).await?
+            }
+            None => Vec::new(),
+        };
+        (links, described)
+    } else {
+        (Vec::new(), Vec::new())
     };
+    let commits = development_references::resolve(server, repo, commits).await?;
     let mut issues = Vec::new();
     let mut history = Vec::new();
     let mut seen = BTreeSet::new();
-    for origin in links
+    for (origin, oid) in links
         .into_iter()
         .filter(|link| link.closes_on_merge)
         .map(|link| link.pair.issue)
         .chain(described.iter().copied())
+        .map(|origin| (origin, None))
+        .chain(commits.into_iter().map(|(origin, oid)| (origin, Some(oid))))
     {
         if !seen.insert((origin.repository, origin.number)) {
             continue;
@@ -99,13 +119,7 @@ pub(crate) async fn capture(
         if described.contains(&origin) {
             history.push(origin);
         }
-        let writer = if principal.is_auto_merge() {
-            // Apply the background merge's same live account checks to the
-            // linked issue. The worker's pull grant alone carries no access.
-            Principal::auto_merge(target.repository, app::actor(principal)?)
-        } else if let Some(writer) = principal.related_read(repo.id, target.repository) {
-            writer
-        } else {
+        let Some(writer) = principal.related_issue_writer(repo.id, target.repository) else {
             continue;
         };
         match app::membership(server, &writer, &issue_repository).await {
@@ -126,12 +140,18 @@ pub(crate) async fn capture(
         issues.push(CapturedIssue {
             origin,
             state_version,
+            external_commit: oid.map(|oid| ExternalCommit {
+                repository: repo.id,
+                oid,
+            }),
         });
     }
-    let description = (!history.is_empty()).then_some(PublishedDescription {
-        pull,
-        issues: history,
-    });
+    let description = pull
+        .filter(|_| !history.is_empty())
+        .map(|pull| PublishedDescription {
+            pull,
+            issues: history,
+        });
     Ok(
         (!issues.is_empty() || description.is_some()).then_some(CrossClosure {
             organization,

@@ -553,11 +553,15 @@ impl UpdateIssue {
                         .ok_or(crate::cells::Error::Invalid("new closure has no reason"))?,
                     pull: closing_source.and_then(|source| match source {
                         ClosingSource::Pull(number) => Some(number),
-                        ClosingSource::Commit(_) | ClosingSource::ExternalPull => None,
+                        _ => None,
                     }),
                     commit: closing_source.and_then(|source| match source {
                         ClosingSource::Commit(oid) => Some(oid.to_owned()),
-                        ClosingSource::Pull(_) | ClosingSource::ExternalPull => None,
+                        _ => None,
+                    }),
+                    external_commit: closing_source.and_then(|source| match source {
+                        ClosingSource::ExternalCommit(commit) => Some(commit.clone()),
+                        _ => None,
                     }),
                 }
             };
@@ -590,6 +594,7 @@ pub(in crate::cells::repository) enum ClosingSource<'a> {
     Pull(u64),
     Commit(&'a str),
     ExternalPull,
+    ExternalCommit(&'a activity::ExternalCommit),
 }
 
 pub(in crate::cells::repository) fn close_linked_issue(

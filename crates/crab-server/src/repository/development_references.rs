@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use crate::{
     app::{self, Error, Result},
     cells::{
@@ -28,12 +30,13 @@ pub(crate) async fn snapshot(
     app::query_output(cell.client.query::<View>(cell.target, None, pull).await)
 }
 
-async fn resolve(
+pub(super) async fn resolve<T>(
     server: &Server,
     source: &Repository,
-    targets: Vec<Qualified>,
-) -> Result<Vec<Destination>> {
-    if targets.is_empty() {
+    targets: impl IntoIterator<Item = (Qualified, T)>,
+) -> Result<Vec<(Destination, T)>> {
+    let mut targets = targets.into_iter().peekable();
+    if targets.peek().is_none() {
         return Ok(Vec::new());
     }
     let Some(organization) = source.organization else {
@@ -45,7 +48,8 @@ async fn resolve(
         .await
         .map_err(app::repository_access_error)?;
     let mut issues = Vec::new();
-    for target in targets {
+    let mut seen = BTreeSet::new();
+    for (target, value) in targets {
         let record = document
             .repositories
             .iter()
@@ -88,8 +92,8 @@ async fn resolve(
                 origin = view.issue_origin.unwrap_or(current);
             }
         }
-        if !issues.contains(&origin) {
-            issues.push(origin);
+        if seen.insert((origin.repository, origin.number)) {
+            issues.push((origin, value));
         }
     }
     Ok(issues)
@@ -107,7 +111,13 @@ pub(crate) async fn targets(
             if require_default && !targets.is_empty() && base_ref != repo.default_ref().await? {
                 return Ok(Vec::new());
             }
-            resolve(server, repo, targets).await
+            Ok(
+                resolve(server, repo, targets.into_iter().map(|target| (target, ())))
+                    .await?
+                    .into_iter()
+                    .map(|(target, ())| target)
+                    .collect(),
+            )
         }
     }
 }
