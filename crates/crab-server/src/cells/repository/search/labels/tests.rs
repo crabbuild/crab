@@ -303,6 +303,7 @@ async fn native_label_choices_search_the_whole_catalog_and_follow_assignments_re
             title: None,
             body: None,
             state: None,
+            reopen_available: false,
             label_ids: Some(vec![1]),
             assignees: None,
         },

@@ -248,6 +248,7 @@ pub(super) async fn update_pull(
     repo: &Repository,
     number: u64,
     input: PullEdit,
+    reopen_available: bool,
 ) -> Result<PullRequest> {
     let routed = app::repository_cell(server, repo)?;
     match crate::app::command_output(
@@ -264,6 +265,7 @@ pub(super) async fn update_pull(
                     title: input.title,
                     body: input.body,
                     state: input.state,
+                    reopen_available,
                     label_ids: input.label_ids,
                     assignees: input.assignees,
                 },
@@ -275,6 +277,7 @@ pub(super) async fn update_pull(
         UpdatePullOutcome::NotFound => Err(Error::NotFound),
         UpdatePullOutcome::Forbidden => Err(Error::Forbidden),
         UpdatePullOutcome::MergePending => Err(Error::MergePending),
+        UpdatePullOutcome::BranchesUnavailable => Err(Error::PullBranchesUnavailable),
         UpdatePullOutcome::InvalidState => {
             Err(Error::Invalid("Merged pull requests cannot change state"))
         }

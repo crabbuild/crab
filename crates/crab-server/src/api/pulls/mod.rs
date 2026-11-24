@@ -41,6 +41,7 @@ pub(super) use git::review_head;
 mod merge;
 mod merge_methods;
 mod readiness;
+pub(in crate::api) mod reopen;
 mod required_checks;
 mod review_requests;
 mod review_threads;
@@ -1111,11 +1112,10 @@ async fn edit(
     input: std::result::Result<Json<PullEdit>, JsonRejection>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
-    let repo = repo.as_ref();
     let Json(input) = input?;
     let actor = app::actor(&principal)?;
     let number = app::number(id)?;
-    let pull = storage::pull(&server, repo, number)
+    let pull = storage::pull(&server, &repo, number)
         .await?
         .ok_or(Error::NotFound)?;
     let label_change = input.label_ids.is_some();
@@ -1125,7 +1125,7 @@ async fn edit(
         .is_some_and(|labels| !labels.is_empty())
         || (input.label_ids.is_none() && !pull.label_ids.is_empty());
     let assignee_change = input.assignee_ids.is_some();
-    let can_triage = app::membership(&server, &principal, repo)
+    let can_triage = app::membership(&server, &principal, &repo)
         .await?
         .principal
         .can_triage(repo.id);
@@ -1160,7 +1160,7 @@ async fn edit(
         return Err(Error::Invalid("No pull request changes supplied"));
     }
     let labels = if needs_label_catalog {
-        labels::catalog(&server, repo).await?
+        labels::catalog(&server, &repo).await?
     } else {
         vec![]
     };
@@ -1178,35 +1178,57 @@ async fn edit(
         .transpose()?;
     // Assignment eligibility and caller role must share the final current roster.
     let (can_triage, assignees) = if let Some(ids) = input.assignee_ids {
-        let roster = crate::api::members::roster::Roster::load(&server, &principal, repo).await?;
+        let roster = crate::api::members::roster::Roster::load(&server, &principal, &repo).await?;
         if !roster.membership.principal.can_triage(repo.id) {
             return Err(Error::AssigneePermission);
         }
         (true, Some(Selection::validate(&roster, ids)?))
     } else {
-        let permissions = app::membership(&server, &principal, repo).await?;
+        let permissions = app::membership(&server, &principal, &repo).await?;
         (permissions.principal.can_triage(repo.id), None)
     };
     if label_change && !can_triage {
         return Err(Error::LabelPermission);
     }
-    let pull = storage::update_pull(
-        &server,
-        repo,
-        number,
-        storage::PullEdit {
-            actor: actor.clone(),
-            can_triage,
-            version: input.version,
-            title,
-            body,
-            state: input.state,
-            label_ids,
-            assignees,
-        },
-    )
-    .await?;
-    let repository = git::PullGit::open(&server, repo, pull.head_repository)
+    let change = storage::PullEdit {
+        actor: actor.clone(),
+        can_triage,
+        version: input.version,
+        title,
+        body,
+        state: input.state,
+        label_ids,
+        assignees,
+    };
+    let pull = if input.state == Some(PullState::Open) && pull.state == PullState::Closed {
+        let worker = Arc::clone(&server);
+        let target = Arc::clone(&repo);
+        reopen::with_available(
+            &server,
+            &principal,
+            &repo,
+            vec![(number, input.version)],
+            reopen::Access::AuthorOrTriage,
+            move |available, grant| async move {
+                let change = storage::PullEdit {
+                    can_triage: grant.principal.can_triage(target.id),
+                    ..change
+                };
+                storage::update_pull(
+                    &worker,
+                    &target,
+                    number,
+                    change,
+                    available.contains(&number),
+                )
+                .await
+            },
+        )
+        .await?
+    } else {
+        storage::update_pull(&server, &repo, number, change, false).await?
+    };
+    let repository = git::PullGit::open(&server, &repo, pull.head_repository)
         .await
         .ok();
     let current = repository
@@ -1217,7 +1239,7 @@ async fn edit(
             pull.number,
             &actor,
             &server,
-            repo,
+            &repo,
             &principal,
             current.as_ref(),
         )

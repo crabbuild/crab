@@ -212,6 +212,7 @@ async fn request_review_cancel_replay_and_refresh_preserve_indexed_participation
             title: Some("Refreshed title".into()),
             body: None,
             state: None,
+            reopen_available: false,
             label_ids: None,
             assignees: None,
         },

@@ -303,6 +303,8 @@ pub(crate) struct UpdatePullInput {
     pub title: Option<String>,
     pub body: Option<String>,
     pub state: Option<PullState>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reopen_available: bool,
     pub label_ids: Option<Vec<u64>>,
     pub assignees: Option<Vec<super::assignments::Assignee>>,
 }
@@ -314,6 +316,7 @@ pub(crate) enum UpdatePullOutcome {
     NotFound,
     Forbidden,
     MergePending,
+    BranchesUnavailable,
     InvalidState,
     InvalidLabel,
     Conflict,
@@ -456,6 +459,7 @@ pub(crate) enum TransitionPullMergeOutcome {
 
 mod operations;
 mod release_notes;
+pub(crate) mod reopen;
 pub(crate) use operations::{
     CreatePull, GetPull, GetPullSubmission, ListPulls, RejectStalePullComparison, UpdatePull,
 };

@@ -1,7 +1,4 @@
-use crate::{
-    cells::repository::{CreatePull, CreatePullInput, RepositoryAuthor},
-    test_support::http::Harness,
-};
+use crate::test_support::{git, http::Harness};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 const ROOT: &str = "/api/repos/team/private";
@@ -15,37 +12,34 @@ async fn seed(h: &Harness, cookie: &str) {
     .await
     .error_for_status()
     .unwrap();
-    let cell = h
-        .server
-        .cells()
-        .unwrap()
-        .repository(h.server.repositories.values()[0].id)
-        .unwrap();
-    cell.client
-        .command::<CreatePull>(
-            &cell.target,
-            crate::app::mutation_identity().unwrap(),
-            CreatePullInput {
-                code_owner_requests: Default::default(),
-                metadata: Default::default(),
-                submission_id: *uuid::Uuid::now_v7().as_bytes(),
-                author: RepositoryAuthor {
-                    issuer: h.provider.issuer.clone(),
-                    subject: "alice-id".into(),
-                    name: "Alice".into(),
-                },
-                draft: false,
-                title: "State action".into(),
-                body: "Description".into(),
-                base_ref: "refs/heads/main".into(),
-                head_ref: "refs/heads/feature".into(),
-                head_repository: None,
-                base_oid: "a".repeat(40),
-                head_oid: "b".repeat(40),
-            },
+    let token: Value = h
+        .write(
+            Method::POST,
+            "/api/git-token",
+            cookie,
+            json!({"owner":"team","repository":"private","access":"write"}),
         )
         .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
         .unwrap();
+    let mut remote = url::Url::parse(&format!("{}/git/team/private.git", h.origin)).unwrap();
+    remote.set_username("crab").unwrap();
+    remote.set_password(token["token"].as_str()).unwrap();
+    let checkout = tempfile::tempdir().unwrap();
+    git::push_review_branches(checkout.path(), remote.as_str()).await;
+    h.write(
+        Method::POST,
+        &format!("{ROOT}/pulls"),
+        cookie,
+        json!({"request_id":uuid::Uuid::now_v7(),"title":"State action","body":"Description",
+            "base_ref":"refs/heads/main","head_ref":"refs/heads/feature"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
 }
 #[tokio::test]
 async fn combined_issue_and_pull_actions_commit_one_comment_and_recover_the_same_submission() {

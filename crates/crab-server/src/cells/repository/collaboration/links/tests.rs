@@ -247,6 +247,7 @@ async fn merge_completion_closes_captured_issues_once() {
         title: None,
         body: Some(body.into()),
         state: None,
+        reopen_available: false,
         label_ids: None,
         assignees: None,
     };

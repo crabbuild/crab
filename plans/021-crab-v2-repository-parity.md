@@ -20,6 +20,9 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
   repository, write grant and ref rules, and requires the branch name to be
   unused. Git objects must still be retained. Deleting from the PR, automatic
   cleanup after merge, and retargeting dependent PRs remain open.
+- Reopening a closed PR checks both branch names under publication leases,
+  including through the bulk and direct update paths. A rejected reopen rolls
+  back its comment or other bulk edits in the same native transaction.
 - Viewed progress now persists per account and PR, keyed to file diff identity.
 - Release notes process merged pull requests in pages using the pinned Git
   range. A native fixture added 4,096 historical merge records, then published

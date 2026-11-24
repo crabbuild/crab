@@ -4177,6 +4177,13 @@ and commit. `POST` to the same endpoint accepts
 ref must still be absent. Retrying a recorded request recovers the original
 result without replaying the Git update.
 
+Reopening a closed pull request requires both branch names to exist, including
+the exact source repository for a fork head. Conversation, bulk, and direct
+state edits keep the selected refs leased through the native state decision.
+A missing ref returns HTTP 409 `pull_branches_unavailable`. A combined comment
+or bulk edit rolls back if reopening fails. Exact retries recover recorded
+state submissions. Once the branch is restored, start a fresh reopen action.
+
 Choose **Update with rebase** from the branch update menu to replay the head
 commits on top of the captured base. Confirm **Rebase branch** to replace the
 head history with the new commits. Crab preserves authors and commit messages,

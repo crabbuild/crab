@@ -98,6 +98,8 @@ pub(crate) enum Error {
     BranchUpdateDestination,
     #[error("The branch name is already in use")]
     BranchRestoreConflict,
+    #[error("The pull request has a missing branch")]
+    PullBranchesUnavailable,
     #[error("Branch restoration failed")]
     BranchRestore(#[source] Box<crate::git::receive::ReceiveError>),
     #[error("The base changes do not merge cleanly into the head branch")]
@@ -426,6 +428,11 @@ impl IntoResponse for Error {
                 StatusCode::CONFLICT,
                 "branch_restore_conflict",
                 "The branch name is already in use. Reload the pull request.",
+            ),
+            Self::PullBranchesUnavailable => (
+                StatusCode::CONFLICT,
+                "pull_branches_unavailable",
+                "Restore the missing branch before reopening the pull request.",
             ),
             Self::BranchRestore(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,

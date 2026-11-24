@@ -161,7 +161,11 @@ export function MergePanel({
           <GitPullRequestClosedIcon size={24} />
           <div>
             <strong>This pull request is closed</strong>
-            <p>Reopen it before merging these commits.</p>
+            <p>
+              {pull.branches_available
+                ? "Reopen it before merging these commits."
+                : "Restore the missing branch before reopening this pull request."}
+            </p>
           </div>
         </div>
         {restoreBranch}

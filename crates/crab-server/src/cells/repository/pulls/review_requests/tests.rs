@@ -304,6 +304,7 @@ async fn requests_require_triage_authority_and_an_open_unarchived_pull() {
         title: None,
         body: None,
         state: Some(PullState::Closed),
+        reopen_available: false,
         label_ids: None,
         assignees: None,
     };

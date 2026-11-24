@@ -224,6 +224,131 @@ async fn completed_pull_restores_the_saved_head_once_without_overwriting_a_branc
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn reopen_checks_live_refs_and_recovers_its_original_decision() {
+    let h = Harness::new(false).await;
+    let writer = h.login().await;
+    let remote = remote(&h, &writer).await;
+    let checkout = tempfile::tempdir().unwrap();
+    let (head, restore) = closed_pull(&h, &writer, remote.as_str(), checkout.path()).await;
+    let version = restore["version"].as_u64().unwrap();
+    let state = format!("{PULL}/state");
+    let reopen = json!({"request_id":Uuid::now_v7(),"version":version,"state":"open","body":"Resume the review"});
+    let rejected = |response: reqwest::Response| async move {
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response.json::<Value>().await.unwrap()["error"]["code"],
+            "pull_branches_unavailable"
+        );
+    };
+    rejected(
+        h.write(
+            Method::PATCH,
+            PULL,
+            &writer,
+            json!({"version":version,"state":"open"}),
+        )
+        .await,
+    )
+    .await;
+    rejected(h.write(Method::POST, &state, &writer, reopen.clone()).await).await;
+    assert_eq!(
+        h.json(&format!("{PULL}/comments"), &writer).await["items"],
+        json!([])
+    );
+
+    let root = "/api/repos/team/private";
+    let issue = h.write(Method::POST, &format!("{root}/issues"), &writer,
+        json!({"request_id":Uuid::now_v7(),"title":"Keep this issue closed","body":"Closed for the bulk test"})).await.error_for_status().unwrap().json::<Value>().await.unwrap();
+    h.write(
+        Method::POST,
+        &format!("{root}/issues/1/state"),
+        &writer,
+        json!({"request_id":Uuid::now_v7(),"version":issue["version"],"state":"closed"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let closed = h.json(&format!("{root}/issues/1"), &writer).await;
+    let repo = &h.server.repositories.values()[0];
+    let selected = h
+        .json(
+            &format!(
+                "{root}/discussions/selection?repository_id={}&items=issue:1:{},pull:1:{version}",
+                repo.id, closed["version"]
+            ),
+            &writer,
+        )
+        .await;
+    let batch = json!({"request_id":Uuid::now_v7(),"repository_id":repo.id,"items":selected["items"],"action":{"kind":"state","state":"open"}});
+    rejected(
+        h.write(
+            Method::POST,
+            &format!("{root}/discussions/bulk"),
+            &writer,
+            batch,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        h.json(&format!("{root}/issues/1"), &writer).await["state"],
+        "closed"
+    );
+
+    h.write(Method::POST, RESTORE, &writer, restore)
+        .await
+        .error_for_status()
+        .unwrap();
+    rejected(h.write(Method::POST, &state, &writer, reopen.clone()).await).await;
+    let mut fresh = reopen;
+    fresh["request_id"] = json!(Uuid::now_v7());
+    let busy = crab_remote::publication::with_leases::<_, crab_remote::publication::Error, _, _>(
+        &repo.store,
+        &repo.layout,
+        ["refs/heads/feature".to_owned()],
+        std::time::Duration::from_secs(30),
+        &h.server.cancellation,
+        |_, _| async {
+            Ok(h.write(Method::POST, &state, &writer, fresh.clone())
+                .await
+                .status())
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(busy, StatusCode::TOO_MANY_REQUESTS);
+    let applied: Value = h
+        .write(Method::POST, &state, &writer, fresh.clone())
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(applied["comment"]["body"], "Resume the review");
+    assert_eq!(h.json(PULL, &writer).await["state"], "open");
+    h.write(
+        Method::DELETE,
+        &format!("{root}/branches"),
+        &writer,
+        json!({"name":"feature","expected_oid":head}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let replayed: Value = h
+        .write(Method::POST, &state, &writer, fresh)
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(applied["comment"]["number"], replayed["comment"]["number"]);
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires agent-browser and the built embedded UI"]
 async fn native_browser_restores_the_closed_pull_branch_and_stock_git_fetches_it() {
     let h = Harness::new(false).await;
@@ -237,6 +362,7 @@ async fn native_browser_restores_the_closed_pull_branch_and_stock_git_fetches_it
         .await;
     browser.sign_in().await;
     browser.run(&["wait", "--text", "Restore branch"]).await;
+    browser.run(&["wait", "--fn", "Array.from(document.querySelectorAll('button')).some(button => button.textContent.trim() === 'Reopen pull request' && button.disabled)"]).await;
     browser
         .run(&[
             "find",
@@ -249,6 +375,25 @@ async fn native_browser_restores_the_closed_pull_branch_and_stock_git_fetches_it
         ])
         .await;
     browser.run(&["wait", "--text", "Restored feature"]).await;
+    browser.run(&["wait", "--fn", "Array.from(document.querySelectorAll('button')).some(button => button.textContent.trim() === 'Reopen pull request' && !button.disabled)"]).await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Reopen pull request",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&[
+            "wait",
+            "--fn",
+            "document.querySelector('.pull-state.open') !== null",
+        ])
+        .await;
     let fresh = tempfile::tempdir().unwrap();
     git::success(fresh.path(), &["init", "--object-format=sha1", "."]).await;
     git::success(fresh.path(), &["fetch", remote.as_str(), "feature"]).await;

@@ -622,6 +622,7 @@ async fn pull_close_reopen_and_merge_completion_update_milestone_progress() {
                     title: None,
                     body: None,
                     state: Some(state),
+                    reopen_available: state == PullState::Open,
                     label_ids: None,
                     assignees: None,
                 },

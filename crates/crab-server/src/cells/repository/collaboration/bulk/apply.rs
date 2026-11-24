@@ -170,6 +170,7 @@ fn apply_item(
                         PullState::Closed
                     }
                 }),
+                reopen_available: input.reopen_available.contains(&item.subject.number),
                 label_ids: labels,
                 assignees,
             },
@@ -183,6 +184,7 @@ fn apply_item(
                 UpdatePullOutcome::InvalidLabel => Failure::InvalidLabels,
                 UpdatePullOutcome::InvalidState => Failure::InvalidState,
                 UpdatePullOutcome::MergePending => Failure::MergePending,
+                UpdatePullOutcome::BranchesUnavailable => Failure::BranchesUnavailable,
                 _ => return Err(Error::Invalid("bulk pull decision is inconsistent")),
             }),
             _ => return Err(Error::Invalid("bulk pull outcome is inconsistent")),

@@ -133,7 +133,7 @@ async fn edit(
     let actor = app::actor(&principal).map_err(IntoResponse::into_response)?;
     let submission_id =
         app::submission_id(&input.request_id).map_err(IntoResponse::into_response)?;
-    let (can_triage, eligible) = if let Action::Assignees { add, .. } = &input.action {
+    let eligible = if let Action::Assignees { add, .. } = &input.action {
         let roster = Roster::load(&server, &principal, &repo)
             .await
             .map_err(IntoResponse::into_response)?;
@@ -147,36 +147,62 @@ async fn edit(
             })
             .collect();
         eligible.sort_unstable_by_key(|person| person.id);
-        (roster.membership.principal.can_triage(repo.id), eligible)
+        eligible
     } else {
-        (
-            app::membership(&server, &principal, &repo)
-                .await
-                .map_err(IntoResponse::into_response)?
-                .principal
-                .can_triage(repo.id),
-            vec![],
-        )
+        vec![]
     };
     let routed = app::repository_cell(&server, &repo).map_err(IntoResponse::into_response)?;
-    let identity = app::mutation_identity().map_err(IntoResponse::into_response)?;
-    let output = app::command_output(
-        routed
-            .client
-            .command::<bulk::Edit>(
-                &routed.target,
-                identity,
-                bulk::Input {
-                    submission_id,
-                    actor: (&actor).into(),
-                    can_triage,
-                    items: input.items,
-                    action: input.action,
-                    eligible,
-                },
+    let candidates = if matches!(
+        input.action,
+        Action::State {
+            state: crate::cells::repository::collaboration::state::State::Open,
+            ..
+        }
+    ) && input.items.len() <= bulk::MAX_ITEMS
+    {
+        input
+            .items
+            .iter()
+            .filter_map(|selected| {
+                let item = &selected.item;
+                (item.subject.kind == SubjectKind::Pull
+                    && app::number(item.subject.number).is_ok()
+                    && app::number(item.version).is_ok())
+                .then_some((item.subject.number, item.version))
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+    let repository = repo.id;
+    let output = super::pulls::reopen::with_available(
+        &server,
+        &principal,
+        &repo,
+        candidates,
+        super::pulls::reopen::Access::Triage,
+        move |reopen_available, grant| async move {
+            app::command_output(
+                routed
+                    .client
+                    .command::<bulk::Edit>(
+                        &routed.target,
+                        app::mutation_identity()?,
+                        bulk::Input {
+                            submission_id,
+                            actor: (&actor).into(),
+                            can_triage: grant.principal.can_triage(repository),
+                            items: input.items,
+                            action: input.action,
+                            eligible,
+                            reopen_available,
+                        },
+                    )
+                    .await,
             )
-            .await,
+        },
     )
+    .await
     .map_err(IntoResponse::into_response)?;
     let count = match output {
         Outcome::Applied(count) => count,
@@ -201,6 +227,7 @@ fn failure(reason: Failure) -> Error {
         Failure::Conflict => Error::Conflict,
         Failure::RequestConflict => Error::RequestConflict,
         Failure::MergePending => Error::MergePending,
+        Failure::BranchesUnavailable => Error::PullBranchesUnavailable,
         Failure::InvalidState => {
             Error::Invalid("The selection contains a discussion that cannot enter that state")
         }

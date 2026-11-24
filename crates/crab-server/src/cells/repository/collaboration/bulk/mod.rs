@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 mod apply;
 
-const MAX_ITEMS: usize = 100;
+pub(crate) const MAX_ITEMS: usize = 100;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -58,6 +58,8 @@ pub(crate) struct Input {
     // Current roster matches for additions only. They are eligibility/name
     // snapshots, excluded from intent identity so a committed retry survives removal.
     pub eligible: Vec<Assignee>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub reopen_available: BTreeSet<u64>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum Failure {
@@ -69,6 +71,7 @@ pub(crate) enum Failure {
     RequestConflict,
     InvalidState,
     MergePending,
+    BranchesUnavailable,
     InvalidLabels,
     InvalidAssignees,
 }
