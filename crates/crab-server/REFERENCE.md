@@ -2823,6 +2823,9 @@ repository, and then links the issue. Retry an interrupted submission with
 the same request ID to recover the original result. **Cancel if not
 applied** fences a pending creation or completes the link if the issue
 already exists.
+After five minutes, Crab automatically finishes the link for a published
+issue or cancels a submission that never published, even if the browser
+has lost its saved request.
 
 Use `group_by=status`, `group_by=issue_type`, or `group_by=field:<UUID>` with
 either Project item endpoint to receive `group_counts`. Issue-type groupings

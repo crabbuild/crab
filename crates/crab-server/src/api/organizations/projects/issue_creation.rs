@@ -66,13 +66,14 @@ pub(super) async fn submit(
                     )
                     .await,
             )?;
-            let projects::Outcome::PendingIssue { ownership_epoch } = decision else {
+            let projects::Outcome::PendingIssue { issue } = decision else {
                 return if decision == projects::Outcome::RequestConflict {
                     Err(Error::Conflict)
                 } else {
                     Ok(decision)
                 };
             };
+            let ownership_epoch = issue.ownership_epoch;
 
             // The reservation is already durable, so recovery may probe the same
             // source Cell after revocation. It may publish fresh work only with
@@ -114,6 +115,7 @@ pub(super) async fn submit(
                             organization,
                             project: project_id,
                             request_id: request.request_id,
+                            actor_id: actor,
                             actor: author,
                             title: item.title.clone(),
                             body: item.body.clone(),
@@ -131,7 +133,11 @@ pub(super) async fn submit(
                     .command::<projects::ResolveIssue>(
                         address,
                         app::mutation_identity()?,
-                        projects::ResolveInput { request, receipt },
+                        projects::ResolveInput {
+                            request_id: request.request_id,
+                            digest: issue.digest,
+                            receipt,
+                        },
                     )
                     .await,
             )

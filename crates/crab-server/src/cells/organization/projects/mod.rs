@@ -11,6 +11,7 @@ mod reads;
 use crate::cells::planning as ledger;
 pub(crate) use commands::{Change, Command, Outcome, Request};
 pub(crate) use history::{GetHistory, HistoryQuery};
+pub(in crate::cells) use issue_creation::due;
 pub(crate) use issue_creation::{ResolveInput, ResolveIssue};
 pub(crate) use reads::{
     Get, Items, ItemsQuery, List, ListQuery, MatchedItems, ProjectKey, TypeSources,
@@ -203,15 +204,9 @@ pub(in crate::cells::organization) fn authorize(
     input: &Value,
 ) -> Result<()> {
     if mutation && operation == ResolveIssue::ID {
-        let input: ResolveInput = serde_json::from_value(input.clone())?;
-        ensure_ready(context)?;
-        let who = input.request.actor;
-        actor(who)?;
-        if member(context, who)?.is_some() && commands::recover(context, &input.request)?.is_some()
-        {
-            return Ok(());
-        }
-        return Err(Error::AccessDenied);
+        // The private resolver only settles an accepted reservation with the
+        // bound repository result. It cannot create a new Project write.
+        return ensure_ready(context);
     }
     #[derive(Deserialize)]
     struct Person {

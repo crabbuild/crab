@@ -1365,7 +1365,11 @@ issue can be linked after source access changes, while a fresh publication
 requires live Project management and repository Write access. Project
 archival, source unlinking, and changes that invalidate reserved planning
 fields wait for the interrupted submission to settle. A project can have
-four pending issue submissions.
+four pending issue submissions. After five minutes, a durable Organization
+Cell alarm recovers an existing source receipt or fences an unstarted issue
+submission. It holds the reserved request digest and repository UUID without
+retaining draft text or browser credentials. The alarm retries an unreachable
+source and processes other due submissions between attempts.
 
 Permanent actor/payload-bound decisions serialize execution, rejection and
 cancellation. Identical retries recover the original minimal result even after

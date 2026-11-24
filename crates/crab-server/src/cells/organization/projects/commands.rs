@@ -97,7 +97,7 @@ pub(crate) enum Outcome {
     },
     RequestConflict,
     PendingIssue {
-        ownership_epoch: u32,
+        issue: issue_creation::PendingIssue,
     },
     IssueAlreadyLinked {
         project: Uuid,
@@ -105,9 +105,9 @@ pub(crate) enum Outcome {
     },
 }
 #[derive(Deserialize, Serialize)]
-struct Saved {
+pub(super) struct Saved {
     digest: String,
-    outcome: Outcome,
+    pub(super) outcome: Outcome,
 }
 fn digest(input: &Request) -> Result<String> {
     Ok(
@@ -116,27 +116,22 @@ fn digest(input: &Request) -> Result<String> {
             .to_string(),
     )
 }
-fn key(input: &Request) -> String {
-    format!("organization/projects/v1/submissions/{}", input.request_id)
+fn key(id: Uuid) -> String {
+    format!("organization/projects/v1/submissions/{id}")
 }
-pub(super) fn save_outcome(
-    context: &Transaction<'_>,
-    input: &Request,
-    outcome: Outcome,
-) -> Result<MutationResult<Outcome>> {
-    context.put_document(
-        &key(input),
-        &Saved {
-            digest: digest(input)?,
-            outcome: outcome.clone(),
-        },
-    )?;
-    Ok(MutationResult::Success(outcome))
+impl Saved {
+    pub(super) fn load(context: &Transaction<'_>, id: Uuid) -> Result<Option<Self>> {
+        actor(id)?;
+        context.document(&key(id))
+    }
+
+    pub(super) fn write(&self, context: &Transaction<'_>, id: Uuid) -> Result<()> {
+        context.put_document(&key(id), self)
+    }
 }
 pub(super) fn recover(context: &Transaction<'_>, input: &Request) -> Result<Option<Outcome>> {
-    actor(input.request_id)?;
     let expected = digest(input)?;
-    Ok(context.document::<Saved>(&key(input))?.map(|saved| {
+    Ok(Saved::load(context, input.request_id)?.map(|saved| {
         if expected == saved.digest {
             saved.outcome
         } else {
@@ -169,7 +164,12 @@ impl Mutation for Change {
                 MutationResult::Success(outcome) | MutationResult::Rejected(outcome) => outcome,
             }
         };
-        save_outcome(context, &input, outcome)
+        Saved {
+            digest: digest(&input)?,
+            outcome: outcome.clone(),
+        }
+        .write(context, input.request_id)?;
+        Ok(MutationResult::Success(outcome))
     }
 }
 pub(super) fn apply(

@@ -32,6 +32,10 @@ async fn setup() -> (Arc<crate::server::Server>, Uuid, Uuid, Uuid) {
     let organization = Uuid::now_v7();
     let owner = Uuid::now_v7();
     let project = Uuid::now_v7();
+    create_project(client, organization, owner, project).await;
+    (server, organization, owner, project)
+}
+async fn create_project(client: &CellClient, organization: Uuid, owner: Uuid, project: Uuid) {
     client
         .initialize(Address::Organization(organization))
         .await
@@ -62,7 +66,6 @@ async fn setup() -> (Arc<crate::server::Server>, Uuid, Uuid, Uuid) {
     .await
     .unwrap();
     assert!(matches!(result, Outcome::Applied { version: 1, .. }));
-    (server, organization, owner, project)
 }
 fn request(actor: Uuid, command: Command) -> Request {
     Request {
@@ -92,6 +95,116 @@ fn work(repository: Uuid) -> Item {
             values: BTreeMap::new(),
         },
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn project_issue_alarm_recovers_the_repository_receipt_after_restart() {
+    use crate::cells::{
+        repository::{RepositoryAuthor, projects::organization_issue as source},
+        runtime::test_node,
+    };
+    use cellar::sdk::{NodeOutcome, ShutdownMode};
+    let directory = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let organization = Uuid::now_v7();
+    let owner = Uuid::now_v7();
+    let repository = Uuid::now_v7();
+    let project = Uuid::now_v7();
+
+    let started = test_node(directory.path(), address).await;
+    let client = &started.client;
+    client.initialize(repository).await.unwrap();
+    create_project(client, organization, owner, project).await;
+    link(client, organization, owner, project, 1, repository).await;
+    let mut item = work(repository).item;
+    item.subject = None;
+    item.title = "Restore a pending issue".into();
+    let submission = Request {
+        source_epoch: Some(0),
+        ..request(
+            owner,
+            Command::CreateIssue {
+                project,
+                repository,
+                item,
+                type_id: None,
+            },
+        )
+    };
+    assert!(matches!(
+        write::<Change>(client, organization, submission.clone())
+            .await
+            .unwrap(),
+        Outcome::PendingIssue { .. }
+    ));
+    let source_reply = client
+        .command::<source::Publish>(
+            repository,
+            crate::app::mutation_identity().unwrap(),
+            source::Request {
+                organization,
+                project,
+                request_id: submission.request_id,
+                actor_id: owner,
+                actor: RepositoryAuthor {
+                    issuer: "urn:crab:test".into(),
+                    subject: owner.to_string(),
+                    name: "Owner".into(),
+                },
+                title: "Restore a pending issue".into(),
+                body: String::new(),
+                type_id: None,
+                ownership_epoch: 0,
+                issue_type: None,
+                can_write: true,
+                cancel: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(source_reply.output, source::Outcome::Created { number: 1 });
+    assert!(
+        items(client, organization, owner, project)
+            .await
+            .items
+            .is_empty()
+    );
+    let NodeOutcome::Stopped(report) = started.node.shutdown(ShutdownMode::Preserve).await.unwrap()
+    else {
+        panic!("Native node did not drain");
+    };
+    assert!(report.cells_drained && !report.drain_timed_out);
+
+    let restored = test_node(directory.path(), address).await;
+    // Poll only the Project read. The original submission never reaches the
+    // restored node's write entry point until its alarm has linked the issue.
+    let row = tokio::time::timeout(std::time::Duration::from_secs(45), async {
+        loop {
+            let page = items(&restored.client, organization, owner, project).await;
+            if let Some(row) = page.items.into_iter().next() {
+                break row.record;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    })
+    .await
+    .expect("The restored Organization Cell alarm did not link the issue");
+    assert_eq!(row.repository, Some(repository));
+    assert_eq!(row.item.subject.unwrap().number, 1);
+    assert!(matches!(
+        write::<Change>(&restored.client, organization, submission).await.unwrap(),
+        Outcome::Applied { project: Some(saved), .. } if saved == project
+    ));
+    let NodeOutcome::Stopped(report) = restored
+        .node
+        .shutdown(ShutdownMode::Preserve)
+        .await
+        .unwrap()
+    else {
+        panic!("Restored node did not drain");
+    };
+    assert!(report.cells_drained && !report.drain_timed_out);
 }
 async fn link(
     client: &CellClient,

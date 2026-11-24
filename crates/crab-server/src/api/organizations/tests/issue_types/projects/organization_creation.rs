@@ -66,43 +66,45 @@ async fn organization_project_recovers_the_issue_after_the_repository_commits() 
             .await
             .unwrap()
     };
-    assert_eq!(
-        begin(&input).await,
-        workspace::Outcome::PendingIssue {
-            ownership_epoch: epoch
-        }
-    );
+    let workspace::Outcome::PendingIssue { issue } = begin(&input).await else {
+        panic!("Expected a reservation");
+    };
+    assert_eq!(issue.ownership_epoch, epoch);
     let repo_cell = cells.repository(repo).unwrap();
-    let committed = repo_cell
-        .client
-        .command::<source::Publish>(
-            &repo_cell.target,
-            app::mutation_identity().unwrap(),
-            source::Request {
-                organization,
-                project,
-                request_id,
-                actor: RepositoryAuthor {
-                    issuer: h.provider.issuer.clone(),
-                    subject: "alice-id".into(),
-                    name: "Alice".into(),
-                },
-                title: "Release from shared planning".into(),
-                body: "Track release work".into(),
-                type_id: Some(type_id),
-                ownership_epoch: epoch,
-                issue_type: Some(issue_type::Selection {
-                    id: type_id,
+    let publish = async |request_id, title: &str| {
+        repo_cell
+            .client
+            .command::<source::Publish>(
+                &repo_cell.target,
+                app::mutation_identity().unwrap(),
+                source::Request {
                     organization,
+                    project,
+                    request_id,
+                    actor_id: actor,
+                    actor: RepositoryAuthor {
+                        issuer: h.provider.issuer.clone(),
+                        subject: "alice-id".into(),
+                        name: "Alice".into(),
+                    },
+                    title: title.into(),
+                    body: "Track release work".into(),
+                    type_id: Some(type_id),
                     ownership_epoch: epoch,
-                }),
-                can_write: true,
-                cancel: false,
-            },
-        )
-        .await
-        .unwrap()
-        .output;
+                    issue_type: Some(issue_type::Selection {
+                        id: type_id,
+                        organization,
+                        ownership_epoch: epoch,
+                    }),
+                    can_write: true,
+                    cancel: false,
+                },
+            )
+            .await
+            .unwrap()
+            .output
+    };
+    let committed = publish(request_id, "Release from shared planning").await;
     assert_eq!(committed, source::Outcome::Created { number: 2 });
     let items = format!("{root}/{project}/items");
     assert_eq!(h.json(&items, &alice).await["page"]["total"], 1);
@@ -153,6 +155,76 @@ async fn organization_project_recovers_the_issue_after_the_repository_commits() 
         "Create from shared planning"
     );
     assert_eq!(h.json(&items, &alice).await["page"]["total"], 3);
+
+    let published = create(
+        project,
+        repo,
+        "Repository committed before disconnect",
+        type_id,
+    );
+    let abandoned = create(
+        project,
+        repo,
+        "Browser disconnected before publication",
+        type_id,
+    );
+    let workspace::Outcome::PendingIssue {
+        issue: published_job,
+    } = begin(&published).await
+    else {
+        panic!("Expected a published-job reservation");
+    };
+    let workspace::Outcome::PendingIssue {
+        issue: abandoned_job,
+    } = begin(&abandoned).await
+    else {
+        panic!("Expected an abandoned-job reservation");
+    };
+    assert_eq!(
+        publish(
+            published_job.request_id,
+            "Repository committed before disconnect"
+        )
+        .await,
+        source::Outcome::Created { number: 4 }
+    );
+    let detail = format!("{root}/{project}");
+    let try_archive = async || {
+        let view = h.json(&detail, &alice).await;
+        send(
+            "commands",
+            json!({
+                "request_id":Uuid::now_v7(),
+                "command":{"kind":"edit","project":project,"version":view["project"]["version"],
+                    "definition":view["project"]["definition"],"archived":true}
+            }),
+        )
+        .await
+    };
+    // Archival is blocked until both reservations resolve. Only the native
+    // alarms can recover these submissions during the wait.
+    assert_eq!(try_archive().await["outcome"], "rejected");
+    tokio::time::timeout(std::time::Duration::from_secs(45), async {
+        loop {
+            if try_archive().await["outcome"] == "applied" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    })
+    .await
+    .expect("Native Project issue recovery did not settle both submissions");
+    assert_eq!(h.json(&items, &alice).await["page"]["total"], 4);
+    assert_eq!(send("commands", published).await["outcome"], "applied");
+    assert_eq!(
+        publish(
+            abandoned_job.request_id,
+            "Browser disconnected before publication"
+        )
+        .await,
+        source::Outcome::Cancelled
+    );
+    assert_eq!(send("commands", abandoned).await["outcome"], "cancelled");
 }
 
 #[tokio::test(flavor = "multi_thread")]

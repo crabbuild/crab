@@ -9,6 +9,8 @@ use uuid::Uuid;
 
 use super::{Address, Error, Result, directory, organization, repository};
 
+mod project_issue_recovery;
+
 pub(crate) use cellar::sdk::storage::SqlValue;
 
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
@@ -86,6 +88,14 @@ impl Transaction<'_> {
 
     pub(crate) fn delete_document(&self, key: &str) -> Result<bool> {
         self.storage.delete(key).map_err(Error::sdk)
+    }
+
+    pub(in crate::cells) fn set_alarm(&self, deadline: Option<i64>) -> Result<()> {
+        match deadline {
+            Some(deadline) => self.storage.set_alarm(deadline),
+            None => self.storage.delete_alarm(),
+        }
+        .map_err(Error::sdk)
     }
 
     pub(crate) fn documents<T: DeserializeOwned>(
@@ -294,8 +304,13 @@ struct ApplicationCell {
 impl Cell for ApplicationCell {
     fn invoke(self: Arc<Self>, context: Context, event: Invocation) -> HandlerFuture<Output> {
         Box::pin(async move {
-            let Invocation::Fetch(request) = event else {
-                return Ok(Output::Done);
+            let request = match event {
+                Invocation::Fetch(request) => request,
+                Invocation::Alarm { .. } if self.class == organization::CLASS => {
+                    project_issue_recovery::alarm(&context).await?;
+                    return Ok(Output::Done);
+                }
+                _ => return Ok(Output::Done),
             };
             let body = request_bytes(&context, request.body).await?;
             let request: Request = serde_json::from_slice(&body)?;
