@@ -1,3 +1,4 @@
+import { openSecondaryFilter } from "./discussion-filters";
 import { expect, test, type Page } from "@playwright/test";
 import { mockPullRequest } from "./pulls/fixture";
 import {
@@ -15,7 +16,7 @@ const choices = [
   ["Awaiting review from you", "is:open user-review-requested:@me"],
   ["Awaiting review from you or your team", "is:open review-requested:@me"],
 ] as const;
-async function fixture(page: Page) {
+async function fixture(page: Page, view: "issues" | "pulls" = "pulls") {
   await mockPullRequest(page);
   const state = {
     fail: false,
@@ -24,11 +25,12 @@ async function fixture(page: Page) {
     queries: [] as string[],
   };
   await page.route(
-    (url) => url.pathname === "/api/repos/team/project/pulls",
+    (url) => url.pathname === `/api/repos/team/project/${view}`,
     (route) => {
       const q =
         new URL(route.request().url()).searchParams.get("q") ?? "is:open";
       state.queries.push(q);
+      const base = q.replace(/ is:(locked|unlocked)/g, "");
       return route.fulfill({
         json: {
           items: [],
@@ -38,6 +40,17 @@ async function fixture(page: Page) {
           authored_by_me: false,
           assigned_to_me: false,
           review_requested_from_me: q === "is:open user-review-requested:@me",
+          lock_filter: {
+            any: { query: base, selected: q === base },
+            locked: {
+              query: `${base} is:locked`,
+              selected: q.endsWith(" is:locked"),
+            },
+            unlocked: {
+              query: `${base} is:unlocked`,
+              selected: q.endsWith(" is:unlocked"),
+            },
+          },
           navigation: {
             kind: "state",
             selected: "open",
@@ -74,7 +87,7 @@ async function fixture(page: Page) {
   return state;
 }
 
-test("the reference review menu uses native destinations and preserves navigation state and focus", async ({
+test("the reference review filter uses native destinations and preserves navigation state and focus", async ({
   page,
 }) => {
   const state = await fixture(page);
@@ -86,14 +99,14 @@ test("the reference review menu uses native destinations and preserves navigatio
     name: "Filter by reviews",
     exact: true,
   });
-  await trigger.click();
-  const menu = page.getByRole("menu", { name: "Filter by reviews" });
+  await openSecondaryFilter(trigger);
+  const menu = page.getByRole("dialog", { name: "Filter by reviews" });
   for (const [label] of choices)
     await expect(
-      menu.getByRole("menuitemradio", { name: label, exact: true }),
+      menu.getByRole("option", { name: label, exact: true }),
     ).toBeVisible();
   await menu
-    .getByRole("menuitemradio", {
+    .getByRole("option", {
       name: "Awaiting review from you or your team",
       exact: true,
     })
@@ -101,9 +114,9 @@ test("the reference review menu uses native destinations and preserves navigatio
   await expect
     .poll(() => new URL(page.url()).searchParams.get("q"))
     .toBe("is:open review-requested:@me");
-  await trigger.click();
+  await openSecondaryFilter(trigger);
   await menu
-    .getByRole("menuitemradio", { name: "Approved review", exact: true })
+    .getByRole("option", { name: "Approved review", exact: true })
     .click();
   await expect
     .poll(() => new URL(page.url()).searchParams.get("q"))
@@ -117,19 +130,19 @@ test("the reference review menu uses native destinations and preserves navigatio
   ]).toEqual(["updated", "asc", "1", false]);
   await expect(trigger).toBeFocused();
   await page.reload();
-  await trigger.click();
+  await openSecondaryFilter(trigger);
   await expect(
-    menu.getByRole("menuitemradio", { name: "Approved review", exact: true }),
-  ).toHaveAttribute("aria-checked", "true");
+    menu.getByRole("option", { name: "Approved review", exact: true }),
+  ).toHaveAttribute("aria-selected", "true");
   await menu
-    .getByRole("menuitemradio", { name: "Not reviewed by you", exact: true })
+    .getByRole("option", { name: "Not reviewed by you", exact: true })
     .click();
   await expect
     .poll(() => new URL(page.url()).searchParams.get("q"))
     .toBe("is:open -reviewed-by:@me");
-  await trigger.click();
+  await openSecondaryFilter(trigger);
   await menu
-    .getByRole("menuitemradio", {
+    .getByRole("option", {
       name: "Awaiting review from you",
       exact: true,
     })
@@ -139,15 +152,17 @@ test("the reference review menu uses native destinations and preserves navigatio
       .getByRole("navigation", { name: "Pull request navigation", exact: true })
       .getByRole("link", { name: "Review requests", exact: true }),
   ).toHaveAttribute("aria-current", "page");
-  await trigger.click();
+  await openSecondaryFilter(trigger);
   await menu
-    .getByRole("menuitem", { name: "Clear review filters", exact: true })
+    .getByRole("button", { name: "Clear review filters", exact: true })
     .click();
   await expect
     .poll(() => new URL(page.url()).searchParams.get("q"))
     .toBe("is:open");
-  await trigger.click();
-  const search = page.getByRole("combobox");
+  await openSecondaryFilter(trigger);
+  const search = page
+    .getByRole("search", { name: "Search pulls" })
+    .getByRole("combobox");
   await search.click();
   await expect(menu).toHaveCount(0);
   await expect(search).toBeFocused();
@@ -158,7 +173,46 @@ test("the reference review menu uses native destinations and preserves navigatio
   await expectNoAccessibilityViolations(page);
 });
 
-test("review choices retry failed reads and keep keyboard focus within a narrow dark menu", async ({
+for (const view of ["issues", "pulls"] as const) {
+  test(`${view} clears conversation filters from the picker input`, async ({
+    page,
+  }) => {
+    await fixture(page, view);
+    await page.goto(
+      `/team/project/${view}?q=is%3Aopen%20label%3Abug%20is%3Alocked&sort=updated`,
+    );
+    const trigger = page.getByRole("button", {
+      name: "Filter by conversation lock",
+    });
+    await expect(trigger).toHaveText("Locked");
+    await openSecondaryFilter(trigger);
+    const dialog = page.getByRole("dialog", {
+      name: "Filter by conversation lock",
+    });
+    const input = dialog.getByRole("combobox");
+    const field = dialog.locator('[data-slot="input-group"]');
+    await input.fill("unlocked");
+    await expect(
+      dialog.getByRole("option", { name: "Unlocked", exact: true }),
+    ).toBeVisible();
+    await expect(
+      dialog.getByRole("option", { name: "Locked", exact: true }),
+    ).toHaveCount(0);
+    await field.getByRole("button", { name: "Clear filter search" }).click();
+    await expect(input).toBeFocused();
+    await expect(input).toHaveValue("");
+    await field
+      .getByRole("button", { name: "Clear conversation filter" })
+      .click();
+    await expect
+      .poll(() => new URL(page.url()).searchParams.get("q"))
+      .toBe("is:open label:bug");
+    expect(new URL(page.url()).searchParams.get("sort")).toBe("updated");
+    await expect(trigger).toBeFocused();
+  });
+}
+
+test("review choices retry failed reads and keep keyboard focus within a narrow dark picker", async ({
   page,
 }) => {
   const state = await fixture(page);
@@ -170,17 +224,17 @@ test("review choices retry failed reads and keep keyboard focus within a narrow 
     name: "Filter by reviews",
     exact: true,
   });
-  await trigger.click();
+  await openSecondaryFilter(trigger);
   await expect(page.getByRole("alert")).toContainText(
     "Review filters unavailable",
   );
   state.fail = false;
-  const retry = page.getByRole("menuitem", { name: "Retry review filters" });
+  const retry = page.getByRole("button", { name: "Retry review filters" });
   await retry.focus();
   await page.keyboard.press("Enter");
-  const menu = page.getByRole("menu", { name: "Filter by reviews" });
+  const menu = page.getByRole("dialog", { name: "Filter by reviews" });
   await expect(
-    menu.getByRole("menuitemradio", { name: "No reviews", exact: true }),
+    menu.getByRole("option", { name: "No reviews", exact: true }),
   ).toBeVisible();
   const box = await menu.boundingBox();
   expect(box!.x).toBeGreaterThanOrEqual(16);
@@ -189,9 +243,9 @@ test("review choices retry failed reads and keep keyboard focus within a narrow 
   await page.keyboard.press("Escape");
   await expect(trigger).toBeFocused();
   state.limit = true;
-  await trigger.click();
+  await openSecondaryFilter(trigger);
   await expect(
-    menu.getByRole("menuitemradio", { name: "No reviews", exact: true }),
+    menu.getByRole("option", { name: "No reviews", exact: true }),
   ).toBeDisabled();
   await expect(menu).toContainText("Shorten the search query");
   expect(

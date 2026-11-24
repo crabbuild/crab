@@ -126,6 +126,16 @@ test("search completes native suggestions with Unicode caret ranges and preserve
     page.getByRole("navigation", { name: "Issue state" }),
   ).toHaveCount(0);
   await input.fill("🦀 AND label:he OR keyboard");
+  const syntax = search.locator(".discussion-query-highlight");
+  await expect(syntax).toHaveText("🦀 AND label:he OR keyboard");
+  await expect(syntax.locator('[data-query-part="operator"]')).toHaveText([
+    "AND",
+    "OR",
+  ]);
+  await expect(syntax.locator('[data-query-part="qualifier"]')).toHaveText(
+    "label:",
+  );
+  await expect(syntax.locator('[data-query-part="value"]')).toHaveText("he");
   for (let i = 0; i < 12; i++) await input.press("ArrowLeft");
   await expect(
     page.getByRole("option", {
@@ -135,6 +145,9 @@ test("search completes native suggestions with Unicode caret ranges and preserve
   await input.press("ArrowDown");
   await input.press("Enter");
   await expect(input).toHaveValue('🦀 AND label:"Help wanted" OR keyboard');
+  await expect(syntax.locator('[data-query-part="value"]')).toHaveText(
+    '"Help wanted"',
+  );
   await input.press("Enter");
   await expect
     .poll(() => new URL(page.url()).searchParams.get("q"))
@@ -151,6 +164,85 @@ test("search completes native suggestions with Unicode caret ranges and preserve
   await search.getByRole("button", { name: "Clear", exact: true }).click();
   await expect(page).not.toHaveURL(/q=/);
   await expect(input).toHaveValue("");
+});
+
+test("Add filter appends a server-completed qualifier without replacing the draft", async ({
+  page,
+}) => {
+  await searchFixture(page);
+  await page.route("**/discussion-search?**", (route) => {
+    const query =
+      new URL(route.request().url()).searchParams.get("query") ?? "";
+    const prefix = query.lastIndexOf("state:");
+    return route.fulfill({
+      json: {
+        start: prefix < 0 ? query.length : prefix,
+        end: query.length,
+        items: [
+          prefix < 0
+            ? { value: "state:", description: "Filter by state" }
+            : { value: "state:closed", description: "Closed work" },
+        ],
+        error: null,
+      },
+    });
+  });
+  await page.goto("/team/project/issues?q=author%3A%40me");
+  const search = page.getByRole("search", { name: "Search issues" });
+  const input = search.getByRole("combobox");
+  await expect(input).toBeVisible();
+  await page.keyboard.press("/");
+  await expect(input).toBeFocused();
+  await input.press("Home");
+  await search.getByRole("button", { name: "Add search filter" }).click();
+  await expect(input).toHaveValue("author:@me ");
+  await search.getByRole("option", { name: "state: Filter by state" }).click();
+  await expect(input).toHaveValue("author:@me state:");
+  await expect(
+    search.getByRole("option", { name: "state:closed Closed work" }),
+  ).toBeVisible();
+  await input.press("ArrowDown");
+  await input.press("Tab");
+  await expect(input).toHaveValue("author:@me state:closed ");
+  await expect(input).toBeFocused();
+  expect(new URL(page.url()).searchParams.get("q")).toBe("author:@me");
+  await input.press("Enter");
+  await expect
+    .poll(() => new URL(page.url()).searchParams.get("q"))
+    .toBe("author:@me state:closed");
+});
+
+test("the toolbar keeps all filters reachable down to 320 pixels", async ({
+  page,
+}) => {
+  await searchFixture(page);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/team/project/issues");
+  const filters = page.getByRole("group", { name: "Discussion filters" });
+  await expect(
+    filters.getByRole("button", { name: "Filter by milestone" }),
+  ).toBeVisible();
+  await page.setViewportSize({ width: 320, height: 800 });
+  const more = filters.getByRole("button", { name: "More filters" });
+  await expect(more).toBeVisible();
+  await expect(
+    filters.getByRole("button", { name: "Filter by author" }),
+  ).toHaveCount(0);
+  await more.click();
+  const overflow = page.getByRole("dialog", { name: "More filters" });
+  for (const field of ["author", "label", "milestone", "assignee"]) {
+    await expect(
+      overflow.getByRole("button", { name: `Filter by ${field}`, exact: true }),
+    ).toBeInViewport({ ratio: 1 });
+  }
+  await page.keyboard.press("Escape");
+  await expect(more).toBeFocused();
+  await expect(
+    filters.getByRole("button", { name: "Sort discussions" }),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(320);
 });
 
 test("syntax and suggestion errors remain visible without losing the query", async ({

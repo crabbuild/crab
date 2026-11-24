@@ -1,17 +1,29 @@
-import { ReviewFilter } from "@/features/pull-requests/reviews/filter";
 import { useEffect, useId, useRef, useState } from "react";
 import {
   CheckIcon,
   ChevronDownIcon,
+  FlagIcon,
+  GitPullRequestIcon,
+  LockIcon,
+  LockOpenIcon,
+  SearchIcon,
   SquareIcon,
   SquareCheckIcon,
   SquareMinusIcon,
+  TagIcon,
+  UserCheckIcon,
   UserRoundIcon,
+  XIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Field, FieldLabel } from "@/components/ui/field";
-import { Input } from "@/components/ui/input";
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupInput,
+} from "@/components/ui/input-group";
 import {
   Popover,
   PopoverContent,
@@ -45,11 +57,13 @@ type AuthorOption = Choice & {
 };
 type PersonOption = Choice & { person: RepositoryAssignee };
 type Item = CatalogOption | AuthorOption | PersonOption;
-type Options = { clear: Choice; truncated: boolean } & (
+type CatalogOptions = { clear: Choice; truncated: boolean } & (
   | { items: CatalogOption[]; missing: Choice }
   | { items: AuthorOption[]; self: Choice }
   | { items: PersonOption[]; self: Choice; missing: Choice; any: Choice }
 );
+type ReviewOptions = { clear: Choice; items: (Choice & { label: string })[] };
+export type ConversationOptions = Record<"any" | "locked" | "unlocked", Choice>;
 
 const presentations = {
   assignees: {
@@ -60,6 +74,7 @@ const presentations = {
     noun: "people",
     singular: "assignee",
     timing: "Assignee filters",
+    Icon: UserCheckIcon,
   },
   authors: {
     title: "Filter by author",
@@ -69,6 +84,7 @@ const presentations = {
     noun: "authors",
     singular: "author",
     timing: "Author filters",
+    Icon: UserRoundIcon,
   },
   milestones: {
     title: "Filter by milestone",
@@ -78,6 +94,7 @@ const presentations = {
     noun: "milestones",
     singular: "milestone",
     timing: "Milestone filters",
+    Icon: FlagIcon,
   },
   labels: {
     title: "Filter by label",
@@ -87,6 +104,7 @@ const presentations = {
     noun: "labels",
     singular: "label",
     timing: "Label filters",
+    Icon: TagIcon,
   },
   "issue-types": {
     title: "Filter by issue type",
@@ -96,37 +114,48 @@ const presentations = {
     noun: "issue types",
     singular: "issue type",
     timing: "Issue type filters",
+    Icon: SquareIcon,
+  },
+  reviews: {
+    title: "Filter by reviews",
+    trigger: "Reviews",
+    find: "Find a review filter",
+    initial: "",
+    noun: "review filters",
+    singular: "review",
+    timing: "Review filters",
+    Icon: GitPullRequestIcon,
+  },
+  conversations: {
+    title: "Filter by conversation lock",
+    trigger: "Conversation",
+    find: "Find a conversation filter",
+    initial: "",
+    noun: "conversation filters",
+    singular: "conversation",
+    timing: undefined,
+    Icon: LockIcon,
   },
 } as const;
 
-export function DiscussionFilter(props: {
-  repo: Repository;
-  query: string;
-  onSelect: (query: string) => void;
-  kind: keyof typeof presentations | "reviewers";
-}) {
-  if (props.kind === "reviewers")
-    return (
-      <ReviewFilter
-        repo={props.repo}
-        query={props.query}
-        onSelect={props.onSelect}
-      />
-    );
-  return <CatalogFilter {...props} kind={props.kind} />;
-}
-function CatalogFilter({
+export function DiscussionFilter({
   repo,
   query,
   onSelect,
   kind,
+  conversation,
+  inOverflow = false,
 }: {
   repo: Repository;
   query: string;
   onSelect: (query: string) => void;
   kind: keyof typeof presentations;
+  conversation?: ConversationOptions;
+  inOverflow?: boolean;
 }) {
   const text = presentations[kind];
+  const Icon = text.Icon;
+  const localSearch = kind === "reviews" || kind === "conversations";
   const people = kind === "authors" || kind === "assignees";
   const id = useId();
   const input = useRef<HTMLInputElement>(null);
@@ -136,37 +165,68 @@ function CatalogFilter({
   const [state, setState] = useState("open");
   const [active, setActive] = useState(-1);
   useEffect(() => {
+    if (localSearch || !open) return;
     const timer = setTimeout(() => setRequested(search), 150);
     return () => clearTimeout(timer);
-  }, [search]);
-  const options = useRequest<Options>(
-    open
+  }, [localSearch, open, search]);
+  const options = useRequest<CatalogOptions | ReviewOptions>(
+    open && kind !== "conversations"
       ? endpoint(repo, `discussion-search/${kind}`, {
           query,
-          search: requested,
+          search: localSearch ? undefined : requested,
           state: kind === "milestones" ? state : undefined,
         })
       : null,
   );
-  const current = requested === search;
+  const current = localSearch || requested === search;
+  const loading =
+    !current || options.loading || (kind === "conversations" && !conversation);
   const data = current ? options.data : undefined;
-  const choices: Item[] = data
+  const catalog = data && "truncated" in data ? data : undefined;
+  const reviewChoices = data && !("truncated" in data) ? data.items : [];
+  const conversationChoices = conversation
+    ? [
+        { ...conversation.locked, number: 1, title: "Locked" },
+        { ...conversation.unlocked, number: 2, title: "Unlocked" },
+      ]
+    : [];
+  const choices: Item[] = catalog
     ? [
         {
-          ...("missing" in data ? data.missing : data.self),
+          ...("missing" in catalog ? catalog.missing : catalog.self),
           number: 0,
           title: text.initial,
           description: kind === "authors" ? "Your contributions" : undefined,
         },
-        ...("any" in data
+        ...("any" in catalog
           ? [
-              { ...data.self, number: -1, title: "Assigned to yourself" },
-              { ...data.any, number: -2, title: "Assigned to anybody" },
+              { ...catalog.self, number: -1, title: "Assigned to yourself" },
+              { ...catalog.any, number: -2, title: "Assigned to anybody" },
             ]
           : []),
-        ...data.items,
+        ...catalog.items,
       ]
-    : [];
+    : [
+        ...conversationChoices,
+        ...reviewChoices.map(({ label, ...choice }) => ({
+          ...choice,
+          id: label,
+          title: label,
+        })),
+      ].filter((item) =>
+        item.title.toLowerCase().includes(search.trim().toLowerCase()),
+      );
+  const clear = conversation?.any ?? data?.clear;
+  const canClearFilter =
+    !search && !!clear && !clear.selected && clear.query !== null;
+  const clearLabel = canClearFilter
+    ? kind === "reviews"
+      ? "Clear review filters"
+      : `Clear ${text.singular} filter`
+    : "Clear filter search";
+  const triggerLabel =
+    conversationChoices.find((choice) => choice.selected)?.title ??
+    text.trigger;
   const selected = active >= 0 && active < choices.length ? active : -1;
   useEffect(() => {
     if (selected >= 0)
@@ -183,20 +243,29 @@ function CatalogFilter({
     if (query == null) return;
     onSelect(query);
     setActive(-1);
-    if (kind !== "labels") setOpen(false);
+    if (kind !== "labels") setPickerOpen(false);
     else input.current?.focus();
   }
+  function setPickerOpen(value: boolean) {
+    setOpen(value);
+    setActive(-1);
+    if (!value) {
+      setSearch("");
+      setRequested("");
+    }
+  }
   return (
-    <Popover
-      open={open}
-      onOpenChange={(value) => {
-        setOpen(value);
-        setActive(-1);
-      }}
-    >
+    <Popover open={open} onOpenChange={setPickerOpen}>
       <PopoverTrigger asChild>
-        <Button variant="outline" size="sm" aria-label={text.title}>
-          {text.trigger} <ChevronDownIcon data-icon="inline-end" />
+        <Button
+          variant={inOverflow ? "ghost" : "outline"}
+          size="sm"
+          aria-label={text.title}
+          title={text.title}
+        >
+          <Icon data-icon="inline-start" aria-hidden="true" />
+          <span data-filter-label>{triggerLabel}</span>
+          <ChevronDownIcon data-icon="inline-end" />
         </Button>
       </PopoverTrigger>
       {/* Each opening owns its focus scope; rapid reopen must not reuse a closing popup. */}
@@ -214,45 +283,67 @@ function CatalogFilter({
             <FieldLabel className="sr-only" htmlFor={`${id}-search`}>
               {text.find}
             </FieldLabel>
-            <Input
-              ref={input}
-              id={`${id}-search`}
-              placeholder={`${text.find}…`}
-              autoComplete="off"
-              maxLength={256}
-              role="combobox"
-              aria-autocomplete="list"
-              aria-describedby={kind === "labels" ? `${id}-help` : undefined}
-              aria-controls={`${id}-options`}
-              aria-expanded={true}
-              aria-activedescendant={
-                selected >= 0 ? `${id}-${selected}` : undefined
-              }
-              value={search}
-              onChange={(event) => {
-                setSearch(event.target.value);
-                setActive(-1);
-              }}
-              onKeyDown={(event) => {
-                if (event.nativeEvent.isComposing) return;
-                if (
-                  (event.key === "ArrowDown" || event.key === "ArrowUp") &&
-                  choices.length
-                ) {
-                  event.preventDefault();
-                  setActive(
-                    event.key === "ArrowDown"
-                      ? (selected + 1) % choices.length
-                      : selected < 0
-                        ? choices.length - 1
-                        : (selected - 1 + choices.length) % choices.length,
-                  );
-                } else if (event.key === "Enter" && selected >= 0) {
-                  event.preventDefault();
-                  choose(choices[selected], event.altKey);
+            <InputGroup>
+              <InputGroupAddon>
+                <SearchIcon aria-hidden="true" />
+              </InputGroupAddon>
+              <InputGroupInput
+                ref={input}
+                id={`${id}-search`}
+                placeholder={`${text.find}…`}
+                autoComplete="off"
+                maxLength={256}
+                role="combobox"
+                aria-autocomplete="list"
+                aria-describedby={kind === "labels" ? `${id}-help` : undefined}
+                aria-controls={`${id}-options`}
+                aria-expanded={true}
+                aria-activedescendant={
+                  selected >= 0 ? `${id}-${selected}` : undefined
                 }
-              }}
-            />
+                value={search}
+                onChange={(event) => {
+                  setSearch(event.target.value);
+                  setActive(-1);
+                }}
+                onKeyDown={(event) => {
+                  if (event.nativeEvent.isComposing) return;
+                  if (
+                    (event.key === "ArrowDown" || event.key === "ArrowUp") &&
+                    choices.length
+                  ) {
+                    event.preventDefault();
+                    setActive(
+                      event.key === "ArrowDown"
+                        ? (selected + 1) % choices.length
+                        : selected < 0
+                          ? choices.length - 1
+                          : (selected - 1 + choices.length) % choices.length,
+                    );
+                  } else if (event.key === "Enter" && selected >= 0) {
+                    event.preventDefault();
+                    choose(choices[selected], event.altKey);
+                  }
+                }}
+              />
+              {(canClearFilter || search) && (
+                <InputGroupAddon align="inline-end">
+                  <InputGroupButton
+                    size="icon-xs"
+                    aria-label={clearLabel}
+                    title={clearLabel}
+                    onClick={() => {
+                      setSearch("");
+                      setActive(-1);
+                      if (canClearFilter) choose(clear);
+                      else input.current?.focus();
+                    }}
+                  >
+                    <XIcon aria-hidden="true" />
+                  </InputGroupButton>
+                </InputGroupAddon>
+              )}
+            </InputGroup>
           </Field>
           {kind === "milestones" && (
             <ToggleGroup
@@ -272,7 +363,7 @@ function CatalogFilter({
             </ToggleGroup>
           )}
           <RequestWidget timing={options.timing} label={text.timing}>
-            {(!current || options.loading) && (
+            {loading && (
               <p role="status" className="p-2 text-xs text-muted-foreground">
                 Loading {text.noun}…
               </p>
@@ -301,7 +392,9 @@ function CatalogFilter({
                       ? "Labels"
                       : kind === "milestones"
                         ? "Milestones"
-                        : "Issue types"
+                        : kind === "issue-types"
+                          ? "Issue types"
+                          : text.trigger
               }
               aria-multiselectable={kind === "labels" || undefined}
               className={cn(
@@ -333,6 +426,12 @@ function CatalogFilter({
                       ? `@${choice.actor.handle}`
                       : choice.description;
                 const color = "color" in choice ? choice.color : undefined;
+                const ChoiceIcon =
+                  kind === "conversations" &&
+                  "number" in choice &&
+                  choice.number === 2
+                    ? LockOpenIcon
+                    : Icon;
                 const excluded = "excluded" in choice && choice.excluded;
                 const initial =
                   "actor" in choice || "person" in choice
@@ -366,13 +465,6 @@ function CatalogFilter({
                       ) : (
                         <SquareIcon className="size-4 shrink-0 text-muted-foreground" />
                       )
-                    ) : !people ? (
-                      <CheckIcon
-                        className={cn(
-                          "size-4 shrink-0",
-                          !choice.selected && "invisible",
-                        )}
-                      />
                     ) : null}
                     {people && (
                       <Avatar size="sm" aria-hidden="true">
@@ -386,6 +478,12 @@ function CatalogFilter({
                         aria-hidden="true"
                         className="mt-0.5 size-3 shrink-0 rounded-full border"
                         style={{ backgroundColor: `#${color}` }}
+                      />
+                    )}
+                    {!people && !color && (
+                      <ChoiceIcon
+                        aria-hidden="true"
+                        className="size-4 shrink-0 text-muted-foreground"
                       />
                     )}
                     <span className="min-w-0 flex-1 break-words">
@@ -403,17 +501,22 @@ function CatalogFilter({
                         </span>
                       )}
                     </span>
-                    {people && (
+                    {kind !== "labels" && (
                       <CheckIcon
                         aria-hidden="true"
-                        className={cn(!choice.selected && "invisible")}
+                        className={cn(
+                          "size-4 shrink-0",
+                          !choice.selected && "invisible",
+                        )}
                       />
                     )}
                   </Button>
                 );
               })}
             </div>
-            {data && !data.items.length && (
+            {(catalog
+              ? !catalog.items.length
+              : (data || conversation) && !choices.length) && (
               <p role="status" className="p-2 text-xs text-muted-foreground">
                 No{" "}
                 {kind === "milestones"
@@ -424,25 +527,16 @@ function CatalogFilter({
                 match.
               </p>
             )}
-            {data?.truncated && (
+            {catalog?.truncated && (
               <p role="status" className="p-2 text-xs text-muted-foreground">
                 Showing 20 matches. Refine your search for more.
               </p>
             )}
-            {data && choices.some((choice) => choice.query === null) && (
+            {choices.some((choice) => choice.query === null) && (
               <p role="status" className="p-2 text-xs text-muted-foreground">
-                Shorten your search query to add a {text.singular} filter.
+                Shorten the search query to enable the remaining {text.singular}{" "}
+                filters.
               </p>
-            )}
-            {data && (
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={data.clear.selected || data.clear.query === null}
-                onClick={() => choose(data.clear)}
-              >
-                Clear {text.singular} filter
-              </Button>
             )}
           </RequestWidget>
           {kind === "labels" && (
