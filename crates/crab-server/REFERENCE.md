@@ -2590,14 +2590,24 @@ repository. Either sidebar shows the relationship to readers with access
 to both endpoints. The link follows the issue through transfers within the
 organization.
 
+Leave **Close issue on merge** selected to complete the issue when the pull
+request merges into its repository's default branch. The merging account
+needs current Write access in the issue repository. Use **Keep open** on
+either sidebar to keep the relationship without automatic closure.
+
 Use the pull request repository UUID as `{repository}` in the edit route.
 GET returns the link's `active` flag and `version`. PUT accepts the desired
-`active` flag and the observed `version`. Repeating a completed transition
-returns its current state. A stale conflicting write returns HTTP 409.
+`active` flag, observed `version`, and optional `closes_on_merge` flag.
+Omitting the flag keeps the selection on existing links and leaves new
+links as related work. Repeating a completed transition returns its current
+state. A stale conflicting write returns HTTP 409.
 Cross-repository links appear under `cross_repository` on the first page of
 each linked-work response and are limited to ten per issue or pull request.
-These links record related work. Automatic closure on merge is available
-for links within a single repository.
+
+Crab captures the authorized issue state versions before publishing the merge.
+The exact Git publication receipt lets the job recover if the response is
+lost or the default branch moves. An intervening closure or reopen takes
+precedence over a delayed cross-repository update.
 
 ### Close a linked issue when its pull request merges
 

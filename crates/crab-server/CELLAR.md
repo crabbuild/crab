@@ -575,6 +575,14 @@ current repository grants before exposing the destination. The owning
 organization's policy lease serializes edits with issue retirement and
 repository ownership changes.
 
+Default-branch merge publication captures opted-in cross-repository links
+with the merging account's current issue Write grants. The commit-closure
+outbox records stable issue origins and observed state versions under the exact
+Git plan. Delivery follows any committed issue move and uses a native version
+check before closing the issue. A late retry therefore preserves a newer
+close or reopen. Recovery verifies the same Git receipt and reacquires the
+owning organization's policy lease before applying the saved closure.
+
 Repository ownership acceptance and the operator's initial organization
 assignment check for incoming issue reservations under the existing policy
 lease. Publication clears the reservation in the same transaction that

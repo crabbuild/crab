@@ -2,6 +2,7 @@ import { useDeferredValue, useState } from "react";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -10,7 +11,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
+import {
+  Field,
+  FieldDescription,
+  FieldGroup,
+  FieldLabel,
+} from "@/components/ui/field";
 import { FieldSelect } from "@/components/ui/field-select";
 import { Input } from "@/components/ui/input";
 import { WorkPicker } from "@/features/projects/item";
@@ -20,11 +26,16 @@ import { repoHref } from "@/lib/repository-route";
 import { useMutation } from "./mutations";
 
 type RepositoryAddress = Pick<Repository, "id" | "owner" | "name">;
-type LinkState = { active: boolean; version: number };
+type LinkState = {
+  active: boolean;
+  version: number;
+  closes_on_merge?: boolean;
+};
 export type RelatedWork = {
   work: Work;
   repository: RepositoryAddress;
   version: number;
+  closes_on_merge: boolean;
   can_unlink: boolean;
 };
 
@@ -56,7 +67,7 @@ export function CrossRepositoryLinks({
 }) {
   const [open, setOpen] = useState(false);
   const mutation = useMutation(csrf, repo);
-  async function unlink(row: RelatedWork) {
+  async function update(row: RelatedWork, active: boolean, closes?: boolean) {
     const source = issue ? repo : row.repository;
     const target = issue ? row.repository : repo;
     const issueNumber = issue ?? row.work.subject.number;
@@ -64,7 +75,7 @@ export function CrossRepositoryLinks({
     const saved = await mutation.run<LinkState>(
       linkEndpoint(source, issueNumber, target, pullNumber),
       "PUT",
-      { active: false, version: row.version },
+      { active, version: row.version, closes_on_merge: closes },
       source,
     );
     if (saved) onSaved();
@@ -89,17 +100,34 @@ export function CrossRepositoryLinks({
                   {title} {work.title}
                 </Link>
                 <span className="muted">{work.state}</span>
+                {row.closes_on_merge && (
+                  <span className="muted">Closes on default-branch merge</span>
+                )}
                 {(issue ? canManage : row.can_unlink) && (
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="ghost"
-                    aria-label={`Unlink ${title}`}
-                    disabled={mutation.pending}
-                    onClick={() => void unlink(row)}
-                  >
-                    Unlink
-                  </Button>
+                  <>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      aria-label={`${row.closes_on_merge ? "Keep open on merge" : "Close on merge"} ${title}`}
+                      disabled={mutation.pending}
+                      onClick={() =>
+                        void update(row, true, !row.closes_on_merge)
+                      }
+                    >
+                      {row.closes_on_merge ? "Keep open" : "Close on merge"}
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      aria-label={`Unlink ${title}`}
+                      disabled={mutation.pending}
+                      onClick={() => void update(row, false)}
+                    >
+                      Unlink
+                    </Button>
+                  </>
                 )}
               </li>
             );
@@ -161,6 +189,7 @@ function LinkPicker({
   const [search, setSearch] = useState("");
   const [repository, setRepository] = useState<RepositoryAddress>();
   const [work, setWork] = useState<Work>();
+  const [closesOnMerge, setClosesOnMerge] = useState(true);
   const query = useDeferredValue(search.trim());
   const names = new URLSearchParams({ organization, q: query, limit: "20" });
   const candidates = useRequest<{ repositories: RepositoryAddress[] }>(
@@ -203,6 +232,7 @@ function LinkPicker({
             const saved = await mutation.run<LinkState>(url, "PUT", {
               active: true,
               version: pair.data.version,
+              closes_on_merge: closesOnMerge,
             });
             if (saved) onSaved();
           }}
@@ -281,6 +311,28 @@ function LinkPicker({
                     )
                   }
                 </Result>
+                {!pair.data?.active && (
+                  <Field orientation="horizontal">
+                    <Checkbox
+                      id="linked-pull-close-on-merge"
+                      checked={closesOnMerge}
+                      disabled={mutation.pending}
+                      onCheckedChange={(checked) =>
+                        setClosesOnMerge(checked === true)
+                      }
+                    />
+                    <div className="flex flex-col gap-1">
+                      <FieldLabel htmlFor="linked-pull-close-on-merge">
+                        Close issue on merge
+                      </FieldLabel>
+                      <FieldDescription>
+                        The pull request must merge into its default branch, and
+                        the merging user needs write access to this issue’s
+                        repository.
+                      </FieldDescription>
+                    </div>
+                  </Field>
+                )}
               </div>
             )}
           </FieldGroup>

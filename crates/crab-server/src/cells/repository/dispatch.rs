@@ -227,6 +227,9 @@ pub(in crate::cells) fn dispatch_mutation(
         }
         commit_closures::Reserve::ID => invoke_mutation::<commit_closures::Reserve>(context, input),
         commit_closures::Resolve::ID => invoke_mutation::<commit_closures::Resolve>(context, input),
+        commit_closures::CloseCross::ID => {
+            invoke_mutation::<commit_closures::CloseCross>(context, input)
+        }
         <SetReaction as Mutation>::ID => invoke_mutation::<SetReaction>(context, input),
         <CreateMilestone as Mutation>::ID => invoke_mutation::<CreateMilestone>(context, input),
         <EditMilestone as Mutation>::ID => invoke_mutation::<EditMilestone>(context, input),
@@ -567,6 +570,10 @@ pub(in crate::cells) fn dispatch_read(
         webhooks::Current::ID => invoke_read::<webhooks::Current>(context, input),
         webhooks::sync::Next::ID => invoke_read::<webhooks::sync::Next>(context, input),
         commit_closures::Next::ID => invoke_read::<commit_closures::Next>(context, input),
+        commit_closures::Cross::ID => invoke_read::<commit_closures::Cross>(context, input),
+        commit_closures::OpenStateVersion::ID => {
+            invoke_read::<commit_closures::OpenStateVersion>(context, input)
+        }
         integrations::List::ID => invoke_read::<integrations::List>(context, input),
         integrations::dispatches::Get::ID => {
             invoke_read::<integrations::dispatches::Get>(context, input)

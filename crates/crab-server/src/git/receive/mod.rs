@@ -1044,4 +1044,4 @@ async fn publish_ref(
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
-pub(crate) use tests::fault_plan_intent;
+pub(crate) use tests::{fault_plan_intent, fault_plan_receipt};

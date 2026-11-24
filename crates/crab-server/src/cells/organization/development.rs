@@ -62,6 +62,8 @@ impl Side {
 pub(crate) struct State {
     pub active: bool,
     pub version: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub closes_on_merge: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -69,6 +71,8 @@ pub(crate) struct State {
 pub(crate) struct Link {
     pub pair: Pair,
     pub version: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub closes_on_merge: bool,
 }
 
 pub(crate) struct List;
@@ -107,6 +111,8 @@ pub(crate) struct Edit {
     pub pair: Pair,
     pub active: bool,
     pub version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closes_on_merge: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -125,7 +131,10 @@ impl Mutation for Set {
 
     fn execute(context: &mut Transaction<'_>, input: Edit) -> Result<MutationResult<Decision>> {
         let prior = Get::execute(context, input.pair)?;
+        let closes_on_merge =
+            input.active && input.closes_on_merge.unwrap_or(prior.closes_on_merge);
         if prior.active == input.active
+            && prior.closes_on_merge == closes_on_merge
             && (prior.version == input.version
                 || input.version.checked_add(1) == Some(prior.version))
         {
@@ -135,7 +144,7 @@ impl Mutation for Set {
             return Ok(MutationResult::Rejected(Decision::Conflict));
         }
         let ends = input.pair.ends();
-        if input.active {
+        if input.active && !prior.active {
             for (side, _) in ends {
                 if context
                     .documents_after::<Link>(&side.prefix()?, None, LIMIT)?
@@ -154,10 +163,12 @@ impl Mutation for Set {
         let state = State {
             active: input.active,
             version,
+            closes_on_merge,
         };
         let link = Link {
             pair: input.pair,
             version,
+            closes_on_merge,
         };
         context.put_document(&input.pair.key(), &state)?;
         // Both endpoints share one receipt and become visible atomically.

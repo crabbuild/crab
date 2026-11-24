@@ -282,6 +282,7 @@ impl Mutation for Retire {
         pins::retire(context, issue.number)?;
         links::branches::retire(context, issue.number)?;
         context.delete_document(&origin_key(issue.number))?;
+        lifecycle::store_state_version(context, issue.number, None)?;
         milestones::transfer_assignment(context, subject, None)?;
         search::contributions::retire_issue(context, issue.number)?;
         if !context.query(
@@ -730,6 +731,9 @@ fn install(context: &mut Transaction<'_>, reservation: &Reservation, count: u64)
     context.put_document(&origin_key(number), &origin)?;
     links::branches::install(context, number, &header.branches)?;
     lifecycle::store(context, number, &header.lifecycle)?;
+    if let Some(version) = header.state_version {
+        lifecycle::store_state_version(context, number, Some(version))?;
+    }
     let subject = Subject {
         kind: SubjectKind::Issue,
         number,

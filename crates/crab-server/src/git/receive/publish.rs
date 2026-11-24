@@ -1498,30 +1498,37 @@ async fn commit_authorized(
         webhooks::reserve_publication(server, entry, plan, mutation.updates).await?;
     }
     let mut closing_publication = None;
-    if let Some(update) = closing_ref
-        && !mutation.closing_issues.is_empty()
-    {
-        let plan = plan_id.ok_or(ReceiveError::Request(
-            "Missing issue closure publication plan",
-        ))?;
-        let publication = commits::Publication {
-            plan: plan.to_owned(),
-            reference: update.name.clone(),
-            before: update.old.map(|old| old.to_string()),
-            after: update.new.ok_or(ReceiveError::BranchChanged)?.to_string(),
+    if let Some(update) = closing_ref {
+        let cross = match mutation.publication {
+            Publication::PullRequest(pull) if pull.candidate.is_none() => {
+                commit_closures::capture(server, entry, &current.principal, pull.number).await?
+            }
+            _ => None,
         };
-        if commit_closures::reserve(
-            server,
-            entry,
-            commits::Reservation {
-                publication: publication.clone(),
-                actor: (&identity).into(),
-                issues: mutation.closing_issues,
-            },
-        )
-        .await?
-        {
-            closing_publication = Some(publication);
+        if !mutation.closing_issues.is_empty() || cross.is_some() {
+            let plan = plan_id.ok_or(ReceiveError::Request(
+                "Missing issue closure publication plan",
+            ))?;
+            let publication = commits::Publication {
+                plan: plan.to_owned(),
+                reference: update.name.clone(),
+                before: update.old.map(|old| old.to_string()),
+                after: update.new.ok_or(ReceiveError::BranchChanged)?.to_string(),
+            };
+            if commit_closures::reserve(
+                server,
+                entry,
+                commits::Reservation {
+                    publication: publication.clone(),
+                    actor: (&identity).into(),
+                    issues: mutation.closing_issues,
+                    cross,
+                },
+            )
+            .await?
+            {
+                closing_publication = Some(publication);
+            }
         }
     }
     if let Some(plan) = plan_id

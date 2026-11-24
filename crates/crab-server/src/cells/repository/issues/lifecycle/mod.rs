@@ -9,6 +9,29 @@ mod preparation;
 pub(crate) use preparation::{GetIssueLifecycleStatus, PrepareIssueLifecycle};
 pub(in crate::cells::repository) use preparation::{ensure_ready, initialize};
 
+fn state_version_key(issue: u64) -> String {
+    format!("collaboration/v1/issues/state-versions/{issue:016x}")
+}
+
+pub(in crate::cells::repository) fn state_version(
+    context: &Transaction<'_>,
+    issue: u64,
+) -> Result<Option<u64>> {
+    context.document(&state_version_key(issue))
+}
+
+pub(in crate::cells::repository) fn store_state_version(
+    context: &Transaction<'_>,
+    issue: u64,
+    version: Option<u64>,
+) -> Result<()> {
+    let key = state_version_key(issue);
+    match version {
+        Some(version) => context.put_document(&key, &version),
+        None => context.delete_document(&key).map(drop),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Reason {

@@ -1,7 +1,17 @@
 use std::collections::BTreeMap;
 
 use super::*;
-use crate::cells::{Result, repository::issues};
+use crate::cells::{
+    Result,
+    repository::{
+        GetRepositoryLifecycle,
+        issues::{
+            self,
+            transfer::publication::{self, Destination},
+        },
+    },
+};
+use uuid::Uuid;
 
 const PENDING: &str = "collaboration/v1/links/commit-publications/due/";
 const RETRY_MS: u64 = 10_000;
@@ -21,6 +31,20 @@ pub(crate) struct Reservation {
     pub publication: Publication,
     pub actor: RepositoryAuthor,
     pub issues: BTreeMap<u64, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cross: Option<CrossClosure>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct CrossClosure {
+    pub organization: Uuid,
+    pub issues: Vec<CapturedIssue>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+pub(crate) struct CapturedIssue {
+    pub origin: Destination,
+    pub state_version: u64,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -68,6 +92,27 @@ impl Mutation for Reserve {
                 "invalid issue closure publication",
             ));
         }
+        if let Some(cross) = &input.cross {
+            if cross.organization.is_nil()
+                || cross.issues.is_empty()
+                || cross.issues.len() > MAX_CLOSING_ISSUES
+            {
+                return Err(crate::cells::Error::Invalid(
+                    "invalid cross-repository issue closure",
+                ));
+            }
+            for issue in &cross.issues {
+                if issue.origin.repository.is_nil() {
+                    return Err(crate::cells::Error::Invalid(
+                        "invalid closing issue repository",
+                    ));
+                }
+                validate_number(issue.origin.number)?;
+                if issue.state_version != 0 {
+                    validate_number(issue.state_version)?;
+                }
+            }
+        }
         let key = job_key(&publication.plan);
         if let Some(existing) = context.document::<Option<Job>>(&key)? {
             return Ok(MutationResult::Rejected(existing.is_some()));
@@ -82,7 +127,7 @@ impl Mutation for Reserve {
                 open.insert(number, oid);
             }
         }
-        if open.is_empty() {
+        if open.is_empty() && input.cross.is_none() {
             return Ok(MutationResult::Rejected(false));
         }
         issues::lifecycle::ensure_ready(context)?;
@@ -97,6 +142,89 @@ impl Mutation for Reserve {
                 created_at: now,
                 reservation: input,
             }),
+        )?;
+        Ok(MutationResult::Success(true))
+    }
+}
+
+pub(crate) struct Cross;
+impl Read for Cross {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
+    const ID: u32 = 468;
+    type Input = String;
+    type Output = Option<(CrossClosure, RepositoryAuthor)>;
+
+    fn execute(context: &mut Transaction<'_>, plan: String) -> Result<Self::Output> {
+        Ok(context
+            .document::<Option<Job>>(&job_key(&plan))?
+            .flatten()
+            .and_then(|job| {
+                job.reservation
+                    .cross
+                    .map(|cross| (cross, job.reservation.actor))
+            }))
+    }
+}
+
+pub(crate) struct OpenStateVersion;
+impl Read for OpenStateVersion {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
+    const ID: u32 = 469;
+    type Input = u64;
+    type Output = Option<u64>;
+
+    fn execute(context: &mut Transaction<'_>, issue: u64) -> Result<Self::Output> {
+        let subject = Subject {
+            kind: SubjectKind::Issue,
+            number: issue,
+        };
+        if subject.closed(context)? != Some(false) {
+            return Ok(None);
+        }
+        Ok(Some(
+            issues::lifecycle::state_version(context, issue)?.unwrap_or_default(),
+        ))
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct DeliverCross {
+    pub target: Destination,
+    pub captured: CapturedIssue,
+    pub actor: RepositoryAuthor,
+}
+
+pub(crate) struct CloseCross;
+impl Mutation for CloseCross {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
+    const ID: u32 = 468;
+    type Input = DeliverCross;
+    type Output = bool;
+
+    fn execute(context: &mut Transaction<'_>, input: DeliverCross) -> Result<MutationResult<bool>> {
+        let number = input.target.number;
+        let Some(issue) = issues::GetIssue::execute(context, number)? else {
+            return Ok(MutationResult::Rejected(false));
+        };
+        if publication::origin(context, number)?.unwrap_or(input.target) != input.captured.origin {
+            return Err(crate::cells::Error::Invalid(
+                "closing issue has a different origin",
+            ));
+        }
+        // The issue carries its state revision through transfers. A later
+        // reopen wins over a delayed publication, including a lost reply.
+        if issue.state != 0
+            || issues::lifecycle::state_version(context, number)?.unwrap_or_default()
+                != input.captured.state_version
+            || GetRepositoryLifecycle::execute(context, ())?.archived
+        {
+            return Ok(MutationResult::Rejected(true));
+        }
+        issues::close_linked_issue(
+            context,
+            number,
+            issues::ClosingSource::ExternalPull,
+            &input.actor,
         )?;
         Ok(MutationResult::Success(true))
     }

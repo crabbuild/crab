@@ -5,12 +5,11 @@ use crate::{
         organization::development as graph,
         repository::{
             collaboration::{DevelopmentEndpoint, GetDevelopmentEndpoint},
-            issues::transfer::publication::{Destination, GetLocation, Location},
+            issues::transfer::publication::Destination,
         },
     },
-    repository::{Repository, settings},
+    repository::{Repository, commit_closures::current_issue, settings},
 };
-use std::collections::BTreeSet;
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -123,6 +122,7 @@ pub(super) async fn detail(
 pub(super) struct Selection {
     active: bool,
     version: u64,
+    closes_on_merge: Option<bool>,
 }
 
 pub(super) async fn set(
@@ -188,6 +188,7 @@ pub(super) async fn set(
                     pair,
                     active: input.active,
                     version: input.version,
+                    closes_on_merge: input.closes_on_merge,
                 },
             )
             .await,
@@ -201,29 +202,6 @@ pub(super) async fn set(
         }
     })
     .await
-}
-
-async fn current_issue(server: &Server, mut subject: Destination) -> Result<Option<Destination>> {
-    let mut seen = BTreeSet::new();
-    loop {
-        if !seen.insert((subject.repository, subject.number)) {
-            return Err(Error::CellContract("Issue transfer redirects form a cycle"));
-        }
-        let Some(repo) = server.repositories.by_id(subject.repository) else {
-            return Ok(None);
-        };
-        let cell = app::repository_cell(server, &repo)?;
-        let location = app::query_output(
-            cell.client
-                .query::<GetLocation>(cell.target, None, subject.number)
-                .await,
-        )?;
-        match location {
-            Location::Present => return Ok(Some(subject)),
-            Location::Moved { destination } => subject = destination,
-            Location::Missing => return Ok(None),
-        }
-    }
 }
 
 pub(super) async fn list(
@@ -300,6 +278,7 @@ pub(super) async fn list(
             "work":view.work,
             "repository":{"id":repo.id,"owner":repo.config.owner,"name":repo.config.name},
             "version":link.version,
+            "closes_on_merge":link.closes_on_merge,
             "can_unlink":can_unlink && grant.principal.can_write(repo.id),
         }));
     }

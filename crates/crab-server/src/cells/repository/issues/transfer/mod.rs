@@ -86,6 +86,8 @@ pub(crate) struct Header {
     pub issue: IssueRecord,
     pub attachments: Vec<Upload>,
     pub lifecycle: lifecycle::Lifecycle,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_version: Option<u64>,
     pub labels: Vec<String>,
     pub milestone: Option<MilestoneKey>,
     pub issue_type: Option<issue_type::Selection>,
@@ -184,6 +186,9 @@ impl Records {
                 if header.issue.number != source.issue
                     || header.issue.version != source.version
                     || header.issue.state != 0
+                    || header
+                        .state_version
+                        .is_some_and(|version| version == 0 || version > source.version)
                 {
                     return Err(Error::Invalid(
                         "Issue transfer header does not match its source",
@@ -415,6 +420,7 @@ impl Read for Capture {
                         lock,
                         branches: links::branches::load(context, number)?,
                         origin: publication::origin(context, number)?,
+                        state_version: lifecycle::state_version(context, number)?,
                     }),
                 }
             }
