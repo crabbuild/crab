@@ -1,3 +1,4 @@
+import { openSecondaryFilter } from "./discussion-filters";
 import { expect, test, type Page } from "@playwright/test";
 import { mockPullRequest } from "./pulls/fixture";
 import {
@@ -90,7 +91,7 @@ test("milestone filter preserves sort and diagnostics, clears cursors and suppor
     name: "Filter by milestone",
     exact: true,
   });
-  await trigger.click();
+  await openSecondaryFilter(trigger);
   const input = page.getByRole("combobox", { name: "Find a milestone" });
   await expect(input).toBeFocused();
   await expect(page.getByRole("option", { name: "Release one" })).toBeVisible();
@@ -106,7 +107,7 @@ test("milestone filter preserves sort and diagnostics, clears cursors and suppor
   expect(url.searchParams.get("direction")).toBe("asc");
   expect(url.searchParams.get("powerbar")).toBe("1");
   await page.reload();
-  await trigger.click();
+  await openSecondaryFilter(trigger);
   await expect(
     page.getByRole("option", { name: "Release one" }),
   ).toHaveAttribute("aria-selected", "true");
@@ -114,7 +115,7 @@ test("milestone filter preserves sort and diagnostics, clears cursors and suppor
   await expect
     .poll(() => new URL(page.url()).searchParams.get("q"))
     .toBe("is:open");
-  await trigger.click();
+  await openSecondaryFilter(trigger);
   await page.getByRole("option", { name: "No milestone", exact: true }).click();
   await expect
     .poll(() => new URL(page.url()).searchParams.get("q"))
@@ -130,7 +131,7 @@ test("milestone filter searches the native catalog across open and closed milest
     name: "Filter by milestone",
     exact: true,
   });
-  await trigger.click();
+  await openSecondaryFilter(trigger);
   const input = page.getByRole("combobox", { name: "Find a milestone" });
   await input.fill("Archived");
   await expect(page.getByText("No open milestones match.")).toBeVisible();
@@ -139,9 +140,14 @@ test("milestone filter searches the native catalog across open and closed milest
     page.getByRole("option", { name: "Archived planning" }),
   ).toBeVisible();
   await expect(input).toBeFocused();
+  await input.press("Escape");
   await selectDarkTheme(page);
   await page.setViewportSize({ width: 390, height: 844 });
-  await trigger.click();
+  await expect(
+    page.getByRole("button", { name: "More filters" }),
+  ).toBeVisible();
+  await openSecondaryFilter(trigger);
+  await page.getByRole("radio", { name: "Closed", exact: true }).click();
   await expect(
     page.getByRole("option", { name: "Archived planning" }),
   ).toBeVisible();

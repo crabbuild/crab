@@ -1,9 +1,17 @@
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState, type ComponentProps } from "react";
 import {
   AlignJustifyIcon,
+  ArrowDownIcon,
+  ArrowUpIcon,
+  CalendarPlusIcon,
+  ClockIcon,
+  EllipsisIcon,
+  ListFilterIcon,
+  SmileIcon,
   Rows2Icon,
   ChevronDownIcon,
   MessageSquareIcon,
+  ArrowDownWideNarrowIcon,
   CheckIcon,
 } from "lucide-react";
 import { Link } from "@/components/navigation/link";
@@ -23,6 +31,11 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { navigate, type Repository, type RepositoryLabel } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
@@ -31,7 +44,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { DiscussionFilter } from "./filter";
+import { DiscussionFilter, type ConversationOptions } from "./filter";
 
 export type ListLabel = Pick<RepositoryLabel, "id" | "name" | "color">;
 export interface DiscussionPage<T> {
@@ -44,10 +57,7 @@ export interface DiscussionPage<T> {
   authored_by_me: boolean;
   assigned_to_me: boolean;
   review_requested_from_me: boolean;
-  lock_filter?: Record<
-    "any" | "locked" | "unlocked",
-    { query: string | null; selected: boolean }
-  >;
+  lock_filter?: ConversationOptions;
   navigation:
     | { kind: "results" }
     | {
@@ -62,10 +72,10 @@ export interface DiscussionTotals {
   reaction_count: number;
 }
 const sorts = [
-  ["created", "Created"],
-  ["updated", "Updated"],
-  ["comments", "Comments"],
-  ["relevance", "Relevance"],
+  ["created", "Created", CalendarPlusIcon],
+  ["updated", "Updated", ClockIcon],
+  ["comments", "Comments", MessageSquareIcon],
+  ["relevance", "Relevance", ListFilterIcon],
 ] as const;
 const reactionSorts = [
   ["reactions", "Total reactions"],
@@ -120,8 +130,36 @@ export function DiscussionListControls({
 }) {
   const filters = discussionFilters(url);
   const [sortOpen, setSortOpen] = useState(false);
+  const toolbar = useRef<HTMLDivElement>(null);
+  const [layout, setLayout] = useState<"full" | "overflow" | "compact">("full");
+  useLayoutEffect(() => {
+    const element = toolbar.current;
+    if (!element) return;
+    // The sidebar and diagnostic panels can narrow the list independently of the window.
+    const update = () => {
+      const width = element.clientWidth;
+      if (!width) return;
+      setLayout(
+        width < 320
+          ? "compact"
+          : width < (view === "pulls" ? 900 : 840)
+            ? "overflow"
+            : "full",
+      );
+    };
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    update();
+    return () => observer.disconnect();
+  }, [view]);
   const navigation = data?.navigation;
   const lock = data?.lock_filter;
+  const [supportsConversationFilter, setSupportsConversationFilter] =
+    useState(false);
+  // Keep the trigger mounted when its query refreshes so focus and adjacent anchors stay put.
+  if (data && supportsConversationFilter !== !!lock) {
+    setSupportsConversationFilter(!!lock);
+  }
   const cannotChangeState =
     navigation?.kind === "state" &&
     (navigation.open === null || navigation.closed === null);
@@ -129,11 +167,45 @@ export function DiscussionListControls({
     ([key]) => key === filters.sort,
   )?.[1];
   const reactionSelected = reactionSorts.some(([key]) => key === filters.sort);
-  const filterKinds = ["authors", "labels", "milestones", "assignees"] as const;
+  const query = discussionQuery(url, view);
   const change = (values: Partial<typeof filters>) =>
     navigate(repoHref(repo, { view, ...filters, ...values }));
+  const sortText =
+    filters.sort === "created"
+      ? filters.direction === "asc"
+        ? "Oldest"
+        : "Newest"
+      : (sortLabel ?? "Sort");
+  function filterButton(
+    kind: ComponentProps<typeof DiscussionFilter>["kind"],
+    inOverflow = false,
+  ) {
+    return (
+      <DiscussionFilter
+        key={kind}
+        kind={kind}
+        repo={repo}
+        query={query}
+        inOverflow={inOverflow}
+        conversation={kind === "conversations" ? lock : undefined}
+        onSelect={(q) => change({ q })}
+      />
+    );
+  }
+  const secondaryFilters = (
+    <>
+      {filterButton("milestones", layout !== "full")}
+      {filterButton("assignees", layout !== "full")}
+      {view === "issues" &&
+        repo.organization_id &&
+        filterButton("issue-types", layout !== "full")}
+      {(lock || (loading && supportsConversationFilter)) &&
+        filterButton("conversations", layout !== "full")}
+      {view === "pulls" && filterButton("reviews", layout !== "full")}
+    </>
+  );
   return (
-    <div className="issues-filters flex-wrap" inert={selecting}>
+    <div ref={toolbar} className="issues-filters flex-wrap" inert={selecting}>
       <div className="discussion-counts gap-3">
         {!data ? (
           <span role="status" className="text-sm text-muted-foreground">
@@ -188,77 +260,35 @@ export function DiscussionListControls({
           </h3>
         )}
       </div>
-      <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center gap-2">
+      <div className="discussion-toolbar-actions ml-auto flex min-w-0 max-w-full flex-wrap items-center gap-2">
         <div
           role="group"
           aria-label="Discussion filters"
           className="flex max-w-full flex-wrap items-center gap-2"
         >
-          {filterKinds.map((kind) => (
-            <DiscussionFilter
-              key={kind}
-              kind={kind}
-              repo={repo}
-              query={discussionQuery(url, view)}
-              onSelect={(q) => change({ q })}
-            />
-          ))}
-          {view === "issues" && repo.organization_id && (
-            <DiscussionFilter
-              kind="issue-types"
-              repo={repo}
-              query={discussionQuery(url, view)}
-              onSelect={(q) => change({ q })}
-            />
-          )}
-          {lock && (
-            <DropdownMenu modal={false}>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  aria-label="Filter by conversation lock"
-                >
-                  {lock.locked.selected
-                    ? "Locked"
-                    : lock.unlocked.selected
-                      ? "Unlocked"
-                      : "Conversation"}
-                  <ChevronDownIcon data-icon="inline-end" />
+          {layout !== "compact" && filterButton("authors")}
+          {layout !== "compact" && filterButton("labels")}
+          {layout !== "full" ? (
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button variant="outline" size="sm" aria-label="More filters">
+                  <EllipsisIcon data-icon="inline-start" aria-hidden="true" />
+                  <span data-filter-label>More</span>
                 </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuRadioGroup
-                  value={
-                    lock.locked.selected
-                      ? "locked"
-                      : lock.unlocked.selected
-                        ? "unlocked"
-                        : lock.any.selected
-                          ? "any"
-                          : ""
-                  }
-                >
-                  {(["any", "locked", "unlocked"] as const).map((choice) => (
-                    <DropdownMenuRadioItem
-                      key={choice}
-                      value={choice}
-                      disabled={lock[choice].query === null}
-                      onSelect={() => {
-                        const q = lock[choice].query;
-                        if (q !== null) change({ q });
-                      }}
-                    >
-                      {choice === "any"
-                        ? "Any conversation"
-                        : choice === "locked"
-                          ? "Locked"
-                          : "Unlocked"}
-                    </DropdownMenuRadioItem>
-                  ))}
-                </DropdownMenuRadioGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
+              </PopoverTrigger>
+              <PopoverContent
+                align="end"
+                collisionPadding={12}
+                aria-label="More filters"
+                className="discussion-filter-overflow w-48 gap-1"
+              >
+                {layout === "compact" && filterButton("authors", true)}
+                {layout === "compact" && filterButton("labels", true)}
+                {secondaryFilters}
+              </PopoverContent>
+            </Popover>
+          ) : (
+            secondaryFilters
           )}
           <DropdownMenu
             modal={false}
@@ -266,8 +296,18 @@ export function DiscussionListControls({
             onOpenChange={setSortOpen}
           >
             <DropdownMenuTrigger asChild>
-              <Button variant="outline" size="sm" aria-label="Sort discussions">
-                Sort <ChevronDownIcon data-icon="inline-end" />
+              <Button
+                variant="outline"
+                size="sm"
+                aria-label="Sort discussions"
+                title={`Sort discussions · ${sortText}`}
+              >
+                <ArrowDownWideNarrowIcon
+                  data-icon="inline-start"
+                  aria-hidden="true"
+                />
+                <span data-filter-label>{sortText}</span>{" "}
+                <ChevronDownIcon data-icon="inline-end" />
               </Button>
             </DropdownMenuTrigger>
             {/* Closing scopes must unmount before a rapid reopen during refresh. */}
@@ -279,14 +319,22 @@ export function DiscussionListControls({
                     value={filters.sort}
                     onValueChange={(sort) => change({ sort })}
                   >
-                    {sorts.map(([value, label]) => (
+                    {sorts.map(([value, label, Icon]) => (
                       <DropdownMenuRadioItem key={value} value={value}>
+                        <Icon
+                          aria-hidden="true"
+                          className="text-muted-foreground"
+                        />
                         {label}
                       </DropdownMenuRadioItem>
                     ))}
                   </DropdownMenuRadioGroup>
                   <DropdownMenuSub>
                     <DropdownMenuSubTrigger>
+                      <SmileIcon
+                        aria-hidden="true"
+                        className="text-muted-foreground"
+                      />
                       Reactions
                       {reactionSelected && <CheckIcon aria-hidden="true" />}
                     </DropdownMenuSubTrigger>
@@ -313,11 +361,19 @@ export function DiscussionListControls({
                   onValueChange={(direction) => change({ direction })}
                 >
                   <DropdownMenuRadioItem value="desc">
+                    <ArrowDownIcon
+                      aria-hidden="true"
+                      className="text-muted-foreground"
+                    />
                     {filters.sort === "created" || filters.sort === "updated"
                       ? "Newest first"
                       : "Highest first"}
                   </DropdownMenuRadioItem>
                   <DropdownMenuRadioItem value="asc">
+                    <ArrowUpIcon
+                      aria-hidden="true"
+                      className="text-muted-foreground"
+                    />
                     {filters.sort === "created" || filters.sort === "updated"
                       ? "Oldest first"
                       : "Lowest first"}
@@ -327,14 +383,6 @@ export function DiscussionListControls({
             )}
           </DropdownMenu>
         </div>
-        {view === "pulls" && (
-          <DiscussionFilter
-            kind="reviewers"
-            repo={repo}
-            query={discussionQuery(url, view)}
-            onSelect={(q) => change({ q })}
-          />
-        )}
         <ToggleGroup
           className="discussion-segments"
           type="single"

@@ -68,6 +68,34 @@ fn suggestions_discover_both_discussion_kinds_and_report_syntax_errors() {
 }
 
 #[test]
+fn empty_search_offers_qualifiers_before_values_and_state_completes() {
+    let result = complete(&input("", 0));
+    assert_eq!(result.items[0].value, "is:");
+    for expected in [
+        "state:",
+        "label:",
+        "author:",
+        "assignee:",
+        "milestone:",
+        "review:",
+    ] {
+        assert!(
+            result.items.iter().any(|item| item.value == expected),
+            "{expected}"
+        );
+    }
+    let state = complete(&input("state:", 6));
+    assert_eq!(
+        state
+            .items
+            .iter()
+            .map(|item| item.value.as_str())
+            .collect::<Vec<_>>(),
+        ["state:open", "state:closed"]
+    );
+}
+
+#[test]
 fn label_prefix_decodes_escaped_quotes_without_losing_literal_characters() {
     for (source, expected) in [
         (r#""say \""#, "say \""),

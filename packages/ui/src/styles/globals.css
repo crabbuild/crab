@@ -2335,6 +2335,61 @@ main {
   justify-content: space-between;
   gap: --spacing(4);
 }
+.discussion-query {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+.discussion-query .discussion-query-highlight,
+.discussion-query > input {
+  position: absolute;
+  inset: 0;
+  height: 100%;
+  padding: 0 --spacing(2.5);
+  font: inherit;
+}
+.discussion-query-highlight {
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  white-space: pre;
+  pointer-events: none;
+}
+.discussion-query-highlight > span {
+  flex: none;
+}
+.discussion-query > input {
+  color: transparent;
+  caret-color: var(--foreground);
+}
+.discussion-query > input::selection {
+  color: transparent;
+  background: color-mix(in srgb, var(--info) 25%, transparent);
+}
+.discussion-search [data-query-part="qualifier"] {
+  color: var(--muted-foreground);
+}
+.discussion-search [data-query-part="value"] {
+  color: var(--info);
+}
+.discussion-search [data-query-part="operator"] {
+  color: var(--done);
+}
+@media (forced-colors: active) {
+  .discussion-query-highlight {
+    display: none;
+  }
+  .discussion-query > input {
+    color: CanvasText;
+  }
+  .discussion-query > input::selection {
+    color: HighlightText;
+    background: Highlight;
+  }
+}
 .issues-filters,
 .issues-filters nav,
 .discussion-actions,
@@ -2425,6 +2480,26 @@ main {
 }
 .discussion-toolbar > * {
   grid-area: 1 / 1;
+}
+.discussion-toolbar {
+  container: discussion-toolbar / inline-size;
+}
+.discussion-filter-overflow [data-slot="popover-trigger"] {
+  width: 100%;
+  justify-content: flex-start;
+}
+.discussion-filter-overflow [data-icon="inline-end"] {
+  margin-inline-start: auto;
+}
+@container discussion-toolbar (max-width: 34rem) {
+  .discussion-toolbar-actions [data-filter-label],
+  .discussion-toolbar-actions [data-icon="inline-end"] {
+    display: none;
+  }
+  .discussion-toolbar-actions button {
+    min-width: --spacing(8);
+    min-height: --spacing(8);
+  }
 }
 .discussion-toolbar-selection {
   display: flex;
@@ -3161,10 +3236,6 @@ main {
   .issues-filters {
     align-items: center;
     gap: --spacing(1);
-  }
-
-  .discussion-counts {
-    flex-basis: 100%;
   }
 
   .discussion-markdown,
