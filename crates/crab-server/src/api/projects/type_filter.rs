@@ -7,7 +7,11 @@ use crate::{
     repository::Repository,
 };
 
-pub(in crate::api) fn scope(repo: &Repository, filter: Filter, types: &Schema) -> Result<Scope> {
+pub(in crate::api) fn scope(
+    repo: &Repository,
+    filter: Option<Filter>,
+    types: &Schema,
+) -> Result<Scope> {
     Ok(Scope {
         organization: repo.organization.ok_or(Error::Invalid(
             "Issue type filters require an organization repository",

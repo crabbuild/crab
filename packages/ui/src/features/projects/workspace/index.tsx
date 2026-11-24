@@ -30,7 +30,7 @@ import { DraftRecovery } from "../drafts";
 import { checkpointDraft, itemDraft, readDraft } from "../draft-storage";
 import { projectEndpoint, type ItemPage, type Row } from "../model";
 import { ProjectSettings } from "../settings";
-import { ProjectTypeFilter } from "../issue-type";
+import { ProjectBoardGrouping, ProjectTypeFilter } from "../issue-type";
 import { ProjectBoard, ProjectTable, ProjectRoadmap } from "../views";
 import { FieldSelect } from "@/components/ui/field-select";
 import { ProjectProperties } from "./forms";
@@ -155,6 +155,18 @@ function PlanningWorkspace({
     project.definition.views.find(
       (view) => view.id === url.searchParams.get("pv"),
     ) ?? project.definition.views[0];
+  const requestedLayout = url.searchParams.get("layout");
+  const layout =
+    requestedLayout === "table" ||
+    requestedLayout === "board" ||
+    requestedLayout === "roadmap"
+      ? requestedLayout
+      : selected.layout;
+  const grouped =
+    layout === "board" &&
+    (url.searchParams.has("group_by_type")
+      ? url.searchParams.get("group_by_type") === "true"
+      : !!selected.group_by_type);
   const status = url.searchParams.get("status") ?? selected.status ?? "";
   const issueType =
     url.searchParams.get("issue_type") ?? selected.issue_type_filter ?? "";
@@ -165,6 +177,7 @@ function PlanningWorkspace({
       status: !overview && status ? status : undefined,
       repository: !overview && repository ? repository : undefined,
       issue_type: !overview && issueType ? issueType : undefined,
+      group_by_type: !overview && grouped ? "true" : undefined,
       after: overview ? undefined : after,
       type_cursor:
         !overview && after
@@ -234,13 +247,6 @@ function PlanningWorkspace({
     typeof editing === "object" && "draft" in editing
       ? editing.draft
       : undefined;
-  const requestedLayout = url.searchParams.get("layout");
-  const layout =
-    requestedLayout === "table" ||
-    requestedLayout === "board" ||
-    requestedLayout === "roadmap"
-      ? requestedLayout
-      : selected.layout;
   const View =
     layout === "board"
       ? ProjectBoard
@@ -312,6 +318,7 @@ function PlanningWorkspace({
             repository: undefined,
             layout: undefined,
             issue_type: undefined,
+            group_by_type: undefined,
           })
         }
       >
@@ -469,6 +476,14 @@ function PlanningWorkspace({
                           value={issueType}
                           onChange={(value) => filters({ issue_type: value })}
                         />
+                        {layout === "board" && (
+                          <ProjectBoardGrouping
+                            grouped={grouped}
+                            onChange={(value) =>
+                              filters({ group_by_type: String(value) })
+                            }
+                          />
+                        )}
                         <span className="text-sm text-muted-foreground">
                           {page.total.toLocaleString()}{" "}
                           {page.total === 1 ? "item" : "items"}

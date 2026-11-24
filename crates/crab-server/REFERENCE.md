@@ -2784,6 +2784,20 @@ same-organization repositories. Counts and pagination use the complete
 matching set. Include the returned `type_cursor` with a filtered continuation.
 A stale result or changed access requires restarting from the first page.
 
+In a board view, use **Group board by** to switch between workflow status and
+issue type. Save the choice under **Settings** → **Views** → **Board
+columns**. A grouped board counts every matching Project item across its pages.
+Issues without an enabled type use **No type**. Drafts, pull requests, and
+issues whose type is unavailable to the viewer use **Other work**.
+
+With source repository triage access, drag an issue to another type column
+or use its **Change issue type** control. Moving to **No type** clears the
+assignment. The card retains its Project workflow status.
+
+Use `group_by_type=true` with either Project item endpoint to receive
+`issue_type_counts` and a per-item `issue_type_group`. Grouped
+continuations carry `type_cursor` even when no type filter is selected.
+
 ### Edit pull requests and review summaries
 
 Pull request authors can choose **Edit pull request** beside the title to update

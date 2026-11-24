@@ -182,6 +182,7 @@ struct Filter {
     item: Option<Uuid>,
     issue_type: Option<String>,
     type_cursor: Option<String>,
+    group_by_type: bool,
 }
 async fn items(
     State(server): State<Arc<Server>>,
@@ -211,13 +212,14 @@ async fn items(
         .map_err(read_error)?
         .output
         .ok_or(Error::NotFound)?;
-    let show_issue_type = page
-        .view
-        .project
-        .definition
-        .views
-        .iter()
-        .any(|view| view.show_issue_type);
+    let show_issue_type = input.group_by_type
+        || page
+            .view
+            .project
+            .definition
+            .views
+            .iter()
+            .any(|view| view.show_issue_type);
     let mut grouped: BTreeMap<Uuid, Vec<Subject>> = BTreeMap::new();
     for entry in &page.items {
         let item = &entry.record;
@@ -237,6 +239,13 @@ async fn items(
         let Some(repo) = accessible(&server, &principal, repository_id).await? else {
             continue;
         };
+        // A grant acquired after classification belongs to a later snapshot.
+        // Keep the row's type in the same scope as its group count.
+        let include_issue_type = show_issue_type
+            && repo.organization == Some(id)
+            && type_scope
+                .as_ref()
+                .is_none_or(|filter| filter.contains_source(&repo));
         let cell = app::repository_cell(&server, &repo)?;
         let found = app::query_output(
             cell.client
@@ -246,7 +255,7 @@ async fn items(
                     source::WorkQuery {
                         subjects: subjects.clone(),
                         default_ref: repo.default_ref().await?,
-                        include_issue_type: show_issue_type && repo.organization == Some(id),
+                        include_issue_type,
                     },
                 )
                 .await,
@@ -317,6 +326,10 @@ async fn items(
             "blocked": summary.is_some_and(|(details, ..)| details.blocked),
             "issue_type": summary.and_then(|(_, _, issue_type, _)| issue_type.as_ref()),
             "issue_type_version": summary.and_then(|(_, _, _, version)| *version),
+            "issue_type_group": input.group_by_type.then(|| crate::cells::repository::issues::issue_type::group(
+                summary.is_some_and(|(details, ..)| details.issue_type.is_some()),
+                summary.and_then(|(_, _, issue_type, _)| issue_type.as_ref().map(|definition| definition.id)),
+            )),
             "assignees": summary.map(|(_, assignees, ..)| assignees).cloned().unwrap_or_default(),
             "parent": summary.and_then(|(details, ..)| details.parent.as_ref()),
             "progress": summary.and_then(|(details, ..)| details.progress.as_ref()),
@@ -332,8 +345,22 @@ async fn items(
     if current.project.version != page.view.project.version {
         return Err(Error::PageChanged);
     }
+    let mut issue_type_counts = type_scope
+        .as_ref()
+        .and_then(|filter| filter.issue_type_counts.clone());
+    if let Some(counts) = &mut issue_type_counts {
+        let other = page
+            .total
+            .checked_sub(counts.values().sum())
+            .ok_or(Error::CellContract(
+                "Issue type groups exceed the project item count",
+            ))?;
+        if other != 0 {
+            counts.insert("other".into(), other);
+        }
+    }
     Ok(Json(
-        json!({"page":{"project":public_project(&current.project),"items":rows,"next":page.next,"counts":page.counts,"total":page.total,"revision":page.view.project.version,"issue_types":types.unwrap_or_default(),"type_cursor":type_scope.map(|filter| filter.cursor)},"can_manage":current.can_manage}),
+        json!({"page":{"project":public_project(&current.project),"items":rows,"next":page.next,"counts":page.counts,"total":page.total,"revision":page.view.project.version,"issue_types":types.unwrap_or_default(),"type_cursor":type_scope.map(|filter| filter.cursor),"issue_type_counts":issue_type_counts},"can_manage":current.can_manage}),
     ))
 }
 #[derive(Deserialize)]

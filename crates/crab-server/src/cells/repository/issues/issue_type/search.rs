@@ -34,12 +34,12 @@ impl Filter {
 pub(crate) struct Scope {
     pub organization: Uuid,
     pub ownership_epoch: u32,
-    pub filter: Filter,
+    pub filter: Option<Filter>,
     pub types: Vec<Uuid>,
 }
 
 impl Scope {
-    pub(in crate::cells::repository) fn predicate(
+    pub(in crate::cells::repository) fn join(
         &self,
         context: &Transaction<'_>,
     ) -> crate::cells::Result<(String, Vec<SqlValue>)> {
@@ -49,30 +49,53 @@ impl Scope {
             ));
         }
         super::super::super::search::index::ensure_ready(context)?;
-        let (operator, types) = match self.filter {
-            Filter::Type(id) if self.types.contains(&id) => ("IN", vec![id]),
-            Filter::Type(_) => return Ok(("0".into(), Vec::new())),
-            Filter::Missing if self.types.is_empty() => {
-                return Ok(("i.number IS NOT NULL".into(), Vec::new()));
-            }
-            Filter::Missing => ("NOT IN", self.types.clone()),
-        };
-        let placeholders = vec!["?"; types.len()].join(",");
+        if self.types.is_empty() {
+            return Ok((
+                "LEFT JOIN repository_issue_type_index it ON 0".into(),
+                Vec::new(),
+            ));
+        }
+        let placeholders = vec!["?"; self.types.len()].join(",");
         let mut values = vec![
             SqlValue::Blob(self.organization.as_bytes().to_vec()),
             SqlValue::Integer(i64::from(self.ownership_epoch)),
         ];
         values.extend(
-            types
-                .into_iter()
+            self.types
+                .iter()
                 .map(|id| SqlValue::Blob(id.as_bytes().to_vec())),
         );
         Ok((
             format!(
-                "i.number IS NOT NULL AND i.number {operator} (SELECT issue FROM repository_issue_type_index WHERE organization=? AND ownership_epoch=? AND type_id IN ({placeholders}))"
+                "LEFT JOIN repository_issue_type_index it ON it.issue=i.number AND it.organization=? AND it.ownership_epoch=? AND it.type_id IN ({placeholders})"
             ),
             values,
         ))
+    }
+
+    pub(in crate::cells::repository) fn filter(&self) -> (&'static str, Option<SqlValue>) {
+        match self.filter {
+            None => ("1", None),
+            Some(Filter::Missing) => ("i.number IS NOT NULL AND it.type_id IS NULL", None),
+            Some(Filter::Type(id)) => (
+                "it.type_id = ?",
+                Some(SqlValue::Blob(id.as_bytes().to_vec())),
+            ),
+        }
+    }
+}
+
+pub(in crate::cells::repository) fn type_id(
+    value: &SqlValue,
+) -> crate::cells::Result<Option<Uuid>> {
+    match value {
+        SqlValue::Null => Ok(None),
+        SqlValue::Blob(bytes) => Uuid::from_slice(bytes)
+            .map(Some)
+            .map_err(crate::cells::Error::sdk),
+        _ => Err(crate::cells::Error::Invalid(
+            "Project issue type ID is invalid",
+        )),
     }
 }
 
@@ -86,9 +109,16 @@ pub(crate) struct MatchInput {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Matches {
-    pub numbers: Vec<u64>,
+    pub issues: Vec<ClassifiedIssue>,
     pub generation: Uuid,
     pub revision: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ClassifiedIssue {
+    pub number: u64,
+    pub issue_type: Option<Uuid>,
 }
 
 pub(crate) struct Match;
@@ -118,20 +148,27 @@ impl Read for Match {
         else {
             return Err(crate::cells::Error::IndexUnavailable);
         };
-        let (predicate, conditions) = input.scope.predicate(context)?;
+        let (join, conditions) = input.scope.join(context)?;
+        let (predicate, filter) = input.scope.filter();
         let mut values = vec![SqlValue::Text(serde_json::to_string(&input.numbers)?)];
         values.extend(conditions);
+        values.extend(filter);
         let rows = context.query(
-            &format!("SELECT i.number FROM json_each(?) wanted JOIN repository_issues i ON i.number=wanted.value WHERE {predicate} ORDER BY i.number"),
+            &format!("SELECT i.number,it.type_id FROM json_each(?) wanted JOIN repository_issues i ON i.number=wanted.value {join} WHERE {predicate} ORDER BY i.number"),
             &values,
         )?;
-        let numbers = rows
+        let issues = rows
             .rows
             .iter()
-            .map(|row| result_u64_from_row(row, 0))
+            .map(|row| {
+                Ok(ClassifiedIssue {
+                    number: result_u64_from_row(row, 0)?,
+                    issue_type: type_id(&row[1])?,
+                })
+            })
             .collect::<crate::cells::Result<_>>()?;
         Ok(Matches {
-            numbers,
+            issues,
             generation: *generation,
             revision: *revision,
         })

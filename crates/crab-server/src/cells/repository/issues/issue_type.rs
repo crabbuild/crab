@@ -6,6 +6,13 @@ use super::*;
 pub(crate) mod search;
 
 const PREFIX: &str = "issues/v1/types/";
+
+pub(crate) fn group(is_issue: bool, issue_type: Option<Uuid>) -> String {
+    if !is_issue {
+        return "other".into();
+    }
+    issue_type.map_or_else(|| "none".into(), |id| id.to_string())
+}
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct Selection {
     pub id: Uuid,

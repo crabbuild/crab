@@ -38,6 +38,7 @@ export interface View {
   hide_closed: boolean;
   show_issue_type?: boolean;
   issue_type_filter?: string | null;
+  group_by_type?: boolean;
 }
 export interface Field {
   id: string;
@@ -81,6 +82,7 @@ export interface Row {
   blocked?: boolean;
   issue_type?: IssueType | null;
   issue_type_version?: number | null;
+  issue_type_group?: string | null;
   item: Item;
   work: Work | null;
   assignees: RepositoryAssignee[];
@@ -97,6 +99,7 @@ export interface ItemPage {
   counts: Record<string, number>;
   issue_types?: IssueType[];
   type_cursor?: string | null;
+  issue_type_counts?: Record<string, number> | null;
   total: number;
 }
 export interface Listing {

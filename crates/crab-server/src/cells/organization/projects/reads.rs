@@ -97,7 +97,7 @@ pub(crate) struct ItemsQuery {
 #[serde(deny_unknown_fields)]
 pub(crate) struct MatchedItems {
     pub project_version: u64,
-    pub items: Vec<Uuid>,
+    pub items: Option<Vec<Uuid>>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -115,6 +115,7 @@ pub(crate) struct TypeSource {
     pub repository: Uuid,
     pub item: Uuid,
     pub number: u64,
+    pub status: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -140,7 +141,7 @@ impl Read for TypeSources {
         let repository = input.repository.map(blob).unwrap_or(SqlValue::Null);
         let item = input.item.map(blob).unwrap_or(SqlValue::Null);
         let rows = context.query(
-            "SELECT repository,id,number FROM organization_project_items WHERE project=? AND kind=0 AND (? IS NULL OR repository=?) AND (? IS NULL OR id=?) ORDER BY repository,number LIMIT ?",
+            "SELECT repository,id,number,status FROM organization_project_items WHERE project=? AND kind=0 AND (? IS NULL OR repository=?) AND (? IS NULL OR id=?) ORDER BY repository,number LIMIT ?",
             &[blob(input.project), repository.clone(), repository, item.clone(), item, integer(MAX_ITEMS + 1)?],
         )?;
         if rows.rows.len() as u64 > MAX_ITEMS {
@@ -154,6 +155,7 @@ impl Read for TypeSources {
                     repository: uuid(&row[0])?,
                     item: uuid(&row[1])?,
                     number: uint(&row[2])?,
+                    status: text(&row[3])?,
                 })
             })
             .collect::<Result<_>>()?;
@@ -208,7 +210,8 @@ impl Read for Items {
         if input
             .matched
             .as_ref()
-            .is_some_and(|matched| matched.items.len() as u64 > MAX_ITEMS)
+            .and_then(|matched| matched.items.as_ref())
+            .is_some_and(|items| items.len() as u64 > MAX_ITEMS)
         {
             return Err(Error::Invalid("Project issue type result limit exceeded"));
         }
@@ -234,9 +237,8 @@ impl Read for Items {
             selected.clone(),
             selected,
         ];
-        if let Some(matched) = input.matched {
-            let ids = matched
-                .items
+        if let Some(items) = input.matched.and_then(|matched| matched.items) {
+            let ids = items
                 .iter()
                 .map(|id| id.simple().to_string())
                 .collect::<Vec<_>>();

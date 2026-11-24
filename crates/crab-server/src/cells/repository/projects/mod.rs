@@ -45,6 +45,8 @@ pub(crate) struct View {
     pub show_issue_type: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue_type_filter: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub group_by_type: bool,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]

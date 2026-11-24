@@ -32,7 +32,7 @@ import { DiscussionMarkdown } from "@/components/discussion/markdown";
 import { CreateProject } from "./create";
 import { ItemEditor } from "./item";
 import { ProjectSettings } from "./settings";
-import { ProjectTypeFilter } from "./issue-type";
+import { ProjectBoardGrouping, ProjectTypeFilter } from "./issue-type";
 import type { IssueType } from "@/lib/contracts";
 import { ProjectBoard, ProjectTable, ProjectRoadmap } from "./views";
 import { useProjectCommands } from "./commands";
@@ -226,6 +226,12 @@ function ProjectWorkspace({
     project.definition.views[0];
   const query = url.searchParams.get("q") ?? selected.query;
   const status = url.searchParams.get("status") ?? selected.status ?? "";
+  const grouped =
+    selected.layout === "board" &&
+    !!repo.organization_id &&
+    (url.searchParams.has("group_by_type")
+      ? url.searchParams.get("group_by_type") === "true"
+      : !!selected.group_by_type);
   const issueType = repo.organization_id
     ? (url.searchParams.get("issue_type") ?? selected.issue_type_filter ?? "")
     : "";
@@ -241,6 +247,7 @@ function ProjectWorkspace({
       status: status || undefined,
       hide_closed: String(hidden),
       issue_type: issueType || undefined,
+      group_by_type: grouped ? "true" : undefined,
       after,
       type_cursor: after
         ? (url.searchParams.get("type_cursor") ?? undefined)
@@ -368,6 +375,7 @@ function ProjectWorkspace({
             status: undefined,
             hide_closed: undefined,
             issue_type: undefined,
+            group_by_type: undefined,
           })
         }
       >
@@ -444,6 +452,12 @@ function ProjectWorkspace({
                 onChange={(value) => filters({ issue_type: value })}
               />
             )}
+            {repo.organization_id && selected.layout === "board" && (
+              <ProjectBoardGrouping
+                grouped={grouped}
+                onChange={(value) => filters({ group_by_type: String(value) })}
+              />
+            )}
             <Button variant="outline" type="submit">
               Apply
             </Button>
@@ -485,6 +499,11 @@ function ProjectWorkspace({
                       onEdit={setEditing}
                       onStatus={changeStatus}
                       showIssueType={selected.show_issue_type}
+                      onIssueTypeChange={
+                        repo.archived || project.archived
+                          ? undefined
+                          : () => (after ? filters({}) : resource.retry())
+                      }
                     />
                   ) : selected.layout === "roadmap" ? (
                     <ProjectRoadmap

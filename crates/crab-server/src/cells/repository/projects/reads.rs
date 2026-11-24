@@ -206,6 +206,8 @@ pub(crate) struct ItemQuery {
     pub default_ref: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue_type: Option<issue_type::search::Scope>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub group_by_type: bool,
 }
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -231,6 +233,8 @@ pub(crate) struct ItemPage {
     pub items: Vec<Row>,
     pub next: Option<Uuid>,
     pub counts: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_type_counts: Option<BTreeMap<String, u64>>,
     pub total: u64,
 }
 pub(crate) struct Items;
@@ -247,11 +251,13 @@ impl Read for Items {
         let Some(project) = load(context, input.project)? else {
             return Ok(None);
         };
-        let issue_type_writable = project
-            .definition
-            .views
-            .iter()
-            .any(|view| view.show_issue_type)
+        let show_issue_type = input.group_by_type
+            || project
+                .definition
+                .views
+                .iter()
+                .any(|view| view.show_issue_type);
+        let issue_type_writable = show_issue_type
             .then(|| settings::archived(context).map(|archived| !archived))
             .transpose()?;
         if input
@@ -269,8 +275,21 @@ impl Read for Items {
         if input.after.is_some() && input.revision != Some(revision) {
             return Err(Error::StaleSearch);
         }
-        let mut predicate = "FROM repository_project_items p LEFT JOIN repository_issues i ON p.kind=0 AND p.number=i.number LEFT JOIN repository_pulls r ON p.kind=1 AND p.number=r.number WHERE p.project=? AND (? IS NULL OR p.id=?) AND (? IS NULL OR p.status=?) AND (?=0 OR COALESCE(i.state,r.state,0)=0) AND instr(lower(COALESCE(i.title,r.title,json_extract(p.data,'$.title'))),lower(?))>0".to_owned();
-        let mut args = vec![
+        if input.group_by_type && input.issue_type.is_none() {
+            return Err(Error::Invalid(
+                "Project issue type grouping needs a repository scope",
+            ));
+        }
+        let (join, mut args) = input
+            .issue_type
+            .as_ref()
+            .map(|scope| scope.join(context))
+            .transpose()?
+            .unwrap_or_default();
+        let mut predicate = format!(
+            "FROM repository_project_items p LEFT JOIN repository_issues i ON p.kind=0 AND p.number=i.number LEFT JOIN repository_pulls r ON p.kind=1 AND p.number=r.number {join} WHERE p.project=? AND (? IS NULL OR p.id=?) AND (? IS NULL OR p.status=?) AND (?=0 OR COALESCE(i.state,r.state,0)=0) AND instr(lower(COALESCE(i.title,r.title,json_extract(p.data,'$.title'))),lower(?))>0"
+        );
+        args.extend([
             id(project.id),
             input.item.map(id).unwrap_or(SqlValue::Null),
             input.item.map(id).unwrap_or(SqlValue::Null),
@@ -286,11 +305,11 @@ impl Read for Items {
                 .unwrap_or(SqlValue::Null),
             SqlValue::Integer(i64::from(input.hide_closed)),
             SqlValue::Text(input.query),
-        ];
+        ]);
         if let Some(scope) = input.issue_type {
-            let (condition, values) = scope.predicate(context)?;
+            let (condition, value) = scope.filter();
             predicate.push_str(&format!(" AND ({condition})"));
-            args.extend(values);
+            args.extend(value);
         }
         let count = context.query(
             &format!("SELECT p.status,COUNT(*) {predicate} GROUP BY p.status"),
@@ -301,6 +320,16 @@ impl Read for Items {
             .iter()
             .map(|r| Ok((result_text(r, 0)?, result_u64_from_row(r, 1)?)))
             .collect::<Result<BTreeMap<_, _>>>()?;
+        let issue_type_counts = input.group_by_type.then(|| {
+            context.query(
+                &format!("SELECT it.type_id,i.number IS NOT NULL,COUNT(*) {predicate} GROUP BY it.type_id,i.number IS NOT NULL"),
+                &args,
+            )?.rows.iter().map(|row| {
+                let issue_type = issue_type::search::type_id(&row[0])?;
+                let has_type_field = result_u64_from_row(row, 1)? == 1;
+                Ok((issue_type::group(has_type_field, issue_type), result_u64_from_row(row, 2)?))
+            }).collect::<Result<BTreeMap<_,_>>>()
+        }).transpose()?;
         args.push(id(input.after.unwrap_or(Uuid::nil())));
         let rows = context.query(
             &format!("SELECT p.data,COALESCE(i.assignees,r.assignees) {predicate} AND p.id>? ORDER BY p.id LIMIT 51"),
@@ -368,6 +397,7 @@ impl Read for Items {
             items,
             next,
             counts,
+            issue_type_counts,
             total,
         }))
     }

@@ -14,6 +14,7 @@ pub(super) struct FilteredItems {
     pub matched: projects::MatchedItems,
     pub cursor: String,
     pub types: Option<Schema>,
+    pub issue_type_counts: Option<BTreeMap<String, u64>>,
     sources: Vec<Source>,
 }
 
@@ -31,11 +32,16 @@ pub(super) async fn resolve(
     actor: Uuid,
     input: &Filter,
 ) -> Result<Option<FilteredItems>> {
-    let Some(filter) = input.issue_type.as_deref() else {
+    if input.issue_type.is_none() && !input.group_by_type {
         shared::validate_cursor(input.after.is_some(), None, input.type_cursor.as_deref())?;
         return Ok(None);
-    };
-    let filter = Selection::parse(filter).map_err(Error::Invalid)?;
+    }
+    let filter = input
+        .issue_type
+        .as_deref()
+        .map(Selection::parse)
+        .transpose()
+        .map_err(Error::Invalid)?;
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     let candidates = cells
         .query::<projects::TypeSources>(
@@ -52,12 +58,12 @@ pub(super) async fn resolve(
         .map_err(read_error)?
         .output
         .ok_or(Error::NotFound)?;
-    let mut grouped = BTreeMap::<Uuid, BTreeMap<u64, Uuid>>::new();
+    let mut grouped = BTreeMap::<Uuid, BTreeMap<u64, (Uuid, String)>>::new();
     for row in candidates.items {
         grouped
             .entry(row.repository)
             .or_default()
-            .insert(row.number, row.item);
+            .insert(row.number, (row.item, row.status));
     }
     // Project repository links cap this fan-out at 20. Each source work
     // lookup reads just the issue/type index and its snapshot stamp.
@@ -78,6 +84,7 @@ pub(super) async fn resolve(
     };
     let mut items = Vec::new();
     let mut sources = Vec::new();
+    let mut issue_type_counts = input.group_by_type.then(BTreeMap::new);
     if let Some(types) = &types {
         let matches = futures_util::future::try_join_all(readable.into_iter().map(
             |(repo, work)| async move {
@@ -96,12 +103,24 @@ pub(super) async fn resolve(
                         .await,
                 )?;
                 let matched = found
-                    .numbers
+                    .issues
                     .iter()
-                    .map(|number| {
-                        work.get(number)
-                            .copied()
-                            .ok_or(Error::CellContract("Unexpected project issue type match"))
+                    .map(|issue| {
+                        let (item, status) = work
+                            .get(&issue.number)
+                            .ok_or(Error::CellContract("Unexpected project issue type match"))?;
+                        let group = (input.group_by_type
+                            && input
+                                .status
+                                .as_ref()
+                                .is_none_or(|selected| selected == status))
+                        .then(|| {
+                            crate::cells::repository::issues::issue_type::group(
+                                true,
+                                issue.issue_type,
+                            )
+                        });
+                        Ok((*item, group))
                     })
                     .collect::<Result<Vec<_>>>()?;
                 Ok::<_, Error>((
@@ -117,7 +136,14 @@ pub(super) async fn resolve(
         .await?;
         for (source, matched) in matches {
             sources.push(source);
-            items.extend(matched);
+            for (item, group) in matched {
+                if filter.is_some() {
+                    items.push(item);
+                }
+                if let (Some(counts), Some(group)) = (&mut issue_type_counts, group) {
+                    *counts.entry(group).or_insert(0) += 1;
+                }
+            }
         }
     }
     let stamps = sources
@@ -142,6 +168,7 @@ pub(super) async fn resolve(
         input.repository,
         input.item,
         &input.status,
+        input.group_by_type,
         stamps,
     ))?;
     shared::validate_cursor(
@@ -152,15 +179,22 @@ pub(super) async fn resolve(
     Ok(Some(FilteredItems {
         matched: projects::MatchedItems {
             project_version: candidates.project_version,
-            items,
+            items: filter.is_some().then_some(items),
         },
         cursor,
         types,
+        issue_type_counts,
         sources,
     }))
 }
 
 impl FilteredItems {
+    pub(super) fn contains_source(&self, repo: &Repository) -> bool {
+        self.sources.iter().any(|source| {
+            source.repo.id == repo.id && source.repo.ownership_epoch == repo.ownership_epoch
+        })
+    }
+
     pub(super) async fn verify(
         &self,
         server: &Server,

@@ -133,7 +133,9 @@ function definition(value: unknown): boolean {
         (view.show_issue_type === undefined ||
           typeof view.show_issue_type === "boolean") &&
         (view.issue_type_filter === undefined ||
-          optionalString(view.issue_type_filter)),
+          optionalString(view.issue_type_filter)) &&
+        (view.group_by_type === undefined ||
+          typeof view.group_by_type === "boolean"),
     )
   );
 }

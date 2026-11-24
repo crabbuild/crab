@@ -1,7 +1,9 @@
 import { AssigneeAvatars } from "@/components/discussion/metadata";
 import { BlockedBadge } from "@/components/discussion/blocked-badge";
 import { IssueTypeBadge } from "@/components/discussion/issue-type-badge";
-import { useRef, useState } from "react";
+import { useMutation } from "@/components/discussion/mutations";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { type DragEvent, useRef, useState } from "react";
 import {
   CircleDotIcon,
   FileTextIcon,
@@ -33,9 +35,10 @@ import {
 } from "@/components/ui/table";
 import { Link } from "@/components/navigation/link";
 import { cn } from "@/lib/utils";
-import type { Repository } from "@/lib/api";
+import { endpoint, type Repository } from "@/lib/api";
 import { priorities, workHref, type Row, type ItemPage } from "./model";
 import { ProjectIssueType } from "./issue-type";
+import { useProjectCommands } from "./commands";
 export function WorkIcon({ row }: { row: Row }) {
   const Icon = row.restricted
     ? LockKeyholeIcon
@@ -259,101 +262,196 @@ export function ProjectBoard({
   onEdit,
   onStatus,
   showIssueType,
+  onIssueTypeChange,
 }: {
-  repo?: Pick<Repository, "owner" | "name">;
+  repo?: Pick<Repository, "id" | "owner" | "name">;
   page: ItemPage;
   editable: boolean;
   onEdit: (row: Row) => void;
   onStatus: (row: Row, status: string) => void;
   showIssueType?: boolean;
+  onIssueTypeChange?: () => void;
 }) {
   const dragged = useRef<Row | null>(null);
   const [over, setOver] = useState<string>();
+  const { csrf } = useProjectCommands();
+  const mutation = useMutation(csrf, null);
+  const grouped = page.issue_type_counts != null;
+  const counts = page.issue_type_counts ?? page.counts;
+  const types = page.issue_types ?? [];
+  const columns = grouped
+    ? [
+        ...types.map((type) => ({ key: type.id, name: type.name })),
+        { key: "none", name: "No type" },
+        ...(counts.other ? [{ key: "other", name: "Other work" }] : []),
+      ]
+    : page.project.definition.statuses.map((status) => ({
+        key: status,
+        name: status,
+      }));
+  const columnFor = (row: Row) =>
+    grouped ? (row.issue_type_group ?? "other") : row.item.status;
+  const movable = (row: Row) =>
+    !row.restricted &&
+    (grouped
+      ? !!onIssueTypeChange &&
+        !!(row.repository ?? repo) &&
+        row.issue_type_version != null &&
+        !mutation.pending &&
+        !mutation.conflict
+      : editable);
+  async function move(row: Row, column: string) {
+    if (!grouped) {
+      onStatus(row, column);
+      return;
+    }
+    const source = row.repository ?? repo;
+    if (
+      !source ||
+      row.work?.subject.kind !== "issue" ||
+      row.issue_type_version == null
+    )
+      return;
+    const saved = await mutation.run<{ version: number }>(
+      endpoint(source, `issues/${row.work.subject.number}/type`),
+      "PUT",
+      {
+        expected_version: row.issue_type_version,
+        type_id: column === "none" ? null : column,
+      },
+      source,
+    );
+    if (saved) onIssueTypeChange?.();
+  }
   return (
-    <div className="project-board" role="region" aria-label="Project board">
-      {page.project.definition.statuses.map((status) => (
-        <section
-          key={status}
-          className={cn(
-            "project-board-column",
-            over === status && "project-board-drop",
-          )}
-          onDragOver={(e) => {
-            if (editable && dragged.current) {
-              e.preventDefault();
-              setOver(status);
-            }
-          }}
-          onDragLeave={() => setOver(undefined)}
-          onDrop={(e) => {
-            e.preventDefault();
-            if (
-              editable &&
-              dragged.current &&
-              dragged.current.item.status !== status
-            )
-              onStatus(dragged.current, status);
-            dragged.current = null;
-            setOver(undefined);
+    <>
+      {mutation.error && (
+        <Alert variant="destructive">
+          <AlertDescription>{mutation.error}</AlertDescription>
+        </Alert>
+      )}
+      {mutation.conflict && onIssueTypeChange && (
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            mutation.reset();
+            onIssueTypeChange();
           }}
         >
-          <header>
-            <span className="project-status-dot" />
-            <h2>{status}</h2>
-            <Badge variant="secondary">{page.counts[status] ?? 0}</Badge>
-          </header>
-          <div className="project-board-cards">
-            {page.items
-              .filter((row) => row.item.status === status)
-              .map((row) => (
-                <article
-                  className="project-board-card"
-                  key={row.item.id}
-                  draggable={editable && !row.restricted}
-                  onDragStart={() => {
-                    dragged.current = row;
-                  }}
-                  onDragEnd={() => {
-                    dragged.current = null;
-                    setOver(undefined);
-                  }}
-                >
-                  <ItemTitle
-                    repo={repo}
-                    row={row}
-                    showIssueType={showIssueType}
-                  />
-                  <footer>
-                    <AssigneeAvatars assignees={row.assignees} />
-                    <Badge variant="outline">
-                      {priorities[row.item.priority]}
-                    </Badge>
-                    {row.item.end && (
-                      <time dateTime={row.item.end}>{row.item.end}</time>
-                    )}
-                    {editable && (
-                      <Button
-                        size="icon-sm"
-                        variant="ghost"
-                        aria-label={`Edit ${row.work?.title ?? row.item.title}`}
-                        onClick={() => onEdit(row)}
-                      >
-                        <PencilIcon />
-                      </Button>
-                    )}
-                  </footer>
-                  <LinkedItems repo={repo} row={row} />
-                </article>
-              ))}
-            {!page.items.some((row) => row.item.status === status) && (
-              <p className="project-column-empty">
-                {page.counts[status] ? "No items on this page" : "No items yet"}
-              </p>
-            )}
-          </div>
-        </section>
-      ))}
-    </div>
+          Reload project items
+        </Button>
+      )}
+      <div className="project-board" role="region" aria-label="Project board">
+        {columns.map(({ key, name }) => {
+          const rows = page.items.filter((row) => columnFor(row) === key);
+          const acceptsDrop = (row: Row) =>
+            movable(row) &&
+            columnFor(row) !== key &&
+            (!grouped || key !== "other");
+          const allowDrop = (e: DragEvent<HTMLElement>) => {
+            if (dragged.current && acceptsDrop(dragged.current)) {
+              e.preventDefault();
+              e.dataTransfer.dropEffect = "move";
+              setOver(key);
+            }
+          };
+          return (
+            <section
+              key={key}
+              aria-label={name}
+              className={cn(
+                "project-board-column",
+                over === key && "project-board-drop",
+              )}
+              onDragEnter={allowDrop}
+              onDragOver={allowDrop}
+              onDragLeave={(e) => {
+                if (
+                  !(e.relatedTarget instanceof Node) ||
+                  !e.currentTarget.contains(e.relatedTarget)
+                ) {
+                  setOver((current) => (current === key ? undefined : current));
+                }
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                if (dragged.current && acceptsDrop(dragged.current))
+                  void move(dragged.current, key);
+                dragged.current = null;
+                setOver(undefined);
+              }}
+            >
+              <header>
+                <span className="project-status-dot" />
+                <h2>{name}</h2>
+                <Badge variant="secondary">{counts[key] ?? 0}</Badge>
+              </header>
+              <div className="project-board-cards">
+                {rows.map((row) => (
+                  <article
+                    className="project-board-card"
+                    key={row.item.id}
+                    draggable={movable(row)}
+                    onDragStart={(e) => {
+                      e.dataTransfer.effectAllowed = "move";
+                      e.dataTransfer.setData("text/plain", row.item.id);
+                      dragged.current = row;
+                    }}
+                    onDragEnd={() => {
+                      dragged.current = null;
+                      setOver(undefined);
+                    }}
+                  >
+                    <ItemTitle
+                      repo={repo}
+                      row={row}
+                      showIssueType={!grouped && showIssueType}
+                    />
+                    <footer>
+                      <AssigneeAvatars assignees={row.assignees} />
+                      {grouped && (
+                        <Badge variant="secondary">{row.item.status}</Badge>
+                      )}
+                      <Badge variant="outline">
+                        {priorities[row.item.priority]}
+                      </Badge>
+                      {row.item.end && (
+                        <time dateTime={row.item.end}>{row.item.end}</time>
+                      )}
+                      {grouped && movable(row) && (
+                        <ProjectIssueType
+                          row={row}
+                          repo={repo}
+                          options={types}
+                          onChange={onIssueTypeChange}
+                        />
+                      )}
+                      {editable && (
+                        <Button
+                          size="icon-sm"
+                          variant="ghost"
+                          aria-label={`Edit ${row.work?.title ?? row.item.title}`}
+                          onClick={() => onEdit(row)}
+                        >
+                          <PencilIcon />
+                        </Button>
+                      )}
+                    </footer>
+                    <LinkedItems repo={repo} row={row} />
+                  </article>
+                ))}
+                {!rows.length && (
+                  <p className="project-column-empty">
+                    {counts[key] ? "No items on this page" : "No items yet"}
+                  </p>
+                )}
+              </div>
+            </section>
+          );
+        })}
+      </div>
+    </>
   );
 }
 const day = 86400000;

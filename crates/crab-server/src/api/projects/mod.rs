@@ -131,6 +131,7 @@ struct Filter {
     hide_closed: bool,
     issue_type: Option<String>,
     type_cursor: Option<String>,
+    group_by_type: bool,
 }
 async fn items(
     State(server): State<Arc<Server>>,
@@ -141,9 +142,16 @@ async fn items(
     let key = (owner, name);
     let repo = app::repository(&server, &principal, &key)?;
     let cell = app::repository_cell(&server, &repo)?;
-    let (type_scope, bound_types, type_cursor) = if let Some(filter) = input.issue_type.as_deref() {
+    let (type_scope, bound_types, type_cursor) = if input.issue_type.is_some()
+        || input.group_by_type
+    {
         use crate::cells::repository::issues::issue_type::search::Filter;
-        let filter = Filter::parse(filter).map_err(Error::Invalid)?;
+        let filter = input
+            .issue_type
+            .as_deref()
+            .map(Filter::parse)
+            .transpose()
+            .map_err(Error::Invalid)?;
         let types = super::organizations::issue_types::active(&server, repo.organization).await?;
         let scope = type_filter::scope(&repo, filter, &types)?;
         let cursor = type_filter::cursor((
@@ -156,6 +164,7 @@ async fn items(
             &input.q,
             &input.status,
             input.hide_closed,
+            input.group_by_type,
         ))?;
         (Some(scope), Some(types), Some(cursor))
     } else {
@@ -181,6 +190,7 @@ async fn items(
                     hide_closed: input.hide_closed,
                     default_ref: repo.default_ref().await?,
                     issue_type: type_scope,
+                    group_by_type: input.group_by_type,
                 },
             )
             .await,
@@ -216,6 +226,13 @@ async fn items(
             );
             value["issue_type"] = json!(issue_type);
             value["issue_type_version"] = json!(version);
+            if input.group_by_type {
+                value["issue_type_group"] =
+                    json!(crate::cells::repository::issues::issue_type::group(
+                        row.issue_type.is_some(),
+                        issue_type.map(|definition| definition.id),
+                    ));
+            }
             Ok(value)
         })
         .collect::<std::result::Result<Vec<_>, serde_json::Error>>()?;
