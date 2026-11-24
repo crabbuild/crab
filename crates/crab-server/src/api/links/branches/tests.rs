@@ -11,6 +11,130 @@ const ISSUE: &str = "/api/repos/team/private/issues/1";
 const EDIT: &str = "/api/repos/team/private/issues/1/development-branches";
 const LINKS: &str = "/api/repos/team/private/issues/1/links?include_branches=true";
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_committed_branch_creation_recovers_after_its_head_moves() {
+    use crate::{
+        app,
+        auth::Principal,
+        cells::repository::collaboration::links::branches::{
+            Branch,
+            creation::{Decision, Request, Reserve, Status},
+        },
+        cells::repository::issues::transfer::{Capture, CaptureInput, CaptureOutcome},
+        git::receive::{self, IssueBranchPublication},
+        repository::development_branches,
+    };
+    use std::sync::Arc;
+
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    let checkout = tempfile::tempdir().unwrap();
+    let (target_id, remote) = seed(&h, &alice, checkout.path()).await;
+    let target = h.server.repositories.by_id(target_id).unwrap();
+    let source = h
+        .server
+        .repositories
+        .get(&("team".into(), "private".into()))
+        .unwrap();
+    let commit = git::success(checkout.path(), &["rev-parse", "main"]).await;
+    let occupied = json!({"request_id":Uuid::now_v7(),"repository":target.id,"name":"main","source_oid":commit});
+    assert_eq!(
+        h.write(Method::POST, EDIT, &alice, occupied).await.status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(h.json(LINKS, &alice).await["branches"]["items"], json!([]));
+
+    let principal = Principal::local();
+    let request = Request {
+        id: Uuid::now_v7(),
+        issue: 1,
+        branch: Branch {
+            repository: target.id,
+            reference: "refs/heads/from-issue".into(),
+        },
+        commit,
+        actor: app::account(&principal).unwrap(),
+        target_epoch: target.ownership_epoch,
+    };
+    let cell = app::repository_cell(&h.server, &source).unwrap();
+    let reserved = cell
+        .client
+        .command::<Reserve>(
+            cell.target,
+            app::mutation_identity().unwrap(),
+            request.clone(),
+        )
+        .await
+        .unwrap()
+        .output;
+    assert!(matches!(reserved, Decision::Saved(Status::Pending)));
+    let version = h.json(ISSUE, &alice).await["version"].as_u64().unwrap();
+    assert!(matches!(
+        cell.client
+            .query::<Capture>(
+                cell.target,
+                None,
+                CaptureInput::Start {
+                    number: 1,
+                    expected_version: version
+                },
+            )
+            .await
+            .unwrap()
+            .output,
+        CaptureOutcome::LinkedWork
+    ));
+
+    // Leave the issue-side request pending as if the create response was lost
+    // after the Git publication worker returned.
+    receive::create_issue_branch(
+        Arc::clone(&h.server),
+        principal.clone(),
+        &target,
+        IssueBranchPublication {
+            source: Arc::clone(&source),
+            request: request.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    git::success(
+        checkout.path(),
+        &["push", remote.as_str(), "HEAD:refs/heads/from-issue"],
+    )
+    .await;
+    assert_ne!(
+        target
+            .ref_oid(&request.branch.reference)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(request.commit.as_str())
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            development_branches::recover(&h.server, &source)
+                .await
+                .unwrap();
+            if h.json(LINKS, &alice).await["branches"]["items"][0]["reference"]
+                == "refs/heads/from-issue"
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        development_branches::submit(Arc::clone(&h.server), principal, source, target, request)
+            .await
+            .unwrap(),
+        Status::Created
+    );
+    h.close().await;
+}
+
 async fn seed(h: &Harness, alice: &str, checkout: &std::path::Path) -> (Uuid, Url) {
     h.add_repository("library").await;
     let target = h
@@ -228,5 +352,57 @@ async fn browser_links_a_branch_from_another_repository_and_unlinks_it_after_rel
         .run(&["wait", "--text", "No linked branches."])
         .await;
     assert_eq!(h.json(LINKS, &alice).await["branches"]["items"], json!([]));
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires agent-browser and the built embedded UI"]
+async fn browser_creates_a_branch_from_the_issue_in_the_selected_repository() {
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    let checkout = tempfile::tempdir().unwrap();
+    let (target, _) = seed(&h, &alice, checkout.path()).await;
+    let commit = git::success(checkout.path(), &["rev-parse", "main"]).await;
+    let browser = Browser::new("issue-branch");
+    let issue = format!("{}/team/private/issues/1", h.origin);
+    browser.run(&["open", &issue]).await;
+    browser.sign_in().await;
+    browser.run(&["wait", "--text", "Create a branch"]).await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Create a branch",
+            "--exact",
+        ])
+        .await;
+    let option = format!(
+        r##"document.querySelector("#branch-repository option[value='{target}']") !== null"##
+    );
+    browser.run(&["wait", "--fn", &option]).await;
+    browser
+        .run(&["select", "#branch-repository", &target.to_string()])
+        .await;
+    browser
+        .run(&["wait", "[role=dialog] button[type=submit]:enabled"])
+        .await;
+    browser
+        .run(&["click", "[role=dialog] button[type=submit]"])
+        .await;
+    browser
+        .run(&["wait", "--text", "team/library:issue-1"])
+        .await;
+    browser.run(&["open", &issue]).await;
+    browser
+        .run(&["wait", "--text", "team/library:issue-1"])
+        .await;
+    let repository = h.server.repositories.by_id(target).unwrap();
+    assert_eq!(
+        repository.ref_oid("refs/heads/issue-1").await.unwrap(),
+        Some(commit)
+    );
     h.close().await;
 }

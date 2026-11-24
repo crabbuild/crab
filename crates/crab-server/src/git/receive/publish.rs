@@ -74,6 +74,7 @@ fn native_plan_id(
 
 pub(super) enum Publication {
     NativePush,
+    IssueBranch(super::IssueBranchPublication),
     PullBranch(super::PullBranchPublication),
     ReviewSuggestions(super::SuggestionPublication),
     BranchUpdate(super::BranchUpdatePublication),
@@ -88,6 +89,7 @@ impl Publication {
     fn plan_id(&self) -> Option<String> {
         match self {
             Self::NativePush => None,
+            Self::IssueBranch(branch) => Some(branch.request.plan(branch.source.id)),
             Self::PullBranch(edit) => Some(edit.plan_id.clone()),
             Self::ReviewSuggestions(batch) => Some(batch.plan_id.clone()),
             Self::BranchUpdate(update) => Some(update.plan_id.clone()),
@@ -102,6 +104,7 @@ impl Publication {
     ) -> &'a CancellationToken {
         match self {
             Self::NativePush
+            | Self::IssueBranch(_)
             | Self::PullBranch(_)
             | Self::ReviewSuggestions(_)
             | Self::BranchUpdate(_)
@@ -361,6 +364,12 @@ async fn run_request(
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>> {
     let entry = super::target(server, principal, key).ok_or(ReceiveError::NotFound)?;
+    if matches!(&input.publication, Publication::IssueBranch(branch)
+        if branch.request.branch.repository != entry.id
+            || branch.request.target_epoch != entry.ownership_epoch)
+    {
+        return Err(ReceiveError::NotFound);
+    }
     if matches!(&input.publication, Publication::BranchUpdate(update) if update.repository != entry.id)
         || matches!(&input.publication, Publication::PullBranch(edit)
             if edit.source.id != entry.id || edit.source.ownership_epoch != entry.ownership_epoch
@@ -442,6 +451,7 @@ async fn run_request(
         )
         .chain(match &input.publication {
             Publication::NativePush
+            | Publication::IssueBranch(_)
             | Publication::PullBranch(_)
             | Publication::ReviewSuggestions(_)
             | Publication::ForkSync { .. } => None,
@@ -1381,6 +1391,10 @@ async fn commit_authorized(
             .archived
     {
         return Err(ReceiveError::Archived);
+    }
+    if let Publication::IssueBranch(branch) = mutation.publication {
+        crate::repository::development_branches::authorize(server, entry, principal, branch)
+            .await?;
     }
     let closure_default = if tracks_issue_closures(server, principal, mutation.updates) {
         Some(entry.default_ref().await?)

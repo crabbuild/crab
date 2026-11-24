@@ -544,6 +544,18 @@ revision, so an issue transfer cannot retire a stale snapshot of those links.
 HTTP readers check current repository grants before returning target identity
 or ref data. Existing transfer headers and issues require no new preparation.
 
+Creating a development branch reserves one link slot and a payload-bound
+request in the issue's Repository Cell before starting the Git ref update.
+The destination uses an absent-ref precondition, the exact starting commit,
+and a Git plan ID derived from the source repository and request UUID.
+The publication gate rechecks both grants and the reserved request.
+The issue may move once that request settles. A proven Git receipt finishes
+the link in the same Cell mutation that records the result. An existing branch
+at the same commit is insufficient evidence. Recovery checks bounded due
+requests. It releases unattempted expired requests under the Git plan lease
+and retains attempted requests while the outcome is ambiguous.
+Update serving peers and UI together before enabling issue branch creation.
+
 Repository ownership acceptance and the operator's initial organization
 assignment check for incoming issue reservations under the existing policy
 lease. Publication clears the reservation in the same transaction that

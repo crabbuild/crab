@@ -216,6 +216,12 @@ pub(in crate::cells) fn dispatch_mutation(
         collaboration::links::branches::Set::ID => {
             invoke_mutation::<collaboration::links::branches::Set>(context, input)
         }
+        collaboration::links::branches::creation::Reserve::ID => {
+            invoke_mutation::<collaboration::links::branches::creation::Reserve>(context, input)
+        }
+        collaboration::links::branches::creation::Settle::ID => {
+            invoke_mutation::<collaboration::links::branches::creation::Settle>(context, input)
+        }
         commit_closures::Reserve::ID => invoke_mutation::<commit_closures::Reserve>(context, input),
         commit_closures::Resolve::ID => invoke_mutation::<commit_closures::Resolve>(context, input),
         <SetReaction as Mutation>::ID => invoke_mutation::<SetReaction>(context, input),
@@ -443,6 +449,12 @@ pub(in crate::cells) fn dispatch_read(
         <ListLinks as Read>::ID => invoke_read::<ListLinks>(context, input),
         collaboration::links::branches::Get::ID => {
             invoke_read::<collaboration::links::branches::Get>(context, input)
+        }
+        collaboration::links::branches::creation::Get::ID => {
+            invoke_read::<collaboration::links::branches::creation::Get>(context, input)
+        }
+        collaboration::links::branches::creation::Due::ID => {
+            invoke_read::<collaboration::links::branches::creation::Due>(context, input)
         }
         <collaboration::conversation::ListConversation as Read>::ID => {
             invoke_read::<collaboration::conversation::ListConversation>(context, input)

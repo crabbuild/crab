@@ -37,7 +37,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         )
         .route(
             "/api/repos/{owner}/{name}/issues/{issue}/development-branches",
-            axum::routing::put(branches::set),
+            axum::routing::put(branches::set).post(branches::create),
         )
         .layer(axum::extract::DefaultBodyLimit::max(4096))
         .route_layer(middleware::from_fn_with_state(server, app::admit))

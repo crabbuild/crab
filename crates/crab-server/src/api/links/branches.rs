@@ -5,6 +5,10 @@ use crate::{
     cells::{RepositoryCell, repository::collaboration::links::branches as native},
     repository::Repository,
 };
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -32,14 +36,14 @@ pub(super) async fn view(
     cell: &RepositoryCell,
     issue: u64,
 ) -> Result<Value> {
-    let state = app::query_output(
+    let view = app::query_output(
         cell.client
             .query::<native::Get>(&cell.target, None, issue)
             .await,
     )?
     .ok_or(Error::NotFound)?;
     let mut grouped = BTreeMap::<_, BTreeSet<_>>::new();
-    for branch in state.branches {
+    for branch in view.state.branches {
         grouped
             .entry(branch.repository)
             .or_default()
@@ -77,10 +81,27 @@ pub(super) async fn view(
         }
     }
     let grant = app::membership(server, principal, source).await?;
+    let can_manage = grant.principal.can_write(source.id);
+    let mut pending = None;
+    if can_manage
+        && let Some(request) = view.pending
+        && app::account(&grant.principal).is_ok_and(|actor| actor == request.actor)
+        && let Some(target) = server.repositories.by_id(request.branch.repository)
+        && let Some(reader) = principal.related_read(source.id, target.id)
+        && can_read(server, &reader, &target).await?
+    {
+        pending = Some(json!({
+            "request_id": request.id,
+            "repository": target.id,
+            "name": request.branch.reference.trim_start_matches("refs/heads/"),
+            "source_oid": request.commit,
+        }));
+    }
     Ok(json!({
         "items": items,
-        "version": state.version,
-        "can_manage": grant.principal.can_write(source.id),
+        "version": view.state.version,
+        "can_manage": can_manage,
+        "pending": pending,
     }))
 }
 
@@ -162,4 +183,100 @@ pub(super) async fn set(
             "An issue can link up to 10 development branches",
         )),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct NewBranch {
+    request_id: Uuid,
+    repository: Uuid,
+    name: String,
+    source_oid: String,
+}
+
+pub(super) async fn create(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name, issue)): Path<(String, String, u64)>,
+    Json(input): Json<NewBranch>,
+) -> std::result::Result<(StatusCode, Json<Value>), Response> {
+    use crate::{api::branches, git::receive::ReceiveError, repository::development_branches};
+    let (source, target, writer, request) =
+        admit_creation(&server, &principal, (owner, name), issue, input)
+            .await
+            .map_err(IntoResponse::into_response)?;
+    let reference = request.branch.reference.clone();
+    let commit = request.commit.clone();
+    let status = development_branches::submit(server, writer, source, target, request)
+        .await
+        .map_err(|error| match error {
+            ReceiveError::Settings(cause) => cause.into_response(),
+            cause => branches::Error::from(cause).into_response(),
+        })?;
+    match status {
+        native::creation::Status::Created => Ok((
+            StatusCode::CREATED,
+            Json(json!({
+                "branch": reference, "commit": commit,
+            })),
+        )),
+        native::creation::Status::Expired => Err(Error::Invalid(
+            "This branch request ended. Reload the issue to start a new request.",
+        )
+        .into_response()),
+        native::creation::Status::Pending => Err(Error::MergeBusy.into_response()),
+    }
+}
+
+async fn admit_creation(
+    server: &Server,
+    principal: &Principal,
+    key: (String, String),
+    issue: u64,
+    input: NewBranch,
+) -> Result<(
+    Arc<Repository>,
+    Arc<Repository>,
+    Principal,
+    native::creation::Request,
+)> {
+    let source = app::repository(server, principal, &key)?;
+    if !app::membership(server, principal, &source)
+        .await?
+        .principal
+        .can_write(source.id)
+    {
+        return Err(Error::LinkPermission);
+    }
+    if input.request_id.is_nil() {
+        return Err(Error::Invalid("Invalid development branch request ID"));
+    }
+    let target = server
+        .repositories
+        .by_id(input.repository)
+        .ok_or(Error::NotFound)?;
+    let reader = principal
+        .related_read(source.id, target.id)
+        .ok_or(Error::NotFound)?;
+    let writer = app::membership(server, &reader, &target).await?.principal;
+    if !writer.can_write(target.id) {
+        return Err(Error::LinkPermission);
+    }
+    let reference = super::super::branches::branch_ref(&input.name).map_err(Error::Invalid)?;
+    let mut request = native::creation::Request {
+        id: input.request_id,
+        issue: app::number(issue)?,
+        branch: native::Branch {
+            repository: target.id,
+            reference,
+        },
+        commit: input.source_oid,
+        actor: app::account(principal)?,
+        target_epoch: target.ownership_epoch,
+    };
+    let oid = request
+        .oid()
+        .map_err(|_| Error::Invalid("Source must be a full SHA-1 commit ID"))?;
+    request.commit = oid.to_string();
+    Ok((source, target, writer, request))
 }

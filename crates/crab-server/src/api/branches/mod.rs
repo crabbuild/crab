@@ -113,7 +113,7 @@ struct ArchiveInput {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum Error {
+pub(super) enum Error {
     #[error("{0}")]
     Input(&'static str),
     #[error("Write access is required to manage branches")]

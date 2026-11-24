@@ -739,6 +739,53 @@ pub(crate) async fn create_branch(
     create_reference(server, principal, key, name, new).await
 }
 
+pub(crate) struct IssueBranchPublication {
+    pub source: Arc<Repository>,
+    pub request: crate::cells::repository::collaboration::links::branches::creation::Request,
+}
+
+impl IssueBranchPublication {
+    fn update(&self) -> Result<crab_git::receive_plan::RefUpdate> {
+        let oid = self.request.oid().map_err(crate::app::Error::Cell)?;
+        Ok(crab_git::receive_plan::RefUpdate {
+            name: self.request.branch.reference.clone(),
+            old: None,
+            new: Some(oid),
+        })
+    }
+}
+
+pub(crate) async fn create_issue_branch(
+    server: Arc<Server>,
+    principal: Principal,
+    target: &Repository,
+    publication: IssueBranchPublication,
+) -> Result<()> {
+    let update = publication.update()?;
+    publish_ref(
+        server,
+        principal,
+        (target.config.owner.clone(), target.config.name.clone()),
+        RefPublication::Update {
+            update,
+            publication: publish::Publication::IssueBranch(publication),
+        },
+    )
+    .await
+}
+
+pub(crate) async fn issue_branch_committed(
+    target: &Repository,
+    publication: &IssueBranchPublication,
+) -> Result<bool> {
+    publish::committed_plan(
+        target,
+        &[publication.update()?],
+        &publication.request.plan(publication.source.id),
+    )
+    .await
+}
+
 pub(crate) async fn create_tag(
     server: Arc<Server>,
     principal: Principal,

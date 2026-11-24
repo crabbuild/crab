@@ -1,4 +1,4 @@
-import { useDeferredValue, useState } from "react";
+import { useDeferredValue, useRef, useState, type ReactNode } from "react";
 import { GitBranchIcon } from "lucide-react";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
@@ -27,11 +27,14 @@ type BranchLink = {
   reference: string;
   exists: boolean;
 };
+type NewBranch = { repository: string; name: string; source_oid: string };
+type CreationRequest = NewBranch & { request_id: string };
 
 export interface BranchLinks {
   items: BranchLink[];
   version: number;
   can_manage: boolean;
+  pending?: CreationRequest | null;
 }
 
 const branchesPrefix = "refs/heads/";
@@ -49,20 +52,52 @@ export function DevelopmentBranches({
   links: BranchLinks;
   onChanged: () => void;
 }) {
-  const [adding, setAdding] = useState(false);
+  const [mode, setMode] = useState<"link" | "create">();
+  const captured = useRef<{ key: string; request: CreationRequest }>(null);
   const mutation = useMutation(csrf, repo);
   const canManage = links.can_manage && !repo.archived;
+  const route = endpoint(repo, `issues/${issue}/development-branches`);
 
   async function save(repository: string, reference: string, active: boolean) {
-    const outcome = await mutation.run<{ version: number }>(
-      endpoint(repo, `issues/${issue}/development-branches`),
-      "PUT",
-      { branch: { repository, reference }, active, version: links.version },
-    );
+    const outcome = await mutation.run<{ version: number }>(route, "PUT", {
+      branch: { repository, reference },
+      active,
+      version: links.version,
+    });
     if (outcome) {
-      setAdding(false);
+      setMode(undefined);
       onChanged();
     }
+  }
+
+  async function create(request: CreationRequest) {
+    const outcome = await mutation.run<{ branch: string; commit: string }>(
+      route,
+      "POST",
+      request,
+    );
+    if (outcome) {
+      captured.current = null;
+      setMode(undefined);
+      onChanged();
+    }
+  }
+
+  function startCreation(input: NewBranch) {
+    const key = JSON.stringify([
+      repo.id,
+      issue,
+      input.repository,
+      input.name,
+      input.source_oid,
+    ]);
+    if (captured.current?.key !== key) {
+      captured.current = {
+        key,
+        request: { request_id: crypto.randomUUID(), ...input },
+      };
+    }
+    void create(captured.current.request);
   }
 
   const feedback = (
@@ -82,22 +117,36 @@ export function DevelopmentBranches({
 
   return (
     <section aria-label="Development branches" className="mt-3 border-t pt-3">
-      <header className="flex items-center justify-between gap-2">
+      <header className="flex flex-wrap items-center justify-between gap-2">
         <strong>Linked branches</strong>
         {canManage && (
-          <Button
-            variant="outline"
-            size="sm"
-            type="button"
-            disabled={mutation.pending}
-            onClick={() => {
-              mutation.reset();
-              setAdding(true);
-            }}
-          >
-            <GitBranchIcon data-icon="inline-start" />
-            Link branch
-          </Button>
+          <div className="flex flex-wrap gap-1">
+            <Button
+              variant="outline"
+              size="sm"
+              type="button"
+              disabled={mutation.pending || Boolean(links.pending)}
+              onClick={() => {
+                mutation.reset();
+                setMode("create");
+              }}
+            >
+              <GitBranchIcon data-icon="inline-start" />
+              Create a branch
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              type="button"
+              disabled={mutation.pending || Boolean(links.pending)}
+              onClick={() => {
+                mutation.reset();
+                setMode("link");
+              }}
+            >
+              Link branch
+            </Button>
+          </div>
         )}
       </header>
       {links.items.length > 0 ? (
@@ -141,16 +190,44 @@ export function DevelopmentBranches({
       ) : (
         <p className="muted">No linked branches.</p>
       )}
-      {adding ? (
+      {canManage && links.pending && (
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="muted">
+            Branch creation pending for {links.pending.name}.
+          </p>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={mutation.pending}
+            onClick={() => {
+              if (links.pending) void create(links.pending);
+            }}
+          >
+            Retry branch creation
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={mutation.pending}
+            onClick={onChanged}
+          >
+            Check status
+          </Button>
+        </div>
+      )}
+      {mode ? (
         <BranchPicker
           repo={repo}
           links={links.items}
+          mode={mode}
+          issue={issue}
           pending={mutation.pending}
           conflict={mutation.conflict}
-          onClose={() => setAdding(false)}
-          onSelect={(repository, reference) =>
+          onClose={() => setMode(undefined)}
+          onLink={(repository, reference) =>
             void save(repository, reference, true)
           }
+          onCreate={startCreation}
         >
           {feedback}
         </BranchPicker>
@@ -164,20 +241,28 @@ export function DevelopmentBranches({
 function BranchPicker({
   repo,
   links,
+  mode,
+  issue,
   pending,
   conflict,
   onClose,
-  onSelect,
+  onLink,
+  onCreate,
   children,
 }: {
   repo: RepositoryAddress;
   links: BranchLink[];
+  mode: "create" | "link";
+  issue: number;
   pending: boolean;
   conflict: boolean;
   onClose: () => void;
-  onSelect: (repository: string, reference: string) => void;
-  children: React.ReactNode;
+  onLink: (repository: string, reference: string) => void;
+  onCreate: (input: NewBranch) => void;
+  children: ReactNode;
 }) {
+  const creating = mode === "create";
+  const [name, setName] = useState(`issue-${issue}`);
   const [repository, setRepository] = useState(repo);
   const [repositorySearch, setRepositorySearch] = useState("");
   const [branchSearch, setBranchSearch] = useState("");
@@ -187,6 +272,18 @@ function BranchPicker({
     `/api/repos?${new URLSearchParams({ q: query, limit: "20" })}`,
   );
   const refs = useRequest<Refs>(endpoint(repository, "refs"), repository.id);
+  const sameRepository = repository.id === repo.id;
+  const access = useRequest<{ repositories: Repository[] }>(
+    creating && !sameRepository
+      ? `/api/repos?${new URLSearchParams({ owner: repository.owner, name: repository.name })}`
+      : null,
+  );
+  const writable =
+    sameRepository ||
+    access.data?.repositories.some(
+      (item) =>
+        item.id === repository.id && item.access === "write" && !item.archived,
+    );
   const repositories = new Map(
     [repository, ...(candidates.data?.repositories ?? [])].map((item) => [
       item.id,
@@ -199,15 +296,30 @@ function BranchPicker({
       .map((link) => link.reference),
   );
   const available = (refs.data?.refs ?? []).filter(
-    (item) => item.name.startsWith(branchesPrefix) && !linked.has(item.name),
+    (item) =>
+      item.name.startsWith(branchesPrefix) &&
+      (creating || !linked.has(item.name)),
   );
   const filter = branchSearch.trim().toLowerCase();
-  const matching = available
-    .filter((ref) =>
-      ref.name.slice(branchesPrefix.length).toLowerCase().includes(filter),
-    )
-    .slice(0, 100);
-  const selected = matching.some((ref) => ref.name === branch) ? branch : "";
+  const matches = available.filter((ref) =>
+    ref.name.slice(branchesPrefix.length).toLowerCase().includes(filter),
+  );
+  const defaultBranch =
+    creating && matches.find((ref) => ref.name === refs.data?.head?.name);
+  const matching = defaultBranch
+    ? [
+        defaultBranch,
+        ...matches.filter((ref) => ref !== defaultBranch).slice(0, 99),
+      ]
+    : matches.slice(0, 100);
+  const selection = branch || (creating ? refs.data?.head?.name : "");
+  const selected = matching.find((ref) => ref.name === selection);
+  const canSubmit = Boolean(
+    selected &&
+    (!creating || (writable && name.trim().length)) &&
+    !pending &&
+    !conflict,
+  );
 
   return (
     <Dialog
@@ -218,20 +330,47 @@ function BranchPicker({
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Link a branch</DialogTitle>
+          <DialogTitle>
+            {creating ? "Create a branch for this issue" : "Link a branch"}
+          </DialogTitle>
           <DialogDescription>
-            Choose an existing branch in a repository you can read.
+            {creating
+              ? "Choose the repository and starting branch."
+              : "Choose an existing branch in a repository you can read."}
           </DialogDescription>
         </DialogHeader>
         <form
           className="flex flex-col gap-4"
           onSubmit={(event) => {
             event.preventDefault();
-            if (selected && !pending && !conflict)
-              onSelect(repository.id, selected);
+            if (!selected || !canSubmit) return;
+            if (creating) {
+              onCreate({
+                repository: repository.id,
+                name: name.trim(),
+                source_oid: selected.oid,
+              });
+            } else {
+              onLink(repository.id, selected.name);
+            }
           }}
         >
           <FieldGroup>
+            {creating && (
+              <Field>
+                <FieldLabel htmlFor="new-development-branch">
+                  New branch name
+                </FieldLabel>
+                <Input
+                  id="new-development-branch"
+                  value={name}
+                  required
+                  maxLength={255}
+                  disabled={pending}
+                  onChange={(event) => setName(event.target.value)}
+                />
+              </Field>
+            )}
             <Field>
               <FieldLabel htmlFor="branch-repository-search">
                 Find a repository
@@ -270,6 +409,14 @@ function BranchPicker({
                 ))}
               </NativeSelect>
             </Field>
+            {creating &&
+              !sameRepository &&
+              (access.error || (access.data && !writable)) && (
+                <p className="error" role="alert">
+                  {access.error ??
+                    "Write access is required in the chosen repository."}
+                </p>
+              )}
             <Result state={refs} timingLabel="Branches">
               {() => (
                 <>
@@ -285,11 +432,13 @@ function BranchPicker({
                     />
                   </Field>
                   <Field>
-                    <FieldLabel htmlFor="development-branch">Branch</FieldLabel>
+                    <FieldLabel htmlFor="development-branch">
+                      {creating ? "Starting branch" : "Branch"}
+                    </FieldLabel>
                     <NativeSelect
                       id="development-branch"
                       required
-                      value={selected}
+                      value={selected?.name ?? ""}
                       disabled={pending || !matching.length}
                       onChange={(event) => setBranch(event.target.value)}
                     >
@@ -311,8 +460,8 @@ function BranchPicker({
           </FieldGroup>
           {children}
           <DialogFooter>
-            <Button disabled={!selected || pending || conflict} type="submit">
-              Link branch
+            <Button disabled={!canSubmit} type="submit">
+              {creating ? "Create branch" : "Link branch"}
             </Button>
           </DialogFooter>
         </form>

@@ -3,6 +3,7 @@ use crate::cells::{Error, Result};
 use uuid::Uuid;
 
 const MAX_BRANCHES: usize = 10;
+pub(crate) mod creation;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(deny_unknown_fields)]
@@ -87,16 +88,25 @@ fn exists(context: &Transaction<'_>, number: u64) -> Result<bool> {
 }
 
 pub(crate) struct Get;
+#[derive(Deserialize, Serialize)]
+pub(crate) struct View {
+    pub state: State,
+    pub pending: Option<creation::Request>,
+}
 impl Read for Get {
     const CLASS: &'static str = super::super::super::CLASS;
     const ID: u32 = 462;
     type Input = u64;
-    type Output = Option<State>;
+    type Output = Option<View>;
 
-    fn execute(context: &mut Transaction<'_>, issue: u64) -> Result<Option<State>> {
-        exists(context, issue)?
-            .then(|| load(context, issue))
-            .transpose()
+    fn execute(context: &mut Transaction<'_>, issue: u64) -> Result<Option<View>> {
+        if !exists(context, issue)? {
+            return Ok(None);
+        }
+        Ok(Some(View {
+            state: load(context, issue)?,
+            pending: creation::for_issue(context, issue)?,
+        }))
     }
 }
 
@@ -147,6 +157,9 @@ impl Mutation for Set {
         match position {
             Ok(index) => {
                 state.branches.remove(index);
+            }
+            Err(_) if creation::pending(context, input.issue)?.is_some() => {
+                return Ok(MutationResult::Rejected(Decision::Conflict));
             }
             Err(index) if state.branches.len() < MAX_BRANCHES => {
                 state.branches.insert(index, input.branch);

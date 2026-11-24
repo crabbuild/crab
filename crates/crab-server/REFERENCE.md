@@ -2470,7 +2470,7 @@ owner label does not acquire ownership.
 | Edit history | `GET /api/repos/{owner}/{name}/edit-history/{target}` and `DELETE ...?revision={number}` |
 | Activity | `GET /api/repos/{owner}/{name}/activity`, `GET /api/repos/{owner}/{name}/issues/{number}/activity`, `GET /api/repos/{owner}/{name}/pulls/{number}/activity` |
 | Linked work | Issue/pull `GET .../{number}/links`; `GET/PUT /api/repos/{owner}/{name}/pulls/{pull}/linked-issues/{issue}` |
-| Development branches | `GET .../issues/{number}/links?include_branches=true`; `PUT .../issues/{number}/development-branches` |
+| Development branches | `GET .../issues/{number}/links?include_branches=true`; `PUT/POST .../issues/{number}/development-branches` |
 | Issue dependencies | `GET .../issues/{number}/dependencies/{blocked_by|blocking}`; `GET/PUT .../issues/{number}/dependencies/{direction}/{other}` |
 | Assign or clear an issue type | `PUT .../issues/{number}/type` |
 
@@ -2562,6 +2562,16 @@ Send `{branch: {repository, reference}, active, version}` to
 `PUT .../issues/{number}/development-branches` using the target repository
 UUID and the issue's observed branch-link version. The response includes
 the committed version. A conflicting mutation returns HTTP 409.
+
+Choose **Create a branch** to publish a new branch in the selected repository
+and link it to the issue. The starting branch defaults to the selected
+repository's default branch. The server verifies Write access in both
+repositories and applies the destination's normal Git branch rules.
+POST `{request_id, repository, name, source_oid}` to the same endpoint,
+using the selected repository UUID and the exact starting commit SHA.
+Keep the request ID and payload for retries. On a lost response, reload the
+issue to see the linked branch or the original actor's pending request.
+Recovery links only the exact Git creation, even if the new branch has moved.
 
 ### Close a linked issue when its pull request merges
 

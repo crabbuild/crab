@@ -316,7 +316,8 @@ pub(crate) enum CaptureOutcome {
 pub(crate) struct Capture;
 
 fn has_linked_work(context: &Transaction<'_>, subject: Subject) -> Result<bool> {
-    if dependencies::has_edges(context, subject.number)?
+    if links::branches::creation::pending(context, subject.number)?.is_some()
+        || dependencies::has_edges(context, subject.number)?
         || duplicates::current(context, subject)?.is_some()
         || links::has_explicit_links(context, subject)?
     {
