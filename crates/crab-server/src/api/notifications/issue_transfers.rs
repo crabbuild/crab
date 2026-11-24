@@ -37,6 +37,7 @@ pub(super) async fn sources(
     server: &Server,
     principal: &Principal,
     repo: &Repository,
+    author: Option<[u8; 32]>,
     entries: &[&Entry],
 ) -> Result<HashMap<u64, String>> {
     let transfers: Vec<_> = entries
@@ -65,6 +66,7 @@ pub(super) async fn sources(
                             ReferenceInput {
                                 search: number.to_string(),
                                 exact: true,
+                                author,
                             },
                         )
                         .await,

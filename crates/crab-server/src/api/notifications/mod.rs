@@ -19,7 +19,8 @@ use crate::{
             IdentityKey,
             notifications::{
                 Entry, List, ListInput, NoticeTarget, Position, Reason, ReleaseKind,
-                State as NotificationState, Thread, ThreadPage, View, filters::Kind,
+                State as NotificationState, Thread, ThreadPage, View,
+                filters::{Author, Kind},
             },
         },
         repository::{
@@ -34,6 +35,7 @@ use crate::{
     server::Server,
 };
 
+mod authors;
 mod discussions;
 mod email;
 mod filters;
@@ -52,6 +54,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
             "/api/notifications/filters",
             get(filters::get).put(filters::update),
         )
+        .route("/api/notifications/authors", get(authors::complete))
         .route("/api/notifications/watched", get(watched::list))
         .route("/api/notifications/subscriptions", get(discussions::list))
         .route("/api/notifications/{id}/state", put(state::single))
@@ -92,6 +95,7 @@ struct Parameters {
     read: Option<bool>,
     reason: Option<Reason>,
     kind: Option<Kind>,
+    author: Option<Author>,
     view: Option<View>,
 }
 
@@ -184,6 +188,23 @@ async fn list(
     }
     let actor = app::account(&principal)?;
     let view = params.view.unwrap_or_default();
+    let author = if let Some(author) = params.author {
+        let Some(author) = authors::bind(&server, &actor, author).await? else {
+            app::account(&principal)?;
+            return Ok(Json(Page {
+                items: Vec::new(),
+                next: None,
+            }));
+        };
+        Some(author)
+    } else {
+        None
+    };
+    let scope = InboxScope {
+        organization: params.organization,
+        view,
+        author: author.as_ref(),
+    };
     let mut items = Vec::new();
     loop {
         let page = entries(&server, actor.clone(), before, view).await?;
@@ -210,17 +231,7 @@ async fn list(
                 .push((order, thread));
         }
         let batches: Vec<Vec<(usize, Item)>> = stream::iter(groups)
-            .map(|(id, entries)| {
-                repository_items(
-                    &server,
-                    &principal,
-                    &actor,
-                    id,
-                    params.organization,
-                    view,
-                    entries,
-                )
-            })
+            .map(|(id, entries)| repository_items(&server, &principal, &actor, id, scope, entries))
             .buffer_unordered(8)
             .try_collect()
             .await?;
@@ -298,9 +309,16 @@ async fn unread(
                         return Ok(false);
                     }
                     let entries: Vec<_> = items.iter().collect();
-                    let sources =
-                        resolve_sources(server, principal, &repo, actor, View::Inbox, &entries)
-                            .await?;
+                    let sources = resolve_sources(
+                        server,
+                        principal,
+                        &repo,
+                        actor,
+                        View::Inbox,
+                        None,
+                        &entries,
+                    )
+                    .await?;
                     let visible = !sources.releases.is_empty()
                         || !sources.transfers.is_empty()
                         || sources.discussions.into_iter().any(|visible| visible);
@@ -361,6 +379,7 @@ async fn resolve_sources(
     repo: &Repository,
     actor: &IdentityKey,
     view: View,
+    author: Option<&authors::BoundAuthor>,
     entries: &[&Entry],
 ) -> Result<ResolvedSources> {
     let cell = app::repository_cell(server, repo)?;
@@ -409,7 +428,14 @@ async fn resolve_sources(
         for batch in numbers.chunks(50) {
             let shown = app::query_output(
                 cell.client
-                    .query::<watches::PublishedReleases>(&cell.target, None, batch.to_vec())
+                    .query::<watches::PublishedReleases>(
+                        &cell.target,
+                        None,
+                        watches::PublishedReleaseQuery {
+                            numbers: batch.to_vec(),
+                            author: author.map(|author| author.identity.clone()),
+                        },
+                    )
                     .await,
             )?;
             if shown.len() != batch.len() {
@@ -430,7 +456,13 @@ async fn resolve_sources(
     let (discussions, releases, transfers) = tokio::try_join!(
         discussions,
         releases,
-        issue_transfers::sources(server, principal, repo, entries),
+        issue_transfers::sources(
+            server,
+            principal,
+            repo,
+            author.map(|author| author.discussion),
+            entries
+        ),
     )?;
     Ok(ResolvedSources {
         discussions,
@@ -439,19 +471,27 @@ async fn resolve_sources(
     })
 }
 
+#[derive(Clone, Copy)]
+struct InboxScope<'a> {
+    organization: Option<Uuid>,
+    view: View,
+    author: Option<&'a authors::BoundAuthor>,
+}
+
 async fn repository_items(
     server: &Server,
     principal: &Principal,
     actor: &IdentityKey,
     id: Uuid,
-    organization: Option<Uuid>,
-    view: View,
+    scope: InboxScope<'_>,
     entries: Vec<(usize, Thread)>,
 ) -> Result<Vec<(usize, Item)>> {
     let Some(repo) = server.repositories.by_id(id) else {
         return Ok(Vec::new());
     };
-    if organization.is_some_and(|organization| repo.organization != Some(organization))
+    if scope
+        .organization
+        .is_some_and(|organization| repo.organization != Some(organization))
         || !may_notify(server, principal, &repo, actor).await?
     {
         return Ok(Vec::new());
@@ -461,7 +501,8 @@ async fn repository_items(
         principal,
         &repo,
         actor,
-        view,
+        scope.view,
+        scope.author,
         &entries
             .iter()
             .map(|(_, thread)| &thread.entry)
@@ -494,6 +535,7 @@ async fn repository_items(
                                     ReferenceInput {
                                         search: number.to_string(),
                                         exact: true,
+                                        author: scope.author.map(|author| author.discussion),
                                     },
                                 )
                                 .await,
@@ -564,7 +606,7 @@ async fn repository_items(
     }
     // Source reads await a different Cell. Recheck the current grant once
     // per repository before presenting its whole batch.
-    if organization.is_some_and(|organization| {
+    if scope.organization.is_some_and(|organization| {
         server
             .repositories
             .by_id(id)

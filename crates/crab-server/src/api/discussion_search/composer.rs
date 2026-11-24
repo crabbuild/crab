@@ -88,6 +88,7 @@ pub(super) async fn references(
         ReferenceInput {
             search: params.search,
             exact: params.exact,
+            author: None,
         },
     )
     .await?;
@@ -112,6 +113,7 @@ pub(super) async fn open_reference(
         ReferenceInput {
             search: number.to_string(),
             exact: true,
+            author: None,
         },
     )
     .await?;
@@ -144,6 +146,7 @@ pub(super) async fn mentions(
     let input = ReferenceInput {
         search: params.search,
         exact: false,
+        author: None,
     };
     input.validate().map_err(Error::Invalid)?;
     let search = input.search.trim().to_lowercase();

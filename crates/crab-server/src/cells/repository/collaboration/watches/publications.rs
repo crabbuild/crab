@@ -2,7 +2,7 @@ use super::{
     CLASS, Error, IdentityKey, Key, Mode, Mutation, MutationResult, PAGE_SIZE, Read, Result,
     Transaction, subscription, watcher_keys,
 };
-use crate::cells::repository::{RepositoryAuthor, integer, result_text, statement};
+use crate::cells::repository::{RepositoryAuthor, SqlValue, integer, result_text};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -117,12 +117,23 @@ pub(crate) struct ReleaseSource {
     pub title: String,
 }
 
-fn source(context: &Transaction<'_>, number: u64) -> Result<Option<ReleaseSource>> {
-    let query = statement(
-        "SELECT tag_name, title FROM repository_releases WHERE number = ? AND draft = 0 AND deleted = 0",
-        vec![integer(number)?],
-    );
-    let rows = context.query(&query.sql, &query.parameters)?;
+fn source(
+    context: &Transaction<'_>,
+    number: u64,
+    author: Option<&IdentityKey>,
+) -> Result<Option<ReleaseSource>> {
+    let rows = context.query(
+        "SELECT tag_name, title FROM repository_releases
+         WHERE number = ?1 AND draft = 0 AND deleted = 0
+           AND (?2 IS NULL OR (author_issuer = ?2 AND author_subject = ?3))",
+        &[
+            integer(number)?,
+            author.map_or(SqlValue::Null, |value| SqlValue::Text(value.issuer.clone())),
+            author.map_or(SqlValue::Null, |value| {
+                SqlValue::Text(value.subject.clone())
+            }),
+        ],
+    )?;
     rows.rows
         .first()
         .map(|row| {
@@ -134,20 +145,32 @@ fn source(context: &Transaction<'_>, number: u64) -> Result<Option<ReleaseSource
         .transpose()
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PublishedReleaseQuery {
+    pub numbers: Vec<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<IdentityKey>,
+}
+
 pub(crate) struct PublishedReleases;
 impl Read for PublishedReleases {
     const CLASS: &'static str = CLASS;
     const ID: u32 = 426;
-    type Input = Vec<u64>;
+    type Input = PublishedReleaseQuery;
     type Output = Vec<Option<ReleaseSource>>;
 
     fn execute(context: &mut Transaction<'_>, input: Self::Input) -> Result<Self::Output> {
-        if input.len() > 50 {
+        if input.numbers.len() > 50 {
             return Err(Error::Invalid("Release notice batch is too large"));
         }
+        if let Some(author) = &input.author {
+            author.validate()?;
+        }
         input
+            .numbers
             .into_iter()
-            .map(|number| source(context, number))
+            .map(|number| source(context, number, input.author.as_ref()))
             .collect()
     }
 }
@@ -167,7 +190,7 @@ impl Read for ReleaseWatchers {
             return Ok(None);
         };
         if context.document::<u64>(&latest_key(event.number))? != Some(event.sequence)
-            || source(context, event.number)?.is_none()
+            || source(context, event.number, None)?.is_none()
         {
             return Ok(Some(super::WatchPage {
                 recipients: Vec::new(),

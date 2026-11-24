@@ -28,8 +28,8 @@ pub(crate) use inbox::{
 
 mod publications;
 pub(crate) use publications::{
-    AcknowledgeRelease, AcknowledgeReleaseInput, PublishedReleases, ReleaseEvent, ReleaseSource,
-    ReleaseWatchers,
+    AcknowledgeRelease, AcknowledgeReleaseInput, PublishedReleaseQuery, PublishedReleases,
+    ReleaseEvent, ReleaseSource, ReleaseWatchers,
 };
 pub(in crate::cells::repository) use publications::{pending as pending_releases, published};
 

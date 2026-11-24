@@ -13,6 +13,19 @@ async fn issue_transfer_notices_follow_membership_in_both_repositories() {
     let h = Harness::new(false).await;
     h.add_repository("library").await;
     let alice = h.login().await;
+    let original: Value = h
+        .write(
+            Method::POST,
+            "/api/profile",
+            &alice,
+            json!({"request_id":Uuid::now_v7(),"handle":"alice","name":"Alice"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     *h.provider.mode.lock().await = "member".into();
     let bob = h.login().await;
     *h.provider.mode.lock().await = "outsider".into();
@@ -99,6 +112,13 @@ async fn issue_transfer_notices_follow_membership_in_both_repositories() {
     h.deliver_notifications("team", "library").await;
     let inbox = "/api/notifications?reason=issue_transferred";
     let page = h.json(inbox, &bob).await;
+    let author = original["id"].as_str().unwrap();
+    let author_inbox = format!("{inbox}&author={author}");
+    assert_eq!(h.json(&author_inbox, &bob).await, page);
+    assert_eq!(
+        h.json(&format!("{inbox}&author=me"), &bob).await["items"],
+        json!([])
+    );
     let [notice] = page["items"].as_array().unwrap().as_slice() else {
         panic!("expected one issue transfer notice, got {page}");
     };
@@ -166,6 +186,19 @@ async fn issue_transfer_notices_follow_membership_in_both_repositories() {
 async fn inbox_delivers_a_review_request_and_mention_to_the_current_member() {
     let h = Harness::new(false).await;
     let alice = h.login().await;
+    let original: Value = h
+        .write(
+            Method::POST,
+            "/api/profile",
+            &alice,
+            json!({"request_id":Uuid::now_v7(),"handle":"alice","name":"Alice"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     let bob_id = h.assignee_id(&alice, "Bob").await;
     *h.provider.mode.lock().await = "member".into();
     let bob = h.login().await;
@@ -242,6 +275,18 @@ async fn inbox_delivers_a_review_request_and_mention_to_the_current_member() {
     let review = &page["items"][0];
     assert_eq!(review["reason"], "review_requested");
     assert_eq!(review["title"], "Please review");
+    let author = original["id"].as_str().unwrap();
+    let authored = h
+        .json(
+            &format!("/api/notifications?kind=pull&author={author}"),
+            &bob,
+        )
+        .await;
+    assert_eq!(authored["items"], json!([review]));
+    assert_eq!(
+        h.json("/api/notifications?kind=pull&author=me", &bob).await["items"],
+        json!([])
+    );
     assert!(
         review["href"]
             .as_str()

@@ -134,7 +134,7 @@ export function Notifications({
   const invitations = tab === "organization-invitations";
   const discussions = !transfers && !invitations;
   const criteria = criteriaAt(url);
-  const { view, repository, kind, organization } = criteria;
+  const { view, repository, kind, organization, author } = criteria;
   return (
     <section
       className="mx-auto grid max-w-4xl gap-5 px-4 py-6 sm:px-8"
@@ -212,7 +212,7 @@ export function Notifications({
           Clear repository filter
         </Link>
       )}
-      {discussions && (organization || kind || view === "read") && (
+      {discussions && (organization || kind || author || view === "read") && (
         <div className="flex flex-wrap items-center gap-3 text-sm">
           {organization && (
             <Link
@@ -228,6 +228,14 @@ export function Notifications({
               href={inboxHref({ ...criteria, kind: undefined })}
             >
               Clear type filter ({kinds[kind]})
+            </Link>
+          )}
+          {author && (
+            <Link
+              className="underline"
+              href={inboxHref({ ...criteria, author: undefined })}
+            >
+              Clear author filter
             </Link>
           )}
           {view === "read" && (

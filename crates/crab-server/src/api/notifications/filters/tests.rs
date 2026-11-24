@@ -107,6 +107,9 @@ async fn notification_filters_are_private_versioned_and_bounded() {
 async fn native_browser_saves_and_reopens_an_inbox_filter_across_sessions() {
     let h = Harness::new(false).await;
     let alice = h.login().await;
+    let alice_profile = profile(&h, &alice, "alice", "Alice").await;
+    let author = alice_profile["id"].as_str().unwrap();
+    let filtered = format!("**/-/notifications?reason=mention&author={author}&preset=*");
     *h.provider.mode.lock().await = "member".into();
     let bob = h.login().await;
     h.write(
@@ -136,7 +139,12 @@ async fn native_browser_saves_and_reopens_an_inbox_filter_across_sessions() {
     browser
         .run(&["select", "select[name=reason]", "mention"])
         .await;
+    browser
+        .run(&["fill", "input[name=filter-author]", "ali"])
+        .await;
+    click(&browser, "Alice (@alice)").await;
     click(&browser, "Save filter").await;
+    browser.run(&["wait", "--url", &filtered]).await;
     browser.run(&["wait", "--text", "Platform mention"]).await;
     assert_eq!(
         h.json(FILTERS, &bob).await["items"][0]["name"],
@@ -150,13 +158,7 @@ async fn native_browser_saves_and_reopens_an_inbox_filter_across_sessions() {
     browser.run(&["wait", "--text", "Platform mention"]).await;
     click(&browser, "Manage filters").await;
     click(&browser, "Platform triage").await;
-    browser
-        .run(&[
-            "wait",
-            "--url",
-            "**/-/notifications?reason=mention&preset=*",
-        ])
-        .await;
+    browser.run(&["wait", "--url", &filtered]).await;
     browser.run(&["wait", "--text", "Platform mention"]).await;
     click(&browser, "Manage filters").await;
     click(&browser, "Edit Platform triage").await;
@@ -171,6 +173,109 @@ async fn native_browser_saves_and_reopens_an_inbox_filter_across_sessions() {
     browser.run(&["wait", "--text", "Filter deleted."]).await;
     assert_eq!(h.json(FILTERS, &bob).await["items"], json!([]));
     drop(browser);
+    h.close().await;
+}
+
+async fn profile(h: &Harness, cookie: &str, handle: &str, name: &str) -> Value {
+    h.write(
+        Method::POST,
+        "/api/profile",
+        cookie,
+        json!({"request_id":Uuid::now_v7(),"handle":handle,"name":name}),
+    )
+    .await
+    .error_for_status()
+    .unwrap()
+    .json()
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn inbox_author_matches_the_thread_opener_and_survives_handle_changes() {
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    let original = profile(&h, &alice, "alice", "Alice").await;
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    let commenter = profile(&h, &bob, "bob", "Bob").await;
+    let issues = "/api/repos/team/private/issues";
+    for (author, title) in [(&alice, "Opened by Alice"), (&bob, "Opened by Bob")] {
+        let issue: Value = h
+            .write(
+                Method::POST,
+                issues,
+                author,
+                json!({"request_id":Uuid::now_v7(),"title":title,"body":""}),
+            )
+            .await
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        h.write(
+            Method::POST,
+            &format!("{issues}/{}/comments", issue["number"].as_u64().unwrap()),
+            &bob,
+            json!({"request_id":Uuid::now_v7(),"body":"One question, @alice."}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    }
+    h.deliver_notifications("team", "private").await;
+    let matches = h
+        .json("/api/notifications/authors?prefix=%40AL", &alice)
+        .await;
+    assert_eq!(
+        matches["items"],
+        json!([{"id":original["id"],"handle":"alice","name":"Alice"}])
+    );
+    assert_eq!(matches["truncated"], false);
+    let original_id = original["id"].as_str().unwrap();
+    let commenter_id = commenter["id"].as_str().unwrap();
+    let author_query = |author| format!("/api/notifications?author={author}&limit=1");
+    for (author, title) in [
+        (original_id, "Opened by Alice"),
+        ("me", "Opened by Alice"),
+        (commenter_id, "Opened by Bob"),
+    ] {
+        let page = h.json(&author_query(author), &alice).await;
+        let [item] = page["items"].as_array().unwrap().as_slice() else {
+            panic!("expected one notification for {title}: {page}");
+        };
+        assert_eq!(item["title"], title);
+        assert_eq!(item["sender"], "Bob");
+        assert!(page["next"].is_null());
+    }
+    h.write(
+        Method::PUT, FILTERS, &alice,
+        json!({"revision":0,"change":{"kind":"save","filter":{
+            "id":Uuid::now_v7(),"name":"My own issues","criteria":{"view":"unread","author":original_id}
+        }}}),
+    ).await.error_for_status().unwrap();
+    h.write(
+        Method::PATCH,
+        "/api/profile",
+        &alice,
+        json!({"version":original["version"],"handle":"alice-renamed","name":"Alice"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let saved = h.json(FILTERS, &alice).await;
+    let author = saved["items"][0]["criteria"]["author"].as_str().unwrap();
+    assert_eq!(author, original_id);
+    assert_eq!(
+        h.json(&author_query(author), &alice).await["items"][0]["title"],
+        "Opened by Alice"
+    );
+    let unknown = Uuid::now_v7().to_string();
+    assert_eq!(
+        h.json(&author_query(&unknown), &alice).await["items"],
+        json!([])
+    );
     h.close().await;
 }
 

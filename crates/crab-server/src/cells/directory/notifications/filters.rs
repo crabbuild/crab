@@ -42,6 +42,37 @@ pub(crate) enum View {
     Done,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(try_from = "String", into = "String")]
+pub(crate) enum Author {
+    Me,
+    Actor(Uuid),
+}
+
+impl TryFrom<String> for Author {
+    type Error = &'static str;
+
+    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+        if value == "me" {
+            return Ok(Self::Me);
+        }
+        Uuid::parse_str(&value)
+            .ok()
+            .filter(|id| !id.is_nil())
+            .map(Self::Actor)
+            .ok_or("Author must be the current account or a valid actor ID")
+    }
+}
+
+impl From<Author> for String {
+    fn from(author: Author) -> Self {
+        match author {
+            Author::Me => "me".into(),
+            Author::Actor(id) => id.to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Criteria {
@@ -54,6 +85,8 @@ pub(crate) struct Criteria {
     pub reason: Option<Reason>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<Kind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<Author>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

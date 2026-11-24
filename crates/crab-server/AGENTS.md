@@ -293,6 +293,8 @@ retains saved and completed conversations with private activity-order indexes.
 `notifications/filters.rs` owns account-private, revisioned inbox filters.
 Applying a filter uses the ordinary inbox query and its current repository
 grants. The filter stores repository and organization IDs without labels.
+Author filters bind the viewer or public actor ID to a qualified identity.
+The Repository Cell matches the original discussion or release author.
 `notifications/retention.rs` sweeps expired completions and fences replay.
 `collaboration/watches/inbox.rs` commits inbox dismissal with the Repository
 watch preference. `api/notifications/` checks repository access and mute state before listing

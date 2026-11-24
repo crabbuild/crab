@@ -18,6 +18,7 @@ import {
 import type { OrganizationView } from "@/lib/contracts";
 import { navigate, useRequest, type Repository } from "@/lib/api";
 import { inboxHref, kinds, reasons, views, type Criteria } from "./filters";
+import { AuthorField } from "./author-field";
 
 const path = "/api/notifications/filters";
 const limit = 15;
@@ -335,7 +336,7 @@ function FilterFields({
         labels.get(repo.organization_id) ?? repo.owner,
       );
   const fields: {
-    key: keyof Criteria;
+    key: Exclude<keyof Criteria, "author">;
     label: string;
     choices: Choice[];
     empty?: string;
@@ -422,6 +423,10 @@ function FilterFields({
           </div>
         );
       })}
+      <AuthorField
+        author={criteria.author}
+        onChange={(author) => onChange({ ...criteria, author })}
+      />
     </div>
   );
 }

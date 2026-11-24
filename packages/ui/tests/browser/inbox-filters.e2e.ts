@@ -44,6 +44,7 @@ test("saved filters combine criteria and recover from a stale edit on mobile", a
     organization,
     reason: "review_requested",
     kind: "pull",
+    author: "me",
   };
   let revision = 0;
   let saved:
@@ -89,6 +90,7 @@ test("saved filters combine criteria and recover from a stale edit on mobile", a
     .getByLabel("Reason", { exact: true })
     .selectOption("review_requested");
   await dialog.getByLabel("Notification type").selectOption("pull");
+  await dialog.getByRole("button", { name: "Me", exact: true }).click();
   await expectNoAccessibilityViolations(page);
   const filteredQuery = page.waitForRequest((request) => {
     const { pathname, searchParams } = new URL(request.url());
@@ -97,6 +99,7 @@ test("saved filters combine criteria and recover from a stale edit on mobile", a
       searchParams.get("organization") === organization &&
       searchParams.get("read") === "true" &&
       searchParams.get("kind") === "pull" &&
+      searchParams.get("author") === "me" &&
       searchParams.get("reason") === "review_requested"
     );
   });

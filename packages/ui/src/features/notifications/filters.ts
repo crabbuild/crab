@@ -59,6 +59,7 @@ export type Criteria = {
   organization?: string;
   reason?: Reason;
   kind?: keyof typeof kinds;
+  author?: string;
 };
 
 function choice<T extends string>(
@@ -80,6 +81,7 @@ export function criteriaAt(url: URL): Criteria {
     organization: params.get("organization") || undefined,
     reason: choice(reasons, params.get("reason")),
     kind: choice(kinds, params.get("kind")),
+    author: params.get("author") || undefined,
   };
 }
 
@@ -89,6 +91,7 @@ function qualifiers(criteria: Criteria) {
   if (criteria.organization) query.set("organization", criteria.organization);
   if (criteria.reason) query.set("reason", criteria.reason);
   if (criteria.kind) query.set("kind", criteria.kind);
+  if (criteria.author) query.set("author", criteria.author);
   return query;
 }
 

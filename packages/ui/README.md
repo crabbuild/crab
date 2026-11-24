@@ -4,8 +4,8 @@ React application embedded by `crab-server`. GitHub repository layouts and
 interactions are the reference; Geist colors and typography define the theme.
 
 Use **Manage filters** in Notifications to name a view and save its repository,
-organization, reason, and notification type. Saved filters follow your account
-across sessions and use current repository access.
+organization, reason, notification type, and original author. Saved filters
+follow your account across sessions and use current repository access.
 
 ## Design system
 
