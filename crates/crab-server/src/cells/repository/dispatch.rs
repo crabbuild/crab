@@ -6,7 +6,7 @@ use super::collaboration::reactions::{GetReactions, SetReaction};
 use super::collaboration::{
     attachments,
     links::{
-        GetLink, ListLinks, SetLink, commits as commit_closures,
+        GetLink, ListLinks, SetLink, branches::promotion::cross, commits as commit_closures,
         keywords::projection as descriptions,
     },
     mention_settings, mentions, watches,
@@ -227,6 +227,11 @@ pub(in crate::cells) fn dispatch_mutation(
         }
         collaboration::links::branches::promotion::Prepare::ID => {
             invoke_mutation::<collaboration::links::branches::promotion::Prepare>(context, input)
+        }
+        cross::Complete::ID => invoke_mutation::<cross::Complete>(context, input),
+        cross::Advance::ID => invoke_mutation::<cross::Advance>(context, input),
+        pulls::CreatePullWithLinks::ID => {
+            invoke_mutation::<pulls::CreatePullWithLinks>(context, input)
         }
         commit_closures::Reserve::ID => invoke_mutation::<commit_closures::Reserve>(context, input),
         commit_closures::Resolve::ID => invoke_mutation::<commit_closures::Resolve>(context, input),
@@ -475,6 +480,9 @@ pub(in crate::cells) fn dispatch_read(
         collaboration::links::branches::creation::PendingForPull::ID => {
             invoke_read::<collaboration::links::branches::creation::PendingForPull>(context, input)
         }
+        cross::Get::ID => invoke_read::<cross::Get>(context, input),
+        cross::Backfill::ID => invoke_read::<cross::Backfill>(context, input),
+        cross::Pending::ID => invoke_read::<cross::Pending>(context, input),
         <collaboration::conversation::ListConversation as Read>::ID => {
             invoke_read::<collaboration::conversation::ListConversation>(context, input)
         }

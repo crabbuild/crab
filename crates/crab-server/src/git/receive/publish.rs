@@ -1457,6 +1457,8 @@ async fn commit_authorized(
             // finished before its issue-side receipt was acknowledged.
             crate::repository::development_branches::recover_for_pull(server, entry, pull.number)
                 .await?;
+            crate::repository::development_branches::promotion::finish(server, entry, pull.number)
+                .await?;
             let linear = mutation
                 .linear_history
                 .as_ref()

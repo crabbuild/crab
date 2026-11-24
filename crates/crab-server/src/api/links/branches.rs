@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::*;
 use crate::{
     cells::{RepositoryCell, repository::collaboration::links::branches as native},
-    repository::Repository,
+    repository::{Repository, development_branches::promotion, settings},
 };
 use axum::{
     http::StatusCode,
@@ -151,29 +151,49 @@ pub(super) async fn set(
     if input.active && target.ref_oid(&input.branch.reference).await?.is_none() {
         return Err(Error::NotFound);
     }
-    app::membership(&server, &reader, &target).await?;
-    if !app::membership(&server, &principal, &source)
-        .await?
-        .principal
-        .can_write(source.id)
-    {
-        return Err(Error::LinkPermission);
-    }
-    let cell = app::repository_cell(&server, &source)?;
-    let outcome = app::command_output(
-        cell.client
-            .command::<native::Set>(
-                &cell.target,
-                app::mutation_identity()?,
-                native::Edit {
-                    issue,
-                    branch: input.branch,
-                    active: input.active,
-                    version: input.version,
-                },
-            )
-            .await,
-    )?;
+    let server = server.as_ref();
+    let source = source.as_ref();
+    let write = |cancel: tokio_util::sync::CancellationToken| async move {
+        app::membership(server, &reader, &target).await?;
+        if !app::membership(server, &principal, source)
+            .await?
+            .principal
+            .can_write(source.id)
+        {
+            return Err(Error::LinkPermission);
+        }
+        if cancel.is_cancelled() {
+            return Err(Error::MergeBusy);
+        }
+        let cell = app::repository_cell(server, source)?;
+        let branch = input.branch;
+        if input.active {
+            promotion::track_branch(server, source, issue, &branch, true).await?;
+        }
+        let outcome = app::command_output(
+            cell.client
+                .command::<native::Set>(
+                    &cell.target,
+                    app::mutation_identity()?,
+                    native::Edit {
+                        issue,
+                        branch: branch.clone(),
+                        active: input.active,
+                        version: input.version,
+                    },
+                )
+                .await,
+        )?;
+        if !input.active && matches!(outcome, native::Decision::Applied(_)) {
+            promotion::track_branch(server, source, issue, &branch, false).await?;
+        }
+        Ok(outcome)
+    };
+    let outcome = if source.organization.is_some() {
+        settings::with_ownership_lease(server, source, write).await?
+    } else {
+        write(server.cancellation.clone()).await?
+    };
     match outcome {
         native::Decision::Applied(version) => Ok(Json(json!({"version":version}))),
         native::Decision::Archived => Err(Error::Archived),

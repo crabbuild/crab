@@ -22,7 +22,7 @@ use crate::{
     app::{self, Error, Result},
     auth::{Identity, Principal},
     cells::repository::{MergeMethod, MergeReviewers, collaboration::Target},
-    repository::Repository,
+    repository::{Repository, development_branches::promotion as branch_links, settings},
     server::Server,
 };
 
@@ -992,7 +992,7 @@ async fn create(
         head_oid: comparison.head_oid,
     };
     let result = if replay || stale {
-        storage::create_pull(&server, &repo, input, stale).await
+        storage::create_pull(&server, &repo, input, stale, None).await
     } else {
         create_at_comparison(&server, &principal, &repo, input).await
     };
@@ -1008,6 +1008,21 @@ async fn create(
         }
         other => other?,
     };
+    if replay && repo.organization.is_some() {
+        let server = server.as_ref();
+        let repo = repo.as_ref();
+        let number = pull.number;
+        if let Err(error) = settings::with_ownership_lease(server, repo, |cancel| async move {
+            if !cancel.is_cancelled() {
+                branch_links::refresh(server, repo, number).await;
+            }
+            Ok(())
+        })
+        .await
+        {
+            tracing::warn!(repository = %repo.id, pull = number, %error, "development branch promotion will retry");
+        }
+    }
     if repo.organization.is_some() && !qualified(&pull.body).is_empty() {
         crate::repository::development_references::refresh(&server, &repo, pull.number).await;
     }
@@ -1107,7 +1122,36 @@ async fn create_at_comparison(
                 if cancel.is_cancelled() {
                     return Err(Error::MergeBusy);
                 }
-                storage::create_pull(worker, repo, input, stale).await
+                if stale
+                    || repo.organization.is_none()
+                    || !input.head_ref.starts_with("refs/heads/")
+                {
+                    return storage::create_pull(worker, repo, input, stale, None).await;
+                }
+                settings::with_ownership_lease(worker, repo, |policy| async move {
+                    if cancel.is_cancelled() || policy.is_cancelled() {
+                        return Err(Error::MergeBusy);
+                    }
+                    let grant = app::membership(worker, &principal, repo).await?;
+                    if fork.is_some() && !grant.principal.can_write(repo.id) {
+                        return Err(Error::Forbidden);
+                    }
+                    let branch = crate::cells::repository::collaboration::links::branches::Branch {
+                        repository: input.head_repository.unwrap_or(repo.id),
+                        reference: input.head_ref.clone(),
+                    };
+                    let links =
+                        branch_links::capture(worker, repo, &grant.principal, branch).await?;
+                    if cancel.is_cancelled() || policy.is_cancelled() {
+                        return Err(Error::MergeBusy);
+                    }
+                    let pull = storage::create_pull(worker, repo, input, false, links).await?;
+                    if !policy.is_cancelled() {
+                        branch_links::refresh(worker, repo, pull.number).await;
+                    }
+                    Ok(pull)
+                })
+                .await
             },
         )
         .await;

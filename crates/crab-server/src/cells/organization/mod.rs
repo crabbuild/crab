@@ -355,10 +355,19 @@ pub(in crate::cells) fn authorize(
         // Linked work is governed by the two repository grants. The trusted
         // HTTP caller checks both before using this organization-owned index.
         (
-            development::List::ID | development::Get::ID | development::descriptions::Pulls::ID,
+            development::List::ID
+            | development::Get::ID
+            | development::descriptions::Pulls::ID
+            | development::branches::Candidates::ID,
             false,
         )
-        | (development::Set::ID | development::descriptions::Replace::ID, true) => {
+        | (
+            development::Set::ID
+            | development::descriptions::Replace::ID
+            | development::branches::Track::ID
+            | development::branches::Promote::ID,
+            true,
+        ) => {
             return Ok(());
         }
         (discovery::GetLanding::ID, false) => return Ok(()),
@@ -461,6 +470,9 @@ pub(in crate::cells) fn dispatch_read(
         development::descriptions::Pulls::ID => {
             invoke_read::<development::descriptions::Pulls>(context, input)
         }
+        development::branches::Candidates::ID => {
+            invoke_read::<development::branches::Candidates>(context, input)
+        }
         projects::Get::ID => invoke_read::<projects::Get>(context, input),
         projects::Items::ID => invoke_read::<projects::Items>(context, input),
         projects::Sources::ID => invoke_read::<projects::Sources>(context, input),
@@ -533,6 +545,12 @@ pub(in crate::cells) fn dispatch_mutation(
         development::Set::ID => invoke_mutation::<development::Set>(context, input),
         development::descriptions::Replace::ID => {
             invoke_mutation::<development::descriptions::Replace>(context, input)
+        }
+        development::branches::Track::ID => {
+            invoke_mutation::<development::branches::Track>(context, input)
+        }
+        development::branches::Promote::ID => {
+            invoke_mutation::<development::branches::Promote>(context, input)
         }
         projects::ResolveIssue::ID => invoke_mutation::<projects::ResolveIssue>(context, input),
         #[cfg(test)]

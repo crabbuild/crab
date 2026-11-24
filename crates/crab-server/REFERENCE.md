@@ -2580,12 +2580,14 @@ Keep the request ID and payload for retries. On a lost response, reload the
 issue to see the linked branch or the original actor's pending request.
 Recovery links only the exact Git creation, even if the new branch has moved.
 
-When a pull request opens in the issue's repository from its linked branch,
-the pull request replaces the branch on the issue. Both conversations show
-the relationship under **From linked branch**. This also works when the head
-is in a fork. Merging into the default branch closes the linked issue through
-the normal pull-request merge path. This promotion covers up to ten issues
-per pull request. The issue and the pull request must belong to the same repository.
+When a pull request opens from a linked branch, it replaces the branch on the
+issue. Both conversations show **From linked branch**. This works with fork
+heads and with issues in another repository in the same organization. For a
+cross-repository link, the pull request author needs Read access to the issue
+repository. Merging into the default branch closes the issue when the merger
+has Write access to the issue repository and the link still closes on merge.
+Crab promotes up to ten matching issues per pull request in each link scope.
+After an upgrade, the background worker indexes earlier branch links in batches.
 
 ### Link a pull request from another repository
 

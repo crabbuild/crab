@@ -38,6 +38,7 @@ export type RelatedWork = {
   closes_on_merge: boolean;
   can_unlink: boolean;
   from_description?: boolean;
+  from_branch?: boolean;
 };
 
 function linkEndpoint(
@@ -104,6 +105,9 @@ export function CrossRepositoryLinks({
                 <span className="muted">{work.state}</span>
                 {row.from_description && (
                   <span className="muted">From PR description</span>
+                )}
+                {row.from_branch && (
+                  <span className="muted">From linked branch</span>
                 )}
                 {row.closes_on_merge && (
                   <span className="muted">Closes on default-branch merge</span>

@@ -16,6 +16,7 @@ use crate::{
 };
 
 use super::Repository;
+pub(crate) mod promotion;
 
 type Result<T> = std::result::Result<T, ReceiveError>;
 
@@ -196,12 +197,46 @@ pub(crate) async fn submit(
     target: Arc<Repository>,
     request: Request,
 ) -> Result<Status> {
-    let cell = app::repository_cell(&server, &source)?;
-    let outcome = app::command_output(
-        cell.client
-            .command::<Reserve>(cell.target, app::mutation_identity()?, request.clone())
-            .await,
-    )?;
+    let (reserve_server, reserve_source, reserve_request) = (&server, &source, &request);
+    let reserve = |cancel: tokio_util::sync::CancellationToken| async move {
+        if cancel.is_cancelled() {
+            return Err(ReceiveError::Cancelled);
+        }
+        let cell = app::repository_cell(reserve_server, reserve_source)?;
+        let outcome = app::command_output(
+            cell.client
+                .command::<Reserve>(
+                    cell.target,
+                    app::mutation_identity()?,
+                    reserve_request.clone(),
+                )
+                .await,
+        )?;
+        if matches!(outcome, Decision::Saved(Status::Pending)) {
+            // Register before the ref can publish. A retry of the same
+            // reservation repairs an interruption before this index write.
+            promotion::track_branch(
+                reserve_server,
+                reserve_source,
+                reserve_request.issue,
+                &reserve_request.branch,
+                true,
+            )
+            .await?;
+        }
+        Ok(outcome)
+    };
+    let outcome = if source.organization.is_some() {
+        super::settings::with_ruleset_lease(
+            &server,
+            super::settings::RulesetScope::Repository(&source),
+            &server.cancellation,
+            reserve,
+        )
+        .await?
+    } else {
+        reserve(server.cancellation.clone()).await?
+    };
     match outcome {
         Decision::Saved(Status::Pending) => {}
         Decision::Saved(status) => return Ok(status),

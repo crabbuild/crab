@@ -9,6 +9,7 @@ use crate::{
 };
 use reqwest::{Method, StatusCode, header};
 
+mod branches;
 mod commit_messages;
 mod keywords;
 
@@ -183,13 +184,7 @@ async fn fixture() -> (Harness, String, Uuid, Repo, Repo) {
     (h, alice, org, issue, pull)
 }
 
-async fn git_pull(
-    h: &Harness,
-    actor: &str,
-    repo: &Repo,
-    checkout: &std::path::Path,
-    description: &str,
-) -> (Value, url::Url) {
+async fn git_remote(h: &Harness, actor: &str, repo: &Repo) -> url::Url {
     let token: Value = h
         .write(
             Method::POST,
@@ -206,6 +201,17 @@ async fn git_pull(
     let mut remote = url::Url::parse(&format!("{}/git{}.git", h.origin, repo.path())).unwrap();
     remote.set_username("crab").unwrap();
     remote.set_password(token["token"].as_str()).unwrap();
+    remote
+}
+
+async fn git_pull(
+    h: &Harness,
+    actor: &str,
+    repo: &Repo,
+    checkout: &std::path::Path,
+    description: &str,
+) -> (Value, url::Url) {
+    let remote = git_remote(h, actor, repo).await;
     let head = git::push_review_branches(checkout, remote.as_str()).await;
     let base = git::success(checkout, &["rev-parse", "main"]).await;
     let pull: Value = repo

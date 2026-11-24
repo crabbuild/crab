@@ -318,6 +318,9 @@ pub(super) async fn list(
         });
         if let Some(manual) = manual {
             item["version"] = json!(manual.version);
+            if manual.from_branch {
+                item["from_branch"] = json!(true);
+            }
         }
         if described {
             item["from_description"] = json!(true);

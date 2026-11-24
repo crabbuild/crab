@@ -566,6 +566,16 @@ branch can promote. Merge publication checks those receipts before capturing
 the default-branch closure set, so an unacknowledged branch creation can
 still close its issue on time.
 
+For cross-repository promotion, the Organization Cell indexes issue origins
+by the exact head repository and ref. Branch writes register candidates before
+they become eligible. A bounded background pass indexes earlier links. Pull
+creation captures readable candidates under the comparison and organization
+leases. The PR write stores those issue origins and observed branch versions
+in its own transaction. Delivery saves the link in both directions, then
+removes the captured branch from the issue. A newer issue branch revision or
+an explicit unlink takes precedence. The background worker and merge
+publication retry pending promotions.
+
 Explicit cross-repository issue and pull request links live in the shared
 Organization Cell. One transaction updates the versioned relationship and
 both bounded indexes. Removing a relationship retains its version so a stale

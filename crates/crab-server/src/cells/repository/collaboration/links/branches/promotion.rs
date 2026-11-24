@@ -1,6 +1,8 @@
 use super::*;
 use crate::cells::repository::{GetPull, PullRecord, PullState, result_blob};
 
+pub(crate) mod cross;
+
 const PREPARATION: &str = "collaboration/v1/development-branch-head-index";
 const BATCH: usize = 32;
 
@@ -109,20 +111,7 @@ pub(in crate::cells::repository) fn create(
     if !step(context)? {
         return Err(Error::Invalid("Development branch index needs preparation"));
     }
-    let repository = match pull.head_repository {
-        Some(repository) => repository,
-        None => {
-            let rows = context.query(
-                "SELECT repository_uuid FROM repository_identity WHERE singleton = 1",
-                &[],
-            )?;
-            Uuid::from_slice(result_blob(&rows.rows[0], 0)?).map_err(Error::sdk)?
-        }
-    };
-    let branch = Branch {
-        repository,
-        reference: pull.head_ref.clone(),
-    };
+    let branch = head(context, pull)?;
     let candidates = context.documents_after::<u64>(&prefix(&branch), None, MAX_CLOSING_ISSUES)?;
     for (_, issue) in candidates {
         let mut state = load(context, issue)?;
@@ -139,6 +128,25 @@ pub(in crate::cells::repository) fn create(
         }
     }
     Ok(())
+}
+
+fn repository_id(context: &Transaction<'_>) -> Result<Uuid> {
+    let rows = context.query(
+        "SELECT repository_uuid FROM repository_identity WHERE singleton = 1",
+        &[],
+    )?;
+    Uuid::from_slice(result_blob(&rows.rows[0], 0)?).map_err(Error::sdk)
+}
+
+fn head(context: &Transaction<'_>, pull: &PullRecord) -> Result<Branch> {
+    let repository = match pull.head_repository {
+        Some(repository) => repository,
+        None => repository_id(context)?,
+    };
+    Ok(Branch {
+        repository,
+        reference: pull.head_ref.clone(),
+    })
 }
 
 pub(super) fn settle(context: &mut Transaction<'_>, issue: u64, pull: u64) -> Result<bool> {

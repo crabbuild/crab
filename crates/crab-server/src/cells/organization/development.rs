@@ -4,6 +4,7 @@ use crate::cells::repository::issues::transfer::publication::Destination;
 const PREFIX: &str = "organization/v1/development-links";
 const LIMIT: usize = 10;
 
+pub(crate) mod branches;
 pub(crate) mod descriptions;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -66,6 +67,8 @@ pub(crate) struct State {
     pub version: u64,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub closes_on_merge: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_branch: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -75,6 +78,8 @@ pub(crate) struct Link {
     pub version: u64,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub closes_on_merge: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_branch: bool,
 }
 
 pub(crate) struct List;
@@ -132,56 +137,64 @@ impl Mutation for Set {
     type Output = Decision;
 
     fn execute(context: &mut Transaction<'_>, input: Edit) -> Result<MutationResult<Decision>> {
-        let prior = Get::execute(context, input.pair)?;
-        let closes_on_merge =
-            input.active && input.closes_on_merge.unwrap_or(prior.closes_on_merge);
-        if prior.active == input.active
-            && prior.closes_on_merge == closes_on_merge
-            && (prior.version == input.version
-                || input.version.checked_add(1) == Some(prior.version))
-        {
-            return Ok(MutationResult::Rejected(Decision::Applied(prior)));
-        }
-        if prior.version != input.version {
-            return Ok(MutationResult::Rejected(Decision::Conflict));
-        }
-        let ends = input.pair.ends();
-        if input.active && !prior.active {
-            for (side, _) in ends {
-                if context
-                    .documents_after::<Link>(&side.prefix()?, None, LIMIT)?
-                    .len()
-                    == LIMIT
-                {
-                    return Ok(MutationResult::Rejected(Decision::Limit));
-                }
-            }
-        }
-        let version = prior
-            .version
-            .checked_add(1)
-            .filter(|next| *next <= MAX_VERSION)
-            .ok_or(Error::Invalid("Development link version exhausted"))?;
-        let state = State {
-            active: input.active,
-            version,
-            closes_on_merge,
-        };
-        let link = Link {
-            pair: input.pair,
-            version,
-            closes_on_merge,
-        };
-        context.put_document(&input.pair.key(), &state)?;
-        // Both endpoints share one receipt and become visible atomically.
-        for (side, other) in ends {
-            let key = format!("{}{}", side.prefix()?, endpoint_key(other));
-            if input.active {
-                context.put_document(&key, &link)?;
-            } else {
-                context.delete_document(&key)?;
-            }
-        }
-        Ok(MutationResult::Success(Decision::Applied(state)))
+        set(context, input, false)
     }
+}
+
+fn set(
+    context: &mut Transaction<'_>,
+    input: Edit,
+    from_branch: bool,
+) -> Result<MutationResult<Decision>> {
+    let prior = Get::execute(context, input.pair)?;
+    let closes_on_merge = input.active && input.closes_on_merge.unwrap_or(prior.closes_on_merge);
+    if prior.active == input.active
+        && prior.closes_on_merge == closes_on_merge
+        && (prior.version == input.version || input.version.checked_add(1) == Some(prior.version))
+    {
+        return Ok(MutationResult::Rejected(Decision::Applied(prior)));
+    }
+    if prior.version != input.version {
+        return Ok(MutationResult::Rejected(Decision::Conflict));
+    }
+    let ends = input.pair.ends();
+    if input.active && !prior.active {
+        for (side, _) in ends {
+            if context
+                .documents_after::<Link>(&side.prefix()?, None, LIMIT)?
+                .len()
+                == LIMIT
+            {
+                return Ok(MutationResult::Rejected(Decision::Limit));
+            }
+        }
+    }
+    let version = prior
+        .version
+        .checked_add(1)
+        .filter(|next| *next <= MAX_VERSION)
+        .ok_or(Error::Invalid("Development link version exhausted"))?;
+    let state = State {
+        active: input.active,
+        version,
+        closes_on_merge,
+        from_branch: input.active && (prior.from_branch || from_branch),
+    };
+    let link = Link {
+        pair: input.pair,
+        version,
+        closes_on_merge,
+        from_branch: state.from_branch,
+    };
+    context.put_document(&input.pair.key(), &state)?;
+    // Both endpoints share one receipt and become visible atomically.
+    for (side, other) in ends {
+        let key = format!("{}{}", side.prefix()?, endpoint_key(other));
+        if input.active {
+            context.put_document(&key, &link)?;
+        } else {
+            context.delete_document(&key)?;
+        }
+    }
+    Ok(MutationResult::Success(Decision::Applied(state)))
 }

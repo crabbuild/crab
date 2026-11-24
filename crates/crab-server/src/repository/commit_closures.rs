@@ -240,7 +240,11 @@ async fn reconcile(
     Ok(())
 }
 
-async fn current_scope(server: &Server, repo: &Repository, organization: Uuid) -> Result<bool> {
+pub(super) async fn current_scope(
+    server: &Server,
+    repo: &Repository,
+    organization: Uuid,
+) -> Result<bool> {
     if repo.organization != Some(organization) {
         return Ok(false);
     }
