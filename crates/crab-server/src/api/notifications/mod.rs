@@ -36,6 +36,7 @@ use crate::{
 
 mod discussions;
 mod email;
+mod issue_transfers;
 mod state;
 mod subscriptions;
 mod unsubscribe;
@@ -97,7 +98,20 @@ struct RepositoryLabel {
 #[serde(untagged)]
 enum InboxSubject {
     Discussion(Subject),
-    Release { kind: ReleaseKind, number: u64 },
+    Release {
+        kind: ReleaseKind,
+        number: u64,
+    },
+    IssueTransfer {
+        kind: IssueTransferKind,
+        number: u64,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum IssueTransferKind {
+    IssueTransfer,
 }
 
 #[derive(Serialize)]
@@ -260,8 +274,10 @@ async fn unread(
                     }
                     let entries: Vec<_> = items.iter().collect();
                     let sources =
-                        resolve_sources(server, &repo, actor, View::Inbox, &entries).await?;
+                        resolve_sources(server, principal, &repo, actor, View::Inbox, &entries)
+                            .await?;
                     let visible = !sources.releases.is_empty()
+                        || !sources.transfers.is_empty()
                         || sources.discussions.into_iter().any(|visible| visible);
                     Ok::<_, Error>(visible && may_notify(server, principal, &repo, actor).await?)
                 }
@@ -311,10 +327,12 @@ async fn may_notify(
 struct ResolvedSources {
     discussions: Vec<bool>,
     releases: HashMap<u64, watches::ReleaseSource>,
+    transfers: HashMap<u64, String>,
 }
 
 async fn resolve_sources(
     server: &Server,
+    principal: &Principal,
     repo: &Repository,
     actor: &IdentityKey,
     view: View,
@@ -331,6 +349,7 @@ async fn resolve_sources(
                 resumed: entry.resumed,
             }),
             NoticeTarget::Release { number, .. } => numbers.push(number),
+            NoticeTarget::IssueTransfer { .. } => {}
         }
     }
     let discussions = async {
@@ -383,10 +402,15 @@ async fn resolve_sources(
         }
         Ok(sources)
     };
-    let (discussions, releases) = tokio::try_join!(discussions, releases)?;
+    let (discussions, releases, transfers) = tokio::try_join!(
+        discussions,
+        releases,
+        issue_transfers::sources(server, principal, repo, entries),
+    )?;
     Ok(ResolvedSources {
         discussions,
         releases,
+        transfers,
     })
 }
 
@@ -406,6 +430,7 @@ async fn repository_items(
     }
     let sources = resolve_sources(
         server,
+        principal,
         &repo,
         actor,
         view,
@@ -474,6 +499,19 @@ async fn repository_items(
                     format!(
                         "/{owner}/{name}/releases/tag/{tag}?repository_id={id}&release_number={number}"
                     ),
+                )
+            }
+            NoticeTarget::IssueTransfer { number, .. } => {
+                let Some(title) = sources.transfers.get(&number) else {
+                    continue;
+                };
+                (
+                    InboxSubject::IssueTransfer {
+                        kind: IssueTransferKind::IssueTransfer,
+                        number,
+                    },
+                    title.clone(),
+                    format!("/{owner}/{name}/issues/{number}?repository_id={id}"),
                 )
             }
         };

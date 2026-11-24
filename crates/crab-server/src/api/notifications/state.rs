@@ -1,4 +1,4 @@
-use super::may_notify;
+use super::{issue_transfers::readable_origins, may_notify};
 use crate::{
     app::{self, Error, Result},
     auth::Principal,
@@ -7,8 +7,8 @@ use crate::{
         directory::{
             IdentityKey,
             notifications::{
-                Action, Changed, Position, Selected, SetState, SetStateInput, State,
-                validate_selection,
+                Action, Changed, CheckSelection, Position, Selected, Selection, SetState,
+                SetStateInput, State, validate_selection,
             },
         },
     },
@@ -127,6 +127,28 @@ async fn apply(
     let repositories = items.iter().map(|item| item.repository_id).collect();
     authorize(server, principal, &identity, &repositories).await?;
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    let selections = app::query_output(
+        cells
+            .query::<CheckSelection>(
+                Address::Directory,
+                None,
+                Selection {
+                    identity: identity.clone(),
+                    items: items.clone(),
+                },
+            )
+            .await,
+    )?;
+    if selections.len() != items.len() {
+        return Err(Error::CellContract(
+            "Notification selection count does not match",
+        ));
+    }
+    let origins: BTreeSet<_> = selections
+        .into_iter()
+        .filter_map(|item| item.transfer_origin)
+        .collect();
+    authorize_origins(server, principal, &origins).await?;
     let result = app::command_output(
         cells
             .command::<SetState>(
@@ -141,8 +163,24 @@ async fn apply(
             .await,
     )?;
     authorize(server, principal, &identity, &repositories).await?;
+    authorize_origins(server, principal, &origins).await?;
     app::account(principal)?;
     result.ok_or(Error::PageChanged)
+}
+
+async fn authorize_origins(
+    server: &Server,
+    principal: &Principal,
+    origins: &BTreeSet<Uuid>,
+) -> Result<()> {
+    if readable_origins(server, principal, origins.clone())
+        .await?
+        .len()
+        != origins.len()
+    {
+        return Err(Error::NotFound);
+    }
+    Ok(())
 }
 
 async fn authorize(

@@ -106,7 +106,7 @@ pub(super) async fn apply(
         groups
             .entry(item.repository_id)
             .or_default()
-            .push((index, item, selected));
+            .push((index, item, selected.current));
     }
     let batches: Vec<_> = stream::iter(groups)
         .map(|(id, items)| apply_repository(&server, &principal, &identity, id, items))

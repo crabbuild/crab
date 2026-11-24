@@ -48,6 +48,62 @@ pub(crate) struct Event {
     pub watch: Option<Watch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow: Option<FollowSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_origin: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Clone)]
+#[serde(deny_unknown_fields)]
+pub(in crate::cells::repository) struct TransferMentions {
+    at: u64,
+    people: Vec<Mention>,
+}
+
+impl TransferMentions {
+    pub(in crate::cells::repository) fn capture(
+        context: &Transaction<'_>,
+        body: &str,
+    ) -> Result<Option<Self>> {
+        if !body.contains('@') {
+            return Ok(None);
+        }
+        let settings = mention_settings::read(context)?;
+        Ok(mentions(body, &settings)
+            .filter(|people| !people.is_empty())
+            .map(|people| Self {
+                at: context.now_ms().unsigned_abs(),
+                people: people.into_iter().collect(),
+            }))
+    }
+
+    pub(in crate::cells::repository) fn publish(
+        &self,
+        context: &Transaction<'_>,
+        origin: Uuid,
+        number: u64,
+        actor: &IdentityKey,
+    ) -> Result<()> {
+        let id = Uuid::now_v7();
+        let event = Event {
+            id,
+            target: Target::Issue { number },
+            version: 0,
+            actor: RepositoryAuthor {
+                issuer: actor.issuer.clone(),
+                subject: actor.subject.clone(),
+                name: "Repository moderator".into(),
+            },
+            created_at_ms: self.at,
+            previous: Vec::new(),
+            current: self.people.clone(),
+            reviewers: Vec::new(),
+            assignees: Vec::new(),
+            watch: None,
+            follow: None,
+            transfer_origin: Some(origin),
+        };
+        context.put_document(&key(event.id, event.created_at_ms), &event)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -245,6 +301,7 @@ pub(in crate::cells::repository) fn record(
                 activity: source.number,
                 event,
             }),
+            transfer_origin: None,
         },
     )
 }
@@ -286,6 +343,7 @@ pub(in crate::cells::repository) fn review_requested(
                     activity: source.number,
                     event: id,
                 }),
+                transfer_origin: None,
             },
         )?;
     }
@@ -330,6 +388,7 @@ pub(in crate::cells::repository) fn assigned(
                 activity: source.number,
                 event,
             }),
+            transfer_origin: None,
         },
     )
 }
@@ -392,6 +451,7 @@ pub(super) fn watched(context: &Transaction<'_>, source: &super::activity::Event
         assignees: Vec::new(),
         watch: Some(Watch::default()),
         follow: None,
+        transfer_origin: None,
     };
     context.put_document(&key(event.id, event.created_at_ms), &event)
 }

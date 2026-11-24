@@ -281,7 +281,11 @@ their qualified identity before scheduling delivery. Watch outbox events carry
 the activity number and advance by bounded pages after Directory delivery.
 The mention outbox pins enrollment sources to committed activity and gates
 later watch pages until the inbox delivery and follow commit. The Directory
-groups inbox entries by typed discussion. `notifications/triage.rs` binds all
+groups inbox entries by typed discussion. Issue transfer receipts capture
+mentions from the source description. Destination publication enqueues them
+in the same transaction that installs the issue. Transfer inbox entries
+carry their source repository and require current grants to both repositories
+for delivery, viewing, and triage. `notifications/triage.rs` binds all
 selected rows to observed activity in one transaction. `notifications/filing.rs`
 retains saved and completed conversations with private activity-order indexes.
 `notifications/retention.rs` sweeps expired completions and fences replay.

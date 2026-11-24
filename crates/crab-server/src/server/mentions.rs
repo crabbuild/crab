@@ -15,7 +15,7 @@ use crate::{
     cells::{
         self, Address, CellClient,
         directory::{
-            IdentityKey, LookupAccounts, LookupIdentities, RegisterAccounts,
+            IdentityKey, LookupAccounts, LookupActors, LookupIdentities, RegisterAccounts,
             notifications::{
                 Access, Deliver, Delivery, HandlesAt, MAX_RECIPIENTS, Notice, NoticeTarget, Reason,
                 Recipient, ReleaseKind, ResolveHandlesAt,
@@ -51,6 +51,42 @@ pub(super) async fn current_grants(
         Err(crate::catalog::CatalogError::NotFound) => Ok(None),
         Err(error) => Err(Error::Membership(Box::new(error))),
     }
+}
+
+pub(super) async fn recipient_has_grant(
+    server: &Server,
+    grants: &MembershipSnapshot,
+    actor: Uuid,
+    identity: &IdentityKey,
+) -> Result<bool> {
+    let Some(auth) = server
+        .auth
+        .as_ref()
+        .filter(|auth| auth.issuer() == identity.issuer)
+    else {
+        return Ok(false);
+    };
+    if grants
+        .members
+        .iter()
+        .any(|member| member.subject == identity.subject)
+    {
+        return Ok(true);
+    }
+    if let Some(organization) = &grants.organization {
+        match app::repository_team_access(server, organization, Some(actor), false).await {
+            Ok(access) if access.owner || !access.teams.is_empty() => return Ok(true),
+            Ok(_) | Err(Error::Cell(cells::Error::NotInitialized | cells::Error::AccessDenied)) => {
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(auth.is_oidc()
+        && !grants.groups.is_empty()
+        && auth
+            .mention_group(&identity.subject, &grants.groups)
+            .await?
+            .is_some())
 }
 
 async fn account_ids(client: &CellClient, identities: &[IdentityKey]) -> Result<Vec<Option<Uuid>>> {
@@ -371,7 +407,7 @@ async fn deliver(
     settings: &Settings,
     event: &Event,
 ) -> Result<Progress> {
-    let notice = Notice {
+    let mut notice = Notice {
         id: event.id,
         repository: repo.id,
         target: event.target.into(),
@@ -415,6 +451,34 @@ async fn deliver(
         issuer: event.actor.issuer.clone(),
         subject: event.actor.subject.clone(),
     };
+    let origin = if let Some(id) = event.transfer_origin {
+        let Some(origin) = server.repositories.by_id(id) else {
+            return Ok(Progress::Ready(None));
+        };
+        let Some(grants) = current_grants(server, &origin).await? else {
+            return Ok(Progress::Ready(None));
+        };
+        let profiles = app::query_output(
+            client
+                .query::<LookupActors>(Address::Directory, None, vec![sender_key.clone()])
+                .await,
+        )?;
+        let [profile] = profiles.as_slice() else {
+            return Err(Error::CellContract(
+                "Transfer sender lookup returned an invalid count",
+            ));
+        };
+        if let Some(profile) = profile {
+            notice.sender.clone_from(&profile.name);
+        }
+        let crate::cells::repository::collaboration::Target::Issue { number } = event.target else {
+            return Err(Error::CellContract("Transfer notice must target an issue"));
+        };
+        notice.target = NoticeTarget::IssueTransfer { origin: id, number };
+        Some((origin, grants))
+    } else {
+        None
+    };
     let recipients: BTreeMap<_, _> = if !event.assignees.is_empty() {
         let sender = account_ids(client, std::slice::from_ref(&sender_key))
             .await?
@@ -435,10 +499,24 @@ async fn deliver(
         )?;
         let sender = sender.into_iter().next().flatten();
         let candidates: Vec<_> = scope.direct.iter().copied().collect();
+        let origin_settings = if event
+            .current
+            .iter()
+            .any(|mention| matches!(mention, Mention::Team { .. }))
+            && let Some((origin, _)) = &origin
+        {
+            Some(app::query_output(
+                client
+                    .query::<mention_settings::Get>(Address::Repository(origin.id), None, ())
+                    .await,
+            )?)
+        } else {
+            None
+        };
         let teams = team_members(
             client,
             event,
-            settings,
+            origin_settings.as_ref().unwrap_or(settings),
             sender,
             scope.groups.is_empty().then_some(candidates.as_slice()),
         )
@@ -482,7 +560,11 @@ async fn deliver(
             {
                 candidates.push(Recipient {
                     actor,
-                    reason,
+                    reason: if origin.is_some() {
+                        Reason::IssueTransferred
+                    } else {
+                        reason
+                    },
                     access,
                 });
                 qualified.push(identity);
@@ -501,12 +583,47 @@ async fn deliver(
                 "Notification preference lookup returned an invalid count",
             ));
         }
-        let recipients: Vec<_> = candidates
+        let mut recipients: Vec<_> = candidates
             .into_iter()
             .zip(qualified)
             .zip(unmuted)
             .filter_map(|(candidate, enabled)| enabled.then_some(candidate))
             .collect();
+        if let Some((origin, origin_grants)) = &origin {
+            let Some(destination_grants) = current_grants(server, repo).await? else {
+                return Ok(Progress::Ready(None));
+            };
+            if destination_grants.revision != scope.revision {
+                return Err(Error::PageChanged);
+            }
+            let checked: Vec<_> = stream::iter(recipients)
+                .map(|(recipient, identity)| {
+                    let destination_grants = &destination_grants;
+                    async move {
+                        let allowed =
+                            recipient_has_grant(server, origin_grants, recipient.actor, &identity)
+                                .await?
+                                && recipient_has_grant(
+                                    server,
+                                    destination_grants,
+                                    recipient.actor,
+                                    &identity,
+                                )
+                                .await?;
+                        Ok::<_, Error>(allowed.then_some((recipient, identity)))
+                    }
+                })
+                .buffer_unordered(6)
+                .try_collect()
+                .await?;
+            recipients = checked.into_iter().flatten().collect();
+            let Some(fresh) = current_grants(server, origin).await? else {
+                return Ok(Progress::Ready(None));
+            };
+            if fresh.revision != origin_grants.revision || !scope.current(server, repo).await? {
+                return Err(Error::PageChanged);
+            }
+        }
         publish(
             server,
             client,

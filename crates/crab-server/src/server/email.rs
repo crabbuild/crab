@@ -4,7 +4,10 @@ use reqwest::{Client, StatusCode, header, redirect::Policy};
 use serde::Serialize;
 use url::Url;
 
-use super::{Server, mentions::current_grants};
+use super::{
+    Server,
+    mentions::{current_grants, recipient_has_grant},
+};
 use crate::{
     NotificationEmailConfig,
     app::{self, Error},
@@ -282,34 +285,8 @@ async fn can_deliver(server: &Server, cells: &CellClient, job: &Job) -> Result<b
     let Some(grants) = current_grants(server, &repo).await? else {
         return Ok(false);
     };
-    let direct = grants
-        .members
-        .iter()
-        .any(|member| member.subject == identity.subject);
-    if !direct {
-        let team = if let Some(organization) = &grants.organization {
-            match app::repository_team_access(server, organization, Some(job.id.actor), false).await
-            {
-                Ok(access) => access.owner || !access.teams.is_empty(),
-                Err(Error::Cell(
-                    crate::cells::Error::NotInitialized | crate::cells::Error::AccessDenied,
-                )) => false,
-                Err(error) => return Err(error.into()),
-            }
-        } else {
-            false
-        };
-        if !team
-            && (!auth.is_oidc()
-                || grants.groups.is_empty()
-                || auth
-                    .mention_group(&identity.subject, &grants.groups)
-                    .await
-                    .map_err(Error::from)?
-                    .is_none())
-        {
-            return Ok(false);
-        }
+    if !recipient_has_grant(server, &grants, job.id.actor, identity).await? {
+        return Ok(false);
     }
     let preference = app::query_output(
         cells

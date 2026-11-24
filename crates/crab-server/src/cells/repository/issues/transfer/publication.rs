@@ -1,6 +1,6 @@
 use super::recovery::Work;
 use super::*;
-use crate::cells::repository::collaboration::milestones;
+use crate::cells::repository::collaboration::{mentions::TransferMentions, milestones};
 
 const MOVED: &str = "collaboration/v1/issue-transfers/moved/";
 const RESERVED: &str = "collaboration/v1/issue-transfers/reserved/";
@@ -175,6 +175,8 @@ impl Mutation for Prepare {
 pub(crate) struct Decision {
     reservation: Reservation,
     source_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mentions: Option<TransferMentions>,
 }
 
 impl Decision {
@@ -261,6 +263,7 @@ impl Mutation for Retire {
         if issue.state != 0 || observed(context, &issue)? != reservation.source {
             return Ok(MutationResult::Rejected(RetireOutcome::Changed));
         }
+        let mentions = TransferMentions::capture(context, &issue.body)?;
         let subject = Subject {
             kind: SubjectKind::Issue,
             number: issue.number,
@@ -292,6 +295,7 @@ impl Mutation for Retire {
         let decision = Decision {
             reservation,
             source_revision,
+            mentions,
         };
         context.put_document(&move_key(issue.number), &decision)?;
         recovery::arm(context, Work::Publish(issue.number), PUBLICATION_GRACE_MS)?;
@@ -550,6 +554,14 @@ impl Mutation for Publish {
             // A committed source move must recover even if the repository has
             // archived since the reservation was admitted.
             install(context, &reservation, job.progress.frames)?;
+            if let Some(mentions) = decision.mentions {
+                mentions.publish(
+                    context,
+                    reservation.source.repository,
+                    reservation.destination.number,
+                    &reservation.actor,
+                )?;
+            }
             job.publication = Some(DestinationState::Published(Prepared {
                 number: reservation.destination.number,
                 ownership_epoch: reservation.ownership_epoch,

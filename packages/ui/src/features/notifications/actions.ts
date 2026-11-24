@@ -6,7 +6,10 @@ export function refreshNotificationBadge() {
 }
 export type NoticeState = { read: boolean; saved: boolean; done: boolean };
 export type Action = { read: boolean } | { save: boolean } | { done: boolean };
-export type Subject = { kind: "issue" | "pull" | "release"; number: number };
+export type Subject = {
+  kind: "issue" | "pull" | "release" | "issue_transfer";
+  number: number;
+};
 type Position = { id: string; created_at_ms: number };
 
 export type Selection = {

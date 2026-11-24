@@ -3,6 +3,7 @@ import {
   AtSignIcon,
   BellIcon,
   GitPullRequestIcon,
+  MoveRightIcon,
   TagIcon,
   UserRoundIcon,
 } from "lucide-react";
@@ -69,6 +70,11 @@ const reasons = {
     label: "Team mentions",
     summary: "Team mention",
     icon: AtSignIcon,
+  },
+  issue_transferred: {
+    label: "Issue transfers",
+    summary: "Issue transferred",
+    icon: MoveRightIcon,
   },
 };
 
@@ -388,7 +394,10 @@ function NotificationList({
         );
         const selectionCanUnsubscribe =
           canUnsubscribe &&
-          selected.every((item) => item.subject.kind !== "release");
+          selected.every(
+            (item) =>
+              item.subject.kind === "issue" || item.subject.kind === "pull",
+          );
         const firstRows = visible.slice(0, MAX_SELECTION);
         const allSelected =
           firstRows.length > 0 &&
@@ -569,7 +578,9 @@ function NotificationList({
                         }
                         actionsDisabled={!!intent || selected.length > 0}
                         onUnsubscribe={
-                          canUnsubscribe && item.subject.kind !== "release"
+                          canUnsubscribe &&
+                          (item.subject.kind === "issue" ||
+                            item.subject.kind === "pull")
                             ? () =>
                                 void applyBulk(
                                   notificationIntent("unsubscribe", [item]),

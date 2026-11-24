@@ -55,16 +55,24 @@ pub(crate) struct Selection {
 }
 
 pub(crate) struct CheckSelection;
+
+#[derive(Clone, Copy, Default, Deserialize, Serialize)]
+pub(crate) struct SelectionStatus {
+    pub current: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_origin: Option<Uuid>,
+}
+
 impl Read for CheckSelection {
     const CLASS: &'static str = CLASS;
     const ID: u32 = 24;
     type Input = Selection;
-    type Output = Vec<bool>;
+    type Output = Vec<SelectionStatus>;
 
     fn execute(context: &mut Transaction<'_>, input: Selection) -> Result<Self::Output> {
         validate_selection(&input.items).map_err(Error::Invalid)?;
         let Some(actor) = active_account(context, input.identity)? else {
-            return Ok(vec![false; input.items.len()]);
+            return Ok(vec![SelectionStatus::default(); input.items.len()]);
         };
         let inboxes = Access::CHANNELS
             .into_iter()
@@ -85,14 +93,14 @@ impl Read for CheckSelection {
                     .iter()
                     .flat_map(|inbox| &inbox.entries)
                     .filter(|entry| item.matches(entry))
-                    .map(|entry| entry.notice.position())
-                    .chain(
-                        archived
-                            .as_ref()
-                            .map(|record| record.entry.notice.position()),
-                    )
-                    .max();
-                Ok(latest == Some(item.expected))
+                    .chain(archived.as_ref().map(|record| &record.entry))
+                    .max_by_key(|entry| entry.notice.position());
+                Ok(
+                    latest.map_or_else(SelectionStatus::default, |entry| SelectionStatus {
+                        current: entry.notice.position() == item.expected,
+                        transfer_origin: entry.notice.target.transfer_origin(),
+                    }),
+                )
             })
             .collect()
     }

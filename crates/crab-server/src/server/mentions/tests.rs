@@ -290,6 +290,43 @@ async fn team_notifications(group_only: bool) {
         group_grant(&h, &alice, false).await;
         assert_eq!(h.json(INBOX, &bob).await, json!({"items":[],"next":null}));
         assert_eq!(h.json(UNREAD, &bob).await, json!({"unread":false}));
+    } else {
+        h.add_repository("library").await;
+        let path = format!("{ISSUES}/1");
+        let version = h.json(&path, &alice).await["version"].clone();
+        let target = h
+            .server
+            .repositories
+            .get(&("team".into(), "library".into()))
+            .unwrap();
+        h.write(
+            Method::POST,
+            &format!("{path}/transfer"),
+            &alice,
+            json!({"request_id":Uuid::now_v7(),"version":version,"destination":target.id}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                if h.json(&path, &alice).await["transfer"]["state"] == "ready" {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap();
+        super::drain_repository(&h.server, &target).await.unwrap();
+        let inbox = h
+            .json(&format!("{INBOX}?reason=issue_transferred"), &bob)
+            .await;
+        let [notice] = inbox["items"].as_array().unwrap().as_slice() else {
+            panic!("expected one transfer notice for the source team, got {inbox}");
+        };
+        assert_eq!(notice["title"], "Team only");
+        assert_eq!(notice["repository"]["id"], json!(target.id));
     }
     h.close().await;
 }
