@@ -137,7 +137,10 @@ async fn native_browser_saves_and_reopens_an_inbox_filter_across_sessions() {
         .run(&["fill", "input[name=filter-name]", "Platform triage"])
         .await;
     browser
-        .run(&["select", "select[name=reason]", "mention"])
+        .choose_select(
+            "[role=dialog] button[role=combobox][id$='-reason']",
+            "mention",
+        )
         .await;
     browser
         .run(&["fill", "input[name=filter-author]", "ali"])

@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import type { ReactNode } from "react";
 import { Component } from "react";
 
@@ -15,9 +16,9 @@ export class AppErrorBoundary extends Component<
         <main className="notice" role="alert">
           <h1>The repository viewer could not load</h1>
           <p>Reload to fetch the current application and try again.</p>
-          <button onClick={() => window.location.reload()}>
+          <Button onClick={() => window.location.reload()}>
             Reload application
-          </button>
+          </Button>
         </main>
       );
     return this.props.children;

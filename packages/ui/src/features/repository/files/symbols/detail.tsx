@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import {
   getFiletypeFromFileName,
   getSharedHighlighter,
@@ -153,7 +154,8 @@ export function CodeSymbolDetails({
                   const current =
                     symbol.role === active.role && symbol.line === active.line;
                   return (
-                    <button
+                    <Button
+                      variant="ghost"
                       className="code-symbol-row"
                       type="button"
                       key={symbol.id}
@@ -168,7 +170,7 @@ export function CodeSymbolDetails({
                         tokens={tokens?.[symbol.line - 1]}
                         matches={matchesByLine.get(symbol.line) ?? []}
                       />
-                    </button>
+                    </Button>
                   );
                 })}
               </>

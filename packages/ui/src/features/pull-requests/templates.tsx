@@ -1,11 +1,8 @@
+import { FieldSelect } from "@/components/ui/field-select";
 import { useState } from "react";
 import { Link } from "@/components/navigation/link";
 import { Button } from "@/components/ui/button";
 import { Field, FieldLabel } from "@/components/ui/field";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
 import { repoHref } from "@/lib/repository-route";
 
 interface PullTemplate {
@@ -51,21 +48,20 @@ export function PullTemplatePicker({
         <>
           <FieldLabel htmlFor="pull-template">Pull request template</FieldLabel>
           <div className="flex flex-wrap items-center gap-2">
-            <NativeSelect
+            <FieldSelect
               id="pull-template"
               value={selected?.path ?? ""}
-              onChange={(event) => setChoice(event.target.value)}
+              onValueChange={(nextValue) => setChoice(nextValue)}
               disabled={disabled}
-            >
-              <NativeSelectOption value="">
-                Choose a template
-              </NativeSelectOption>
-              {templates.map((item) => (
-                <NativeSelectOption key={item.path} value={item.path}>
-                  {item === catalog.default ? "Default template" : item.file}
-                </NativeSelectOption>
-              ))}
-            </NativeSelect>
+              options={[
+                { value: "", label: "Choose a template" },
+                ...templates.map((item) => ({
+                  value: item.path,
+                  label:
+                    item === catalog.default ? "Default template" : item.file,
+                })),
+              ]}
+            />
             <Button
               type="button"
               size="sm"

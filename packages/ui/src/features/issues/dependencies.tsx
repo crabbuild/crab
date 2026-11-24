@@ -1,3 +1,4 @@
+import { Disclosure } from "@/components/ui/collapsible";
 import { useState } from "react";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
@@ -37,20 +38,19 @@ type Props = {
 export function IssueDependencies(props: Props) {
   const [open, setOpen] = useState(false);
   return (
-    <details
+    <Disclosure
       className="linked-work"
-      onToggle={(event) => setOpen(event.currentTarget.open)}
+      onOpenChange={(open) => setOpen(open)}
+      summaryClassName="cursor-pointer font-semibold"
+      summary={<>Issue dependencies</>}
     >
-      <summary className="cursor-pointer font-semibold">
-        Issue dependencies
-      </summary>
       {open && (
         <div className="grid gap-4 pt-3">
           <DependencyList {...props} direction="blocked_by" />
           <DependencyList {...props} direction="blocking" />
         </div>
       )}
-    </details>
+    </Disclosure>
   );
 }
 

@@ -1,3 +1,4 @@
+import { Disclosure } from "@/components/ui/collapsible";
 import { useEffect, useRef, useState } from "react";
 import {
   FolderKanbanIcon,
@@ -625,12 +626,14 @@ function ProjectWorkspace({
             )}
           </Result>
           {project.definition.readme && (
-            <details className="project-readme">
-              <summary>Project overview</summary>
+            <Disclosure
+              className="project-readme"
+              summary={<>Project overview</>}
+            >
               <DiscussionMarkdown>
                 {project.definition.readme}
               </DiscussionMarkdown>
-            </details>
+            </Disclosure>
           )}
         </TabsContent>
         {project.definition.views

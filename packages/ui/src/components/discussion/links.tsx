@@ -1,3 +1,4 @@
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { useState } from "react";
@@ -251,12 +252,11 @@ export function LinkedWork({
                 )}
                 {allowIssueClosure && (
                   <label className="linked-work-close">
-                    <input
-                      type="checkbox"
+                    <Checkbox
                       checked={closesOnMerge}
                       disabled={mutation.pending}
-                      onChange={(event) =>
-                        setClosesOnMerge(event.target.checked)
+                      onCheckedChange={(checked) =>
+                        setClosesOnMerge(checked === true)
                       }
                     />
                     Close issue when merged into the default branch

@@ -1,3 +1,4 @@
+import { chooseSelectOption } from "./select";
 import { expect, test } from "@playwright/test";
 import { expectNoAccessibilityViolations } from "./accessibility";
 
@@ -172,12 +173,14 @@ test("repository search pages on the server and restores a stale continuation", 
   expect(requests.at(-1)?.get("q")).toBe("project");
   expect(requests.at(-1)?.get("organization")).toBe(organization);
   await page.getByRole("button", { name: "Filter by property" }).click();
-  await page
-    .getByRole("combobox", { name: "Property", exact: true })
-    .selectOption("region");
-  await page
-    .getByRole("combobox", { name: "Value", exact: true })
-    .selectOption("US East");
+  await chooseSelectOption(
+    page.getByRole("combobox", { name: "Property", exact: true }),
+    "region",
+  );
+  await chooseSelectOption(
+    page.getByRole("combobox", { name: "Value", exact: true }),
+    "US East",
+  );
   await expectNoAccessibilityViolations(page);
   await page.getByRole("button", { name: "Add filter", exact: true }).click();
   await expect(page.getByRole("status")).toContainText(
@@ -194,15 +197,17 @@ test("repository search pages on the server and restores a stale continuation", 
     page.getByRole("link", { name: "org-matching-project" }),
   ).toBeVisible();
   expect(requests.at(-1)?.get("after")).toBe("property-token");
-  await page
-    .getByRole("combobox", { name: "Archive status" })
-    .selectOption("true");
+  await chooseSelectOption(
+    page.getByRole("combobox", { name: "Archive status" }),
+    "true",
+  );
   await expect(search).toHaveValue(
     'project props.region:"US East" archived:true',
   );
-  await page
-    .getByRole("combobox", { name: "Fork status" })
-    .selectOption("only");
+  await chooseSelectOption(
+    page.getByRole("combobox", { name: "Fork status" }),
+    "only",
+  );
   await expect(search).toHaveValue(
     'project props.region:"US East" archived:true fork:only',
   );

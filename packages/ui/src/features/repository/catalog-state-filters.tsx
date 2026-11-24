@@ -1,8 +1,5 @@
+import { FieldSelect } from "@/components/ui/field-select";
 import { useState } from "react";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
 
 const filters = [
   {
@@ -58,27 +55,27 @@ export function RepositoryStateFilters({
       {filters.map(({ key, label, options }) => {
         const qualifier = new RegExp(`^-?${key}:`, "i");
         return (
-          <NativeSelect
+          <FieldSelect
             key={key}
             aria-label={label}
             value={selected(
               key,
               queryTerms.find((term) => qualifier.test(term)),
             )}
-            onChange={(event) => {
+            onValueChange={(nextValue) => {
               const next = terms(draft()).filter(
                 (term) => !qualifier.test(term),
               );
-              if (event.target.value) next.push(`${key}:${event.target.value}`);
+              if (nextValue) next.push(`${key}:${nextValue}`);
               setTooLong(!apply(next.join(" ")));
             }}
-          >
-            {options.map(([value, title]) => (
-              <NativeSelectOption key={value} value={value}>
-                {title}
-              </NativeSelectOption>
-            ))}
-          </NativeSelect>
+            options={[
+              ...options.map(([value, title]) => ({
+                value: value,
+                label: title,
+              })),
+            ]}
+          />
         );
       })}
       {tooLong && (

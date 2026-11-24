@@ -1,3 +1,4 @@
+import { FieldSelect } from "@/components/ui/field-select";
 import { useEffect, useRef, useState } from "react";
 import { ClockIcon } from "@primer/octicons-react";
 import { Link } from "@/components/navigation/link";
@@ -15,10 +16,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
 import { endpoint, request, useRequest, type Repository } from "@/lib/api";
 import { short } from "@/lib/format";
 import { mergeMethod } from "./merge-methods";
@@ -339,22 +336,22 @@ export function AutoMerge({
           {!enqueue && (
             <label className="grid gap-1">
               Merge method
-              <NativeSelect
+              <FieldSelect
                 value={method}
                 disabled={save.pending || recovering}
-                onChange={(event) => {
+                onValueChange={(nextValue) => {
                   const selected = pull.merge_methods.find(
-                    (method) => method === event.target.value,
+                    (method) => method === nextValue,
                   );
                   if (selected) setMethod(selected);
                 }}
-              >
-                {pull.merge_methods.map((method) => (
-                  <NativeSelectOption value={method} key={method}>
-                    {mergeMethod(method).label}
-                  </NativeSelectOption>
-                ))}
-              </NativeSelect>
+                options={[
+                  ...pull.merge_methods.map((method) => ({
+                    value: method,
+                    label: mergeMethod(method).label,
+                  })),
+                ]}
+              />
             </label>
           )}
           {!enqueue && (method === "merge_commit" || method === "squash") && (

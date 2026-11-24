@@ -501,16 +501,11 @@ async fn browser_links_a_branch_from_another_repository_and_unlinks_it_after_rel
             "--exact",
         ])
         .await;
-    let option = format!(
-        r##"document.querySelector("#branch-repository option[value='{target}']") !== null"##
-    );
-    browser.run(&["wait", "--fn", &option]).await;
     browser
-        .run(&["select", "#branch-repository", &target.to_string()])
+        .choose_select("#branch-repository", &target.to_string())
         .await;
-    browser.run(&["wait", "#development-branch"]).await;
     browser
-        .run(&["select", "#development-branch", "refs/heads/feature"])
+        .choose_select("#development-branch", "refs/heads/feature")
         .await;
     browser
         .run(&["click", "[role=dialog] button[type=submit]"])
@@ -561,12 +556,8 @@ async fn browser_creates_a_branch_from_the_issue_in_the_selected_repository() {
             "--exact",
         ])
         .await;
-    let option = format!(
-        r##"document.querySelector("#branch-repository option[value='{target}']") !== null"##
-    );
-    browser.run(&["wait", "--fn", &option]).await;
     browser
-        .run(&["select", "#branch-repository", &target.to_string()])
+        .choose_select("#branch-repository", &target.to_string())
         .await;
     browser
         .run(&["wait", "[role=dialog] button[type=submit]:enabled"])

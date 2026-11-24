@@ -307,13 +307,7 @@ async fn browser_links_a_pull_from_another_repository_and_unlinks_it_from_the_pu
         ])
         .await;
     browser
-        .run(&["wait", "--fn", &format!(
-            r##"document.querySelector("#linked-pull-repository option[value='{}']") !== null"##,
-            pull.id
-        )])
-        .await;
-    browser
-        .run(&["select", "#linked-pull-repository", &pull.id.to_string()])
+        .choose_select("#linked-pull-repository", &pull.id.to_string())
         .await;
     browser
         .run(&[
@@ -325,6 +319,9 @@ async fn browser_links_a_pull_from_another_repository_and_unlinks_it_from_the_pu
     browser.run(&["wait", "--text", "Ship the service"]).await;
     browser
         .run(&["find", "text", "Ship the service", "click", "--exact"])
+        .await;
+    browser
+        .run(&["wait", "[role=dialog] button[type=submit]:enabled"])
         .await;
     browser
         .run(&["click", "[role=dialog] button[type=submit]:enabled"])

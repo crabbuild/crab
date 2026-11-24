@@ -1,3 +1,6 @@
+import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
+import { FieldSelect } from "@/components/ui/field-select";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -320,7 +323,7 @@ export function BranchProtectionSettings({
                 : `Edit ${state.rules[editing].branch}`}
             </h3>
             <label htmlFor="protection-branch">Branch name</label>
-            <input
+            <Input
               id="protection-branch"
               value={branch}
               maxLength={255}
@@ -334,17 +337,17 @@ export function BranchProtectionSettings({
             <label htmlFor="protection-approvals">
               Required approving reviews
             </label>
-            <select
+            <FieldSelect
               id="protection-approvals"
               value={approvals}
-              onChange={(event) => setApprovals(event.target.value)}
-            >
-              {Array.from({ length: 21 }, (_, value) => (
-                <option key={value} value={value}>
-                  {value}
-                </option>
-              ))}
-            </select>
+              onValueChange={(nextValue) => setApprovals(nextValue)}
+              options={[
+                ...Array.from({ length: 21 }, (_, value) => ({
+                  value: String(value),
+                  label: value,
+                })),
+              ]}
+            />
             <label className="flex items-center gap-2">
               <Checkbox
                 checked={codeOwners}
@@ -390,7 +393,7 @@ export function BranchProtectionSettings({
               Require linear history
             </label>
             <label htmlFor="protection-checks">Required status checks</label>
-            <textarea
+            <Textarea
               id="protection-checks"
               value={checks}
               rows={4}

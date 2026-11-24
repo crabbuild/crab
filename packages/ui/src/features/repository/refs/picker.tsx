@@ -226,7 +226,8 @@ export function RevisionPicker({
           </TabsContent>
         </Tabs>
         {canCreate && (
-          <button
+          <Button
+            variant="ghost"
             ref={createAction}
             type="button"
             className="revision-picker-create"
@@ -238,7 +239,7 @@ export function RevisionPicker({
               {creating ? "Creating branch" : "Create branch"}:{" "}
               <strong>{candidate}</strong> from &apos;{label}&apos;
             </span>
-          </button>
+          </Button>
         )}
         {createError && (
           <p className="revision-picker-error" role="alert">

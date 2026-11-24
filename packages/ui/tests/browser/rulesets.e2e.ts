@@ -1,3 +1,4 @@
+import { chooseSelectOption } from "./select";
 import { expect, test } from "@playwright/test";
 import { expectNoAccessibilityViolations } from "./accessibility";
 import { mockPullRequest } from "./pulls/fixture";
@@ -106,6 +107,13 @@ test("repository admins manage rulesets and readers see active rules", async ({
 
   await page.goto("/team/project/settings/rulesets");
   await page.getByRole("button", { name: "New ruleset" }).click();
+  const target = page.getByRole("combobox", { name: "Target" });
+  await target.press("Space");
+  await page.getByRole("option", { name: "Branches" }).press("ArrowDown");
+  await page.getByRole("option", { name: "Tags" }).press("Enter");
+  await expect(target).toHaveText("Tags");
+  await expect(target).toBeFocused();
+  await chooseSelectOption(target, { label: "Branches" });
   await page.getByLabel("Name", { exact: true }).fill("Release branches");
   await page.getByLabel("Include patterns").fill("release/**/*");
   await page.getByLabel("Exclude patterns").fill("release/sandbox");
@@ -132,11 +140,15 @@ test("repository admins manage rulesets and readers see active rules", async ({
   await page.getByLabel("Required check names").fill("ci/release");
   await strict.check();
   await queue.check();
-  await page.getByLabel("Add bypass actor").selectOption(releaseTeam);
-  await page.getByLabel("Add bypass actor").selectOption("repository_admin");
-  await page
-    .getByLabel("Bypass mode for Repository administrators")
-    .selectOption("always");
+  await chooseSelectOption(page.getByLabel("Add bypass actor"), releaseTeam);
+  await chooseSelectOption(
+    page.getByLabel("Add bypass actor"),
+    "repository_admin",
+  );
+  await chooseSelectOption(
+    page.getByLabel("Bypass mode for Repository administrators"),
+    "always",
+  );
   await expectNoAccessibilityViolations(page);
   await page.getByRole("button", { name: "Save ruleset" }).click();
   await expect(
@@ -197,7 +209,7 @@ test("repository admins manage rulesets and readers see active rules", async ({
   admin = true;
   await page.goto("/team/project/settings/rulesets");
   await page.getByRole("button", { name: "Edit Release branches" }).click();
-  await page.getByLabel("Enforcement").selectOption("disabled");
+  await chooseSelectOption(page.getByLabel("Enforcement"), "disabled");
   await page.getByRole("button", { name: "Save ruleset" }).click();
   await expect(page.getByText("Disabled", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Delete Release branches" }).click();

@@ -1,3 +1,6 @@
+import { Disclosure } from "@/components/ui/collapsible";
+import { Checkbox } from "@/components/ui/checkbox";
+import { FieldSelect } from "@/components/ui/field-select";
 import { useState, type FormEvent } from "react";
 import { useSubmission } from "@/components/discussion/hooks";
 import { useMutation } from "@/components/discussion/mutations";
@@ -12,10 +15,6 @@ import {
   FieldSet,
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
 import { short } from "@/lib/format";
 import { repoHref } from "@/lib/repository-route";
@@ -81,10 +80,7 @@ export function OutboundWebhooks({
   }
 
   return (
-    <section
-      className="settings-content outbound-webhooks"
-      aria-labelledby="webhooks-title"
-    >
+    <section className="settings-content" aria-labelledby="webhooks-title">
       <div className="settings-title">
         <div>
           <h2 id="webhooks-title">Webhooks</h2>
@@ -180,23 +176,23 @@ export function OutboundWebhooks({
                     <FieldLabel htmlFor="webhook-destination-picker">
                       Webhook destination
                     </FieldLabel>
-                    <NativeSelect
+                    <FieldSelect
                       id="webhook-destination-picker"
                       className="w-full max-w-xl"
                       value={selected ?? ""}
                       disabled={mutation.pending}
-                      onChange={(event) => {
+                      onValueChange={(nextValue) => {
                         setSecret(undefined);
                         mutation.reset();
-                        setDestinationKey(event.target.value);
+                        setDestinationKey(nextValue);
                       }}
-                    >
-                      {destinations.map(({ id, url }) => (
-                        <NativeSelectOption key={id} value={id}>
-                          {url ?? `Former destination ${short(id)}`}
-                        </NativeSelectOption>
-                      ))}
-                    </NativeSelect>
+                      options={[
+                        ...destinations.map(({ id, url }) => ({
+                          value: id,
+                          label: url ?? `Former destination ${short(id)}`,
+                        })),
+                      ]}
+                    />
                   </Field>
                 )}
                 {selected && destination && !repo.archived && (
@@ -280,11 +276,16 @@ export function OutboundWebhooks({
                           </code>
                         </p>
                       )}
-                      <details className="text-sm">
-                        <summary className="w-fit cursor-pointer font-medium">
-                          Delivery details · {delivery.attempts}{" "}
-                          {delivery.attempts === 1 ? "attempt" : "attempts"}
-                        </summary>
+                      <Disclosure
+                        className="text-sm"
+                        summaryClassName="w-fit cursor-pointer font-medium"
+                        summary={
+                          <>
+                            Delivery details · {delivery.attempts}{" "}
+                            {delivery.attempts === 1 ? "attempt" : "attempts"}
+                          </>
+                        }
+                      >
                         <p className="mt-2 wrap-anywhere font-mono text-xs">
                           {delivery.id}
                         </p>
@@ -298,7 +299,7 @@ export function OutboundWebhooks({
                             </li>
                           ))}
                         </ul>
-                      </details>
+                      </Disclosure>
                     </li>
                   ))}
                 </ul>
@@ -343,10 +344,9 @@ function EventsForm({
         <FieldLegend variant="label">Events</FieldLegend>
         <div className="grid gap-1">
           <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
+            <Checkbox
               checked={push}
-              onChange={(event) => setPush(event.target.checked)}
+              onCheckedChange={(checked) => setPush(checked === true)}
             />{" "}
             Git pushes
           </label>
@@ -355,10 +355,9 @@ function EventsForm({
           </FieldDescription>
         </div>
         <label className="flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
+          <Checkbox
             checked={pull}
-            onChange={(event) => setPull(event.target.checked)}
+            onCheckedChange={(checked) => setPull(checked === true)}
           />{" "}
           Pull requests
         </label>

@@ -1,3 +1,5 @@
+import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { Button } from "@/components/ui/button";
 import { useEffect, useRef, useState, type FormEvent } from "react";
@@ -303,7 +305,7 @@ export function GitImport({
           {!forkJob && (
             <label>
               Git source
-              <input
+              <Input
                 required
                 value={job?.source ?? source}
                 onChange={(event) => {
@@ -325,7 +327,7 @@ export function GitImport({
                 : personal
                   ? "Personal namespace"
                   : "Crab owner"}
-              <input
+              <Input
                 required
                 value={
                   organization?.name ??
@@ -347,7 +349,7 @@ export function GitImport({
           )}
           <label>
             Repository name
-            <input
+            <Input
               required
               value={job?.name ?? name}
               onChange={(event) => {
@@ -362,7 +364,7 @@ export function GitImport({
           {!forkJob && (!job || job.resumable) && (
             <label>
               Source token <span className="muted">(HTTPS private repos)</span>
-              <input
+              <Input
                 type="password"
                 value={token}
                 onChange={(event) => setToken(event.target.value)}
@@ -375,7 +377,7 @@ export function GitImport({
           {!forkJob && !job && (
             <label className="git-import-description">
               Description <span className="muted">(optional)</span>
-              <textarea
+              <Textarea
                 value={description}
                 onChange={(event) => setDescription(event.target.value)}
                 placeholder="What should people know about this repository?"

@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { PaperclipIcon, XIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -168,7 +169,7 @@ export function EditorAttachments({
   const picker = useRef<HTMLInputElement>(null);
   return (
     <div className="editor-attachments">
-      <input
+      <Input
         ref={picker}
         type="file"
         hidden

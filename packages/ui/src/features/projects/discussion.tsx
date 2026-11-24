@@ -1,3 +1,4 @@
+import { Progress } from "@/components/ui/progress";
 import { useEffect, useRef, useState } from "react";
 import {
   ArrowDownIcon,
@@ -304,7 +305,8 @@ export function SubIssues({
             )}
           </header>
           {!!tree.progress.total && (
-            <progress
+            <Progress
+              className="mb-3"
               max={tree.progress.total}
               value={tree.progress.closed}
               aria-label="Closed sub-issues"

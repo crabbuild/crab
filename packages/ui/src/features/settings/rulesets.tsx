@@ -1,3 +1,6 @@
+import { Checkbox } from "@/components/ui/checkbox";
+import { Textarea } from "@/components/ui/textarea";
+import { FieldSelect } from "@/components/ui/field-select";
 import { useState, type FormEvent, type ReactNode } from "react";
 import { Link } from "@/components/navigation/link";
 import { Failure } from "@/components/discussion/failure";
@@ -567,37 +570,38 @@ function RulesetForm({
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="grid gap-1">
             Target
-            <select
-              className={fieldClass}
+            <FieldSelect
+              className="w-full"
               value={rule.target}
-              onChange={(event) => {
-                const target = event.target.value === "tag" ? "tag" : "branch";
+              onValueChange={(nextValue) => {
+                const target = nextValue === "tag" ? "tag" : "branch";
                 if (target === "tag") {
                   if (include === "~DEFAULT_BRANCH") setInclude("~ALL");
                   if (exclude === "~DEFAULT_BRANCH") setExclude("");
                 }
                 change({ target });
               }}
-            >
-              <option value="branch">Branches</option>
-              <option value="tag">Tags</option>
-            </select>
+              options={[
+                { value: "branch", label: "Branches" },
+                { value: "tag", label: "Tags" },
+              ]}
+            />
           </label>
           <label className="grid gap-1">
             Enforcement
-            <select
-              className={fieldClass}
+            <FieldSelect
+              className="w-full"
               value={rule.enforcement}
-              onChange={(event) =>
+              onValueChange={(nextValue) =>
                 change({
-                  enforcement:
-                    event.target.value === "disabled" ? "disabled" : "active",
+                  enforcement: nextValue === "disabled" ? "disabled" : "active",
                 })
               }
-            >
-              <option value="active">Active</option>
-              <option value="disabled">Disabled</option>
-            </select>
+              options={[
+                { value: "active", label: "Active" },
+                { value: "disabled", label: "Disabled" },
+              ]}
+            />
           </label>
         </div>
         {organization && rule.repositories && (
@@ -623,7 +627,7 @@ function RulesetForm({
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="grid gap-1">
             Include patterns
-            <textarea
+            <Textarea
               className={fieldClass}
               value={include}
               required
@@ -633,7 +637,7 @@ function RulesetForm({
           </label>
           <label className="grid gap-1">
             Exclude patterns
-            <textarea
+            <Textarea
               className={fieldClass}
               value={exclude}
               onChange={(event) => setExclude(event.target.value)}
@@ -641,41 +645,37 @@ function RulesetForm({
           </label>
         </div>
         <label className="flex items-center gap-2">
-          <input
-            type="checkbox"
+          <Checkbox
             checked={rule.restrict_creations}
-            onChange={(event) =>
-              change({ restrict_creations: event.target.checked })
+            onCheckedChange={(checked) =>
+              change({ restrict_creations: checked === true })
             }
           />{" "}
           Restrict creations
         </label>
         <label className="flex items-center gap-2">
-          <input
-            type="checkbox"
+          <Checkbox
             checked={Boolean(rule.restrict_updates)}
-            onChange={(event) =>
-              change({ restrict_updates: event.target.checked })
+            onCheckedChange={(checked) =>
+              change({ restrict_updates: checked === true })
             }
           />{" "}
           Restrict updates
         </label>
         <label className="flex items-center gap-2">
-          <input
-            type="checkbox"
+          <Checkbox
             checked={rule.restrict_deletions}
-            onChange={(event) =>
-              change({ restrict_deletions: event.target.checked })
+            onCheckedChange={(checked) =>
+              change({ restrict_deletions: checked === true })
             }
           />{" "}
           Restrict deletions
         </label>
         <label className="flex items-center gap-2">
-          <input
-            type="checkbox"
+          <Checkbox
             checked={Boolean(rule.require_linear_history)}
-            onChange={(event) =>
-              change({ require_linear_history: event.target.checked })
+            onCheckedChange={(checked) =>
+              change({ require_linear_history: checked === true })
             }
           />{" "}
           Require linear history
@@ -683,11 +683,10 @@ function RulesetForm({
         {branch && (
           <>
             <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
+              <Checkbox
                 checked={rule.require_pull_request}
-                onChange={(event) =>
-                  change({ require_pull_request: event.target.checked })
+                onCheckedChange={(checked) =>
+                  change({ require_pull_request: checked === true })
                 }
               />{" "}
               Require a pull request before updating
@@ -704,22 +703,20 @@ function RulesetForm({
               />
             </label>
             <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
+              <Checkbox
                 checked={rule.required_code_owner_reviews}
-                onChange={(event) =>
-                  change({ required_code_owner_reviews: event.target.checked })
+                onCheckedChange={(checked) =>
+                  change({ required_code_owner_reviews: checked === true })
                 }
               />{" "}
               Require code owner review
             </label>
             <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
+              <Checkbox
                 checked={rule.require_conversation_resolution}
-                onChange={(event) =>
+                onCheckedChange={(checked) =>
                   change({
-                    require_conversation_resolution: event.target.checked,
+                    require_conversation_resolution: checked === true,
                   })
                 }
               />{" "}
@@ -727,7 +724,7 @@ function RulesetForm({
             </label>
             <label className="grid gap-1">
               Required check names
-              <textarea
+              <Textarea
                 className={fieldClass}
                 placeholder="One check per line"
                 value={checks}
@@ -735,23 +732,21 @@ function RulesetForm({
               />
             </label>
             <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
+              <Checkbox
                 checked={Boolean(rule.require_up_to_date)}
                 disabled={!hasRequiredChecks && !rule.require_up_to_date}
-                onChange={(event) =>
-                  change({ require_up_to_date: event.target.checked })
+                onCheckedChange={(checked) =>
+                  change({ require_up_to_date: checked === true })
                 }
               />
               Require branches to be up to date before merging
             </label>
             <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
+              <Checkbox
                 checked={Boolean(rule.require_merge_queue)}
                 disabled={!hasRequiredChecks && !rule.require_merge_queue}
-                onChange={(event) =>
-                  change({ require_merge_queue: event.target.checked })
+                onCheckedChange={(checked) =>
+                  change({ require_merge_queue: checked === true })
                 }
               />
               Require merge queue
@@ -774,16 +769,16 @@ function RulesetForm({
               })),
             ].map(({ id, name }) => (
               <label className="flex items-center gap-2" key={id}>
-                <input
-                  type="checkbox"
+                <Checkbox
                   checked={rule.required_integrations.includes(id)}
-                  onChange={(event) =>
+                  onCheckedChange={(checked) =>
                     change({
-                      required_integrations: event.target.checked
-                        ? [...rule.required_integrations, id]
-                        : rule.required_integrations.filter(
-                            (value) => value !== id,
-                          ),
+                      required_integrations:
+                        checked === true
+                          ? [...rule.required_integrations, id]
+                          : rule.required_integrations.filter(
+                              (value) => value !== id,
+                            ),
                     })
                   }
                 />{" "}

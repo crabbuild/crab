@@ -1,13 +1,11 @@
+import { Checkbox } from "@/components/ui/checkbox";
+import { FieldSelect } from "@/components/ui/field-select";
 import { useState } from "react";
 import { Failure } from "@/components/discussion/failure";
 import { useMutation } from "@/components/discussion/mutations";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
 import { mergeMethods } from "@/features/pull-requests/merge-methods";
 import type { MergeMethod } from "@/features/pull-requests/model";
@@ -55,25 +53,21 @@ function QueueMethodSelect({
   inherited?: boolean;
 }) {
   return (
-    <NativeSelect
+    <FieldSelect
       value={value}
-      onChange={({ target }) => {
-        const selected = queueMethods.find(
-          ({ value }) => value === target.value,
-        );
+      onValueChange={(nextValue) => {
+        const selected = queueMethods.find(({ value }) => value === nextValue);
         if (selected) onChange(selected.value);
-        else if (inherited && target.value === "") onChange("");
+        else if (inherited && nextValue === "") onChange("");
       }}
-    >
-      {inherited && (
-        <NativeSelectOption value="">Repository default</NativeSelectOption>
-      )}
-      {queueMethods.map(({ value, label }) => (
-        <NativeSelectOption key={value} value={value}>
-          {label}
-        </NativeSelectOption>
-      ))}
-    </NativeSelect>
+      options={[
+        ...(inherited ? [{ value: "", label: "Repository default" }] : []),
+        ...queueMethods.map(({ value, label }) => ({
+          value: value,
+          label: label,
+        })),
+      ]}
+    />
   );
 }
 
@@ -248,13 +242,12 @@ function MergeMethodForm({
         <legend className="sr-only">Enabled merge methods</legend>
         {mergeMethods.map(({ value, label, description }) => (
           <label key={value} className="flex items-start gap-2">
-            <input
+            <Checkbox
               className="mt-1"
-              type="checkbox"
               checked={enabled.includes(value)}
-              onChange={({ target }) => {
+              onCheckedChange={(checked) => {
                 setEnabled((current) =>
-                  target.checked
+                  checked === true
                     ? [...current, value]
                     : current.filter((item) => item !== value),
                 );
@@ -269,11 +262,10 @@ function MergeMethodForm({
           </label>
         ))}
         <label className="flex items-start gap-2">
-          <input
+          <Checkbox
             className="mt-1"
-            type="checkbox"
             checked={autoMerge}
-            onChange={({ target }) => setAutoMerge(target.checked)}
+            onCheckedChange={(checked) => setAutoMerge(checked === true)}
           />
           <span>
             Allow auto-merge
@@ -286,11 +278,12 @@ function MergeMethodForm({
         {repo.can_admin && (
           <div className="grid gap-3">
             <label className="flex items-start gap-2">
-              <input
+              <Checkbox
                 className="mt-1"
-                type="checkbox"
                 checked={deleteBranches}
-                onChange={({ target }) => setDeleteBranches(target.checked)}
+                onCheckedChange={(checked) =>
+                  setDeleteBranches(checked === true)
+                }
               />
               <span>
                 Automatically delete head branches
@@ -301,11 +294,10 @@ function MergeMethodForm({
               </span>
             </label>
             <label className="flex items-start gap-2">
-              <input
+              <Checkbox
                 className="mt-1"
-                type="checkbox"
                 checked={mergeQueue}
-                onChange={({ target }) => setMergeQueue(target.checked)}
+                onCheckedChange={(checked) => setMergeQueue(checked === true)}
               />
               <span>
                 Allow merge queue

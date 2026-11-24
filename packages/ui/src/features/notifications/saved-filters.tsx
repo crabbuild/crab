@@ -10,11 +10,8 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { FieldSelect } from "@/components/ui/field-select";
 import { Input } from "@/components/ui/input";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
 import type { OrganizationView } from "@/lib/contracts";
 import { navigate, useRequest, type Repository } from "@/lib/api";
 import { inboxHref, kinds, reasons, views, type Criteria } from "./filters";
@@ -53,24 +50,22 @@ export function SavedFilters({
   return (
     <div className="flex flex-wrap items-center gap-2">
       {Boolean(collection?.items.length) && (
-        <NativeSelect
+        <FieldSelect
           aria-label="Saved filter"
           className="max-w-full"
           value={selected?.id ?? ""}
-          onChange={(event) => {
-            const item = collection?.items.find(
-              (item) => item.id === event.target.value,
-            );
+          onValueChange={(value) => {
+            const item = collection?.items.find((item) => item.id === value);
             if (item) navigate(inboxHref(item.criteria, item.id));
           }}
-        >
-          <NativeSelectOption value="">Saved filters</NativeSelectOption>
-          {collection?.items.map(({ id, name }) => (
-            <NativeSelectOption key={id} value={id}>
-              {name}
-            </NativeSelectOption>
-          ))}
-        </NativeSelect>
+          options={[
+            { value: "", label: "Saved filters" },
+            ...(collection?.items ?? []).map(({ id, name }) => ({
+              value: id,
+              label: name,
+            })),
+          ]}
+        />
       )}
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogTrigger asChild>
@@ -391,35 +386,26 @@ function FilterFields({
       {fields.map(({ key, label, choices, empty }) => {
         const value = criteria[key] ?? "";
         const fieldId = `${fieldPrefix}-${key}`;
+        const options = empty ? [{ value: "", label: empty }] : [];
+        if (value && !choices.some((choice) => choice.value === value)) {
+          options.push({ value, label: `Unavailable ${label.toLowerCase()}` });
+        }
         return (
           <div key={key} className="grid min-w-0 gap-1.5 text-sm font-medium">
             <label htmlFor={fieldId}>{label}</label>
-            <NativeSelect
+            <FieldSelect
               id={fieldId}
               className="w-full"
               name={key}
               value={value}
-              onChange={(event) =>
+              onValueChange={(value) =>
                 onChange({
                   ...criteria,
-                  [key]: event.target.value || undefined,
+                  [key]: value || undefined,
                 })
               }
-            >
-              {empty && (
-                <NativeSelectOption value="">{empty}</NativeSelectOption>
-              )}
-              {value && !choices.some((choice) => choice.value === value) && (
-                <NativeSelectOption value={value}>
-                  Unavailable {label.toLowerCase()}
-                </NativeSelectOption>
-              )}
-              {choices.map(({ value, label }) => (
-                <NativeSelectOption key={value} value={value}>
-                  {label}
-                </NativeSelectOption>
-              ))}
-            </NativeSelect>
+              options={[...options, ...choices]}
+            />
           </div>
         );
       })}

@@ -1,3 +1,4 @@
+import { Disclosure } from "@/components/ui/collapsible";
 import { Button } from "@/components/ui/button";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
@@ -163,17 +164,21 @@ export function IssueTemplatePicker({
               <p className="notice">No issue templates are available.</p>
             )}
             {catalog.unavailable.length > 0 && (
-              <details className="notice mt-4">
-                <summary>
-                  {catalog.unavailable.length} template files could not be
-                  loaded
-                </summary>
+              <Disclosure
+                className="notice mt-4"
+                summary={
+                  <>
+                    {catalog.unavailable.length}template files could not be
+                    loaded
+                  </>
+                }
+              >
                 <ul className="mt-2 list-disc pl-5">
                   {catalog.unavailable.map((file) => (
                     <li key={file}>{file}</li>
                   ))}
                 </ul>
-              </details>
+              </Disclosure>
             )}
             {catalog.truncated && (
               <p className="muted mt-2">

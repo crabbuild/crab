@@ -1,11 +1,8 @@
 import { SearchIcon } from "@primer/octicons-react";
 import { Button } from "@/components/ui/button";
 import { Field, FieldLabel } from "@/components/ui/field";
+import { FieldSelect } from "@/components/ui/field-select";
 import { Input } from "@/components/ui/input";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
 import { navigate, useRequest } from "@/lib/api";
 import { WorkResults, type WorkPage } from "./results";
 
@@ -94,34 +91,27 @@ export default function WorkSearch({ url }: { url: URL }) {
           </Field>
           <Field>
             <FieldLabel htmlFor="discussion-search-kind">Type</FieldLabel>
-            <NativeSelect
+            <FieldSelect
               id="discussion-search-kind"
               name="kind"
               defaultValue={kind}
               className="w-full"
-            >
-              <NativeSelectOption value="">All types</NativeSelectOption>
-              <NativeSelectOption value="issue">Issues</NativeSelectOption>
-              <NativeSelectOption value="pull">
-                Pull requests
-              </NativeSelectOption>
-            </NativeSelect>
+              options={{
+                "": "All types",
+                issue: "Issues",
+                pull: "Pull requests",
+              }}
+            />
           </Field>
           <Field>
             <FieldLabel htmlFor="discussion-search-sort">Sort</FieldLabel>
-            <NativeSelect
+            <FieldSelect
               id="discussion-search-sort"
               name="sort"
               defaultValue={sort}
               className="w-full"
-            >
-              <NativeSelectOption value="created">
-                Newest created
-              </NativeSelectOption>
-              <NativeSelectOption value="updated">
-                Last updated
-              </NativeSelectOption>
-            </NativeSelect>
+              options={{ created: "Newest created", updated: "Last updated" }}
+            />
           </Field>
           <Button type="submit" className="col-span-2 sm:col-span-1">
             <SearchIcon data-icon="inline-start" />

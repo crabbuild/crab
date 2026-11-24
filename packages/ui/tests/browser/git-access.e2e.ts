@@ -1,3 +1,4 @@
+import { chooseSelectOption } from "./select";
 import { expect, test } from "@playwright/test";
 import {
   expectNoAccessibilityViolations,
@@ -79,7 +80,7 @@ test("Git tokens require a repository and keep secrets tied to that selection", 
   });
   await expect(generate).toBeDisabled();
   const repository = page.getByLabel("Repository", { exact: true });
-  await repository.selectOption("team/first");
+  await chooseSelectOption(repository, "team/first");
   await generate.click();
   await expect(page.getByRole("status")).toContainText(
     "Could not update Git access",
@@ -92,14 +93,16 @@ test("Git tokens require a repository and keep secrets tied to that selection", 
   await expect(token).toHaveAttribute("type", "password");
   await expectNoAccessibilityViolations(page);
   requestedAccess = "write";
-  await page.getByLabel("Access", { exact: true }).selectOption("write");
+  await chooseSelectOption(page.getByLabel("Access", { exact: true }), "write");
   await expect(token).toHaveCount(0);
   await generate.click();
   await expect(
     page.getByLabel("Write token for team/first", { exact: false }),
   ).toHaveValue("fixture-token");
-  await repository.selectOption("team/second");
-  await expect(page.getByLabel("Access", { exact: true })).toHaveValue("read");
+  await chooseSelectOption(repository, "team/second");
+  await expect(page.getByLabel("Access", { exact: true })).toHaveText(
+    "Read (clone and fetch)",
+  );
   await expect(
     page.locator("#git-token-access option[value=write]"),
   ).toHaveCount(0);

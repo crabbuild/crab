@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { Result } from "@/components/request/result";
 import { Badge } from "@/components/ui/badge";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
@@ -270,7 +271,8 @@ export function DiffView({
                   renderAnnotation={(annotation) => {
                     const thread = annotation.metadata;
                     return (
-                      <button
+                      <Button
+                        variant="ghost"
                         type="button"
                         className="inline-review-annotation"
                         data-thread-number={thread.number}
@@ -279,7 +281,7 @@ export function DiffView({
                       >
                         {review?.renderAnnotation?.(thread) ??
                           `Comment #${thread.number}`}
-                      </button>
+                      </Button>
                     );
                   }}
                   style={diffColors}

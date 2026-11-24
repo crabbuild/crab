@@ -1,3 +1,4 @@
+import { FieldSelect } from "@/components/ui/field-select";
 import { useEffect, useId, useRef, useState } from "react";
 import { useMutation } from "@/components/discussion/mutations";
 import { Button } from "@/components/ui/button";
@@ -10,10 +11,6 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
 import { request } from "@/lib/api";
 import type { WatchPage } from "./watched";
 
@@ -174,19 +171,16 @@ export function BulkUnwatch({
           <label htmlFor={ownerId} className="font-medium">
             Repository owner
           </label>
-          <NativeSelect
+          <FieldSelect
             id={ownerId}
             value={owner}
             disabled={running || !!progress}
-            onChange={(event) => setOwner(event.target.value)}
-          >
-            <NativeSelectOption value="">Choose an owner</NativeSelectOption>
-            {owners.map((name) => (
-              <NativeSelectOption key={name} value={name}>
-                {name}
-              </NativeSelectOption>
-            ))}
-          </NativeSelect>
+            onValueChange={(nextValue) => setOwner(nextValue)}
+            options={[
+              { value: "", label: "Choose an owner" },
+              ...owners.map((name) => ({ value: name, label: name })),
+            ]}
+          />
         </div>
         {owner && !reviewed && (
           <p role="status">Loading watches for {owner}…</p>

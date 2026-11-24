@@ -1,3 +1,4 @@
+import { chooseSelectOption } from "./select";
 import { expect, test, type Page } from "@playwright/test";
 import {
   expectNoAccessibilityViolations,
@@ -448,7 +449,7 @@ for (const mobile of [false, true])
     await expect(
       page.getByRole("heading", { name: "My draft", exact: true }),
     ).toBeVisible();
-    await page.getByLabel("Assignment method").selectOption({
+    await chooseSelectOption(page.getByLabel("Assignment method"), {
       label: "Load balance",
     });
     await page.getByLabel("Reviewers per request").fill("2");
@@ -469,8 +470,8 @@ for (const mobile of [false, true])
     await expect(
       page.getByRole("status", { name: "Team submission result" }),
     ).toContainText("Update review assignment completed.");
-    await expect(page.getByLabel("Assignment method")).toHaveValue(
-      "fewest_open",
+    await expect(page.getByLabel("Assignment method")).toHaveText(
+      "Load balance",
     );
     await expect(page.getByLabel("Reviewers per request")).toHaveValue("2");
     await expect(excluded).toBeChecked();

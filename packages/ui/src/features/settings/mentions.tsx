@@ -1,3 +1,4 @@
+import { FieldSelect } from "@/components/ui/field-select";
 import { useId, useState } from "react";
 import { PlusIcon, TrashIcon } from "lucide-react";
 import { useMutation } from "@/components/discussion/mutations";
@@ -11,10 +12,6 @@ import {
   FieldSet,
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
 import type { TeamListing } from "@/lib/contracts";
 
@@ -358,20 +355,20 @@ function TeamAliases({
         </Field>
         <Field className="min-w-0 flex-[1_1_12rem]">
           <FieldLabel htmlFor={`${id}-team`}>Closed team</FieldLabel>
-          <NativeSelect
+          <FieldSelect
             id={`${id}-team`}
             className="w-full"
             value={selection ? selected : ""}
             disabled={available.length === 0}
-            onChange={(event) => setSelected(event.target.value)}
-          >
-            <NativeSelectOption value="">Choose a team</NativeSelectOption>
-            {available.map(({ team }) => (
-              <NativeSelectOption key={team.id} value={team.id}>
-                {team.name}
-              </NativeSelectOption>
-            ))}
-          </NativeSelect>
+            onValueChange={(nextValue) => setSelected(nextValue)}
+            options={[
+              { value: "", label: "Choose a team" },
+              ...available.map(({ team }) => ({
+                value: team.id,
+                label: team.name,
+              })),
+            ]}
+          />
         </Field>
         <Button
           variant="outline"

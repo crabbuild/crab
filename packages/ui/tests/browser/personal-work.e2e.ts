@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { expectNoAccessibilityViolations } from "./accessibility";
+import { chooseSelectOption } from "./select";
 
 test("personal work filters, pages, and recovers a changed access scope on mobile", async ({
   page,
@@ -134,7 +135,7 @@ test("workspace search shares its query, sort, and scope across pages", async ({
   await page.goto("/-/discussion-search");
   await page.getByRole("searchbox").fill("release is:open");
   await page.getByLabel("Repository scope").fill("team/service");
-  await page.getByLabel("Sort").selectOption("updated");
+  await chooseSelectOption(page.getByLabel("Sort"), "updated");
   await page.getByRole("button", { name: "Search", exact: true }).click();
   await expect(page).toHaveURL(
     /q=release\+is%3Aopen&scope=team%2Fservice&sort=updated/,

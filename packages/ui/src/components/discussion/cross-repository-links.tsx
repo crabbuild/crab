@@ -11,11 +11,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
+import { FieldSelect } from "@/components/ui/field-select";
 import { Input } from "@/components/ui/input";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
 import { WorkPicker } from "@/features/projects/item";
 import type { Work } from "@/features/projects/model";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
@@ -232,25 +229,23 @@ function LinkPicker({
               <FieldLabel htmlFor="linked-pull-repository">
                 Repository
               </FieldLabel>
-              <NativeSelect
+              <FieldSelect
                 id="linked-pull-repository"
                 value={repository?.id ?? ""}
                 disabled={mutation.pending}
-                onChange={(event) => {
-                  setRepository(addresses.get(event.target.value));
+                onValueChange={(value) => {
+                  setRepository(addresses.get(value));
                   setWork(undefined);
                   mutation.reset();
                 }}
-              >
-                <NativeSelectOption value="">
-                  Choose a repository
-                </NativeSelectOption>
-                {[...addresses.values()].map((address) => (
-                  <NativeSelectOption key={address.id} value={address.id}>
-                    {address.owner}/{address.name}
-                  </NativeSelectOption>
-                ))}
-              </NativeSelect>
+                options={[
+                  { value: "", label: "Choose a repository" },
+                  ...Array.from(addresses.values(), (address) => ({
+                    value: address.id,
+                    label: `${address.owner}/${address.name}`,
+                  })),
+                ]}
+              />
             </Field>
             {repository && !work && (
               <WorkPicker

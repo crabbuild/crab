@@ -1,3 +1,4 @@
+import { chooseSelectOption } from "../select";
 import { expect, test } from "@playwright/test";
 import { mockPullRequest } from "./fixture";
 
@@ -74,7 +75,7 @@ test("base changes use the previewed tips and recover a missing response", async
   await expect(choice.locator(`option[value="${pull.head_ref}"]`)).toHaveCount(
     0,
   );
-  await choice.selectOption(stable);
+  await chooseSelectOption(choice, stable);
   await expect(
     dialog.getByRole("region", { name: "New comparison" }),
   ).toContainText(tip.slice(0, 7));

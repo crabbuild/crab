@@ -1,11 +1,9 @@
+import { Checkbox } from "@/components/ui/checkbox";
+import { FieldSelect } from "@/components/ui/field-select";
 import { useId } from "react";
 import { DiscussionMarkdown } from "@/components/discussion/markdown";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
 
 type Prompt = { label: string; description: string | null };
 type Text = Prompt & {
@@ -163,16 +161,15 @@ export function TemplateFields({
               {help}
               {checks.map((option, optionIndex) => (
                 <div key={optionIndex} className="flex items-start gap-2">
-                  <input
+                  <Checkbox
                     className="mt-1"
-                    type="checkbox"
                     id={`${id}-${optionIndex}`}
                     checked={selected.includes(optionIndex)}
                     required={option.required}
-                    onChange={(event) =>
+                    onCheckedChange={(checked) =>
                       onAnswer(
                         index,
-                        event.target.checked
+                        checked === true
                           ? [...selected, optionIndex].sort((a, b) => a - b)
                           : selected.filter((value) => value !== optionIndex),
                       )
@@ -194,23 +191,20 @@ export function TemplateFields({
         if (field.type === "dropdown") {
           const selected = Array.isArray(answer) ? answer[0] : undefined;
           control = (
-            <NativeSelect
+            <FieldSelect
               {...props}
-              value={selected ?? ""}
-              onChange={(event) =>
-                onAnswer(
-                  index,
-                  event.target.value === "" ? [] : [Number(event.target.value)],
-                )
+              value={selected === undefined ? "" : String(selected)}
+              onValueChange={(nextValue) =>
+                onAnswer(index, nextValue === "" ? [] : [Number(nextValue)])
               }
-            >
-              <NativeSelectOption value="">Choose an option</NativeSelectOption>
-              {field.attributes.options.map((option, index) => (
-                <NativeSelectOption key={index} value={index}>
-                  {option}
-                </NativeSelectOption>
-              ))}
-            </NativeSelect>
+              options={[
+                { value: "", label: "Choose an option" },
+                ...field.attributes.options.map((option, index) => ({
+                  value: String(index),
+                  label: option,
+                })),
+              ]}
+            />
           );
         } else {
           const text = {

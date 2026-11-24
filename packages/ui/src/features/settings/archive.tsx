@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { endpoint, type Repository } from "@/lib/api";
 import { AlertIcon, ArchiveIcon } from "@primer/octicons-react";
@@ -105,7 +106,7 @@ export function ArchiveSettings({
               To confirm, type <code>{fullName}</code> below.
             </p>
             <label htmlFor="archive-confirmation">Repository name</label>
-            <input
+            <Input
               id="archive-confirmation"
               value={confirmation}
               autoComplete="off"

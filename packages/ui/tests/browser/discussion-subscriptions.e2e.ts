@@ -1,3 +1,4 @@
+import { chooseSelectOption } from "./select";
 import { expect, test } from "@playwright/test";
 import { expectNoAccessibilityViolations } from "./accessibility";
 import { mockPullRequest } from "./pulls/fixture";
@@ -99,7 +100,7 @@ test("subscriptions show quiet follows across pages and save changes using the r
   );
   await expect(page.getByText(/Repository muted/)).toBeVisible();
   await expectNoAccessibilityViolations(page);
-  await page.getByLabel("Discussion type").selectOption("pull");
+  await chooseSelectOption(page.getByLabel("Discussion type"), "pull");
   await expect(page).toHaveURL(/kind=pull$/);
   await expect(link).toBeVisible();
   const settings = page.getByRole("button", {
@@ -111,14 +112,14 @@ test("subscriptions show quiet follows across pages and save changes using the r
   const choice = dialog.getByLabel("Notify me about");
   const save = dialog.getByRole("button", { name: "Save preference" });
   await settings.click();
-  await choice.selectOption("state_changes");
+  await chooseSelectOption(choice, "state_changes");
   await save.click();
   await expect(dialog.getByRole("alert")).toContainText("response was lost");
   await save.click();
   await expect(dialog).toBeHidden();
   await expect(page.getByText(/State changes only/)).toBeVisible();
   await settings.click();
-  await choice.selectOption("unsubscribed");
+  await chooseSelectOption(choice, "unsubscribed");
   await save.click();
   await expect(link).toBeHidden();
   await expect(
@@ -202,7 +203,7 @@ test("subscriptions filter by reason and keep the requested time order across pa
   const reason = page.getByLabel("Subscription reason");
   const list = page.getByRole("group", { name: "Discussion subscriptions" });
   const titles = () => list.getByRole("link");
-  await sort.selectOption("recent");
+  await chooseSelectOption(sort, "recent");
   await expect(titles()).toHaveText(["Manual follow", "Mentioned follow"]);
   await expect(list.getByText("Manually subscribed")).toBeVisible();
   await page.getByRole("button", { name: "Load more subscriptions" }).click();
@@ -212,18 +213,18 @@ test("subscriptions filter by reason and keep the requested time order across pa
     "Earlier follow",
   ]);
   await expect(list.getByText("Source unavailable")).toBeVisible();
-  await sort.selectOption("oldest");
+  await chooseSelectOption(sort, "oldest");
   await expect(titles()).toHaveText([
     "Mentioned follow",
     "Manual follow",
     "Earlier follow",
   ]);
-  await reason.selectOption("mention");
+  await chooseSelectOption(reason, "mention");
   await expect(titles()).toHaveText(["Mentioned follow"]);
   await expect(page).toHaveURL(/sort=oldest&reason=mention$/);
   await expectNoAccessibilityViolations(page);
   await page.reload();
-  await expect(reason).toHaveValue("mention");
-  await expect(sort).toHaveValue("oldest");
+  await expect(reason).toHaveText("Mention");
+  await expect(sort).toHaveText("Least recently subscribed");
   await expect(titles()).toHaveText(["Mentioned follow"]);
 });

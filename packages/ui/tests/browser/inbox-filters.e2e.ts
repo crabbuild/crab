@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { expectNoAccessibilityViolations } from "./accessibility";
 import { mockPullRequest } from "./pulls/fixture";
+import { chooseSelectOption } from "./select";
 
 test("saved filters combine criteria and recover from a stale edit on mobile", async ({
   page,
@@ -82,14 +83,15 @@ test("saved filters combine criteria and recover from a stale edit on mobile", a
   await dialog.getByRole("button", { name: "New filter" }).click();
   await expect(dialog.getByLabel("Filter name")).toBeFocused();
   await dialog.getByLabel("Filter name").fill("Platform PR reviews");
-  await dialog.getByLabel("View", { exact: true }).selectOption("read");
-  await dialog
-    .getByLabel("Organization", { exact: true })
-    .selectOption({ label: "Platform" });
-  await dialog
-    .getByLabel("Reason", { exact: true })
-    .selectOption("review_requested");
-  await dialog.getByLabel("Notification type").selectOption("pull");
+  await chooseSelectOption(dialog.getByLabel("View", { exact: true }), "read");
+  await chooseSelectOption(dialog.getByLabel("Organization", { exact: true }), {
+    label: "Platform",
+  });
+  await chooseSelectOption(
+    dialog.getByLabel("Reason", { exact: true }),
+    "review_requested",
+  );
+  await chooseSelectOption(dialog.getByLabel("Notification type"), "pull");
   await dialog.getByRole("button", { name: "Me", exact: true }).click();
   await expectNoAccessibilityViolations(page);
   const filteredQuery = page.waitForRequest((request) => {
@@ -108,8 +110,8 @@ test("saved filters combine criteria and recover from a stale edit on mobile", a
     .click();
   await filteredQuery;
   await expect(dialog).toHaveCount(0);
-  await expect(page.getByLabel("Saved filter", { exact: true })).toHaveValue(
-    saved!.id,
+  await expect(page.getByLabel("Saved filter", { exact: true })).toHaveText(
+    "Platform PR reviews",
   );
 
   await page.getByRole("button", { name: "Manage filters" }).click();

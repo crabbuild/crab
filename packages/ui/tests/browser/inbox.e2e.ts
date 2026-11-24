@@ -1,3 +1,4 @@
+import { chooseSelectOption } from "./select";
 import { expect, test } from "@playwright/test";
 import { expectNoAccessibilityViolations } from "./accessibility";
 import { emptyReactions } from "./fixtures";
@@ -192,16 +193,16 @@ test("notifications preserve unread state and open the exact review reply", asyn
   const review = page.getByRole("link", { name: "Review the README" });
   await expect(review).toHaveAttribute("href", "/team/project/pull/2");
   const reason = page.getByLabel("Reason", { exact: true });
-  await reason.selectOption("assigned");
+  await chooseSelectOption(reason, "assigned");
   await expect(page.getByText(/Assignment · Updated by Alice/)).toBeVisible();
   await expect(
     page.getByRole("link", { name: "Assigned issue" }),
   ).toHaveAttribute("href", "/team/project/issues/3");
   await expect(review).toHaveCount(0);
   await page.reload();
-  await expect(reason).toHaveValue("assigned");
+  await expect(reason).toHaveText("Assignments");
   await expectNoAccessibilityViolations(page);
-  await reason.selectOption("issue_transferred");
+  await chooseSelectOption(reason, "issue_transferred");
   const transferred = page.getByRole("link", { name: "Moved issue" });
   await expect(transferred).toHaveAttribute("href", "/team/library/issues/4");
   const transferRow = page.getByRole("listitem").filter({ has: transferred });
@@ -211,7 +212,7 @@ test("notifications preserve unread state and open the exact review reply", asyn
   await expect(
     transferRow.getByRole("button", { name: "Unsubscribe" }),
   ).toHaveCount(0);
-  await reason.selectOption("");
+  await chooseSelectOption(reason, "");
   await page.getByRole("button", { name: "Load older notifications" }).click();
   await expect(page.getByRole("alert")).toContainText("Inbox unavailable");
   await expect(review).toBeVisible();
@@ -250,10 +251,12 @@ test("notifications preserve unread state and open the exact review reply", asyn
   await expect(
     reviewRow.getByRole("button", { name: "Mark as unread" }),
   ).toBeVisible();
-  await page
-    .getByRole("region", { name: "Notifications" })
-    .getByLabel("Repository", { exact: true })
-    .selectOption(second.id);
+  await chooseSelectOption(
+    page
+      .getByRole("region", { name: "Notifications" })
+      .getByLabel("Repository", { exact: true }),
+    second.id,
+  );
   await expect(page.getByRole("link", { name: "Library issue" })).toBeVisible();
   await expect(review).toHaveCount(0);
   await page.getByRole("link", { name: "Clear repository filter" }).click();
@@ -522,7 +525,7 @@ test("bulk selection spans loaded pages and retries the same submission", async 
     await page.evaluate(() => document.documentElement.scrollWidth),
   ).toBeLessThanOrEqual(390);
   await expectNoAccessibilityViolations(page);
-  await action.selectOption("done");
+  await chooseSelectOption(action, "done");
   await apply.click();
   await expect(inbox.getByRole("alert")).toContainText("This list changed");
   await expect(inbox.getByRole("link", { name: rows[0].title })).toBeVisible();
@@ -531,7 +534,7 @@ test("bulk selection spans loaded pages and retries the same submission", async 
   await older.click();
   await expect(inbox.getByRole("link", { name: rows[1].title })).toBeVisible();
   await selectAll.click();
-  await action.selectOption("save");
+  await chooseSelectOption(action, "save");
   await apply.click();
   await expect(inbox.getByRole("alert")).toContainText("The response was lost");
   await expect(selectAll).toBeDisabled();
@@ -541,14 +544,14 @@ test("bulk selection spans loaded pages and retries the same submission", async 
   await expect(inbox.getByLabel("Repository", { exact: true })).toBeFocused();
 
   await selectAll.click();
-  await action.selectOption("done");
+  await chooseSelectOption(action, "done");
   await apply.click();
   await expect(inbox.getByText("No unread notifications.")).toBeVisible();
   await inbox.getByRole("link", { name: "Done", exact: true }).click();
   await older.click();
   await expect(inbox.getByRole("link", { name: rows[1].title })).toBeVisible();
   await selectAll.click();
-  await action.selectOption("restore");
+  await chooseSelectOption(action, "restore");
   await apply.click();
   await expect(inbox.getByText("No completed notifications.")).toBeVisible();
 });
@@ -685,9 +688,10 @@ test("unsubscribe recovers a lost reply and reports a stale row in a batch", asy
   await inbox
     .getByRole("checkbox", { name: "Select all loaded notifications" })
     .click();
-  await inbox
-    .getByLabel("Bulk notification action")
-    .selectOption("unsubscribe");
+  await chooseSelectOption(
+    inbox.getByLabel("Bulk notification action"),
+    "unsubscribe",
+  );
   await inbox.getByRole("button", { name: "Apply to selected" }).click();
   await expect(inbox.getByRole("alert")).toContainText(
     "One conversation changed",
@@ -780,7 +784,10 @@ test("release notifications filter and open the exact publication", async ({
 
   await page.goto("/-/notifications");
   const inbox = page.getByRole("region", { name: "Notifications" });
-  await inbox.getByLabel("Reason", { exact: true }).selectOption("release");
+  await chooseSelectOption(
+    inbox.getByLabel("Reason", { exact: true }),
+    "release",
+  );
   const link = inbox.getByRole("link", { name: notice.title });
   await expect(link).toHaveAttribute("href", href);
   await expect(

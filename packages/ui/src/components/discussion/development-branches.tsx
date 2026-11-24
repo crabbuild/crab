@@ -13,10 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
+import { FieldSelect } from "@/components/ui/field-select";
 import { endpoint, useRequest, type Refs, type Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 import { useMutation } from "./mutations";
@@ -390,24 +387,22 @@ function BranchPicker({
             )}
             <Field>
               <FieldLabel htmlFor="branch-repository">Repository</FieldLabel>
-              <NativeSelect
+              <FieldSelect
                 id="branch-repository"
                 value={repository.id}
                 disabled={pending}
-                onChange={(event) => {
-                  const choice = repositories.get(event.target.value);
+                onValueChange={(value) => {
+                  const choice = repositories.get(value);
                   if (!choice) return;
                   setRepository(choice);
                   setBranch("");
                   setBranchSearch("");
                 }}
-              >
-                {[...repositories.values()].map((item) => (
-                  <NativeSelectOption key={item.id} value={item.id}>
-                    {item.owner}/{item.name}
-                  </NativeSelectOption>
-                ))}
-              </NativeSelect>
+                options={Array.from(repositories.values(), (item) => ({
+                  value: item.id,
+                  label: `${item.owner}/${item.name}`,
+                }))}
+              />
             </Field>
             {creating &&
               !sameRepository &&
@@ -435,24 +430,25 @@ function BranchPicker({
                     <FieldLabel htmlFor="development-branch">
                       {creating ? "Starting branch" : "Branch"}
                     </FieldLabel>
-                    <NativeSelect
+                    <FieldSelect
                       id="development-branch"
                       required
                       value={selected?.name ?? ""}
                       disabled={pending || !matching.length}
-                      onChange={(event) => setBranch(event.target.value)}
-                    >
-                      <NativeSelectOption value="">
-                        {matching.length
-                          ? "Choose a branch"
-                          : "No matching branches"}
-                      </NativeSelectOption>
-                      {matching.map((item) => (
-                        <NativeSelectOption key={item.name} value={item.name}>
-                          {item.name.slice(branchesPrefix.length)}
-                        </NativeSelectOption>
-                      ))}
-                    </NativeSelect>
+                      onValueChange={setBranch}
+                      options={[
+                        {
+                          value: "",
+                          label: matching.length
+                            ? "Choose a branch"
+                            : "No matching branches",
+                        },
+                        ...matching.map((item) => ({
+                          value: item.name,
+                          label: item.name.slice(branchesPrefix.length),
+                        })),
+                      ]}
+                    />
                   </Field>
                 </>
               )}

@@ -1,3 +1,4 @@
+import { chooseSelectOption } from "../select";
 import { expect, test } from "@playwright/test";
 import { mockPullRequest } from "./fixture";
 
@@ -65,9 +66,10 @@ test("a waiting merge can be confirmed, recovered, and canceled", async ({
   const panel = page.getByRole("region", { name: "Auto-merge", exact: true });
   await panel.getByRole("button", { name: "Enable auto-merge" }).click();
   const confirm = page.getByRole("dialog", { name: "Enable auto-merge" });
-  await confirm
-    .getByRole("combobox", { name: "Merge method" })
-    .selectOption("squash");
+  await chooseSelectOption(
+    confirm.getByRole("combobox", { name: "Merge method" }),
+    "squash",
+  );
   await confirm
     .getByRole("textbox", { name: "Commit message" })
     .fill("Reviewed changes");
