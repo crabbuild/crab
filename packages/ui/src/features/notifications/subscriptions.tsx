@@ -1,13 +1,10 @@
+import { FieldSelect } from "@/components/ui/field-select";
 import { useRef, useState } from "react";
 import { RelativeTime } from "@/components/discussion/time";
 import { Link } from "@/components/navigation/link";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Spinner } from "@/components/ui/spinner";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
 import { navigate, useRequest } from "@/lib/api";
 import type { Address } from "./actions";
 import { BulkSubscriptions, discussionKey } from "./bulk-subscriptions";
@@ -85,65 +82,63 @@ export function DiscussionSubscriptions({
       <div className="flex flex-wrap gap-3">
         <label className="grid gap-1 text-sm font-medium">
           Repository
-          <NativeSelect
+          <FieldSelect
             value={repository}
-            onChange={(event) => filter("repository", event.target.value)}
-          >
-            <NativeSelectOption value="">All repositories</NativeSelectOption>
-            {repository &&
-              !repositories.some(({ id }) => id === repository) && (
-                <NativeSelectOption value={repository}>
-                  Selected repository
-                </NativeSelectOption>
-              )}
-            {repositories.map(({ id, owner, name }) => (
-              <NativeSelectOption key={id} value={id}>
-                {owner}/{name}
-              </NativeSelectOption>
-            ))}
-          </NativeSelect>
+            onValueChange={(nextValue) => filter("repository", nextValue)}
+            options={[
+              { value: "", label: "All repositories" },
+              ...(repository &&
+              !repositories.some(({ id }) => id === repository)
+                ? [{ value: repository, label: "Selected repository" }]
+                : []),
+              ...repositories.map(({ id, owner, name }) => ({
+                value: id,
+                label: (
+                  <>
+                    {owner}/{name}
+                  </>
+                ),
+              })),
+            ]}
+          />
         </label>
         <label className="grid gap-1 text-sm font-medium">
           Discussion type
-          <NativeSelect
+          <FieldSelect
             value={selectedKind}
-            onChange={(event) => filter("kind", event.target.value)}
-          >
-            <NativeSelectOption value="">
-              Issues and pull requests
-            </NativeSelectOption>
-            <NativeSelectOption value="issue">Issues</NativeSelectOption>
-            <NativeSelectOption value="pull">Pull requests</NativeSelectOption>
-          </NativeSelect>
+            onValueChange={(nextValue) => filter("kind", nextValue)}
+            options={[
+              { value: "", label: "Issues and pull requests" },
+              { value: "issue", label: "Issues" },
+              { value: "pull", label: "Pull requests" },
+            ]}
+          />
         </label>
         <label className="grid gap-1 text-sm font-medium">
           Subscription reason
-          <NativeSelect
+          <FieldSelect
             value={selectedReason}
-            onChange={(event) => filter("reason", event.target.value)}
-          >
-            <NativeSelectOption value="">All reasons</NativeSelectOption>
-            {Object.entries(reasons).map(([value, label]) => (
-              <NativeSelectOption key={value} value={value}>
-                {label}
-              </NativeSelectOption>
-            ))}
-          </NativeSelect>
+            onValueChange={(nextValue) => filter("reason", nextValue)}
+            options={[
+              { value: "", label: "All reasons" },
+              ...Object.entries(reasons).map(([value, label]) => ({
+                value: value,
+                label: label,
+              })),
+            ]}
+          />
         </label>
         <label className="grid gap-1 text-sm font-medium">
           Sort subscriptions
-          <NativeSelect
+          <FieldSelect
             value={selectedSort}
-            onChange={(event) => filter("sort", event.target.value)}
-          >
-            <NativeSelectOption value="">Repository order</NativeSelectOption>
-            <NativeSelectOption value="recent">
-              Most recently subscribed
-            </NativeSelectOption>
-            <NativeSelectOption value="oldest">
-              Least recently subscribed
-            </NativeSelectOption>
-          </NativeSelect>
+            onValueChange={(nextValue) => filter("sort", nextValue)}
+            options={[
+              { value: "", label: "Repository order" },
+              { value: "recent", label: "Most recently subscribed" },
+              { value: "oldest", label: "Least recently subscribed" },
+            ]}
+          />
         </label>
       </div>
       {selectedSort && !selectedReason && (

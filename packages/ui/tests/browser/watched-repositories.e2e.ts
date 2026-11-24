@@ -1,3 +1,4 @@
+import { chooseSelectOption } from "./select";
 import { expect, test } from "@playwright/test";
 import { expectNoAccessibilityViolations } from "./accessibility";
 import { mockPullRequest } from "./pulls/fixture";
@@ -97,7 +98,7 @@ test("watched repositories can load past an empty page and save a release-only w
   const dialog = page.getByRole("dialog", { name: "Repository notifications" });
   const releases = dialog.getByRole("checkbox", { name: "New releases" });
   await watch.click();
-  await dialog.getByLabel("Notify me about").selectOption("direct");
+  await chooseSelectOption(dialog.getByLabel("Notify me about"), "direct");
   await releases.click();
   await dialog.getByRole("button", { name: "Save preference" }).click();
   await expect(dialog).toBeHidden();

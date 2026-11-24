@@ -1,3 +1,4 @@
+import { chooseSelectOption } from "../select";
 import { expect, test } from "@playwright/test";
 import { mockPullRequest } from "./fixture";
 import type { PullRequest } from "../../../src/features/pull-requests/model";
@@ -344,14 +345,17 @@ test("repository merge methods govern the picker and a pending rebase retains it
   await settings
     .getByRole("checkbox", { name: /^Fast-forward only/ })
     .uncheck();
-  await settings.getByLabel("Queue merge method").selectOption("rebase");
+  await chooseSelectOption(settings.getByLabel("Queue merge method"), "rebase");
   await settings.getByLabel("Concurrent queue builds").fill("3");
   const overrides = settings.getByRole("group", {
     name: "Branch queue overrides",
   });
   await overrides.getByRole("button", { name: "Add branch override" }).click();
   await overrides.getByLabel("Branch name").fill("release/stable");
-  await overrides.getByLabel("Branch queue method").selectOption("squash");
+  await chooseSelectOption(
+    overrides.getByLabel("Branch queue method"),
+    "squash",
+  );
   await overrides.getByLabel("Branch check timeout (minutes)").fill("30");
   await settings.getByRole("button", { name: "Save merge methods" }).click();
   await expect(
@@ -360,12 +364,14 @@ test("repository merge methods govern the picker and a pending rebase retains it
   await expect(
     settings.getByRole("checkbox", { name: /^Squash and merge/ }),
   ).toBeChecked();
-  await expect(settings.getByLabel("Queue merge method")).toHaveValue("rebase");
+  await expect(settings.getByLabel("Queue merge method")).toHaveText(
+    "Rebase and merge",
+  );
   await expect(overrides.getByLabel("Branch name")).toHaveValue(
     "release/stable",
   );
-  await expect(overrides.getByLabel("Branch queue method")).toHaveValue(
-    "squash",
+  await expect(overrides.getByLabel("Branch queue method")).toHaveText(
+    "Squash and merge",
   );
 
   await page.goto("/team/project/pull/1");

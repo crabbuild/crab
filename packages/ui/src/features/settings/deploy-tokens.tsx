@@ -1,13 +1,10 @@
+import { FieldSelect } from "@/components/ui/field-select";
 import { useState } from "react";
 import { useMutation } from "@/components/discussion/mutations";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
 
 type DeployToken = {
@@ -164,17 +161,16 @@ export function DeployTokens({
                     <FieldLabel htmlFor="deploy-token-expiration">
                       Expiration
                     </FieldLabel>
-                    <NativeSelect
+                    <FieldSelect
                       id="deploy-token-expiration"
                       value={days}
-                      onChange={(event) => setDays(event.target.value)}
-                    >
-                      <NativeSelectOption value="1">1 day</NativeSelectOption>
-                      <NativeSelectOption value="7">7 days</NativeSelectOption>
-                      <NativeSelectOption value="30">
-                        30 days
-                      </NativeSelectOption>
-                    </NativeSelect>
+                      onValueChange={(nextValue) => setDays(nextValue)}
+                      options={[
+                        { value: "1", label: "1 day" },
+                        { value: "7", label: "7 days" },
+                        { value: "30", label: "30 days" },
+                      ]}
+                    />
                   </Field>
                   <Button
                     type="submit"

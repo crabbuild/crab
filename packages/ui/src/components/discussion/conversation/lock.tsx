@@ -1,3 +1,4 @@
+import { FieldSelect } from "@/components/ui/field-select";
 import {
   createContext,
   useContext,
@@ -179,35 +180,36 @@ export function ConversationLockControl({
               >
                 <label className="grid gap-1 text-sm">
                   Reason
-                  <select
-                    className="rounded-md border bg-background px-3 py-2"
+                  <FieldSelect
+                    className="w-full max-w-xs"
                     value={reason}
-                    onChange={(event) =>
-                      setReason(event.currentTarget.value as LockReason | "")
+                    onValueChange={(nextValue) =>
+                      setReason(nextValue as LockReason | "")
                     }
-                  >
-                    <option value="">No reason</option>
-                    {Object.entries(reasons).map(([key, label]) => (
-                      <option key={key} value={key}>
-                        {label}
-                      </option>
-                    ))}
-                  </select>
+                    options={[
+                      { value: "", label: "No reason" },
+                      ...Object.entries(reasons).map(([key, label]) => ({
+                        value: key,
+                        label: label,
+                      })),
+                    ]}
+                  />
                 </label>
                 <label className="grid gap-1 text-sm">
                   Duration
-                  <select
-                    className="rounded-md border bg-background px-3 py-2"
+                  <FieldSelect
+                    className="w-full max-w-xs"
                     value={duration}
-                    onChange={(event) =>
-                      setDuration(event.currentTarget.value as Duration | "")
+                    onValueChange={(nextValue) =>
+                      setDuration(nextValue as Duration | "")
                     }
-                  >
-                    <option value="">Until unlocked</option>
-                    <option value="hour">1 hour</option>
-                    <option value="day">1 day</option>
-                    <option value="week">1 week</option>
-                  </select>
+                    options={[
+                      { value: "", label: "Until unlocked" },
+                      { value: "hour", label: "1 hour" },
+                      { value: "day", label: "1 day" },
+                      { value: "week", label: "1 week" },
+                    ]}
+                  />
                 </label>
                 <Failure message={mutation.error} />
                 <DialogFooter>

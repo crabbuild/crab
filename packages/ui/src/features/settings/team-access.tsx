@@ -1,12 +1,10 @@
+import { Disclosure } from "@/components/ui/collapsible";
+import { FieldSelect } from "@/components/ui/field-select";
 import { useState } from "react";
 import { UsersIcon } from "lucide-react";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
 import type {
   TeamAccessState,
@@ -203,13 +201,13 @@ function GrantEditor({
                     </span>
                   )}
                 </div>
-                <NativeSelect
+                <FieldSelect
                   aria-label={`Role for ${label}`}
                   className="w-28"
                   disabled={locked || !name}
                   value={grant.access}
-                  onChange={(event) => {
-                    const role = event.target.value;
+                  onValueChange={(nextValue) => {
+                    const role = nextValue;
                     if (isRepositoryRole(role))
                       edit(
                         draft.map((item) =>
@@ -219,13 +217,13 @@ function GrantEditor({
                         ),
                       );
                   }}
-                >
-                  {repositoryRoles.map((value) => (
-                    <NativeSelectOption key={value} value={value}>
-                      {repositoryRoleLabels[value]}
-                    </NativeSelectOption>
-                  ))}
-                </NativeSelect>
+                  options={[
+                    ...repositoryRoles.map((value) => ({
+                      value: value,
+                      label: repositoryRoleLabels[value],
+                    })),
+                  ]}
+                />
                 <Button
                   variant="outline"
                   className="justify-self-end"
@@ -249,10 +247,11 @@ function GrantEditor({
       {unavailable && (
         <p role="status">Remove grants for unavailable teams before saving.</p>
       )}
-      <details className="text-muted-foreground">
-        <summary className="w-fit cursor-pointer">
-          What can each role do?
-        </summary>
+      <Disclosure
+        className="text-muted-foreground"
+        summaryClassName="w-fit cursor-pointer"
+        summary={<>What can each role do?</>}
+      >
         <dl className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1">
           <dt className="font-medium">Read</dt>
           <dd>View and clone the repository.</dd>
@@ -263,7 +262,7 @@ function GrantEditor({
           <dt className="font-medium">Admin</dt>
           <dd>Manage repository settings and direct collaborator access.</dd>
         </dl>
-      </details>
+      </Disclosure>
       {error && (
         <div className="notice error" role="alert">
           <p>{error}</p>

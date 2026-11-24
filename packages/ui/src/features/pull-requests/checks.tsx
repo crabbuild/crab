@@ -1,3 +1,4 @@
+import { Disclosure } from "@/components/ui/collapsible";
 import { repoHref } from "@/lib/repository-route";
 import {
   CheckCircleFillIcon,
@@ -321,16 +322,21 @@ function CheckRunDetail({ run }: { run: CheckRun }) {
         <h3>Steps</h3>
         {output.steps.length ? (
           output.steps.map((step, index) => (
-            <details key={`${step.name}:${index}`}>
-              <summary className={outcome(step)}>
-                <OutcomeIcon {...step} />
-                <strong>{step.name}</strong>
-                <span>{label(step)}</span>
-              </summary>
+            <Disclosure
+              key={`${step.name}:${index}`}
+              summaryClassName={outcome(step)}
+              summary={
+                <>
+                  <OutcomeIcon {...step} />
+                  <strong>{step.name}</strong>
+                  <span>{label(step)}</span>
+                </>
+              }
+            >
               <pre>
                 <code>{step.log || "No log output was reported."}</code>
               </pre>
-            </details>
+            </Disclosure>
           ))
         ) : (
           <p className="muted">No steps were reported.</p>

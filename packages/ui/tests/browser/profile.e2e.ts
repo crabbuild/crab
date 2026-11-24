@@ -1,3 +1,4 @@
+import { chooseSelectOption } from "./select";
 import { expect, test, type Page } from "@playwright/test";
 import {
   expectNoAccessibilityViolations,
@@ -137,7 +138,7 @@ test("review availability is reachable from account settings and persists on mob
   await page.goto("/-/profile");
   await page.getByRole("link", { name: "Review availability" }).click();
   const status = page.getByLabel("Set status");
-  await status.selectOption("one_hour");
+  await chooseSelectOption(status, "one_hour");
   await page.getByRole("button", { name: "Save availability" }).click();
   await expect(page.getByRole("status")).toContainText(
     "Review availability saved.",

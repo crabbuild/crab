@@ -1,3 +1,4 @@
+import { chooseSelectOption } from "./select";
 import { expect, test, type Page } from "@playwright/test";
 import type { FilePreview } from "@/lib/contracts";
 import { tableFromArrays, tableToIPC } from "apache-arrow";
@@ -2645,6 +2646,9 @@ test("format-aware previews explore data, office files, media, and databases loc
       image.evaluate((node) => (node as HTMLImageElement).naturalWidth),
     )
     .toBe(80);
+  const zoom = page.getByRole("slider", { name: "Image zoom" });
+  await zoom.press("ArrowRight");
+  await expect(zoom).toHaveAttribute("aria-valuenow", "125");
 
   await page.goto(`/team/project/blob/main/report.xlsx`);
   await expect(
@@ -2775,6 +2779,56 @@ test("format-aware previews explore data, office files, media, and databases loc
     page.getByRole("heading", { name: "Hex and ASCII" }),
   ).toBeVisible();
   await expect(page.getByText(/00000000\s+08 03 12 00 ff 00/)).toBeVisible();
+});
+
+test("audio previews play and pause using the shared media controls", async ({
+  page,
+}) => {
+  const rate = 8000;
+  const audio = Buffer.alloc(44 + 4 * rate, 128);
+  audio.write("RIFF", 0);
+  audio.writeUInt32LE(audio.length - 8, 4);
+  audio.write("WAVEfmt ", 8);
+  audio.writeUInt32LE(16, 16);
+  audio.writeUInt16LE(1, 20);
+  audio.writeUInt16LE(1, 22);
+  audio.writeUInt32LE(rate, 24);
+  audio.writeUInt32LE(rate, 28);
+  audio.writeUInt16LE(1, 32);
+  audio.writeUInt16LE(8, 34);
+  audio.write("data", 36);
+  audio.writeUInt32LE(audio.length - 44, 40);
+  await routePreviewFiles(page, { "sample.wav": { text: null, bytes: audio } });
+
+  await page.goto("/team/project/blob/main/sample.wav");
+  const player = page.getByRole("region", {
+    name: "Audio preview of sample.wav",
+  });
+  const position = player.getByRole("slider", { name: "Playback position" });
+  await expect(position).toHaveAttribute("aria-valuemax", "4");
+  await player.getByRole("button", { name: "Play", exact: true }).click();
+  await expect
+    .poll(() =>
+      player
+        .locator("audio")
+        .evaluate((node: HTMLAudioElement) => node.currentTime),
+    )
+    .toBeGreaterThan(0);
+  await player.getByRole("button", { name: "Pause", exact: true }).click();
+  await expect(
+    player.getByRole("button", { name: "Play", exact: true }),
+  ).toBeVisible();
+  await chooseSelectOption(
+    player.getByRole("combobox", { name: "Playback speed" }),
+    "1.5",
+  );
+  await expect
+    .poll(() =>
+      player
+        .locator("audio")
+        .evaluate((node: HTMLAudioElement) => node.playbackRate),
+    )
+    .toBe(1.5);
 });
 
 test("blame and source panes resize with pointer and keyboard controls", async ({
@@ -3220,7 +3274,7 @@ test("code search preserves scope and links each match to the searched commit", 
     .click();
   const form = page.getByRole("search", { name: "Search repository code" });
   await form.getByLabel("Search text").fill("render");
-  await form.getByLabel("Search in").selectOption("symbol");
+  await chooseSelectOption(form.getByLabel("Search in"), "symbol");
   await form.getByLabel("Directory (optional)").fill("src");
   await form.getByRole("checkbox", { name: "Match case" }).check();
   await form.getByRole("button", { name: "Search", exact: true }).click();
@@ -3583,11 +3637,11 @@ test("protected file edits create a review branch and open the exact comparison"
   await page.getByLabel("New branch name").fill("docs/readme-review");
   await page.getByRole("button", { name: "Propose changes" }).click();
   await expect(page).toHaveURL(/\/compare\//);
-  await expect(page.locator(".compare-picker select").nth(0)).toHaveValue(
-    "refs/heads/main",
+  await expect(page.getByRole("combobox", { name: "base:" })).toHaveText(
+    "main",
   );
-  await expect(page.locator(".compare-picker select").nth(1)).toHaveValue(
-    "refs/heads/docs/readme-review",
+  await expect(page.getByRole("combobox", { name: "compare:" })).toHaveText(
+    "docs/readme-review",
   );
   await expect(page.getByLabel("Title", { exact: true })).toHaveValue(
     "Propose README update",
@@ -3667,7 +3721,7 @@ test("mobile Code menu stays within the viewport and theme selection persists", 
   ] as const) {
     await page.setViewportSize({ width, height: 800 });
     await selectTheme(page, theme);
-    await page.locator(".clone-menu summary").click();
+    await page.locator(".clone-menu [data-slot=collapsible-trigger]").click();
     await expect(
       page.getByLabel("Repository URL", { exact: true }),
     ).toHaveValue(`${new URL(page.url()).origin}/git/team/project.git`);
@@ -3691,7 +3745,7 @@ test("mobile Code menu stays within the viewport and theme selection persists", 
     expect(geometry.body).toBeLessThanOrEqual(geometry.viewport);
     expect(geometry.left).toBeGreaterThanOrEqual(0);
     expect(geometry.right).toBeLessThanOrEqual(geometry.viewport);
-    await page.locator(".clone-menu summary").click();
+    await page.locator(".clone-menu [data-slot=collapsible-trigger]").click();
   }
   await page.reload();
   await expect(page.locator('[aria-label="Light"]')).toHaveAttribute(
@@ -4016,6 +4070,30 @@ test("branch and tag pages follow the GitHub refs hierarchy", async ({
   ).toBeLessThanOrEqual(390);
 });
 
+test("repository settings sections have space between them on desktop and mobile", async ({
+  page,
+}) => {
+  await page.goto("/team/project/settings");
+  const panels = page.locator(".settings-content > .settings-section");
+  await expect(
+    page.getByRole("region", { name: "Pull request merge methods" }),
+  ).toBeVisible();
+  for (const width of [1205, 390]) {
+    await page.setViewportSize({ width, height: 850 });
+    const gaps = await panels.evaluateAll((panels) =>
+      panels
+        .slice(1)
+        .map(
+          (panel, index) =>
+            panel.getBoundingClientRect().top -
+            panels[index].getBoundingClientRect().bottom,
+        ),
+    );
+    expect(gaps.length).toBeGreaterThanOrEqual(4);
+    for (const gap of gaps) expect(gap).toBeGreaterThanOrEqual(16);
+  }
+});
+
 test("repository settings changes the default branch with explicit confirmation", async ({
   page,
 }) => {
@@ -4061,9 +4139,10 @@ test("repository settings changes the default branch with explicit confirmation"
   ).toBeVisible();
   await expect(page.locator(".default-branch-current")).toContainText("main");
   await page.getByRole("button", { name: "Change" }).click();
-  await page
-    .getByRole("combobox", { name: "Choose a branch" })
-    .selectOption("refs/heads/feature/docs");
+  await chooseSelectOption(
+    page.getByRole("combobox", { name: "Choose a branch" }),
+    "refs/heads/feature/docs",
+  );
   await page.getByRole("button", { name: "Update", exact: true }).click();
   await expect(
     page.getByText("Change the default branch to feature/docs?"),
@@ -4203,7 +4282,7 @@ test("repository settings create, edit, and delete branch protection rules", asy
     .getByRole("button", { name: "Add branch protection rule" })
     .click();
   await page.getByLabel("Branch name").fill("main");
-  await page.getByLabel("Required approving reviews").selectOption("2");
+  await chooseSelectOption(page.getByLabel("Required approving reviews"), "2");
   const queue = page.getByRole("checkbox", { name: "Require merge queue" });
   await expect(queue).toBeDisabled();
   await page.getByLabel("Required status checks").fill("ci/test\nsecurity");
@@ -4230,7 +4309,7 @@ test("repository settings create, edit, and delete branch protection rules", asy
 
   await page.getByRole("button", { name: "Edit main" }).click();
   await expect(queue).toBeChecked();
-  await page.getByLabel("Required approving reviews").selectOption("1");
+  await chooseSelectOption(page.getByLabel("Required approving reviews"), "1");
   await page.getByLabel("Required status checks").fill("build");
   await page.getByRole("button", { name: "Save changes" }).click();
   await expect(rule).toContainText("1 approving review required");

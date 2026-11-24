@@ -1,13 +1,10 @@
+import { FieldSelect } from "@/components/ui/field-select";
 import { useState } from "react";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
 import type {
   ReviewRoutingAlgorithm,
   ReviewRoutingSettings,
@@ -94,20 +91,17 @@ function ReviewRoutingForm({
     >
       <div className="flex flex-col gap-2">
         <Label htmlFor="review-routing-algorithm">Assignment method</Label>
-        <NativeSelect
+        <FieldSelect
           id="review-routing-algorithm"
           name="algorithm"
           defaultValue={settings.algorithm}
           disabled={commands.locked}
-        >
-          <NativeSelectOption value="disabled">Disabled</NativeSelectOption>
-          <NativeSelectOption value="round_robin">
-            Round robin
-          </NativeSelectOption>
-          <NativeSelectOption value="fewest_open">
-            Load balance
-          </NativeSelectOption>
-        </NativeSelect>
+          options={[
+            { value: "disabled", label: "Disabled" },
+            { value: "round_robin", label: "Round robin" },
+            { value: "fewest_open", label: "Load balance" },
+          ]}
+        />
       </div>
       <div className="flex flex-col gap-2">
         <Label htmlFor="review-routing-count">Reviewers per request</Label>

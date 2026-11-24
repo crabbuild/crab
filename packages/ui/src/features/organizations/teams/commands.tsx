@@ -1,3 +1,4 @@
+import { Disclosure } from "@/components/ui/collapsible";
 import { useEffect, useRef, useState } from "react";
 import { useMutation } from "@/components/discussion/mutations";
 import { Link } from "@/components/navigation/link";
@@ -230,14 +231,13 @@ export function TeamFeedback({ commands }: { commands: Commands }) {
 
 function OriginalIntent({ intent }: { intent: Intent }) {
   return (
-    <details className="my-2">
-      <summary>Original submission</summary>
+    <Disclosure className="my-2" summary={<>Original submission</>}>
       <p className="break-all">
         Account: {intent.actor} · Organization: {intent.organization}
       </p>
       <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all text-xs">
         {JSON.stringify(intent.body, null, 2)}
       </pre>
-    </details>
+    </Disclosure>
   );
 }

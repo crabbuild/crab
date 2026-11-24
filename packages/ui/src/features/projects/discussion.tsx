@@ -1,3 +1,4 @@
+import { Progress } from "@/components/ui/progress";
 import { useEffect, useState } from "react";
 import { FolderKanbanIcon, PlusIcon, ListTreeIcon } from "lucide-react";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
@@ -266,7 +267,8 @@ export function SubIssues({
             )}
           </header>
           {!!tree.progress.total && (
-            <progress
+            <Progress
+              className="mb-3"
               max={tree.progress.total}
               value={tree.progress.closed}
               aria-label="Closed sub-issues"

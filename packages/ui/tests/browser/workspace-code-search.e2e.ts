@@ -1,3 +1,4 @@
+import { chooseSelectOption } from "./select";
 import { expect, test } from "@playwright/test";
 
 test("workspace search clears old results when access changes between pages", async ({
@@ -66,7 +67,7 @@ test("workspace search clears old results when access changes between pages", as
   await page.goto(`/-/code-search?organization=${organization}`);
   const form = page.getByRole("search", { name: "Search workspace code" });
   await form.getByLabel("Search text").fill(expression);
-  await form.getByLabel("Search in").selectOption("path");
+  await chooseSelectOption(form.getByLabel("Search in"), "path");
   await form.getByLabel("Directory (optional)").fill("src");
   await form.getByRole("checkbox", { name: "Match case" }).check();
   await form.getByRole("button", { name: "Search", exact: true }).click();

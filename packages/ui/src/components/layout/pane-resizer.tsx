@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useRef, type KeyboardEvent, type PointerEvent } from "react";
 
 type Props = {
@@ -36,7 +37,8 @@ export function PaneResizer({
   );
   const update = (next: number) => onChange(clamp(next, min, max));
   return (
-    <button
+    <Button
+      variant="ghost"
       type="button"
       className={`pane-resizer ${className}`}
       role="separator"
@@ -95,6 +97,6 @@ export function PaneResizer({
       {/* The tree limits hits to this target to keep its scrollbar reachable.
           Events still bubble to the separator, which owns pointer capture. */}
       <span className="pane-resizer-target" aria-hidden="true" />
-    </button>
+    </Button>
   );
 }

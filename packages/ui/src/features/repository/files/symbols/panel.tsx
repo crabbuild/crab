@@ -31,7 +31,8 @@ function SymbolRow({
   onActivate: (symbol: CodeSymbol) => void;
 }) {
   return (
-    <button
+    <Button
+      variant="ghost"
       className="code-symbol-row"
       type="button"
       onClick={() => onActivate(symbol)}
@@ -40,7 +41,7 @@ function SymbolRow({
       <span className="code-symbol-name">{symbol.name}</span>
       <span className="code-symbol-kind">{symbol.kind}</span>
       <span className="code-symbol-line">{symbol.line}</span>
-    </button>
+    </Button>
   );
 }
 

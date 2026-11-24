@@ -1,3 +1,4 @@
+import { FieldSelect } from "@/components/ui/field-select";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { endpoint, type Ref, type Refs, type Repository } from "@/lib/api";
@@ -184,17 +185,17 @@ function DefaultBranchSettings({
       {editing && !confirming && (
         <div className="default-branch-form">
           <label htmlFor="default-branch-select">Choose a branch</label>
-          <select
+          <FieldSelect
             id="default-branch-select"
             value={selectedName}
-            onChange={(event) => setSelectedName(event.target.value)}
-          >
-            {choices.map((ref) => (
-              <option key={ref.name} value={ref.name}>
-                {branchName(ref)}
-              </option>
-            ))}
-          </select>
+            onValueChange={(nextValue) => setSelectedName(nextValue)}
+            options={[
+              ...choices.map((ref) => ({
+                value: ref.name,
+                label: branchName(ref),
+              })),
+            ]}
+          />
           <div>
             <Button variant="outline" size="sm" onClick={cancel}>
               Cancel

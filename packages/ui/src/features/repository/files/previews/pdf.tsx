@@ -1,3 +1,5 @@
+import { Slider } from "@/components/ui/slider";
+import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 
 import { useEffect, useRef, useState } from "react";
@@ -114,17 +116,19 @@ export function PdfPreview({
     <div className="pdf-preview">
       <div className="pdf-preview-toolbar">
         <div className="pdf-page-controls">
-          <button
+          <Button
+            variant="ghost"
             className="button-link"
             disabled={page === 1}
             onClick={() => setPage((value) => Math.max(1, value - 1))}
           >
             Previous
-          </button>
+          </Button>
           <span>
             Page {page} of {document.numPages}
           </span>
-          <button
+          <Button
+            variant="ghost"
             className="button-link"
             disabled={page === document.numPages}
             onClick={() =>
@@ -132,18 +136,17 @@ export function PdfPreview({
             }
           >
             Next
-          </button>
+          </Button>
         </div>
         <label>
           Zoom
-          <input
-            aria-label="PDF zoom"
-            type="range"
-            min="50"
-            max="200"
-            step="25"
+          <Slider
+            label="PDF zoom"
+            min={50}
+            max={200}
+            step={25}
             value={zoom}
-            onChange={(event) => setZoom(Number(event.target.value))}
+            onValueChange={setZoom}
           />
           <output>{zoom}%</output>
         </label>

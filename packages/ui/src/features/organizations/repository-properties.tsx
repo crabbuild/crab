@@ -1,3 +1,6 @@
+import { Checkbox } from "@/components/ui/checkbox";
+import { Textarea } from "@/components/ui/textarea";
+import { FieldSelect } from "@/components/ui/field-select";
 import { useState } from "react";
 import { Failure } from "@/components/discussion/failure";
 import { useMutation } from "@/components/discussion/mutations";
@@ -181,32 +184,32 @@ function Definitions({
           </label>
           <label className="grid gap-1">
             Property type
-            <select
-              className={control}
+            <FieldSelect
+              className="w-full"
               value={draft.kind}
               disabled={!!existing}
-              onChange={(event) => {
+              onValueChange={(nextValue) => {
                 setOptions("");
                 setDraft({
                   ...draft,
-                  kind: event.target.value as PropertyKind,
+                  kind: nextValue as PropertyKind,
                   options: [],
                   default: null,
                 });
               }}
-            >
-              {Object.entries(kinds).map(([kind, name]) => (
-                <option key={kind} value={kind}>
-                  {name}
-                </option>
-              ))}
-            </select>
+              options={[
+                ...Object.entries(kinds).map(([kind, name]) => ({
+                  value: kind,
+                  label: name,
+                })),
+              ]}
+            />
           </label>
           {(draft.kind === "single_select" ||
             draft.kind === "multi_select") && (
             <label className="grid gap-1">
               Allowed values, one per line
-              <textarea
+              <Textarea
                 className={control}
                 required
                 value={options}
@@ -242,16 +245,14 @@ function Definitions({
             onChange={(value) => setDraft({ ...draft, default: value })}
           />
           <label className="flex items-start gap-2">
-            <input
-              type="checkbox"
+            <Checkbox
               className="mt-1"
               checked={draft.values_editable_by === "repository"}
-              onChange={(event) =>
+              onCheckedChange={(checked) =>
                 setDraft({
                   ...draft,
-                  values_editable_by: event.target.checked
-                    ? "repository"
-                    : "organization",
+                  values_editable_by:
+                    checked === true ? "repository" : "organization",
                 })
               }
             />

@@ -1,3 +1,5 @@
+import { Checkbox } from "@/components/ui/checkbox";
+import { FieldSelect } from "@/components/ui/field-select";
 import { Input } from "@/components/ui/input";
 
 export type PropertyValue = boolean | string | string[];
@@ -53,13 +55,13 @@ export function PropertyInput({
         <legend className="font-medium">{label}</legend>
         {definition.options.map((option) => (
           <label className="flex items-center gap-2" key={option}>
-            <input
-              type="checkbox"
+            <Checkbox
               checked={selected.includes(option)}
-              onChange={(event) => {
-                const next = event.target.checked
-                  ? [...selected, option]
-                  : selected.filter((item) => item !== option);
+              onCheckedChange={(checked) => {
+                const next =
+                  checked === true
+                    ? [...selected, option]
+                    : selected.filter((item) => item !== option);
                 onChange(next.length ? next : null);
               }}
             />
@@ -88,11 +90,11 @@ export function PropertyInput({
   return (
     <label className="grid gap-1">
       {label}
-      <select
-        className={control}
+      <FieldSelect
+        className="w-full"
         value={value === null ? "" : display(value)}
-        onChange={(event) => {
-          const next = event.target.value;
+        onValueChange={(nextValue) => {
+          const next = nextValue;
           onChange(
             next === ""
               ? null
@@ -101,17 +103,14 @@ export function PropertyInput({
                 : next,
           );
         }}
-      >
-        <option value="">{unset}</option>
-        {(definition.kind === "boolean"
-          ? ["true", "false"]
-          : definition.options
-        ).map((option) => (
-          <option key={option} value={option}>
-            {option}
-          </option>
-        ))}
-      </select>
+        options={[
+          { value: "", label: unset },
+          ...(definition.kind === "boolean"
+            ? ["true", "false"]
+            : definition.options
+          ).map((option) => ({ value: option, label: option })),
+        ]}
+      />
     </label>
   );
 }

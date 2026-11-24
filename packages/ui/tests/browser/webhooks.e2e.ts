@@ -123,7 +123,7 @@ test("webhook setup recovers its secret and redelivery keeps the delivery ID", a
   await page.goto("/team/project/settings/webhooks");
   await expect(page.getByRole("heading", { name: "Webhooks" })).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
-  await expect(page.getByLabel("Webhook destination")).toHaveValue("ci");
+  await expect(page.getByLabel("Webhook destination")).toHaveText(destination);
   const receiver = await page
     .getByRole("region", { name: "Destination", exact: true })
     .boundingBox();

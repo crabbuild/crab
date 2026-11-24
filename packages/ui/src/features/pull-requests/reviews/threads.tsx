@@ -1,3 +1,6 @@
+import { Disclosure } from "@/components/ui/collapsible";
+import { Textarea } from "@/components/ui/textarea";
+import { Checkbox } from "@/components/ui/checkbox";
 import { useCommentVisibility } from "@/components/discussion/conversation/comment-visibility";
 import { useConversationLock } from "@/components/discussion/conversation/lock";
 import { Link } from "@/components/navigation/link";
@@ -454,18 +457,17 @@ export function PullReviewThreads({
             {selectedSide === "new" && (
               <div className="inline-review-suggestion">
                 <label>
-                  <input
-                    type="checkbox"
+                  <Checkbox
                     checked={suggestionEnabled}
                     disabled={mutation.pending}
-                    onChange={(event) =>
-                      setSuggestionEnabled(event.target.checked)
+                    onCheckedChange={(checked) =>
+                      setSuggestionEnabled(checked === true)
                     }
                   />{" "}
                   Include suggested replacement
                 </label>
                 {suggestionEnabled && (
-                  <textarea
+                  <Textarea
                     aria-label="Suggested replacement"
                     value={suggestion}
                     rows={4}
@@ -573,20 +575,22 @@ export function PullReviewThreads({
           </div>
         )}
       </Result>
-      <details
+      <Disclosure
         className="inline-review-outdated"
-        open={
+        expanded={
           unresolvedOnly ||
           Boolean(outdatedMatch) ||
           linkedOutdated ||
           undefined
         }
+        summary={
+          <>
+            Outdated conversations
+            {summary &&
+              ` (${unresolvedOnly ? summary.outdated_unresolved : summary.outdated})`}
+          </>
+        }
       >
-        <summary>
-          Outdated conversations
-          {summary &&
-            ` (${unresolvedOnly ? summary.outdated_unresolved : summary.outdated})`}
-        </summary>
         <Result state={outdatedThreads} timingLabel="Outdated review threads">
           {() =>
             outdatedItems.length ? (
@@ -618,7 +622,7 @@ export function PullReviewThreads({
             )
           }
         </Result>
-      </details>
+      </Disclosure>
     </section>
   );
 }

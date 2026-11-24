@@ -1,3 +1,4 @@
+import { FieldSelect } from "@/components/ui/field-select";
 import { useId } from "react";
 import { PlusIcon, TrashIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -10,10 +11,6 @@ import {
   FieldSet,
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
 import type { RepositoryGroup } from "@/lib/contracts";
 import {
   isRepositoryRole,
@@ -69,21 +66,21 @@ export function GroupAccess({
               </Field>
               <Field className="min-w-0 sm:w-36">
                 <FieldLabel htmlFor={`${id}-role-${index}`}>Role</FieldLabel>
-                <NativeSelect
+                <FieldSelect
                   id={`${id}-role-${index}`}
                   value={grant.access}
-                  onChange={(event) => {
-                    const access = event.target.value;
+                  onValueChange={(nextValue) => {
+                    const access = nextValue;
                     if (isRepositoryRole(access))
                       change(index, { ...grant, access });
                   }}
-                >
-                  {repositoryRoles.map((role) => (
-                    <NativeSelectOption key={role} value={role}>
-                      {repositoryRoleLabels[role]}
-                    </NativeSelectOption>
-                  ))}
-                </NativeSelect>
+                  options={[
+                    ...repositoryRoles.map((role) => ({
+                      value: role,
+                      label: repositoryRoleLabels[role],
+                    })),
+                  ]}
+                />
               </Field>
               <Button
                 variant="ghost"

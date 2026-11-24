@@ -1,3 +1,4 @@
+import { FieldSelect } from "@/components/ui/field-select";
 import { BellIcon } from "lucide-react";
 import { useId, useState } from "react";
 import { useMutation } from "@/components/discussion/mutations";
@@ -12,10 +13,6 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
 import { refreshNotificationBadge } from "./index";
 import { endpoint, useRequest } from "@/lib/api";
 import type { Address } from "./actions";
@@ -225,18 +222,18 @@ function NotificationPreference<Mode extends string>({
                 <label className="text-sm font-medium" htmlFor={modeId}>
                   Notify me about
                 </label>
-                <NativeSelect
+                <FieldSelect
                   id={modeId}
                   value={mode}
                   disabled={mutation.pending}
-                  onChange={(event) => setDraft(event.target.value)}
-                >
-                  {Object.entries(modes).map(([value, label]) => (
-                    <NativeSelectOption key={value} value={value}>
-                      {label}
-                    </NativeSelectOption>
-                  ))}
-                </NativeSelect>
+                  onValueChange={(nextValue) => setDraft(nextValue)}
+                  options={[
+                    ...Object.entries(modes).map(([value, label]) => ({
+                      value: value,
+                      label: label,
+                    })),
+                  ]}
+                />
                 {releaseChoice && (
                   <label
                     className="flex w-fit items-center gap-2 text-sm"

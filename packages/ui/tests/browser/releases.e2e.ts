@@ -1,3 +1,4 @@
+import { chooseSelectOption } from "./select";
 import { expect, test } from "@playwright/test";
 import {
   expectNoAccessibilityViolations,
@@ -255,7 +256,7 @@ test("publishes and browses GitHub-style releases and source tags", async ({
     page.getByRole("heading", { name: "New release" }),
   ).toBeVisible();
   await page.getByLabel("Tag name").fill("v1.0.0");
-  await page.getByLabel("Target").selectOption("refs/heads/main");
+  await chooseSelectOption(page.getByLabel("Target"), "refs/heads/main");
   await page.getByLabel("Release title").fill("Crab 1.0");
   await page
     .getByRole("textbox", { name: "Release notes", exact: true })
@@ -282,7 +283,7 @@ test("publishes and browses GitHub-style releases and source tags", async ({
   await page
     .getByRole("textbox", { name: "Release notes", exact: true })
     .fill("Updated release notes.");
-  await page.getByLabel("Previous tag").selectOption("refs/tags/v0.9.0");
+  await chooseSelectOption(page.getByLabel("Previous tag"), "refs/tags/v0.9.0");
   await page.getByRole("button", { name: "Generate release notes" }).click();
   await page.getByText("Preview notes since v0.9.0").click();
   await expect(

@@ -1,3 +1,5 @@
+import { Disclosure } from "@/components/ui/collapsible";
+import { FieldSelect } from "@/components/ui/field-select";
 import { useEffect, useRef, useState } from "react";
 
 import { Failure } from "@/components/discussion/failure";
@@ -70,26 +72,23 @@ export function ReleaseNotesGenerator({
     <div className="grid gap-2">
       <div className="flex flex-wrap items-center gap-2">
         <label htmlFor="release-previous-tag">Previous tag</label>
-        <select
+        <FieldSelect
           id="release-previous-tag"
           value={previous}
-          onChange={(event) => {
-            setPrevious(event.target.value);
+          onValueChange={(nextValue) => {
+            setPrevious(nextValue);
             setPreview(undefined);
             setError(undefined);
           }}
           disabled={pending || generating}
-        >
-          <option value="">Automatic</option>
-          <option value="refs/tags/">All history</option>
-          {tags
-            .filter((ref) => refName(ref) !== tag)
-            .map((ref) => (
-              <option key={ref.name} value={ref.name}>
-                {refName(ref)}
-              </option>
-            ))}
-        </select>
+          options={[
+            { value: "", label: "Automatic" },
+            { value: "refs/tags/", label: "All history" },
+            ...tags
+              .filter((ref) => refName(ref) !== tag)
+              .map((ref) => ({ value: ref.name, label: refName(ref) })),
+          ]}
+        />
         <Button
           type="button"
           size="sm"
@@ -103,19 +102,23 @@ export function ReleaseNotesGenerator({
       <Failure message={error} />
       {preview && (
         <>
-          <details className="min-w-0">
-            <summary>
-              {preview.previous_tag
-                ? `Preview notes since ${preview.previous_tag}`
-                : "Preview notes for all history"}
-            </summary>
+          <Disclosure
+            className="min-w-0"
+            summary={
+              <>
+                {preview.previous_tag
+                  ? `Preview notes since ${preview.previous_tag}`
+                  : "Preview notes for all history"}
+              </>
+            }
+          >
             {preview.configuration_file && (
               <p className="text-sm text-muted-foreground">
                 Rules from <code>{preview.configuration_file}</code>
               </p>
             )}
             <DiscussionMarkdown>{preview.body}</DiscussionMarkdown>
-          </details>
+          </Disclosure>
           <Button
             type="button"
             size="sm"

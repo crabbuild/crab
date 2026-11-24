@@ -143,7 +143,7 @@ test("repository activity retains pages through errors and supports refresh and 
     exact: true,
   });
   await expect(widget).toContainText("Recent activity");
-  await widget.locator("summary").click();
+  await widget.getByRole("button", { name: /Activity/ }).click();
   await expect(widget).toContainText("cell;dur=2.5");
   await expectNoAccessibilityViolations(page);
   await selectDarkTheme(page);

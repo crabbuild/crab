@@ -1,12 +1,8 @@
+import { Slider } from "@/components/ui/slider";
+import { MediaPlayer } from "./media-player";
+import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
-import {
-  lazy,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { lazy, useEffect, useRef, useState, type ReactNode } from "react";
 
 import type { Repository } from "@/lib/api";
 import { DataTable } from "./data/explorer";
@@ -208,23 +204,24 @@ function NotebookPreview({
 }
 
 function useObjectUrl(bytes: Uint8Array, mime: string) {
-  const url = useMemo(
-    () =>
-      URL.createObjectURL(
-        new Blob(
-          [
-            bytes.buffer.slice(
-              bytes.byteOffset,
-              bytes.byteOffset + bytes.byteLength,
-            ) as ArrayBuffer,
-          ],
-          { type: mime },
-        ),
-      ),
-    [bytes, mime],
-  );
-  useEffect(() => () => URL.revokeObjectURL(url), [url]);
-  return url;
+  const [source, setSource] = useState<{
+    bytes: Uint8Array;
+    mime: string;
+    url: string;
+  }>();
+  useEffect(() => {
+    // Each effect setup owns its URL, including when React replays the effect.
+    const data = bytes.buffer.slice(
+      bytes.byteOffset,
+      bytes.byteOffset + bytes.byteLength,
+    ) as ArrayBuffer;
+    const url = URL.createObjectURL(new Blob([data], { type: mime }));
+    setSource({ bytes, mime, url });
+    return () => URL.revokeObjectURL(url);
+  }, [bytes, mime]);
+  return source?.bytes === bytes && source.mime === mime
+    ? source.url
+    : undefined;
 }
 
 function MediaPreview({
@@ -241,20 +238,22 @@ function MediaPreview({
     descriptor.mime ?? "application/octet-stream",
   );
   const [zoom, setZoom] = useState(100);
+  if (descriptor.kind === "pdf")
+    return <PdfPreview bytes={bytes} name={name} />;
+  if (!url) return null;
   if (descriptor.kind === "image")
     return (
       <div className="media-preview">
         <div className="media-preview-toolbar">
           <label>
             Zoom
-            <input
-              aria-label="Image zoom"
-              type="range"
-              min="25"
-              max="300"
-              step="25"
+            <Slider
+              label="Image zoom"
+              min={25}
+              max={300}
+              step={25}
               value={zoom}
-              onChange={(event) => setZoom(Number(event.target.value))}
+              onValueChange={setZoom}
             />
             <output>{zoom}%</output>
           </label>
@@ -268,18 +267,13 @@ function MediaPreview({
         </div>
       </div>
     );
-  if (descriptor.kind === "pdf")
-    return <PdfPreview bytes={bytes} name={name} />;
-  if (descriptor.kind === "audio")
-    return (
-      <div className="media-player">
-        <audio src={url} controls aria-label={`Audio preview of ${name}`} />
-      </div>
-    );
   return (
-    <div className="media-player video-player">
-      <video src={url} controls aria-label={`Video preview of ${name}`} />
-    </div>
+    <MediaPlayer
+      key={url}
+      src={url}
+      name={name}
+      video={descriptor.kind === "video"}
+    />
   );
 }
 
@@ -350,14 +344,15 @@ function OfficeFilePreview({
             <div className="office-preview">
               <nav className="preview-tabs" aria-label="Workbook sheets">
                 {value.sheets.map((sheet, index) => (
-                  <button
+                  <Button
+                    variant="ghost"
                     key={sheet.name}
                     className={index === section ? "active" : ""}
                     aria-current={index === section ? "page" : undefined}
                     onClick={() => setSection(index)}
                   >
                     {sheet.name}
-                  </button>
+                  </Button>
                 ))}
               </nav>
               {selected ? (

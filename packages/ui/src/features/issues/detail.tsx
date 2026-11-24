@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 import { EditHistory } from "@/components/discussion/conversation/edit-history";
 import {
   ConversationLockControl,
@@ -274,7 +275,7 @@ function EditIssue({
       }}
     >
       <label htmlFor="edit-issue-title">Title</label>
-      <input
+      <Input
         id="edit-issue-title"
         autoFocus
         value={title}

@@ -397,7 +397,7 @@ export function UploadFiles({
         <strong>Drag files here to add them to your repository</strong>
         <span>or choose your files</span>
         <span className="sr-only">
-          <input
+          <Input
             type="file"
             multiple
             aria-label="Choose files to upload"

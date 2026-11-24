@@ -1,3 +1,4 @@
+import { FieldSelect } from "@/components/ui/field-select";
 import { useState } from "react";
 import { SearchIcon } from "@primer/octicons-react";
 import { Link } from "@/components/navigation/link";
@@ -6,10 +7,6 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
 import { navigate, useRequest } from "@/lib/api";
 import { short } from "@/lib/format";
 import { repoHref } from "@/lib/repository-route";
@@ -124,20 +121,17 @@ export default function WorkspaceCodeSearch({ url }: { url: URL }) {
         <div className="flex flex-wrap items-end gap-3">
           <Field className="w-auto">
             <FieldLabel htmlFor="workspace-search-kind">Search in</FieldLabel>
-            <NativeSelect
+            <FieldSelect
               id="workspace-search-kind"
               name="kind"
               defaultValue={kind}
-            >
-              <NativeSelectOption value="any">
-                Contents and paths
-              </NativeSelectOption>
-              <NativeSelectOption value="content">
-                File contents
-              </NativeSelectOption>
-              <NativeSelectOption value="path">File paths</NativeSelectOption>
-              <NativeSelectOption value="symbol">Symbols</NativeSelectOption>
-            </NativeSelect>
+              options={[
+                { value: "any", label: "Contents and paths" },
+                { value: "content", label: "File contents" },
+                { value: "path", label: "File paths" },
+                { value: "symbol", label: "Symbols" },
+              ]}
+            />
           </Field>
           <Field className="min-w-44 flex-1">
             <FieldLabel htmlFor="workspace-search-directory">

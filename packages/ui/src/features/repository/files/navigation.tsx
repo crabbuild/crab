@@ -195,7 +195,8 @@ export function FileNavigation({
       <FileBreadcrumb repo={repo} rev={rev} path={path} />
       {!treeOpen && (
         <div className="file-navigation-actions">
-          <button
+          <Button
+            variant="ghost"
             className="file-search-opener"
             type="button"
             aria-label="Go to file"
@@ -204,7 +205,7 @@ export function FileNavigation({
             <SearchIcon />
             <span>Go to file</span>
             <kbd>T</kbd>
-          </button>
+          </Button>
           <CloneMenu
             repo={repo}
             revision={archiveRevision}
