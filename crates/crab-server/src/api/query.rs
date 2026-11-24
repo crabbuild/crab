@@ -285,25 +285,8 @@ pub(super) async fn execute(
                         "path": display_path(path.as_bytes()),
                         "path_hex": encode_hex(path.as_bytes())
                     })
-                } else if let Some(base) = &base {
-                    let result = snapshot.compare(base, &operation).await?;
-                    comparison_json(result, base_tip)
                 } else {
-                    let mut pending = vec![GitPath::root()];
-                    let mut changes = Vec::new();
-                    while let Some(directory) = pending.pop() {
-                        let mut cursor = None;
-                        loop {
-                            let entries = snapshot.list_directory(&directory, &PageRequest::new(200,cursor)?, &operation).await?;
-                            for entry in entries.items {
-                                if entry.kind == EntryKind::Tree { pending.push(entry.path); }
-                                else { changes.push(json!({"path":display_path(entry.path.as_bytes()),"path_hex":encode_hex(entry.path.as_bytes()),"kind":"Added","old":null,"new":entry_json(&entry)})); }
-                            }
-                            cursor = entries.next;
-                            if cursor.is_none() { break; }
-                        }
-                    }
-                    json!({"base":null,"changes":changes})
+                    comparison_changes(&snapshot, base.as_ref(), base_tip, &operation).await?
                 }
             }
             Action::Blame => {
@@ -316,6 +299,46 @@ pub(super) async fn execute(
         Ok(Payload::Json(value))
     }.await;
     operation.finish(result).await
+}
+
+pub(super) async fn comparison_changes(
+    head: &RemoteGitSnapshot,
+    base: Option<&RemoteGitSnapshot>,
+    base_tip: Option<String>,
+    operation: &crab_remote_git::OperationContext,
+) -> crab_remote_git::Result<serde_json::Value> {
+    if let Some(base) = base {
+        let comparison = head.compare(base, operation).await?;
+        return Ok(comparison_json(comparison, base_tip));
+    }
+    let mut pending = vec![GitPath::root()];
+    let mut changes = Vec::new();
+    while let Some(directory) = pending.pop() {
+        let mut cursor = None;
+        loop {
+            let entries = head
+                .list_directory(&directory, &PageRequest::new(200, cursor)?, operation)
+                .await?;
+            for entry in entries.items {
+                if entry.kind == EntryKind::Tree {
+                    pending.push(entry.path);
+                } else {
+                    changes.push(json!({
+                        "path": display_path(entry.path.as_bytes()),
+                        "path_hex": encode_hex(entry.path.as_bytes()),
+                        "kind": "Added",
+                        "old": null,
+                        "new": entry_json(&entry),
+                    }));
+                }
+            }
+            cursor = entries.next;
+            if cursor.is_none() {
+                break;
+            }
+        }
+    }
+    Ok(json!({"base": null, "changes": changes}))
 }
 
 async fn comparison_side(

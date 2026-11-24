@@ -9,11 +9,11 @@ export function usePullComparison(
   base: string,
   head: string,
   upstream?: string,
-  mergedPull?: number,
+  savedComparison?: string,
 ) {
   return useRequest<Changes & { base: string; base_tip: string }>(
-    mergedPull !== undefined
-      ? endpoint(repo, `pulls/${mergedPull}/merged-comparison`)
+    savedComparison
+      ? endpoint(repo, savedComparison)
       : base && head
         ? endpoint(repo, "changes", {
             rev: head,
@@ -35,7 +35,7 @@ export function ChangeComparison({
   sticky = false,
   idPrefix,
   review,
-  mergedPull,
+  fileAction,
 }: {
   state: ReturnType<typeof useRequest<Changes>>;
   repo: Pick<Repository, "owner" | "name">;
@@ -46,7 +46,7 @@ export function ChangeComparison({
   sticky?: boolean;
   idPrefix?: string;
   review?: DiffReviewState;
-  mergedPull?: number;
+  fileAction?: string;
 }) {
   return (
     <Result state={state}>
@@ -62,7 +62,7 @@ export function ChangeComparison({
           sticky={sticky}
           idPrefix={idPrefix}
           review={review}
-          mergedPull={mergedPull}
+          fileAction={fileAction}
         />
       )}
     </Result>

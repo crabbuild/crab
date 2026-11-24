@@ -4333,14 +4333,23 @@ access.
 
 If either branch is deleted, the conversation and original OIDs remain visible.
 A completed merge retains its pre-merge base and head IDs after source deletion.
-**Files changed** reads the recorded comparison and inline anchors while its Git
-objects remain in storage, including after squash or rebase. The server uses the
-completed merge record to select both roots and checks current access to the PR
-repository and any source fork. The retained endpoints are
-`GET .../pulls/{number}/merged-comparison` and `GET .../pulls/{number}/merged-comparison/file?path_hex=...`.
-The file read is limited to paths changed by that comparison. Commit browsing
-still uses normal Git reachability. The **Checks** tab reads stored reports for
-the recorded merge commits independently of their Git objects.
+**Files changed** and **Commits** read the recorded comparison while its Git
+objects remain in storage, including after squash or rebase. The server checks
+current access to the PR repository and any source fork. Inline review anchors
+use the same recorded comparison as the base route
+`GET .../pulls/{number}/merged-comparison`.
+
+| Path | Response |
+| --- | --- |
+| Base route | Changed files from the recorded comparison. |
+| `/file?path_hex=...` | One changed file from that comparison. |
+| `/commits?limit=50&cursor=...` | Original commits reachable from the recorded head and excluded from the recorded base, with a signed `next` cursor when another page exists. |
+| `/commits/{oid}` | Commit metadata and changed files relative to its first parent. The OID must belong to the recorded range. |
+| `/commits/{oid}/file?path_hex=...` | One file changed by that commit. |
+
+Ordinary repository commit browsing requires Git reachability. The **Checks**
+tab reads stored reports for the recorded merge commits independently of their
+Git objects.
 
 Reviews record `commented`, `approved`, or `changes_requested` against the exact current head. Pull authors cannot approve or request changes on their own pull. Advancing the head marks older reviews as not current.
 

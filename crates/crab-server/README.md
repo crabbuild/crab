@@ -265,6 +265,7 @@ rendering. In-app navigation retains the flag; `powerbar=0` disables it.
 | Issues or new issue | `/issues`, `/issues/{number}`, `/issues/new` |
 | Pull requests or detail | `/pulls`, `/pull/{number}` |
 | Pull request tabs | `/pull/{number}/commits`, `/pull/{number}/files`, `/pull/{number}/checks` |
+| Original commit on a merged pull request | `/pull/{number}/commits/{oid}` |
 | Repository activity | `/activity` |
 | New pull request | `/compare/{base}...{head}` |
 | Releases or release detail | `/releases`, `/releases/tag/{tag}` |

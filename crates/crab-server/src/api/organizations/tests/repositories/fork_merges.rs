@@ -322,6 +322,15 @@ pub(super) async fn exercise(
                     .json(&format!("{saved}/file?path_hex={path}"), alice)
                     .await;
                 assert_eq!(file["new"]["text"], "second fork change");
+                let history = format!("{saved}/commits");
+                let commits = h.json(&history, alice).await;
+                assert_eq!(commits["items"].as_array().unwrap().len(), 3);
+                assert_eq!(commits["items"][0]["oid"], head);
+                let file = h
+                    .json(&format!("{history}/{head}/file?path_hex={path}"), alice)
+                    .await;
+                assert!(file["old"].is_null());
+                assert_eq!(file["new"]["text"], "second fork change");
                 let mut restoration = h.json(&branch_path, alice).await["branch"].clone();
                 assert_eq!(restoration["action"], "restore");
                 restoration["request_id"] = json!(Uuid::now_v7());

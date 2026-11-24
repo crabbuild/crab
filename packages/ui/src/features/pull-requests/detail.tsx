@@ -85,7 +85,8 @@ export function PullDetail({
     setEpoch((value) => value + 1);
   }
   const data = current ?? pull.data;
-  const requestedTab = repositoryRoute(url)?.pullTab;
+  const route = repositoryRoute(url);
+  const requestedTab = route?.pullTab;
   const tab =
     requestedTab === "commits" ||
     requestedTab === "files" ||
@@ -269,8 +270,15 @@ export function PullDetail({
               }}
             />
           ) : tab === "commits" ? (
-            data.branches_available ? (
-              <PullCommits repo={repo} pull={data} url={url} />
+            data.branches_available || data.merge ? (
+              <PullCommits
+                repo={repo}
+                pull={data}
+                url={url}
+                selected={route?.pullCommit}
+                theme={theme}
+                codeThemes={codeThemes}
+              />
             ) : null
           ) : linkedThread ? (
             <LinkedReviewThread

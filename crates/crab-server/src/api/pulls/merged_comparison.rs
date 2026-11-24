@@ -4,7 +4,9 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use crab_remote_git::{GitPath, OperationContext, OperationKind, RemoteGitSnapshot};
+use crab_remote_git::{
+    Commit, GitPath, OperationContext, OperationKind, Page, PageRequest, RemoteGitSnapshot,
+};
 use gix_hash::ObjectId;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -15,7 +17,7 @@ use super::{git::PullGit, statuses::parse_oid, storage};
 use crate::{
     api::{
         ApiError, decode_hex, display_path, encode_hex, query, read_admission,
-        representation::content_json,
+        representation::{commit_json, content_json, decode_cursor, encode_cursor},
     },
     app::{self, Error, Result},
     auth::Principal,
@@ -24,6 +26,7 @@ use crate::{
 };
 
 type Address = (String, String, u64);
+type CommitAddress = (String, String, u64, String);
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 pub(super) fn routes() -> Router<Arc<Server>> {
@@ -35,6 +38,18 @@ pub(super) fn routes() -> Router<Arc<Server>> {
         .route(
             "/api/repos/{owner}/{name}/pulls/{number}/merged-comparison/file",
             get(file),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/pulls/{number}/merged-comparison/commits",
+            get(commits),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/pulls/{number}/merged-comparison/commits/{oid}",
+            get(commit),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/pulls/{number}/merged-comparison/commits/{oid}/file",
+            get(commit_file),
         )
 }
 
@@ -48,13 +63,29 @@ struct File {
 #[serde(deny_unknown_fields)]
 struct NoParameters {}
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct History {
+    cursor: Option<String>,
+    limit: Option<usize>,
+}
+
+enum Read {
+    Comparison(Option<GitPath>),
+    History {
+        limit: usize,
+        cursor: Option<String>,
+    },
+    Commit(ObjectId, Option<GitPath>),
+}
+
 async fn changes(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path(address): Path<Address>,
     Query(_): Query<NoParameters>,
 ) -> Response {
-    read(server, principal, address, None).await
+    read(server, principal, address, Read::Comparison(None)).await
 }
 
 async fn file(
@@ -63,22 +94,94 @@ async fn file(
     Path(address): Path<Address>,
     Query(input): Query<File>,
 ) -> Response {
-    if input.path_hex.is_empty() || input.path_hex.len() > 8192 {
-        return ApiError::Input("Choose a changed file path").into_response();
-    }
-    let path =
-        decode_hex(&input.path_hex).and_then(|bytes| GitPath::new(bytes).map_err(ApiError::from));
-    match path {
-        Ok(path) => read(server, principal, address, Some(path)).await,
+    match file_path(&input.path_hex) {
+        Ok(path) => read(server, principal, address, Read::Comparison(Some(path))).await,
         Err(error) => error.into_response(),
     }
+}
+
+async fn commits(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path(address): Path<Address>,
+    Query(input): Query<History>,
+) -> Response {
+    let limit = input.limit.unwrap_or(50);
+    if !(1..=200).contains(&limit) {
+        return ApiError::Input("limit must be between 1 and 200").into_response();
+    }
+    read(
+        server,
+        principal,
+        address,
+        Read::History {
+            limit,
+            cursor: input.cursor,
+        },
+    )
+    .await
+}
+
+async fn commit(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name, number, oid)): Path<CommitAddress>,
+    Query(_): Query<NoParameters>,
+) -> Response {
+    match selected_oid(&oid) {
+        Ok(oid) => {
+            read(
+                server,
+                principal,
+                (owner, name, number),
+                Read::Commit(oid, None),
+            )
+            .await
+        }
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn commit_file(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name, number, oid)): Path<CommitAddress>,
+    Query(input): Query<File>,
+) -> Response {
+    let oid = match selected_oid(&oid) {
+        Ok(oid) => oid,
+        Err(error) => return error.into_response(),
+    };
+    match file_path(&input.path_hex) {
+        Ok(path) => {
+            read(
+                server,
+                principal,
+                (owner, name, number),
+                Read::Commit(oid, Some(path)),
+            )
+            .await
+        }
+        Err(error) => error.into_response(),
+    }
+}
+
+fn selected_oid(value: &str) -> std::result::Result<ObjectId, ApiError> {
+    parse_oid(value).map_err(|_| ApiError::Input("Choose an exact Git commit ID"))
+}
+
+fn file_path(hex: &str) -> std::result::Result<GitPath, ApiError> {
+    if hex.is_empty() || hex.len() > 8192 {
+        return Err(ApiError::Input("Choose a changed file path"));
+    }
+    Ok(GitPath::new(decode_hex(hex)?)?)
 }
 
 async fn read(
     server: Arc<Server>,
     principal: Principal,
     (owner, name, number): Address,
-    path: Option<GitPath>,
+    request: Read,
 ) -> Response {
     let Ok(admission) = read_admission::acquire_bulk(&server) else {
         return read_admission::busy();
@@ -96,7 +199,37 @@ async fn read(
         let capture = Capture::open(&server, &principal, &repo, &pull, &cancel)
             .await
             .map_err(IntoResponse::into_response)?;
-        let value = capture.view(path, &cancel).await.map_err(remote_response)?;
+        let value = match request {
+            Read::History { limit, cursor } => {
+                let source_id = capture
+                    .fork
+                    .as_ref()
+                    .map_or(repo.id, |(source, _)| source.id);
+                let cursor = cursor
+                    .as_deref()
+                    .map(|cursor| decode_cursor(&server.cursor_key, source_id, cursor))
+                    .transpose()
+                    .map_err(IntoResponse::into_response)?;
+                let page = PageRequest::new(limit, cursor).map_err(remote_response)?;
+                let history = capture
+                    .history(&page, &cancel)
+                    .await
+                    .map_err(remote_response)?;
+                let items = history.items.iter().map(commit_json).collect::<Vec<_>>();
+                let next = history
+                    .next
+                    .map(|next| encode_cursor(&server.cursor_key, source_id, next));
+                json!({"items": items, "next": next})
+            }
+            Read::Comparison(path) => capture
+                .view(None, path, &cancel)
+                .await
+                .map_err(remote_response)?,
+            Read::Commit(oid, path) => capture
+                .view(Some(oid), path, &cancel)
+                .await
+                .map_err(remote_response)?,
+        };
         capture
             .recheck(&server, &principal, &repo)
             .await
@@ -134,6 +267,25 @@ struct Capture {
     fork: Option<(Arc<Repository>, Principal)>,
     base: ObjectId,
     head: ObjectId,
+}
+
+struct Operations {
+    head: OperationContext,
+    fork_base: Option<OperationContext>,
+}
+
+impl Operations {
+    fn base(&self) -> &OperationContext {
+        self.fork_base.as_ref().unwrap_or(&self.head)
+    }
+
+    async fn finish<T>(self, result: crab_remote_git::Result<T>) -> crab_remote_git::Result<T> {
+        let result = match self.fork_base {
+            Some(base) => base.finish(result).await,
+            None => result,
+        };
+        self.head.finish(result).await
+    }
 }
 
 impl Capture {
@@ -203,43 +355,71 @@ impl Capture {
         Ok(())
     }
 
-    async fn snapshots(
+    async fn operations(
         &self,
-        operation: &OperationContext,
+        kind: OperationKind,
         cancel: &CancellationToken,
-    ) -> crab_remote_git::Result<(RemoteGitSnapshot, RemoteGitSnapshot)> {
-        let source = self.git.head();
-        let head = source.snapshot_retained(self.head, operation).await?;
-        let ancestor = if self.fork.is_some() {
-            let base_operation = self
-                .git
-                .base
-                .operation(OperationKind::Compare, cancel)
-                .await?;
-            let result = async {
-                let base = self
-                    .git
-                    .base
-                    .snapshot_retained(self.base, &base_operation)
-                    .await?;
-                query::comparison_ancestor(&head, &base, operation, &base_operation).await
+    ) -> crab_remote_git::Result<Operations> {
+        let head = self.git.head().operation(kind, cancel).await?;
+        let fork_base = if self.fork.is_some() {
+            match self.git.base.operation(kind, cancel).await {
+                Ok(base) => Some(base),
+                Err(error) => return head.finish(Err(error)).await,
             }
-            .await;
-            base_operation.finish(result).await?
         } else {
-            let base = source.snapshot_retained(self.base, operation).await?;
-            let ancestor = query::comparison_ancestor(&head, &base, operation, operation).await?;
-            if ancestor == base.commit_oid() {
-                return Ok((base, head));
-            }
-            ancestor
+            None
         };
-        let base = source.snapshot_retained(ancestor, operation).await?;
+        Ok(Operations { head, fork_base })
+    }
+
+    async fn tips(
+        &self,
+        ops: &Operations,
+    ) -> crab_remote_git::Result<(RemoteGitSnapshot, RemoteGitSnapshot)> {
+        let base = self
+            .git
+            .base
+            .snapshot_retained(self.base, ops.base())
+            .await?;
+        let head = self
+            .git
+            .head()
+            .snapshot_retained(self.head, &ops.head)
+            .await?;
         Ok((base, head))
+    }
+
+    async fn ancestor(
+        &self,
+        base: RemoteGitSnapshot,
+        head: &RemoteGitSnapshot,
+        ops: &Operations,
+    ) -> crab_remote_git::Result<RemoteGitSnapshot> {
+        let ancestor = query::comparison_ancestor(head, &base, &ops.head, ops.base()).await?;
+        if ops.fork_base.is_none() && ancestor == base.commit_oid() {
+            return Ok(base);
+        }
+        self.git.head().snapshot_retained(ancestor, &ops.head).await
+    }
+
+    async fn history(
+        &self,
+        page: &PageRequest,
+        cancel: &CancellationToken,
+    ) -> crab_remote_git::Result<Page<Commit>> {
+        let ops = self.operations(OperationKind::History, cancel).await?;
+        let result = async {
+            let (base, head) = self.tips(&ops).await?;
+            head.ahead_history_across_captures(&base, page, &ops.head, ops.base())
+                .await
+        }
+        .await;
+        ops.finish(result).await
     }
 
     async fn view(
         &self,
+        selected: Option<ObjectId>,
         path: Option<GitPath>,
         cancel: &CancellationToken,
     ) -> crab_remote_git::Result<Value> {
@@ -248,32 +428,55 @@ impl Capture {
         } else {
             OperationKind::Compare
         };
-        let operation = self.git.head().operation(kind, cancel).await?;
+        let ops = self.operations(kind, cancel).await?;
         let value = async {
-            let (base, head) = self.snapshots(&operation, cancel).await?;
+            let (base, head) = self.tips(&ops).await?;
+            let (base, head, metadata) = if let Some(oid) = selected {
+                let commit = head
+                    .ahead_commit_across_captures(&base, oid, &ops.head, ops.base())
+                    .await?
+                    .ok_or(crab_remote_git::Error::PathNotFound)?;
+                // Only the range walk may authorize a user-supplied commit.
+                // Its verified first parent is the base of this one-commit diff.
+                let source = self.git.head();
+                let base = match commit.parents.first() {
+                    Some(parent) => Some(source.snapshot_retained(*parent, &ops.head).await?),
+                    None => None,
+                };
+                let view = source.snapshot_retained(commit.oid, &ops.head).await?;
+                (base, view, Some(commit))
+            } else {
+                let base = self.ancestor(base, &head, &ops).await?;
+                (Some(base), head, None)
+            };
             if let Some(path) = path {
                 let blobs =
-                    query::comparison_blobs_for_snapshots(Some(&base), &head, &path, &operation)
+                    query::comparison_blobs_for_snapshots(base.as_ref(), &head, &path, &ops.head)
                         .await?;
                 if !blobs.changed || blobs.old.is_none() && blobs.new.is_none() {
                     return Err(crab_remote_git::Error::PathNotFound);
                 }
                 return Ok(json!({
-                    "base": base.commit_oid().to_string(),
+                    "base": base.as_ref().map(|base| base.commit_oid().to_string()),
+                    "commit": head.commit_oid().to_string(),
                     "path": display_path(path.as_bytes()),
                     "path_hex": encode_hex(path.as_bytes()),
                     "old": blobs.old.as_ref().map(content_json),
                     "new": blobs.new.as_ref().map(content_json),
                 }));
             }
-            let changes = head.compare(&base, &operation).await?;
-            let mut value = query::comparison_json(changes, Some(self.base.to_string()));
-            value["commit"] = json!(self.head.to_string());
+            let base_tip = selected.is_none().then(|| self.base.to_string());
+            let mut value =
+                query::comparison_changes(&head, base.as_ref(), base_tip, &ops.head).await?;
+            if let Some(commit) = metadata {
+                value["metadata"] = commit_json(&commit);
+            }
+            value["commit"] = json!(head.commit_oid().to_string());
             value["generation"] = json!(self.git.head().generation());
             Ok(value)
         }
         .await;
-        operation.finish(value).await
+        ops.finish(value).await
     }
 }
 
@@ -286,17 +489,17 @@ pub(super) async fn anchors(
     let cancel = server.cancellation.child_token();
     let _cancel_on_drop = cancel.clone().drop_guard();
     let capture = Capture::open(server, principal, repo, pull, &cancel).await?;
-    let operation = capture
-        .git
-        .head()
-        .operation(OperationKind::Compare, &cancel)
+    let ops = capture
+        .operations(OperationKind::Compare, &cancel)
         .await
         .map_err(crate::Error::from)?;
-    let snapshots = capture.snapshots(&operation, &cancel).await;
-    let (base, head) = operation
-        .finish(snapshots)
-        .await
-        .map_err(crate::Error::from)?;
+    let snapshots = async {
+        let (base, head) = capture.tips(&ops).await?;
+        let base = capture.ancestor(base, &head, &ops).await?;
+        Ok((base, head))
+    }
+    .await;
+    let (base, head) = ops.finish(snapshots).await.map_err(crate::Error::from)?;
     capture.recheck(server, principal, repo).await?;
     Ok((base.commit_oid().to_string(), head.commit_oid().to_string()))
 }

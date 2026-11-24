@@ -154,15 +154,16 @@ export function PullReviewThreads({
     refresh();
   }
   const suggestions = useSuggestionBatch(repo, pull, csrf, refreshThreads);
-  const mergedPull = pull.merge ? pull.number : undefined;
-  const comparisonRepo =
-    mergedPull === undefined ? (pull.head_repository ?? repo) : repo;
+  const savedComparison = pull.merge
+    ? `pulls/${pull.number}/merged-comparison`
+    : undefined;
+  const comparisonRepo = pull.merge ? repo : (pull.head_repository ?? repo);
   const comparison = usePullComparison(
     comparisonRepo,
     pull.base_oid,
     pull.head_oid,
     pull.head_repository ? repo.id : undefined,
-    mergedPull,
+    savedComparison,
   );
   const preview = comparison.data;
   const comparisonChanged =
@@ -424,7 +425,7 @@ export function PullReviewThreads({
         theme={theme}
         codeThemes={codeThemes}
         review={review}
-        mergedPull={mergedPull}
+        fileAction={savedComparison && `${savedComparison}/file`}
       />
       {linkedThread.error && (
         <Failure
