@@ -43,6 +43,8 @@ const actions: Record<AuditAction, string> = {
   repository_deleted: "Repository deleted",
   repository_restored: "Repository restored",
   repository_visibility_changed: "Repository visibility changed",
+  outside_collaborators_removed: "Outside collaborators removed",
+  collaborator_grants_retained: "Collaborator repository grants retained",
 };
 
 const textFilters = [

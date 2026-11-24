@@ -28,7 +28,7 @@ pub(crate) fn enabled(server: &Server) -> bool {
 }
 
 pub(crate) async fn configure_team(
-    server: &Server,
+    server: &Arc<Server>,
     organization: Uuid,
     team: Uuid,
     actor: Uuid,

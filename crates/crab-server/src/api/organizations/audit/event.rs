@@ -36,6 +36,8 @@ pub(in crate::api) enum AuditAction {
     RepositoryDeleted,
     RepositoryRestored,
     RepositoryVisibilityChanged,
+    OutsideCollaboratorsRemoved,
+    CollaboratorGrantsRetained,
 }
 
 #[derive(Serialize)]
@@ -113,6 +115,11 @@ impl From<organization::Event> for RawEvent {
             Action::Membership { member, role, .. } => {
                 event.account = Some(member);
                 event.detail = Some(role.map_or("Removed", member_role).into());
+                AuditAction::OrganizationMembership
+            }
+            Action::MemberConverted { member, .. } => {
+                event.account = Some(member);
+                event.detail = Some("Converted to outside collaborator".into());
                 AuditAction::OrganizationMembership
             }
             Action::Invitation {
@@ -237,6 +244,8 @@ impl From<audit::Entry> for RawEvent {
             audit::Action::Deleted => AuditAction::RepositoryDeleted,
             audit::Action::Restored => AuditAction::RepositoryRestored,
             audit::Action::VisibilityChanged => AuditAction::RepositoryVisibilityChanged,
+            audit::Action::OutsideCollaboratorsRemoved => AuditAction::OutsideCollaboratorsRemoved,
+            audit::Action::CollaboratorGrantsRetained => AuditAction::CollaboratorGrantsRetained,
         };
         let operator = entry.actor.issuer == "urn:crab:local";
         Self {
@@ -254,11 +263,15 @@ impl From<audit::Entry> for RawEvent {
                 account: None,
                 team: None,
                 project: None,
-                repository: Some(AuditRepository {
-                    id: entry.repository,
-                    name: entry.name,
+                repository: entry
+                    .repository
+                    .map(|(id, name)| AuditRepository { id, name }),
+                detail: entry.outside_grants.map(|removal| {
+                    format!(
+                        "{} collaborators · {} grants · {} repositories",
+                        removal.collaborators, removal.grants, removal.repositories,
+                    )
                 }),
-                detail: None,
             },
         }
     }

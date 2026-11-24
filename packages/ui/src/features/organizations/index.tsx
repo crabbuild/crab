@@ -13,10 +13,12 @@ import { useMutation } from "@/components/discussion/mutations";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { FieldSelect } from "@/components/ui/field-select";
-import { useRequest } from "@/lib/api";
+import { navigate, useRequest } from "@/lib/api";
 import { MutationError } from "./feedback";
 import type {
   OrganizationMembership,
@@ -32,6 +34,8 @@ import { Invitations, InviteDialog } from "./invitations";
 import { OrganizationSettings, isOrganizationSettings } from "./settings";
 import { OrganizationRepositories } from "./repositories";
 import { MemberAccess } from "./repository-access";
+import { ConvertMembers } from "./convert-members";
+import { OutsideCollaborators } from "./outside-collaborators";
 import { organizationHref } from "@/lib/organization-route";
 import { TeamPicker } from "@/features/settings/team-picker";
 export { OrganizationInvitation } from "./invitations";
@@ -56,8 +60,11 @@ export function OrganizationPage({
       <Result state={own} timingLabel="Organization">
         {({ organization, role, actor, can_create }) => {
           const settings = isOrganizationSettings(tab);
-          const people = tab === "people" || tab === "invitations";
           const owner = role === "owner";
+          const people =
+            tab === "people" ||
+            (owner &&
+              (tab === "invitations" || tab === "outside-collaborators"));
           return (
             <>
               <header className="mb-6 flex min-w-0 flex-wrap items-start gap-4">
@@ -165,25 +172,66 @@ export function OrganizationPage({
                     csrf={csrf}
                     commands={commands}
                   />
-                ) : tab === "people" || (owner && tab === "invitations") ? (
-                  <People
-                    key={tab}
-                    id={id}
-                    endpoint={endpoint}
-                    csrf={csrf}
-                    owner={owner}
-                    invites={tab === "invitations"}
-                    href={organizationHref(organization)}
-                    onInvited={() =>
-                      setNotice(
-                        "Invitation created. It appears in the invitee’s notifications.",
-                      )
-                    }
-                    onChanged={(message) => {
-                      setNotice(message);
-                      own.retry();
-                    }}
-                  />
+                ) : people ? (
+                  <div className="grid gap-4">
+                    {owner && (
+                      <nav
+                        aria-label="Organization people"
+                        className="flex flex-wrap gap-2"
+                      >
+                        {[
+                          ["people", "Members"],
+                          ["outside-collaborators", "Outside collaborators"],
+                          ["invitations", "Invitations"],
+                        ].map(([view, label]) => (
+                          <Button
+                            key={view}
+                            asChild
+                            variant={tab === view ? "secondary" : "ghost"}
+                            size="sm"
+                          >
+                            <Link
+                              href={organizationHref(
+                                organization,
+                                `?tab=${view}`,
+                              )}
+                              aria-current={tab === view ? "page" : undefined}
+                            >
+                              {label}
+                            </Link>
+                          </Button>
+                        ))}
+                      </nav>
+                    )}
+                    {tab === "outside-collaborators" ? (
+                      <OutsideCollaborators
+                        endpoint={endpoint}
+                        csrf={csrf}
+                        onInvited={() =>
+                          setNotice("Invitation sent to the collaborator.")
+                        }
+                      />
+                    ) : (
+                      <People
+                        key={tab}
+                        id={id}
+                        actor={actor}
+                        endpoint={endpoint}
+                        csrf={csrf}
+                        owner={owner}
+                        invites={tab === "invitations"}
+                        onInvited={() =>
+                          setNotice(
+                            "Invitation created. It appears in the invitee’s notifications.",
+                          )
+                        }
+                        onChanged={(message) => {
+                          setNotice(message);
+                          own.retry();
+                        }}
+                      />
+                    )}
+                  </div>
                 ) : owner && settings ? (
                   <OrganizationSettings
                     tab={tab}
@@ -214,24 +262,37 @@ export function OrganizationPage({
 }
 function People({
   id,
+  actor,
   endpoint,
   csrf,
   owner,
   invites,
-  href,
   onInvited,
   onChanged,
 }: {
   id: string;
+  actor: string;
   endpoint: string;
   csrf: string;
   owner: boolean;
   invites: boolean;
-  href: string;
   onInvited: () => void;
   onChanged: (message: string) => void;
 }) {
   const [after, setAfter] = useState<string>();
+  const [checks, setChecks] = useState<Record<string, number>>({});
+  const changePage = (cursor?: string) => {
+    setChecks({});
+    setAfter(cursor);
+  };
+  const select = (member: OrganizationMembership, checked: boolean) => {
+    setChecks((previous) => {
+      const next = { ...previous };
+      if (checked) next[member.actor] = member.version;
+      else delete next[member.actor];
+      return next;
+    });
+  };
   const [query, setQuery] = useState("");
   const [q, setQ] = useState("");
   const [role, setRole] = useState("all");
@@ -245,31 +306,11 @@ function People({
     invites ? null : `${endpoint}/members?${params}`,
   );
   const refresh = () => {
-    setAfter(undefined);
+    changePage();
     members.retry();
   };
   return (
     <div className="flex flex-col gap-4">
-      {owner && (
-        <nav aria-label="Organization people" className="flex flex-wrap gap-2">
-          <Button asChild variant={invites ? "ghost" : "secondary"} size="sm">
-            <Link
-              href={`${href}?tab=people`}
-              aria-current={invites ? undefined : "page"}
-            >
-              Members
-            </Link>
-          </Button>
-          <Button asChild variant={invites ? "secondary" : "ghost"} size="sm">
-            <Link
-              href={`${href}?tab=invitations`}
-              aria-current={invites ? "page" : undefined}
-            >
-              Invitations
-            </Link>
-          </Button>
-        </nav>
-      )}
       <div className="flex flex-wrap items-end gap-3">
         <form
           role="search"
@@ -277,7 +318,7 @@ function People({
           className="flex items-end gap-2"
           onSubmit={(event) => {
             event.preventDefault();
-            setAfter(undefined);
+            changePage();
             setQ(query.trim());
           }}
         >
@@ -304,7 +345,7 @@ function People({
             value={role}
             options={{ all: "All roles", member: "Member", owner: "Owner" }}
             onValueChange={(value) => {
-              setAfter(undefined);
+              changePage();
               setRole(value);
             }}
           />
@@ -324,7 +365,7 @@ function People({
                 cancelled: "Cancelled invitations",
               }}
               onValueChange={(value) => {
-                setAfter(undefined);
+                changePage();
                 setStatus(value as typeof status);
               }}
             />
@@ -335,7 +376,7 @@ function People({
             <Button
               variant="outline"
               onClick={() => {
-                setAfter(undefined);
+                changePage();
                 setTeam(undefined);
               }}
             >
@@ -348,7 +389,7 @@ function People({
               selected={new Set()}
               disabled={false}
               onSelect={(value) => {
-                setAfter(undefined);
+                changePage();
                 setTeam(value);
               }}
             />
@@ -380,51 +421,116 @@ function People({
             </div>
           </div>
           <Result state={members} timingLabel="Organization members">
-            {(data) => (
-              <>
-                {data.items.length ? (
-                  <ul className="divide-y rounded-lg border">
-                    {data.items.map((member) => (
-                      <MemberRow
-                        key={`${member.actor}:${member.version}`}
-                        member={member}
-                        organization={id}
-                        canManage={data.can_manage}
-                        endpoint={endpoint}
-                        csrf={csrf}
-                        onChanged={(message) => {
-                          onChanged(message);
-                          refresh();
-                        }}
-                      />
-                    ))}
-                  </ul>
-                ) : (
-                  <p
-                    role="status"
-                    className="rounded-lg border p-6 text-center text-sm text-muted-foreground"
-                  >
-                    No members on this page.
-                  </p>
-                )}
-                <div className="flex gap-2">
-                  <Button
-                    variant="outline"
-                    disabled={!after}
-                    onClick={() => setAfter(undefined)}
-                  >
-                    First page
-                  </Button>
-                  <Button
-                    variant="outline"
-                    disabled={!data.next}
-                    onClick={() => setAfter(data.next ?? undefined)}
-                  >
-                    Next page
-                  </Button>
-                </div>
-              </>
-            )}
+            {(data) => {
+              const selected = data.items.filter(
+                (member) => checks[member.actor] === member.version,
+              );
+              return (
+                <>
+                  {data.can_manage && data.items.length > 0 && (
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <Label
+                        className="flex items-center gap-2"
+                        htmlFor="select-members-page"
+                      >
+                        <Checkbox
+                          id="select-members-page"
+                          checked={
+                            selected.length === data.items.length ||
+                            (selected.length > 0 && "indeterminate")
+                          }
+                          onCheckedChange={(checked) =>
+                            setChecks(
+                              checked
+                                ? Object.fromEntries(
+                                    data.items.map(({ actor, version }) => [
+                                      actor,
+                                      version,
+                                    ]),
+                                  )
+                                : {},
+                            )
+                          }
+                        />
+                        Select page
+                      </Label>
+                      {selected.length > 0 && (
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-sm text-muted-foreground">
+                            {selected.length} selected
+                          </span>
+                          <ConvertMembers
+                            endpoint={`${endpoint}/members/conversion`}
+                            csrf={csrf}
+                            members={selected}
+                            onReload={refresh}
+                            onConverted={() => {
+                              if (
+                                selected.some(
+                                  (member) => member.actor === actor,
+                                )
+                              ) {
+                                navigate("/");
+                              } else {
+                                onChanged(
+                                  selected.length === 1
+                                    ? "Converted 1 member to an outside collaborator."
+                                    : `Converted ${selected.length} members to outside collaborators.`,
+                                );
+                                refresh();
+                              }
+                            }}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {data.items.length ? (
+                    <ul className="divide-y rounded-lg border">
+                      {data.items.map((member) => (
+                        <MemberRow
+                          key={`${member.actor}:${member.version}`}
+                          member={member}
+                          checked={checks[member.actor] === member.version}
+                          onSelect={(checked) => select(member, checked)}
+                          organization={id}
+                          canManage={data.can_manage}
+                          endpoint={endpoint}
+                          csrf={csrf}
+                          onChanged={(message) => {
+                            onChanged(message);
+                            refresh();
+                          }}
+                        />
+                      ))}
+                    </ul>
+                  ) : (
+                    <p
+                      role="status"
+                      className="rounded-lg border p-6 text-center text-sm text-muted-foreground"
+                    >
+                      No members on this page.
+                    </p>
+                  )}
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      disabled={!after}
+                      onClick={() => changePage()}
+                    >
+                      First page
+                    </Button>
+                    <Button
+                      variant="outline"
+                      disabled={!data.next}
+                      onClick={() => changePage(data.next ?? undefined)}
+                    >
+                      Next page
+                    </Button>
+                  </div>
+                </>
+              );
+            }}
           </Result>
         </>
       )}
@@ -433,6 +539,8 @@ function People({
 }
 function MemberRow({
   member,
+  checked,
+  onSelect,
   organization,
   canManage,
   endpoint,
@@ -440,6 +548,8 @@ function MemberRow({
   onChanged,
 }: {
   member: OrganizationMembership;
+  checked: boolean;
+  onSelect: (checked: boolean) => void;
   organization: string;
   canManage: boolean;
   endpoint: string;
@@ -461,17 +571,27 @@ function MemberRow({
   return (
     <li className="flex flex-col gap-3 p-4">
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-4">
-        <div className="min-w-0 break-words">
-          {member.profile ? (
-            <Link href={`/-/users/${member.actor}`} className="font-medium">
-              {name}
-            </Link>
-          ) : (
-            <strong className="font-medium">{name}</strong>
+        <div className="flex min-w-0 items-center gap-3">
+          {canManage && (
+            <Checkbox
+              aria-label={`Select ${member.profile?.name ?? member.actor}`}
+              checked={checked}
+              disabled={mutation.pending || removing}
+              onCheckedChange={(checked) => onSelect(checked === true)}
+            />
           )}
-          <p className="mt-1 break-all text-sm text-muted-foreground">
-            {member.profile ? `@${member.profile.handle}` : member.actor}
-          </p>
+          <div className="min-w-0 break-words">
+            {member.profile ? (
+              <Link href={`/-/users/${member.actor}`} className="font-medium">
+                {name}
+              </Link>
+            ) : (
+              <strong className="font-medium">{name}</strong>
+            )}
+            <p className="mt-1 break-all text-sm text-muted-foreground">
+              {member.profile ? `@${member.profile.handle}` : member.actor}
+            </p>
+          </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {canManage ? (

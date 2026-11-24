@@ -33,15 +33,16 @@ use teams::repository_access::{
 };
 pub(crate) mod teams;
 pub(crate) use commands::{
-    Bootstrap, BootstrapInput, ChangeMember, ChangeOutcome, Edit, EditInput, MemberChange,
+    Bootstrap, BootstrapInput, ChangeMember, ChangeOutcome, CheckConversion, Conversion,
+    ConversionMember, Edit, EditInput, FinalizeConversion, MAX_CONVERSION_MEMBERS, MemberChange,
 };
 pub(crate) use invitations::{
     CancelInvitation, DecideInvitation, Decision, FindInvitations, GetInvitation, Invitation,
     InvitationKey, InvitationState, InvitationView, Invite, InviteInput, ListInvitations,
 };
 pub(crate) use reads::{
-    ActivityQuery, Caller, Collection, FindMembers, GetMember, GetOrganization, ListActivity,
-    ListMembers, MemberKey, Page, PageCursor, PageQuery, PeopleQuery,
+    ActiveMembers, ActivityQuery, Caller, Collection, FindMembers, GetMember, GetOrganization,
+    ListActivity, ListMembers, MemberBatch, MemberKey, Page, PageCursor, PageQuery, PeopleQuery,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -167,6 +168,10 @@ fn record(context: &Transaction<'_>) -> Result<Option<Organization>> {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Action {
     Created,
+    MemberConverted {
+        member: Uuid,
+        version: u64,
+    },
     Automation {
         identity: Uuid,
         action: automation::Audit,
@@ -371,6 +376,9 @@ pub(in crate::cells) fn authorize(
             return Ok(());
         }
         (discovery::GetLanding::ID, false) => return Ok(()),
+        // The catalog commits conversion grants before trusted recovery
+        // submits this operation. A self-conversion may already be applied.
+        (CheckConversion::ID, false) | (FinalizeConversion::ID, true) => return Ok(()),
         (GetOrganization::ID | ListMembers::ID | FindMembers::ID, false) => false,
         (
             GetMember::ID
@@ -382,6 +390,7 @@ pub(in crate::cells) fn authorize(
             | properties::GetSelection::ID
             | issue_types::Get::ID
             | InspectMemberRepositoryRoles::ID
+            | ActiveMembers::ID
             | automation::List::ID
             | repository_policy::Get::ID,
             false,
@@ -523,6 +532,8 @@ pub(in crate::cells) fn dispatch_read(
         discovery::GetLanding::ID => invoke_read::<discovery::GetLanding>(context, input),
         ListMembers::ID => invoke_read::<ListMembers>(context, input),
         FindMembers::ID => invoke_read::<FindMembers>(context, input),
+        ActiveMembers::ID => invoke_read::<ActiveMembers>(context, input),
+        CheckConversion::ID => invoke_read::<CheckConversion>(context, input),
         GetMember::ID => invoke_read::<GetMember>(context, input),
         ListActivity::ID => invoke_read::<ListActivity>(context, input),
         GetInvitation::ID => invoke_read::<GetInvitation>(context, input),
@@ -580,6 +591,7 @@ pub(in crate::cells) fn dispatch_mutation(
         automation::Change::ID => invoke_mutation::<automation::Change>(context, input),
         Edit::ID => invoke_mutation::<Edit>(context, input),
         ChangeMember::ID => invoke_mutation::<ChangeMember>(context, input),
+        FinalizeConversion::ID => invoke_mutation::<FinalizeConversion>(context, input),
         Invite::ID => invoke_mutation::<Invite>(context, input),
         CancelInvitation::ID => invoke_mutation::<CancelInvitation>(context, input),
         DecideInvitation::ID => invoke_mutation::<DecideInvitation>(context, input),

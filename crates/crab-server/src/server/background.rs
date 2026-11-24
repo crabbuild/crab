@@ -83,6 +83,13 @@ pub(super) async fn refresh_catalog(server: Arc<Server>) {
         if let Err(error) = catalog.flush_membership_audit().await {
             tracing::warn!(error = ?error, "membership audit flush failed");
         }
+        for &organization in document.pending_conversions.keys() {
+            if let Err(error) =
+                crate::api::recover_collaborator_conversion(&server, organization).await
+            {
+                tracing::warn!(%organization, %error, "Collaborator conversion recovery will retry");
+            }
+        }
         if document.version < active_version {
             server.catalog_healthy.store(false, Ordering::Release);
             server.metrics.record_catalog_refresh_failure();

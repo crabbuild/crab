@@ -13,6 +13,7 @@ use crate::{
         directory::{IdentityKey, LookupAccounts},
         organization::teams::sync::{Binding, SyncAction, SyncGroup, SyncInput, SyncOutcome},
     },
+    repository::settings::{RulesetScope, with_ruleset_lease},
 };
 
 const MAX_DIRECTORY: usize = 8 * 1024 * 1024;
@@ -69,12 +70,12 @@ struct Snapshot {
 }
 
 pub(super) struct Groups<'a> {
-    server: &'a Server,
+    server: &'a Arc<Server>,
     pub(super) auth: &'a Authentication,
 }
 
 impl<'a> Groups<'a> {
-    pub(super) fn new(server: &'a Server) -> Result<Self> {
+    pub(super) fn new(server: &'a Arc<Server>) -> Result<Self> {
         let auth = server.auth.as_ref().ok_or_else(Error::not_found)?;
         Ok(Self { server, auth })
     }
@@ -251,15 +252,34 @@ impl<'a> Groups<'a> {
             members,
             action,
         };
-        let identity = app::mutation_identity().map_err(Error::unavailable)?;
-        cells
-            .command::<SyncGroup>(
-                Address::Organization(link.target.organization),
-                identity,
-                input,
-            )
+        let organization = link.target.organization;
+        let worker = Arc::clone(self.server);
+        self.server
+            .receives
+            .spawn(async move {
+                with_ruleset_lease(
+                    &worker,
+                    RulesetScope::Organization(organization),
+                    &worker.cancellation,
+                    |cancel| async move {
+                        if cancel.is_cancelled() {
+                            return Err(app::Error::MergeBusy);
+                        }
+                        app::command_output(
+                            cells
+                                .command::<SyncGroup>(
+                                    Address::Organization(organization),
+                                    app::mutation_identity()?,
+                                    input,
+                                )
+                                .await,
+                        )
+                    },
+                )
+                .await
+            })
             .await
-            .map(|outcome| outcome.output)
+            .map_err(Error::unavailable)?
             .map_err(Error::unavailable)
     }
 

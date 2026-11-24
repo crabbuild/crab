@@ -1827,6 +1827,57 @@ suspension version. Reload from the first page after a change. The response
 omits private provider identities and group names. Upgrade Organization Cell
 peers together so every owner supports the new read.
 
+### Find outside collaborators
+
+Organization owners can open **People → Outside collaborators** to find
+people who have direct repository grants and lack an active membership in
+the organization. Search by name or public username. Expand a person's
+repository list to see the role granted on each repository. **Manage access**
+opens that repository's access settings to change or remove the grant.
+For collaborators with a public profile, **Invite to organization** opens
+the standard invitation with the person selected.
+
+Select one or more people and choose **Remove from all repositories** to
+revoke their direct grants in one change. This covers grants inherited by
+private forks and grants stored in deleted repository records. Independent
+grants from the identity provider can still apply. The organization audit log
+records the removal and the number of people, repositories, and grants affected.
+
+`GET /api/organizations/{id}/outside-collaborators` returns a paginated
+list of people, with an opaque key and direct repository count for each.
+`GET /api/organizations/{id}/outside-collaborators/{key}/repositories`
+lists that person's direct grants. The listings combine the catalog and
+current Organization Cell membership and expose public profiles and directly
+held roles on source repositories.
+An `after` token is tied to the owner, organization, search, and current
+catalog and organization revisions. Restart from the first page after a
+grant or membership changes. Upgrade Organization Cell peers together to
+enable the member checks for this view.
+
+`POST /api/organizations/{id}/outside-collaborators/remove` accepts the
+listing's `revision` and up to 50 distinct collaborator `keys`. It returns
+`{collaborators, repositories, grants}` after a successful catalog commit.
+The owner and targets are checked under the organization policy lease shared
+by membership changes and invitation acceptance. Reload after a conflict to
+review the current membership and grants before submitting again.
+Upgrade serving replicas together before using bulk removal so every replica
+can read its audit event.
+
+From **People → Members**, organization owners can select members and choose
+**Convert to outside collaborators**. Existing direct roles and the highest current team grant
+on each source repository become direct access. Organization ownership, team
+membership, and baseline access end. The organization must retain an owner.
+Private forks follow their source repository grants.
+
+`POST /api/organizations/{id}/members/conversion` accepts a `members` array
+of up to 50 distinct `{actor, version}` entries and returns the count in
+`converted` after completion. Crab validates the whole selection before
+committing the retained grants and durable conversion record in one catalog
+write. The Organization Cell removes the selected memberships in one
+transaction. The catalog refresh worker can resume an interrupted batch.
+Membership and team changes serialize with the grant snapshot.
+Upgrade serving peers together before using conversion.
+
 ### Configure protected branches
 
 A repository can define at most 100 exact branch rules:

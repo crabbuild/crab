@@ -1,6 +1,8 @@
 use super::{repositories::repository_write, *};
 use crate::test_support::http::{browser::Browser, organizations::bootstrap};
 
+mod conversion;
+
 pub(super) struct AccessFixture {
     pub(super) h: Harness,
     pub(super) organization: Uuid,
@@ -226,6 +228,388 @@ async fn owner_inspects_configured_roles_and_a_team_revocation_invalidates_the_p
     let blocked = f.h.json(&path, &f.alice).await;
     assert_eq!(blocked["account"], "suspended");
     assert_eq!(blocked["items"][0]["access"], "read");
+    f.h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn owner_finds_outside_collaborators_and_revokes_a_repository_grant() {
+    let f = AccessFixture::new().await;
+    let people = format!("{}/outside-collaborators", f.org);
+    let member = format!("{}/members/{}", f.org, f.member);
+    assert_eq!(f.get(&people, &f.bob).await.status(), StatusCode::NOT_FOUND);
+    assert_eq!(f.h.json(&people, &f.alice).await["items"], json!([]));
+
+    let repo = f.repository.strip_prefix("/api/repos/").unwrap();
+    let (owner, _) = repo.split_once('/').unwrap();
+    let other = format!("/api/repos/{owner}/private-tool");
+    let other_members = format!("{other}/members");
+    let snapshot =
+        f.h.server
+            .catalog()
+            .unwrap()
+            .membership(owner, "private-tool")
+            .await
+            .unwrap();
+    let write_other = async |revision: Value, members: Value| {
+        repository_write(
+            &f.h,
+            Method::PUT,
+            &other_members,
+            &f.alice,
+            snapshot.repository_id,
+            json!({
+                "expected_revision": revision, "members": members, "groups": [],
+            }),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+    };
+    let unregistered =
+        json!({"subject":"contractor-id","name":"External Contractor","access":"read"});
+    write_other(
+        json!(snapshot.revision),
+        json!([
+            {"subject":"bob-id","name":"Bob","access":"write"}, unregistered
+        ]),
+    )
+    .await;
+    let membership = f.h.json(&member, &f.alice).await;
+    f.h.write(
+        Method::DELETE,
+        &member,
+        &f.alice,
+        json!({"version":membership["member"]["version"]}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+
+    let first = f.h.json(&format!("{people}?limit=1"), &f.alice).await;
+    assert_eq!(first["items"][0]["name"], "Bob");
+    assert_eq!(first["items"][0]["repository_count"], 2);
+    assert!(!first.to_string().contains("bob-id"));
+    let people_next = first["next"].as_str().unwrap();
+    let following =
+        f.h.json(&format!("{people}?after={people_next}"), &f.alice)
+            .await;
+    assert_eq!(following["items"][0]["name"], "External Contractor");
+    assert_eq!(following["items"][0]["profile"], Value::Null);
+    let searched = f.h.json(&format!("{people}?q=contractor"), &f.alice).await;
+    assert_eq!(searched["items"], following["items"]);
+
+    let access = format!(
+        "{people}/{}/repositories",
+        first["items"][0]["key"].as_str().unwrap()
+    );
+    assert_eq!(f.get(&access, &f.bob).await.status(), StatusCode::NOT_FOUND);
+    let grants = f.h.json(&format!("{access}?limit=1"), &f.alice).await;
+    assert_eq!(grants["items"][0]["name"], "library");
+    assert_eq!(grants["items"][0]["access"], "read");
+    let grant_page = format!("{access}?after={}", grants["next"].as_str().unwrap());
+    assert_eq!(
+        f.h.json(&grant_page, &f.alice).await["items"][0]["access"],
+        "write"
+    );
+    assert_eq!(
+        f.get(&format!("{other}/refs"), &f.bob).await.status(),
+        StatusCode::OK
+    );
+
+    write_other(
+        f.h.json(&other_members, &f.alice).await["revision"].clone(),
+        json!([unregistered]),
+    )
+    .await;
+    assert_eq!(
+        f.get(&grant_page, &f.alice).await.status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        f.get(&format!("{other}/refs"), &f.bob).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(f.h.json(&access, &f.alice).await["items"], grants["items"]);
+    assert_eq!(
+        f.get(&format!("{}/refs", f.repository), &f.bob)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+
+    let current_page = f.h.json(&format!("{people}?limit=1"), &f.alice).await;
+    let after = current_page["next"].as_str().unwrap();
+    let invite = format!("{}/invitations/{}", f.org, f.member);
+    let previous = f.h.json(&invite, &f.alice).await;
+    let pending =
+        f.h.write(
+            Method::PUT,
+            &invite,
+            &f.alice,
+            json!({
+                "role":"member", "version":previous["invitation"]["version"],
+            }),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    f.h.write(
+        Method::POST,
+        &format!("{}/invitation", f.org),
+        &f.bob,
+        json!({
+            "accept":true, "version":pending["version"],
+        }),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert_eq!(
+        f.get(&format!("{people}?after={after}"), &f.alice)
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        f.get(&access, &f.alice).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        f.h.write(
+            Method::POST,
+            &format!("{people}/remove"),
+            &f.alice,
+            json!({"revision":current_page["revision"],"keys":[current_page["items"][0]["key"]]}),
+        )
+        .await
+        .status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        f.h.json(&people, &f.alice).await["items"],
+        following["items"]
+    );
+    f.h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bulk_outside_removal_revokes_all_selected_sources_and_survives_restore() {
+    use crate::{
+        RepositoryAccess, RepositoryMember,
+        catalog::{
+            MembershipActor,
+            deletion::{Delete, Restore},
+        },
+    };
+
+    let f = AccessFixture::new().await;
+    let catalog = f.h.server.catalog().unwrap();
+    let repo = f.repository.strip_prefix("/api/repos/").unwrap();
+    let (owner, _) = repo.split_once('/').unwrap();
+    let members = [
+        ("bob-id", "Bob"),
+        ("vendor-id", "Vendor"),
+        ("contractor-id", "Contractor"),
+    ]
+    .map(|(subject, name)| RepositoryMember {
+        subject: subject.into(),
+        name: name.into(),
+        access: RepositoryAccess::Read,
+    });
+    for name in ["library", "private-tool"] {
+        catalog
+            .set_members(owner, name, members.to_vec(), true)
+            .await
+            .unwrap();
+    }
+    let retired: Value =
+        f.h.write(
+            Method::POST,
+            &format!("{}/repositories/creation", f.org),
+            &f.alice,
+            json!({"request_id":Uuid::now_v7(),"name":"retired","description":""}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let repository = Uuid::parse_str(retired["id"].as_str().unwrap()).unwrap();
+    catalog
+        .set_members(owner, "retired", members.to_vec(), true)
+        .await
+        .unwrap();
+    let (document, _) = catalog.load().await.unwrap();
+    let record = document.repository_by_id(repository).unwrap();
+    let actor = MembershipActor {
+        issuer: "urn:crab:local".into(),
+        subject: "operator".into(),
+    };
+    let operation = Uuid::now_v7();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    catalog
+        .delete_repository(
+            document.version,
+            Delete {
+                repository,
+                organization: f.organization,
+                actor: actor.clone(),
+                operation,
+                expected_version: record.name_version(),
+                now,
+            },
+        )
+        .await
+        .unwrap();
+
+    let root = format!("{}/outside-collaborators", f.org);
+    let remove = format!("{root}/remove");
+    let prior = f.h.json(&root, &f.alice).await;
+    assert_eq!(prior["items"].as_array().unwrap().len(), 2);
+    let denied =
+        f.h.write(
+            Method::POST,
+            &remove,
+            &f.bob,
+            json!({
+                "revision":prior["revision"], "keys":[prior["items"][0]["key"]],
+            }),
+        )
+        .await;
+    assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+    let member = format!("{}/members/{}", f.org, f.member);
+    let membership = f.h.json(&member, &f.alice).await;
+    f.h.write(
+        Method::DELETE,
+        &member,
+        &f.alice,
+        json!({
+            "version":membership["member"]["version"],
+        }),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+
+    let listed = f.h.json(&root, &f.alice).await;
+    let keys: Vec<_> = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["name"] != "Contractor")
+        .map(|row| row["key"].clone())
+        .collect();
+    assert_eq!(keys.len(), 2);
+    let revoke = async |revision: Value, keys: Vec<Value>| {
+        f.h.write(
+            Method::POST,
+            &remove,
+            &f.alice,
+            json!({ "revision":revision, "keys":keys }),
+        )
+        .await
+    };
+    assert_eq!(
+        revoke(
+            listed["revision"].clone(),
+            vec![keys[0].clone(), json!("0".repeat(64))]
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT,
+    );
+    assert_eq!(f.h.json(&root, &f.alice).await["items"], listed["items"]);
+    let token: Value =
+        f.h.write(
+            Method::POST,
+            "/api/git-token",
+            &f.bob,
+            json!({
+                "owner":owner, "repository":"library","access":"read",
+            }),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let git_advertisement = format!(
+        "{}/git/{owner}/library.git/info/refs?service=git-upload-pack",
+        f.h.origin
+    );
+    let fetch = async || {
+        f.h.http
+            .get(&git_advertisement)
+            .header("git-protocol", "version=2")
+            .basic_auth("crab", token["token"].as_str())
+            .send()
+            .await
+            .unwrap()
+            .status()
+    };
+    assert_eq!(fetch().await, StatusCode::OK);
+    let removed: Value = revoke(listed["revision"].clone(), keys.clone())
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        removed,
+        json!({"collaborators":2, "repositories":3, "grants":6})
+    );
+    assert_eq!(
+        revoke(listed["revision"].clone(), keys).await.status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        f.get(&format!("{}/refs", f.repository), &f.bob)
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(fetch().await, StatusCode::NOT_FOUND);
+
+    catalog
+        .restore_repository(Restore {
+            repository,
+            organization: f.organization,
+            operation,
+            actor,
+            now: now + 1,
+        })
+        .await
+        .unwrap();
+    for name in ["library", "private-tool", "retired"] {
+        assert_eq!(
+            catalog.membership(owner, name).await.unwrap().members,
+            vec![members[2].clone()]
+        );
+    }
+    assert_eq!(
+        catalog.membership(owner, "library").await.unwrap().groups[0].group,
+        "release-admins"
+    );
+    let audit =
+        f.h.json(
+            &format!("{}/audit-log?action=outside_collaborators_removed", f.org),
+            &f.alice,
+        )
+        .await;
+    assert_eq!(audit["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        audit["items"][0]["detail"],
+        "2 collaborators · 6 grants · 3 repositories"
+    );
     f.h.close().await;
 }
 
