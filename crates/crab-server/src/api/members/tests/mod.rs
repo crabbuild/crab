@@ -466,7 +466,7 @@ async fn malformed_membership_is_rejected_and_two_writers_cannot_overwrite_each_
 
 #[tokio::test]
 async fn triage_uses_durable_grants_for_issue_and_pull_management_without_git_write() {
-    use crate::cells::repository::{CreatePull, CreatePullInput, RepositoryAuthor};
+    use crate::test_support::git;
     use reqwest::Method;
     let h = Harness::new(false).await;
     h.initialize_directory().await;
@@ -502,33 +502,38 @@ async fn triage_uses_durable_grants_for_issue_and_pull_management_without_git_wr
         .await
         .unwrap();
     let repo = h.server.repositories.values()[0].clone();
-    h.server
-        .cells()
-        .unwrap()
-        .command::<CreatePull>(
-            repo.id,
-            crate::app::mutation_identity().unwrap(),
-            CreatePullInput {
-                code_owner_requests: Default::default(),
-                metadata: Default::default(),
-                submission_id: *uuid::Uuid::now_v7().as_bytes(),
-                author: RepositoryAuthor {
-                    issuer: h.provider.issuer.clone(),
-                    subject: "alice-id".into(),
-                    name: "Alice".into(),
-                },
-                draft: false,
-                title: "Triage pull".into(),
-                body: "Original pull".into(),
-                base_ref: "refs/heads/main".into(),
-                head_ref: "refs/heads/feature".into(),
-                head_repository: None,
-                base_oid: "a".repeat(40),
-                head_oid: "b".repeat(40),
-            },
+    let token: Value = h
+        .write(
+            Method::POST,
+            "/api/git-token",
+            &alice,
+            json!({
+                "owner":"team","repository":"private","access":"write",
+            }),
         )
         .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
         .unwrap();
+    let mut remote = url::Url::parse(&format!("{}/git/team/private.git", h.origin)).unwrap();
+    remote.set_username("crab").unwrap();
+    remote.set_password(token["token"].as_str()).unwrap();
+    let source = tempfile::tempdir().unwrap();
+    git::push_review_branches(source.path(), remote.as_str()).await;
+    h.write(
+        Method::POST,
+        &format!("{root}/pulls"),
+        &alice,
+        json!({
+            "request_id":uuid::Uuid::now_v7(),"title":"Triage pull","body":"Original pull",
+            "base_ref":"refs/heads/main","head_ref":"refs/heads/feature",
+        }),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
     *h.provider.mode.lock().await = "member".into();
     let bob = h.login().await;
     let mut members = repo.config.members.clone();

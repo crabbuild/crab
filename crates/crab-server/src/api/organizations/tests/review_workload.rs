@@ -138,6 +138,16 @@ async fn team_review_routing_balances_and_rotates_across_organization_repositori
         let work = tempfile::tempdir().unwrap();
         let path = work.path();
         let head = git::push_review_branches(path, remote.as_str()).await;
+        git::success(
+            path,
+            &[
+                "push",
+                remote.as_str(),
+                "feature:refs/heads/feature-followup",
+                "feature:refs/heads/feature-final",
+            ],
+        )
+        .await;
         if codeowners {
             git::success(path, &["switch", "main"]).await;
             std::fs::write(path.join("CODEOWNERS"), format!("* @{owner}/engineering\n")).unwrap();
@@ -149,9 +159,9 @@ async fn team_review_routing_balances_and_rotates_across_organization_repositori
     };
     let (source_id, source, head) = create("library", false).await;
     let (target_id, target, _) = create("consumer", true).await;
-    let create_pull = async |repo: &str, id, draft| {
+    let create_pull = async |repo: &str, id, head_ref: &str, draft| {
         let result: Value = repository_write(&h, Method::POST, &format!("{repo}/pulls"), &alice, id,
-            json!({"request_id":Uuid::now_v7(),"title":"Load balance","body":"","base_ref":"refs/heads/main","head_ref":"refs/heads/feature","draft":draft}))
+            json!({"request_id":Uuid::now_v7(),"title":"Load balance","body":"","base_ref":"refs/heads/main","head_ref":head_ref,"draft":draft}))
             .await.error_for_status().unwrap().json().await.unwrap();
         format!("{repo}/pulls/{}", result["number"].as_u64().unwrap())
     };
@@ -189,7 +199,7 @@ async fn team_review_routing_balances_and_rotates_across_organization_repositori
 
     // The member that wins the local tie has already fulfilled a request
     // elsewhere. The first assignment in the empty repository should skip them.
-    let pull = create_pull(&source, source_id, false).await;
+    let pull = create_pull(&source, source_id, "refs/heads/feature", false).await;
     review(
         &pull,
         source_id,
@@ -207,7 +217,7 @@ async fn team_review_routing_balances_and_rotates_across_organization_repositori
     .await
     .error_for_status()
     .unwrap();
-    let pull = create_pull(&target, target_id, true).await;
+    let pull = create_pull(&target, target_id, "refs/heads/feature", true).await;
     let manual = review(
         &pull,
         target_id,
@@ -232,7 +242,7 @@ async fn team_review_routing_balances_and_rotates_across_organization_repositori
 
     // The open request now contributes more than the fulfilled one. A new
     // CODEOWNERS request uses the same balance and keeps the team visible.
-    let automatic = create_pull(&target, target_id, false).await;
+    let automatic = create_pull(&target, target_id, "refs/heads/feature-followup", false).await;
     let requests = h.json(&format!("{automatic}/reviewers"), &alice).await;
     assert_eq!(requests["items"][0]["candidate_id"], json!(first.0));
     assert_eq!(requests["items"][0]["request"]["code_owner"], true);
@@ -243,7 +253,7 @@ async fn team_review_routing_balances_and_rotates_across_organization_repositori
         json!({"kind":"review_routing","team":team,"version":1,"algorithm":"round_robin","reviewers":1}),
     )
     .await;
-    let extra = create_pull(&source, source_id, false).await;
+    let extra = create_pull(&source, source_id, "refs/heads/feature-followup", false).await;
     review(
         &extra,
         source_id,
@@ -252,7 +262,7 @@ async fn team_review_routing_balances_and_rotates_across_organization_repositori
     .await;
     // Round robin favors the older team assignment even when that reviewer
     // now has more open work and the destination has no local rotation.
-    let manual = create_pull(&source, source_id, false).await;
+    let manual = create_pull(&source, source_id, "refs/heads/feature-final", false).await;
     review(
         &manual,
         source_id,
@@ -264,7 +274,7 @@ async fn team_review_routing_balances_and_rotates_across_organization_repositori
 
     // The newly rotated member was last used on a different repository.
     // CODEOWNERS must consider that assignment before the older local order.
-    let automatic = create_pull(&target, target_id, false).await;
+    let automatic = create_pull(&target, target_id, "refs/heads/feature-final", false).await;
     let requests = h.json(&format!("{automatic}/reviewers"), &alice).await;
     assert_eq!(requests["items"][0]["candidate_id"], json!(first.0));
     assert_eq!(requests["items"][0]["request"]["code_owner"], true);

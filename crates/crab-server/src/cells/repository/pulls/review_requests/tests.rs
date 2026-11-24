@@ -31,17 +31,18 @@ async fn seed(cell: &RepositoryCell) {
     seed_with_owners(cell, Default::default()).await;
 }
 async fn seed_with_owners(cell: &RepositoryCell, code_owner_requests: automatic::Plan) {
+    let request = Uuid::now_v7();
     let input = CreatePullInput {
         code_owner_requests,
         metadata: Default::default(),
         draft: false,
-        submission_id: *Uuid::now_v7().as_bytes(),
+        submission_id: *request.as_bytes(),
         author: author("Alice"),
         title: "Review requests".into(),
         body: String::new(),
         base_ref: "refs/heads/main".into(),
         base_oid: "a".repeat(40),
-        head_ref: "refs/heads/topic".into(),
+        head_ref: format!("refs/heads/topic-{request}"),
         head_repository: None,
         head_oid: "b".repeat(40),
     };

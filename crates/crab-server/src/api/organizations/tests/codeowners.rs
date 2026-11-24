@@ -199,7 +199,13 @@ async fn codeowners_requests_reviews_and_enforces_base_policy_at_merge() {
     assert_eq!(notifications["items"][0]["reason"], "review_requested");
 
     let mut draft = request;
+    git::success(
+        path,
+        &["push", remote.as_str(), "feature:refs/heads/draft-topic"],
+    )
+    .await;
     draft["request_id"] = json!(Uuid::now_v7());
+    draft["head_ref"] = json!("refs/heads/draft-topic");
     draft["title"] = json!("Draft proposal");
     draft["draft"] = json!(true);
     repository_write(&h, Method::POST, &pulls, &alice, repo_id, draft)
