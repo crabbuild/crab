@@ -2475,6 +2475,25 @@ owner label does not acquire ownership.
 
 Every route prefix is `/api/repos/{owner}/{name}`. Browser mutations require the session cookie, canonical `Origin`, and CSRF token.
 
+### Transfer an issue
+
+Open an issue and choose **Transfer issue** in its sidebar. The picker shows
+repositories under the same owner where you have Moderate access or higher.
+You need that access in both repositories. The move preserves the issue,
+comments, assignees, and discussion attachments. Labels match by name.
+Milestones match by title and due date. The original URL continues to work.
+
+Current transfer support covers open issues. Crab keeps the source issue in
+place when it detects reactions, retained edit history, or linked work that
+the destination cannot preserve.
+
+`GET /api/repos/{owner}/{name}/issues/{number}/transfer` lists up to 30 eligible
+destinations and accepts optional `q` to filter by repository name. POST the
+same route with `request_id`, the observed issue `version`, and the destination
+repository UUID as `destination`. A committed move returns `202 Accepted`.
+Repeat the same submission to recover a lost reply. Read the original issue
+URL for the current transfer status.
+
 ### Follow a transferred issue
 
 The original issue detail returns a `transfer` object after a committed move.

@@ -160,7 +160,7 @@ pub(super) struct VisibleRepository {
     pub(super) repository: Arc<crate::repository::Repository>,
     pub(super) topics: Vec<String>,
     pub(super) team_access: Option<RepositoryAccess>,
-    principal: Principal,
+    pub(super) principal: Principal,
     pub(super) organization_owner: bool,
 }
 

@@ -129,6 +129,22 @@ impl Mutation for Prepare {
             }
             lifecycle::ensure_ready(context)?;
             let number = allocate_issue(context)?;
+            let (repository, _) = identity(context)?;
+            let reservation = Reservation {
+                request: input.request,
+                source: job.source,
+                destination: Destination { repository, number },
+                ownership_epoch: input.ownership_epoch,
+                actor: job.actor.clone(),
+                commitment: job.progress.commitment,
+            };
+            // Check the same installation and projections before allowing the
+            // source to retire. A rejected nested scope discards the preview.
+            context.apply(|preview| {
+                install(preview, &reservation, job.progress.frames)?;
+                search::index::flush(preview)?;
+                Ok(MutationResult::Rejected(()))
+            })?;
             job.publication = Some(DestinationState::Prepared(Prepared {
                 number,
                 ownership_epoch: input.ownership_epoch,
@@ -164,6 +180,19 @@ pub(crate) struct Decision {
 impl Decision {
     pub(crate) fn destination(&self) -> Destination {
         self.reservation.destination
+    }
+
+    pub(crate) fn matches_request(
+        &self,
+        request: Uuid,
+        destination: Uuid,
+        version: u64,
+        actor: &IdentityKey,
+    ) -> bool {
+        self.reservation.request == request
+            && self.reservation.destination.repository == destination
+            && self.reservation.source.version == version
+            && &self.reservation.actor == actor
     }
 }
 
@@ -239,6 +268,16 @@ impl Mutation for Retire {
         pins::retire(context, issue.number)?;
         milestones::transfer_assignment(context, subject, None)?;
         search::contributions::retire_issue(context, issue.number)?;
+        if !context.query(
+            "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'repository_issue_parents'",
+            &[],
+        )?.rows.is_empty() {
+            // Removing a parent leaves a revisioned empty relationship row.
+            context.query(
+                "DELETE FROM repository_issue_parents WHERE child = ? AND parent IS NULL",
+                &[integer(issue.number)?],
+            )?;
+        }
         // Cascades remove ordinary comment reads. The search projections and
         // durable redirect commit in the same source transaction.
         let removed = context.query(

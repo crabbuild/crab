@@ -9,9 +9,9 @@ use crate::cells::{
         Subject, SubjectKind, Target,
         activity::{self, ListActivity},
         attachments::{self, Upload},
-        locks,
+        dependencies, duplicates, edit_history, links, locks,
         milestones::GetAssignment,
-        minimization,
+        minimization, reactions,
     },
 };
 
@@ -46,14 +46,14 @@ pub(crate) enum CaptureInput {
     Continue { source: Source, cursor: Cursor },
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Frame {
     pub source: Source,
     pub records: Records,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "section", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Records {
     Issue {
@@ -71,7 +71,7 @@ pub(crate) enum Records {
     },
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Header {
     pub issue: IssueRecord,
@@ -83,7 +83,7 @@ pub(crate) struct Header {
     pub lock: locks::Lock,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Comment {
     pub record: CommentRecord,
@@ -91,7 +91,7 @@ pub(crate) struct Comment {
     pub visibility: Option<minimization::State>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct MilestoneKey {
     pub title: String,
@@ -264,9 +264,38 @@ pub(crate) enum CaptureOutcome {
     Changed,
     Closed,
     Archived,
+    DiscussionHistory,
+    LinkedWork,
 }
 
 pub(crate) struct Capture;
+
+fn has_discussion_history(context: &Transaction<'_>, target: Target) -> Result<bool> {
+    Ok(edit_history::exists(context, target)? || reactions::has_reactions(context, target)?)
+}
+
+fn has_linked_work(context: &Transaction<'_>, subject: Subject) -> Result<bool> {
+    if dependencies::has_edges(context, subject.number)?
+        || duplicates::current(context, subject)?.is_some()
+        || links::has_explicit_links(context, subject)?
+    {
+        return Ok(true);
+    }
+    let tables = context.query(
+        "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'repository_issue_parents'",
+        &[],
+    )?;
+    if tables.rows.is_empty() {
+        return Ok(false);
+    }
+    let number = integer(subject.number)?;
+    let linked = context.query(
+        "SELECT 1 FROM repository_issue_parents WHERE parent = ? OR (child = ? AND parent IS NOT NULL)
+         UNION ALL SELECT 1 FROM repository_project_items WHERE kind = 0 AND number = ? LIMIT 1",
+        &[number.clone(), number.clone(), number],
+    )?;
+    Ok(!linked.rows.is_empty())
+}
 
 impl Read for Capture {
     const CLASS: &'static str = crate::cells::repository::CLASS;
@@ -304,6 +333,12 @@ impl Read for Capture {
         };
         let records = match input {
             CaptureInput::Start { .. } => {
+                if has_discussion_history(context, Target::Issue { number })? {
+                    return Ok(CaptureOutcome::DiscussionHistory);
+                }
+                if has_linked_work(context, subject)? {
+                    return Ok(CaptureOutcome::LinkedWork);
+                }
                 let labels = ListLabels::execute(context, ())?
                     .labels
                     .into_iter()
@@ -349,6 +384,17 @@ impl Read for Capture {
                 else {
                     return Err(Error::Invalid("Issue transfer comment target is missing"));
                 };
+                for record in &items {
+                    if has_discussion_history(
+                        context,
+                        Target::IssueComment {
+                            issue: number,
+                            number: record.number,
+                        },
+                    )? {
+                        return Ok(CaptureOutcome::DiscussionHistory);
+                    }
+                }
                 let items = items
                     .into_iter()
                     .map(|record| {
@@ -402,7 +448,7 @@ impl Read for Capture {
     }
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StageInput {
     pub request: Uuid,

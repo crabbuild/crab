@@ -519,32 +519,55 @@ async fn issue_transfer_publishes_verified_attachments_with_destination_access()
         bytes
     );
 
-    let reservation = reserve(Uuid::now_v7()).await;
-    let moved_id = transferred_id(reservation.request, id);
+    let request_id = Uuid::now_v7();
+    let moved_id = transferred_id(request_id, id);
     let new = format!("/api/discussion-attachments/{}/{moved_id}", target.id);
-    let retired = origin_cell
-        .client
-        .command::<Retire>(
-            origin_cell.target,
-            app::mutation_identity().unwrap(),
-            reservation,
-        )
-        .await
-        .unwrap()
-        .output;
-    let RetireOutcome::Committed { decision } = retired else {
-        panic!("{retired:?}");
-    };
-    let destination = decision.destination();
     let old_issue = format!("{ROOT}/issues/{issue_number}");
+    let endpoint = format!("{old_issue}/transfer");
+    assert_eq!(
+        h.json(&endpoint, &alice).await,
+        json!([{"id":target.id,"owner":"team","name":"library"}])
+    );
+    let payload = json!({
+        "request_id":request_id, "version":issue["version"], "destination":target.id
+    });
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    let catalog = h.server.catalog().unwrap();
+    let mut source_members = catalog.membership("team", "private").await.unwrap().members;
+    for member in &mut source_members {
+        if member.subject == "bob-id" {
+            member.access = crate::RepositoryAccess::Moderate;
+        }
+    }
+    catalog
+        .set_members("team", "private", source_members, true)
+        .await
+        .unwrap();
+    assert_eq!(h.json(&endpoint, &bob).await, json!([]));
+    assert_eq!(
+        h.write(Method::POST, &endpoint, &bob, payload.clone())
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    // Discard the first response body to exercise the same browser submission
+    // after a potentially lost response.
+    for _ in 0..2 {
+        assert_eq!(
+            h.write(Method::POST, &endpoint, &alice, payload.clone())
+                .await
+                .status(),
+            StatusCode::ACCEPTED
+        );
+    }
     // Once the source commits, no caller has to send the destination command.
     // Wait through the real native alarm and exercise the original HTTP link.
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+    let number = tokio::time::timeout(std::time::Duration::from_secs(20), async {
         loop {
             let moved = h.json(&old_issue, &alice).await;
             if moved["transfer"]["state"] == "ready" {
-                assert_eq!(moved["transfer"]["number"], destination.number);
-                break;
+                break moved["transfer"]["number"].as_u64().unwrap();
             }
             assert_eq!(moved["transfer"]["state"], "pending");
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -560,9 +583,6 @@ async fn issue_transfer_publishes_verified_attachments_with_destination_access()
             .unwrap()
             .output
     );
-    *h.provider.mode.lock().await = "member".into();
-    let bob = h.login().await;
-    let catalog = h.server.catalog().unwrap();
     let mut members = catalog.membership("team", "private").await.unwrap().members;
     members.retain(|member| member.subject != "bob-id");
     catalog
@@ -575,7 +595,7 @@ async fn issue_transfer_publishes_verified_attachments_with_destination_access()
     );
     let downloaded = download(&h, &bob, &new).await.error_for_status().unwrap();
     assert_eq!(downloaded.bytes().await.unwrap().as_ref(), bytes);
-    let path = format!("/api/repos/team/library/issues/{}", destination.number);
+    let path = format!("/api/repos/team/library/issues/{number}");
     assert_eq!(
         h.json(&path, &bob).await["body"],
         body.replace(&format!("<{old}>"), &format!("<{new}>"))

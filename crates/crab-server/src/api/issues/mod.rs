@@ -29,6 +29,7 @@ use crate::{
     server::Server,
 };
 
+mod move_issue;
 mod pins;
 mod templates;
 mod transferred;
@@ -48,6 +49,10 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .route(
             "/api/repos/{owner}/{name}/issues/{number}",
             get(detail).patch(edit),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/issues/{number}/transfer",
+            get(move_issue::destinations).post(move_issue::submit),
         )
         .route(
             "/api/repos/{owner}/{name}/issues/{number}/type",

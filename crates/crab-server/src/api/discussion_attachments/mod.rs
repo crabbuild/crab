@@ -10,6 +10,7 @@ use axum::{
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
@@ -18,6 +19,7 @@ use crate::{
     auth::Principal,
     cells::repository::collaboration::attachments::{
         Collect, Due, Expire, Finish, Get, MAX_BYTES, ReadInput, Reserve, ReserveOutcome, Upload,
+        transferred_id,
     },
     repository::Repository,
     server::Server,
@@ -56,6 +58,49 @@ struct View {
 fn object_path(repo: &Repository, id: Uuid) -> object_store::path::Path {
     repo.layout
         .repo_path(&format!("discussion-attachments/v1/{}/{id}", repo.id))
+}
+
+pub(super) async fn copy_for_issue_transfer(
+    server: &Server,
+    source: &Repository,
+    destination: &Repository,
+    request: Uuid,
+    upload: &Upload,
+) -> Result<Uuid> {
+    let cancel = server.cancellation.child_token();
+    let _permit = server
+        .acquire_transfer(&cancel)
+        .await
+        .map_err(Error::AttachmentAdmission)?;
+    let id = transferred_id(request, upload.id);
+    let copy = async {
+        let path = object_path(source, upload.id);
+        let (bytes, _) = source
+            .store
+            .get_with_etag_bounded(&path, upload.size)
+            .await?;
+        if bytes.len() as u64 != upload.size
+            || format!("{:x}", Sha256::digest(&bytes)) != upload.digest
+        {
+            return Err(Error::Storage(crab_storage::StorageError::CorruptObject {
+                path: path.to_string(),
+                reason: "attachment size or digest does not match the captured manifest".into(),
+            }));
+        }
+        // Stage owns this private ID already. A lost storage reply must
+        // recover against the same bytes without overwriting an occupied key.
+        destination
+            .store
+            .put_if_absent_verified(&object_path(destination, id), bytes)
+            .await?;
+        Ok(id)
+    };
+    tokio::select! {
+        () = cancel.cancelled() => Err(Error::AttachmentTransfer(asset_transfer::Error::Cancelled)),
+        result = tokio::time::timeout(TRANSFER_BUDGET, copy) => {
+            result.map_err(|_| Error::AttachmentTransfer(asset_transfer::Error::Cancelled))?
+        }
+    }
 }
 
 async fn upload(

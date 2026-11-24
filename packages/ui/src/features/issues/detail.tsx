@@ -31,6 +31,7 @@ import { Comments } from "./comments";
 import { PinIssue } from "./pins";
 import { IssueDependencies } from "./dependencies";
 import { IssueTypeControl } from "./type";
+import { IssueMove } from "./move-issue";
 
 function IssueBadge({ issue }: { issue: Issue }) {
   const { state, state_reason: reason } = issue;
@@ -97,6 +98,12 @@ export function IssueDetail({
     if (destination)
       window.location.replace(destination + window.location.hash);
   }, [destination]);
+  const refresh = resource.retry;
+  useEffect(() => {
+    if (transfer?.state !== "pending" || resource.loading) return;
+    const timer = window.setTimeout(refresh, 1500);
+    return () => window.clearTimeout(timer);
+  }, [refresh, resource.loading, transfer?.state]);
   if (transfer) {
     return (
       <section className="issues-page issue-detail">
@@ -273,6 +280,17 @@ export function IssueDetail({
               setMetadataEpoch((value) => value + 1);
             }}
           />
+          {current.can_transfer && !repo.archived && (
+            <IssueMove
+              repo={repo}
+              csrf={csrf}
+              issue={current}
+              onAccepted={() => {
+                setIssue(undefined);
+                resource.retry();
+              }}
+            />
+          )}
         </DiscussionMetadata>
       </div>
     </section>

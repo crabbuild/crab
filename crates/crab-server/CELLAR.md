@@ -543,11 +543,14 @@ The issue detail route resolves the move through independent, current grants
 on the original and destination repositories. It exposes the destination only
 after publication, and the browser retains the original comment anchor.
 
-The HTTP write workflow must check both current grants and the shared owner,
-then prepare under the same policy lease used for ownership changes. It also
-owns the verified object copy and remaining discussion state and relationship
-placement.
-The native write commands stay private while those paths are under construction.
+The browser HTTP workflow checks both repository grants and the shared owner.
+It reserves and verifies attachment copies before preparing. Preparation
+previews publication and its search projections in a rolled-back transaction.
+Approval and retirement run under the policy leases used for repository
+ownership changes. The source refuses captures with retained edit history,
+reactions, or repository-local relationships that require a different
+publication format. The HTTP coordinator also checks organization Project
+placements in the owning organization.
 
 ## Reviewer search preparation
 

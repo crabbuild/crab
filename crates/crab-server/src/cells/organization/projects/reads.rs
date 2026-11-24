@@ -1,6 +1,30 @@
 use super::*;
 use planning::grouping::{self, GroupBy};
 
+pub(crate) struct HasIssueItem;
+impl Read for HasIssueItem {
+    const CLASS: &'static str = super::super::CLASS;
+    const ID: u32 = 36;
+    type Input = (Uuid, u64);
+    type Output = bool;
+
+    fn execute(context: &mut Transaction<'_>, (repository, number): Self::Input) -> Result<bool> {
+        if repository.is_nil() || number == 0 {
+            return Err(Error::Invalid("issue project reference is invalid"));
+        }
+        if context.document::<bool>(READY)? != Some(true) {
+            return Ok(false);
+        }
+        let found = context.query(
+            "SELECT 1 FROM organization_project_repositories r
+             JOIN organization_project_items i ON i.project=r.project AND i.repository=r.repository
+             WHERE r.repository=? AND i.kind=0 AND i.number=? LIMIT 1",
+            &[blob(repository), integer(number)?],
+        )?;
+        Ok(!found.rows.is_empty())
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ListQuery {

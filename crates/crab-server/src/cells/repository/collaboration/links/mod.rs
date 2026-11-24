@@ -91,6 +91,15 @@ fn prefix(subject: Subject) -> String {
     format!("{ROOT}/subjects/{}/", subject.key())
 }
 
+pub(in crate::cells::repository) fn has_explicit_links(
+    context: &Transaction<'_>,
+    subject: Subject,
+) -> crate::cells::Result<bool> {
+    Ok(!context
+        .documents::<bool>(&prefix(subject), None, 1)?
+        .is_empty())
+}
+
 fn index(subject: Subject, other: u64) -> String {
     format!("{}{other:016x}", prefix(subject))
 }

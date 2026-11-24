@@ -169,19 +169,25 @@ impl Principal {
     }
 
     pub(crate) fn related_read(&self, origin: Uuid, related: Uuid) -> Option<Self> {
+        Some(
+            self.related_catalog(origin)?
+                .scoped_to_repository(Some(related)),
+        )
+    }
+
+    pub(crate) fn related_catalog(&self, origin: Uuid) -> Option<Self> {
         if !self.can_read(origin) {
             return None;
         }
         // Resolve an independent grant from the browser credential. A Git
         // token or worker scoped to the origin cannot read another repository.
-        let reader = if let Some(session) = self.user_session() {
-            Self::user(Arc::clone(session))
+        if let Some(session) = self.user_session() {
+            Some(Self::user(Arc::clone(session)))
         } else if self.is_local() {
-            Self::local()
+            Some(Self::local())
         } else {
-            return None;
-        };
-        Some(reader.scoped_to_repository(Some(related)))
+            None
+        }
     }
     pub(crate) fn is_user(&self) -> bool {
         self.user_session().is_some()

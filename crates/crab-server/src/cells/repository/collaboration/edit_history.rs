@@ -102,7 +102,10 @@ fn text(context: &Transaction<'_>, key: &str) -> Result<Option<String>> {
         .transpose()
 }
 
-pub(super) fn exists(context: &Transaction<'_>, target: Target) -> Result<bool> {
+pub(in crate::cells::repository) fn exists(
+    context: &Transaction<'_>,
+    target: Target,
+) -> Result<bool> {
     Ok(context
         .document::<Retention>(&History::new(target).retention())?
         .is_some())

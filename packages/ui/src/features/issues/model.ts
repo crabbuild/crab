@@ -19,6 +19,7 @@ export interface Issue extends Comment {
   can_label: boolean;
   can_assign: boolean;
   can_close: boolean;
+  can_transfer?: boolean;
 }
 export type IssueTransfer = {
   transfer:

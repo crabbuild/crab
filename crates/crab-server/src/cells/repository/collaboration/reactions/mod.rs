@@ -82,6 +82,13 @@ pub(crate) struct Query {
 
 type Counts = BTreeMap<Kind, u64>;
 
+pub(in crate::cells::repository) fn has_reactions(
+    context: &Transaction<'_>,
+    target: Target,
+) -> crate::cells::Result<bool> {
+    Ok(!counts(context, target)?.is_empty())
+}
+
 fn counts_key(target: Target) -> String {
     format!("{PREFIX}/reactions/{}/counts", target.key())
 }

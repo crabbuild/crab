@@ -14,7 +14,7 @@ pub(crate) use history::{GetHistory, HistoryQuery};
 pub(in crate::cells) use issue_creation::due;
 pub(crate) use issue_creation::{ResolveInput, ResolveIssue};
 pub(crate) use reads::{
-    Get, Items, ItemsQuery, List, ListQuery, MatchedItems, ProjectKey, TypeSources,
+    Get, HasIssueItem, Items, ItemsQuery, List, ListQuery, MatchedItems, ProjectKey, TypeSources,
     TypeSourcesQuery, View,
 };
 
@@ -193,7 +193,13 @@ pub(in crate::cells::organization) fn handles(operation: u32, mutation: bool) ->
     } else {
         matches!(
             operation,
-            GetPreparation::ID | List::ID | Get::ID | Items::ID | GetHistory::ID | TypeSources::ID
+            GetPreparation::ID
+                | List::ID
+                | Get::ID
+                | Items::ID
+                | GetHistory::ID
+                | TypeSources::ID
+                | HasIssueItem::ID
         )
     }
 }
@@ -203,6 +209,11 @@ pub(in crate::cells::organization) fn authorize(
     mutation: bool,
     input: &Value,
 ) -> Result<()> {
+    if !mutation && operation == HasIssueItem::ID {
+        // The trusted issue transfer coordinator checks placement without
+        // exposing the organization Projects or their item contents.
+        return Ok(());
+    }
     if mutation && operation == ResolveIssue::ID {
         // The private resolver only settles an accepted reservation with the
         // bound repository result. It cannot create a new Project write.

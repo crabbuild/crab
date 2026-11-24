@@ -42,6 +42,8 @@ pub(crate) enum Error {
     TransferPublication(#[source] crab_remote::publication::Error),
     #[error("Incoming issue transfers must finish before repository ownership can change")]
     RepositoryIssueTransfersPending,
+    #[error("This transfer expired. Reload the issue to start a new transfer.")]
+    IssueTransferExpired,
     #[error("This username is already taken")]
     ProfileHandleTaken,
     #[error("Your profile is already registered; reload to edit it")]
@@ -370,6 +372,11 @@ impl IntoResponse for Error {
                 StatusCode::CONFLICT,
                 "issue_transfers_pending",
                 "Incoming issue transfers must finish before repository ownership can change",
+            ),
+            Self::IssueTransferExpired => (
+                StatusCode::CONFLICT,
+                "issue_transfer_expired",
+                "This transfer expired. Reload the issue to start a new transfer.",
             ),
             Self::Invalid(message) => (StatusCode::BAD_REQUEST, "invalid_request", *message),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found", "Resource not found"),

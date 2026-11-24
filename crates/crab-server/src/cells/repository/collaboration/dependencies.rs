@@ -78,6 +78,21 @@ fn issue(number: u64) -> Subject {
     }
 }
 
+pub(in crate::cells::repository) fn has_edges(
+    context: &Transaction<'_>,
+    number: u64,
+) -> Result<bool> {
+    for direction in [Direction::BlockedBy, Direction::Blocking] {
+        if !context
+            .documents_after::<Edge>(&direction.prefix(number), None, 1)?
+            .is_empty()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub(in crate::cells::repository) fn blocked(
     context: &Transaction<'_>,
     number: u64,
