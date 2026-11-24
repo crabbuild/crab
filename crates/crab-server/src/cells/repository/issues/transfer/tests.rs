@@ -724,18 +724,27 @@ async fn issue_transfer_alarm_publishes_the_reserved_number_after_restart() {
     };
     let number = reservation.destination.number;
     assert_eq!(number, previous.number + 1);
+    assert_eq!(
+        origin
+            .client
+            .query::<GetLocation>(origin_id, None, issue.number)
+            .await
+            .unwrap()
+            .output,
+        Location::Present
+    );
     assert!(matches!(
         mutate::<Retire>(&origin, reservation).await,
         RetireOutcome::Committed { .. }
     ));
-    assert!(
+    assert_eq!(
         target
             .client
-            .query::<GetIssue>(target_id, None, number)
+            .query::<GetLocation>(target_id, None, number)
             .await
             .unwrap()
-            .output
-            .is_none()
+            .output,
+        Location::Missing
     );
     let NodeOutcome::Stopped(report) = started.node.shutdown(ShutdownMode::Preserve).await.unwrap()
     else {
@@ -744,11 +753,20 @@ async fn issue_transfer_alarm_publishes_the_reserved_number_after_restart() {
     assert!(report.cells_drained && !report.drain_timed_out);
 
     let restored = test_node(directory.path(), address).await;
-    restored
-        .client
-        .query::<GetMove>(origin_id, None, issue.number)
-        .await
-        .unwrap();
+    assert_eq!(
+        restored
+            .client
+            .query::<GetLocation>(origin_id, None, issue.number)
+            .await
+            .unwrap()
+            .output,
+        Location::Moved {
+            destination: Destination {
+                repository: target_id,
+                number
+            }
+        }
+    );
     let published = tokio::time::timeout(std::time::Duration::from_secs(45), async {
         loop {
             let output = restored
@@ -765,6 +783,15 @@ async fn issue_transfer_alarm_publishes_the_reserved_number_after_restart() {
     .await
     .expect("The restored Repository Cell alarm did not publish the reserved issue");
     assert_eq!(published, IssueRecord { number, ..issue });
+    assert_eq!(
+        restored
+            .client
+            .query::<GetLocation>(target_id, None, number)
+            .await
+            .unwrap()
+            .output,
+        Location::Present
+    );
     let NodeOutcome::Stopped(report) = restored
         .node
         .shutdown(ShutdownMode::Preserve)

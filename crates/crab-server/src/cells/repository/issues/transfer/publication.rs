@@ -326,6 +326,42 @@ impl Read for GetMove {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum Location {
+    Present,
+    Moved { destination: Destination },
+    Missing,
+}
+
+pub(crate) struct GetLocation;
+
+impl Read for GetLocation {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
+    const ID: u32 = 459;
+    type Input = u64;
+    type Output = Location;
+
+    fn execute(context: &mut Transaction<'_>, number: u64) -> Result<Self::Output> {
+        if let Some(decision) = moved(context, number)? {
+            return Ok(Location::Moved {
+                destination: decision.destination(),
+            });
+        }
+        // Read the move and live issue in one snapshot. Retirement removes
+        // the issue and commits the redirect in the same source transaction.
+        let live = context.query(
+            "SELECT 1 FROM repository_issues WHERE number = ?",
+            &[integer(number)?],
+        )?;
+        Ok(if live.rows.is_empty() {
+            Location::Missing
+        } else {
+            Location::Present
+        })
+    }
+}
+
 pub(crate) struct HasReservations;
 
 impl Read for HasReservations {

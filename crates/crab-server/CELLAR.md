@@ -550,9 +550,11 @@ the ownership fence, keeps a compact replay decision, and prunes one private
 frame at a time. The attachment sweeper removes only destination objects sealed
 by that cancellation, after the active-copy grace period.
 
-The issue detail route resolves the move through independent, current grants
-on the original and destination repositories. It exposes the destination only
-after publication, and the browser retains the original comment anchor.
+The issue detail route follows durable move decisions to the current issue.
+Each Repository Cell reads the live issue and its move decision in one snapshot.
+The route rechecks the original and every traversed repository grant before
+disclosing the final published location. The browser retains the comment anchor
+from the original URL.
 
 The browser HTTP workflow checks both repository grants and the shared owner.
 It reserves and verifies attachment copies before preparing. Preparation

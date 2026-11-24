@@ -470,6 +470,9 @@ pub(in crate::cells) fn dispatch_read(
         issues::transfer::publication::GetMove::ID => {
             invoke_read::<issues::transfer::publication::GetMove>(context, input)
         }
+        issues::transfer::publication::GetLocation::ID => {
+            invoke_read::<issues::transfer::publication::GetLocation>(context, input)
+        }
         issues::transfer::publication::HasReservations::ID => {
             invoke_read::<issues::transfer::publication::HasReservations>(context, input)
         }

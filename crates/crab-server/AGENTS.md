@@ -287,7 +287,9 @@ in the same transaction that installs the issue. Transfer inbox entries
 carry their source repository and require current grants to both repositories
 for delivery, viewing, and triage. An opted-in email uses the same notice ID.
 The sender rechecks both grants and the destination issue before sending an
-authenticated inbox link. `notifications/triage.rs` binds all
+authenticated inbox link. `api/issues/transferred.rs` follows committed issue
+moves to the published location and rechecks every traversed repository grant
+before disclosure. `notifications/triage.rs` binds all
 selected rows to observed activity in one transaction. `notifications/filing.rs`
 retains saved and completed conversations with private activity-order indexes.
 `notifications/filters.rs` owns account-private, revisioned inbox filters.
