@@ -1034,10 +1034,28 @@ async fn create_at_comparison(
     repo: &Arc<Repository>,
     input: NewPullRequest,
 ) -> Result<PullRequest> {
+    use crate::cells::repository::collaboration::links::branches::promotion::Prepare;
+
     let fork = input
         .head_repository
         .map(|id| git::fork_repository(server, repo, id))
         .transpose()?;
+    let cell = app::repository_cell(server, repo)?;
+    // Prepare preview-era links in bounded commits before borrowing the ref
+    // leases. Concurrent branch edits already maintain the target index.
+    loop {
+        if server.cancellation.is_cancelled() {
+            return Err(Error::MergeBusy);
+        }
+        let ready = app::command_output(
+            cell.client
+                .command::<Prepare>(cell.target, app::mutation_identity()?, ())
+                .await,
+        )?;
+        if ready {
+            break;
+        }
+    }
     let worker = Arc::clone(server);
     let principal = principal.clone();
     let repo = Arc::clone(repo);

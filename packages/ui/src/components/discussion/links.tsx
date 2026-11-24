@@ -18,6 +18,7 @@ interface LinkedWork {
   version?: number;
   closes_on_merge?: boolean;
   from_description?: boolean;
+  from_branch?: boolean;
 }
 interface LinkPage {
   items: LinkedWork[];
@@ -100,6 +101,7 @@ export function LinkedWork({
                     version,
                     closes_on_merge: closes,
                     from_description: described,
+                    from_branch,
                   }) => {
                     const isIssue = work.subject.kind === "issue";
                     const number = work.subject.number;
@@ -120,6 +122,9 @@ export function LinkedWork({
                         <span className="muted">{work.state}</span>
                         {described && (
                           <span className="muted">From PR description</span>
+                        )}
+                        {from_branch && (
+                          <span className="muted">From linked branch</span>
                         )}
                         {closes &&
                           (pull

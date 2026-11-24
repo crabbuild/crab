@@ -3,7 +3,9 @@ use crate::cells::{Error, Result};
 use uuid::Uuid;
 
 const MAX_BRANCHES: usize = 10;
+const STATES: &str = "collaboration/v1/links/development-branches/";
 pub(crate) mod creation;
+pub(crate) mod promotion;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(deny_unknown_fields)]
@@ -55,7 +57,7 @@ impl State {
 }
 
 fn key(issue: u64) -> String {
-    format!("{ROOT}/development-branches/{issue:016x}")
+    format!("{STATES}{issue:016x}")
 }
 
 pub(in crate::cells::repository) fn load(context: &Transaction<'_>, issue: u64) -> Result<State> {
@@ -69,12 +71,26 @@ pub(in crate::cells::repository) fn install(
 ) -> Result<()> {
     state.validate()?;
     if !state.is_empty() {
+        let previous = load(context, issue)?;
+        for branch in &previous.branches {
+            if state.branches.binary_search(branch).is_err() {
+                promotion::index(context, branch, issue, false)?;
+            }
+        }
+        for branch in &state.branches {
+            if previous.branches.binary_search(branch).is_err() {
+                promotion::index(context, branch, issue, true)?;
+            }
+        }
         context.put_document(&key(issue), state)?;
     }
     Ok(())
 }
 
 pub(in crate::cells::repository) fn retire(context: &Transaction<'_>, issue: u64) -> Result<()> {
+    for branch in load(context, issue)?.branches {
+        promotion::index(context, &branch, issue, false)?;
+    }
     context.delete_document(&key(issue)).map(drop)
 }
 

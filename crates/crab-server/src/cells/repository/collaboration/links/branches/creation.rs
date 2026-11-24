@@ -49,14 +49,25 @@ pub(crate) struct Job {
     pub status: Status,
     due: u64,
     expires_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pull: Option<u64>,
 }
 
 fn key(id: Uuid) -> String {
     format!("{PREFIX}/requests/{id}")
 }
 
+pub(super) const ISSUES: &str = "collaboration/v1/development-branch-creation/issues/";
 fn issue_key(issue: u64) -> String {
-    format!("{PREFIX}/issues/{issue:016x}")
+    format!("{ISSUES}{issue:016x}")
+}
+
+fn pull_prefix(pull: u64) -> String {
+    format!("{PREFIX}/pulls/{pull:016x}/")
+}
+
+fn pull_key(pull: u64, request: Uuid) -> String {
+    format!("{}{request}", pull_prefix(pull))
 }
 
 const DUE: &str = "collaboration/v1/development-branch-creation/due/";
@@ -127,8 +138,10 @@ impl Mutation for Reserve {
             status: Status::Pending,
             due: now,
             expires_at: now.saturating_add(EXPIRE_MS),
+            pull: None,
         };
         context.put_document(&issue_key(job.request.issue), &job.request.id)?;
+        promotion::index(context, &job.request.branch, job.request.issue, true)?;
         save(context, &job)?;
         advance_revision(context)?;
         Ok(MutationResult::Success(Decision::Saved(Status::Pending)))
@@ -162,6 +175,50 @@ pub(super) fn for_issue(context: &Transaction<'_>, issue: u64) -> Result<Option<
         "Pending development branch request is missing",
     ))?;
     Ok(Some(job.request))
+}
+
+pub(super) fn record_pull(
+    context: &Transaction<'_>,
+    branch: &Branch,
+    issue: u64,
+    pull: u64,
+) -> Result<()> {
+    let Some(id) = pending(context, issue)? else {
+        return Ok(());
+    };
+    let Some(mut job) = context.document::<Job>(&key(id))? else {
+        return Err(Error::Invalid(
+            "Pending development branch request is missing",
+        ));
+    };
+    if job.status == Status::Pending && job.request.branch == *branch && job.pull.is_none() {
+        job.pull = Some(pull);
+        context.put_document(&pull_key(pull, id), &id)?;
+        context.put_document(&key(id), &job)?;
+    }
+    Ok(())
+}
+
+pub(crate) struct PendingForPull;
+impl Read for PendingForPull {
+    const CLASS: &'static str = CLASS;
+    const ID: u32 = 466;
+    type Input = u64;
+    type Output = Vec<Request>;
+
+    fn execute(context: &mut Transaction<'_>, pull: u64) -> Result<Vec<Request>> {
+        validate_number(pull)?;
+        context
+            .documents_after::<Uuid>(&pull_prefix(pull), None, MAX_CLOSING_ISSUES)?
+            .into_iter()
+            .map(|(_, id)| {
+                Ok(context
+                    .document::<Job>(&key(id))?
+                    .ok_or(Error::Invalid("Pending pull branch request is missing"))?
+                    .request)
+            })
+            .collect()
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -228,18 +285,30 @@ impl Mutation for Settle {
             Resolution::Committed => {
                 // The reservation owns one slot and prevents the issue moving
                 // while Git can still publish its exact branch creation.
-                let mut state = load(context, issue)?;
-                if let Err(index) = state.branches.binary_search(&job.request.branch) {
-                    state.branches.insert(index, job.request.branch.clone());
-                    state.version = next_version(state.version)?;
-                    install(context, issue, &state)?;
+                if let Some(pull) = job.pull
+                    && promotion::settle(context, issue, pull)?
+                {
+                    promotion::index(context, &job.request.branch, issue, false)?;
+                } else {
+                    let mut state = load(context, issue)?;
+                    if let Err(index) = state.branches.binary_search(&job.request.branch) {
+                        state.branches.insert(index, job.request.branch.clone());
+                        state.version = next_version(state.version)?;
+                        install(context, issue, &state)?;
+                    }
                 }
                 job.status = Status::Created;
             }
-            Resolution::Abandoned => job.status = Status::Expired,
+            Resolution::Abandoned => {
+                promotion::index(context, &job.request.branch, issue, false)?;
+                job.status = Status::Expired;
+            }
         }
         if job.status != Status::Pending {
             context.delete_document(&issue_key(issue))?;
+            if let Some(pull) = job.pull {
+                context.delete_document(&pull_key(pull, id))?;
+            }
             advance_revision(context)?;
         }
         save(context, &job)?;

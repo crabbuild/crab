@@ -556,6 +556,16 @@ requests. It releases unattempted expired requests under the Git plan lease
 and retains attempted requests while the outcome is ambiguous.
 Update serving peers and UI together before enabling issue branch creation.
 
+The issue Cell indexes development links by head repository UUID and full ref.
+The pull-creation transaction uses that index to replace eligible branches
+with normal linked-issue records when the pull request lives in the same Cell.
+Earlier links are indexed in bounded, resumable batches before acquiring
+the comparison leases. A pending branch creation can remember the first pull
+request that opens from it. Its exact Git receipt must be proven before the
+branch can promote. Merge publication checks those receipts before capturing
+the default-branch closure set, so an unacknowledged branch creation can
+still close its issue on time.
+
 Repository ownership acceptance and the operator's initial organization
 assignment check for incoming issue reservations under the existing policy
 lease. Publication clears the reservation in the same transaction that

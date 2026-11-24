@@ -136,18 +136,29 @@ async fn a_committed_branch_creation_recovers_after_its_head_moves() {
 }
 
 async fn seed(h: &Harness, alice: &str, checkout: &std::path::Path) -> (Uuid, Url) {
-    h.add_repository("library").await;
+    seed_repository(h, alice, checkout, "library").await
+}
+
+async fn seed_repository(
+    h: &Harness,
+    alice: &str,
+    checkout: &std::path::Path,
+    name: &str,
+) -> (Uuid, Url) {
+    if name != "private" {
+        h.add_repository(name).await;
+    }
     let target = h
         .server
         .repositories
-        .get(&("team".into(), "library".into()))
+        .get(&("team".into(), name.into()))
         .unwrap();
     let token: Value = h
         .write(
             Method::POST,
             "/api/git-token",
             alice,
-            json!({"owner":"team","repository":"library","access":"write"}),
+            json!({"owner":"team","repository":name,"access":"write"}),
         )
         .await
         .error_for_status()
@@ -155,7 +166,7 @@ async fn seed(h: &Harness, alice: &str, checkout: &std::path::Path) -> (Uuid, Ur
         .json()
         .await
         .unwrap();
-    let mut remote = Url::parse(&format!("{}/git/team/library.git", h.origin)).unwrap();
+    let mut remote = Url::parse(&format!("{}/git/team/{name}.git", h.origin)).unwrap();
     remote.set_username("crab").unwrap();
     remote.set_password(token["token"].as_str()).unwrap();
     git::push_review_branches(checkout, remote.as_str()).await;
@@ -169,6 +180,177 @@ async fn seed(h: &Harness, alice: &str, checkout: &std::path::Path) -> (Uuid, Ur
     .error_for_status()
     .unwrap();
     (target.id, remote)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires agent-browser and the built embedded UI"]
+async fn browser_promotes_an_issue_branch_to_its_pull_and_closes_the_issue_on_merge() {
+    use crate::{
+        app,
+        auth::Principal,
+        cells::repository::collaboration::links::branches::{
+            Branch,
+            creation::{Decision, Request, Reserve, Status},
+        },
+        git::receive::{self, IssueBranchPublication},
+    };
+    use std::sync::Arc;
+
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    let checkout = tempfile::tempdir().unwrap();
+    let (repo, remote) = seed_repository(&h, &alice, checkout.path(), "private").await;
+    h.write(
+        Method::POST,
+        "/api/repos/team/private/issues",
+        &alice,
+        json!({
+            "request_id":Uuid::now_v7(),"title":"Issue with a pending branch result","body":""
+        }),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let source = h.server.repositories.by_id(repo).unwrap();
+    let principal = Principal::local();
+    let request = Request {
+        id: Uuid::now_v7(),
+        issue: 2,
+        branch: Branch {
+            repository: repo,
+            reference: "refs/heads/rollout".into(),
+        },
+        commit: git::success(checkout.path(), &["rev-parse", "main"]).await,
+        actor: app::account(&principal).unwrap(),
+        target_epoch: source.ownership_epoch,
+    };
+    let cell = app::repository_cell(&h.server, &source).unwrap();
+    assert!(matches!(
+        cell.client
+            .command::<Reserve>(
+                cell.target,
+                app::mutation_identity().unwrap(),
+                request.clone()
+            )
+            .await
+            .unwrap()
+            .output,
+        Decision::Saved(Status::Pending)
+    ));
+    receive::create_issue_branch(
+        Arc::clone(&h.server),
+        principal,
+        &source,
+        IssueBranchPublication {
+            source: Arc::clone(&source),
+            request,
+        },
+    )
+    .await
+    .unwrap();
+    git::success(
+        checkout.path(),
+        &["push", remote.as_str(), "HEAD:refs/heads/rollout"],
+    )
+    .await;
+    h.write(
+        Method::PUT,
+        EDIT,
+        &alice,
+        json!({
+            "branch":{"repository":repo,"reference":"refs/heads/rollout"},"version":0,"active":true
+        }),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+
+    let browser = Browser::new("branch-pr");
+    let compare = format!("{}/team/private/compare/main...rollout", h.origin);
+    browser.run(&["open", &compare]).await;
+    browser.sign_in().await;
+    browser.run(&["wait", "#discussion-title"]).await;
+    browser
+        .run(&["fill", "#discussion-title", "Ship the planned feature"])
+        .await;
+    let click = |label| {
+        let browser = &browser;
+        async move {
+            browser
+                .run(&[
+                    "find", "role", "button", "click", "--name", label, "--exact",
+                ])
+                .await
+        }
+    };
+    browser.run(&["wait", "--fn", "[...document.querySelectorAll('button')].some(button => !button.disabled && button.textContent.trim() === 'Create pull request')"]).await;
+    click("Create pull request").await;
+    browser
+        .run(&["wait", "--url", "**/team/private/pull/1*"])
+        .await;
+    browser.run(&["wait", "--text", "From linked branch"]).await;
+    let issue = h.json(LINKS, &alice).await;
+    assert_eq!(issue["branches"]["items"], json!([]));
+    assert_eq!(issue["items"][0]["from_branch"], true);
+    assert_eq!(issue["items"][0]["closes_on_merge"], true);
+    assert_eq!(
+        h.json("/api/repos/team/private/issues/2/links", &alice)
+            .await["items"],
+        json!([])
+    );
+
+    let mut members = source.config.members.clone();
+    members
+        .iter_mut()
+        .find(|member| member.subject == "bob-id")
+        .unwrap()
+        .access = crate::RepositoryAccess::Write;
+    h.server
+        .catalog()
+        .unwrap()
+        .set_members("team", "private", members, true)
+        .await
+        .unwrap();
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    let head = git::success(checkout.path(), &["rev-parse", "HEAD"]).await;
+    h.write(
+        Method::POST,
+        "/api/repos/team/private/pulls/1/reviews",
+        &bob,
+        json!({
+            "request_id":Uuid::now_v7(),"state":"approved","body":"","commit_oid":head,
+        }),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    h.http
+        .post(format!(
+            "{}/api/repos/team/private/statuses/{head}",
+            h.origin
+        ))
+        .basic_auth("crab", remote.password())
+        .json(&json!({"request_id":Uuid::now_v7(),"context":"ci/test","state":"success"}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let pull = format!("{}/team/private/pull/1", h.origin);
+    browser.run(&["open", &pull]).await;
+    browser.run(&["wait", "--text", "Merge pull request"]).await;
+    click("Merge pull request").await;
+    click("Confirm merge").await;
+    browser
+        .run(&["wait", "--text", "Pull request merged"])
+        .await;
+    assert_eq!(h.json(ISSUE, &alice).await["state"], "closed");
+    assert_eq!(
+        h.json("/api/repos/team/private/issues/2", &alice).await["state"],
+        "closed"
+    );
+    h.close().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

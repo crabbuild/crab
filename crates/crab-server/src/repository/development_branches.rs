@@ -9,7 +9,7 @@ use crate::{
     app::{self, Error},
     auth::Principal,
     cells::repository::collaboration::links::branches::creation::{
-        Decision, Due, Get, Request, Reserve, Resolution, Settle, Status,
+        Decision, Due, Get, PendingForPull, Request, Reserve, Resolution, Settle, Status,
     },
     git::receive::{self, IssueBranchPublication, ReceiveError},
     server::Server,
@@ -85,6 +85,42 @@ async fn finish_committed(
     Ok(Some(
         settle(server, publication, Resolution::Committed).await?,
     ))
+}
+
+pub(crate) async fn recover_for_pull(
+    server: &Server,
+    source: &Repository,
+    pull: u64,
+) -> Result<()> {
+    let cell = app::repository_cell(server, source)?;
+    let requests = app::query_output(
+        cell.client
+            .query::<PendingForPull>(cell.target, None, pull)
+            .await,
+    )?;
+    if requests.is_empty() {
+        return Ok(());
+    }
+    let source = server
+        .repositories
+        .by_id(source.id)
+        .filter(|repo| {
+            repo.ownership_epoch == source.ownership_epoch
+                && repo.identity.placement_generation() == source.identity.placement_generation()
+        })
+        .ok_or(Error::RepositoryChanged)?;
+    for request in requests {
+        let target = server
+            .repositories
+            .by_id(request.branch.repository)
+            .ok_or(Error::RepositoryChanged)?;
+        let publication = IssueBranchPublication {
+            source: Arc::clone(&source),
+            request,
+        };
+        finish_committed(server, &target, &publication).await?;
+    }
+    Ok(())
 }
 
 async fn abandon(

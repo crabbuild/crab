@@ -1437,6 +1437,10 @@ async fn commit_authorized(
         if let Some(candidate) = &pull.candidate {
             crate::api::authorize_merge_candidate(server, entry, pull, candidate).await?;
         } else {
+            // Preserve the linked-issue closure when branch Git publication
+            // finished before its issue-side receipt was acknowledged.
+            crate::repository::development_branches::recover_for_pull(server, entry, pull.number)
+                .await?;
             let linear = mutation
                 .linear_history
                 .as_ref()

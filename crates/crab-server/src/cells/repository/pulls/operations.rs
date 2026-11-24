@@ -151,6 +151,7 @@ fn write_pull(
         number: record.number,
     };
     let source = activity::append(context, target, &record.author, Action::Created)?;
+    collaboration::links::branches::promotion::create(context, &record)?;
     webhooks::pull(context, &record, webhooks::PullAction::Opened)?;
     crate::cells::repository::collaboration::body_written(context, &source, None, &record.body)?;
     collaboration::mentions::assigned(context, &source, &[], &record.assignees)?;

@@ -2573,6 +2573,13 @@ Keep the request ID and payload for retries. On a lost response, reload the
 issue to see the linked branch or the original actor's pending request.
 Recovery links only the exact Git creation, even if the new branch has moved.
 
+When a pull request opens in the issue's repository from its linked branch,
+the pull request replaces the branch on the issue. Both conversations show
+the relationship under **From linked branch**. This also works when the head
+is in a fork. Merging into the default branch closes the linked issue through
+the normal pull-request merge path. This promotion covers up to ten issues
+per pull request. The issue and the pull request must belong to the same repository.
+
 ### Close a linked issue when its pull request merges
 
 In the pull request’s **Linked issues** section, enter an issue number and leave

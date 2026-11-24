@@ -65,6 +65,8 @@ pub(crate) struct Link {
     pub version: u64,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub closes_on_merge: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    from_branch: bool,
 }
 
 fn load(context: &Transaction<'_>, pair: Pair) -> crate::cells::Result<Link> {
@@ -75,6 +77,7 @@ fn load(context: &Transaction<'_>, pair: Pair) -> crate::cells::Result<Link> {
             active: false,
             version: 0,
             closes_on_merge: false,
+            from_branch: false,
         }),
         Some(link) => {
             validate_number(link.version)?;
@@ -176,6 +179,9 @@ impl Mutation for SetLink {
             link.closes_on_merge = closes;
         }
         link.active = input.active;
+        if !link.active {
+            link.from_branch = false;
+        }
         link.version = next_version(link.version)?;
         // Keep the inactive record's version. Deleting it would let a delayed
         // add overwrite a later unlink, or a delayed unlink erase a new link.
@@ -254,6 +260,8 @@ pub(crate) struct LinkedWork {
     pub closes_on_merge: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub from_description: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_branch: bool,
 }
 
 pub(crate) struct ListLinks;
@@ -343,6 +351,7 @@ impl Read for ListLinks {
                     version: link.active.then_some(link.version),
                     closes_on_merge: from_description || link.closes_on_merge,
                     from_description,
+                    from_branch: link.from_branch,
                 })
             })
             .collect::<crate::cells::Result<Vec<_>>>()?;
