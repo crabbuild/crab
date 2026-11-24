@@ -1,5 +1,6 @@
 use super::*;
 use crate::test_support::http::browser::Browser;
+mod groups;
 
 async fn project_with_issue(
     h: &Harness,
@@ -140,12 +141,9 @@ async fn project_issue_type_fields_follow_source_permissions_and_assignment() {
     let hidden_matches = h.json(&filter, &reader).await;
     assert_eq!(hidden_matches["page"]["total"], 0);
     let hidden_groups = h
-        .json(&format!("{shared_items}?group_by_type=true"), &reader)
+        .json(&format!("{shared_items}?group_by=issue_type"), &reader)
         .await;
-    assert_eq!(
-        hidden_groups["page"]["issue_type_counts"],
-        json!({"other":1})
-    );
+    assert_eq!(hidden_groups["page"]["group_counts"], json!({"other":1}));
     assert_eq!(
         hidden_groups["page"]["items"][0]["issue_type_group"],
         "other"
@@ -163,10 +161,10 @@ async fn project_issue_type_fields_follow_source_permissions_and_assignment() {
         assert_eq!(visible["page"]["items"][0]["issue_type_version"], version);
         assert_eq!(h.json(&filter, &reader).await["page"]["total"], 1);
         let grouped = h
-            .json(&format!("{shared_items}?group_by_type=true"), &reader)
+            .json(&format!("{shared_items}?group_by=issue_type"), &reader)
             .await;
         let type_id = types[1]["id"].as_str().unwrap();
-        assert_eq!(grouped["page"]["issue_type_counts"][type_id], 1);
+        assert_eq!(grouped["page"]["group_counts"][type_id], 1);
         assert_eq!(grouped["page"]["items"][0]["issue_type_group"], type_id);
     }
     types[1]["name"] = json!("Incident");
@@ -358,18 +356,18 @@ async fn project_type_filter_counts_matching_rows_across_repositories_and_pages(
     assert_eq!(page["counts"]["Done"], 1);
     assert_eq!(page["items"].as_array().unwrap().len(), 50);
     let grouped = h
-        .json(&format!("{shared_items}?group_by_type=true"), &alice)
+        .json(&format!("{shared_items}?group_by=issue_type"), &alice)
         .await;
-    assert_eq!(grouped["page"]["issue_type_counts"][bug], 52);
-    assert_eq!(grouped["page"]["issue_type_counts"]["none"], 1);
+    assert_eq!(grouped["page"]["group_counts"][bug], 52);
+    assert_eq!(grouped["page"]["group_counts"]["none"], 1);
     assert_eq!(grouped["page"]["items"].as_array().unwrap().len(), 50);
     let done = h
         .json(
-            &format!("{filtered}&group_by_type=true&status=Done"),
+            &format!("{filtered}&group_by=issue_type&status=Done"),
             &alice,
         )
         .await;
-    assert_eq!(done["page"]["issue_type_counts"][bug], 1);
+    assert_eq!(done["page"]["group_counts"][bug], 1);
     assert_eq!(done["page"]["total"], 1);
     let continuation = format!(
         "{filtered}&after={}&version={}&type_cursor={}",
@@ -469,12 +467,12 @@ async fn project_type_filter_counts_matching_rows_across_repositories_and_pages(
     );
     let grouped_local = h
         .json(
-            &format!("{repository_projects}/{local}/items?group_by_type=true"),
+            &format!("{repository_projects}/{local}/items?group_by=issue_type"),
             &alice,
         )
         .await;
     assert_eq!(
-        grouped_local["page"]["issue_type_counts"],
+        grouped_local["page"]["group_counts"],
         json!({"none":2,"other":1})
     );
 }

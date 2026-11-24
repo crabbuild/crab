@@ -32,7 +32,8 @@ import { DiscussionMarkdown } from "@/components/discussion/markdown";
 import { CreateProject } from "./create";
 import { ItemEditor } from "./item";
 import { ProjectSettings } from "./settings";
-import { ProjectGrouping, ProjectTypeFilter } from "./issue-type";
+import { ProjectTypeFilter } from "./issue-type";
+import { ProjectGrouping, selectedGrouping } from "./grouping";
 import type { IssueType } from "@/lib/contracts";
 import { ProjectBoard, ProjectTable, ProjectRoadmap } from "./views";
 import { useProjectCommands } from "./commands";
@@ -42,6 +43,7 @@ import { checkpointDraft, itemDraft, readDraft } from "./draft-storage";
 import {
   projectHref,
   type Listing,
+  type Item,
   type ItemPage,
   type Project,
   type Row,
@@ -226,11 +228,12 @@ function ProjectWorkspace({
     project.definition.views[0];
   const query = url.searchParams.get("q") ?? selected.query;
   const status = url.searchParams.get("status") ?? selected.status ?? "";
-  const grouped =
-    !!repo.organization_id &&
-    (url.searchParams.has("group_by_type")
-      ? url.searchParams.get("group_by_type") === "true"
-      : !!selected.group_by_type);
+  const groupBy = selectedGrouping(
+    selected.layout,
+    project.definition.fields,
+    !!repo.organization_id,
+    url.searchParams.get("group_by") ?? selected.group_by,
+  );
   const issueType = repo.organization_id
     ? (url.searchParams.get("issue_type") ?? selected.issue_type_filter ?? "")
     : "";
@@ -246,7 +249,7 @@ function ProjectWorkspace({
       status: status || undefined,
       hide_closed: String(hidden),
       issue_type: issueType || undefined,
-      group_by_type: grouped ? "true" : undefined,
+      group_by: groupBy,
       after,
       type_cursor: after
         ? (url.searchParams.get("type_cursor") ?? undefined)
@@ -286,21 +289,22 @@ function ProjectWorkspace({
     repo.archived || project.archived
       ? undefined
       : () => (after ? filters({}) : resource.retry());
-  async function changeStatus(row: Row, status: string) {
+  async function changeItem(row: Row, edit: (item: Item) => Item) {
     if (!commands.account) return;
     const scope = { target: { repo }, project: project.id, item: row.item.id };
     const previous = readDraft(commands.account, scope, "item");
     if (previous?.kind === "item") {
       checkpointDraft(commands.account, scope, {
         ...previous,
-        item: { ...previous.item, status },
+        item: edit(previous.item),
       });
       setEditing(row);
       return;
     }
+    const item = edit(row.item);
     const checkpoint = checkpointDraft(commands.account, scope, {
       ...itemDraft(project, row, repo.id),
-      item: { ...row.item, status },
+      item,
     });
     await commands.submit(
       repo,
@@ -308,7 +312,7 @@ function ProjectWorkspace({
         kind: "item",
         project: project.id,
         version: row.version,
-        item: { ...row.item, status },
+        item,
       },
       checkpoint,
     );
@@ -378,7 +382,7 @@ function ProjectWorkspace({
             status: undefined,
             hide_closed: undefined,
             issue_type: undefined,
-            group_by_type: undefined,
+            group_by: undefined,
           })
         }
       >
@@ -455,13 +459,13 @@ function ProjectWorkspace({
                 onChange={(value) => filters({ issue_type: value })}
               />
             )}
-            {repo.organization_id && (
-              <ProjectGrouping
-                layout={selected.layout}
-                grouped={grouped}
-                onChange={(value) => filters({ group_by_type: String(value) })}
-              />
-            )}
+            <ProjectGrouping
+              layout={selected.layout}
+              fields={project.definition.fields}
+              issueTypes={!!repo.organization_id}
+              groupBy={groupBy}
+              onChange={(value) => filters({ group_by: value })}
+            />
             <Button variant="outline" type="submit">
               Apply
             </Button>
@@ -501,13 +505,15 @@ function ProjectWorkspace({
                       page={page}
                       editable={editable && can_manage}
                       onEdit={setEditing}
-                      onStatus={changeStatus}
+                      groupBy={groupBy}
+                      onChangeItem={changeItem}
                       showIssueType={selected.show_issue_type}
                       onIssueTypeChange={onIssueTypeChange}
                     />
                   ) : selected.layout === "roadmap" ? (
                     <ProjectRoadmap
                       repo={repo}
+                      groupBy={groupBy}
                       page={page}
                       editable={editable && can_manage}
                       onEdit={setEditing}
@@ -520,7 +526,8 @@ function ProjectWorkspace({
                       page={page}
                       editable={editable && can_manage}
                       onEdit={setEditing}
-                      onStatus={changeStatus}
+                      groupBy={groupBy}
+                      onChangeItem={changeItem}
                       showIssueType={selected.show_issue_type}
                       onIssueTypeChange={onIssueTypeChange}
                     />

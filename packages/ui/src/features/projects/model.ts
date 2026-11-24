@@ -29,6 +29,7 @@ export interface Work {
   state: "open" | "closed" | "merged";
 }
 export type Layout = "table" | "board" | "roadmap";
+export type GroupBy = "status" | "issue_type" | `field:${string}`;
 export interface View {
   id: string;
   name: string;
@@ -38,7 +39,7 @@ export interface View {
   hide_closed: boolean;
   show_issue_type?: boolean;
   issue_type_filter?: string | null;
-  group_by_type?: boolean;
+  group_by?: GroupBy;
 }
 export interface Field {
   id: string;
@@ -99,7 +100,7 @@ export interface ItemPage {
   counts: Record<string, number>;
   issue_types?: IssueType[];
   type_cursor?: string | null;
-  issue_type_counts?: Record<string, number> | null;
+  group_counts?: Record<string, number> | null;
   total: number;
 }
 export interface Listing {

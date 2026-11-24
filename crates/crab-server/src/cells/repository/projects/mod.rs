@@ -7,11 +7,13 @@ use crate::cells::{
     Error, Result,
     application::{Mutation, MutationResult, Read, SqlValue},
 };
+use grouping::GroupBy;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 mod commands;
+pub(crate) mod grouping;
 pub(crate) mod hierarchy;
 mod history;
 pub(crate) mod preparation;
@@ -45,8 +47,8 @@ pub(crate) struct View {
     pub show_issue_type: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue_type_filter: Option<String>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub group_by_type: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_by: Option<GroupBy>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -156,6 +158,14 @@ impl Definition {
                     && v.issue_type_filter.as_deref().is_none_or(|value| {
                         super::issues::issue_type::search::Filter::parse(value).is_ok()
                     })
+                    && match v.group_by {
+                        Some(GroupBy::Field(id)) => self.fields.iter().any(|field| {
+                            field.id == id
+                                && (v.layout != Layout::Board
+                                    || matches!(field.definition, FieldKind::Select { .. }))
+                        }),
+                        _ => true,
+                    }
             })
     }
 }

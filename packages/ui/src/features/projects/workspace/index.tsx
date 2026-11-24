@@ -28,9 +28,10 @@ import { useProjectCommands } from "../commands";
 import { ProjectHistory } from "../history";
 import { DraftRecovery } from "../drafts";
 import { checkpointDraft, itemDraft, readDraft } from "../draft-storage";
-import { projectEndpoint, type ItemPage, type Row } from "../model";
+import { projectEndpoint, type Item, type ItemPage, type Row } from "../model";
 import { ProjectSettings } from "../settings";
-import { ProjectGrouping, ProjectTypeFilter } from "../issue-type";
+import { ProjectTypeFilter } from "../issue-type";
+import { ProjectGrouping, selectedGrouping } from "../grouping";
 import { ProjectBoard, ProjectTable, ProjectRoadmap } from "../views";
 import { FieldSelect } from "@/components/ui/field-select";
 import { ProjectProperties } from "./forms";
@@ -162,9 +163,12 @@ function PlanningWorkspace({
     requestedLayout === "roadmap"
       ? requestedLayout
       : selected.layout;
-  const grouped = url.searchParams.has("group_by_type")
-    ? url.searchParams.get("group_by_type") === "true"
-    : !!selected.group_by_type;
+  const groupBy = selectedGrouping(
+    layout,
+    project.definition.fields,
+    true,
+    url.searchParams.get("group_by") ?? selected.group_by,
+  );
   const status = url.searchParams.get("status") ?? selected.status ?? "";
   const issueType =
     url.searchParams.get("issue_type") ?? selected.issue_type_filter ?? "";
@@ -175,7 +179,7 @@ function PlanningWorkspace({
       status: !overview && status ? status : undefined,
       repository: !overview && repository ? repository : undefined,
       issue_type: !overview && issueType ? issueType : undefined,
-      group_by_type: !overview && grouped ? "true" : undefined,
+      group_by: overview ? undefined : groupBy,
       after: overview ? undefined : after,
       type_cursor:
         !overview && after
@@ -206,7 +210,7 @@ function PlanningWorkspace({
   }, [commands.generation, resource.retry]);
   const editable =
     detail.can_manage && !project.archived && !commands.locked && !refreshing;
-  async function changeStatus(row: Row, status: string) {
+  async function changeItem(row: Row, edit: (item: Item) => Item) {
     if (row.restricted) return;
     if (!commands.account) return;
     const scope = {
@@ -218,14 +222,15 @@ function PlanningWorkspace({
     if (previous?.kind === "item") {
       checkpointDraft(commands.account, scope, {
         ...previous,
-        item: { ...previous.item, status },
+        item: edit(previous.item),
       });
       setEditing(row);
       return;
     }
+    const item = edit(row.item);
     const checkpoint = checkpointDraft(commands.account, scope, {
       ...itemDraft(project, row, row.repository?.id ?? ""),
-      item: { ...row.item, status },
+      item,
     });
     await commands.submitOrganization(
       organization,
@@ -234,7 +239,7 @@ function PlanningWorkspace({
         project: project.id,
         version: row.version,
         repository: row.repository?.id ?? null,
-        item: { ...row.item, status },
+        item,
       },
       checkpoint,
     );
@@ -316,7 +321,7 @@ function PlanningWorkspace({
             repository: undefined,
             layout: undefined,
             issue_type: undefined,
-            group_by_type: undefined,
+            group_by: undefined,
           })
         }
       >
@@ -353,7 +358,7 @@ function PlanningWorkspace({
           <div className="workspace-project-content">
             <div className="workspace-project-work">
               {resource.error &&
-                (after || status || repository || issueType || grouped) && (
+                (after || status || repository || issueType || groupBy) && (
                   <Button
                     variant="outline"
                     onClick={() =>
@@ -361,7 +366,7 @@ function PlanningWorkspace({
                         status: "",
                         repository: undefined,
                         issue_type: "",
-                        group_by_type: "false",
+                        group_by: "none",
                       })
                     }
                   >
@@ -477,10 +482,10 @@ function PlanningWorkspace({
                         />
                         <ProjectGrouping
                           layout={layout}
-                          grouped={grouped}
-                          onChange={(value) =>
-                            filters({ group_by_type: String(value) })
-                          }
+                          fields={project.definition.fields}
+                          issueTypes
+                          groupBy={groupBy}
+                          onChange={(value) => filters({ group_by: value })}
                         />
                         <span className="text-sm text-muted-foreground">
                           {page.total.toLocaleString()}{" "}
@@ -498,9 +503,8 @@ function PlanningWorkspace({
                               ? undefined
                               : () => (after ? filters({}) : resource.retry())
                           }
-                          onStatus={(row, status) =>
-                            void changeStatus(row, status)
-                          }
+                          groupBy={groupBy}
+                          onChangeItem={changeItem}
                         />
                       ) : (
                         <Empty>

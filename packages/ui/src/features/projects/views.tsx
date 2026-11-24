@@ -34,10 +34,17 @@ import {
 import { Link } from "@/components/navigation/link";
 import { cn } from "@/lib/utils";
 import type { Repository } from "@/lib/api";
-import { priorities, workHref, type Row, type ItemPage } from "./model";
+import {
+  priorities,
+  workHref,
+  type Row,
+  type ItemPage,
+  type GroupBy,
+} from "./model";
 import { ProjectIssueType } from "./issue-type";
 import {
-  issueTypeGroups,
+  projectGroups,
+  type ChangeProjectItem,
   ProjectGroupMoveFailure,
   useProjectGroupMove,
 } from "./grouping";
@@ -148,7 +155,9 @@ export function LinkedItems({
 function ProjectGroupLabel({ name, count }: { name: string; count: number }) {
   return (
     <span className="inline-flex items-center gap-2">
-      {name}
+      <span className="max-w-[min(36ch,65vw)] truncate" title={name}>
+        {name}
+      </span>
       <Badge variant="outline">
         {count}
         <span className="sr-only">{count === 1 ? " item" : " items"}</span>
@@ -161,7 +170,8 @@ export function ProjectTable({
   page,
   editable,
   onEdit,
-  onStatus,
+  groupBy,
+  onChangeItem,
   showIssueType,
   onIssueTypeChange,
 }: {
@@ -169,18 +179,21 @@ export function ProjectTable({
   page: ItemPage;
   editable: boolean;
   onEdit: (row: Row) => void;
-  onStatus: (row: Row, status: string) => void;
+  groupBy?: GroupBy;
+  onChangeItem: ChangeProjectItem;
   showIssueType?: boolean;
   onIssueTypeChange?: () => void;
 }) {
-  const groups = issueTypeGroups(page);
-  const showType = !!groups || showIssueType;
+  const groups = groupBy ? projectGroups(page, groupBy) : undefined;
+  const showType = groupBy === "issue_type" || showIssueType;
   const fields = page.project.definition.fields;
   const types = page.issue_types ?? [];
   const columns = 6 + fields.length + Number(!!showType) + Number(editable);
   const { draggable, dropTarget, over, error, reload } = useProjectGroupMove(
+    groupBy,
     repo,
-    groups ? onIssueTypeChange : undefined,
+    onIssueTypeChange,
+    editable ? onChangeItem : undefined,
   );
   const renderRow = (row: Row) => (
     <TableRow key={row.item.id} {...draggable(row)}>
@@ -208,7 +221,9 @@ export function ProjectTable({
         {editable && !row.restricted ? (
           <Select
             value={row.item.status}
-            onValueChange={(status) => onStatus(row, status)}
+            onValueChange={(status) =>
+              onChangeItem(row, (item) => ({ ...item, status }))
+            }
           >
             <SelectTrigger
               aria-label={`Status for ${row.work?.title ?? row.item.title}`}
@@ -307,7 +322,8 @@ export function ProjectBoard({
   page,
   editable,
   onEdit,
-  onStatus,
+  groupBy = "status",
+  onChangeItem,
   showIssueType,
   onIssueTypeChange,
 }: {
@@ -315,26 +331,20 @@ export function ProjectBoard({
   page: ItemPage;
   editable: boolean;
   onEdit: (row: Row) => void;
-  onStatus: (row: Row, status: string) => void;
+  groupBy?: GroupBy;
+  onChangeItem: ChangeProjectItem;
   showIssueType?: boolean;
   onIssueTypeChange?: () => void;
 }) {
-  const typeGroups = issueTypeGroups(page);
-  const grouped = !!typeGroups;
+  const byType = groupBy === "issue_type";
+  const columns = projectGroups(page, groupBy);
   const types = page.issue_types ?? [];
-  const columns =
-    typeGroups ??
-    page.project.definition.statuses.map((status) => ({
-      key: status,
-      name: status,
-      count: page.counts[status] ?? 0,
-      rows: page.items.filter((row) => row.item.status === status),
-    }));
   const { draggable, dropTarget, movable, over, error, reload } =
     useProjectGroupMove(
+      groupBy,
       repo,
-      grouped ? onIssueTypeChange : undefined,
-      !grouped && editable ? onStatus : undefined,
+      onIssueTypeChange,
+      editable ? onChangeItem : undefined,
     );
   return (
     <>
@@ -365,11 +375,11 @@ export function ProjectBoard({
                   <ItemTitle
                     repo={repo}
                     row={row}
-                    showIssueType={!grouped && showIssueType}
+                    showIssueType={!byType && showIssueType}
                   />
                   <footer>
                     <AssigneeAvatars assignees={row.assignees} />
-                    {grouped && (
+                    {groupBy !== "status" && (
                       <Badge variant="secondary">{row.item.status}</Badge>
                     )}
                     <Badge variant="outline">
@@ -378,7 +388,7 @@ export function ProjectBoard({
                     {row.item.end && (
                       <time dateTime={row.item.end}>{row.item.end}</time>
                     )}
-                    {grouped && movable(row) && (
+                    {byType && movable(row) && (
                       <ProjectIssueType
                         row={row}
                         repo={repo}
@@ -421,6 +431,7 @@ export function ProjectRoadmap({
   page,
   editable,
   onEdit,
+  groupBy,
   showIssueType,
   onIssueTypeChange,
 }: {
@@ -428,6 +439,7 @@ export function ProjectRoadmap({
   page: ItemPage;
   editable: boolean;
   onEdit: (row: Row) => void;
+  groupBy?: GroupBy;
   showIssueType?: boolean;
   onIssueTypeChange?: () => void;
 }) {
@@ -450,7 +462,8 @@ export function ProjectRoadmap({
         Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + offset + i, 1),
       ),
   );
-  const groups = issueTypeGroups(page);
+  const groups = groupBy ? projectGroups(page, groupBy) : undefined;
+  const byType = groupBy === "issue_type";
   const types = page.issue_types ?? [];
   const renderRow = (row: Row) => {
     const from = row.item.start
@@ -474,9 +487,9 @@ export function ProjectRoadmap({
           <ItemTitle
             repo={repo}
             row={row}
-            showIssueType={!groups && showIssueType}
+            showIssueType={!byType && showIssueType}
           />
-          {groups && onIssueTypeChange && row.issue_type_version != null && (
+          {byType && onIssueTypeChange && row.issue_type_version != null && (
             <ProjectIssueType
               row={row}
               repo={repo}

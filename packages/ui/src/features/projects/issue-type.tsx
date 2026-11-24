@@ -11,34 +11,7 @@ import { IssueTypeControl } from "@/features/issues/type";
 import type { Repository } from "@/lib/api";
 import type { IssueType } from "@/lib/contracts";
 import { useProjectCommands } from "./commands";
-import type { Layout, Row } from "./model";
-
-export function ProjectGrouping({
-  layout,
-  grouped,
-  onChange,
-  label,
-  id,
-}: {
-  layout: Layout;
-  grouped: boolean;
-  onChange: (grouped: boolean) => void;
-  label?: string;
-  id?: string;
-}) {
-  return (
-    <FieldSelect
-      id={id}
-      label={label ?? (layout === "board" ? "Group board by" : "Group by")}
-      value={grouped ? "type" : "default"}
-      options={{
-        default: layout === "board" ? "Workflow status" : "No grouping",
-        type: "Issue type",
-      }}
-      onValueChange={(value) => onChange(value === "type")}
-    />
-  );
-}
+import type { Row } from "./model";
 
 export function ProjectTypeFilter({
   types,

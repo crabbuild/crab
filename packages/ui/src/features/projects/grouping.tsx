@@ -2,39 +2,129 @@ import { useRef, useState, type DragEvent } from "react";
 import { useMutation } from "@/components/discussion/mutations";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { FieldSelect } from "@/components/ui/field-select";
 import { endpoint, type Repository } from "@/lib/api";
 import { useProjectCommands } from "./commands";
-import type { ItemPage, Row } from "./model";
+import type { Field, GroupBy, Item, ItemPage, Layout, Row } from "./model";
 
-function issueTypeGroup(row: Row) {
-  return row.issue_type_group ?? "other";
+function layoutFields(layout: Layout, fields: Field[]) {
+  return layout === "board"
+    ? fields.filter((field) => field.definition.kind === "select")
+    : fields;
 }
 
-export function issueTypeGroups(page: ItemPage) {
-  const counts = page.issue_type_counts;
-  if (!counts) return undefined;
+export function selectedGrouping(
+  layout: Layout,
+  fields: Field[],
+  issueTypes: boolean,
+  requested: string | null | undefined,
+): GroupBy | undefined {
+  if (requested === "status" || (requested === "issue_type" && issueTypes))
+    return requested;
+  const field = layoutFields(layout, fields).find(
+    (field) => requested === `field:${field.id}`,
+  );
+  if (field) return `field:${field.id}`;
+  return layout === "board" ? "status" : undefined;
+}
 
-  const types = (page.issue_types ?? []).map((type) => ({
-    key: type.id,
-    name: type.name,
-  }));
-  types.push({ key: "none", name: "No type" });
-  if (counts.other) types.push({ key: "other", name: "Other work" });
-  const groups = types.map(({ key, name }) => ({
+export function ProjectGrouping({
+  layout,
+  fields,
+  issueTypes,
+  groupBy,
+  onChange,
+  label,
+  id,
+}: {
+  layout: Layout;
+  fields: Field[];
+  issueTypes: boolean;
+  groupBy: GroupBy | undefined;
+  onChange: (value: string) => void;
+  label?: string;
+  id?: string;
+}) {
+  return (
+    <FieldSelect
+      id={id}
+      label={label ?? (layout === "board" ? "Group board by" : "Group by")}
+      value={groupBy ?? "none"}
+      options={{
+        ...(layout === "board" ? {} : { none: "No grouping" }),
+        status: "Workflow status",
+        ...(issueTypes ? { issue_type: "Issue type" } : {}),
+        ...Object.fromEntries(
+          layoutFields(layout, fields).map((field) => [
+            `field:${field.id}`,
+            field.name || "Unnamed field",
+          ]),
+        ),
+      }}
+      onValueChange={onChange}
+    />
+  );
+}
+
+function rowGroup(row: Row, grouping: GroupBy) {
+  if (grouping === "status") return row.item.status;
+  if (grouping === "issue_type") return row.issue_type_group ?? "other";
+  return row.item.values[grouping.slice("field:".length)] ?? "";
+}
+
+export function projectGroups(page: ItemPage, grouping: GroupBy) {
+  const { definition } = page.project;
+  const counts =
+    page.group_counts ?? (grouping === "status" ? page.counts : {});
+  const field = definition.fields.find(
+    (field) => grouping === `field:${field.id}`,
+  );
+  let names: { key: string; name: string }[];
+  if (grouping === "status") {
+    names = definition.statuses.map((status) => ({
+      key: status,
+      name: status,
+    }));
+  } else if (grouping === "issue_type") {
+    names = (page.issue_types ?? []).map((type) => ({
+      key: type.id,
+      name: type.name,
+    }));
+    names.push({ key: "none", name: "No type" });
+    if (counts.other) names.push({ key: "other", name: "Other work" });
+  } else {
+    const values =
+      field?.definition.kind === "select"
+        ? field.definition.options
+        : Object.keys(counts)
+            .filter(Boolean)
+            .sort((a, b) =>
+              field?.definition.kind === "number"
+                ? Number(a) - Number(b)
+                : a.localeCompare(b),
+            );
+    names = values.map((value) => ({ key: value, name: value }));
+    names.push({ key: "", name: "No value" });
+  }
+  const groups = names.map(({ key, name }) => ({
     key,
     name,
-    count: counts[key] ?? 0,
+    count: Object.hasOwn(counts, key) ? counts[key] : 0,
     rows: [] as Row[],
   }));
   const byKey = new Map(groups.map((group) => [group.key, group]));
-  for (const row of page.items) byKey.get(issueTypeGroup(row))?.rows.push(row);
+  for (const row of page.items)
+    byKey.get(rowGroup(row, grouping))?.rows.push(row);
   return groups;
 }
 
+export type ChangeProjectItem = (row: Row, edit: (item: Item) => Item) => void;
+
 export function useProjectGroupMove(
+  grouping: GroupBy | undefined,
   repo: Pick<Repository, "id" | "owner" | "name"> | undefined,
   refreshIssueType: (() => void) | undefined,
-  changeStatus?: (row: Row, status: string) => void,
+  editItem?: ChangeProjectItem,
 ) {
   const dragged = useRef<Row | null>(null);
   const [over, setOver] = useState<string>();
@@ -42,8 +132,8 @@ export function useProjectGroupMove(
   const mutation = useMutation(csrf, null);
 
   function movable(row: Row) {
-    if (row.restricted) return false;
-    if (changeStatus) return true;
+    if (!grouping || row.restricted) return false;
+    if (grouping !== "issue_type") return !!editItem;
     return (
       !!refreshIssueType &&
       !!(row.repository ?? repo) &&
@@ -55,8 +145,19 @@ export function useProjectGroupMove(
   }
 
   async function move(row: Row, key: string) {
-    if (changeStatus) {
-      changeStatus(row, key);
+    if (!grouping) return;
+    if (grouping === "status") {
+      editItem?.(row, (item) => ({ ...item, status: key }));
+      return;
+    }
+    if (grouping.startsWith("field:")) {
+      const field = grouping.slice("field:".length);
+      editItem?.(row, (item) => {
+        const values = { ...item.values };
+        if (key) values[field] = key;
+        else delete values[field];
+        return { ...item, values };
+      });
       return;
     }
     const source = row.repository ?? repo;
@@ -99,10 +200,10 @@ export function useProjectGroupMove(
   function dropTarget(key: string) {
     function accepts(row: Row) {
       return (
+        !!grouping &&
         movable(row) &&
-        (changeStatus
-          ? row.item.status !== key
-          : key !== "other" && issueTypeGroup(row) !== key)
+        (grouping !== "issue_type" || key !== "other") &&
+        rowGroup(row, grouping) !== key
       );
     }
     function allow(event: DragEvent<HTMLElement>) {

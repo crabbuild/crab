@@ -32,7 +32,8 @@ pub(super) async fn resolve(
     actor: Uuid,
     input: &Filter,
 ) -> Result<Option<FilteredItems>> {
-    if input.issue_type.is_none() && !input.group_by_type {
+    let group_by_type = input.group_by == Some(source::grouping::GroupBy::IssueType);
+    if input.issue_type.is_none() && !group_by_type {
         shared::validate_cursor(input.after.is_some(), None, input.type_cursor.as_deref())?;
         return Ok(None);
     }
@@ -84,7 +85,7 @@ pub(super) async fn resolve(
     };
     let mut items = Vec::new();
     let mut sources = Vec::new();
-    let mut issue_type_counts = input.group_by_type.then(BTreeMap::new);
+    let mut issue_type_counts = group_by_type.then(BTreeMap::new);
     if let Some(types) = &types {
         let matches = futures_util::future::try_join_all(readable.into_iter().map(
             |(repo, work)| async move {
@@ -109,7 +110,7 @@ pub(super) async fn resolve(
                         let (item, status) = work
                             .get(&issue.number)
                             .ok_or(Error::CellContract("Unexpected project issue type match"))?;
-                        let group = (input.group_by_type
+                        let group = (group_by_type
                             && input
                                 .status
                                 .as_ref()
@@ -168,7 +169,7 @@ pub(super) async fn resolve(
         input.repository,
         input.item,
         &input.status,
-        input.group_by_type,
+        input.group_by,
         stamps,
     ))?;
     shared::validate_cursor(

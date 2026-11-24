@@ -136,6 +136,7 @@ async fn items(
                 repository: None,
                 item: None,
                 matched: None,
+                group_by: None,
             },
         )
         .await

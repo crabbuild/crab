@@ -24,7 +24,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useProjectCommands, CommandError } from "./commands";
 import type { Project, Field as ProjectField, Layout } from "./model";
 import { useProjectDraft } from "./drafts";
-import { ProjectGrouping, ProjectTypeFilter } from "./issue-type";
+import { ProjectTypeFilter } from "./issue-type";
+import { ProjectGrouping, selectedGrouping } from "./grouping";
 import type { IssueType } from "@/lib/contracts";
 export function ProjectSettings({
   target,
@@ -50,8 +51,21 @@ export function ProjectSettings({
     },
   );
   const { definition: draft, statuses, archived, version } = saved.value;
-  const setDraft = (definition: Project["definition"]) =>
-    saved.update({ definition });
+  const setDraft = (definition: Project["definition"]) => {
+    const views = definition.views.map((view) =>
+      !view.group_by ||
+      view.group_by ===
+        selectedGrouping(
+          view.layout,
+          definition.fields,
+          issueTypes,
+          view.group_by,
+        )
+        ? view
+        : { ...view, group_by: undefined },
+    );
+    saved.update({ definition: { ...definition, views } });
+  };
   const setStatuses = (statuses: string) => saved.update({ statuses });
   const setArchived = (archived: boolean) => saved.update({ archived });
   const setVersion = (version: number) => saved.update({ version });
@@ -484,31 +498,46 @@ export function ProjectSettings({
                           </FieldLabel>
                         </Field>
                       )}
+                      <Field>
+                        <FieldLabel htmlFor={`${id}-group-${view.id}`}>
+                          {view.layout === "board"
+                            ? "Board columns"
+                            : "Group by"}
+                        </FieldLabel>
+                        <ProjectGrouping
+                          id={`${id}-group-${view.id}`}
+                          layout={view.layout}
+                          label={`${view.layout === "board" ? "Board columns" : "Group by"} for ${view.name}`}
+                          fields={draft.fields}
+                          issueTypes={issueTypes}
+                          groupBy={selectedGrouping(
+                            view.layout,
+                            draft.fields,
+                            issueTypes,
+                            view.group_by,
+                          )}
+                          onChange={(value) =>
+                            setDraft({
+                              ...draft,
+                              views: draft.views.map((current, n) =>
+                                n === i
+                                  ? {
+                                      ...current,
+                                      group_by: selectedGrouping(
+                                        view.layout,
+                                        draft.fields,
+                                        issueTypes,
+                                        value,
+                                      ),
+                                    }
+                                  : current,
+                              ),
+                            })
+                          }
+                        />
+                      </Field>
                       {issueTypes && (
                         <>
-                          <Field>
-                            <FieldLabel htmlFor={`${id}-group-${view.id}`}>
-                              {view.layout === "board"
-                                ? "Board columns"
-                                : "Group by"}
-                            </FieldLabel>
-                            <ProjectGrouping
-                              id={`${id}-group-${view.id}`}
-                              layout={view.layout}
-                              label={`${view.layout === "board" ? "Board columns" : "Group by"} for ${view.name}`}
-                              grouped={view.group_by_type ?? false}
-                              onChange={(value) =>
-                                setDraft({
-                                  ...draft,
-                                  views: draft.views.map((current, n) =>
-                                    n === i
-                                      ? { ...current, group_by_type: value }
-                                      : current,
-                                  ),
-                                })
-                              }
-                            />
-                          </Field>
                           <Field>
                             <FieldLabel
                               htmlFor={`${id}-issue-type-filter-${view.id}`}

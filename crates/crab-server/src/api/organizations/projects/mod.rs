@@ -182,7 +182,7 @@ struct Filter {
     item: Option<Uuid>,
     issue_type: Option<String>,
     type_cursor: Option<String>,
-    group_by_type: bool,
+    group_by: Option<source::grouping::GroupBy>,
 }
 async fn items(
     State(server): State<Arc<Server>>,
@@ -190,6 +190,7 @@ async fn items(
     Path((id, selected)): Path<(Uuid, Uuid)>,
     Query(input): Query<Filter>,
 ) -> Result<Json<Value>> {
+    let group_by_type = input.group_by == Some(source::grouping::GroupBy::IssueType);
     let actor = actor(&server, &principal).await?;
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     let type_scope = type_filter::resolve(&server, &principal, id, selected, actor, &input).await?;
@@ -205,6 +206,7 @@ async fn items(
                 status: input.status,
                 repository: input.repository,
                 item: input.item,
+                group_by: input.group_by,
                 matched: type_scope.as_ref().map(|filter| filter.matched.clone()),
             },
         )
@@ -212,7 +214,7 @@ async fn items(
         .map_err(read_error)?
         .output
         .ok_or(Error::NotFound)?;
-    let show_issue_type = input.group_by_type
+    let show_issue_type = group_by_type
         || page
             .view
             .project
@@ -326,7 +328,7 @@ async fn items(
             "blocked": summary.is_some_and(|(details, ..)| details.blocked),
             "issue_type": summary.and_then(|(_, _, issue_type, _)| issue_type.as_ref()),
             "issue_type_version": summary.and_then(|(_, _, _, version)| *version),
-            "issue_type_group": input.group_by_type.then(|| crate::cells::repository::issues::issue_type::group(
+            "issue_type_group": group_by_type.then(|| crate::cells::repository::issues::issue_type::group(
                 summary.is_some_and(|(details, ..)| details.issue_type.is_some()),
                 summary.and_then(|(_, _, issue_type, _)| issue_type.as_ref().map(|definition| definition.id)),
             )),
@@ -360,7 +362,7 @@ async fn items(
         }
     }
     Ok(Json(
-        json!({"page":{"project":public_project(&current.project),"items":rows,"next":page.next,"counts":page.counts,"total":page.total,"revision":page.view.project.version,"issue_types":types.unwrap_or_default(),"type_cursor":type_scope.map(|filter| filter.cursor),"issue_type_counts":issue_type_counts},"can_manage":current.can_manage}),
+        json!({"page":{"project":public_project(&current.project),"items":rows,"next":page.next,"counts":page.counts,"total":page.total,"revision":page.view.project.version,"issue_types":types.unwrap_or_default(),"type_cursor":type_scope.map(|filter| filter.cursor),"group_counts":issue_type_counts.or(page.group_counts)},"can_manage":current.can_manage}),
     ))
 }
 #[derive(Deserialize)]

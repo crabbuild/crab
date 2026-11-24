@@ -2784,9 +2784,11 @@ same-organization repositories. Counts and pagination use the complete
 matching set. Include the returned `type_cursor` with a filtered continuation.
 A stale result or changed access requires restarting from the first page.
 
-Use **Group by** in a table or roadmap, or **Group board by** on a board, to
-organize work by issue type. Save the choice for a view under **Settings** →
-**Views**. Group counts cover every matching Project item across its pages.
+Use **Group by** in a table or roadmap to organize work by workflow status,
+issue type, or a custom Project field. Boards offer status, issue type, and
+single-select fields. Save the choice for a view under **Settings** → **Views**.
+Group counts cover every matching Project item across its pages. For text,
+number, and date fields, each page includes counts for its displayed groups.
 Issues without an enabled type use **No type**. Drafts, pull requests, and
 issues whose type is unavailable to the viewer use **Other work**.
 
@@ -2795,9 +2797,13 @@ a table or board, or use the **Change issue type** control in any layout.
 Moving to **No type** clears the assignment. The item retains its Project
 workflow status and dates.
 
-Use `group_by_type=true` with either Project item endpoint to receive
-`issue_type_counts` and a per-item `issue_type_group`. Grouped
-continuations carry `type_cursor` even when no type filter is selected.
+Project editors can drag work between status or custom field groups on a
+table or board. Dropping into **No value** clears the custom field. These
+moves use the versioned Project item command and preserve other item fields.
+
+Use `group_by=status`, `group_by=issue_type`, or `group_by=field:<UUID>` with
+either Project item endpoint to receive `group_counts`. Issue-type groupings
+include `issue_type_group` per item and carry `type_cursor` on continuation.
 
 ### Edit pull requests and review summaries
 

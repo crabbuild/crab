@@ -206,8 +206,8 @@ pub(crate) struct ItemQuery {
     pub default_ref: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue_type: Option<issue_type::search::Scope>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub group_by_type: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_by: Option<GroupBy>,
 }
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -234,7 +234,7 @@ pub(crate) struct ItemPage {
     pub next: Option<Uuid>,
     pub counts: BTreeMap<String, u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub issue_type_counts: Option<BTreeMap<String, u64>>,
+    pub group_counts: Option<BTreeMap<String, u64>>,
     pub total: u64,
 }
 pub(crate) struct Items;
@@ -251,7 +251,8 @@ impl Read for Items {
         let Some(project) = load(context, input.project)? else {
             return Ok(None);
         };
-        let show_issue_type = input.group_by_type
+        let group_by_type = input.group_by == Some(GroupBy::IssueType);
+        let show_issue_type = group_by_type
             || project
                 .definition
                 .views
@@ -275,7 +276,7 @@ impl Read for Items {
         if input.after.is_some() && input.revision != Some(revision) {
             return Err(Error::StaleSearch);
         }
-        if input.group_by_type && input.issue_type.is_none() {
+        if group_by_type && input.issue_type.is_none() {
             return Err(Error::Invalid(
                 "Project issue type grouping needs a repository scope",
             ));
@@ -320,7 +321,7 @@ impl Read for Items {
             .iter()
             .map(|r| Ok((result_text(r, 0)?, result_u64_from_row(r, 1)?)))
             .collect::<Result<BTreeMap<_, _>>>()?;
-        let issue_type_counts = input.group_by_type.then(|| {
+        let issue_type_counts = group_by_type.then(|| {
             context.query(
                 &format!("SELECT it.type_id,i.number IS NOT NULL,COUNT(*) {predicate} GROUP BY it.type_id,i.number IS NOT NULL"),
                 &args,
@@ -391,13 +392,27 @@ impl Read for Items {
             None
         };
         let total = counts.values().sum();
+        let group_counts = match input.group_by {
+            Some(GroupBy::Status) => Some(counts.clone()),
+            Some(GroupBy::IssueType) => issue_type_counts,
+            Some(GroupBy::Field(field)) => Some(grouping::field_counts(
+                context,
+                &project.definition,
+                field,
+                "$.values",
+                &predicate,
+                &args[..args.len() - 1],
+                items.iter().map(|row| &row.item),
+            )?),
+            None => None,
+        };
         Ok(Some(ItemPage {
             project,
             revision,
             items,
             next,
             counts,
-            issue_type_counts,
+            group_counts,
             total,
         }))
     }

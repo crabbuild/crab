@@ -134,8 +134,11 @@ function definition(value: unknown): boolean {
           typeof view.show_issue_type === "boolean") &&
         (view.issue_type_filter === undefined ||
           optionalString(view.issue_type_filter)) &&
-        (view.group_by_type === undefined ||
-          typeof view.group_by_type === "boolean"),
+        (view.group_by === undefined ||
+          (string(view.group_by) &&
+            /^(?:status|issue_type|field:[0-9a-f-]{36})$/i.test(
+              view.group_by,
+            ))),
     )
   );
 }

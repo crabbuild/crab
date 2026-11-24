@@ -87,7 +87,7 @@ async fn page(cell: &RepositoryCell, project: Uuid) -> ItemPage {
                 hide_closed: false,
                 default_ref: "refs/heads/main".into(),
                 issue_type: None,
-                group_by_type: false,
+                group_by: None,
             },
         )
         .await
@@ -519,7 +519,7 @@ async fn pages_count_all_matching_work_and_reject_stale_cursors() {
         hide_closed: false,
         default_ref: "refs/heads/main".into(),
         issue_type: None,
-        group_by_type: false,
+        group_by: None,
     };
     let next = cell
         .client

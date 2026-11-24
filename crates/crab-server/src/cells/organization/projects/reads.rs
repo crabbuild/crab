@@ -1,4 +1,5 @@
 use super::*;
+use planning::grouping::{self, GroupBy};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -92,6 +93,8 @@ pub(crate) struct ItemsQuery {
     pub item: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matched: Option<MatchedItems>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_by: Option<GroupBy>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -176,6 +179,8 @@ pub(crate) struct ItemPage {
     pub items: Vec<Entry>,
     pub next: Option<Uuid>,
     pub counts: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_counts: Option<BTreeMap<String, u64>>,
     pub total: u64,
 }
 pub(crate) struct Items;
@@ -229,7 +234,7 @@ impl Read for Items {
             .map(SqlValue::Text)
             .unwrap_or(SqlValue::Null);
         let selected = input.item.map(blob).unwrap_or(SqlValue::Null);
-        let mut predicate = "FROM organization_project_items WHERE project=? AND (? IS NULL OR repository=?) AND (? IS NULL OR id=?)".to_owned();
+        let mut predicate = "FROM organization_project_items p WHERE project=? AND (? IS NULL OR repository=?) AND (? IS NULL OR id=?)".to_owned();
         let mut bindings = vec![
             blob(input.project),
             repository.clone(),
@@ -258,15 +263,11 @@ impl Read for Items {
             Some(status) => *counts.get(status).unwrap_or(&0),
             None => counts.values().sum(),
         };
-        bindings.extend([
-            blob(input.after.unwrap_or(Uuid::nil())),
-            status.clone(),
-            status,
-        ]);
+        predicate.push_str(" AND (? IS NULL OR status=?)");
+        bindings.extend([status.clone(), status]);
+        bindings.push(blob(input.after.unwrap_or(Uuid::nil())));
         let rows = context.query(
-            &format!(
-                "SELECT data {predicate} AND id>? AND (? IS NULL OR status=?) ORDER BY id LIMIT 51"
-            ),
+            &format!("SELECT data {predicate} AND id>? ORDER BY id LIMIT 51"),
             &bindings,
         )?;
         let mut items = rows
@@ -283,6 +284,22 @@ impl Read for Items {
             .collect::<Result<Vec<_>>>()?;
         let more = items.len() > 50;
         items.truncate(50);
+        let group_counts = match input.group_by {
+            Some(GroupBy::Status) => Some(match &input.status {
+                Some(status) => BTreeMap::from([(status.clone(), total)]),
+                None => counts.clone(),
+            }),
+            Some(GroupBy::Field(field)) => Some(grouping::field_counts(
+                context,
+                &view.project.definition,
+                field,
+                "$.item.values",
+                &predicate,
+                &bindings[..bindings.len() - 1],
+                items.iter().map(|row| &row.record.item),
+            )?),
+            _ => None,
+        };
         Ok(Some(ItemPage {
             view,
             next: if more {
@@ -292,6 +309,7 @@ impl Read for Items {
             },
             items,
             counts,
+            group_counts,
             total,
         }))
     }
