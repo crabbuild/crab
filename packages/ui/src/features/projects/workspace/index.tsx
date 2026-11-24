@@ -46,6 +46,7 @@ import { ProjectBoard } from "../board";
 import { ProjectTable, ProjectRoadmap } from "../views";
 import { FieldSelect } from "@/components/ui/field-select";
 import { ProjectProperties } from "./forms";
+import { ProjectAccess } from "./access";
 import { ProjectLibrary } from "./library";
 import { WorkspaceItemEditor } from "./item";
 import { Repositories } from "./repositories";
@@ -167,6 +168,7 @@ function PlanningWorkspace({
   const generation = useRef(commands.generation);
   const [editing, setEditing] = useState<ProjectItemSelection>();
   const [settings, setSettings] = useState(false);
+  const [access, setAccess] = useState(false);
   const [properties, setProperties] = useState(false);
   const overview = url.searchParams.get("view") === "overview";
   const selected =
@@ -339,7 +341,7 @@ function PlanningWorkspace({
               "Give this project a clear outcome and bring its work together."}
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           {detail.can_manage && (
             <Button
               variant="outline"
@@ -348,6 +350,16 @@ function PlanningWorkspace({
             >
               <Settings2Icon data-icon="inline-start" />
               Settings
+            </Button>
+          )}
+          {detail.can_admin && (
+            <Button
+              variant="outline"
+              disabled={commands.locked}
+              onClick={() => setAccess(true)}
+            >
+              <UsersIcon data-icon="inline-start" />
+              Manage access
             </Button>
           )}
           {editable && (
@@ -734,8 +746,16 @@ function PlanningWorkspace({
           target={{ organization }}
           project={project}
           issueTypes
+          canArchive={detail.can_admin === true}
           typeChoices={detail.issue_types ?? []}
           onClose={() => setSettings(false)}
+        />
+      )}
+      {access && detail.can_admin && (
+        <ProjectAccess
+          organization={organization}
+          project={project}
+          onClose={() => setAccess(false)}
         />
       )}
     </section>

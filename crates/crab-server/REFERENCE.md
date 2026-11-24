@@ -2979,6 +2979,25 @@ Both Project command endpoints accept `reorder_views` with `project`,
 `version`, and `order`, a list containing every saved view UUID exactly once.
 The command updates the view order and records it in Project history.
 
+In an organization Project, **Manage access** lets Project administrators set
+the base role and grant **Read**, **Write**, or **Admin** to current members and
+teams. The base role starts at **Read**. Setting it to **No access** hides the
+Project from members without a grant. A current direct grant takes precedence
+over the base role. Active team memberships can add access. Organization
+owners and the creator's original membership retain administrative access.
+Write includes editing planning data and views. Admin also includes managing
+access and opening or archiving the Project. Linked issues and PRs still follow
+their repository permissions.
+
+Project admins can call `GET /api/organizations/{id}/projects/{project}/access`
+to read the base role, grants, and Project version. Post `set_access` to the
+organization Project command endpoint with `project`, `version`, `target`
+(`{kind:"base"}`, `{kind:"member",id}`, or `{kind:"team",id}`) and `role`
+(`none`, `read`, `write`, or `admin`). `none` removes a member or team grant.
+A Project supports up to 100 explicit grants. A grant to a member expires when
+that membership ends. Team grants check the active roster on every operation.
+Upgrade all serving peers before saving Project access policies.
+
 With source repository triage access, drag an issue to another type group in
 a table or board, or use the **Change issue type** control in any layout.
 Moving to **No type** clears the assignment. The item retains its Project

@@ -540,7 +540,9 @@ of the saved view UUIDs.
 `cells/organization/projects/` owns organization project definitions, planning
 properties, UUID-bound repository links/items, creator membership incarnations
 and permanent submissions. `api/organizations/projects/` composes independent
-source grants with bounded current work enrichment. Both project scopes share
+source grants with bounded current work enrichment. `projects/access.rs` owns
+Project base roles, membership-incarnation grants, and effective team access.
+Project access cannot authorize a linked repository. Both project scopes share
 canonical source metadata in `cells/repository/projects/reads.rs`; never copy
 source titles/states into organization records or treat project access as a
 repository grant. Private preparation is `cells prepare-organization-projects`.

@@ -124,12 +124,30 @@ impl Read for List {
                 "project page changed; reload the first page",
             ));
         }
-        let rows=context.query("SELECT data FROM organization_projects WHERE archived=? AND id>? AND instr(name_key,?)>0 ORDER BY id LIMIT 31",&[SqlValue::Integer(i64::from(input.archived)),blob(input.after.unwrap_or(Uuid::nil())),SqlValue::Text(input.search.to_lowercase())])?;
-        let mut items = rows
-            .rows
-            .iter()
-            .map(|row| serde_json::from_str::<Project>(&text(&row[0])?).map_err(Error::from))
-            .collect::<Result<Vec<_>>>()?;
+        let viewer = access::Viewer::load(context, input.actor, true)?;
+        let search = SqlValue::Text(input.search.to_lowercase());
+        let mut after = input.after.unwrap_or(Uuid::nil());
+        let mut items = Vec::new();
+        // Scan bounded batches so inaccessible projects do not consume visible page slots.
+        while items.len() <= 30 {
+            let rows = context.query("SELECT id,data FROM organization_projects WHERE archived=? AND id>? AND instr(name_key,?)>0 ORDER BY id LIMIT 31", &[SqlValue::Integer(i64::from(input.archived)), blob(after), search.clone()])?;
+            for row in &rows.rows {
+                after = uuid(&row[0])?;
+                let project: Project = serde_json::from_str(&text(&row[1])?)?;
+                if project.id != after {
+                    return Err(Error::Invalid("organization project record is invalid"));
+                }
+                if viewer.role(&project) != AccessRole::None {
+                    items.push(project);
+                    if items.len() > 30 {
+                        break;
+                    }
+                }
+            }
+            if rows.rows.len() < 31 {
+                break;
+            }
+        }
         let more = items.len() > 30;
         items.truncate(30);
         Ok(Listing {
@@ -154,6 +172,8 @@ pub(crate) struct View {
     pub project: Project,
     pub repositories: Vec<Uuid>,
     pub can_manage: bool,
+    #[serde(default)]
+    pub can_admin: bool,
 }
 pub(crate) struct Get;
 impl Read for Get {
@@ -162,15 +182,19 @@ impl Read for Get {
     type Input = ProjectKey;
     type Output = Option<View>;
     fn execute(context: &mut Transaction<'_>, input: ProjectKey) -> Result<Option<View>> {
-        load(context, input.project)?
-            .map(|project| {
-                Ok(View {
-                    can_manage: can_manage(context, input.actor, &project)?,
-                    repositories: repositories(context, input.project)?,
-                    project,
-                })
-            })
-            .transpose()
+        let Some(project) = load(context, input.project)? else {
+            return Ok(None);
+        };
+        let role = access::effective_role(context, input.actor, &project)?;
+        if role == AccessRole::None {
+            return Ok(None);
+        }
+        Ok(Some(View {
+            can_manage: role >= AccessRole::Write,
+            can_admin: role == AccessRole::Admin,
+            repositories: repositories(context, input.project)?,
+            project,
+        }))
     }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]

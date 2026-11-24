@@ -30,10 +30,24 @@ export interface WorkspaceProject extends Project {
 export interface Detail {
   project: WorkspaceProject;
   can_manage: boolean;
+  can_admin?: boolean;
   repositories: LinkedRepository[];
   restricted_repositories: number;
   issue_types?: IssueType[];
   lead: { id: string; handle: string; name: string } | null;
+}
+export type AccessRole = "none" | "read" | "write" | "admin";
+export type GrantTarget = { kind: "member" | "team"; id: string };
+export type AccessTarget = { kind: "base" } | GrantTarget;
+export interface ProjectAccessView {
+  version: number;
+  base: AccessRole;
+  grants: {
+    target: GrantTarget;
+    role: AccessRole;
+    active: boolean;
+    label: string | null;
+  }[];
 }
 export type WorkspaceCommand =
   | Extract<
@@ -48,6 +62,13 @@ export type WorkspaceCommand =
           | "bulk_fields";
       }
     >
+  | {
+      kind: "set_access";
+      project: string;
+      version: number;
+      target: AccessTarget;
+      role: AccessRole;
+    }
   | {
       kind: "create_issue";
       project: string;

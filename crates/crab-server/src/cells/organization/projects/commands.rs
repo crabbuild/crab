@@ -24,6 +24,12 @@ pub(crate) enum Command {
         version: u64,
         order: Vec<Uuid>,
     },
+    SetAccess {
+        project: Uuid,
+        version: u64,
+        target: AccessTarget,
+        role: AccessRole,
+    },
     Planning {
         project: Uuid,
         version: u64,
@@ -64,6 +70,7 @@ impl Command {
             Self::Edit { project, .. }
             | Self::ColumnLimit { project, .. }
             | Self::ReorderViews { project, .. }
+            | Self::SetAccess { project, .. }
             | Self::Planning { project, .. }
             | Self::Repository { project, .. }
             | Self::Item { project, .. }
@@ -78,6 +85,7 @@ impl Command {
             Self::Edit { version, .. }
             | Self::ColumnLimit { version, .. }
             | Self::ReorderViews { version, .. }
+            | Self::SetAccess { version, .. }
             | Self::Planning { version, .. }
             | Self::Repository { version, .. }
             | Self::Item { version, .. }
@@ -255,6 +263,7 @@ fn apply_command(
             updated_at: now,
             created_by: input.actor,
             creator_epoch: epoch(context, input.actor)?,
+            access: Default::default(),
         };
         save(context, &project)?;
         history::append(
@@ -296,7 +305,7 @@ fn apply_command(
     if project.version.saturating_add(pending.len() as u64) >= MAX_VERSION {
         return Ok(rejected("Project version limit reached"));
     }
-    if project.archived && !matches!(command, Command::Edit { .. }) {
+    if project.archived && !matches!(command, Command::Edit { .. } | Command::SetAccess { .. }) {
         return Ok(rejected("Archived projects are read-only"));
     }
     let mut event_target = ledger::Target::Project;
@@ -355,6 +364,14 @@ fn apply_command(
         Command::ReorderViews { order, .. } => {
             if !project.definition.reorder_views(order) {
                 return Ok(rejected("Include each saved Project view exactly once"));
+            }
+        }
+        Command::SetAccess { target, role, .. } => {
+            if let Some(reason) = project
+                .access
+                .change(context, input.actor, *target, *role)?
+            {
+                return Ok(rejected(reason));
             }
         }
         Command::Planning { properties, .. } => {

@@ -22,6 +22,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc};
 use uuid::Uuid;
+#[cfg(test)]
+mod access_tests;
 mod history;
 mod issue_creation;
 #[cfg(test)]
@@ -36,6 +38,10 @@ pub(super) fn routes() -> Router<Arc<Server>> {
         .route("/api/organizations/{id}/projects/commands", post(change))
         .route("/api/organizations/{id}/projects/cancel", post(cancel))
         .route("/api/organizations/{id}/projects/{project}", get(detail))
+        .route(
+            "/api/organizations/{id}/projects/{project}/access",
+            get(access),
+        )
         .route(
             "/api/organizations/{id}/projects/{project}/history",
             get(history::read),
@@ -53,6 +59,67 @@ pub(super) fn routes() -> Router<Arc<Server>> {
             get(candidates),
         )
         .layer(axum::extract::DefaultBodyLimit::max(96 * 1024))
+}
+async fn access(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((id, project)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Value>> {
+    let actor = actor(&server, &principal).await?;
+    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    let read = || async {
+        cells
+            .query::<projects::GetAccess>(
+                Address::Organization(id),
+                None,
+                projects::ProjectKey { actor, project },
+            )
+            .await
+            .map_err(read_error)?
+            .output
+            .ok_or(Error::NotFound)
+    };
+    let initial = read().await?;
+    let ids: Vec<_> = initial
+        .grants
+        .iter()
+        .filter_map(|grant| match grant.target {
+            projects::AccessTarget::Member { id } if grant.active => Some(id),
+            _ => None,
+        })
+        .collect();
+    if ids.is_empty() {
+        app::account(&principal)?;
+        return Ok(Json(serde_json::to_value(initial)?));
+    }
+    let profiles = app::query_output(
+        cells
+            .query::<crate::cells::directory::LookupProfiles>(Address::Directory, None, ids.clone())
+            .await,
+    )?;
+    if profiles.len() != ids.len() {
+        return Err(Error::CellContract(
+            "Project access profile count is invalid",
+        ));
+    }
+    let names: BTreeMap<_, _> = ids
+        .into_iter()
+        .zip(profiles)
+        .filter_map(|(id, profile)| profile.map(|profile| (id, profile.name)))
+        .collect();
+    let mut current = read().await?;
+    if current.version != initial.version {
+        return Err(Error::PageChanged);
+    }
+    for grant in &mut current.grants {
+        if let projects::AccessTarget::Member { id } = grant.target
+            && grant.active
+        {
+            grant.label = names.get(&id).cloned();
+        }
+    }
+    app::account(&principal)?;
+    Ok(Json(serde_json::to_value(current)?))
 }
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -188,7 +255,7 @@ async fn detail(
         return Err(Error::PageChanged);
     }
     Ok(Json(
-        json!({"project":public_project(&current.project),"can_manage":current.can_manage,"repositories":repositories,"restricted_repositories":view.repositories.len()-repositories.len(),"lead":profiles.first().cloned().flatten(),"issue_types":types}),
+        json!({"project":public_project(&current.project),"can_manage":current.can_manage,"can_admin":current.can_admin,"repositories":repositories,"restricted_repositories":view.repositories.len()-repositories.len(),"lead":profiles.first().cloned().flatten(),"issue_types":types}),
     ))
 }
 #[derive(Default, Deserialize)]

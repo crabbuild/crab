@@ -4,11 +4,13 @@ use super::*;
 use crate::cells::repository::projects as planning;
 use std::collections::BTreeMap;
 
+mod access;
 mod commands;
 mod history;
 mod issue_creation;
 mod reads;
 use crate::cells::planning as ledger;
+pub(crate) use access::{AccessRole, AccessTarget, GetAccess};
 pub(crate) use commands::{AttachmentCheck, Change, Command, Outcome, Request};
 pub(crate) use history::{GetHistory, HistoryQuery};
 pub(in crate::cells) use issue_creation::due;
@@ -59,6 +61,8 @@ pub(crate) struct Project {
     pub updated_at: u64,
     pub created_by: Uuid,
     pub creator_epoch: u64,
+    #[serde(default, skip_serializing_if = "access::Policy::is_default")]
+    access: access::Policy,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -90,11 +94,7 @@ fn epoch(context: &Transaction<'_>, person: Uuid) -> Result<u64> {
         .ok_or(Error::AccessDenied)
 }
 fn can_manage(context: &Transaction<'_>, person: Uuid, project: &Project) -> Result<bool> {
-    let Some(member) = member(context, person)?.filter(|member| member.active) else {
-        return Ok(false);
-    };
-    Ok(member.role == Role::Owner
-        || (person == project.created_by && epoch(context, person)? == project.creator_epoch))
+    Ok(access::effective_role(context, person, project)? >= AccessRole::Write)
 }
 fn load(context: &Transaction<'_>, project: Uuid) -> Result<Option<Project>> {
     context
@@ -110,6 +110,7 @@ fn load(context: &Transaction<'_>, project: Uuid) -> Result<Option<Project>> {
                 || record.version == 0
                 || record.version > MAX_VERSION
                 || !record.definition.valid()
+                || !record.access.valid()
             {
                 return Err(Error::Invalid("organization project record is invalid"));
             }
@@ -201,6 +202,7 @@ pub(in crate::cells::organization) fn handles(operation: u32, mutation: bool) ->
                 | Sources::ID
                 | GetAttachmentSources::ID
                 | BulkSources::ID
+                | GetAccess::ID
         )
     }
 }
@@ -218,6 +220,7 @@ pub(in crate::cells::organization) fn authorize(
     #[derive(Deserialize)]
     struct Person {
         actor: Uuid,
+        project: Option<Uuid>,
     }
     let who: Person = serde_json::from_value(input.clone())?;
     actor(who.actor)?;
@@ -243,15 +246,29 @@ pub(in crate::cells::organization) fn authorize(
         if !membership.is_some_and(|member| member.active) {
             return Err(Error::AccessDenied);
         }
-        if let Some(project) = request.command.project()
-            && let Some(project) = load(context, project)?
-            && !can_manage(context, who.actor, &project)?
-        {
-            return Err(Error::AccessDenied);
+        if let Some(id) = request.command.project() {
+            let Some(project) = load(context, id)? else {
+                return Err(Error::AccessDenied);
+            };
+            let required = match request.command {
+                Command::SetAccess { .. } => AccessRole::Admin,
+                Command::Edit { archived, .. } if archived != project.archived => AccessRole::Admin,
+                _ => AccessRole::Write,
+            };
+            if access::effective_role(context, who.actor, &project)? < required {
+                return Err(Error::AccessDenied);
+            }
         }
         return Ok(());
     }
     if !membership.is_some_and(|member| member.active) {
+        return Err(Error::AccessDenied);
+    }
+    if !matches!(operation, Get::ID | Items::ID | GetAccess::ID)
+        && let Some(id) = who.project
+        && let Some(project) = load(context, id)?
+        && access::effective_role(context, who.actor, &project)? == AccessRole::None
+    {
         return Err(Error::AccessDenied);
     }
     Ok(())
