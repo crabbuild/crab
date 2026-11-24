@@ -1,12 +1,9 @@
+import { FieldSelect } from "@/components/ui/field-select";
 import { useEffect, useState } from "react";
 import { useMutation } from "@/components/discussion/mutations";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
 import { useRequest } from "@/lib/api";
 import type {
   ReviewAvailability,
@@ -96,24 +93,22 @@ function AvailabilityForm({
       </p>
       <div className="flex flex-col gap-2">
         <Label htmlFor="review-availability-choice">Set status</Label>
-        <NativeSelect
+        <FieldSelect
           id="review-availability-choice"
           value={choice}
-          onChange={(event) => {
-            setChoice(event.target.value as ReviewAvailabilityChoice);
+          onValueChange={(nextValue) => {
+            setChoice(nextValue as ReviewAvailabilityChoice);
             setSaved(false);
           }}
           disabled={mutation.pending || mutation.conflict}
-        >
-          <NativeSelectOption value="" disabled>
-            Choose a status
-          </NativeSelectOption>
-          {choices.map(({ value, label }) => (
-            <NativeSelectOption key={value} value={value}>
-              {label}
-            </NativeSelectOption>
-          ))}
-        </NativeSelect>
+          options={[
+            { value: "", label: "Choose a status", disabled: true },
+            ...choices.map(({ value, label }) => ({
+              value: value,
+              label: label,
+            })),
+          ]}
+        />
       </div>
       <Button
         type="submit"

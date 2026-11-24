@@ -1,3 +1,4 @@
+import { FieldSelect } from "@/components/ui/field-select";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -10,10 +11,6 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { Field, FieldLabel } from "@/components/ui/field";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
 import { useMutation } from "@/components/discussion/mutations";
 import { Result } from "@/components/request/result";
 import {
@@ -135,28 +132,23 @@ export function ChangeBase({
               <FieldLabel htmlFor="change-pull-base">
                 New base branch
               </FieldLabel>
-              <NativeSelect
+              <FieldSelect
                 id="change-pull-base"
                 value={selection}
                 disabled={!!attempt || mutation.pending}
-                onChange={(event) => setSelection(event.target.value)}
-              >
-                <NativeSelectOption value="">
-                  Choose a branch
-                </NativeSelectOption>
-                {rows
-                  .filter(
-                    ({ name }) =>
-                      name.startsWith("refs/heads/") &&
-                      name !== pull.base_ref &&
-                      (pull.head_repository || name !== pull.head_ref),
-                  )
-                  .map(({ name }) => (
-                    <NativeSelectOption key={name} value={name}>
-                      {branch(name)}
-                    </NativeSelectOption>
-                  ))}
-              </NativeSelect>
+                onValueChange={(nextValue) => setSelection(nextValue)}
+                options={[
+                  { value: "", label: "Choose a branch" },
+                  ...rows
+                    .filter(
+                      ({ name }) =>
+                        name.startsWith("refs/heads/") &&
+                        name !== pull.base_ref &&
+                        (pull.head_repository || name !== pull.head_ref),
+                    )
+                    .map(({ name }) => ({ value: name, label: branch(name) })),
+                ]}
+              />
             </Field>
           )}
         </Result>

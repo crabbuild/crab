@@ -65,11 +65,10 @@ test("a repository administrator can configure and clear a team alias", async ({
   await page.getByLabel("Organization ID").fill(organization);
   await page.getByLabel("Mention namespace").fill("engineering");
   const picker = page.getByLabel("Closed team");
-  await expect(picker.locator("option")).toHaveText([
-    "Choose a team",
-    "Platform",
-  ]);
-  await picker.selectOption(team);
+  await picker.click();
+  const options = page.getByRole("listbox").getByRole("option");
+  await expect(options).toHaveText(["Choose a team", "Platform"]);
+  await options.filter({ hasText: "Platform" }).click();
   await page.getByRole("button", { name: "Add team" }).click();
   const alias = page.getByRole("textbox", { name: "Alias for Platform" });
   await alias.fill("platform");

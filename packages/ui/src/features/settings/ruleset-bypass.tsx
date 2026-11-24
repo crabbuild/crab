@@ -1,3 +1,4 @@
+import { FieldSelect } from "@/components/ui/field-select";
 import { useState } from "react";
 import { useRequest } from "@/lib/api";
 import type { TeamListing } from "@/lib/contracts";
@@ -65,7 +66,6 @@ export function RulesetBypassEditor({
   for (const team of available ?? []) {
     actors.push({ actor: { kind: "team", id: team.id }, label: team.name });
   }
-  const selectStyle = "rounded-md border bg-background px-3 py-2 text-sm";
   return (
     <fieldset className="grid gap-2">
       <legend className="font-medium">Bypass access</legend>
@@ -80,18 +80,18 @@ export function RulesetBypassEditor({
         return (
           <div key={key} className="flex flex-wrap items-center gap-2">
             <span className="min-w-36 break-all text-sm">{label}</span>
-            <select
+            <FieldSelect
               aria-label={`Bypass mode for ${label}`}
-              className={selectStyle}
+              className="w-full max-w-xs"
               value={grant.mode}
-              onChange={(event) =>
+              onValueChange={(nextValue) =>
                 onChange(
                   grants.map((item) =>
                     item === grant
                       ? {
                           ...item,
                           mode:
-                            event.target.value === "pull_request"
+                            nextValue === "pull_request"
                               ? "pull_request"
                               : "always",
                         }
@@ -99,14 +99,19 @@ export function RulesetBypassEditor({
                   ),
                 )
               }
-            >
-              <option value="always">Always</option>
-              {(branch || grant.mode === "pull_request") && (
-                <option disabled={!branch} value="pull_request">
-                  Pull requests only
-                </option>
-              )}
-            </select>
+              options={[
+                { value: "always", label: "Always" },
+                ...(branch || grant.mode === "pull_request"
+                  ? [
+                      {
+                        value: "pull_request",
+                        label: "Pull requests only",
+                        disabled: !branch,
+                      },
+                    ]
+                  : []),
+              ]}
+            />
             <Button
               type="button"
               variant="ghost"
@@ -135,12 +140,12 @@ export function RulesetBypassEditor({
       )}
       <label className="grid gap-1">
         Add bypass actor
-        <select
-          className={selectStyle}
+        <FieldSelect
+          className="w-full max-w-xs"
           value=""
-          onChange={(event) => {
+          onValueChange={(nextValue) => {
             const added = actors.find(
-              ({ actor }) => actorKey(actor) === event.target.value,
+              ({ actor }) => actorKey(actor) === nextValue,
             );
             if (added)
               onChange([
@@ -151,23 +156,18 @@ export function RulesetBypassEditor({
                 },
               ]);
           }}
-        >
-          <option value="" disabled>
-            Select a role or team
-          </option>
-          {actors.map(({ actor, label }) => {
-            const key = actorKey(actor);
-            return (
-              <option
-                value={key}
-                key={key}
-                disabled={grants.some((grant) => actorKey(grant.actor) === key)}
-              >
-                {label}
-              </option>
-            );
-          })}
-        </select>
+          options={[
+            { value: "", label: "Select a role or team", disabled: true },
+            ...actors.map(({ actor, label }) => {
+              const key = actorKey(actor);
+              return {
+                value: key,
+                label: label,
+                disabled: grants.some((grant) => actorKey(grant.actor) === key),
+              };
+            }),
+          ]}
+        />
       </label>
     </fieldset>
   );

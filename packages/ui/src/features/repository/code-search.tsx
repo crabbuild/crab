@@ -1,3 +1,4 @@
+import { FieldSelect } from "@/components/ui/field-select";
 import { useEffect, useRef, useState } from "react";
 import { SearchIcon } from "@primer/octicons-react";
 import { Link } from "@/components/navigation/link";
@@ -6,10 +7,6 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
 import {
   endpoint,
   navigate,
@@ -176,16 +173,17 @@ function SearchForm({
       <div className="flex flex-wrap items-end gap-3">
         <Field className="w-auto">
           <FieldLabel htmlFor="code-search-kind">Search in</FieldLabel>
-          <NativeSelect id="code-search-kind" name="kind" defaultValue={kind}>
-            <NativeSelectOption value="any">
-              Contents and paths
-            </NativeSelectOption>
-            <NativeSelectOption value="content">
-              File contents
-            </NativeSelectOption>
-            <NativeSelectOption value="path">File paths</NativeSelectOption>
-            <NativeSelectOption value="symbol">Symbols</NativeSelectOption>
-          </NativeSelect>
+          <FieldSelect
+            id="code-search-kind"
+            name="kind"
+            defaultValue={kind}
+            options={[
+              { value: "any", label: "Contents and paths" },
+              { value: "content", label: "File contents" },
+              { value: "path", label: "File paths" },
+              { value: "symbol", label: "Symbols" },
+            ]}
+          />
         </Field>
         <Field className="w-auto">
           <FieldLabel asChild>

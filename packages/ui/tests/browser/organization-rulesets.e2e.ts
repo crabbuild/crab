@@ -1,3 +1,4 @@
+import { chooseSelectOption } from "./select";
 import { expect, test } from "@playwright/test";
 import { expectNoAccessibilityViolations } from "./accessibility";
 import { mockPullRequest } from "./pulls/fixture";
@@ -190,7 +191,7 @@ test("owners target repositories and repository admins see inherited rules as re
   await page.goto(`/-/organizations/${id}?tab=rulesets`);
   await page.getByRole("button", { name: "New ruleset" }).click();
   await page.getByLabel("Name", { exact: true }).fill("Release policy");
-  await page.getByLabel("Repository targeting").selectOption("selected");
+  await chooseSelectOption(page.getByLabel("Repository targeting"), "selected");
   await expect(
     page.getByRole("button", { name: "Save ruleset" }),
   ).toBeDisabled();
@@ -217,7 +218,7 @@ test("owners target repositories and repository admins see inherited rules as re
   });
 
   await page.getByRole("button", { name: "Edit Release policy" }).click();
-  await page.getByLabel("Repository targeting").selectOption("name");
+  await chooseSelectOption(page.getByLabel("Repository targeting"), "name");
   await page.getByLabel("Include repository patterns").fill("project*");
   await page.getByLabel("Exclude repository patterns").fill("project-sandbox");
   const preventRenaming = page.getByRole("checkbox", {
@@ -242,8 +243,8 @@ test("owners target repositories and repository admins see inherited rules as re
   await page.getByRole("link", { name: "Properties", exact: true }).click();
   await page.getByRole("button", { name: "New property" }).click();
   await page.getByLabel("Property name").fill("regulated");
-  await page.getByLabel("Property type").selectOption("boolean");
-  await page.getByLabel("Default value").selectOption("true");
+  await chooseSelectOption(page.getByLabel("Property type"), "boolean");
+  await chooseSelectOption(page.getByLabel("Default value"), "true");
   await page
     .getByRole("checkbox", { name: /Allow repository administrators/ })
     .check();
@@ -258,10 +259,11 @@ test("owners target repositories and repository admins see inherited rules as re
     name: "Action for regulated",
     exact: true,
   });
-  await action.selectOption("set");
-  await page
-    .getByRole("combobox", { name: "regulated", exact: true })
-    .selectOption("true");
+  await chooseSelectOption(action, "set");
+  await chooseSelectOption(
+    page.getByRole("combobox", { name: "regulated", exact: true }),
+    "true",
+  );
   await expectNoAccessibilityViolations(page);
   await page.getByRole("button", { name: "Save repository values" }).click();
   const retry = page.getByRole("button", { name: "Retry save" });
@@ -273,23 +275,29 @@ test("owners target repositories and repository admins see inherited rules as re
   ).toBeVisible();
   await page.getByRole("link", { name: "Rulesets", exact: true }).click();
   await page.getByRole("button", { name: "Edit Release policy" }).click();
-  await page.getByLabel("Repository targeting").selectOption("properties");
+  await chooseSelectOption(
+    page.getByLabel("Repository targeting"),
+    "properties",
+  );
   await expect(
     page.getByRole("button", { name: "Save ruleset" }),
   ).toBeDisabled();
   await page.getByRole("button", { name: "Add condition" }).click();
-  await page
-    .getByRole("combobox", { name: "Property", exact: true })
-    .selectOption(schema.definitions[0].id);
-  await page.getByLabel("Matching value").selectOption("true");
+  await chooseSelectOption(
+    page.getByRole("combobox", { name: "Property", exact: true }),
+    schema.definitions[0].id,
+  );
+  await chooseSelectOption(page.getByLabel("Matching value"), "true");
   await page.getByRole("button", { name: "Add condition" }).click();
   const system = page.getByRole("group", { name: "Condition 2" });
-  await system
-    .getByRole("combobox", { name: "Property", exact: true })
-    .selectOption("system:fork");
-  await system
-    .getByRole("combobox", { name: "Matching value", exact: true })
-    .selectOption("false");
+  await chooseSelectOption(
+    system.getByRole("combobox", { name: "Property", exact: true }),
+    "system:fork",
+  );
+  await chooseSelectOption(
+    system.getByRole("combobox", { name: "Matching value", exact: true }),
+    "false",
+  );
   await expectNoAccessibilityViolations(page);
   await page.getByRole("button", { name: "Save ruleset" }).click();
   await expect(
@@ -335,9 +343,10 @@ test("owners target repositories and repository admins see inherited rules as re
   await page
     .getByRole("button", { name: "Edit properties", exact: true })
     .click();
-  await page
-    .getByRole("combobox", { name: "regulated", exact: true })
-    .selectOption("false");
+  await chooseSelectOption(
+    page.getByRole("combobox", { name: "regulated", exact: true }),
+    "false",
+  );
   await expectNoAccessibilityViolations(page);
   await page.getByRole("button", { name: "Save property values" }).click();
   await expect(

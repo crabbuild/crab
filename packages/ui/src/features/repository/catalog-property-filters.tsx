@@ -1,9 +1,9 @@
+import { FieldSelect } from "@/components/ui/field-select";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Result } from "@/components/request/result";
 import { useRequest } from "@/lib/api";
 import {
-  control,
   PropertyInput,
   propertySchemaPath,
   type PropertySchema,
@@ -73,37 +73,38 @@ export function RepositoryPropertyFilters({
               >
                 <label className="grid gap-1">
                   Property
-                  <select
-                    className={control}
+                  <FieldSelect
+                    className="w-full"
                     value={field}
                     required
-                    onChange={(event) => {
-                      setField(event.target.value);
+                    onValueChange={(nextValue) => {
+                      setField(nextValue);
                       setValue(null);
                     }}
-                  >
-                    <option value="">Choose a property</option>
-                    {definitions.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.name}
-                      </option>
-                    ))}
-                  </select>
+                    options={[
+                      { value: "", label: "Choose a property" },
+                      ...definitions.map((item) => ({
+                        value: item.id,
+                        label: item.name,
+                      })),
+                    ]}
+                  />
                 </label>
                 {definition && (
                   <>
                     <label className="grid gap-1">
                       Match
-                      <select
-                        className={control}
+                      <FieldSelect
+                        className="w-full"
                         value={exclude ? "exclude" : "include"}
-                        onChange={(event) =>
-                          setExclude(event.target.value === "exclude")
+                        onValueChange={(nextValue) =>
+                          setExclude(nextValue === "exclude")
                         }
-                      >
-                        <option value="include">Has this value</option>
-                        <option value="exclude">Excludes this value</option>
-                      </select>
+                        options={[
+                          { value: "include", label: "Has this value" },
+                          { value: "exclude", label: "Excludes this value" },
+                        ]}
+                      />
                     </label>
                     <PropertyInput
                       key={field}

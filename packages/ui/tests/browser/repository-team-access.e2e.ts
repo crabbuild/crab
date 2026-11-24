@@ -1,3 +1,4 @@
+import { chooseSelectOption } from "./select";
 import { expect, test } from "@playwright/test";
 import { mockPullRequest } from "./pulls/fixture";
 import {
@@ -143,9 +144,10 @@ test("organization owners can search teams and reconcile a stale grant edit", as
   await expect(add).toBeFocused();
   await expect(save).toBeDisabled();
   await removeDeleted.click();
-  await page
-    .getByRole("combobox", { name: "Role for Release engineers" })
-    .selectOption("admin");
+  await chooseSelectOption(
+    page.getByRole("combobox", { name: "Role for Release engineers" }),
+    "admin",
+  );
 
   state.revision++;
   await save.click();

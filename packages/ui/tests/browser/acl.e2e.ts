@@ -1,3 +1,4 @@
+import { chooseSelectOption } from "./select";
 import { test, expect } from "@playwright/test";
 import { mockPullRequest } from "./pulls/fixture";
 import {
@@ -96,10 +97,10 @@ test("SSO group access edits are revisioned, persist after reload and preserve g
   await page
     .getByLabel("Group identifier 2", { exact: true })
     .fill("team-developers");
-  await page
-    .getByRole("combobox", { name: "Role", exact: true })
-    .nth(1)
-    .selectOption("write");
+  await chooseSelectOption(
+    page.getByRole("combobox", { name: "Role", exact: true }).nth(1),
+    "write",
+  );
   await expectNoAccessibilityViolations(page);
   await page.getByRole("button", { name: "Save access" }).click();
   await expect(page.getByRole("status")).toContainText("Access updated.");

@@ -1,3 +1,4 @@
+import { Disclosure } from "@/components/ui/collapsible";
 import { Badge } from "@/components/ui/badge";
 import {
   InputGroup,
@@ -114,10 +115,15 @@ function SourceArchive({
 }) {
   const assets = release.assets ?? [];
   return (
-    <details className="release-assets" open>
-      <summary>
-        Assets <span>{assets.length + 1}</span>
-      </summary>
+    <Disclosure
+      className="release-assets"
+      expanded
+      summary={
+        <>
+          Assets <span>{assets.length + 1}</span>
+        </>
+      }
+    >
       <a
         href={endpoint(repo, "archive", {
           rev: `refs/tags/${release.tag_name}`,
@@ -144,7 +150,7 @@ function SourceArchive({
           </span>
         </a>
       ))}
-    </details>
+    </Disclosure>
   );
 }
 

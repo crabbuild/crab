@@ -1,3 +1,4 @@
+import { FieldSelect } from "@/components/ui/field-select";
 import { useState } from "react";
 import { useMutation } from "@/components/discussion/mutations";
 import { Result } from "@/components/request/result";
@@ -6,10 +7,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
 import { useRequest } from "@/lib/api";
 import type {
   AutomationAccess,
@@ -294,16 +291,17 @@ function IdentityCard({
             <FieldLabel htmlFor={`automation-expiry-${identity.id}`}>
               Token lifetime
             </FieldLabel>
-            <NativeSelect
+            <FieldSelect
               id={`automation-expiry-${identity.id}`}
               value={hours}
-              onChange={(e) => setHours(e.target.value)}
-            >
-              <NativeSelectOption value="1">1 hour</NativeSelectOption>
-              <NativeSelectOption value="24">1 day</NativeSelectOption>
-              <NativeSelectOption value="168">7 days</NativeSelectOption>
-              <NativeSelectOption value="720">30 days</NativeSelectOption>
-            </NativeSelect>
+              onValueChange={(nextValue) => setHours(nextValue)}
+              options={[
+                { value: "1", label: "1 hour" },
+                { value: "24", label: "1 day" },
+                { value: "168", label: "7 days" },
+                { value: "720", label: "30 days" },
+              ]}
+            />
           </Field>
           <Button
             disabled={
@@ -452,11 +450,11 @@ function GrantEditor({
                 <FieldLabel htmlFor={`automation-access-${grant.repository}`}>
                   Access to {grant.name}
                 </FieldLabel>
-                <NativeSelect
+                <FieldSelect
                   id={`automation-access-${grant.repository}`}
                   value={grant.access}
-                  onChange={(event) => {
-                    const access = event.target.value as AutomationAccess;
+                  onValueChange={(nextValue) => {
+                    const access = nextValue as AutomationAccess;
                     setGrants((items) =>
                       items.map((item) =>
                         item.repository === grant.repository
@@ -465,10 +463,11 @@ function GrantEditor({
                       ),
                     );
                   }}
-                >
-                  <NativeSelectOption value="read">Read</NativeSelectOption>
-                  <NativeSelectOption value="write">Write</NativeSelectOption>
-                </NativeSelect>
+                  options={[
+                    { value: "read", label: "Read" },
+                    { value: "write", label: "Write" },
+                  ]}
+                />
               </Field>
               <Button
                 size="sm"

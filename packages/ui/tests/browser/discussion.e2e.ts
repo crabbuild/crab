@@ -1,3 +1,4 @@
+import { chooseSelectOption } from "./select";
 import { conversationPage } from "./conversation";
 import { emptyReactions } from "./fixtures";
 import { expect, test, type Page } from "@playwright/test";
@@ -202,12 +203,12 @@ test("issue notification settings save a discussion override", async ({
   await trigger.click();
   const dialog = page.getByRole("dialog", { name: "Issue notifications" });
   const choice = dialog.getByLabel("Notify me about");
-  await expect(choice).toHaveValue("inherit");
-  await choice.selectOption("follow");
+  await expect(choice).toHaveText("Use repository setting");
+  await chooseSelectOption(choice, "follow");
   await dialog.getByRole("button", { name: "Save preference" }).click();
   await expect(dialog).toBeHidden();
   await trigger.click();
-  await expect(choice).toHaveValue("follow");
+  await expect(choice).toHaveText("All discussion activity");
 });
 
 test("adding an issue to a project uses a new item revision independently of project settings", async ({

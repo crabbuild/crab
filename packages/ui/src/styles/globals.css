@@ -22,8 +22,7 @@ body {
 body,
 button,
 input,
-textarea,
-select {
+textarea {
   font-family: var(--font-sans);
 }
 body {
@@ -34,18 +33,8 @@ body {
 a:not([data-slot]):hover {
   text-decoration: underline;
 }
-button,
-select {
+button {
   cursor: pointer;
-}
-select:not([data-slot="native-select"]) {
-  color: var(--foreground);
-  background: var(--background);
-  border: 1px solid var(--input);
-  border-radius: var(--radius-md);
-  padding: --spacing(1.5) --spacing(3);
-  max-width: 320px;
-  font-size: var(--text-sm);
 }
 @layer base {
   a {
@@ -82,7 +71,7 @@ select:not([data-slot="native-select"]) {
     font-size: var(--text-xs);
   }
 }
-:where(button, a, select):not([data-slot]):focus-visible {
+:where(button, a):not([data-slot]):focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 3px;
 }
@@ -108,7 +97,7 @@ input[type="checkbox"] {
 .cm-content ::selection {
   color: var(--foreground);
 }
-:where(input, textarea, select):not(
+:where(input, textarea):not(
   [data-slot],
   [type="checkbox"],
   [type="radio"],
@@ -122,7 +111,7 @@ input[type="checkbox"] {
     border-color 150ms,
     box-shadow 150ms;
 }
-:where(input, textarea, select):not(
+:where(input, textarea):not(
     [data-slot],
     [type="checkbox"],
     [type="radio"],
@@ -133,10 +122,10 @@ input[type="checkbox"] {
   ):enabled:hover {
   border-color: var(--input-hover);
 }
-:where(input, textarea, select):not([data-slot]):focus-visible {
+:where(input, textarea):not([data-slot]):focus-visible {
   @apply border-ring ring-2 ring-ring/25 outline-none;
 }
-:where(input, textarea, select):not([data-slot]):disabled {
+:where(input, textarea):not([data-slot]):disabled {
   color: var(--muted-foreground);
   cursor: not-allowed;
 }
@@ -483,17 +472,18 @@ main {
   border-radius: var(--radius);
   background: var(--muted);
 }
-.timing summary {
+.timing > [data-slot="collapsible-trigger"] {
   display: flex;
+  width: 100%;
   justify-content: space-between;
   gap: --spacing(4);
   cursor: pointer;
 }
-.timing summary span,
+.timing > [data-slot="collapsible-trigger"] span,
 .timing-details code {
   overflow-wrap: anywhere;
 }
-.timing summary strong {
+.timing > [data-slot="collapsible-trigger"] strong {
   flex-shrink: 0;
   color: var(--info);
   font-variant-numeric: tabular-nums;
@@ -954,7 +944,7 @@ main {
   margin-top: --spacing(5);
   border-top: 1px solid var(--border);
 }
-.inline-review-outdated > summary {
+.inline-review-outdated > [data-slot="collapsible-trigger"] {
   padding: --spacing(3) 0;
   color: var(--warning);
   cursor: pointer;
@@ -971,7 +961,9 @@ main {
   opacity: 0.82;
 }
 .review-thread-summary {
+  position: relative;
   display: flex;
+  width: 100%;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
@@ -981,11 +973,12 @@ main {
   cursor: pointer;
   list-style-position: inside;
 }
-.review-thread-details[open] .review-thread-summary {
+.review-thread-details[data-state="open"] .review-thread-summary {
   border-bottom: 1px solid var(--border);
 }
-.review-thread-summary::marker {
-  color: var(--muted-foreground);
+.review-thread-summary > svg:first-child {
+  position: absolute;
+  inset-inline-start: --spacing(2);
 }
 .review-thread-summary-main {
   display: flex;
@@ -1174,6 +1167,8 @@ main {
 }
 .pane-resizer {
   position: relative;
+  height: auto;
+  border-radius: 0;
   width: 8px;
   min-width: 8px;
   margin: 0;
@@ -1492,9 +1487,6 @@ main {
   .repo-title h1 {
     font-size: var(--text-lg);
   }
-  .toolbar select {
-    max-width: 200px;
-  }
   .file-table td:first-child {
     width: 45%;
   }
@@ -1725,7 +1717,7 @@ main {
 }
 .check-run-list svg,
 .check-run-heading > svg,
-.check-steps summary > svg {
+.check-steps [data-slot="collapsible-trigger"] > svg {
   flex: 0 0 auto;
   margin-top: 3px;
 }
@@ -1796,21 +1788,21 @@ main {
 .check-steps > p {
   padding: --spacing(1) --spacing(4) --spacing(3);
 }
-.check-steps details + details {
+.check-steps [data-slot="collapsible"] + [data-slot="collapsible"] {
   border-top: 1px solid var(--border);
 }
-.check-steps summary {
+.check-steps [data-slot="collapsible-trigger"] {
   display: flex;
   align-items: center;
   gap: --spacing(2);
   padding: --spacing(3) --spacing(4);
   cursor: pointer;
 }
-.check-steps summary strong {
+.check-steps [data-slot="collapsible-trigger"] strong {
   min-width: 0;
   flex: 1;
 }
-.check-steps summary span {
+.check-steps [data-slot="collapsible-trigger"] span {
   color: var(--muted-foreground);
   font-size: var(--text-xs);
 }
@@ -2073,7 +2065,7 @@ main {
     flex-direction: column;
     align-items: stretch;
   }
-  .compare-picker [data-slot="native-select-wrapper"] {
+  .compare-picker [data-slot="select-trigger"] {
     width: 100%;
     max-width: 100%;
   }
@@ -2135,8 +2127,8 @@ main {
 .git-access-icon {
   display: none;
 }
-.git-access summary,
-.clone-menu summary {
+.git-access > [data-slot="collapsible-trigger"],
+.clone-menu > [data-slot="collapsible-trigger"] {
   color: var(--foreground);
   cursor: pointer;
   border: 1px solid var(--border);
@@ -2147,7 +2139,7 @@ main {
   white-space: nowrap;
 }
 @media (max-width: 375px) {
-  .git-access > summary {
+  .git-access > [data-slot="collapsible-trigger"] {
     display: flex;
     width: --spacing(9);
     height: --spacing(9);
@@ -2155,9 +2147,6 @@ main {
     justify-content: center;
     padding: 0;
     list-style: none;
-  }
-  .git-access > summary::-webkit-details-marker {
-    display: none;
   }
   .git-access-label {
     display: none;
@@ -2192,7 +2181,7 @@ main {
   margin: --spacing(3) 0 --spacing(1.5);
 }
 .git-popover input,
-.git-popover select {
+.git-popover [data-slot="select-trigger"] {
   width: 100%;
   padding: --spacing(2);
   margin-bottom: --spacing(2.5);
@@ -2208,7 +2197,7 @@ main {
   margin-top: --spacing(3);
   flex-wrap: wrap;
 }
-.clone-menu summary {
+.clone-menu > [data-slot="collapsible-trigger"] {
   display: flex;
   align-items: center;
   gap: --spacing(2);
@@ -2220,10 +2209,10 @@ main {
   background: var(--primary);
   border-color: var(--primary);
 }
-.clone-menu summary:hover {
+.clone-menu > [data-slot="collapsible-trigger"]:hover {
   background: var(--foreground);
 }
-.clone-menu.compact summary {
+.clone-menu.compact > [data-slot="collapsible-trigger"] {
   display: grid;
   width: 32px;
   height: 32px;
@@ -2233,11 +2222,8 @@ main {
   background: var(--background);
   border-color: var(--border);
 }
-.clone-menu.compact summary:hover {
+.clone-menu.compact > [data-slot="collapsible-trigger"]:hover {
   background: var(--muted);
-}
-.clone-menu summary::-webkit-details-marker {
-  display: none;
 }
 .download-archive {
   display: flex;
@@ -2676,16 +2662,6 @@ main {
   border: 1px solid var(--input);
   border-radius: var(--radius-md);
   font: inherit;
-}
-.label-color-input {
-  display: flex;
-  align-items: center;
-  gap: --spacing(2);
-}
-.label-color-input input[type="color"] {
-  width: 44px;
-  height: 34px;
-  padding: 3px;
 }
 .label-catalog > header,
 .label-row {
@@ -3375,14 +3351,12 @@ main {
 .settings-content {
   min-width: 0;
 }
-.outbound-webhooks,
-.outbound-webhooks > .timing-widget {
+.settings-content,
+.settings-content > .timing-widget {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   align-content: start;
   gap: --spacing(5);
-}
-.outbound-webhooks > .settings-title {
-  margin-bottom: 0;
 }
 .account-settings {
   display: grid;
@@ -3400,7 +3374,6 @@ main {
   padding: var(--page-block) var(--page-gutter);
 }
 .settings-content > h2 {
-  margin-bottom: --spacing(4);
   padding-bottom: --spacing(2);
   border-bottom: 1px solid var(--border);
   font-size: var(--text-2xl);
@@ -3411,7 +3384,6 @@ main {
 }
 .settings-title.members-settings-title {
   align-items: center;
-  margin-bottom: --spacing(5);
 }
 .members-settings-title h2 {
   margin: 0;
@@ -3545,13 +3517,10 @@ main {
   gap: --spacing(1.5);
   font-weight: 600;
 }
-.member-field input,
-.member-field select {
+.member-field input {
   width: 100%;
   min-width: 0;
   font-weight: 400;
-}
-.member-field input {
   max-width: none;
 }
 .member-access-control {
@@ -3635,7 +3604,6 @@ main {
   align-items: flex-start;
   justify-content: space-between;
   gap: --spacing(4);
-  margin-bottom: --spacing(4);
   padding-bottom: --spacing(2);
   border-bottom: 1px solid var(--border);
 }
@@ -3689,7 +3657,7 @@ main {
 .default-branch-form label {
   font-weight: 600;
 }
-.default-branch-form select {
+.default-branch-form [data-slot="select-trigger"] {
   width: min(100%, 420px);
   max-width: none;
 }
@@ -3720,7 +3688,7 @@ main {
   padding: 0 --spacing(4) --spacing(4);
 }
 .danger-zone {
-  margin-top: --spacing(8);
+  margin-block-start: --spacing(3);
 }
 .danger-zone > h2 {
   margin-bottom: --spacing(2);
@@ -4055,12 +4023,12 @@ main {
   margin: 0 -16px;
   border-top: 1px solid var(--border);
 }
-.release-assets > summary {
+.release-assets > [data-slot="collapsible-trigger"] {
   padding: --spacing(3.5) --spacing(4);
   cursor: pointer;
   font-weight: 600;
 }
-.release-assets > summary > span {
+.release-assets > [data-slot="collapsible-trigger"] > span {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -4251,7 +4219,7 @@ main {
   font-weight: 600;
 }
 .release-target-picker > span,
-.release-target-picker > select {
+.release-target-picker > [data-slot="select-trigger"] {
   width: 100%;
   max-width: none;
 }
@@ -4512,7 +4480,7 @@ main {
   font-size: var(--text-sm);
   white-space: nowrap;
 }
-.timing summary:hover {
+.timing > [data-slot="collapsible-trigger"]:hover {
   color: var(--info);
 }
 @media (max-width: 1100px) {
@@ -6120,9 +6088,6 @@ main {
   color: var(--muted-foreground);
   font-size: var(--text-xs);
 }
-.media-preview-toolbar input {
-  accent-color: var(--info);
-}
 .media-preview-toolbar output {
   width: 42px;
   color: var(--foreground);
@@ -6175,8 +6140,9 @@ main {
   color: var(--muted-foreground);
   font-size: var(--text-xs);
 }
-.pdf-preview-toolbar input {
-  accent-color: var(--info);
+.media-preview-toolbar [data-slot="slider"],
+.pdf-preview-toolbar [data-slot="slider"] {
+  width: --spacing(32);
 }
 .pdf-preview-toolbar output {
   width: 42px;
@@ -6263,13 +6229,12 @@ main {
 }
 .media-player {
   display: grid;
+  gap: --spacing(4);
   min-height: 240px;
-  place-items: center;
+  align-content: center;
+  justify-items: center;
   padding: --spacing(8);
   background: var(--muted);
-}
-.media-player audio {
-  width: min(640px, 100%);
 }
 .media-player video {
   width: min(1080px, 100%);
@@ -7774,7 +7739,7 @@ main {
   min-width: 180px;
   flex: 1;
 }
-.project-filter-bar > [data-slot="native-select-wrapper"] {
+.project-filter-bar > [data-slot="select-trigger"] {
   max-width: 190px;
 }
 .project-item-summary {
@@ -7958,7 +7923,7 @@ main {
   border-top: 1px solid var(--border);
   padding-top: --spacing(5);
 }
-.project-readme summary {
+.project-readme > [data-slot="collapsible-trigger"] {
   cursor: pointer;
   font-weight: 500;
   margin-bottom: --spacing(4);
@@ -8120,12 +8085,6 @@ main {
 .project-sub-issues header svg {
   width: 16px;
   height: 16px;
-}
-.project-sub-issues progress {
-  width: 100%;
-  height: 5px;
-  accent-color: var(--primary);
-  margin-bottom: --spacing(3);
 }
 .project-parent-row {
   font-size: var(--text-xs);

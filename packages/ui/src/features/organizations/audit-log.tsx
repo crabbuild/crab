@@ -1,3 +1,4 @@
+import { FieldSelect } from "@/components/ui/field-select";
 import { useEffect, useRef, useState } from "react";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
@@ -5,10 +6,6 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Empty, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
 import { Input } from "@/components/ui/input";
 import {
   Table,
@@ -116,19 +113,19 @@ export function OrganizationAuditLog({ id, url }: { id: string; url: URL }) {
         <FieldGroup className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <Field>
             <FieldLabel htmlFor="audit-action">Action</FieldLabel>
-            <NativeSelect
+            <FieldSelect
               id="audit-action"
               className="w-full"
               name="action"
               defaultValue={filters.get("action") ?? "all"}
-            >
-              <NativeSelectOption value="all">All actions</NativeSelectOption>
-              {Object.entries(actions).map(([value, label]) => (
-                <NativeSelectOption key={value} value={value}>
-                  {label}
-                </NativeSelectOption>
-              ))}
-            </NativeSelect>
+              options={[
+                { value: "all", label: "All actions" },
+                ...Object.entries(actions).map(([value, label]) => ({
+                  value: value,
+                  label: label,
+                })),
+              ]}
+            />
           </Field>
           {textFilters.map(({ name, label, length }) => (
             <Field key={name}>

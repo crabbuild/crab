@@ -104,7 +104,7 @@ function CommitFields({
           aria-labelledby="commit-target-heading"
         >
           <Field orientation="horizontal" data-disabled={target.protected}>
-            <input
+            <Input
               id="commit-direct"
               className="mt-0.5 size-4 shrink-0"
               type="radio"
@@ -129,7 +129,7 @@ function CommitFields({
             </FieldContent>
           </Field>
           <Field orientation="horizontal">
-            <input
+            <Input
               id="commit-pull"
               className="mt-0.5 size-4 shrink-0"
               type="radio"

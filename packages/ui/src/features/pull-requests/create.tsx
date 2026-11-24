@@ -1,13 +1,10 @@
+import { FieldSelect } from "@/components/ui/field-select";
 import { CreationForm } from "@/components/discussion/create/form";
 import {
   selection,
   type MetadataDraft,
 } from "@/components/discussion/create/metadata";
 import { useCreateSubmission } from "@/components/discussion/create/submission";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -143,44 +140,48 @@ export function NewPull({
           <FieldLabel htmlFor="pull-base">
             {fork ? "Upstream branch" : "base:"}
           </FieldLabel>
-          <NativeSelect
+          <FieldSelect
             id="pull-base"
             disabled={creation.locked}
             value={base}
-            onChange={(event) => setBase(event.target.value)}
-          >
-            {!base && (
-              <NativeSelectOption value="">Choose a branch</NativeSelectOption>
-            )}
-            {branches.map((ref) => (
-              <NativeSelectOption key={ref.name} value={ref.name}>
-                {fork && `${repo.name}:`}
-                {branch(ref.name)}
-              </NativeSelectOption>
-            ))}
-          </NativeSelect>
+            onValueChange={(nextValue) => setBase(nextValue)}
+            options={[
+              ...(!base ? [{ value: "", label: "Choose a branch" }] : []),
+              ...branches.map((ref) => ({
+                value: ref.name,
+                label: (
+                  <>
+                    {fork && `${repo.name}:`}
+                    {branch(ref.name)}
+                  </>
+                ),
+              })),
+            ]}
+          />
         </Field>
         <span aria-hidden="true">←</span>
         <Field orientation="horizontal" className="w-auto gap-2">
           <FieldLabel htmlFor={fork ? "fork-compare-head" : "pull-head"}>
             {fork ? "Fork branch" : "compare:"}
           </FieldLabel>
-          <NativeSelect
+          <FieldSelect
             id={fork ? "fork-compare-head" : "pull-head"}
             disabled={creation.locked}
             value={head}
-            onChange={(event) => setHead(event.target.value)}
-          >
-            {!head && (
-              <NativeSelectOption value="">Choose a branch</NativeSelectOption>
-            )}
-            {headBranches.map((ref) => (
-              <NativeSelectOption key={ref.name} value={ref.name}>
-                {fork && `${headRepo.name}:`}
-                {branch(ref.name)}
-              </NativeSelectOption>
-            ))}
-          </NativeSelect>
+            onValueChange={(nextValue) => setHead(nextValue)}
+            options={[
+              ...(!head ? [{ value: "", label: "Choose a branch" }] : []),
+              ...headBranches.map((ref) => ({
+                value: ref.name,
+                label: (
+                  <>
+                    {fork && `${headRepo.name}:`}
+                    {branch(ref.name)}
+                  </>
+                ),
+              })),
+            ]}
+          />
         </Field>
       </div>
       {!fork && branches.length < 2 ? (

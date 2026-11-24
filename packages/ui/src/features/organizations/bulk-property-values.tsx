@@ -1,3 +1,5 @@
+import { Checkbox } from "@/components/ui/checkbox";
+import { FieldSelect } from "@/components/ui/field-select";
 import { useState } from "react";
 import { Failure } from "@/components/discussion/failure";
 import { useMutation } from "@/components/discussion/mutations";
@@ -6,7 +8,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useRequest, type Repository } from "@/lib/api";
 import {
-  control,
   display,
   PropertyInput,
   propertySchemaPath,
@@ -164,14 +165,13 @@ export function BulkPropertyValues({
                         className="flex items-center gap-2 break-all"
                         key={repo.id}
                       >
-                        <input
-                          type="checkbox"
+                        <Checkbox
                           checked={selected[repo.id] !== undefined}
                           disabled={
                             remaining === 0 && selected[repo.id] === undefined
                           }
-                          onChange={(event) =>
-                            toggle(repo, event.target.checked)
+                          onCheckedChange={(checked) =>
+                            toggle(repo, checked === true)
                           }
                         />
                         {repo.name}
@@ -338,11 +338,11 @@ function SelectionEditor({
               </p>
               <label className="grid gap-1">
                 Action for {definition.name}
-                <select
-                  className={control}
+                <FieldSelect
+                  className="w-full"
                   value={edit?.kind ?? "keep"}
-                  onChange={(event) => {
-                    const next = event.target.value;
+                  onValueChange={(nextValue) => {
+                    const next = nextValue;
                     change(
                       definition.id,
                       next === "set"
@@ -352,11 +352,12 @@ function SelectionEditor({
                           : undefined,
                     );
                   }}
-                >
-                  <option value="keep">Keep current values</option>
-                  <option value="set">Set override</option>
-                  <option value="default">Use default</option>
-                </select>
+                  options={[
+                    { value: "keep", label: "Keep current values" },
+                    { value: "set", label: "Set override" },
+                    { value: "default", label: "Use default" },
+                  ]}
+                />
               </label>
               {edit?.kind === "set" && (
                 <PropertyInput

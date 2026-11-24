@@ -1,3 +1,5 @@
+import { Checkbox } from "@/components/ui/checkbox";
+import { FieldSelect } from "@/components/ui/field-select";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { repoHref } from "@/lib/repository-route";
@@ -75,10 +77,9 @@ function ReleaseNotesFields({
         />
       </div>
       <label className="release-prerelease">
-        <input
-          type="checkbox"
+        <Checkbox
           checked={prerelease}
-          onChange={(event) => setPrerelease(event.target.checked)}
+          onCheckedChange={(checked) => setPrerelease(checked === true)}
           disabled={pending}
         />
         <span>
@@ -137,7 +138,7 @@ function ReleaseAssetsEditor({
         </div>
         <label className="button-link">
           Add files
-          <input
+          <Input
             type="file"
             multiple
             hidden
@@ -533,24 +534,35 @@ export function NewRelease({
           autoFocus
         />
         <label htmlFor="release-target">Target</label>
-        <select
+        <FieldSelect
           id="release-target"
           value={existingTag ? "existing-tag" : branch}
-          onChange={(event) => setBranch(event.target.value)}
+          onValueChange={(nextValue) => setBranch(nextValue)}
           disabled={pending || Boolean(existingTag)}
           required
-        >
-          {existingTag && (
-            <option value="existing-tag">
-              {refName(existingTag)} ({short(target ?? "")})
-            </option>
-          )}
-          {branches.map((ref) => (
-            <option key={ref.name} value={ref.name}>
-              {refName(ref)} ({short(ref.oid)})
-            </option>
-          ))}
-        </select>
+          options={[
+            ...(existingTag
+              ? [
+                  {
+                    value: "existing-tag",
+                    label: (
+                      <>
+                        {refName(existingTag)}({short(target ?? "")})
+                      </>
+                    ),
+                  },
+                ]
+              : []),
+            ...branches.map((ref) => ({
+              value: ref.name,
+              label: (
+                <>
+                  {refName(ref)}({short(ref.oid)})
+                </>
+              ),
+            })),
+          ]}
+        />
         {existingTag && (
           <p className="muted release-existing-tag">
             Existing tag <strong>{refName(existingTag)}</strong> targets{" "}

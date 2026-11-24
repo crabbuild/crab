@@ -1,3 +1,4 @@
+import { chooseSelectOption } from "../select";
 import { expect, test } from "@playwright/test";
 import { mockPullRequest } from "./fixture";
 import {
@@ -39,10 +40,8 @@ test("pull creation and review navigation preserve GitHub-style controls", async
     page.getByRole("heading", { name: "Compare changes" }),
   ).toBeVisible();
   await expectNoAccessibilityViolations(page);
-  await expect(page.getByLabel("base:")).toHaveValue("refs/heads/main");
-  await expect(page.getByLabel("compare:")).toHaveValue(
-    "refs/heads/feature/docs",
-  );
+  await expect(page.getByLabel("base:")).toHaveText("main");
+  await expect(page.getByLabel("compare:")).toHaveText("feature/docs");
   await page.getByLabel("Title", { exact: true }).fill("Document the feature");
   const pullForm = page.getByRole("form", { name: "Create discussion" });
   const description = pullForm.getByRole("textbox", {
@@ -90,17 +89,21 @@ test("pull creation and review navigation preserve GitHub-style controls", async
   await page.goto("/team/project/pull/2?powerbar=1");
   for (const component of ["Pull request", "Conversation"]) {
     const timing = page.locator(
-      `details[aria-label="${component} request timing"]`,
+      `[data-slot="collapsible"][aria-label="${component} request timing"]`,
     );
-    await expect(timing.locator("summary")).toContainText(/\d+\.\d ms/);
+    await expect(
+      timing.getByRole("button", { name: new RegExp(component) }),
+    ).toContainText(/\d+\.\d ms/);
     await expect(timing.locator("..")).toHaveClass("timing-widget");
-    await timing.locator("summary").click();
+    await timing.getByRole("button", { name: new RegExp(component) }).click();
     await expect(timing.locator("code").first()).toContainText(
       "/api/repos/team/project/pulls/2",
     );
   }
   await expect(
-    page.locator('details[aria-label="Pull request request timing"]'),
+    page.locator(
+      '[data-slot="collapsible"][aria-label="Pull request request timing"]',
+    ),
   ).toContainText("handler;dur=12.5");
   const pullWidget = page.getByRole("group", {
     name: "Pull request request widget",
@@ -195,12 +198,12 @@ for (const { address, missing, replacement } of [
       }),
     ).toBeVisible();
     const selector = page.getByLabel(missing);
-    await expect(selector).toHaveValue("");
+    await expect(selector).toHaveText("Choose a branch");
     await expect(
       page.getByRole("button", { name: "Create pull request", exact: true }),
     ).toHaveCount(0);
 
-    await selector.selectOption(replacement);
+    await chooseSelectOption(selector, replacement);
     await expect(
       page.getByText("1 changed file", { exact: true }),
     ).toBeVisible();
@@ -278,8 +281,8 @@ test("a late pull request template preserves what the author typed", async ({
   } finally {
     showTemplate();
   }
-  await expect(page.getByLabel("Pull request template")).toHaveValue(
-    ".github/pull_request_template.md",
+  await expect(page.getByLabel("Pull request template")).toHaveText(
+    "Default template",
   );
   await expect(description).toHaveValue("An author already wrote this.");
   await page
@@ -717,7 +720,9 @@ test("review conversations and ambiguous merge recovery preserve the pull workfl
     .getByRole("dialog", { name: "Commit suggestion", exact: true })
     .getByRole("button", { name: "Commit changes" })
     .click();
-  await page.locator(".inline-review-outdated > summary").click();
+  await page
+    .locator(".inline-review-outdated > [data-slot=collapsible-trigger]")
+    .click();
   await expect(page.locator(".inline-review-outdated")).toContainText(
     "Outdated conversations (1)",
   );
@@ -731,10 +736,10 @@ test("review conversations and ambiguous merge recovery preserve the pull workfl
   await expect(page.locator(".review-thread-card")).toContainText("Resolved");
   await expect(
     page.locator(".review-thread-card .review-thread-details"),
-  ).not.toHaveAttribute("open", "");
-  await page
-    .locator(".inline-review-outdated")
-    .evaluate((node) => ((node as HTMLDetailsElement).open = true));
+  ).toHaveAttribute("data-state", "closed");
+  const outdated = page.getByRole("button", { name: /Outdated conversations/ });
+  if ((await outdated.getAttribute("aria-expanded")) === "false")
+    await outdated.click();
   await page.locator(".review-thread-card .review-thread-summary").click();
   await page
     .locator(".review-thread-card")

@@ -1,3 +1,4 @@
+import { Input } from "@/components/ui/input";
 import { useSubmission } from "@/components/discussion/hooks";
 import { useMutation } from "@/components/discussion/mutations";
 import { Result } from "@/components/request/result";
@@ -12,6 +13,40 @@ import { TagIcon } from "@primer/octicons-react";
 import { useState } from "react";
 import type { LabelCatalog } from "./model";
 import { LabelBadge } from "./selection";
+
+function LabelColor({
+  color,
+  onChange,
+}: {
+  color: string;
+  onChange: (color: string) => void;
+}) {
+  return (
+    <label>
+      Color
+      <span className="flex items-center gap-2">
+        <span
+          aria-hidden="true"
+          className="size-6 shrink-0 rounded border"
+          style={{
+            backgroundColor: /^\p{ASCII_Hex_Digit}{6}$/u.test(color)
+              ? `#${color}`
+              : undefined,
+          }}
+        />
+        <Input
+          className="w-24 font-mono"
+          required
+          pattern="[0-9a-fA-F]{6}"
+          title="Enter a six-digit hex color"
+          maxLength={6}
+          value={color}
+          onChange={(event) => onChange(event.target.value.toLowerCase())}
+        />
+      </span>
+    </label>
+  );
+}
 
 export function LabelsPage({ repo, csrf }: { repo: Repository; csrf: string }) {
   const catalog = useRequest<LabelCatalog>(endpoint(repo, "labels"));
@@ -57,29 +92,17 @@ export function LabelsPage({ repo, csrf }: { repo: Repository; csrf: string }) {
                 <h3>New label</h3>
                 <label>
                   Name
-                  <input
+                  <Input
                     required
                     maxLength={50}
                     value={name}
                     onChange={(event) => setName(event.target.value)}
                   />
                 </label>
-                <label>
-                  Color
-                  <span className="label-color-input">
-                    <input
-                      type="color"
-                      value={`#${color}`}
-                      onChange={(event) =>
-                        setColor(event.target.value.slice(1))
-                      }
-                    />
-                    <code>#{color}</code>
-                  </span>
-                </label>
+                <LabelColor color={color} onChange={setColor} />
                 <label className="label-description-input">
                   Description
-                  <input
+                  <Input
                     maxLength={100}
                     value={description}
                     onChange={(event) => setDescription(event.target.value)}
@@ -175,27 +198,17 @@ function LabelRow({
       >
         <label>
           Name
-          <input
+          <Input
             required
             maxLength={50}
             value={name}
             onChange={(event) => setName(event.target.value)}
           />
         </label>
-        <label>
-          Color
-          <span className="label-color-input">
-            <input
-              type="color"
-              value={`#${color}`}
-              onChange={(event) => setColor(event.target.value.slice(1))}
-            />
-            <code>#{color}</code>
-          </span>
-        </label>
+        <LabelColor color={color} onChange={setColor} />
         <label className="label-description-input">
           Description
-          <input
+          <Input
             maxLength={100}
             value={description}
             onChange={(event) => setDescription(event.target.value)}

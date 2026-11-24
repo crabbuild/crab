@@ -122,7 +122,9 @@ grant, and this consolidation does not establish full GitHub Enterprise parity.
 
 - `src/components/ui/`: owned shadcn/Radix primitives, explicit variants and
   accessible control behavior. Generate additions with the shadcn CLI using
-  `components.json`, then review the generated source.
+  `components.json`, then review the generated source. Use the owned shadcn
+  components for application controls. Use `FieldSelect` for form and filter
+  dropdowns, including choices that clear a selection.
 - `src/components/discussion/`: shared Markdown rendering, composer, search,
   metadata, mutations, conflict review, and permalink focus. Its `conversation/`
   owns one chronological reader, typed comment/review/activity cards, bounded

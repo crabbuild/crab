@@ -1,13 +1,10 @@
+import { FieldSelect } from "@/components/ui/field-select";
 import { useState, useRef, type FormEvent } from "react";
 import { useMutation } from "@/components/discussion/mutations";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
 import {
   Dialog,
   DialogContent,
@@ -183,24 +180,19 @@ function TransferForm({ repo, csrf }: { repo: Repository; csrf: string }) {
           >
             <label className="grid gap-1 text-sm font-medium">
               Recipient type
-              <NativeSelect
+              <FieldSelect
                 value={kind}
-                onChange={(event) => {
+                onValueChange={(nextValue) => {
                   setKind(
-                    event.target.value === "organization"
-                      ? "organization"
-                      : "account",
+                    nextValue === "organization" ? "organization" : "account",
                   );
                   setValue("");
                 }}
-              >
-                <NativeSelectOption value="account">
-                  Personal account
-                </NativeSelectOption>
-                <NativeSelectOption value="organization">
-                  Organization
-                </NativeSelectOption>
-              </NativeSelect>
+                options={[
+                  { value: "account", label: "Personal account" },
+                  { value: "organization", label: "Organization" },
+                ]}
+              />
             </label>
             <label className="grid gap-1 text-sm font-medium">
               {kind === "account"

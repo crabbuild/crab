@@ -1,3 +1,6 @@
+import { Disclosure } from "@/components/ui/collapsible";
+import { Input } from "@/components/ui/input";
+import { FieldSelect } from "@/components/ui/field-select";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -77,14 +80,18 @@ export function GitAccess({
     }
   }
   return (
-    <details
+    <Disclosure
       className="git-access"
-      onToggle={(event) => onOpenChange(event.currentTarget.open)}
+      onOpenChange={(open) => onOpenChange(open)}
+      summaryLabel="Git access"
+      indicator={false}
+      summary={
+        <>
+          <KeyIcon className="git-access-icon" aria-hidden="true" />
+          <span className="git-access-label">Git access</span>
+        </>
+      }
     >
-      <summary aria-label="Git access">
-        <KeyIcon className="git-access-icon" aria-hidden="true" />
-        <span className="git-access-label">Git access</span>
-      </summary>
       <div className="panel git-popover">
         <h2>Git access token</h2>
         <p>
@@ -93,49 +100,49 @@ export function GitAccess({
           when this sign-in expires or you sign out.
         </p>
         <p>Save it in your Git credential manager. It is shown only here.</p>
-        <details className="credential-setup">
-          <summary>Credential manager setup</summary>
+        <Disclosure
+          className="credential-setup"
+          summary={<>Credential manager setup</>}
+        >
           <p>Run once to keep this server’s repository tokens separate:</p>
           <code>git config --global '{credentialKey}' true</code>
-        </details>
+        </Disclosure>
         <label htmlFor="git-token-repository">Repository</label>
-        <select
+        <FieldSelect
           id="git-token-repository"
           value={selected}
           disabled={pending}
-          onChange={(event) => {
-            setSelected(event.target.value);
+          onValueChange={(nextValue) => {
+            setSelected(nextValue);
             setAccess("read");
             setToken(undefined);
             setMessage(undefined);
           }}
-        >
-          <option value="">Choose a repository</option>
-          {repositories.map((repo) => {
-            const name = `${repo.owner}/${repo.name}`;
-            return (
-              <option key={name} value={name}>
-                {name}
-              </option>
-            );
-          })}
-        </select>
+          options={[
+            { value: "", label: "Choose a repository" },
+            ...repositories.map((repo) => {
+              const name = `${repo.owner}/${repo.name}`;
+              return { value: name, label: name };
+            }),
+          ]}
+        />
         <label htmlFor="git-token-access">Access</label>
-        <select
+        <FieldSelect
           id="git-token-access"
           value={requestedAccess}
           disabled={pending || !repository}
-          onChange={(event) => {
-            setAccess(event.target.value === "write" ? "write" : "read");
+          onValueChange={(nextValue) => {
+            setAccess(nextValue === "write" ? "write" : "read");
             setToken(undefined);
             setMessage(undefined);
           }}
-        >
-          <option value="read">Read (clone and fetch)</option>
-          {repository?.access === "write" && !repository.archived && (
-            <option value="write">Read and write (push)</option>
-          )}
-        </select>
+          options={[
+            { value: "read", label: "Read (clone and fetch)" },
+            ...(repository?.access === "write" && !repository.archived
+              ? [{ value: "write", label: "Read and write (push)" }]
+              : []),
+          ]}
+        />
         {repositories.length === 0 && (
           <p>No repositories available for a token.</p>
         )}
@@ -146,7 +153,7 @@ export function GitAccess({
               {token.owner}/{token.repository} · expires in about{" "}
               {Math.ceil(token.expires_in / 60)} minutes
             </label>
-            <input
+            <Input
               id="git-token"
               readOnly
               type="password"
@@ -189,7 +196,7 @@ export function GitAccess({
         </div>
         {message && <p role="status">{message}</p>}
       </div>
-    </details>
+    </Disclosure>
   );
 }
 
@@ -211,20 +218,26 @@ export function CloneMenu({
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState(false);
   return (
-    <details className={`clone-menu${compact ? " compact" : ""}`}>
-      <summary aria-label={compact ? label : undefined}>
-        {compact ? (
-          <CompactIcon />
-        ) : (
-          <>
-            <CodeIcon /> Code <TriangleDownIcon size={12} />
-          </>
-        )}
-      </summary>
+    <Disclosure
+      className={`clone-menu${compact ? " compact" : ""}`}
+      summaryLabel={compact ? label : undefined}
+      indicator={false}
+      summary={
+        <>
+          {compact ? (
+            <CompactIcon />
+          ) : (
+            <>
+              <CodeIcon /> Code <TriangleDownIcon size={12} />
+            </>
+          )}
+        </>
+      }
+    >
       <div className="panel git-popover">
         <h2>Clone with HTTP</h2>
         <label htmlFor="clone-url">Repository URL</label>
-        <input
+        <Input
           id="clone-url"
           readOnly
           value={url}
@@ -259,6 +272,6 @@ export function CloneMenu({
           <p role="status">Select the URL field and copy it manually.</p>
         )}
       </div>
-    </details>
+    </Disclosure>
   );
 }

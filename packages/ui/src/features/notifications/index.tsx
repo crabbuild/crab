@@ -1,3 +1,4 @@
+import { FieldSelect } from "@/components/ui/field-select";
 import { useEffect, useRef, useState } from "react";
 import {
   AtSignIcon,
@@ -12,10 +13,6 @@ import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
 import { navigate, useRequest } from "@/lib/api";
 
 import {
@@ -300,7 +297,7 @@ function NotificationList({
   const page = useRequest<InboxPage>(
     cursor ? `/api/notifications?${filters}` : null,
   );
-  const repositoryFilter = useRef<HTMLSelectElement>(null);
+  const repositoryFilter = useRef<HTMLButtonElement>(null);
   const focusAfterRefresh = useRef(false);
   useEffect(() => {
     if (focusAfterRefresh.current && !initial.loading && initial.data) {
@@ -401,43 +398,41 @@ function NotificationList({
               <label htmlFor="inbox-repository" className="text-sm font-medium">
                 Repository
               </label>
-              <NativeSelect
+              <FieldSelect
                 ref={repositoryFilter}
                 id="inbox-repository"
                 value={repository}
-                onChange={(event) =>
-                  navigate(inboxHref(view, event.target.value, reason))
+                onValueChange={(nextValue) =>
+                  navigate(inboxHref(view, nextValue, reason))
                 }
-              >
-                <NativeSelectOption value="">
-                  All repositories
-                </NativeSelectOption>
-                {repositories.map((repo) => (
-                  <NativeSelectOption key={repo.id} value={repo.id}>
-                    {titleOf(repo)}
-                  </NativeSelectOption>
-                ))}
-              </NativeSelect>
+                options={[
+                  { value: "", label: "All repositories" },
+                  ...repositories.map((repo) => ({
+                    value: repo.id,
+                    label: titleOf(repo),
+                  })),
+                ]}
+              />
               <label htmlFor="inbox-reason" className="text-sm font-medium">
                 Reason
               </label>
-              <NativeSelect
+              <FieldSelect
                 id="inbox-reason"
                 value={reason}
-                onChange={(event) => {
-                  const value = event.target.value;
+                onValueChange={(nextValue) => {
+                  const value = nextValue;
                   navigate(
                     inboxHref(view, repository, isReason(value) ? value : ""),
                   );
                 }}
-              >
-                <NativeSelectOption value="">All reasons</NativeSelectOption>
-                {Object.entries(reasons).map(([value, { label }]) => (
-                  <NativeSelectOption key={value} value={value}>
-                    {label}
-                  </NativeSelectOption>
-                ))}
-              </NativeSelect>
+                options={[
+                  { value: "", label: "All reasons" },
+                  ...Object.entries(reasons).map(([value, { label }]) => ({
+                    value: value,
+                    label: label,
+                  })),
+                ]}
+              />
             </div>
             <p role="status" className="sr-only">
               {announcement}
@@ -504,32 +499,30 @@ function NotificationList({
                   </label>
                   {!!selected.length && (
                     <div className="flex flex-wrap items-center gap-2">
-                      <NativeSelect
+                      <FieldSelect
                         aria-label="Bulk notification action"
                         value={bulkAction}
-                        onChange={(event) => {
-                          const value = event.target.value;
+                        onValueChange={(nextValue) => {
+                          const value = nextValue;
                           setBulkAction(isBulkAction(value) ? value : "");
                         }}
                         disabled={!!intent}
-                      >
-                        <NativeSelectOption value="">
-                          Choose action
-                        </NativeSelectOption>
-                        {Object.keys(bulkActions)
-                          .filter(isBulkAction)
-                          .filter((action) =>
-                            action === "unsubscribe"
-                              ? selectionCanUnsubscribe
-                              : view !== "done" ||
-                                !["read", "unread", "done"].includes(action),
-                          )
-                          .map((action) => (
-                            <NativeSelectOption key={action} value={action}>
-                              {bulkActions[action].label}
-                            </NativeSelectOption>
-                          ))}
-                      </NativeSelect>
+                        options={[
+                          { value: "", label: "Choose action" },
+                          ...Object.keys(bulkActions)
+                            .filter(isBulkAction)
+                            .filter((action) =>
+                              action === "unsubscribe"
+                                ? selectionCanUnsubscribe
+                                : view !== "done" ||
+                                  !["read", "unread", "done"].includes(action),
+                            )
+                            .map((action) => ({
+                              value: action,
+                              label: bulkActions[action].label,
+                            })),
+                        ]}
+                      />
                       <Button
                         variant="outline"
                         size="sm"

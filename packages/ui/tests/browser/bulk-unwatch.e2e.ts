@@ -1,3 +1,4 @@
+import { chooseSelectOption } from "./select";
 import { expect, test } from "@playwright/test";
 import { expectNoAccessibilityViolations } from "./accessibility";
 import { mockPullRequest } from "./pulls/fixture";
@@ -100,7 +101,7 @@ test("unwatch all previews an owner's full selection and retries the same versio
   const dialog = page.getByRole("dialog", {
     name: "Unwatch repositories by owner",
   });
-  await dialog.getByLabel("Repository owner").selectOption("team");
+  await chooseSelectOption(dialog.getByLabel("Repository owner"), "team");
   await expect(
     dialog.getByText("52 watched repositories owned by team."),
   ).toBeVisible();

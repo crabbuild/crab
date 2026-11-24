@@ -1,3 +1,4 @@
+import { Disclosure } from "@/components/ui/collapsible";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { useLocation, type Loaded, type Timing } from "@/lib/api";
@@ -61,13 +62,18 @@ export function RequestWidget({
     >
       {/* Keep the diagnostic header stable while a request refreshes;
           adding it after completion moves anchored menus during a click. */}
-      <details className="timing" aria-label={`${label} request timing`}>
-        <summary>
-          <span>{label}</span>
-          <strong aria-label={timing ? undefined : "No timing yet"}>
-            {timing ? `${timing.roundtrip.toFixed(1)} ms` : "—"}
-          </strong>
-        </summary>
+      <Disclosure
+        className="timing"
+        aria-label={`${label} request timing`}
+        summary={
+          <>
+            <span>{label}</span>
+            <strong aria-label={timing ? undefined : "No timing yet"}>
+              {timing ? `${timing.roundtrip.toFixed(1)} ms` : "—"}
+            </strong>
+          </>
+        }
+      >
         <div className="timing-details">
           {timing ? (
             <>
@@ -86,7 +92,7 @@ export function RequestWidget({
             <p>No completed request timing yet.</p>
           )}
         </div>
-      </details>
+      </Disclosure>
       {children}
     </div>
   );

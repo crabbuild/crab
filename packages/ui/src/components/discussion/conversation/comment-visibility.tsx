@@ -1,3 +1,4 @@
+import { FieldSelect } from "@/components/ui/field-select";
 import {
   createContext,
   useContext,
@@ -217,25 +218,23 @@ export function CommentVisibility({
                       >
                         <label className="grid gap-1 text-sm">
                           Reason
-                          <select
-                            className="rounded-md border bg-background px-3 py-2"
+                          <FieldSelect
+                            className="w-full max-w-xs"
                             required
                             value={choice}
-                            onChange={(event) =>
-                              setChoice(
-                                event.currentTarget.value as
-                                  | MinimizationReason
-                                  | "",
-                              )
+                            onValueChange={(nextValue) =>
+                              setChoice(nextValue as MinimizationReason | "")
                             }
-                          >
-                            <option value="">Choose a reason</option>
-                            {Object.entries(reasons).map(([key, label]) => (
-                              <option key={key} value={key}>
-                                {label}
-                              </option>
-                            ))}
-                          </select>
+                            options={[
+                              { value: "", label: "Choose a reason" },
+                              ...Object.entries(reasons).map(
+                                ([key, label]) => ({
+                                  value: key,
+                                  label: label,
+                                }),
+                              ),
+                            ]}
+                          />
                         </label>
                         <Failure message={mutation.error} />
                         <DialogFooter>

@@ -1,3 +1,4 @@
+import { FieldSelect } from "@/components/ui/field-select";
 import { useState } from "react";
 import { Link } from "@/components/navigation/link";
 import { Failure } from "@/components/discussion/failure";
@@ -14,10 +15,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
 import {
   endpoint,
   navigate,
@@ -71,30 +68,33 @@ export function MergeQueue({
         {branch && (
           <div className="grid gap-1.5">
             <Label htmlFor="merge-queue-branch">Target branch</Label>
-            <NativeSelect
+            <FieldSelect
               id="merge-queue-branch"
               value={branch}
-              onChange={(event) =>
+              onValueChange={(nextValue) =>
                 navigate(
                   repoHref(repo, {
                     view: "pulls",
                     action: "queue",
-                    branch: event.target.value,
+                    branch: nextValue,
                   }),
                 )
               }
-            >
-              {!branches.some((ref) => ref.name === branch) && (
-                <NativeSelectOption value={branch}>
-                  {branch.replace(/^refs\/heads\//, "")}
-                </NativeSelectOption>
-              )}
-              {branches.map((ref) => (
-                <NativeSelectOption key={ref.name} value={ref.name}>
-                  {ref.name.slice("refs/heads/".length)}
-                </NativeSelectOption>
-              ))}
-            </NativeSelect>
+              options={[
+                ...(!branches.some((ref) => ref.name === branch)
+                  ? [
+                      {
+                        value: branch,
+                        label: branch.replace(/^refs\/heads\//, ""),
+                      },
+                    ]
+                  : []),
+                ...branches.map((ref) => ({
+                  value: ref.name,
+                  label: ref.name.slice("refs/heads/".length),
+                })),
+              ]}
+            />
           </div>
         )}
       </div>

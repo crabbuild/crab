@@ -1,3 +1,4 @@
+import { chooseSelectOption } from "./select";
 import { expect, test } from "@playwright/test";
 import { expectNoAccessibilityViolations } from "./accessibility";
 import { mockPullRequest } from "./pulls/fixture";
@@ -60,20 +61,20 @@ test("repository watch preferences recover a lost reply and refresh the unread b
   const dialog = page.getByRole("dialog", { name: "Repository notifications" });
   const choice = dialog.getByLabel("Notify me about");
   const save = dialog.getByRole("button", { name: "Save preference" });
-  await expect(choice).toHaveValue("direct");
+  await expect(choice).toHaveText("Direct notifications");
   await expect(save).toBeDisabled();
   await expectNoAccessibilityViolations(page);
   const releases = dialog.getByRole("checkbox", { name: "New releases" });
-  await choice.selectOption("issues");
+  await chooseSelectOption(choice, "issues");
   await releases.click();
   await save.click();
   await expect(dialog.getByRole("alert")).toContainText("response was lost");
   await save.click();
   await expect(dialog).toBeHidden();
   await watch.click();
-  await expect(choice).toHaveValue("issues");
+  await expect(choice).toHaveText("Issue updates");
   await expect(releases).toBeChecked();
-  await choice.selectOption("muted");
+  await chooseSelectOption(choice, "muted");
   await expect(releases).not.toBeChecked();
   await expect(releases).toBeDisabled();
   await save.click();
@@ -83,7 +84,7 @@ test("repository watch preferences recover a lost reply and refresh the unread b
   ).toBeVisible();
   await page.reload();
   await watch.click();
-  await expect(choice).toHaveValue("muted");
+  await expect(choice).toHaveText("Muted");
 });
 
 test("pull request notification settings reload a newer choice before retrying", async ({
@@ -140,21 +141,21 @@ test("pull request notification settings reload a newer choice before retrying",
   });
   const choice = dialog.getByLabel("Notify me about");
   const save = dialog.getByRole("button", { name: "Save preference" });
-  await expect(choice).toHaveValue("inherit");
+  await expect(choice).toHaveText("Use repository setting");
   await expectNoAccessibilityViolations(page);
 
   preference = { mode: "follow", version: 1 };
-  await choice.selectOption("state_changes");
+  await chooseSelectOption(choice, "state_changes");
   await save.click();
   await expect(dialog.getByRole("alert")).toHaveText("Newer preference saved.");
   await expect(save).toBeDisabled();
   await dialog.getByRole("button", { name: "Reload preference" }).click();
-  await expect(choice).toHaveValue("follow");
-  await choice.selectOption("state_changes");
+  await expect(choice).toHaveText("All discussion activity");
+  await chooseSelectOption(choice, "state_changes");
   await save.click();
   await expect(dialog).toBeHidden();
 
   await page.reload();
   await trigger.click();
-  await expect(choice).toHaveValue("state_changes");
+  await expect(choice).toHaveText("State changes only");
 });

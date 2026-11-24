@@ -1,3 +1,6 @@
+import { Checkbox } from "@/components/ui/checkbox";
+import { Textarea } from "@/components/ui/textarea";
+import { FieldSelect } from "@/components/ui/field-select";
 import { useState } from "react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -115,11 +118,11 @@ export function RepositoryTargetEditor({
       <legend className="font-medium">Target repositories</legend>
       <label className="grid gap-1">
         Repository targeting
-        <select
-          className={styles}
+        <FieldSelect
+          className="w-full"
           value={target.kind}
-          onChange={(event) => {
-            switch (event.target.value) {
+          onValueChange={(nextValue) => {
+            switch (nextValue) {
               case "name":
                 onChange({
                   kind: "name",
@@ -137,18 +140,19 @@ export function RepositoryTargetEditor({
                 onChange(allRepositories);
             }
           }}
-        >
-          <option value="all">All repositories</option>
-          <option value="selected">Selected repositories</option>
-          <option value="name">Matching repository names</option>
-          <option value="properties">Matching repository properties</option>
-        </select>
+          options={[
+            { value: "all", label: "All repositories" },
+            { value: "selected", label: "Selected repositories" },
+            { value: "name", label: "Matching repository names" },
+            { value: "properties", label: "Matching repository properties" },
+          ]}
+        />
       </label>
       {target.kind === "name" && (
         <div className="grid gap-2 sm:grid-cols-2">
           <label className="grid gap-1">
             Include repository patterns
-            <textarea
+            <Textarea
               className={styles}
               placeholder="release-*"
               value={include}
@@ -161,7 +165,7 @@ export function RepositoryTargetEditor({
           </label>
           <label className="grid gap-1">
             Exclude repository patterns
-            <textarea
+            <Textarea
               className={styles}
               value={exclude}
               onChange={(event) => {
@@ -171,13 +175,12 @@ export function RepositoryTargetEditor({
             />
           </label>
           <label className="flex items-center gap-2 sm:col-span-2">
-            <input
-              type="checkbox"
+            <Checkbox
               checked={!!target.protected}
-              onChange={(event) =>
+              onCheckedChange={(checked) =>
                 onChange({
                   ...target,
-                  protected: event.target.checked || undefined,
+                  protected: checked === true || undefined,
                 })
               }
             />
@@ -211,15 +214,15 @@ export function RepositoryTargetEditor({
                       className="flex items-center gap-2 break-all"
                       key={id}
                     >
-                      <input
-                        type="checkbox"
+                      <Checkbox
                         checked={target.ids.includes(id)}
-                        onChange={(event) => {
+                        onCheckedChange={(checked) => {
                           onChange({
                             ...target,
-                            ids: event.target.checked
-                              ? [...target.ids, id]
-                              : target.ids.filter((value) => value !== id),
+                            ids:
+                              checked === true
+                                ? [...target.ids, id]
+                                : target.ids.filter((value) => value !== id),
                           });
                         }}
                       />
@@ -228,10 +231,9 @@ export function RepositoryTargetEditor({
                   ))}
                   {unavailable.map((id) => (
                     <label className="flex items-center gap-2" key={id}>
-                      <input
-                        type="checkbox"
+                      <Checkbox
                         checked
-                        onChange={() =>
+                        onCheckedChange={() =>
                           onChange({
                             ...target,
                             ids: target.ids.filter((value) => value !== id),
@@ -279,15 +281,14 @@ export function RepositoryTargetEditor({
                 <legend>Condition {index + 1}</legend>
                 <label className="grid gap-1">
                   Property
-                  <select
-                    className={styles}
+                  <FieldSelect
+                    className="w-full"
                     value={
                       "system" in condition
                         ? `system:${condition.system}`
                         : condition.property
                     }
-                    onChange={(event) => {
-                      const key = event.target.value;
+                    onValueChange={(key) => {
                       const next = { value: null, exclude: condition.exclude };
                       if (key === "system:fork")
                         change({ ...next, system: "fork" });
@@ -295,22 +296,25 @@ export function RepositoryTargetEditor({
                         change({ ...next, system: "name" });
                       else change({ ...next, property: key });
                     }}
-                  >
-                    <option value="">Choose a property</option>
-                    <optgroup label="Built-in properties">
-                      <option value="system:fork">Repository type</option>
-                      <option value="system:name">Repository name</option>
-                    </optgroup>
-                    {definitions.length > 0 && (
-                      <optgroup label="Custom properties">
-                        {definitions.map(({ id, name }) => (
-                          <option key={id} value={id}>
-                            {name}
-                          </option>
-                        ))}
-                      </optgroup>
-                    )}
-                  </select>
+                    options={[
+                      { value: "", label: "Choose a property" },
+                      {
+                        value: "system:fork",
+                        label: "Repository type",
+                        group: "Built-in properties",
+                      },
+                      {
+                        value: "system:name",
+                        label: "Repository name",
+                        group: "Built-in properties",
+                      },
+                      ...definitions.map(({ id, name }) => ({
+                        value: id,
+                        label: name,
+                        group: "Custom properties",
+                      })),
+                    ]}
+                  />
                 </label>
                 {definition && (
                   <PropertyInput
@@ -334,27 +338,26 @@ export function RepositoryTargetEditor({
                   (condition.system === "fork" ? (
                     <label className="grid gap-1">
                       Matching value
-                      <select
-                        className={styles}
+                      <FieldSelect
+                        className="w-full"
                         value={
                           condition.value === null
                             ? ""
                             : String(condition.value)
                         }
-                        onChange={(event) =>
+                        onValueChange={(nextValue) =>
                           change({
                             ...condition,
                             value:
-                              event.target.value === ""
-                                ? null
-                                : event.target.value === "true",
+                              nextValue === "" ? null : nextValue === "true",
                           })
                         }
-                      >
-                        <option value="">Choose a repository type</option>
-                        <option value="false">Source repository</option>
-                        <option value="true">Fork</option>
-                      </select>
+                        options={[
+                          { value: "", label: "Choose a repository type" },
+                          { value: "false", label: "Source repository" },
+                          { value: "true", label: "Fork" },
+                        ]}
+                      />
                     </label>
                   ) : (
                     <label className="grid gap-1">
@@ -376,13 +379,12 @@ export function RepositoryTargetEditor({
                     </label>
                   ))}
                 <label className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
+                  <Checkbox
                     checked={!!condition.exclude}
-                    onChange={(event) =>
+                    onCheckedChange={(checked) =>
                       change({
                         ...condition,
-                        exclude: event.target.checked || undefined,
+                        exclude: checked === true || undefined,
                       })
                     }
                   />

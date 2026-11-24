@@ -1,3 +1,4 @@
+import { Disclosure } from "@/components/ui/collapsible";
 import { ShieldLockIcon } from "@primer/octicons-react";
 import { Link } from "@/components/navigation/link";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
@@ -81,10 +82,11 @@ export function CodeOwnersSummary({
         </p>
       )}
       {report.groups.length > 0 && (
-        <details open={required && pending > 0}>
-          <summary className="w-fit cursor-pointer">
-            Code owner requirements
-          </summary>
+        <Disclosure
+          expanded={required && pending > 0}
+          summaryClassName="w-fit cursor-pointer"
+          summary={<>Code owner requirements</>}
+        >
           <ul className="mt-2 grid list-none gap-2 p-0">
             {report.groups.map((group) => (
               <li
@@ -108,7 +110,7 @@ export function CodeOwnersSummary({
               </li>
             ))}
           </ul>
-        </details>
+        </Disclosure>
       )}
     </div>
   );

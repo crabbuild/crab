@@ -1,3 +1,4 @@
+import { Disclosure } from "@/components/ui/collapsible";
 import { EditHistory } from "@/components/discussion/conversation/edit-history";
 import {
   CommentVisibility,
@@ -163,45 +164,48 @@ export function ReviewThreadCard({
       tabIndex={-1}
       className={`panel review-thread-card${thread.outdated ? " outdated" : ""}${thread.resolved ? " resolved" : ""}`}
     >
-      <details
+      <Disclosure
         className="review-thread-details"
-        open={linked || !thread.resolved || undefined}
-      >
-        <summary className="review-thread-summary">
-          <span className="review-thread-summary-main">
-            <span className="review-author-avatar" aria-hidden="true">
-              {initials(thread.author.profile?.name ?? thread.author.name)}
-            </span>
-            <span className="review-thread-summary-copy">
-              <span className="review-thread-author-line">
-                <strong>
-                  <Author author={thread.author} />
-                </strong>{" "}
-                <span className="muted">left a review comment</span>
+        expanded={linked || !thread.resolved || undefined}
+        summaryClassName="review-thread-summary"
+        summary={
+          <>
+            <span className="review-thread-summary-main">
+              <span className="review-author-avatar" aria-hidden="true">
+                {initials(thread.author.profile?.name ?? thread.author.name)}
               </span>
-              <span className="review-thread-location">
-                <code>{thread.path}</code>
-                <span>{lineLocation}</span>
-                <span>{thread.side === "old" ? "old file" : "new file"}</span>
-              </span>
-            </span>
-          </span>
-          <span className="review-thread-statuses">
-            {!minimized &&
-              thread.suggested_text !== null &&
-              !thread.outdated && (
-                <span className="review-thread-badge suggestion">
-                  Suggestion
+              <span className="review-thread-summary-copy">
+                <span className="review-thread-author-line">
+                  <strong>
+                    {thread.author.profile?.handle ?? thread.author.name}
+                  </strong>{" "}
+                  <span className="muted">left a review comment</span>
                 </span>
+                <span className="review-thread-location">
+                  <code>{thread.path}</code>
+                  <span>{lineLocation}</span>
+                  <span>{thread.side === "old" ? "old file" : "new file"}</span>
+                </span>
+              </span>
+            </span>
+            <span className="review-thread-statuses">
+              {!minimized &&
+                thread.suggested_text !== null &&
+                !thread.outdated && (
+                  <span className="review-thread-badge suggestion">
+                    Suggestion
+                  </span>
+                )}
+              {thread.outdated && (
+                <span className="review-thread-badge">Outdated</span>
               )}
-            {thread.outdated && (
-              <span className="review-thread-badge">Outdated</span>
-            )}
-            {thread.resolved && (
-              <span className="review-thread-badge resolved">Resolved</span>
-            )}
-          </span>
-        </summary>
+              {thread.resolved && (
+                <span className="review-thread-badge resolved">Resolved</span>
+              )}
+            </span>
+          </>
+        }
+      >
         <div className="review-thread-content">
           <CommentVisibility
             repo={repo}
@@ -292,6 +296,7 @@ export function ReviewThreadCard({
               </div>
             )}
             <div className="discussion-actions review-thread-actions">
+              {thread.author.profile && <Author author={thread.author} />}
               {thread.can_edit && canPost && !repo.archived && !editing && (
                 <Button
                   variant="outline"
@@ -346,7 +351,7 @@ export function ReviewThreadCard({
           />
           <Failure message={mutation.error} />
         </div>
-      </details>
+      </Disclosure>
     </article>
   );
 }
