@@ -20,15 +20,18 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
   Checks tab separates these commits after squash or rebase and branch
   cleanup. Files changed, inline review navigation, and paginated original
   commits use the pre-merge comparison while its objects remain in storage.
-  Commit links open individual diffs within the recorded PR range. A durable
-  Git retention policy is still open.
+  Commit links open individual diffs within the recorded PR range. The active
+  v2 inventory preserves the original objects through pack replacement and
+  recovery-history pruning.
 - Writers can restore a missing head branch from a completed pull request.
   The panel shows the saved commit. Publication checks the current source
   repository, write grant and ref rules, and requires the branch name to be
   unused. Git objects must still be retained. Completed PRs can also delete
   a head that still matches the recorded commit. Current protection and open
-  base or head dependencies can prevent deletion. Automatic cleanup after
-  merge and retargeting dependent PRs remain open.
+  base or head dependencies can prevent deletion. The source repository can
+  opt in to automatic cleanup after merge. For a same-repository merged PR,
+  cleanup can move eligible dependent PRs to the recorded base before deleting
+  the old branch.
 - Reopening a closed PR checks both branch names under publication leases,
   including through the bulk and direct update paths. A rejected reopen rolls
   back its comment or other bulk edits in the same native transaction.

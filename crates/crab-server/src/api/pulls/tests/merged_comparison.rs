@@ -4,13 +4,29 @@ use crate::test_support::{
     http::{Harness, browser::Browser},
 };
 use axum::http::StatusCode;
+use crab_metadata::capsule_protocol::{
+    GcFence, HistorySegment, HistorySegmentState, MAX_HISTORY_CHAIN_BYTES,
+    MAX_HISTORY_CHAIN_SEGMENTS, load_history_chain, prune_retained_browse_indexes,
+    prune_retained_capsule_sources,
+};
+use crab_read::capsule_protocol::{CapsuleReadLimits, open_view_from_root_for_repack};
+use crab_remote::checkpoint::{
+    publish_capsule_checkpoint_from_view, repack_capsule_repository_from_view,
+};
+use crab_write::capsule_protocol::{begin_gc, end_gc, open_root, replace_history};
 use reqwest::Method;
 use serde_json::{Value, json};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 const ROOT: &str = "/api/repos/team/private";
 const PULL: &str = "/api/repos/team/private/pulls/1";
 const SAVED: &str = "/api/repos/team/private/pulls/1/merged-comparison";
+const MAINTENANCE_BYTES: u64 = 16 * 1024 * 1024;
+const MAINTENANCE_LIMITS: CapsuleReadLimits = CapsuleReadLimits {
+    max_capsule_bytes: MAINTENANCE_BYTES,
+    max_frontier_bytes: MAINTENANCE_BYTES,
+};
 
 async fn retrieve(h: &Harness, alice: &str, path: &str) -> reqwest::Response {
     h.http
@@ -26,6 +42,26 @@ async fn squash_and_delete(h: &Harness, alice: &str) -> (Vec<String>, Value) {
     let checkout = tempfile::tempdir().unwrap();
     let path = checkout.path();
     open_pull(h, alice, remote.as_str(), path).await;
+    let repository = h
+        .server
+        .repositories
+        .get(&("team".into(), "private".into()))
+        .unwrap();
+    let layout = &repository.layout;
+    let root = open_root(layout).await.unwrap();
+    let view = open_view_from_root_for_repack(layout, root, MAINTENANCE_LIMITS)
+        .await
+        .unwrap();
+    let checkpoint = publish_capsule_checkpoint_from_view(
+        layout,
+        &view,
+        1,
+        MAINTENANCE_BYTES,
+        &h.server.cancellation,
+    )
+    .await
+    .unwrap();
+    assert!(checkpoint.published);
     assert_eq!(
         retrieve(h, alice, SAVED).await.status(),
         StatusCode::NOT_FOUND
@@ -96,6 +132,7 @@ async fn squash_and_delete(h: &Harness, alice: &str) -> (Vec<String>, Value) {
     .error_for_status()
     .unwrap();
     git::success(path, &["push", remote.as_str(), "--delete", "feature"]).await;
+    repack_and_prune(h, layout, head).await;
     let general = format!(
         "{ROOT}/changes?rev={head}&base={}&merge_base=true",
         compare["base_tip"].as_str().unwrap()
@@ -107,8 +144,108 @@ async fn squash_and_delete(h: &Harness, alice: &str) -> (Vec<String>, Value) {
     (commits, compare)
 }
 
+async fn repack_and_prune(
+    h: &Harness,
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    head: &str,
+) {
+    let root = open_root(layout).await.unwrap();
+    let view = open_view_from_root_for_repack(layout, root, MAINTENANCE_LIMITS)
+        .await
+        .unwrap();
+    assert!(!view.refs().contains_key("refs/heads/feature"));
+    let head = gix_hash::ObjectId::from_hex(head.as_bytes()).unwrap();
+    let original = view
+        .capsule_run_member_oids()
+        .iter()
+        .find(|(_, members)| members.iter().flatten().any(|oid| oid == head.as_bytes()))
+        .map(|(source, _)| source.clone())
+        .unwrap();
+    let repack = repack_capsule_repository_from_view(
+        layout,
+        &view,
+        MAINTENANCE_BYTES,
+        &h.server.cancellation,
+    )
+    .await
+    .unwrap();
+    assert!(repack.work.published);
+    assert!(repack.work.pack_bytes_written > 0);
+    assert!(repack.packs_after < view.git_pack_count());
+
+    let root = open_root(layout).await.unwrap();
+    let chain = load_history_chain(
+        layout,
+        root.record().root().history().unwrap(),
+        MAX_HISTORY_CHAIN_SEGMENTS,
+        MAX_HISTORY_CHAIN_BYTES,
+    )
+    .await
+    .unwrap();
+    assert!(chain.len() > 1);
+    let latest = &chain[0];
+    let cutoff = latest.checkpoint().covered_generation();
+    let retained = HistorySegment::build(
+        latest.checkpoint().clone(),
+        None,
+        HistorySegmentState::new(
+            latest.refs().clone(),
+            latest.peeled_refs().clone(),
+            latest.head().to_owned(),
+            latest.compacted_ref_transactions().clone(),
+            latest.capsule_runs().to_vec(),
+        ),
+    )
+    .unwrap();
+    let fence_id = blake3::hash(Uuid::now_v7().as_bytes()).to_hex().to_string();
+    let expiry = (SystemTime::now() + Duration::from_secs(60))
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let fence = GcFence::new(&fence_id, expiry).unwrap();
+    let fenced = begin_gc(layout, root, fence).await.unwrap();
+    let replaced = replace_history(layout, fenced.clone(), &[retained]).await;
+    let cleanup = async {
+        if replaced.is_ok() {
+            prune_retained_browse_indexes(layout, cutoff).await?;
+            prune_retained_capsule_sources(layout, cutoff).await?;
+        }
+        Ok::<_, crab_metadata::error::MetadataError>(())
+    }
+    .await;
+    let root = end_gc(
+        layout,
+        replaced.as_ref().unwrap_or(&fenced).clone(),
+        &fence_id,
+    )
+    .await
+    .unwrap();
+    replaced.unwrap();
+    cleanup.unwrap();
+    let chain = load_history_chain(
+        layout,
+        root.record().root().history().unwrap(),
+        MAX_HISTORY_CHAIN_SEGMENTS,
+        MAX_HISTORY_CHAIN_BYTES,
+    )
+    .await
+    .unwrap();
+    assert_eq!(chain.len(), 1);
+    let view = open_view_from_root_for_repack(layout, root, MAINTENANCE_LIMITS)
+        .await
+        .unwrap();
+    assert!(
+        view.layered_checkpoint()
+            .unwrap()
+            .sources()
+            .iter()
+            .chain(view.capsule_run_sources())
+            .all(|source| source.object_hash() != original)
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn saved_merge_comparison_keeps_original_commits_files_and_anchors() {
+async fn saved_merge_comparison_survives_git_repack_and_history_prune() {
     let h = Harness::new(false).await;
     let alice = h.login().await;
     let (commits, compare) = squash_and_delete(&h, &alice).await;
@@ -190,6 +327,7 @@ async fn native_browser_reads_the_merged_history_after_source_deletion() {
         .await;
     browser.sign_in().await;
     browser.run(&["wait", "--text", "1 changed file"]).await;
+    browser.run(&["wait", "[data-thread-number='1']"]).await;
     browser
         .run(&[
             "find",
@@ -214,6 +352,8 @@ async fn native_browser_reads_the_merged_history_after_source_deletion() {
     browser
         .run(&["wait", "--text", "Original commits at merge time."])
         .await;
+    let commit_link = format!("a[href^='/team/private/pull/1/commits/{}']", commits[0]);
+    browser.run(&["wait", &commit_link]).await;
     browser
         .run(&[
             "find",

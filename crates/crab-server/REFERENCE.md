@@ -4351,6 +4351,13 @@ Ordinary repository commit browsing requires Git reachability. The **Checks**
 tab reads stored reports for the recorded merge commits independently of their
 Git objects.
 
+The active v2 pack inventory supplies saved PR comparisons. Repack preserves
+the object IDs in its replacement packs. Pruning recovery history drops old
+checkpoint references and capture indexes while the active inventory continues
+to supply the recorded commits. Repository GC keeps the pack sources in that
+active inventory. Restoring an older repository state or removing stored Git
+objects can make a saved comparison unavailable.
+
 Reviews record `commented`, `approved`, or `changes_requested` against the exact current head. Pull authors cannot approve or request changes on their own pull. Advancing the head marks older reviews as not current.
 
 On branches with required approvals, only current explicit repository Write and
