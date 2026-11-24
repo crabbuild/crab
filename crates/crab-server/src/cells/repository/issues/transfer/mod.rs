@@ -9,7 +9,9 @@ use crate::cells::{
         Subject, SubjectKind, Target,
         activity::{self, ListActivity},
         attachments::{self, Upload},
-        dependencies, duplicates, edit_history, links, locks,
+        dependencies, duplicates,
+        edit_history::transfer as edit_history,
+        links, locks,
         milestones::GetAssignment,
         minimization,
         reactions::transfer as reactions,
@@ -72,6 +74,8 @@ pub(crate) enum Records {
     Activity {
         before: Option<u64>,
         items: Vec<activity::Event>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        edits: Vec<edit_history::Edit>,
         next: Option<u64>,
     },
 }
@@ -113,6 +117,14 @@ impl Records {
         attachments
             .iter()
             .chain(comments.iter().flat_map(|comment| &comment.attachments))
+            .chain(
+                match self {
+                    Self::Activity { edits, .. } => Some(edits),
+                    _ => None,
+                }
+                .into_iter()
+                .flat_map(|edits| edits.iter().flat_map(|edit| &edit.attachments)),
+            )
     }
 
     fn cursor(&self) -> Option<Cursor> {
@@ -199,6 +211,7 @@ impl Records {
             Self::Activity {
                 before,
                 items,
+                edits,
                 next,
             } => {
                 validate_page(
@@ -207,6 +220,21 @@ impl Records {
                     ACTIVITY_PAGE,
                     items.iter().map(|item| item.number),
                 )?;
+                let mut ordered = edits.iter().peekable();
+                for event in items {
+                    if let Some(edit) = ordered.next_if(|edit| edit.number == event.number) {
+                        let subject = event.target.subject();
+                        if subject.kind != SubjectKind::Issue || subject.number != source.issue {
+                            return Err(Error::Invalid(
+                                "Issue transfer edit belongs to another issue",
+                            ));
+                        }
+                        edit.validate(source.repository, event)?;
+                    }
+                }
+                if ordered.next().is_some() {
+                    return Err(Error::Invalid("Issue transfer edit has no source activity"));
+                }
             }
             Self::Reactions { page } => page.validate()?,
         }
@@ -279,7 +307,6 @@ pub(crate) enum CaptureOutcome {
     Changed,
     Closed,
     Archived,
-    DiscussionHistory,
     LinkedWork,
 }
 
@@ -344,9 +371,6 @@ impl Read for Capture {
         };
         let records = match input {
             CaptureInput::Start { .. } => {
-                if edit_history::exists(context, Target::Issue { number })? {
-                    return Ok(CaptureOutcome::DiscussionHistory);
-                }
                 if has_linked_work(context, subject)? {
                     return Ok(CaptureOutcome::LinkedWork);
                 }
@@ -395,17 +419,6 @@ impl Read for Capture {
                 else {
                     return Err(Error::Invalid("Issue transfer comment target is missing"));
                 };
-                for record in &items {
-                    if edit_history::exists(
-                        context,
-                        Target::IssueComment {
-                            issue: number,
-                            number: record.number,
-                        },
-                    )? {
-                        return Ok(CaptureOutcome::DiscussionHistory);
-                    }
-                }
                 let items = items
                     .into_iter()
                     .map(|record| {
@@ -442,27 +455,62 @@ impl Read for Capture {
             CaptureInput::Continue {
                 cursor: Cursor::Activity { before },
                 ..
-            } => {
-                let page = ListActivity::execute(
-                    context,
-                    activity::Query {
-                        subject: Some(subject),
-                        before,
-                        limit: ACTIVITY_PAGE,
-                    },
-                )?
-                .ok_or(Error::Invalid("Issue transfer activity target is missing"))?;
-                Records::Activity {
-                    before,
-                    items: page.items,
-                    next: page.next,
-                }
-            }
+            } => capture_activity(context, source, subject, before)?,
         };
         Ok(CaptureOutcome::Ready {
             frame: Box::new(Frame { source, records }),
         })
     }
+}
+
+fn capture_activity(
+    context: &mut Transaction<'_>,
+    source: Source,
+    subject: Subject,
+    before: Option<u64>,
+) -> Result<Records> {
+    let page = ListActivity::execute(
+        context,
+        activity::Query {
+            subject: Some(subject),
+            before,
+            limit: ACTIVITY_PAGE,
+        },
+    )?
+    .ok_or(Error::Invalid("Issue transfer activity target is missing"))?;
+    let mut items = Vec::<activity::Event>::new();
+    let mut edits = Vec::new();
+    let mut next = page.next;
+    let mut size = 0;
+    for event in page.items {
+        let edit = edit_history::capture(context, source.repository, &event)?;
+        let bytes = serde_json::to_vec(&event)?.len()
+            + edit
+                .as_ref()
+                .map(serde_json::to_vec)
+                .transpose()?
+                .map_or(0, |bytes| bytes.len())
+            + 64;
+        // Leave room for the frame and cursor around the event and its edit.
+        if size + bytes > MAX_LIST_OUTPUT_BYTES - 1024 {
+            let last = items.last().ok_or(Error::Invalid(
+                "Issue transfer edit exceeds the frame byte limit",
+            ))?;
+            next = Some(last.number);
+            break;
+        }
+        size += bytes;
+        if let Some(edit) = edit {
+            edits.push(edit);
+        }
+        items.push(event);
+    }
+    Ok(Records::Activity {
+        before,
+        items,
+        edits,
+        next,
+    })
 }
 
 #[derive(Clone, Deserialize, Serialize)]

@@ -696,14 +696,74 @@ fn install(context: &mut Transaction<'_>, reservation: &Reservation, count: u64)
         )?;
     }
 
-    for ordinal in (activity_from..=count).rev() {
-        let Records::Activity { items, .. } = frame(context, reservation, ordinal)? else {
+    install_activity(context, reservation, activity_from..=count)
+}
+
+fn install_activity(
+    context: &Transaction<'_>,
+    reservation: &Reservation,
+    ordinals: std::ops::RangeInclusive<u64>,
+) -> Result<()> {
+    for ordinal in ordinals.rev() {
+        let Records::Activity {
+            before,
+            items,
+            edits,
+            next,
+        } = frame(context, reservation, ordinal)?
+        else {
             return Err(Error::Invalid("Reserved issue activity is out of order"));
         };
+        if !edits.is_empty() {
+            // Settled transfers replay using the original digest. Keep the
+            // activity, but discard staged copies of redactable edit text.
+            let scrubbed = Frame {
+                source: reservation.source,
+                records: Records::Activity {
+                    before,
+                    items: items.clone(),
+                    edits: Vec::new(),
+                    next,
+                },
+            };
+            context.query(
+                "UPDATE repository_issue_transfer_frames SET payload = ? WHERE transfer = ? AND ordinal = ?",
+                &[
+                    SqlValue::Blob(serde_json::to_vec(&scrubbed)?),
+                    SqlValue::Blob(reservation.request.as_bytes().to_vec()),
+                    integer(ordinal)?,
+                ],
+            )?;
+        }
+        let mut edits = edits.into_iter().rev().peekable();
         for mut event in items.into_iter().rev() {
-            if relocate_event(&mut event, reservation.source.issue, number) {
-                activity::import(context, event)?;
+            let edit = edits.next_if(|edit| edit.number == event.number);
+            if relocate_event(
+                &mut event,
+                reservation.source.issue,
+                reservation.destination.number,
+            ) {
+                let imported = activity::import(context, event)?;
+                if let Some(edit) = edit {
+                    edit_history::install(
+                        context,
+                        reservation.request,
+                        reservation.source.repository,
+                        reservation.destination.repository,
+                        &imported,
+                        edit,
+                    )?;
+                }
+            } else if edit.is_some() {
+                return Err(Error::Invalid(
+                    "Reserved issue edit has no destination activity",
+                ));
             }
+        }
+        if edits.next().is_some() {
+            return Err(Error::Invalid(
+                "Reserved issue edit is missing its activity",
+            ));
         }
     }
     Ok(())

@@ -8,6 +8,8 @@ use crate::test_support::http::Harness;
 
 const ROOT: &str = "/api/repos/team/private";
 
+mod history_transfer;
+
 async fn upload(
     h: &Harness,
     cookie: &str,

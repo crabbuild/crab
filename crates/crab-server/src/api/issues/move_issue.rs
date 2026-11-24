@@ -246,11 +246,6 @@ impl Transfer<'_> {
                 CaptureOutcome::Closed => {
                     return Err(Error::Invalid("Only open issues can be transferred"));
                 }
-                CaptureOutcome::DiscussionHistory => {
-                    return Err(Error::Invalid(
-                        "This issue has edit history that Crab cannot transfer yet",
-                    ));
-                }
                 CaptureOutcome::LinkedWork => {
                     return Err(Error::Invalid(
                         "This issue has linked work that Crab cannot transfer yet",
@@ -425,65 +420,6 @@ impl Transfer<'_> {
         }
         Ok(())
     }
-}
-
-#[cfg(test)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn transfer_keeps_an_issue_with_retained_edits_in_its_source() {
-    use crate::test_support::http::Harness;
-    use reqwest::Method;
-
-    let h = Harness::new(false).await;
-    h.add_repository("library").await;
-    let target = h
-        .server
-        .repositories
-        .get(&("team".into(), "library".into()))
-        .unwrap();
-    let alice = h.login().await;
-    let issue: Value = h.write(
-        Method::POST,
-        "/api/repos/team/private/issues",
-        &alice,
-        json!({"request_id":Uuid::now_v7(),"title":"Retain previous text","body":"First version"}),
-    ).await.error_for_status().unwrap().json().await.unwrap();
-    let number = issue["number"].as_u64().unwrap();
-    let path = format!("/api/repos/team/private/issues/{number}");
-    let changed: Value = h
-        .write(
-            Method::PATCH,
-            &path,
-            &alice,
-            json!({"version":issue["version"],"body":"Replacement text"}),
-        )
-        .await
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let response = h.write(
-        Method::POST,
-        &format!("{path}/transfer"),
-        &alice,
-        json!({"request_id":Uuid::now_v7(),"version":changed["version"],"destination":target.id}),
-    ).await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body: Value = response.json().await.unwrap();
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("edit history")
-    );
-    let retained = h.json(&path, &alice).await;
-    assert_eq!(retained["body"], "Replacement text");
-    assert_eq!(retained["has_edit_history"], true);
-    assert_eq!(
-        h.json("/api/repos/team/library/issues", &alice).await["items"],
-        json!([])
-    );
-    h.close().await;
 }
 
 #[cfg(test)]

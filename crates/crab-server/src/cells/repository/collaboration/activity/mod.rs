@@ -364,7 +364,7 @@ pub(in crate::cells::repository) fn append(
 pub(in crate::cells::repository) fn import(
     context: &Transaction<'_>,
     mut event: Event,
-) -> crate::cells::Result<()> {
+) -> crate::cells::Result<Event> {
     validate_author(&event.actor)?;
     event.action.validate(event.target)?;
     if !event.target.exists(context)? {
@@ -373,7 +373,8 @@ pub(in crate::cells::repository) fn import(
         ));
     }
     event.number = super::next_version(latest(context)?)?;
-    store(context, &event)
+    store(context, &event)?;
+    Ok(event)
 }
 
 fn store(context: &Transaction<'_>, event: &Event) -> crate::cells::Result<()> {

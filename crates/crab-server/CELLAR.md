@@ -521,6 +521,12 @@ retain opaque actor membership keys, derive destination counts, and compare
 those counts with the source snapshot. Publication keeps a viewer's ability to
 remove an existing reaction after the issue moves.
 
+Activity frames include retained issue and comment edits within the frame
+byte budget. The destination remaps revisions to the imported activity
+numbers and preserves redactions and gaps in edit history. Only retained
+text contributes attachment manifests. Publication removes edit text from
+staging and keeps the original frame digest for exact replay.
+
 Issue bodies and comments carry manifests for linked published attachments in
 the source repository. The receiver reserves the transfer-specific attachment
 IDs before the worker writes their bytes. A staged frame advances only with a
@@ -552,9 +558,9 @@ The browser HTTP workflow checks both repository grants and the shared owner.
 It reserves and verifies attachment copies before preparing. Preparation
 previews publication and its search projections in a rolled-back transaction.
 Approval and retirement run under the policy leases used for repository
-ownership changes. The source refuses captures with retained edit history
-or repository-local relationships that require a different
-publication format. The HTTP coordinator also checks organization Project
+ownership changes. The source refuses captures with repository-local
+relationships that require a different publication format. The HTTP
+coordinator also checks organization Project
 placements in the owning organization.
 
 ## Reviewer search preparation

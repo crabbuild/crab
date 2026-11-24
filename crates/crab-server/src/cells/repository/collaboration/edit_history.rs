@@ -11,6 +11,8 @@ use crate::cells::{
     },
 };
 
+pub(crate) mod transfer;
+
 const LIMIT: u8 = 100;
 
 #[derive(Deserialize, Serialize)]
@@ -90,6 +92,25 @@ impl History {
         context.delete_document(&self.suggestion(number))?;
         Ok(())
     }
+
+    fn store_content(
+        &self,
+        context: &Transaction<'_>,
+        number: u64,
+        body: &str,
+        suggestion: Option<&str>,
+    ) -> Result<()> {
+        // Encode each field separately so Markdown escaping cannot exceed
+        // the native document limit.
+        context.put_document(&self.body(number), &STANDARD_NO_PAD.encode(body))?;
+        if let Some(suggestion) = suggestion {
+            context.put_document(
+                &self.suggestion(number),
+                &STANDARD_NO_PAD.encode(suggestion),
+            )?;
+        }
+        Ok(())
+    }
 }
 
 fn text(context: &Transaction<'_>, key: &str) -> Result<Option<String>> {
@@ -102,10 +123,7 @@ fn text(context: &Transaction<'_>, key: &str) -> Result<Option<String>> {
         .transpose()
 }
 
-pub(in crate::cells::repository) fn exists(
-    context: &Transaction<'_>,
-    target: Target,
-) -> Result<bool> {
+pub(super) fn exists(context: &Transaction<'_>, target: Target) -> Result<bool> {
     Ok(context
         .document::<Retention>(&History::new(target).retention())?
         .is_some())
@@ -147,18 +165,7 @@ pub(in crate::cells::repository) fn record(
         redaction: None,
         previous: (state.latest != 0).then_some(state.latest),
     };
-    // Encode each bounded text field separately. JSON escaping arbitrary
-    // Markdown and suggestion text could exceed the native document limit.
-    context.put_document(
-        &history.body(edit.number),
-        &STANDARD_NO_PAD.encode(previous),
-    )?;
-    if let Some(suggestion) = suggestion {
-        context.put_document(
-            &history.suggestion(edit.number),
-            &STANDARD_NO_PAD.encode(suggestion),
-        )?;
-    }
+    history.store_content(context, edit.number, previous, suggestion)?;
     context.put_document(&history.revision(edit.number), &revision)?;
     state.latest = edit.number;
     context.put_document(&history.retention(), &state)
