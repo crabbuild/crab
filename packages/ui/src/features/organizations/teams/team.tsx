@@ -1,10 +1,13 @@
 import { useEffect, useState } from "react";
+import { ArrowLeftIcon } from "lucide-react";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
+import { BrowseRepositories } from "@/features/repository/catalog-browse";
+import { navigate } from "@/lib/api";
 import type { TeamView } from "@/lib/contracts";
 import { teamHref, type Draft } from "./model";
 import type { Commands } from "./commands";
@@ -38,14 +41,22 @@ export function TeamDetail({
     commands.generation,
   );
   const current = state.data;
-  const command = commands.resolved?.intent.body.command;
-  const applied = commands.resolved?.acknowledgement.outcome === "applied";
+  const resolution = commands.resolved;
+  const command =
+    resolution?.intent.actor === actor &&
+    resolution.intent.organization === organization &&
+    resolution.acknowledgement.outcome === "applied"
+      ? resolution.intent.body.command
+      : undefined;
+  const deleted = command?.kind === "delete" && command.team === team;
+  useEffect(() => {
+    if (deleted) navigate(teamHref(organization));
+  }, [deleted, organization]);
   useEffect(() => {
     if (!current || state.loading || state.error) return;
     setDraft((old) => {
       if (!old) return current.team;
       if (
-        applied &&
         command?.kind === "edit" &&
         command.team === team &&
         old.version === command.version &&
@@ -56,15 +67,21 @@ export function TeamDetail({
         return { ...old, version: current.team.version };
       return old;
     });
-  }, [current, state.loading, state.error, command, applied, team]);
-  const settings = url.searchParams.get("view") === "settings";
+  }, [current, state.loading, state.error, command, team]);
+  const tab = url.searchParams.get("view");
+  const settings = tab === "settings";
+  const repositories = tab === "repositories";
+  const members = !settings && !repositories;
   const failure = commands.failure?.body.command;
   const conflict =
     commands.conflict && failure?.kind === "edit" && failure.team === team;
   return (
     <div className="flex flex-col gap-5">
-      <Link href={teamHref(organization)} className="w-fit text-sm">
-        ← All teams
+      <Link
+        href={teamHref(organization)}
+        className="flex w-fit items-center gap-2 text-sm"
+      >
+        <ArrowLeftIcon className="size-4" aria-hidden="true" /> All teams
       </Link>
       <Result state={state} timingLabel="Team">
         {(view) => (
@@ -72,34 +89,58 @@ export function TeamDetail({
             <header className="flex flex-wrap items-start justify-between gap-4">
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-3">
-                  <h2 className="break-words text-2xl font-semibold tracking-tight">
+                  <h2
+                    dir="auto"
+                    className="min-w-0 wrap-anywhere text-2xl font-semibold tracking-tight"
+                  >
                     {view.team.name}
                   </h2>
                   <Badge variant="outline">
                     {view.team.visibility === "secret" ? "Secret" : "Visible"}
                   </Badge>
+                  {view.role && (
+                    <Badge variant="secondary">
+                      {view.role === "maintainer" ? "Maintainer" : "Member"}
+                    </Badge>
+                  )}
                 </div>
-                <p className="mt-2 whitespace-pre-wrap break-words text-sm text-muted-foreground">
-                  {view.team.description || "No description provided."}
-                </p>
+                {view.team.description && (
+                  <p
+                    dir="auto"
+                    className="mt-2 whitespace-pre-wrap wrap-anywhere text-sm text-muted-foreground"
+                  >
+                    {view.team.description}
+                  </p>
+                )}
               </div>
               <Button variant="outline" onClick={state.retry}>
                 Refresh team
               </Button>
             </header>
-            <nav aria-label="Team" className="flex gap-2 border-b pb-3">
-              <Button asChild variant={!settings ? "secondary" : "ghost"}>
+            <nav
+              aria-label="Team"
+              className="flex flex-wrap gap-2 border-b pb-3"
+            >
+              <Button asChild variant={members ? "secondary" : "ghost"}>
                 <Link
                   href={teamHref(organization, team)}
-                  aria-current={!settings ? "page" : undefined}
+                  aria-current={members ? "page" : undefined}
                 >
                   Members
+                </Link>
+              </Button>
+              <Button asChild variant={repositories ? "secondary" : "ghost"}>
+                <Link
+                  href={teamHref(organization, team, "repositories")}
+                  aria-current={repositories ? "page" : undefined}
+                >
+                  Repositories
                 </Link>
               </Button>
               {view.can_manage && (
                 <Button asChild variant={settings ? "secondary" : "ghost"}>
                   <Link
-                    href={`${teamHref(organization, team)}&view=settings`}
+                    href={teamHref(organization, team, "settings")}
                     aria-current={settings ? "page" : undefined}
                   >
                     Settings
@@ -107,7 +148,31 @@ export function TeamDetail({
                 </Button>
               )}
             </nav>
-            {!settings ? (
+            {repositories ? (
+              <section
+                className="grid min-w-0 gap-4"
+                aria-labelledby="team-repositories"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <h3 id="team-repositories" className="text-lg font-semibold">
+                    Team repositories
+                  </h3>
+                  {owner && (
+                    <Button asChild variant="outline" size="sm">
+                      <Link
+                        href={`/-/organizations/${organization}?tab=repositories`}
+                      >
+                        Browse organization repositories
+                      </Link>
+                    </Button>
+                  )}
+                </div>
+                <BrowseRepositories
+                  url={url}
+                  scope={{ kind: "team", organization, team }}
+                />
+              </section>
+            ) : members ? (
               <TeamMembers
                 organization={organization}
                 actor={actor}
@@ -233,20 +298,16 @@ export function TeamDetail({
                             variant="destructive"
                             disabled={commands.locked}
                             onClick={() =>
-                              void commands
-                                .submit(
-                                  organization,
-                                  actor,
-                                  {
-                                    kind: "delete",
-                                    team,
-                                    version: view.team.version,
-                                  },
-                                  "Delete team",
-                                )
-                                .then((value) => {
-                                  if (value) setDeleting(false);
-                                })
+                              void commands.submit(
+                                organization,
+                                actor,
+                                {
+                                  kind: "delete",
+                                  team,
+                                  version: view.team.version,
+                                },
+                                "Delete team",
+                              )
                             }
                           >
                             Confirm delete team

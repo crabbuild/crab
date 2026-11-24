@@ -16,6 +16,7 @@ import {
   resumeGitImport,
   startGitImport,
   startRepositoryFork,
+  useRequest,
   type GitImportJob,
   type Repository,
 } from "@/lib/api";
@@ -31,6 +32,7 @@ export function GitImport({
   account,
   csrf,
   defaultOwner = "",
+  personal = false,
   organization,
   fork,
   onImported,
@@ -38,6 +40,7 @@ export function GitImport({
   account: string;
   csrf: string;
   defaultOwner?: string;
+  personal?: boolean;
   organization?: { id: string; name: string; requestedJob?: string };
   fork?: Pick<Repository, "id" | "owner" | "name">;
   onImported: (repository: ImportedRepository) => void;
@@ -50,7 +53,9 @@ export function GitImport({
     ? `crab:fork:${account}:${fork.id}`
     : organizationId
       ? `crab:git-import:${account}:${organizationId}`
-      : `crab:git-import:${account}`;
+      : personal
+        ? `crab:git-import:personal:${account}`
+        : `crab:git-import:${account}`;
   const [jobId, setJobId] = useState<string>(() => {
     if (organization?.requestedJob) return organization.requestedJob;
     try {
@@ -60,6 +65,9 @@ export function GitImport({
     }
   });
   const [open, setOpen] = useState(!!jobId);
+  const personalDestination = useRequest<{ owner: string }>(
+    personal && open ? "/api/repos/creation" : null,
+  );
   const [source, setSource] = useState("");
   const [owner, setOwner] = useState(defaultOwner);
   const defaultName = fork ? `${fork.name}-fork` : "";
@@ -188,7 +196,10 @@ export function GitImport({
       setError("Enter a Git source URL or a GitHub owner/name.");
       return;
     }
-    if ((!organizationId && !owner.trim()) || !repositoryName) {
+    const destination = personal
+      ? personalDestination.data?.owner
+      : owner.trim();
+    if ((!organizationId && !destination) || !repositoryName) {
       setError("Choose the Crab owner and repository name.");
       return;
     }
@@ -197,7 +208,7 @@ export function GitImport({
     setJob(undefined);
     const fields = {
       source: sourceValue,
-      owner: organizationId ? undefined : owner.trim(),
+      owner: organizationId ? undefined : destination,
       name: repositoryName.trim(),
       description: description.trim() || undefined,
     };
@@ -309,14 +320,28 @@ export function GitImport({
           )}
           {!forkJob && (
             <label>
-              {organization ? "Organization" : "Crab owner"}
+              {organization
+                ? "Organization"
+                : personal
+                  ? "Personal namespace"
+                  : "Crab owner"}
               <input
                 required
-                value={organization?.name ?? job?.owner ?? owner}
+                value={
+                  organization?.name ??
+                  job?.owner ??
+                  (personal ? (personalDestination.data?.owner ?? "") : owner)
+                }
                 onChange={(event) => setOwner(event.target.value)}
-                placeholder="team"
+                placeholder={
+                  personalDestination.loading
+                    ? "Loading namespace…"
+                    : personal
+                      ? undefined
+                      : "team"
+                }
                 autoComplete="organization"
-                disabled={!!organization || fixedDestination}
+                disabled={!!organization || personal || fixedDestination}
               />
             </label>
           )}
@@ -360,6 +385,19 @@ export function GitImport({
             </label>
           )}
         </div>
+        {personalDestination.error && !job && (
+          <div className="git-import-feedback error" role="alert">
+            <span>{personalDestination.error}</span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={personalDestination.retry}
+            >
+              Retry namespace lookup
+            </Button>
+          </div>
+        )}
         {error && (
           <div className="git-import-feedback error" role="alert">
             <AlertIcon aria-hidden="true" />
@@ -418,7 +456,14 @@ export function GitImport({
             </Button>
           )}
           {(!job || running || job.resumable) && (
-            <Button type="submit" disabled={running || submitting}>
+            <Button
+              type="submit"
+              disabled={
+                running ||
+                submitting ||
+                (personal && !job && !personalDestination.data)
+              }
+            >
               {submitting || running
                 ? forkJob
                   ? "Creating fork…"

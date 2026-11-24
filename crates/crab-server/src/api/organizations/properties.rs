@@ -76,7 +76,7 @@ async fn filter_fields(
         .output;
     // A definition is visible through repository access. Revalidate that
     // access after the Organization Cell read before returning definitions.
-    let current = crate::api::catalog::visible_matching(&server, &principal, |repo| {
+    let current = crate::api::catalog::visible_matching(&server, &principal, None, |repo| {
         repo.id == repository.id
             && repo.organization == Some(organization)
             && repo.ownership_epoch == repository.ownership_epoch

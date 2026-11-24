@@ -140,10 +140,12 @@ export function App() {
   const reviewAvailability = url.pathname === "/-/settings/review-availability";
   const profileSettings =
     url.pathname === "/-/profile" || savedReplies || reviewAvailability;
-  const actorId =
-    /^\/-\/users\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(
+  const actorRoute =
+    /^\/-\/users\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(\/repositories)?$/i.exec(
       url.pathname,
-    )?.[1];
+    );
+  const personalRepositories = url.pathname === "/-/repositories/personal";
+  const repositoryCatalogPage = url.pathname === "/" || personalRepositories;
   const transferId = /^\/-\/repository-transfers\/([0-9a-f-]{36})$/i.exec(
     url.pathname,
   )?.[1];
@@ -153,7 +155,8 @@ export function App() {
     );
   const route =
     profileSettings ||
-    actorId ||
+    actorRoute ||
+    personalRepositories ||
     transferId ||
     organizationRoute ||
     notifications ||
@@ -433,6 +436,12 @@ export function App() {
                           Your profile
                         </Link>
                       </DropdownMenuItem>
+                      <DropdownMenuItem asChild>
+                        <Link href="/-/repositories/personal">
+                          <RepoIcon aria-hidden="true" />
+                          Your repositories
+                        </Link>
+                      </DropdownMenuItem>
                     </DropdownMenuGroup>
                     {session.data.user && (
                       <>
@@ -534,25 +543,35 @@ export function App() {
                       : "profile"
                 }
               />
-            ) : actorId ? (
-              <UserProfile id={actorId} />
-            ) : url.pathname !== "/" && !route ? (
+            ) : actorRoute ? (
+              <UserProfile
+                key={actorRoute[1]}
+                id={actorRoute[1]}
+                repositories={Boolean(actorRoute[2])}
+                url={url}
+              />
+            ) : !repositoryCatalogPage && !route ? (
               <div className="notice error" role="alert">
                 <h1>Page not found</h1>
                 <Link href="/">Back to repositories</Link>
               </div>
-            ) : url.pathname === "/" ? (
+            ) : repositoryCatalogPage ? (
               <div className="catalog">
                 <div className="section-heading">
-                  <h1>Your repositories</h1>
+                  <h1>
+                    {personalRepositories
+                      ? "Personal repositories"
+                      : "Repositories"}
+                  </h1>
                   <div className="flex flex-wrap items-start gap-2">
                     <CreateRepository
                       csrf={session.data?.csrf ?? ""}
                       onCreated={(repository) => navigate(repoHref(repository))}
                     />
                     <GitImport
-                      key={importAccount}
+                      key={`${importAccount}:${personalRepositories}`}
                       account={importAccount}
+                      personal={personalRepositories}
                       csrf={session.data?.csrf ?? ""}
                       defaultOwner={gitOwnerSuggestion(
                         session.data?.user?.name,
@@ -563,9 +582,40 @@ export function App() {
                     />
                   </div>
                 </div>
+                <nav
+                  aria-label="Repository ownership"
+                  className="mb-5 flex flex-wrap gap-2 border-b pb-3"
+                >
+                  <Button
+                    asChild
+                    variant={personalRepositories ? "ghost" : "secondary"}
+                  >
+                    <Link
+                      href="/"
+                      aria-current={personalRepositories ? undefined : "page"}
+                    >
+                      All accessible
+                    </Link>
+                  </Button>
+                  <Button
+                    asChild
+                    variant={personalRepositories ? "secondary" : "ghost"}
+                  >
+                    <Link
+                      href="/-/repositories/personal"
+                      aria-current={personalRepositories ? "page" : undefined}
+                    >
+                      Personal
+                    </Link>
+                  </Button>
+                </nav>
                 <BrowseRepositories
                   url={url}
-                  subject={session.data?.user?.subject}
+                  scope={
+                    personalRepositories
+                      ? { kind: "personal" }
+                      : { kind: "all", subject: session.data.user?.subject }
+                  }
                 />
               </div>
             ) : (

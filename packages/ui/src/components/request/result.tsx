@@ -25,7 +25,10 @@ export function Result<T>({
   if (state.loading || state.data === undefined)
     return (
       <div className="notice" role="status">
-        <Spinner /> Loading repository data…
+        <Spinner />{" "}
+        {timingLabel
+          ? `Loading ${timingLabel.toLowerCase()}…`
+          : "Loading repository data…"}
       </div>
     );
   return (

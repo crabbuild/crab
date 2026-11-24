@@ -1,4 +1,5 @@
 use super::{actor, read_error, target};
+use crate::api::catalog_browse::{self, Scope, Search};
 use crate::{
     api::write,
     app::{self, Error, Result},
@@ -69,6 +70,10 @@ pub(super) fn routes() -> Router<Arc<Server>> {
             axum::routing::post(cancel),
         )
         .route("/api/organizations/{id}/teams/{team}", get(own))
+        .route(
+            "/api/organizations/{id}/teams/{team}/repositories",
+            get(repositories),
+        )
         .route(
             "/api/organizations/{id}/teams/{team}/identity-group",
             get(identity_group).put(link_identity_group),
@@ -177,7 +182,16 @@ async fn own(
     Extension(principal): Extension<Principal>,
     Path((id, team)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<native::View>> {
-    let actor = actor(&server, &principal).await?;
+    Ok(Json(view(&server, &principal, id, team).await?))
+}
+
+async fn view(
+    server: &Server,
+    principal: &Principal,
+    id: Uuid,
+    team: Uuid,
+) -> Result<native::View> {
+    let actor = actor(server, principal).await?;
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     let view = cells
         .query::<native::Get>(target(id)?, None, native::Key { actor, team })
@@ -185,8 +199,29 @@ async fn own(
         .map_err(read_error)?
         .output
         .ok_or(Error::NotFound)?;
-    app::account(&principal)?;
-    Ok(Json(view))
+    app::account(principal)?;
+    Ok(view)
+}
+
+async fn repositories(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((organization, team)): Path<(Uuid, Uuid)>,
+    Query(search): Query<Search>,
+) -> Result<Json<serde_json::Value>> {
+    let before = view(&server, &principal, organization, team).await?;
+    let page = catalog_browse::list(
+        &server,
+        &principal,
+        Scope::Team { organization, team },
+        search,
+    )
+    .await?;
+    // A team can become secret or be deleted while the catalog page is read.
+    if view(&server, &principal, organization, team).await? != before {
+        return Err(Error::PageChanged);
+    }
+    Ok(page)
 }
 #[derive(Serialize)]
 struct IdentityGroup {

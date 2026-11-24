@@ -199,7 +199,7 @@ async fn visible(
     organization: Option<Uuid>,
     pattern: &Pattern,
 ) -> app::Result<Vec<Arc<Repository>>> {
-    let mut repositories: Vec<_> = catalog::visible_matching(server, principal, |repo| {
+    let mut repositories: Vec<_> = catalog::visible_matching(server, principal, None, |repo| {
         organization.is_none_or(|id| repo.organization == Some(id))
             && pattern.query.evaluate(&pattern.repository_facts(repo)).0 != Truth::No
     })

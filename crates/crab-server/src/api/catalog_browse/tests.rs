@@ -17,6 +17,208 @@ async fn get(h: &Harness, cookie: &str, path: &str) -> reqwest::Response {
         .unwrap()
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn personal_repository_browse_uses_stable_ownership_and_current_viewer_access() {
+    let h = Harness::new(false).await;
+    h.server
+        .catalog()
+        .unwrap()
+        .mark_cell_ready(h.server.repositories.values()[0].id)
+        .await
+        .unwrap();
+    let (organization, _, _) = crate::test_support::http::organizations::bootstrap(&h).await;
+    let alice = h.login().await;
+    let profile: Value = h
+        .write(
+            Method::POST,
+            "/api/profile",
+            &alice,
+            json!({"request_id":Uuid::now_v7(),"handle":"alice","name":"Alice"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let actor = profile["id"].as_str().unwrap();
+    let public = format!("/api/actors/{actor}/repositories");
+    let organization_creation = format!("/api/organizations/{organization}/repositories/creation");
+    let mut owner = String::new();
+    for (path, name) in [
+        ("/api/repos/creation", "personal-a"),
+        ("/api/repos/creation", "personal-b"),
+        (&organization_creation, "shared"),
+    ] {
+        let repo: Value = h
+            .write(
+                Method::POST,
+                path,
+                &alice,
+                json!({"request_id":Uuid::now_v7(),"name":name,"description":""}),
+            )
+            .await
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if name == "personal-a" {
+            owner = repo["owner"].as_str().unwrap().to_owned();
+        }
+    }
+    let personal = h.json("/api/repos/personal?limit=1", &alice).await;
+    assert_eq!(personal["repositories"][0]["name"], "personal-a");
+    let cursor = personal["next"].as_str().unwrap();
+    assert_eq!(
+        h.json(&format!("/api/repos/personal?after={cursor}"), &alice)
+            .await["repositories"][0]["name"],
+        "personal-b"
+    );
+    assert_eq!(
+        get(&h, &alice, &format!("/api/repos?after={cursor}"))
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        h.json(&public, &alice).await["repositories"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    h.write(
+        Method::PATCH,
+        "/api/profile",
+        &alice,
+        json!({"version":profile["version"],"handle":"alice-new","name":"Alice"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    assert_eq!(h.json(&public, &bob).await["repositories"], json!([]));
+    let catalog = h.server.catalog().unwrap();
+    let repo = catalog.membership(&owner, "personal-a").await.unwrap();
+    let mut members = repo.members;
+    members.push(RepositoryMember {
+        subject: "bob-id".into(),
+        name: "Bob".into(),
+        access: RepositoryAccess::Read,
+    });
+    catalog
+        .set_members(&owner, "personal-a", members, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        h.json(&public, &bob).await["repositories"][0]["name"],
+        "personal-a"
+    );
+    assert_eq!(
+        h.json("/api/repos/personal", &bob).await["repositories"],
+        json!([])
+    );
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires agent-browser and the built embedded UI; uses isolated real OIDC/native Cells"]
+async fn native_browser_creates_in_personal_scope_and_opens_the_profile_repository() {
+    let h = Harness::new(false).await;
+    h.server
+        .catalog()
+        .unwrap()
+        .mark_cell_ready(h.server.repositories.values()[0].id)
+        .await
+        .unwrap();
+    let alice = h.login().await;
+    let profile: Value = h
+        .write(
+            Method::POST,
+            "/api/profile",
+            &alice,
+            json!({"request_id":Uuid::now_v7(),"handle":"alice","name":"Alice"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let profile_url = format!("{}/-/users/{}", h.origin, profile["id"].as_str().unwrap());
+    let browser = Browser::new("personal-repositories");
+    browser.run(&["open", &h.origin]).await;
+    browser.sign_in().await;
+    browser
+        .run(&["wait", "a[href='/-/repositories/personal']"])
+        .await;
+    browser
+        .run(&[
+            "find", "role", "link", "click", "--name", "Personal", "--exact",
+        ])
+        .await;
+    browser
+        .run(&[
+            "wait",
+            "--text",
+            "You don’t have any personal repositories yet.",
+        ])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "New repository",
+            "--exact",
+        ])
+        .await;
+    browser.run(&["wait", "#new-repository-name"]).await;
+    browser
+        .run(&["find", "label", "Repository name", "fill", "alice-notes"])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Create repository",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", "--text", "This repository is empty"])
+        .await;
+    let personal = h.json("/api/repos/personal", &alice).await;
+    assert_eq!(personal["repositories"][0]["name"], "alice-notes");
+
+    browser.run(&["open", &profile_url]).await;
+    browser
+        .run(&[
+            "wait",
+            "nav[aria-label='User profile'] a[href$='/repositories']",
+        ])
+        .await;
+    browser
+        .run(&[
+            "click",
+            "nav[aria-label='User profile'] a[href$='/repositories']",
+        ])
+        .await;
+    browser
+        .run(&["wait", "--fn", "document.querySelector('ul[aria-label=\"Repository results\"]')?.textContent.trim() === 'alice-notes'"])
+        .await;
+    drop(browser);
+    h.close().await;
+}
+
 async fn revoke_bob(h: &Harness, name: &str) {
     h.server
         .catalog()

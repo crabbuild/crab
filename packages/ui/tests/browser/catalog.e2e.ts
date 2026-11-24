@@ -18,6 +18,60 @@ async function session(page: Page) {
   );
 }
 
+test("personal import retries namespace resolution before submitting", async ({
+  page,
+}) => {
+  await session(page);
+  let namespaceAvailable = false;
+  let submitted = false;
+  await page.route("**/api/repos/personal?*", (route) =>
+    route.fulfill({ json: { repositories: [], next: null } }),
+  );
+  await page.route("**/api/repos/creation", (route) =>
+    namespaceAvailable
+      ? route.fulfill({ json: { owner, default_branch: "main" } })
+      : route.fulfill({
+          status: 503,
+          json: { error: { message: "Namespace lookup is unavailable" } },
+        }),
+  );
+  await page.route("**/api/imports/git", (route) => {
+    const input = route.request().postDataJSON();
+    expect(input).toMatchObject({
+      source: "https://github.com/example/notes.git",
+      owner,
+      name: "notes",
+    });
+    submitted = true;
+    return route.fulfill({
+      status: 202,
+      json: {
+        ...input,
+        id: input.request_id,
+        state: "queued",
+        message: "Queued for import",
+        resumable: false,
+      },
+    });
+  });
+
+  await page.goto("/-/repositories/personal");
+  await page.getByRole("button", { name: "Import from Git" }).click();
+  await page
+    .getByLabel("Git source")
+    .fill("https://github.com/example/notes.git");
+  const start = page.getByRole("button", { name: "Start import" });
+  await expect(start).toBeDisabled();
+  await expect(page.getByText("Namespace lookup is unavailable")).toBeVisible();
+  namespaceAvailable = true;
+  await page.getByRole("button", { name: "Retry namespace lookup" }).click();
+  const namespace = page.getByLabel("Personal namespace");
+  await expect(namespace).toHaveValue(owner);
+  await expect(namespace).toBeDisabled();
+  await start.click();
+  await expect.poll(() => submitted).toBe(true);
+});
+
 test("new repository recovers one submission after a reload", async ({
   page,
 }) => {

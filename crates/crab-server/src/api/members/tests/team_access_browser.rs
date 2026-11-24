@@ -107,6 +107,23 @@ async fn organization_owner_grants_and_revokes_a_team_members_repository_access_
             .error_for_status()
             .unwrap();
     }
+    let team_repositories = format!(
+        "{}/-/organizations/{organization}?tab=teams&team={team}&view=repositories",
+        h.origin
+    );
+    owner.run(&["open", &team_repositories]).await;
+    owner
+        .run(&[
+            "wait",
+            "--text",
+            "No repositories with team access are visible to you.",
+        ])
+        .await;
+    click(&owner, "link", "Browse organization repositories").await;
+    owner
+        .run(&["wait", "a[aria-label='Manage team access for private']"])
+        .await;
+    click(&owner, "link", "Manage team access for private").await;
 
     let teammate = Browser::new("grant-teammate");
     sign_in(&teammate, &repository).await;
@@ -130,6 +147,19 @@ async fn organization_owner_grants_and_revokes_a_team_members_repository_access_
     owner.run(&["select", role, "admin"]).await;
     click(&owner, "button", "Save team access").await;
     owner.run(&["wait", "--text", "Team access saved."]).await;
+    teammate.run(&["open", &team_repositories]).await;
+    teammate
+        .run(&[
+            "wait", "--fn",
+            "[...document.querySelectorAll('[aria-label=\"Repository results\"] > li')].some(row => row.querySelector('a[href=\"/team/private\"]') && row.textContent.includes('Admin'))",
+        ])
+        .await;
+    assert!(
+        !teammate
+            .run(&["snapshot"])
+            .await
+            .contains("Manage team access")
+    );
     teammate.run(&["open", &repository]).await;
     teammate
         .run(&["wait", "--text", "This repository is empty"])
@@ -176,6 +206,14 @@ async fn organization_owner_grants_and_revokes_a_team_members_repository_access_
     teammate.run(&["open", &repository]).await;
     teammate
         .run(&["wait", "--text", "Repository not found"])
+        .await;
+    teammate.run(&["open", &team_repositories]).await;
+    teammate
+        .run(&[
+            "wait",
+            "--text",
+            "No repositories with team access are visible to you.",
+        ])
         .await;
 
     owner.run(&["reload"]).await;

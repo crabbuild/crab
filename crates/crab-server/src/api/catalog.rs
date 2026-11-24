@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
+use super::catalog_browse::{self, Scope, Search};
 use crate::{
     RepositoryAccess, RepositoryMember, app,
     auth::Principal,
@@ -48,19 +49,19 @@ pub(super) async fn list(
             "owner and name must be provided together",
         ));
     }
-    let actor = app::actor(&principal)?;
     if selection.q.is_some() || selection.after.is_some() || selection.limit.is_some() {
         if selection.owner.is_some() {
             return Err(app::Error::Invalid(
                 "Search and exact repository lookup cannot be combined",
             ));
         }
-        return super::catalog_browse::list(
+        return catalog_browse::list(
             &server,
             &principal,
-            &actor,
-            super::catalog_browse::Search {
-                organization: selection.organization,
+            selection
+                .organization
+                .map_or(Scope::All, Scope::Organization),
+            Search {
                 query: selection.q.unwrap_or_default(),
                 after: selection.after,
                 limit: selection.limit,
@@ -68,6 +69,7 @@ pub(super) async fn list(
         )
         .await;
     }
+    app::actor(&principal)?;
     let address = selection.owner.as_deref().zip(selection.name.as_deref());
     let mut matches = visible(&server, &principal, address, selection.organization).await?;
     if matches.is_empty()
@@ -87,6 +89,7 @@ pub(super) async fn list(
         principal: current,
         organization_owner,
         topics,
+        ..
     } in matches
     {
         let protections = crate::repository::settings::load(&server, &repository).await?;
@@ -155,8 +158,9 @@ pub(super) async fn list(
 pub(super) struct VisibleRepository {
     pub(super) repository: Arc<crate::repository::Repository>,
     pub(super) topics: Vec<String>,
+    pub(super) team_access: Option<RepositoryAccess>,
     principal: Principal,
-    organization_owner: bool,
+    pub(super) organization_owner: bool,
 }
 
 pub(super) async fn visible(
@@ -165,7 +169,7 @@ pub(super) async fn visible(
     selection: Option<(&str, &str)>,
     organization: Option<Uuid>,
 ) -> app::Result<Vec<VisibleRepository>> {
-    visible_matching(server, principal, |repository| {
+    visible_matching(server, principal, None, |repository| {
         selection.is_none_or(|(owner, name)| {
             owner == repository.config.owner && name == repository.config.name
         }) && organization.is_none_or(|id| repository.organization == Some(id))
@@ -176,6 +180,7 @@ pub(super) async fn visible(
 pub(super) async fn visible_matching(
     server: &Server,
     principal: &Principal,
+    team: Option<Uuid>,
     mut include: impl FnMut(&crate::repository::Repository) -> bool,
 ) -> app::Result<Vec<VisibleRepository>> {
     let selected: Vec<_> = server
@@ -187,7 +192,7 @@ pub(super) async fn visible_matching(
     if selected.is_empty() {
         return Ok(Vec::new());
     }
-    let document = if principal.is_local() {
+    let document = if principal.is_local() && team.is_none() {
         None
     } else {
         let catalog = server.catalog().ok_or(app::Error::NotFound)?;
@@ -235,6 +240,7 @@ pub(super) async fn visible_matching(
             .as_ref()
             .and_then(|grants| grants.get(&repository.id))
             .copied();
+        let mut team_access = None;
         let current = if let Some(grants) = &grants {
             let Some(record) = record.filter(|record| {
                 record.owner == repository.config.owner
@@ -248,6 +254,13 @@ pub(super) async fn visible_matching(
             let source = record
                 .access_record(record.forked_from.and_then(|id| grants.get(&id).copied()))
                 .map_err(|error| app::Error::Membership(Box::new(error)))?;
+            if let Some(team) = team {
+                team_access = source
+                    .organization
+                    .as_ref()
+                    .and_then(|access| access.teams.iter().find(|grant| grant.team == team))
+                    .map(|grant| grant.access);
+            }
             let mut config = repository.config.clone();
             config.members = source.members.clone();
             config.groups = source.groups.clone();
@@ -268,7 +281,7 @@ pub(super) async fn visible_matching(
         } else {
             principal.clone()
         };
-        if !current.can_read(repository.id) {
+        if !current.can_read(repository.id) || (team.is_some() && team_access.is_none()) {
             continue;
         }
         let organization_owner = repository
@@ -283,14 +296,16 @@ pub(super) async fn visible_matching(
             repository,
             principal: current,
             organization_owner,
+            team_access,
         });
     }
     Ok(visible)
 }
 
-pub(super) fn creation_routes(server: Arc<Server>) -> Router<Arc<Server>> {
+pub(super) fn namespace_routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .route("/api/repos/creation", get(creation).post(create))
+        .route("/api/repos/personal", get(personal))
         .route(
             "/api/organizations/{organization}/repositories/creation",
             get(organization_creation).post(create_organization),
@@ -310,6 +325,17 @@ fn namespace(principal: &Principal) -> app::Result<String> {
         &identity.issuer,
         &identity.subject,
     ))
+}
+
+async fn personal(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Query(search): Query<Search>,
+) -> app::Result<Json<serde_json::Value>> {
+    let owner = namespace(&principal)?;
+    let page = catalog_browse::list(&server, &principal, Scope::Personal(owner), search).await?;
+    app::account(&principal)?;
+    Ok(page)
 }
 
 async fn creation(

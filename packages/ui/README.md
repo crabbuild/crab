@@ -282,9 +282,9 @@ The shared Button defaults to `type="button"`; mutations
 must opt into `type="submit"`. Keep native permission, version and replay checks
 in the server even when the UI disables an action.
 
-The header's rightmost avatar opens profile settings and sign-out for SSO
-sessions. Local sessions expose profile settings only; Git access remains a
-separate header control.
+The header's avatar menu opens profile settings and the personal repository
+catalog. It also offers sign-out for SSO sessions. Git access has a separate
+header control.
 
 Organization foundation pages live in `src/features/organizations/` at
 `/-/organizations/{uuid}` and `/-/organizations/{uuid}/invitation`. The first owner
@@ -293,11 +293,24 @@ page never creates authority. People, pending invitations, recipient decisions
 and profile settings use native organization APIs with version checks. Public
 username search selects stable accounts; invitations currently use a manually
 shared link, with no email delivery. Organization discovery and owner-name routing
-are still separate work. Standalone teams use native organization authority.
-In organization repositories, **Settings → Members → Team access** lets admins
-find visible teams and grant, change or revoke a repository role. Team and
-individual edits use the same catalog revision. Reload team access after a
-conflict to see the current grants before editing again.
+are still separate work.
+
+The **Personal** catalog at
+`/-/repositories/personal` lists repositories in the signed-in account's
+namespace. Creating or importing from that view uses the same server-resolved
+namespace. A user profile's **Repositories** tab at
+`/-/users/{actor}/repositories` lists repositories in that user's namespace
+that the viewer can read. The home catalog's **All accessible** view includes
+personal, organization, and operator-managed repositories the account can read.
+
+Open an organization's **Teams** tab to manage team members and settings.
+A team's **Repositories** tab lists readable repositories with a grant for that
+team, including forks that inherit the grant. Organization owners can open
+**Manage team access** from an organization or team repository row to grant,
+change, or revoke a role in that repository. Team and individual edits use the
+same catalog revision. Reload team access after a conflict to see current grants
+before editing again.
+
 The pull request **Reviewers** picker searches people and visible teams with
 repository access. Team rows show pending requests or link to the submitted
 review. The notification inbox receives team review requests through the same

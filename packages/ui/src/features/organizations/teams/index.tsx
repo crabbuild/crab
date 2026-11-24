@@ -31,6 +31,18 @@ export function Teams({
   commands: Commands;
 }) {
   const team = url.searchParams.get("team");
+  if (
+    team !== null &&
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      team,
+    )
+  )
+    return (
+      <div className="notice error" role="alert">
+        <p>Team not found.</p>
+        <Link href={teamHref(id)}>Back to teams</Link>
+      </div>
+    );
   return team ? (
     <TeamDetail
       key={team}
@@ -80,43 +92,65 @@ function TeamList({
   }
   return (
     <div className="flex flex-col gap-5">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <form
-          className="flex min-w-0 flex-1 items-end gap-2"
-          onSubmit={(event) => {
-            event.preventDefault();
-            setAfter(undefined);
-            setSearch(query);
-          }}
-        >
-          <Field className="max-w-md">
-            <FieldLabel htmlFor="team-search">Find a team</FieldLabel>
-            <Input
-              id="team-search"
-              value={query}
-              maxLength={100}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search teams…"
-            />
-          </Field>
-          <Button variant="outline" type="submit">
-            Search
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-lg font-semibold">Organization teams</h2>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="outline" onClick={refresh}>
+            Refresh teams
           </Button>
-        </form>
-        <Button variant="outline" onClick={refresh}>
-          Refresh teams
+          {listing.data?.can_create && (
+            <Button
+              disabled={commands.locked}
+              onClick={() => setCreating((value) => !value)}
+              aria-expanded={creating}
+              aria-controls={creating ? "new-team" : undefined}
+            >
+              {creating ? "Close new team" : "New team"}
+            </Button>
+          )}
+        </div>
+      </div>
+      <form
+        role="search"
+        aria-label="Team search"
+        className="flex flex-wrap items-center gap-2"
+        onSubmit={(event) => {
+          event.preventDefault();
+          setAfter(undefined);
+          if (query.trim() === search && !after) listing.retry();
+          setSearch(query.trim());
+        }}
+      >
+        <Input
+          id="team-search"
+          className="min-w-36 max-w-md flex-1"
+          aria-label="Find a team"
+          type="search"
+          value={query}
+          maxLength={100}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Search teams…"
+        />
+        <Button variant="outline" type="submit">
+          Search
         </Button>
-        {listing.data?.can_create && (
+        {search && (
           <Button
-            disabled={commands.locked}
-            onClick={() => setCreating((value) => !value)}
+            variant="ghost"
+            type="button"
+            onClick={() => {
+              setQuery("");
+              setSearch("");
+              setAfter(undefined);
+            }}
           >
-            {creating ? "Close new team" : "New team"}
+            Clear search
           </Button>
         )}
-      </div>
+      </form>
       {creating && (
         <form
+          id="new-team"
           className="flex max-w-2xl flex-col gap-5 rounded-lg border p-5"
           onSubmit={(event) => {
             event.preventDefault();
@@ -160,9 +194,6 @@ function TeamList({
         {(data) => (
           <>
             <div className="overflow-hidden rounded-lg border">
-              <div className="border-b bg-muted/40 px-5 py-3 font-medium">
-                Teams
-              </div>
               {data.items.length ? (
                 <ul className="divide-y">
                   {data.items.map((item) => (
@@ -177,7 +208,7 @@ function TeamList({
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-2">
                           <Link
-                            className="break-words text-base font-semibold"
+                            className="min-w-0 wrap-anywhere text-base font-semibold"
                             href={teamHref(id, item.team.id)}
                           >
                             {item.team.name}
@@ -190,12 +221,15 @@ function TeamList({
                           )}
                         </div>
                         {item.team.description && (
-                          <p className="mt-1 whitespace-pre-wrap break-words text-sm text-muted-foreground">
+                          <p
+                            dir="auto"
+                            className="mt-1 whitespace-pre-wrap wrap-anywhere text-sm text-muted-foreground"
+                          >
                             {item.team.description}
                           </p>
                         )}
                         <p className="mt-2 text-sm text-muted-foreground">
-                          {item.members}{" "}
+                          {item.members.toLocaleString()}{" "}
                           {item.members === 1 ? "member" : "members"}
                           {item.role
                             ? ` · ${item.role === "maintainer" ? "Maintainer" : "Member"}`
@@ -206,7 +240,10 @@ function TeamList({
                   ))}
                 </ul>
               ) : (
-                <p className="p-10 text-center text-sm text-muted-foreground">
+                <p
+                  role="status"
+                  className="p-6 text-center text-sm text-muted-foreground"
+                >
                   {search
                     ? "No teams match your search."
                     : "No teams to show. Teams help organize people who collaborate."}

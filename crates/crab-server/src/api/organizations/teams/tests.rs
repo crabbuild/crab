@@ -56,16 +56,18 @@ async fn public_team_routes_preserve_secret_visibility_and_current_maintainer_au
         json!({"outcome":"applied","id":team})
     );
     let path = format!("{root}/{team}");
-    assert_eq!(
-        h.http
-            .get(format!("{}{path}", h.origin))
-            .header("cookie", &bob)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::NOT_FOUND
-    );
+    for endpoint in [path.clone(), format!("{path}/repositories")] {
+        assert_eq!(
+            h.http
+                .get(format!("{}{endpoint}", h.origin))
+                .header("cookie", &bob)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
     let page = h.json(&root, &bob).await;
     assert_eq!(page["items"], json!([]));
     assert!(!page.to_string().contains("Confidential"));

@@ -55,7 +55,10 @@ export function OrganizationRepositories({
           )}
         </div>
       </header>
-      <BrowseRepositories url={url} organization={id} />
+      <BrowseRepositories
+        url={url}
+        scope={{ kind: "organization", organization: id, owner: canCreate }}
+      />
     </section>
   );
 }

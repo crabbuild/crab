@@ -5,7 +5,7 @@ use std::{
 
 use axum::Json;
 use futures_util::{StreamExt, TryStreamExt, stream};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -17,14 +17,47 @@ use query::{Cursor, Query};
 
 use super::catalog::visible_matching;
 use crate::{
+    RepositoryAccess,
     app::{Error, Result},
-    auth::{Identity, Principal},
+    auth::Principal,
     repository::{Repository, settings},
     server::Server,
 };
 
+pub(super) enum Scope {
+    All,
+    Personal(String),
+    Organization(Uuid),
+    Team { organization: Uuid, team: Uuid },
+}
+
+impl Scope {
+    fn organization(&self) -> Option<Uuid> {
+        match self {
+            Self::Organization(id)
+            | Self::Team {
+                organization: id, ..
+            } => Some(*id),
+            _ => None,
+        }
+    }
+
+    fn includes(&self, repo: &Repository) -> bool {
+        match self {
+            Self::All => true,
+            Self::Personal(owner) => repo.organization.is_none() && repo.config.owner == *owner,
+            Self::Organization(id)
+            | Self::Team {
+                organization: id, ..
+            } => repo.organization == Some(*id),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct Search {
-    pub organization: Option<Uuid>,
+    #[serde(default, rename = "q")]
     pub query: String,
     pub after: Option<String>,
     pub limit: Option<u8>,
@@ -40,6 +73,10 @@ struct Entry<'a> {
     topics: &'a [String],
     archived: bool,
     fork: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    team_access: Option<RepositoryAccess>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    can_manage_team_access: bool,
 }
 
 #[derive(Default)]
@@ -54,7 +91,7 @@ struct Window<'a> {
 pub(super) async fn list(
     server: &Server,
     principal: &Principal,
-    actor: &Identity,
+    scope: Scope,
     search: Search,
 ) -> Result<Json<Value>> {
     let limit = usize::from(search.limit.unwrap_or(32));
@@ -63,10 +100,16 @@ pub(super) async fn list(
             "Repository search accepts at most 200 characters and pages of 1–50",
         ));
     }
-    let query = Query::parse(&search.query, search.organization)?;
+    let actor = crate::app::actor(principal)?;
+    let organization = scope.organization();
+    let team = match &scope {
+        Scope::Team { team, .. } => Some(*team),
+        _ => None,
+    };
+    let query = Query::parse(&search.query, organization)?;
     let filtered = query.filtered();
     let property_filter = !query.terms.is_empty();
-    let key = query.cursor_key(server, actor, search.organization);
+    let key = query.cursor_key(server, &actor, &scope);
     let after = search
         .after
         .as_deref()
@@ -74,11 +117,8 @@ pub(super) async fn list(
         .transpose()?;
     let words: Vec<_> = query.text.split_whitespace().collect();
     let mut ranks = HashMap::new();
-    let scoped = visible_matching(server, principal, |repo| {
-        if search
-            .organization
-            .is_some_and(|id| repo.organization != Some(id))
-        {
+    let scoped = visible_matching(server, principal, team, |repo| {
+        if !scope.includes(repo) {
             return false;
         }
         if query
@@ -92,10 +132,9 @@ pub(super) async fn list(
         property_filter
     })
     .await?;
-    let property_organization = search
-        .organization
-        .filter(|_| property_filter && !scoped.is_empty());
+    let property_organization = organization.filter(|_| property_filter && !scoped.is_empty());
     let mut topics = HashMap::new();
+    let mut team_grants = HashMap::new();
     let mut ranked: Vec<_> = scoped
         .into_iter()
         .filter_map(|row| {
@@ -104,6 +143,9 @@ pub(super) async fn list(
                 return None;
             }
             topics.insert(row.repository.id, row.topics);
+            if let Some(access) = row.team_access {
+                team_grants.insert(row.repository.id, (access, row.organization_owner));
+            }
             Some((priority, row.repository))
         })
         .collect();
@@ -159,9 +201,9 @@ pub(super) async fn list(
     {
         return Err(Error::PageChanged);
     }
-    let scope = filtered.then(|| scan::scope(server, &visible, window.property_revision));
+    let snapshot_scope = filtered.then(|| scan::scope(server, &visible, window.property_revision));
     let cursor_state = |id| -> Result<Option<blake3::Hash>> {
-        let Some(mut scope) = scope.clone() else {
+        let Some(mut scope) = snapshot_scope.clone() else {
             return Ok(None);
         };
         if query.archived.is_some() {
@@ -189,7 +231,10 @@ pub(super) async fn list(
     let ids: HashSet<_> = checked.iter().map(|repo| repo.id).collect();
     // An organization grant or direct membership may change while we read the
     // page's archive state. Recheck even the lookahead used to issue a cursor.
-    let current = visible_matching(server, principal, |repo| ids.contains(&repo.id)).await?;
+    let current = visible_matching(server, principal, team, |repo| {
+        ids.contains(&repo.id) && scope.includes(repo)
+    })
+    .await?;
     if current.len() != ids.len()
         || checked.iter().any(|repo| {
             !current.iter().any(|row| {
@@ -199,6 +244,10 @@ pub(super) async fn list(
                     && fresh.config.name == repo.config.name
                     && fresh.config.description == repo.config.description
                     && topics.get(&repo.id) == Some(&row.topics)
+                    && team_grants.get(&repo.id).copied()
+                        == row
+                            .team_access
+                            .map(|access| (access, row.organization_owner))
                     && fresh.organization == repo.organization
                     && fresh.ownership_epoch == repo.ownership_epoch
                     && fresh.forked_from == repo.forked_from
@@ -231,6 +280,9 @@ pub(super) async fn list(
             topics: topics.get(&repo.id).map_or(&[], Vec::as_slice),
             archived: lifecycle.archived,
             fork: repo.forked_from.is_some(),
+            team_access: team_grants.get(&repo.id).map(|&(access, _)| access),
+            can_manage_team_access: team_grants.get(&repo.id).is_some_and(|&(_, owner)| owner)
+                && repo.forked_from.is_none(),
         })
         .collect();
     Ok(Json(
