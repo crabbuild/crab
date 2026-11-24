@@ -22,8 +22,7 @@ use crate::{
     cells::{
         Address,
         organization::{
-            Caller,
-            discovery::{GetLanding, Landing},
+            discovery::Landing,
             repositories::{AuthorizeCreation, Creation, CreationOutcome, valid_creation},
         },
     },
@@ -193,7 +192,8 @@ pub(super) async fn visible_matching(
     if selected.is_empty() {
         return Ok(Vec::new());
     }
-    let document = if principal.is_local() && team.is_none() {
+    let local_listing = principal.is_local() && team.is_none();
+    let document = if local_listing && selected.iter().all(|repo| repo.organization.is_none()) {
         None
     } else {
         let catalog = server.catalog().ok_or(app::Error::NotFound)?;
@@ -217,7 +217,9 @@ pub(super) async fn visible_matching(
         .as_ref()
         .map_or("urn:crab:local", |auth| auth.issuer());
     let mut organizations = std::collections::HashMap::new();
-    if let Some(grants) = &grants {
+    if let Some(grants) = &grants
+        && !local_listing
+    {
         for repo in &selected {
             if let Some(record) = grants.get(&repo.id)
                 && let Some(organization) = record.organization_id()
@@ -242,7 +244,9 @@ pub(super) async fn visible_matching(
             .and_then(|grants| grants.get(&repository.id))
             .copied();
         let mut team_access = None;
-        let current = if let Some(grants) = &grants {
+        let current = if local_listing && repository.organization.is_none() {
+            principal.clone()
+        } else if let Some(grants) = &grants {
             let Some(record) = record.filter(|record| {
                 record.owner == repository.config.owner
                     && record.name == repository.config.name
@@ -343,7 +347,7 @@ async fn creation(
     Extension(principal): Extension<Principal>,
 ) -> app::Result<Json<serde_json::Value>> {
     Ok(Json(
-        json!({"owner":namespace(&principal)?,"default_branch":"main"}),
+        json!({"owner":namespace(&principal)?,"default_branch":crate::config::DEFAULT_REPOSITORY_BRANCH}),
     ))
 }
 
@@ -368,24 +372,20 @@ async fn organization_creation(
     Path(organization): Path<Uuid>,
 ) -> app::Result<Json<serde_json::Value>> {
     let actor = super::organizations::actor(&server, &principal).await?;
-    creation_allowed(&server, organization, actor).await?;
+    let default_branch = creation_allowed(&server, organization, actor).await?;
     app::account(&principal)?;
     Ok(Json(
-        json!({"owner":organization_namespace(organization),"default_branch":"main"}),
+        json!({"owner":organization_namespace(organization),"default_branch":default_branch}),
     ))
 }
 
-async fn creation_allowed(server: &Server, organization: Uuid, actor: Uuid) -> app::Result<()> {
-    let cells = server.cells().ok_or(app::Error::CellUnavailable)?;
-    match cells
-        .query::<GetLanding>(Address::Organization(organization), None, Caller { actor })
-        .await
-        .map_err(super::organizations::read_error)?
-        .output
-    {
+async fn creation_allowed(server: &Server, organization: Uuid, actor: Uuid) -> app::Result<String> {
+    match crate::repository::access::organization_landing(server, organization, actor).await? {
         Some(Landing::Member {
-            can_create: true, ..
-        }) => Ok(()),
+            can_create: true,
+            default_branch,
+            ..
+        }) => Ok(default_branch),
         _ => Err(app::Error::NotFound),
     }
 }
@@ -415,12 +415,16 @@ async fn create_organization(
         .map_err(super::organizations::read_error)?
         .output;
     match authorized {
-        CreationOutcome::Accepted { grant_creator } => {
+        CreationOutcome::Accepted {
+            grant_creator,
+            default_branch,
+        } => {
             let response = publish(
                 &server,
                 &principal,
                 BrowserNamespace::Organization(organization),
                 grant_creator,
+                default_branch,
                 input,
             )
             .await?;
@@ -463,6 +467,7 @@ async fn create(
         &principal,
         BrowserNamespace::Personal(owner),
         true,
+        crate::config::default_repository_branch(),
         input,
     )
     .await
@@ -473,6 +478,7 @@ async fn publish(
     principal: &Principal,
     namespace: BrowserNamespace,
     grant_creator: bool,
+    default_branch: String,
     input: CreateRepository,
 ) -> app::Result<(StatusCode, Json<CreatedRepository>)> {
     let actor = app::actor(principal)?;
@@ -508,7 +514,9 @@ async fn publish(
         .receives
         .spawn(async move {
             if record.application == RepositoryApplicationState::EmptyCellPending {
-                catalog.initialize_git(&record, "main", true).await?;
+                catalog
+                    .initialize_git(&record, &default_branch, true)
+                    .await?;
                 worker
                     .initialize_catalog_repository(
                         record.id,

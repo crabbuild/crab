@@ -73,6 +73,8 @@ struct Entry<'a> {
     topics: &'a [String],
     archived: bool,
     fork: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    can_admin: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     team_access: Option<RepositoryAccess>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -256,6 +258,11 @@ pub(super) async fn list(
     {
         return Err(Error::PageChanged);
     }
+    let admins: HashSet<_> = current
+        .iter()
+        .filter(|row| row.principal.can_admin(row.repository.id))
+        .map(|row| row.repository.id)
+        .collect();
     let next = page
         .last()
         .copied()
@@ -280,6 +287,7 @@ pub(super) async fn list(
             topics: topics.get(&repo.id).map_or(&[], Vec::as_slice),
             archived: lifecycle.archived,
             fork: repo.forked_from.is_some(),
+            can_admin: admins.contains(&repo.id),
             team_access: team_grants.get(&repo.id).map(|&(access, _)| access),
             can_manage_team_access: team_grants.get(&repo.id).is_some_and(|&(_, owner)| owner)
                 && repo.forked_from.is_none(),

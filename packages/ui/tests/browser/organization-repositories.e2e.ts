@@ -11,7 +11,7 @@ test("organization repository creation recovers its owner-scoped request after r
   const repository = {
     id: "01900000-0000-7000-8000-000000000014",
     owner,
-    organization,
+    organization_id: organization,
     name: "widgets",
     description: "Team repository",
     access: "write",
@@ -27,6 +27,8 @@ test("organization repository creation recovers its owner-scoped request after r
   let role = "owner";
   let created = false;
   let directRead = false;
+  let directAdmin = false;
+  let organizationVisible = true;
   let intent: unknown;
   await page.route("**/api/**", (route) => {
     const request = route.request();
@@ -44,7 +46,8 @@ test("organization repository creation recovers its owner-scoped request after r
           },
         },
       });
-    if (pathname === orgApi)
+    if (pathname === orgApi) {
+      if (!organizationVisible) return route.fulfill({ status: 404 });
       return route.fulfill({
         json: {
           organization: {
@@ -57,6 +60,7 @@ test("organization repository creation recovers its owner-scoped request after r
           role,
         },
       });
+    }
     if (pathname === `${orgApi}/members`)
       return route.fulfill({
         json: { items: [], next: null, revision: 1, can_manage: true },
@@ -64,7 +68,7 @@ test("organization repository creation recovers its owner-scoped request after r
     if (pathname === `${orgApi}/repositories/creation`) {
       expect(role).toBe("owner");
       if (request.method() === "GET")
-        return route.fulfill({ json: { owner, default_branch: "main" } });
+        return route.fulfill({ json: { owner, default_branch: "trunk" } });
       expect(actor).toBe(alice);
       expect(request.headers()["x-csrf-token"]).toBe("fixture-csrf");
       if (!created) {
@@ -87,13 +91,13 @@ test("organization repository creation recovers its owner-scoped request after r
             (searchParams.get("organization") === organization ||
               searchParams.get("owner") === owner) &&
             (role === "owner" || directRead)
-              ? [repository]
+              ? [{ ...repository, can_admin: role === "owner" || directAdmin }]
               : [],
         },
       });
     if (pathname === `/api/repos/${owner}/widgets/refs`)
       return route.fulfill({
-        json: { head: null, default_branch: "main", refs: [] },
+        json: { head: null, unborn_head: "refs/heads/trunk", refs: [] },
       });
     return route.fulfill({
       status: 404,
@@ -114,6 +118,7 @@ test("organization repository creation recovers its owner-scoped request after r
   await expect(page.getByRole("dialog")).toContainText(
     "owned by Crab Engineering",
   );
+  await expect(page.getByRole("dialog")).toContainText("Default branch trunk");
   await page.getByLabel("Repository name").fill("widgets");
   await page.getByLabel("Description (optional)").fill("Team repository");
   await page
@@ -138,6 +143,14 @@ test("organization repository creation recovers its owner-scoped request after r
     .getByRole("button", { name: "Create repository", exact: true })
     .click();
   await expect(page).toHaveURL(new RegExp(`/${owner}/widgets$`));
+  const banner = page.getByRole("banner");
+  await expect(page).toHaveTitle("Crab Engineering/widgets · Crab");
+  await banner
+    .getByRole("link", { name: "Crab Engineering", exact: true })
+    .click();
+  await expect(page).toHaveURL(
+    new RegExp(`/crab-engineering--${organization}\\?tab=repositories$`),
+  );
 
   actor = bob;
   role = "member";
@@ -154,6 +167,18 @@ test("organization repository creation recovers its owner-scoped request after r
     "href",
     `/${owner}/widgets`,
   );
+  const settings = page.getByRole("link", { name: "Settings for widgets" });
+  await expect(settings).toHaveCount(0);
+  directAdmin = true;
+  await page.reload();
+  await settings.click();
+  await expect(page).toHaveURL(new RegExp(`/${owner}/widgets/settings$`));
+  organizationVisible = false;
+  await page.reload();
+  await expect(banner.getByRole("heading", { name: /widgets/ })).toBeVisible();
+  await expect(
+    banner.getByRole("link", { name: "Crab Engineering", exact: true }),
+  ).toHaveCount(0);
 });
 
 test("a current organization owner can resume a shared import", async ({

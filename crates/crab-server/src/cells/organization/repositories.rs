@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::{DEFAULT_REPOSITORY_BRANCH, default_repository_branch};
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -39,29 +40,45 @@ impl Mutation for AuthorizeCreation {
         // Keep the original ticket digest. A later promotion must not change
         // which direct grant an already authorized reservation carries.
         let creator = format!("{key}/member-creator");
-        let grant_creator = if let Some(existing) = context.document::<[u8; 32]>(&key)? {
-            if existing != digest {
-                return Ok(MutationResult::Rejected(CreationOutcome::Conflict));
-            }
-            context.document::<bool>(&creator)?.unwrap_or(false)
-        } else {
-            let member_creating =
-                member(context, input.actor)?.is_some_and(|member| member.role == Role::Member);
-            context.put_document(&key, &digest)?;
-            if member_creating {
-                context.put_document(&creator, &true)?;
-            }
-            member_creating
-        };
+        let branch = format!("{key}/default-branch");
+        let (grant_creator, default_branch) =
+            if let Some(existing) = context.document::<[u8; 32]>(&key)? {
+                if existing != digest {
+                    return Ok(MutationResult::Rejected(CreationOutcome::Conflict));
+                }
+                (
+                    context.document::<bool>(&creator)?.unwrap_or(false),
+                    context
+                        .document::<String>(&branch)?
+                        .unwrap_or_else(default_repository_branch),
+                )
+            } else {
+                let member_creating =
+                    member(context, input.actor)?.is_some_and(|member| member.role == Role::Member);
+                context.put_document(&key, &digest)?;
+                if member_creating {
+                    context.put_document(&creator, &true)?;
+                }
+                // The authorized branch must survive retries across policy changes.
+                let default_branch = repository_policy::load(context)?.default_branch;
+                if default_branch != DEFAULT_REPOSITORY_BRANCH {
+                    context.put_document(&branch, &default_branch)?;
+                }
+                (member_creating, default_branch)
+            };
         Ok(MutationResult::Success(CreationOutcome::Accepted {
             grant_creator,
+            default_branch,
         }))
     }
 }
 
 #[derive(Deserialize, Serialize)]
 pub(crate) enum CreationOutcome {
-    Accepted { grant_creator: bool },
+    Accepted {
+        grant_creator: bool,
+        default_branch: String,
+    },
     Conflict,
 }
 

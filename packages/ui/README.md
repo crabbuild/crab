@@ -312,6 +312,17 @@ with no repositories. Invitation recipients can open their offers from
 **Notifications → Organization invitations** or a shared link. Configured
 email delivery uses the recipient's verified address and opt-in.
 
+Organization owners can invite a member directly from **People** and review
+pending or past invitations under **People → Invitations**. **Settings** has
+dedicated pages for the organization profile, member privileges, and repository
+governance. The **Repositories** list links people with repository Admin access
+directly to that repository's settings.
+From an organization repository, the organization name in the header links
+back to the repository list when the current viewer can open the organization.
+Repository administrators can check whether they can delete a repository in
+**Settings → General → Danger Zone**. Organization owners can restore eligible
+repositories from **Settings → Deleted repositories** for 90 days.
+
 The **Personal** catalog at
 `/-/repositories/personal` lists repositories in the signed-in account's
 namespace. Creating or importing from that view uses the same server-resolved
@@ -329,8 +340,8 @@ team, including forks that inherit the grant. Organization owners can open
 change, or revoke a role in that repository. Team and individual edits use the
 same catalog revision. Reload team access after a conflict to see current grants
 before editing again. Organization owners can grant access directly from a
-team's **Repositories** tab and configure member creation and baseline roles
-under **Settings → Repository policy**. The People tab filters active members
+team's **Repositories** tab and configure repository permissions under
+**Settings → Member privileges**. The People tab filters active members
 by name, role, and visible team. Owners can also search invitation history.
 
 The pull request **Reviewers** picker searches people and visible teams with

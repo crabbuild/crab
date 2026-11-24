@@ -1,4 +1,5 @@
 import { RepoIcon } from "@primer/octicons-react";
+import { SettingsIcon } from "lucide-react";
 import { useRef } from "react";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
@@ -20,6 +21,7 @@ type Entry = Pick<
 type Page = {
   repositories: (Entry & {
     fork: boolean;
+    can_admin?: boolean;
     team_access?: RepositoryAccess;
     can_manage_team_access?: boolean;
   })[];
@@ -188,6 +190,22 @@ export function BrowseRepositories({ url, scope }: { url: URL; scope: Scope }) {
                           {repositoryRoleLabels[repo.team_access]}
                         </Badge>
                       )}
+                      {scope.kind === "organization" && repo.can_admin && (
+                        <Button
+                          asChild
+                          variant="ghost"
+                          size="sm"
+                          className="sm:ms-auto"
+                        >
+                          <Link
+                            href={repoHref(repo, { view: "settings" })}
+                            aria-label={`Settings for ${repo.name}`}
+                          >
+                            <SettingsIcon data-icon="inline-start" />
+                            Settings
+                          </Link>
+                        </Button>
+                      )}
                       {(repo.can_manage_team_access ||
                         (scope.kind === "organization" &&
                           scope.owner &&
@@ -196,7 +214,11 @@ export function BrowseRepositories({ url, scope }: { url: URL; scope: Scope }) {
                           asChild
                           variant="ghost"
                           size="sm"
-                          className="sm:ms-auto"
+                          className={
+                            scope.kind === "organization" && repo.can_admin
+                              ? undefined
+                              : "sm:ms-auto"
+                          }
                         >
                           <Link
                             href={repoHref(repo, {

@@ -101,7 +101,7 @@ impl Offer {
             && valid_actor(&self.requester)
             && self.recipient.valid()
             && !self.recipient_label.is_empty()
-            && self.recipient_label.len() <= 100
+            && self.recipient_label.chars().count() <= 100
             && !self.recipient_label.chars().any(char::is_control)
             && valid_repository_component(&self.from_owner)
             && valid_repository_component(&self.from_name)

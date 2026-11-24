@@ -1,9 +1,11 @@
 import { FieldSelect } from "@/components/ui/field-select";
 import { useState, useRef, type FormEvent } from "react";
+import { ChevronDownIcon } from "lucide-react";
 import { useMutation } from "@/components/discussion/mutations";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
+import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
   Dialog,
@@ -16,6 +18,9 @@ import {
 import { useRequest, type Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 import { refreshNotificationBadge } from "@/features/notifications/actions";
+import { OrganizationChoices } from "@/features/organizations/choices";
+import { organizationDestination } from "@/lib/organization-route";
+import type { Organization, OrganizationRole } from "@/lib/contracts";
 
 type Location = Pick<Repository, "owner" | "name">;
 type Offer = {
@@ -33,6 +38,9 @@ type Offer = {
 type Target =
   | { kind: "account"; handle: string }
   | { kind: "organization"; id: string };
+type Destination = Pick<Organization, "id" | "name"> & {
+  role: OrganizationRole;
+};
 
 type Proposal = {
   request_id: string;
@@ -77,7 +85,7 @@ export function TransferSettings({
               Transfer repository
             </Button>
           </DialogTrigger>
-          <DialogContent>
+          <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-md">
             <DialogHeader>
               <DialogTitle>Transfer repository</DialogTitle>
               <DialogDescription>
@@ -95,32 +103,45 @@ export function TransferSettings({
 
 function TransferForm({ repo, csrf }: { repo: Repository; csrf: string }) {
   const path = `/api/repositories/${repo.id}/transfer`;
-  const settings = useRequest<{ version: number; offer: Offer | null }>(path);
+  const settings = useRequest<{
+    version: number;
+    can_transfer: boolean;
+    offer: Offer | null;
+  }>(path);
   const mutation = useMutation(csrf, repo);
-  const [kind, setKind] = useState<Target["kind"]>("account");
+  const [kind, setKind] = useState("account");
   const [value, setValue] = useState("");
-  const [name, setName] = useState(repo.name);
+  const [organization, setOrganization] = useState<Destination>();
+  const [draftName, setName] = useState(repo.name);
+  const [confirmation, setConfirmation] = useState("");
   const [saved, setSaved] = useState<Offer>();
   const [copied, setCopied] = useState(false);
   const intent = useRef<{ key: string; payload: Proposal } | undefined>(
     undefined,
   );
+  const keepsSourceName =
+    kind === "directory" && organization?.role === "member";
+  const name = keepsSourceName ? repo.name : draftName;
   const validName =
     /^[a-z0-9._-]{1,100}$/i.test(name) && name !== "." && name !== "..";
+  const entered = value.trim();
+  const destination =
+    kind === "organization"
+      ? organizationDestination(entered, window.location.origin)
+      : organization?.id;
+  const recipient: Target | undefined =
+    kind === "account"
+      ? entered
+        ? { kind, handle: entered }
+        : undefined
+      : destination && destination !== repo.organization_id
+        ? { kind: "organization", id: destination }
+        : undefined;
+  const ready = Boolean(recipient && validName && confirmation === repo.name);
 
   async function propose(event: FormEvent<HTMLFormElement>, version: number) {
     event.preventDefault();
-    if (!value.trim() || !validName || mutation.pending) return;
-    const entered = value.trim();
-    const recipient: Target =
-      kind === "account"
-        ? { kind, handle: entered }
-        : {
-            kind,
-            id: entered
-              .replace(/^.*\/-\/organizations\//, "")
-              .split(/[/?#]/, 1)[0],
-          };
+    if (!recipient || !ready || mutation.pending) return;
     const key = JSON.stringify({ recipient, name, version });
     if (intent.current?.key !== key) {
       intent.current = {
@@ -138,11 +159,19 @@ function TransferForm({ repo, csrf }: { repo: Repository; csrf: string }) {
 
   return (
     <Result state={settings} timingLabel="Repository transfer">
-      {({ version, offer }) => {
+      {({ version, can_transfer, offer }) => {
         const current = saved ?? offer;
         return current?.state === "pending" ? (
           <div className="grid gap-3">
-            <p role="status">Awaiting acceptance from {current.recipient}.</p>
+            <p role="status" className="wrap-anywhere">
+              Awaiting acceptance from {current.recipient}.
+            </p>
+            {!can_transfer && (
+              <p className="text-sm text-muted-foreground">
+                Your account can cancel this offer. Your organization restricts
+                who can transfer this repository.
+              </p>
+            )}
             <p className="text-sm">
               The recipient can review this offer in Notifications for 24 hours.
               You can also share the link directly.
@@ -173,6 +202,11 @@ function TransferForm({ repo, csrf }: { repo: Repository; csrf: string }) {
               </Button>
             </div>
           </div>
+        ) : !can_transfer ? (
+          <p className="text-sm text-muted-foreground">
+            Your organization’s transfer policy does not let your account
+            transfer this repository. Contact an organization owner.
+          </p>
         ) : (
           <form
             className="grid gap-3"
@@ -181,42 +215,95 @@ function TransferForm({ repo, csrf }: { repo: Repository; csrf: string }) {
             <label className="grid gap-1 text-sm font-medium">
               Recipient type
               <FieldSelect
+                label="Recipient type"
+                className="w-full"
                 value={kind}
                 onValueChange={(nextValue) => {
-                  setKind(
-                    nextValue === "organization" ? "organization" : "account",
-                  );
+                  setKind(nextValue);
                   setValue("");
+                  setConfirmation("");
                 }}
                 options={[
                   { value: "account", label: "Personal account" },
-                  { value: "organization", label: "Organization" },
+                  { value: "directory", label: "Your organizations" },
+                  { value: "organization", label: "Other organization" },
                 ]}
               />
             </label>
-            <label className="grid gap-1 text-sm font-medium">
-              {kind === "account"
-                ? "Recipient profile handle"
-                : "Organization link or ID"}
-              <Input
-                value={value}
-                onChange={(event) => setValue(event.target.value)}
-                maxLength={256}
-                required
+            {kind === "directory" ? (
+              <TransferOrganizationPicker
+                source={repo.organization_id}
+                selected={organization}
+                select={(selected) => {
+                  setOrganization(selected);
+                  setConfirmation("");
+                }}
               />
-            </label>
-            <label className="grid gap-1 text-sm font-medium">
-              Repository name at destination
+            ) : (
+              <Field className="gap-1">
+                <FieldLabel htmlFor="transfer-recipient">
+                  {kind === "account"
+                    ? "Recipient profile handle"
+                    : "Organization link or ID"}
+                </FieldLabel>
+                <Input
+                  id="transfer-recipient"
+                  aria-describedby={
+                    kind === "organization" && entered && !recipient
+                      ? "transfer-recipient-help"
+                      : undefined
+                  }
+                  value={value}
+                  onChange={(event) => setValue(event.target.value)}
+                  maxLength={1024}
+                  required
+                />
+                {kind === "organization" && entered && !recipient && (
+                  <FieldDescription id="transfer-recipient-help">
+                    {destination
+                      ? "Choose an organization other than the current owner."
+                      : "Enter a Crab organization link from this server or an organization ID."}
+                  </FieldDescription>
+                )}
+              </Field>
+            )}
+            <Field className="gap-1">
+              <FieldLabel htmlFor="transfer-destination-name">
+                Repository name at destination
+              </FieldLabel>
               <Input
+                id="transfer-destination-name"
+                aria-describedby={
+                  kind === "account"
+                    ? undefined
+                    : "transfer-destination-name-help"
+                }
                 name="destination-name"
                 value={name}
+                readOnly={keepsSourceName}
                 onChange={(event) => setName(event.target.value)}
+                maxLength={100}
+                required
+              />
+              {kind !== "account" && (
+                <FieldDescription id="transfer-destination-name-help">
+                  Only a destination organization owner can change the name
+                  during transfer.
+                </FieldDescription>
+              )}
+            </Field>
+            <label className="grid gap-1 text-sm font-medium wrap-anywhere">
+              Type {repo.name} to confirm transfer.
+              <Input
+                value={confirmation}
+                onChange={(event) => setConfirmation(event.target.value)}
+                autoComplete="off"
                 maxLength={100}
                 required
               />
             </label>
             {mutation.error && <p role="alert">{mutation.error}</p>}
-            {mutation.status === 409 && (
+            {(mutation.status === 403 || mutation.status === 409) && (
               <Button
                 type="button"
                 variant="outline"
@@ -232,7 +319,7 @@ function TransferForm({ repo, csrf }: { repo: Repository; csrf: string }) {
             <Button
               type="submit"
               className="justify-self-end"
-              disabled={!value.trim() || !validName || mutation.pending}
+              disabled={!ready || mutation.pending}
             >
               {mutation.pending ? "Creating offer…" : "Create transfer offer"}
             </Button>
@@ -240,6 +327,54 @@ function TransferForm({ repo, csrf }: { repo: Repository; csrf: string }) {
         );
       }}
     </Result>
+  );
+}
+
+function TransferOrganizationPicker({
+  source,
+  selected,
+  select,
+}: {
+  source?: string;
+  selected?: Destination;
+  select: (organization: Destination) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          className="w-full justify-between"
+        >
+          <span className="truncate">
+            {selected?.name ?? "Choose organization"}
+          </span>
+          <ChevronDownIcon data-icon="inline-end" />
+        </Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Choose organization</DialogTitle>
+          <DialogDescription>
+            Select an organization where you can create repositories.
+          </DialogDescription>
+        </DialogHeader>
+        {open && (
+          <OrganizationChoices
+            eligible={(entry) =>
+              entry.organization.id !== source &&
+              (entry.can_create || entry.role === "owner")
+            }
+            select={({ organization, role }) => {
+              select({ id: organization.id, name: organization.name, role });
+              setOpen(false);
+            }}
+          />
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }
 

@@ -33,6 +33,8 @@ pub(in crate::api) enum AuditAction {
     RepositoryAccessChanged,
     RepositoryTransferredIn,
     RepositoryTransferredOut,
+    RepositoryDeleted,
+    RepositoryRestored,
 }
 
 #[derive(Serialize)]
@@ -231,6 +233,8 @@ impl From<audit::Entry> for RawEvent {
             audit::Action::AccessChanged => AuditAction::RepositoryAccessChanged,
             audit::Action::TransferredIn => AuditAction::RepositoryTransferredIn,
             audit::Action::TransferredOut => AuditAction::RepositoryTransferredOut,
+            audit::Action::Deleted => AuditAction::RepositoryDeleted,
+            audit::Action::Restored => AuditAction::RepositoryRestored,
         };
         let operator = entry.actor.issuer == "urn:crab:local";
         Self {

@@ -18,6 +18,7 @@ use crate::{
         },
         organization::{
             Caller, GetOrganization, Role,
+            discovery::{GetLanding, Landing},
             teams::{
                 repository_access::{
                     ActorTeams, RepositoryActor, RepositoryTeamNames, RepositoryTeamQuery,
@@ -61,7 +62,23 @@ pub(crate) async fn organization_role(
         .query::<GetOrganization>(Address::Organization(organization), None, Caller { actor })
         .await
     {
-        Ok(result) => Ok(result.output.map(|value| value.role)),
+        Ok(result) => Ok(result.output.map(|view| view.role)),
+        Err(crate::cells::Error::NotInitialized | crate::cells::Error::AccessDenied) => Ok(None),
+        Err(error) => Err(Error::Cell(error)),
+    }
+}
+
+pub(crate) async fn organization_landing(
+    server: &Server,
+    organization: Uuid,
+    actor: Uuid,
+) -> Result<Option<Landing>> {
+    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    match cells
+        .query::<GetLanding>(Address::Organization(organization), None, Caller { actor })
+        .await
+    {
+        Ok(result) => Ok(result.output),
         Err(crate::cells::Error::NotInitialized | crate::cells::Error::AccessDenied) => Ok(None),
         Err(error) => Err(Error::Cell(error)),
     }

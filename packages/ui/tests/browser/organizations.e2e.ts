@@ -27,7 +27,10 @@ async function fixture(page: Page) {
     policy: {
       version: number;
       member_creation: boolean;
+      member_transfer: boolean;
+      member_deletion: boolean;
       baseline: "read" | "write" | null;
+      default_branch: string;
     };
   } = {
     organization: {
@@ -51,7 +54,14 @@ async function fixture(page: Page) {
     writes: [],
     fail: false,
     metadataVisible: true,
-    policy: { version: 0, member_creation: false, baseline: null },
+    policy: {
+      version: 0,
+      member_creation: false,
+      member_transfer: false,
+      member_deletion: false,
+      baseline: null,
+      default_branch: "main",
+    },
   };
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -221,11 +231,30 @@ test("organization owners save repository policy from settings", async ({
   page,
 }) => {
   const state = await fixture(page);
-  await page.goto(`${root}?tab=settings`);
+  await page.goto(root);
+  await page.getByRole("link", { name: "Settings", exact: true }).click();
+  await page.getByRole("link", { name: "Member privileges" }).click();
+  await page.getByLabel("Default branch for new repositories").fill("trunk");
   await page
     .getByRole("combobox", { name: "Who can create repositories" })
     .click();
   await page.getByRole("option", { name: "All organization members" }).click();
+  await page
+    .getByRole("combobox", { name: "Who can transfer repositories" })
+    .click();
+  await page
+    .getByRole("option", {
+      name: "Owners and members with repository Admin access",
+    })
+    .click();
+  await page
+    .getByRole("combobox", { name: "Who can delete repositories" })
+    .click();
+  await page
+    .getByRole("option", {
+      name: "Owners and members with repository Admin access",
+    })
+    .click();
   await page.getByRole("combobox", { name: "Baseline member access" }).click();
   await page.getByRole("option", { name: "Read", exact: true }).click();
   await page.getByRole("button", { name: "Save repository policy" }).click();
@@ -233,9 +262,121 @@ test("organization owners save repository policy from settings", async ({
   expect(state.policy).toEqual({
     version: 1,
     member_creation: true,
+    member_transfer: true,
+    member_deletion: true,
     baseline: "read",
+    default_branch: "trunk",
   });
   await expectNoAccessibilityViolations(page);
+});
+
+test("organization owners delete and restore repositories", async ({
+  page,
+}) => {
+  await fixture(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const repo = {
+    id: "01900000-0000-7000-8000-000000000021",
+    owner: "org-crab",
+    name: "library",
+    organization_id: id,
+    can_admin: true,
+    archive_version: 0,
+  };
+  const repository = `/${repo.owner}/${repo.name}`;
+  const deletion = `/api/repositories/${repo.id}/deletion`;
+  const deleted = `/api/organizations/${id}/deleted-repositories`;
+  const deletedAt = Date.now();
+  let submission: { request_id: string } | null = null;
+  let removed = false;
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const { pathname } = new URL(request.url());
+    if (pathname === "/api/repos")
+      return route.fulfill({ json: { repositories: removed ? [] : [repo] } });
+    if (pathname.endsWith("/refs"))
+      return route.fulfill({ json: { head: null, refs: [] } });
+    if (pathname.endsWith("/settings/merge-methods"))
+      return route.fulfill({ json: { version: 0, enabled: ["merge_commit"] } });
+    if (pathname.endsWith("/pulls/recent-pushes"))
+      return route.fulfill({ json: { items: [] } });
+    if (pathname === deletion) {
+      if (request.method() === "GET")
+        return route.fulfill({
+          json: { version: 0, can_delete: true, forks: 1 },
+        });
+      expect(request.method()).toBe("DELETE");
+      expect(request.headers()["x-csrf-token"]).toBe("csrf");
+      if (!submission) {
+        submission = request.postDataJSON();
+        expect(submission).toEqual({
+          request_id: expect.any(String),
+          version: 0,
+          confirmation: "org-crab/library",
+        });
+        removed = true;
+        return route.abort("failed");
+      }
+      expect(request.postDataJSON()).toEqual(submission);
+      return route.fulfill({ json: { organization: id } });
+    }
+    if (pathname === deleted) {
+      return route.fulfill({
+        json: {
+          items: removed
+            ? [
+                {
+                  ...repo,
+                  deletion_id: submission?.request_id,
+                  deleted_at_ms: deletedAt,
+                  expires_at_ms: deletedAt + 90 * 86_400_000,
+                  can_restore: true,
+                  forks: 1,
+                },
+              ]
+            : [],
+          next: null,
+        },
+      });
+    }
+    if (pathname === `${deleted}/${repo.id}`) {
+      expect(request.method()).toBe("PUT");
+      expect(request.headers()["x-csrf-token"]).toBe("csrf");
+      expect(request.postDataJSON()).toEqual({
+        deletion_id: submission?.request_id,
+      });
+      removed = false;
+      return route.fulfill({ json: repo });
+    }
+    return route.fallback();
+  });
+
+  await page.goto(`${repository}/settings`);
+  await page.getByRole("button", { name: "Delete this repository" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("This also deletes 1 private fork.");
+  const remove = dialog.getByRole("button", { name: "Delete repository" });
+  await expect(remove).toBeDisabled();
+  await dialog
+    .getByLabel("Type org-crab/library to confirm deletion")
+    .fill("org-crab/library");
+  await remove.click();
+  await expect(dialog.getByRole("alert")).toBeVisible();
+  await remove.click();
+  await expect(page).toHaveURL(/tab=repositories$/);
+  await expect(
+    page.getByRole("link", { name: "library", exact: true }),
+  ).toHaveCount(0);
+  await page.getByRole("link", { name: "Settings", exact: true }).click();
+  await page
+    .getByRole("link", { name: "Deleted repositories", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Restore library" }).click();
+  await expect(dialog).toContainText("Team grants need to be added again.");
+  await expectNoAccessibilityViolations(page);
+  await dialog.getByRole("button", { name: "Restore repository" }).click();
+  await page.getByRole("status").getByRole("link", { name: "library" }).click();
+  await expect(page).toHaveURL(new RegExp(`${repository}$`));
 });
 
 test("owners see identity-provider management and blocked access in People", async ({
@@ -272,7 +413,7 @@ test("owners invite by stable account, preserve a conflicted form, and cancel wi
   page,
 }) => {
   const state = await fixture(page);
-  await page.goto(`${root}?tab=invitations`);
+  await page.goto(root);
   await page
     .getByRole("button", { name: "Invite member", exact: true })
     .click();
@@ -299,6 +440,11 @@ test("owners invite by stable account, preserve a conflicted form, and cancel wi
     .getByRole("button", { name: "Create invitation", exact: true })
     .click();
   await expect(dialog).toHaveCount(0);
+  await expect(page.getByRole("status")).toContainText("Invitation created.");
+  await page.getByRole("link", { name: "Invitations", exact: true }).click();
+  await expect(
+    page.getByRole("link", { name: "People", exact: true }),
+  ).toHaveAttribute("aria-current", "page");
   await expect(
     page.getByRole("button", { name: "Cancel invitation", exact: true }),
   ).toBeVisible();
@@ -396,8 +542,22 @@ test("organization settings and read-only people remain accessible at mobile wid
   await page.setViewportSize({ width: 390, height: 844 });
   await expectNoAccessibilityViolations(page);
   await selectDarkTheme(page);
+  await page.setViewportSize({ width: 320, height: 844 });
+  await page.getByRole("link", { name: "Member privileges" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Member privileges" }),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
   await expectNoAccessibilityViolations(page);
   state.role = "member";
+  await page.reload();
+  await expect(page.getByRole("alert")).toContainText(
+    "This organization page is unavailable.",
+  );
   await page.goto(root);
   await expect(
     page.getByRole("link", { name: "Settings", exact: true }),

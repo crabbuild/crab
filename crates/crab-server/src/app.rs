@@ -40,6 +40,18 @@ pub(crate) enum Error {
     IdentityAuthority(#[source] Box<crate::auth::AuthError>),
     #[error("Repository transfer publication is unavailable")]
     TransferPublication(#[source] crab_remote::publication::Error),
+    #[error("The organization’s transfer policy does not allow this repository to be transferred")]
+    RepositoryTransferRestricted,
+    #[error(
+        "The organization’s policy does not allow this repository to be deleted by this account"
+    )]
+    RepositoryDeletionRestricted,
+    #[error(
+        "The requester must have permission to create repositories in the destination organization"
+    )]
+    RepositoryTransferDestinationCreationRequired,
+    #[error("Only a destination organization owner can change the repository name during transfer")]
+    RepositoryTransferDestinationOwnerRequired,
     #[error("Incoming issue transfers must finish before repository ownership can change")]
     RepositoryIssueTransfersPending,
     #[error("This transfer expired. Reload the issue to start a new transfer.")]
@@ -374,6 +386,26 @@ impl IntoResponse for Error {
                 StatusCode::CONFLICT,
                 "issue_transfers_pending",
                 "Incoming issue transfers must finish before repository ownership can change",
+            ),
+            Self::RepositoryTransferRestricted => (
+                StatusCode::FORBIDDEN,
+                "repository_transfer_restricted",
+                "The organization’s transfer policy does not allow this repository to be transferred",
+            ),
+            Self::RepositoryDeletionRestricted => (
+                StatusCode::FORBIDDEN,
+                "repository_deletion_restricted",
+                "The organization’s policy does not allow this repository to be deleted by this account",
+            ),
+            Self::RepositoryTransferDestinationCreationRequired => (
+                StatusCode::FORBIDDEN,
+                "transfer_destination_creation_required",
+                "The requester must have permission to create repositories in the destination organization",
+            ),
+            Self::RepositoryTransferDestinationOwnerRequired => (
+                StatusCode::FORBIDDEN,
+                "transfer_destination_owner_required",
+                "Only a destination organization owner can change the repository name during transfer",
             ),
             Self::IssueTransferExpired => (
                 StatusCode::CONFLICT,
@@ -1105,6 +1137,21 @@ pub(crate) async fn membership(
     if principal.is_local() || principal.import_grant().is_some() {
         if !principal.can_read(repo.id) {
             return Err(Error::NotFound);
+        }
+        if principal.is_local() && repo.organization.is_some() {
+            let snapshot = server
+                .catalog()
+                .ok_or(Error::NotFound)?
+                .membership(&repo.config.owner, &repo.config.name)
+                .await
+                .map_err(repository_access_error)?;
+            // A local credential must not bypass catalog removal on a stale peer.
+            if snapshot.repository_id != repo.id
+                || snapshot.name != repo.config.name
+                || snapshot.ownership_epoch != repo.ownership_epoch
+            {
+                return Err(Error::NotFound);
+            }
         }
         let organization_owner = if let Some(grant) = principal.import_grant() {
             if !grant.active(server).await {

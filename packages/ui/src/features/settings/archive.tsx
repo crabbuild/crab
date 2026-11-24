@@ -62,8 +62,7 @@ export function ArchiveSettings({
   }
 
   return (
-    <section className="danger-zone" aria-labelledby="danger-zone-heading">
-      <h2 id="danger-zone-heading">Danger Zone</h2>
+    <>
       <div className="danger-zone-row">
         <div>
           <strong>
@@ -145,6 +144,6 @@ export function ArchiveSettings({
           </div>
         </div>
       )}
-    </section>
+    </>
   );
 }

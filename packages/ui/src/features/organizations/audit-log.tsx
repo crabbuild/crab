@@ -40,6 +40,8 @@ const actions: Record<AuditAction, string> = {
   repository_access_changed: "Repository access changed",
   repository_transferred_in: "Repository transferred in",
   repository_transferred_out: "Repository transferred out",
+  repository_deleted: "Repository deleted",
+  repository_restored: "Repository restored",
 };
 
 const textFilters = [

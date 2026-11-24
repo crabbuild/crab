@@ -767,11 +767,19 @@ caller can access. Managed namespaces accept new repositories through the
 organization creation path.
 
 Organization owners can read and update `/api/organizations/{id}/repository-policy`
-and configure it in **Settings → Repository policy**. Updates carry the saved
-`version`, `member_creation`, and `baseline` (`null`, `read`, or `write`).
-The default is owners-only creation with no baseline. The highest applicable
+and configure it in **Settings → Member privileges**. Updates carry the saved
+`version`, `member_creation`, `member_transfer`, `member_deletion`, `baseline`
+(`null`, `read`, or `write`), and `default_branch` (a short Git branch name).
+By default only owners can create, transfer, or delete repositories, and
+members have no base access.
+The highest applicable
 organization, repository, and group role applies subject to credential limits.
 The People repository access inspector shows the baseline separately.
+
+New organization repositories start with the branch name configured in Member
+privileges, initially `main`. Once repository creation is authorized, retries
+use the branch name captured for that request. Git imports use the source
+repository's default branch.
 
 Upgrade serving replicas together before starting organization-owned
 creation. Existing catalog entries keep their previous ownership and grants.
@@ -787,8 +795,9 @@ before description matches. The organization tab keeps the search scoped to
 that organization. Search terms and the current page are in the URL.
 
 `GET /api/repos?limit=32` returns `{repositories, next}`. Each result has
-`id`, `owner`, `name`, `description`, and `archived`. Provide optional
-`q` (up to 200 characters) and `organization` (UUID). Pages accept a
+`id`, `owner`, `name`, `description`, and `archived`. A result includes
+`can_admin: true` when the caller has current repository Admin access. Provide
+optional `q` (up to 200 characters) and `organization` (UUID). Pages accept a
 `limit` from 1 to 50 and return `next: null` on the last page. Send the
 returned continuation as `after` with the same search and organization.
 Crab binds it to the signed-in account and rechecks current repository
@@ -872,15 +881,22 @@ Continuations bind the query and the matching readable catalog scope.
 ### Transfer repository ownership
 
 In **Settings → General**, a repository administrator can create an offer for a
-personal account by profile handle or for an organization by link or ID. Share
-the private offer link with the recipient. The named account or a current owner
+personal account by profile handle. For an organization, choose an eligible one
+by name or enter its link or ID. The requester must have creation permission
+in the destination. A transfer that changes the repository name requires an
+owner of the destination organization to make the request. Confirm the current
+repository name before creating the offer. Share the private offer link with
+the recipient. The named account or a current owner
 of the destination organization sees eligible offers in **Notifications →
 Repository transfers** and must sign in and accept within 24 hours. The bell
 also signals a pending offer. A current source administrator can cancel a
 pending offer. The recipient can
-also decline it. Crab rechecks the requester's authority and destination access
-at acceptance. Archived repositories and repositories in a private fork network
-are ineligible for transfer.
+also decline it. Organization owners can allow current members with direct,
+team, or group Admin access to transfer organization repositories. Crab checks
+source and destination permissions when the offer is created and again at
+acceptance. Tightening either policy blocks outstanding offers from members
+who lose permission. Archived repositories and repositories in a private fork
+network are ineligible for transfer.
 If the offer changes a protected repository name, acceptance also checks
 the source requester's current ruleset bypass grants.
 
@@ -892,8 +908,10 @@ access. Existing URLs redirect after checking current access until the former
 address is reclaimed. Issue a fresh Git token for the destination owner after
 acceptance. That token can follow the authorized redirect from the old remote.
 
-`GET /api/repositories/{repository}/transfer` returns the current name version
-and offer to a repository administrator. A `POST` to that route submits `version`,
+`GET /api/repositories/{repository}/transfer` returns the current name version,
+`can_transfer`, and offer to a repository administrator. Organization offers
+show the confirmed destination's name.
+A `POST` to that route submits `version`,
 `request_id`, destination `name`, and `recipient` (`{kind:"account",handle}` or
 `{kind:"organization",id}`). `GET /api/repository-transfers/{id}` reads the
 private offer. `PUT` on that path takes `decision` (`accept`, `decline`, or
@@ -904,6 +922,30 @@ reports `pending_transfers: true` when there is a pending offer and no unread
 discussion notification is taking priority. The browser endpoints use the session and the usual CSRF protection.
 Retry a lost response with the same request ID or decision. A changed source
 address, a competing catalog update, or a claimed destination blocks acceptance.
+
+### Delete and restore an organization repository
+
+In **Settings → General → Danger Zone**, type the full repository name to
+confirm deletion. Organization policy controls whether members with
+repository Admin access can delete a repository. Deleting a repository also
+removes its private forks from the active catalog. Deleting a fork leaves the
+upstream repository available.
+
+Organization owners can restore an eligible repository and its private forks
+for 90 days under **Settings → Deleted repositories**. Restoration keeps the
+repository UUID, refs, and collaboration history. Team grants need to be
+assigned again. The original repository and fork names must be available.
+An individually deleted fork cannot be restored on its own. The catalog
+retains a storage reservation after expiry. This workflow does not purge data
+from the configured object store.
+
+`GET /api/repositories/{repository}/deletion` returns eligibility, name
+version, and the number of affected forks. Send `request_id`, `version`, and
+`confirmation` to `DELETE` on the same path. Organization owners can list
+recent deletions at `GET /api/organizations/{organization}/deleted-repositories`
+and restore at `PUT /api/organizations/{organization}/deleted-repositories/{repository}`
+with `deletion_id`. Pass the returned `next` as `before` to page through
+recent deletions. Reuse the same request ID after a lost deletion response.
 
 ### Git imports
 

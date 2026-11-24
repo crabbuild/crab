@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { ChevronDownIcon } from "lucide-react";
-import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -12,14 +11,12 @@ import {
 } from "@/components/ui/dialog";
 import { GitImport } from "@/features/imports";
 import {
-  useOrganizationDirectory,
-  type OrganizationEntry,
-} from "@/features/organizations/directory";
+  OrganizationChoices,
+  type OrganizationMembershipEntry,
+} from "@/features/organizations/choices";
 import { navigate } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 import { CreateRepository } from "./create";
-
-type OrganizationOwner = Extract<OrganizationEntry, { kind: "member" }>;
 
 export function RepositoryOwnerActions({
   account,
@@ -30,7 +27,7 @@ export function RepositoryOwnerActions({
   csrf: string;
   personal: boolean;
 }) {
-  const [owner, setOwner] = useState<OrganizationOwner>();
+  const [owner, setOwner] = useState<OrganizationMembershipEntry>();
   const [open, setOpen] = useState(false);
   const selected = personal ? undefined : owner;
   const organization = selected?.organization;
@@ -55,8 +52,19 @@ export function RepositoryOwnerActions({
                 Select a destination for repository creation or import.
               </DialogDescription>
             </DialogHeader>
+            <Button
+              variant="outline"
+              className="justify-start"
+              onClick={() => {
+                setOwner(undefined);
+                setOpen(false);
+              }}
+            >
+              Personal
+            </Button>
             {open && (
-              <OwnerChoices
+              <OrganizationChoices
+                eligible={(entry) => entry.can_create || entry.role === "owner"}
                 select={(entry) => {
                   setOwner(entry);
                   setOpen(false);
@@ -97,77 +105,5 @@ export function RepositoryOwnerActions({
         />
       )}
     </div>
-  );
-}
-
-function OwnerChoices({
-  select,
-}: {
-  select: (entry?: OrganizationOwner) => void;
-}) {
-  const [after, setAfter] = useState<string>();
-  const state = useOrganizationDirectory(after);
-  return (
-    <>
-      <Button
-        variant="outline"
-        className="justify-start"
-        onClick={() => select()}
-      >
-        Personal
-      </Button>
-      <Result state={state} timingLabel="Eligible organizations">
-        {({ items, next }) => {
-          const eligible = items.filter(
-            (entry): entry is OrganizationOwner =>
-              entry.kind === "member" &&
-              (entry.can_create || entry.role === "owner"),
-          );
-          return (
-            <>
-              {eligible.length ? (
-                <ul
-                  aria-label="Eligible organizations"
-                  className="max-h-[35dvh] divide-y overflow-auto rounded-lg border"
-                >
-                  {eligible.map((entry) => (
-                    <li key={entry.organization.id}>
-                      <Button
-                        variant="ghost"
-                        className="h-auto w-full justify-start text-start whitespace-normal wrap-anywhere"
-                        onClick={() => select(entry)}
-                      >
-                        {entry.organization.name}
-                      </Button>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-muted-foreground" role="status">
-                  No eligible organizations on this page.
-                </p>
-              )}
-              {(after || next) && (
-                <div className="flex flex-wrap gap-2">
-                  {after && (
-                    <Button
-                      variant="outline"
-                      onClick={() => setAfter(undefined)}
-                    >
-                      First page
-                    </Button>
-                  )}
-                  {next && (
-                    <Button variant="outline" onClick={() => setAfter(next)}>
-                      Next page
-                    </Button>
-                  )}
-                </div>
-              )}
-            </>
-          );
-        }}
-      </Result>
-    </>
   );
 }

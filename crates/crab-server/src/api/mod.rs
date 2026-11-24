@@ -34,6 +34,7 @@ mod projects;
 mod pulls;
 mod reactions;
 mod releases;
+mod repository_deletion;
 mod repository_metadata;
 mod repository_name;
 mod repository_transfer;
@@ -607,6 +608,7 @@ pub(crate) fn routes(server: Arc<Server>) -> axum::Router<Arc<Server>> {
         .merge(repository_metadata::routes(Arc::clone(&server)))
         .merge(repository_name::routes(Arc::clone(&server)))
         .merge(repository_transfer::routes(Arc::clone(&server)))
+        .merge(repository_deletion::routes(Arc::clone(&server)))
         .route(
             "/api/repos/{owner}/{name}/archive",
             axum::routing::get(archive::download),

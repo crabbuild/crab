@@ -70,7 +70,9 @@ pub(super) async fn list(
                     Err(error) => return Err(read_error(error)),
                 };
                 Ok(landing.map(|entry| match entry {
-                    Landing::Member { view, can_create } => Entry::Member {
+                    Landing::Member {
+                        view, can_create, ..
+                    } => Entry::Member {
                         organization: view.organization,
                         actor,
                         role: view.role,

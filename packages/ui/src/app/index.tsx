@@ -34,6 +34,11 @@ import {
 } from "@/features/organizations";
 import { OrganizationDirectory } from "@/features/organizations/directory";
 import {
+  matchOrganizationRoute,
+  organizationHref,
+} from "@/lib/organization-route";
+import type { OrganizationView } from "@/lib/contracts";
+import {
   TeamFeedback,
   useTeamCommands,
 } from "@/features/organizations/teams/commands";
@@ -158,10 +163,7 @@ export function App() {
   const transferId = /^\/-\/repository-transfers\/([0-9a-f-]{36})$/i.exec(
     url.pathname,
   )?.[1];
-  const organizationRoute =
-    /^\/-\/organizations\/(?:[^/]+--)?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(\/invitation|\/projects(?:\/([0-9a-f-]{36}))?)?$/i.exec(
-      url.pathname,
-    );
+  const organizationRoute = matchOrganizationRoute(url.pathname);
   const route =
     profileSettings ||
     actorRoute ||
@@ -258,13 +260,19 @@ export function App() {
       repo.name === route.name &&
       (expectedRepository === null || expectedRepository === repo.id),
   );
+  const repositoryOwnership = useRequest<OrganizationView>(
+    repo?.organization_id
+      ? `/api/organizations/${encodeURIComponent(repo.organization_id)}`
+      : null,
+  ).data;
+  const repositoryOrganization = repositoryOwnership?.organization;
   useEffect(() => {
     if (authenticated === false) {
       document.title = "Sign in to Crab";
       return;
     }
     document.title = repo
-      ? `${repo.owner}/${repo.name} · Crab`
+      ? `${repositoryOrganization?.name ?? repo.owner}/${repo.name} · Crab`
       : subscriptions
         ? "Subscriptions · Crab"
         : watched
@@ -285,6 +293,7 @@ export function App() {
   }, [
     authenticated,
     repo,
+    repositoryOrganization,
     watched,
     inbox,
     subscriptions,
@@ -357,11 +366,28 @@ export function App() {
             {repo ? (
               <div className="global-repository">
                 <RepoIcon size={16} />
-                <h1>
-                  <Link href={repoHref(repo)}>
-                    {repo.owner} <span aria-hidden="true">/</span>{" "}
-                    <strong>{repo.name}</strong>
-                  </Link>
+                <h1 className="wrap-anywhere">
+                  {repositoryOrganization ? (
+                    <>
+                      <Link
+                        href={organizationHref(
+                          repositoryOrganization,
+                          "?tab=repositories",
+                        )}
+                      >
+                        <bdi>{repositoryOrganization.name}</bdi>
+                      </Link>{" "}
+                      <span aria-hidden="true">/</span>{" "}
+                      <Link href={repoHref(repo)}>
+                        <strong>{repo.name}</strong>
+                      </Link>
+                    </>
+                  ) : (
+                    <Link href={repoHref(repo)}>
+                      {repo.owner} <span aria-hidden="true">/</span>{" "}
+                      <strong>{repo.name}</strong>
+                    </Link>
+                  )}
                 </h1>
                 {repo.archived && <Badge variant="outline">Archived</Badge>}
               </div>
@@ -685,6 +711,7 @@ export function App() {
                           <RepositoryPage
                             key={repo.id}
                             repo={repo}
+                            ownership={repositoryOwnership}
                             url={url}
                             theme={resolved}
                             codeThemes={codeThemeChoices[codeTheme].themes}

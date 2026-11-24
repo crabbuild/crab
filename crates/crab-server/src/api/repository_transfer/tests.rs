@@ -47,9 +47,15 @@ async fn member(h: &Harness) -> String {
     cookie
 }
 
-async fn propose(h: &Harness, cookie: &str, repo: Uuid, recipient: Value) -> (String, Value) {
+async fn propose(
+    h: &Harness,
+    cookie: &str,
+    repo: Uuid,
+    recipient: Value,
+    name: &str,
+) -> (String, Value) {
     let request =
-        json!({"request_id":Uuid::now_v7(),"recipient":recipient,"version":0,"name":"moved"});
+        json!({"request_id":Uuid::now_v7(),"recipient":recipient,"version":0,"name":name});
     let response: Value = h
         .write(
             Method::POST,
@@ -137,7 +143,14 @@ async fn personal_transfer_requires_consent_and_preserves_repository_data() {
     .error_for_status()
     .unwrap();
 
-    let (path, request) = propose(&h, &alice, id, json!({"kind":"account","handle":"bob"})).await;
+    let (path, request) = propose(
+        &h,
+        &alice,
+        id,
+        json!({"kind":"account","handle":"bob"}),
+        "moved",
+    )
+    .await;
     let replay = h
         .write(
             Method::POST,
@@ -282,7 +295,8 @@ async fn organization_transfer_rechecks_source_and_destination_authority() {
     .unwrap();
 
     let target = json!({"kind":"organization","id":organization});
-    let (path, _) = propose(&h, &alice, id, target.clone()).await;
+    let (path, _) = propose(&h, &alice, id, target.clone(), "moved").await;
+    assert_eq!(h.json(&path, &alice).await["recipient"], "Crab engineering");
     assert_eq!(get(&h, &path, &bob).await.status(), StatusCode::NOT_FOUND);
     assert_eq!(h.json(INCOMING, &bob).await["items"], json!([]));
     assert_eq!(
@@ -327,7 +341,89 @@ async fn organization_transfer_rechecks_source_and_destination_authority() {
     assert_eq!(canceled["state"], "cancelled");
     assert_eq!(h.json(INCOMING, &alice).await["items"], json!([]));
 
-    let (path, _) = propose(&h, &bob, id, target).await;
+    let submit = format!("/api/repositories/{id}/transfer");
+    let policy = format!("{root}/repository-policy");
+    for recipient in [
+        target.clone(),
+        json!({"kind":"organization","id":Uuid::now_v7()}),
+    ] {
+        let rejected = h
+            .write(
+                Method::POST,
+                &submit,
+                &bob,
+                json!({
+                    "request_id":Uuid::now_v7(),"recipient":recipient,"version":0,"name":"private"
+                }),
+            )
+            .await;
+        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            rejected.json::<Value>().await.unwrap()["error"]["code"],
+            "transfer_destination_creation_required"
+        );
+    }
+
+    h.write(
+        Method::PUT,
+        &policy,
+        &alice,
+        json!({
+            "version":0,"member_creation":true,"member_transfer":false,"baseline":null
+        }),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let renamed = h
+        .write(
+            Method::POST,
+            &submit,
+            &bob,
+            json!({
+                "request_id":Uuid::now_v7(),"recipient":target,"version":0,"name":"moved"
+            }),
+        )
+        .await;
+    assert_eq!(renamed.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        renamed.json::<Value>().await.unwrap()["error"]["code"],
+        "transfer_destination_owner_required"
+    );
+
+    let (path, _) = propose(&h, &bob, id, target, "private").await;
+    h.write(
+        Method::PUT,
+        &policy,
+        &alice,
+        json!({
+            "version":1,"member_creation":false,"member_transfer":false,"baseline":null
+        }),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let blocked = h
+        .write(Method::PUT, &path, &alice, json!({"decision":"accept"}))
+        .await;
+    assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        blocked.json::<Value>().await.unwrap()["error"]["code"],
+        "transfer_destination_creation_required"
+    );
+    assert_eq!(h.server.repositories.by_id(id).unwrap().organization, None);
+    assert_eq!(h.json(&path, &alice).await["state"], "pending");
+    h.write(
+        Method::PUT,
+        &policy,
+        &alice,
+        json!({
+            "version":2,"member_creation":true,"member_transfer":false,"baseline":null
+        }),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
     let accepted: Value = h
         .write(Method::PUT, &path, &alice, json!({"decision":"accept"}))
         .await
@@ -341,7 +437,7 @@ async fn organization_transfer_rechecks_source_and_destination_authority() {
     assert_eq!(h.json(UNREAD, &alice).await, json!({"unread":false}));
     let active = h.server.repositories.by_id(id).unwrap();
     assert_eq!(active.organization, Some(organization));
-    let lookup = format!("/api/repos?owner={}&name=moved", active.config.owner);
+    let lookup = format!("/api/repos?owner={}&name=private", active.config.owner);
     assert_eq!(
         h.json(&lookup, &alice).await["repositories"][0]["can_admin"],
         true
@@ -354,12 +450,178 @@ async fn organization_transfer_rechecks_source_and_destination_authority() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn organization_transfer_policy_fences_team_admin_offers() {
+    let (h, _) = fixture().await;
+    let (organization, _, bob_id) = organizations::bootstrap(&h).await;
+    let alice = h.login().await;
+    h.write(
+        Method::POST,
+        "/api/profile",
+        &alice,
+        json!({"request_id":Uuid::now_v7(),"handle":"alice","name":"Alice"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let bob = member(&h).await;
+    let org = format!("/api/organizations/{organization}");
+    h.write(
+        Method::PUT,
+        &format!("{org}/invitations/{bob_id}"),
+        &alice,
+        json!({"version":0,"role":"member"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    h.write(
+        Method::POST,
+        &format!("{org}/invitation"),
+        &bob,
+        json!({"version":1,"accept":true}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let repo: Value = h
+        .write(
+            Method::POST,
+            &format!("{org}/repositories/creation"),
+            &alice,
+            json!({"request_id":Uuid::now_v7(),"name":"library","description":""}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = Uuid::parse_str(repo["id"].as_str().unwrap()).unwrap();
+    let owner = repo["owner"].as_str().unwrap();
+    let team = Uuid::now_v7();
+    let teams = format!("{org}/teams/commands");
+    for (request_id, command) in [
+        (
+            team,
+            json!({"kind":"create","name":"Maintainers","description":"","visibility":"secret"}),
+        ),
+        (
+            Uuid::now_v7(),
+            json!({"kind":"member","team":team,"member":bob_id,"version":0,"role":"member"}),
+        ),
+    ] {
+        h.write(
+            Method::POST,
+            &teams,
+            &alice,
+            json!({"request_id":request_id,"command":command}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    }
+    let team_access = format!("/api/repos/{owner}/library/team-access");
+    let revision = h.json(&team_access, &alice).await["revision"].clone();
+    let session = h.json("/api/session", &alice).await;
+    h.http
+        .put(format!("{}{team_access}", h.origin))
+        .header(header::COOKIE, &alice)
+        .header(header::ORIGIN, &h.origin)
+        .header("x-csrf-token", session["csrf"].as_str().unwrap())
+        .header("x-crab-repository-id", id.to_string())
+        .json(&json!({"expected_revision":revision,"teams":[{"team":team,"access":"admin"}]}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    let policy = format!("{org}/repository-policy");
+    let transfer = format!("/api/repositories/{id}/transfer");
+    let to_alice = json!({"kind":"account","handle":"alice"});
+    assert_eq!(h.json(&transfer, &alice).await["can_transfer"], true);
+    assert_eq!(h.json(&transfer, &bob).await["can_transfer"], false);
+    let rejected = h
+        .write(
+            Method::POST,
+            &transfer,
+            &bob,
+            json!({"request_id":Uuid::now_v7(),"recipient":to_alice,"version":0,"name":"moved"}),
+        )
+        .await;
+    assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        rejected.json::<Value>().await.unwrap()["error"]["code"],
+        "repository_transfer_restricted"
+    );
+
+    h.write(
+        Method::PUT,
+        &policy,
+        &alice,
+        json!({
+            "version":0,"member_creation":false,"member_transfer":true,"baseline":null
+        }),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert_eq!(h.json(&transfer, &bob).await["can_transfer"], true);
+    let (offer, _) = propose(&h, &bob, id, to_alice, "moved").await;
+    h.write(
+        Method::PUT,
+        &policy,
+        &alice,
+        json!({
+            "version":1,"member_creation":false,"member_transfer":false,"baseline":null
+        }),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let blocked = h
+        .write(Method::PUT, &offer, &alice, json!({"decision":"accept"}))
+        .await;
+    assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        h.server.repositories.by_id(id).unwrap().organization,
+        Some(organization)
+    );
+    assert_eq!(h.json(&offer, &bob).await["can_cancel"], true);
+    h.write(Method::PUT, &offer, &bob, json!({"decision":"cancel"}))
+        .await
+        .error_for_status()
+        .unwrap();
+    let (offer, _) = propose(
+        &h,
+        &alice,
+        id,
+        json!({"kind":"account","handle":"bob"}),
+        "moved",
+    )
+    .await;
+    h.write(Method::PUT, &offer, &bob, json!({"decision":"accept"}))
+        .await
+        .error_for_status()
+        .unwrap();
+    assert_eq!(h.server.repositories.by_id(id).unwrap().organization, None);
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires agent-browser and the built embedded UI with native catalog and memory object storage"]
 async fn native_browser_accepts_a_repository_transfer_from_another_account() {
     let (h, id) = fixture().await;
     let alice = h.login().await;
     let bob = member(&h).await;
-    let (path, _) = propose(&h, &alice, id, json!({"kind":"account","handle":"bob"})).await;
+    let (path, _) = propose(
+        &h,
+        &alice,
+        id,
+        json!({"kind":"account","handle":"bob"}),
+        "moved",
+    )
+    .await;
     let browser = Browser::new("repository-transfer");
     let link = format!("{}/-/notifications", h.origin);
     browser.run(&["open", &link]).await;

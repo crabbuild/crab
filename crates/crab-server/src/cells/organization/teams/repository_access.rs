@@ -16,6 +16,10 @@ pub(crate) struct RepositoryActor {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ActorTeams {
     pub owner: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub member_transfer: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub member_deletion: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline: Option<RepositoryAccess>,
     pub teams: Vec<Uuid>,
@@ -37,33 +41,28 @@ impl Read for RepositoryTeamsForActor {
             return Ok(ActorTeams::default());
         };
         let owner = organization.role == OrganizationRole::Owner;
-        let baseline = super::super::repository_policy::load(context)?.baseline;
+        let policy = super::super::repository_policy::load(context)?;
+        let mut grant = ActorTeams {
+            owner,
+            member_transfer: policy.member_transfer,
+            member_deletion: policy.member_deletion,
+            baseline: policy.baseline,
+            ..Default::default()
+        };
         if !input.include_teams {
-            return Ok(ActorTeams {
-                owner,
-                baseline,
-                teams: Vec::new(),
-                bypass_teams: Vec::new(),
-            });
+            return Ok(grant);
         }
-        let mut teams = Vec::new();
-        let mut bypass_teams = Vec::new();
         for row in active_team_rows(context, input.actor, false)? {
             let [team, visible, _] = row.as_slice() else {
                 return Err(Error::Invalid("invalid repository team membership"));
             };
             let team = uuid(team)?;
-            teams.push(team);
+            grant.teams.push(team);
             if uint(visible)? != 0 {
-                bypass_teams.push(team);
+                grant.bypass_teams.push(team);
             }
         }
-        Ok(ActorTeams {
-            owner,
-            baseline,
-            teams,
-            bypass_teams,
-        })
+        Ok(grant)
     }
 }
 

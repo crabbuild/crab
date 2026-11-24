@@ -7,6 +7,7 @@ import { AlertIcon, GitBranchIcon, PencilIcon } from "@primer/octicons-react";
 import { useMemo, useState } from "react";
 import { ArchiveSettings } from "./archive";
 import { DescriptionSettings } from "./description";
+import { DeleteRepositorySettings } from "./delete-repository";
 import { MergeMethodSettings } from "./merge-methods";
 import { RenameSettings } from "./rename";
 import { TopicSettings } from "./topics";
@@ -61,11 +62,24 @@ export function GeneralSettings({
       {repo.can_admin && (
         <>
           <TransferSettings repo={repo} csrf={csrf} />
-          <ArchiveSettings
-            repo={repo}
-            csrf={csrf}
-            onChanged={onRepositoryChanged}
-          />
+          <section
+            className="danger-zone"
+            aria-labelledby="danger-zone-heading"
+          >
+            <h2 id="danger-zone-heading">Danger Zone</h2>
+            <ArchiveSettings
+              repo={repo}
+              csrf={csrf}
+              onChanged={onRepositoryChanged}
+            />
+            {repo.organization_id && csrf && (
+              <DeleteRepositorySettings
+                repo={repo}
+                csrf={csrf}
+                onChanged={onRepositoryChanged}
+              />
+            )}
+          </section>
         </>
       )}
     </section>

@@ -1,6 +1,6 @@
 import { Link } from "@/components/navigation/link";
 import type { OrganizationView, Session } from "@/lib/contracts";
-import { useRequest, type Refs, type Repository } from "@/lib/api";
+import type { Refs, Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 import { DeployTokens } from "./deploy-tokens";
 import { GeneralSettings } from "./general";
@@ -14,6 +14,7 @@ import { OutboundWebhooks } from "./webhooks";
 
 export function Settings({
   repo,
+  ownership,
   refs,
   csrf,
   section,
@@ -22,6 +23,7 @@ export function Settings({
   onRepositoryChanged,
 }: {
   repo: Repository;
+  ownership?: OrganizationView;
   refs: Refs;
   csrf: string;
   section:
@@ -40,11 +42,6 @@ export function Settings({
 }) {
   const organization =
     identity && repo.can_admin ? repo.organization_id : undefined;
-  const ownership = useRequest<OrganizationView>(
-    organization
-      ? `/api/organizations/${encodeURIComponent(organization)}`
-      : null,
-  );
   const teamSection = section === "team-access";
   if (!repo.can_admin) {
     return section === "general" ? (
@@ -122,7 +119,7 @@ export function Settings({
             Deploy tokens
           </Link>
         )}
-        {ownership.data?.role === "owner" && (
+        {ownership?.role === "owner" && (
           <Link
             className={teamSection ? "active" : ""}
             aria-current={teamSection ? "page" : undefined}

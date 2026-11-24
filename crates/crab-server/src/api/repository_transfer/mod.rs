@@ -20,7 +20,7 @@ use crate::{
     cells::{
         Address,
         directory::{IdentityKey, ResolveHandles},
-        organization::Role,
+        organization::{Role, discovery::Landing},
     },
     repository::{access, settings},
     server::Server,
@@ -107,10 +107,11 @@ impl View {
 #[derive(Serialize)]
 struct Current {
     version: u32,
+    can_transfer: bool,
     offer: Option<View>,
 }
 
-fn account(principal: &Principal) -> Result<MembershipActor> {
+pub(super) fn account(principal: &Principal) -> Result<MembershipActor> {
     if !principal.is_user() {
         return Err(Error::SessionRequired);
     }
@@ -128,7 +129,7 @@ fn key(actor: &MembershipActor) -> IdentityKey {
     }
 }
 
-async fn organization_owner(
+pub(super) async fn organization_owner(
     server: &Server,
     organization: Uuid,
     actor: &MembershipActor,
@@ -139,11 +140,42 @@ async fn organization_owner(
     Ok(access::organization_role(server, organization, actor).await? == Some(Role::Owner))
 }
 
-async fn can_manage_source(
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SourceAccess {
+    None,
+    Admin,
+    Allowed,
+}
+
+impl SourceAccess {
+    fn require_transfer(self) -> Result<()> {
+        match self {
+            Self::None => Err(Error::NotFound),
+            Self::Admin => Err(Error::RepositoryTransferRestricted),
+            Self::Allowed => Ok(()),
+        }
+    }
+}
+
+async fn source_access(
     server: &Server,
     record: &CatalogRecord,
     actor: &MembershipActor,
-) -> Result<bool> {
+) -> Result<SourceAccess> {
+    management_access(server, record, actor, Management::Transfer).await
+}
+
+pub(super) enum Management {
+    Transfer,
+    Delete,
+}
+
+pub(super) async fn management_access(
+    server: &Server,
+    record: &CatalogRecord,
+    actor: &MembershipActor,
+    operation: Management,
+) -> Result<SourceAccess> {
     let auth = server.auth.as_ref().ok_or(Error::SessionRequired)?;
     if actor.issuer != auth.issuer()
         || auth
@@ -152,19 +184,38 @@ async fn can_manage_source(
             .map_err(|error| Error::IdentityAuthority(Box::new(error)))?
             .suspended
     {
-        return Ok(false);
+        return Ok(SourceAccess::None);
     }
-    if record
-        .members
-        .iter()
-        .any(|member| member.subject == actor.subject && member.access == RepositoryAccess::Admin)
+    let (organization_admin, permitted) = if let Some(organization) = &record.organization {
+        let grant = access::organization_grants_for_identity(
+            server,
+            key(actor),
+            [(organization.id, !organization.teams.is_empty())].into(),
+        )
+        .await?
+        .remove(&organization.id)
+        .unwrap_or_default();
+        let admin = access::organization_access(&grant, &organization.teams)
+            == Some(RepositoryAccess::Admin);
+        let members_allowed = match operation {
+            Management::Transfer => grant.member_transfer,
+            Management::Delete => grant.member_deletion,
+        };
+        (admin, grant.owner || members_allowed)
+    } else {
+        (false, true)
+    };
+    let admin_access = if permitted {
+        SourceAccess::Allowed
+    } else {
+        SourceAccess::Admin
+    };
+    if organization_admin
+        || record.members.iter().any(|member| {
+            member.subject == actor.subject && member.access == RepositoryAccess::Admin
+        })
     {
-        return Ok(true);
-    }
-    if let Some(organization) = record.organization_id()
-        && organization_owner(server, organization, actor).await?
-    {
-        return Ok(true);
+        return Ok(admin_access);
     }
     let admin_groups: Vec<_> = record
         .groups
@@ -172,12 +223,16 @@ async fn can_manage_source(
         .filter(|grant| grant.access == RepositoryAccess::Admin)
         .cloned()
         .collect();
-    Ok(!admin_groups.is_empty()
+    if !admin_groups.is_empty()
         && auth.is_oidc()
         && auth
             .mention_group(&actor.subject, &admin_groups)
             .await?
-            .is_some())
+            .is_some()
+    {
+        return Ok(admin_access);
+    }
+    Ok(SourceAccess::None)
 }
 
 async fn can_receive(server: &Server, target: &Recipient, actor: &MembershipActor) -> Result<bool> {
@@ -187,7 +242,12 @@ async fn can_receive(server: &Server, target: &Recipient, actor: &MembershipActo
     }
 }
 
-async fn target(server: &Server, input: Target, issuer: &str) -> Result<(Recipient, String)> {
+async fn target(
+    server: &Server,
+    input: Target,
+    requester: &MembershipActor,
+    renaming: bool,
+) -> Result<(Recipient, String)> {
     match input {
         Target::Account { handle } => {
             let handle = handle.trim().trim_start_matches('@').to_ascii_lowercase();
@@ -201,7 +261,7 @@ async fn target(server: &Server, input: Target, issuer: &str) -> Result<(Recipie
             let [Some(identity)] = identities.as_slice() else {
                 return Err(Error::Invalid("No account has that handle"));
             };
-            if identity.issuer != issuer {
+            if identity.issuer != requester.issuer {
                 return Err(Error::Invalid("No account has that handle"));
             }
             Ok((
@@ -214,11 +274,37 @@ async fn target(server: &Server, input: Target, issuer: &str) -> Result<(Recipie
                 format!("@{handle}"),
             ))
         }
-        Target::Organization { id } if !id.is_nil() => {
-            Ok((Recipient::Organization { id }, id.to_string()))
-        }
-        Target::Organization { .. } => Err(Error::Invalid("Choose a valid organization ID")),
+        Target::Organization { id } => Ok((
+            Recipient::Organization { id },
+            destination_organization(server, id, requester, renaming).await?,
+        )),
     }
+}
+
+async fn destination_organization(
+    server: &Server,
+    id: Uuid,
+    requester: &MembershipActor,
+    renaming: bool,
+) -> Result<String> {
+    let denied = || Error::RepositoryTransferDestinationCreationRequired;
+    let actor = access::actor_id(server, key(requester))
+        .await?
+        .ok_or_else(denied)?;
+    let Some(Landing::Member {
+        view,
+        can_create: true,
+        ..
+    }) = access::organization_landing(server, id, actor).await?
+    else {
+        // Unknown organizations and destinations outside the actor's authority
+        // return the same error, without disclosing private metadata.
+        return Err(denied());
+    };
+    if renaming && view.role != Role::Owner {
+        return Err(Error::RepositoryTransferDestinationOwnerRequired);
+    }
+    Ok(view.organization.name)
 }
 
 fn now() -> Result<i64> {
@@ -249,12 +335,14 @@ async fn current(
     let record = document
         .repository_by_id(repository)
         .ok_or(Error::NotFound)?;
-    if !can_manage_source(&server, record, &actor).await? {
+    let access = source_access(&server, record, &actor).await?;
+    if access == SourceAccess::None {
         return Err(Error::NotFound);
     }
     let now = now()?;
     Ok(Json(Current {
         version: record.name_version(),
+        can_transfer: access == SourceAccess::Allowed,
         offer: record
             .transfer
             .as_ref()
@@ -273,38 +361,64 @@ async fn propose(
     let record = document
         .repository_by_id(repository)
         .ok_or(Error::NotFound)?;
-    if !can_manage_source(&server, record, &requester).await? {
-        return Err(Error::NotFound);
+    source_access(&server, record, &requester)
+        .await?
+        .require_transfer()?;
+    let source = source_repository(&server, &document, record).await?;
+    let (server, source) = (server.as_ref(), source.as_ref());
+    let request_id = input.request_id;
+    let destination = match &input.recipient {
+        Target::Organization { id } if id.is_nil() => {
+            return Err(Error::Invalid("Choose a valid organization ID"));
+        }
+        Target::Organization { id } => Some(*id),
+        Target::Account { .. } => None,
+    };
+    let renaming = input.name != record.name;
+    if let Some(id) = destination {
+        destination_organization(server, id, &requester, renaming).await?;
     }
-    let active = server
-        .repositories
-        .by_id(repository)
-        .ok_or(Error::NotFound)?;
-    if settings::load_lifecycle(&server, &active).await?.archived {
-        return Err(Error::Archived);
-    }
-    let (recipient, recipient_label) = target(&server, input.recipient, &requester.issuer).await?;
-    account(&principal)?;
-    let now = now()?;
-    let published = catalog
-        .propose_transfer(
-            document.version,
-            repository,
-            Proposal {
-                id: input.request_id,
-                requester,
-                recipient,
-                recipient_label,
-                name: input.name,
-                version: input.version,
-            },
-            now,
-        )
-        .await
-        .map_err(catalog_error)?;
-    let (record, offer) = published
-        .transfer(input.request_id)
-        .ok_or(Error::NotFound)?;
+    let (published, now) = settings::with_transfer_ownership_leases(
+        server,
+        source,
+        destination,
+        |cancel| async move {
+            source_access(server, record, &requester)
+                .await?
+                .require_transfer()?;
+            if settings::load_lifecycle(server, source).await?.archived {
+                return Err(Error::Archived);
+            }
+            let (recipient, recipient_label) =
+                target(server, input.recipient, &requester, renaming).await?;
+            account(&principal)?;
+            if cancel.is_cancelled() {
+                return Err(Error::TransferPublication(
+                    crab_remote::publication::Error::Cancelled,
+                ));
+            }
+            let now = now()?;
+            let published = catalog
+                .propose_transfer(
+                    document.version,
+                    repository,
+                    Proposal {
+                        id: request_id,
+                        requester,
+                        recipient,
+                        recipient_label,
+                        name: input.name,
+                        version: input.version,
+                    },
+                    now,
+                )
+                .await
+                .map_err(catalog_error)?;
+            Ok((published, now))
+        },
+    )
+    .await?;
+    let (record, offer) = published.transfer(request_id).ok_or(Error::NotFound)?;
     Ok(Json(View::new(record, offer, now, true, false)))
 }
 
@@ -317,8 +431,8 @@ async fn read(
     let (_, document) = load(&server).await?;
     let (record, offer) = document.transfer(id).ok_or(Error::NotFound)?;
     let recipient = can_receive(&server, &offer.recipient, &actor).await?;
-    let source =
-        offer.state == OfferState::Pending && can_manage_source(&server, record, &actor).await?;
+    let source = offer.state == OfferState::Pending
+        && source_access(&server, record, &actor).await? != SourceAccess::None;
     if !recipient && !source && actor != offer.requester {
         return Err(Error::NotFound);
     }
@@ -350,7 +464,8 @@ async fn decide(
     let (record, offer) = document.transfer(id).ok_or(Error::NotFound)?;
     let source = matches!(input.decision, Choice::Cancel);
     let permitted = if source {
-        can_manage_source(&server, record, &actor).await?
+        // Even under an owners-only transfer policy, administrators can stop an offer.
+        source_access(&server, record, &actor).await? != SourceAccess::None
     } else {
         can_receive(&server, &offer.recipient, &actor).await?
     };
@@ -400,44 +515,32 @@ async fn accept(
     if !offer.available(record, now()?) {
         return Err(Error::PageChanged);
     }
-    let active = server
-        .repositories
-        .by_id(record.id)
-        .ok_or(Error::NotFound)?;
-    if active.config.owner != record.owner
-        || active.config.name != record.name
-        || active.organization != record.organization_id()
-    {
-        // A peer with stale routing could otherwise lock the former owner's policy.
-        server
-            .install_catalog(document.clone())
-            .await
-            .map_err(|error| Error::RepositorySetup(Box::new(error)))?;
-    }
-    let active = server
-        .repositories
-        .by_id(record.id)
-        .ok_or(Error::NotFound)?;
+    let active = source_repository(server, document, record).await?;
     let source = active.as_ref();
-    if source.config.owner != record.owner
-        || source.config.name != record.name
-        || source.organization != record.organization_id()
-    {
-        return Err(Error::PageChanged);
-    }
-    // Finish any publication holding the source policy lease before switching
-    // namespaces. Later publications must read the new owner and its policies.
-    settings::with_ownership_lease(server, source, |cancel| async move {
+    let destination = match &offer.recipient {
+        Recipient::Organization { id } => Some(*id),
+        Recipient::Account { .. } => None,
+    };
+    // Both policies must stay current through publication. Existing source
+    // publications also finish under the former ownership before this switch.
+    settings::with_transfer_ownership_leases(server, source, destination, |cancel| async move {
         if settings::load_lifecycle(server, source).await?.archived {
             return Err(Error::Archived);
         }
-        if !can_manage_source(server, record, &offer.requester).await?
-            || !can_receive(server, &offer.recipient, &actor).await?
-        {
+        if !can_receive(server, &offer.recipient, &actor).await? {
             return Err(Error::PageChanged);
         }
+        match source_access(server, record, &offer.requester).await? {
+            SourceAccess::None => return Err(Error::PageChanged),
+            SourceAccess::Admin => return Err(Error::RepositoryTransferRestricted),
+            SourceAccess::Allowed => {}
+        }
+        let renaming = offer.name != record.name;
+        if let Some(destination) = destination {
+            destination_organization(server, destination, &offer.requester, renaming).await?;
+        }
         settings::require_no_issue_reservations(server, source).await?;
-        if offer.name != record.name {
+        if renaming {
             // The source administrator requested the name change. A
             // destination owner cannot lend them a ruleset bypass.
             settings::check_rename(server, record, key(&offer.requester)).await?;
@@ -462,6 +565,36 @@ async fn accept(
             .map_err(catalog_error)
     })
     .await
+}
+
+pub(super) async fn source_repository(
+    server: &Server,
+    document: &CatalogDocument,
+    record: &CatalogRecord,
+) -> Result<Arc<crate::repository::Repository>> {
+    let matches = |repo: &crate::repository::Repository| {
+        repo.config.owner == record.owner
+            && repo.config.name == record.name
+            && repo.organization == record.organization_id()
+            && repo.ownership_epoch == record.ownership_epoch
+    };
+    let active = server
+        .repositories
+        .by_id(record.id)
+        .ok_or(Error::NotFound)?;
+    if matches(&active) {
+        return Ok(active);
+    }
+    // A peer with stale routing could otherwise lock the former owner's policy.
+    server
+        .install_catalog(document.clone())
+        .await
+        .map_err(|error| Error::RepositorySetup(Box::new(error)))?;
+    server
+        .repositories
+        .by_id(record.id)
+        .filter(|repo| matches(repo))
+        .ok_or(Error::PageChanged)
 }
 
 #[cfg(test)]

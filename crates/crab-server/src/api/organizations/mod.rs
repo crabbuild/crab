@@ -120,7 +120,10 @@ async fn own(
         .await
         .map_err(read_error)?
         .output;
-    let Some(organization::discovery::Landing::Member { view, can_create }) = landing else {
+    let Some(organization::discovery::Landing::Member {
+        view, can_create, ..
+    }) = landing
+    else {
         return Err(Error::NotFound);
     };
     app::account(&principal)?;

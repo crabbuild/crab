@@ -240,7 +240,9 @@ test("owners target repositories and repository admins see inherited rules as re
   await expect(preventRenaming).toBeChecked();
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
 
-  await page.getByRole("link", { name: "Properties", exact: true }).click();
+  await page
+    .getByRole("link", { name: "Repository properties", exact: true })
+    .click();
   await page.getByRole("button", { name: "New property" }).click();
   await page.getByLabel("Property name").fill("regulated");
   await chooseSelectOption(page.getByLabel("Property type"), "boolean");

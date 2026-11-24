@@ -110,7 +110,7 @@ export type IssueType = { id: string, name: string, description: string, color: 
 export type IssueTypeSchema = { version: number, definitions: Array<IssueType>, };
 
 // prettier-ignore
-export type AuditAction = "organization_created" | "automation_changed" | "organization_edited" | "organization_membership" | "organization_invitation" | "rulesets_changed" | "repository_properties_changed" | "issue_types_changed" | "project_changed" | "team_created" | "team_edited" | "team_group_sync" | "team_deleted" | "team_membership" | "team_creation_policy" | "repository_policy_changed" | "repository_registered" | "repository_access_changed" | "repository_transferred_in" | "repository_transferred_out";
+export type AuditAction = "organization_created" | "automation_changed" | "organization_edited" | "organization_membership" | "organization_invitation" | "rulesets_changed" | "repository_properties_changed" | "issue_types_changed" | "project_changed" | "team_created" | "team_edited" | "team_group_sync" | "team_deleted" | "team_membership" | "team_creation_policy" | "repository_policy_changed" | "repository_registered" | "repository_access_changed" | "repository_transferred_in" | "repository_transferred_out" | "repository_deleted" | "repository_restored";
 
 // prettier-ignore
 export type AuditRepository = { id: string, name: string, };

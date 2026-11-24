@@ -1,4 +1,5 @@
 pub(crate) mod audit;
+pub(crate) mod deletion;
 pub(crate) mod description;
 mod read;
 mod rename;
@@ -130,6 +131,8 @@ pub struct CatalogDocument {
     pub schema_version: u32,
     pub version: u64,
     pub repositories: Vec<CatalogRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) deleted_repositories: Vec<deletion::DeletedRepository>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub membership_audit_head: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -195,6 +198,7 @@ impl Default for CatalogDocument {
             schema_version: SCHEMA_VERSION,
             version: 0,
             repositories: Vec::new(),
+            deleted_repositories: Vec::new(),
             membership_audit_head: None,
             organization_audit_heads: BTreeMap::new(),
             pending_membership_audit: None,
@@ -216,7 +220,9 @@ impl CatalogDocument {
     }
 
     fn validate(&self, root: &StorageRoot) -> Result<(), CatalogError> {
-        if self.schema_version != SCHEMA_VERSION || self.repositories.len() > MAX_REPOSITORIES {
+        if self.schema_version != SCHEMA_VERSION
+            || self.repositories.len() + self.deleted_repositories.len() > MAX_REPOSITORIES
+        {
             return Err(CatalogError::Invalid(
                 "unsupported schema or repository count",
             ));
@@ -225,10 +231,6 @@ impl CatalogDocument {
             if event.repository_version != self.version
                 || !event.valid()
                 || !self.valid_pending_scopes(event)
-                || !self
-                    .repositories
-                    .iter()
-                    .any(|record| record.id == event.repository_id)
                 || event.previous != self.membership_audit_head
             {
                 return Err(CatalogError::Invalid("membership audit event is invalid"));
@@ -237,6 +239,10 @@ impl CatalogDocument {
                 .repositories
                 .iter()
                 .find(|record| record.id == event.repository_id)
+                .or_else(|| {
+                    self.deleted_repository(event.repository_id)
+                        .map(|deleted| &deleted.repository)
+                })
                 .ok_or(CatalogError::Invalid("audit repository is missing"))?;
             if record.membership_digest()? != event.new_members_digest {
                 return Err(CatalogError::Invalid(
@@ -309,6 +315,7 @@ impl CatalogDocument {
         }
         self.validate_renames(&mut names)?;
         self.validate_transfers()?;
+        self.validate_deletions(root, &records, &mut prefixes)?;
         Ok(())
     }
 
@@ -1058,6 +1065,9 @@ impl CatalogStore {
                 .repositories
                 .iter()
                 .any(|existing| existing.id == record.id || existing.prefix == record.prefix)
+                || document.deleted_repositories.iter().any(|deleted| {
+                    deleted.repository.id == record.id || deleted.repository.prefix == record.prefix
+                })
             {
                 return Err(CatalogError::Conflict);
             }

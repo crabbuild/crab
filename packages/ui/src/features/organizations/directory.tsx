@@ -6,6 +6,7 @@ import { Result } from "@/components/request/result";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useRequest } from "@/lib/api";
+import { organizationHref } from "@/lib/organization-route";
 import type {
   Invitation,
   Organization,
@@ -28,23 +29,6 @@ export function useOrganizationDirectory(after?: string, enabled = true) {
       ? `/api/organizations${after ? `?${new URLSearchParams({ after })}` : ""}`
       : null,
   );
-}
-
-export function organizationHref(
-  organization: Pick<Organization, "id" | "name">,
-  section = "",
-) {
-  const name = organization.name
-    .normalize("NFKD")
-    .toLowerCase()
-    .replace(/\p{Mark}/gu, "")
-    .replace(/[^\p{Letter}\p{Number}]+/gu, "-");
-  const slug =
-    Array.from(name)
-      .slice(0, 60)
-      .join("")
-      .replace(/^-+|-+$/g, "") || "organization";
-  return `/-/organizations/${encodeURIComponent(slug)}--${organization.id}${section}`;
 }
 
 export const organizationInvitationsHref =

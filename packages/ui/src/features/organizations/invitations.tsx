@@ -26,7 +26,8 @@ import type {
   OrganizationRole,
 } from "@/lib/contracts";
 import { MutationError } from "./feedback";
-import { organizationHref, organizationInvitationsHref } from "./directory";
+import { organizationHref } from "@/lib/organization-route";
+import { organizationInvitationsHref } from "./directory";
 
 export function Invitations({
   endpoint,
@@ -37,15 +38,14 @@ export function Invitations({
   endpoint: string;
   id: string;
   csrf: string;
-  filters?: { q: string; role: string; status: InvitationState };
+  filters: { q: string; role: string; status: InvitationState };
 }) {
   const [after, setAfter] = useState<string>();
   const params = new URLSearchParams(after ? { after } : {});
-  if (filters) {
-    params.set("status", filters.status);
-    if (filters.q) params.set("q", filters.q);
-    if (filters.role !== "all") params.set("role", filters.role);
-  }
+  params.set("status", filters.status);
+  if (filters.q) params.set("q", filters.q);
+  if (filters.role !== "all") params.set("role", filters.role);
+  const pending = filters.status === "pending";
   const offers = useRequest<OrganizationPage<InvitationOffer>>(
     `${endpoint}/invitations?${params}`,
   );
@@ -58,7 +58,7 @@ export function Invitations({
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-lg font-semibold">
-          {filters ? "Organization invitations" : "Pending invitations"}
+          {pending ? "Pending invitations" : "Organization invitations"}
         </h2>
         <div className="flex gap-2">
           <Button variant="outline" onClick={refresh}>
@@ -88,9 +88,9 @@ export function Invitations({
           <>
             {data.items.length === 0 ? (
               <p className="py-8 text-center text-sm text-muted-foreground">
-                {filters
-                  ? "No invitations match these filters."
-                  : "No pending invitations."}
+                {pending && !filters.q && filters.role === "all"
+                  ? "No pending invitations."
+                  : "No invitations match these filters."}
               </p>
             ) : (
               <ul className="divide-y rounded-lg border">
@@ -156,7 +156,7 @@ export function Invitations({
     </div>
   );
 }
-function InviteDialog({
+export function InviteDialog({
   endpoint,
   csrf,
   onInvited,

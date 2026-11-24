@@ -6,7 +6,7 @@ import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { DiscussionWorkspace } from "@/components/discussion/workspace";
-import type { Session } from "@/lib/contracts";
+import type { OrganizationView, Session } from "@/lib/contracts";
 import { GitImport } from "@/features/imports";
 import {
   displayHex,
@@ -122,6 +122,7 @@ function clampTreePaneWidth(width: number, max = MAX_TREE_PANE_WIDTH) {
 
 export function RepositoryPage({
   repo,
+  ownership,
   url,
   theme,
   codeThemes,
@@ -130,6 +131,7 @@ export function RepositoryPage({
   onRepositoryChanged,
 }: {
   repo: Repository;
+  ownership?: OrganizationView;
   url: URL;
   theme: "light" | "dark";
   codeThemes: CodeThemes;
@@ -482,7 +484,10 @@ export function RepositoryPage({
             <GitImport
               key={`${identity.issuer}:${identity.subject}:${repo.id}`}
               account={JSON.stringify([identity.issuer, identity.subject])}
-              organization={{ id: repo.organization_id, name: repo.owner }}
+              organization={{
+                id: repo.organization_id,
+                name: ownership?.organization.name ?? repo.owner,
+              }}
               fork={repo}
               csrf={csrf}
               onImported={(repository) => {
@@ -648,6 +653,7 @@ export function RepositoryPage({
                 >
                   <Settings
                     repo={repo}
+                    ownership={ownership}
                     refs={data}
                     csrf={csrf}
                     section={
