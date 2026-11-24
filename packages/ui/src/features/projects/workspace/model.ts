@@ -2,7 +2,9 @@ import type { Repository } from "@/lib/api";
 import type { IssueType } from "@/lib/contracts";
 import type { Command, Item, Project } from "../model";
 
-export type LinkedRepository = Pick<Repository, "id" | "owner" | "name">;
+export type LinkedRepository = Pick<Repository, "id" | "owner" | "name"> & {
+  can_create_issue?: boolean;
+};
 export const statuses = {
   planned: "Planned",
   in_progress: "In progress",
@@ -35,6 +37,13 @@ export interface Detail {
 }
 export type WorkspaceCommand =
   | Extract<Command, { kind: "create" | "edit" | "remove" }>
+  | {
+      kind: "create_issue";
+      project: string;
+      repository: string;
+      item: Item;
+      type_id: string | null;
+    }
   | {
       kind: "planning";
       project: string;

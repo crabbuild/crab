@@ -490,6 +490,7 @@ pub(in crate::cells) fn dispatch_mutation(
         }
         projects::Prepare::ID => invoke_mutation::<projects::Prepare>(context, input),
         projects::Change::ID => invoke_mutation::<projects::Change>(context, input),
+        projects::ResolveIssue::ID => invoke_mutation::<projects::ResolveIssue>(context, input),
         #[cfg(test)]
         teams::tests::WithoutTeams::ID => {
             invoke_mutation::<teams::tests::WithoutTeams>(context, input)

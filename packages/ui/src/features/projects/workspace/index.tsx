@@ -260,8 +260,19 @@ function PlanningWorkspace({
     const draft = blankItem(status || project.definition.statuses[0]);
     setEditing({ initialItem: applyProjectGroup(draft, group, key) });
   };
+  const canCreateIssue = detail.repositories.some(
+    (repo) => repo.can_create_issue,
+  );
+  const addGroupIssue = (typeId: string | null) => {
+    setEditing({
+      initialItem: blankItem(status || project.definition.statuses[0]),
+      initialIssueType: typeId,
+    });
+  };
   const createInGroup =
-    editable && groupBy !== undefined && groupBy !== "issue_type";
+    editable &&
+    groupBy !== undefined &&
+    (groupBy !== "issue_type" || canCreateIssue);
   const initialItem =
     typeof editing === "object" && "initialItem" in editing
       ? editing.initialItem
@@ -271,6 +282,10 @@ function PlanningWorkspace({
   const draftItem =
     typeof editing === "object" && "draft" in editing
       ? editing.draft
+      : undefined;
+  const initialIssueType =
+    typeof editing === "object" && "initialItem" in editing
+      ? editing.initialIssueType
       : undefined;
   const View =
     layout === "board"
@@ -520,6 +535,9 @@ function PlanningWorkspace({
                           editable={editable}
                           onEdit={setEditing}
                           onAddGroupItem={addGroupItem}
+                          onAddGroupIssue={
+                            canCreateIssue ? addGroupIssue : undefined
+                          }
                           showIssueType={selected.show_issue_type}
                           onIssueTypeChange={
                             project.archived
@@ -664,6 +682,7 @@ function PlanningWorkspace({
           row={editingRow}
           draftItem={draftItem}
           initialItem={initialItem}
+          initialIssueType={initialIssueType}
           onClose={() => setEditing(undefined)}
         />
       )}

@@ -29,10 +29,30 @@ impl CreateIssue {
     pub(in crate::cells::repository) fn for_project(
         context: &mut Transaction<'_>,
         input: CreateIssueInput,
+        selection: Option<issue_type::Selection>,
     ) -> crate::cells::Result<MutationResult<CreateIssueOutcome>> {
         // The enclosing Project transaction records the only submission
         // decision. Standalone issue request IDs cannot select its issue.
-        Self::write(context, input, false)
+        let created = Self::write(context, input, false)?;
+        if let (MutationResult::Success(CreateIssueOutcome::Created(issue)), Some(selection)) =
+            (&created, selection)
+            && !matches!(
+                issue_type::Set::execute(
+                    context,
+                    issue_type::SetInput {
+                        number: issue.number,
+                        expected_version: 0,
+                        selection: Some(selection),
+                    }
+                )?,
+                MutationResult::Success(issue_type::Outcome::Saved(_))
+            )
+        {
+            return Err(crate::cells::Error::Invalid(
+                "project issue type assignment failed",
+            ));
+        }
+        Ok(created)
     }
 
     fn write(

@@ -68,6 +68,7 @@ export function ProjectCommandsProvider({
   const completion = useRef<((outcome: Outcome) => void) | null>(null);
   const [generation, setGeneration] = useState(0);
   const [error, setError] = useState<string>();
+  const [notice, setNotice] = useState<string>();
   const [pending, setPending] = useState(false);
   const [journalError, setJournalError] = useState<string>();
   const activeAccount = useRef(account);
@@ -109,6 +110,7 @@ export function ProjectCommandsProvider({
     busy.current = true;
     setPending(true);
     setError(undefined);
+    setNotice(undefined);
     try {
       // Recovery must use the persisted intent, including its original target.
       // Never turn a lost response into a replacement submission after reload.
@@ -156,6 +158,7 @@ export function ProjectCommandsProvider({
       if (
         !value ||
         (value.outcome !== "applied" &&
+          value.outcome !== "issue_already_linked" &&
           value.outcome !== "cancelled" &&
           value.outcome !== "rejected" &&
           value.outcome !== "item_conflict")
@@ -177,7 +180,9 @@ export function ProjectCommandsProvider({
         )
           throw new Error("The conflict did not match this submission.");
       }
-      if (value.outcome === "applied") {
+      const applied =
+        value.outcome === "applied" || value.outcome === "issue_already_linked";
+      if (applied) {
         const command = captured.body.command;
         const expected =
           command.kind === "parent" || command.kind === "sub_issue"
@@ -187,6 +192,9 @@ export function ProjectCommandsProvider({
               : command.project;
         if (
           value.project !== expected ||
+          (value.outcome === "issue_already_linked" &&
+            (!("organization" in captured.target) ||
+              command.kind !== "create_issue")) ||
           !Number.isSafeInteger(value.version) ||
           value.version < 0
         )
@@ -196,12 +204,15 @@ export function ProjectCommandsProvider({
         setGeneration((previous) => previous + 1);
       }
       if (activeAccount.current !== captured.account) return;
-      if (value.outcome === "applied" && captured.draft)
-        clearDraft(captured.draft);
+      if (applied && captured.draft) clearDraft(captured.draft);
       removeProjectIntent(captured);
       current.current = null;
       setIntent(null);
       if (value.outcome === "rejected") setError(value.reason);
+      if (value.outcome === "issue_already_linked")
+        setNotice(
+          "The issue was already added to this Project. Its current planning fields were kept.",
+        );
       if (value.outcome === "item_conflict")
         setError(
           "This item changed since you opened it. Your draft is preserved. Review the saved item before saving again.",
@@ -283,10 +294,14 @@ export function ProjectCommandsProvider({
             : Promise.resolve(undefined),
       }}
     >
-      {(intent || error) && (
+      {(intent || error || notice) && (
         <Alert className="project-feedback" aria-live="polite">
           <AlertTitle>
-            {intent ? "Project submission" : "Changes were not saved"}
+            {intent
+              ? "Project submission"
+              : error
+                ? "Changes were not saved"
+                : "Issue added to Project"}
           </AlertTitle>
           <AlertDescription>
             {intent?.account !== account && intent ? (
@@ -296,7 +311,7 @@ export function ProjectCommandsProvider({
               </p>
             ) : (
               <>
-                <p>{error ?? "Saving your changes…"}</p>
+                <p>{error ?? notice ?? "Saving your changes…"}</p>
                 {intent && (
                   <div className="flex flex-wrap gap-2">
                     <Button
@@ -321,7 +336,10 @@ export function ProjectCommandsProvider({
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={() => setError(undefined)}
+                    onClick={() => {
+                      setError(undefined);
+                      setNotice(undefined);
+                    }}
                   >
                     Dismiss
                   </Button>

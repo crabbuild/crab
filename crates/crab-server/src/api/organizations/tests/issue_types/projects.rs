@@ -1,6 +1,7 @@
 use super::*;
 use crate::test_support::http::browser::Browser;
 mod groups;
+mod organization_creation;
 mod typed;
 
 async fn project_with_issue(

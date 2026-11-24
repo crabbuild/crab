@@ -75,6 +75,9 @@ pub(in crate::cells) fn dispatch_mutation(
             invoke_mutation::<projects::tests::Historical>(context, input)
         }
         projects::Change::ID => invoke_mutation::<projects::Change>(context, input),
+        projects::organization_issue::Publish::ID => {
+            invoke_mutation::<projects::organization_issue::Publish>(context, input)
+        }
         projects::preparation::Prepare::ID => {
             invoke_mutation::<projects::preparation::Prepare>(context, input)
         }

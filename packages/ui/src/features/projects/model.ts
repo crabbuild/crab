@@ -142,6 +142,7 @@ export type Command =
   | { kind: "parent"; child: number; parent: number | null; version: number };
 export type Outcome =
   | { outcome: "applied"; project: string | null; version: number }
+  | { outcome: "issue_already_linked"; project: string; version: number }
   | { outcome: "cancelled" }
   | { outcome: "rejected"; reason: string }
   | {

@@ -6,10 +6,12 @@ use std::collections::BTreeMap;
 
 mod commands;
 mod history;
+mod issue_creation;
 mod reads;
 use crate::cells::planning as ledger;
 pub(crate) use commands::{Change, Command, Outcome, Request};
 pub(crate) use history::{GetHistory, HistoryQuery};
+pub(crate) use issue_creation::{ResolveInput, ResolveIssue};
 pub(crate) use reads::{
     Get, Items, ItemsQuery, List, ListQuery, MatchedItems, ProjectKey, TypeSources,
     TypeSourcesQuery, View,
@@ -186,7 +188,7 @@ impl Mutation for Prepare {
 }
 pub(in crate::cells::organization) fn handles(operation: u32, mutation: bool) -> bool {
     if mutation {
-        matches!(operation, Prepare::ID | Change::ID)
+        matches!(operation, Prepare::ID | Change::ID | ResolveIssue::ID)
     } else {
         matches!(
             operation,
@@ -200,6 +202,17 @@ pub(in crate::cells::organization) fn authorize(
     mutation: bool,
     input: &Value,
 ) -> Result<()> {
+    if mutation && operation == ResolveIssue::ID {
+        let input: ResolveInput = serde_json::from_value(input.clone())?;
+        ensure_ready(context)?;
+        let who = input.request.actor;
+        actor(who)?;
+        if member(context, who)?.is_some() && commands::recover(context, &input.request)?.is_some()
+        {
+            return Ok(());
+        }
+        return Err(Error::AccessDenied);
+    }
     #[derive(Deserialize)]
     struct Person {
         actor: Uuid,

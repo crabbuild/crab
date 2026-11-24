@@ -71,6 +71,7 @@ fn request(actor: Uuid, command: Command) -> Request {
         command,
         cancel: false,
         source_allowed: true,
+        source_epoch: None,
     }
 }
 fn work(repository: Uuid) -> Item {

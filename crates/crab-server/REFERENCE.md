@@ -2812,6 +2812,18 @@ If a type is disabled before submission, the editor can select an enabled
 type and keep the draft. The repository Project `create_issue` command
 accepts an optional `type_id` with the enabled organization type UUID.
 
+In an organization Project, choose **New issue** when adding work, or
+**Create issue in** on an issue-type group. Choose a linked repository
+owned by the organization where you have Write access. The editor keeps
+the selected issue type and planning fields in its recovery draft.
+Organization Project `create_issue` commands take `project`, `repository`,
+`item` (a new item with no subject), and an optional `type_id`.
+The server reserves the Project item, commits the issue and type in the
+repository, and then links the issue. Retry an interrupted submission with
+the same request ID to recover the original result. **Cancel if not
+applied** fences a pending creation or completes the link if the issue
+already exists.
+
 Use `group_by=status`, `group_by=issue_type`, or `group_by=field:<UUID>` with
 either Project item endpoint to receive `group_counts`. Issue-type groupings
 include `issue_type_group` per item and carry `type_cursor` on continuation.

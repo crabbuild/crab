@@ -1335,9 +1335,12 @@ creation/conversion; no implicit migration or ownership inference occurs.
 Public `/api/organizations/{id}/projects` reads bounded project pages. `/{project}`
 returns metadata and accessible repository links; `/{project}/items` returns
 planning rows/counts with status/repository filters and version-checked paging.
+Linked repository metadata includes `can_create_issue` for current Write grants
+in the organization. The command revalidates this grant before publishing.
 `/{project}/candidates?repository=UUID&q=QUERY` searches authorized linked source
 work. POST `/commands` and `/cancel` use the same `{request_id,command}` body.
-Commands are `create`, `edit`, `planning`, `repository`, `item` and `remove`.
+Commands are `create`, `edit`, `planning`, `repository`, `item`, `create_issue`
+and `remove`.
 Project definitions, properties and links carry the captured project version.
 Item commands carry their own row revision, with zero for a new item. An item's
 source identity cannot be replaced. A repository with retained project items
@@ -1352,6 +1355,17 @@ before returning rows. Inaccessible sources expose only a redacted project row,
 without source UUID/name/number, title or body. Project counts describe planning
 membership, including redacted rows; they make no source-access or merge claims.
 There is no distributed transaction or grant inheritance between Cells.
+
+For `create_issue`, the Organization Cell reserves a new item under the
+actor and payload digest. The reservation pins the linked repository and
+ownership epoch. The Repository Cell commits the issue, optional issue
+type, and a separate publication receipt in one transaction. Replaying or
+cancelling the browser request first recovers that receipt. A committed
+issue can be linked after source access changes, while a fresh publication
+requires live Project management and repository Write access. Project
+archival, source unlinking, and changes that invalidate reserved planning
+fields wait for the interrupted submission to settle. A project can have
+four pending issue submissions.
 
 Permanent actor/payload-bound decisions serialize execution, rejection and
 cancellation. Identical retries recover the original minimal result even after

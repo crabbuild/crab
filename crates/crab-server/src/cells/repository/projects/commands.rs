@@ -230,6 +230,7 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
                     body: body.clone(),
                     metadata: Default::default(),
                 },
+                None,
             )?;
             let MutationResult::Success(super::super::CreateIssueOutcome::Created(issue)) = created
             else {
@@ -399,27 +400,13 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
                         body: entry.body.clone(),
                         metadata: Default::default(),
                     },
+                    selection,
                 )?;
                 let MutationResult::Success(super::super::CreateIssueOutcome::Created(issue)) =
                     created
                 else {
                     return Err(Error::Invalid("project issue creation failed"));
                 };
-                if let Some(selection) = selection
-                    && !matches!(
-                        issue_type::Set::execute(
-                            context,
-                            issue_type::SetInput {
-                                number: issue.number,
-                                expected_version: 0,
-                                selection: Some(selection),
-                            }
-                        )?,
-                        MutationResult::Success(issue_type::Outcome::Saved(_))
-                    )
-                {
-                    return Err(Error::Invalid("project issue type assignment failed"));
-                }
                 if let Some(parent) = parent
                     && let MutationResult::Rejected(outcome) =
                         hierarchy::change(context, issue.number, Some(*parent), 0, &input.actor)?

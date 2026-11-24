@@ -37,6 +37,7 @@ export function WorkspaceItemEditor({
   row,
   draftItem,
   initialItem,
+  initialIssueType,
   onClose,
 }: {
   organization: string;
@@ -44,8 +45,11 @@ export function WorkspaceItemEditor({
   row?: Row;
   draftItem?: string;
   initialItem?: Item;
+  initialIssueType?: string | null;
   onClose: () => void;
 }) {
+  const writable = detail.repositories.filter((repo) => repo.can_create_issue);
+  const typeChoices = detail.issue_types ?? [];
   const saved = useProjectDraft(
     {
       target: { organization },
@@ -62,10 +66,18 @@ export function WorkspaceItemEditor({
         ? row.work
           ? "existing"
           : "draft"
-        : detail.repositories.length
-          ? "existing"
-          : "draft",
-      repository: row?.repository?.id ?? detail.repositories[0]?.id ?? "",
+        : initialIssueType !== undefined
+          ? "issue"
+          : detail.repositories.length
+            ? "existing"
+            : "draft",
+      repository:
+        row?.repository?.id ??
+        (initialIssueType !== undefined
+          ? writable[0]?.id
+          : detail.repositories[0]?.id) ??
+        "",
+      issueType: initialIssueType,
       parent: "",
       work: row?.work ?? null,
       version: row?.version ?? 0,
@@ -79,14 +91,22 @@ export function WorkspaceItemEditor({
     mode,
     repository,
     work: picked,
+    issueType,
     version,
     definition,
     existing: wasExisting,
     restricted,
   } = saved.value;
+  const canWriteIssue = writable.some((repo) => repo.id === repository);
   const setItem = (item: Item) => saved.update({ item });
   const setMode = (mode: string) => {
     if (mode === "existing" || mode === "draft") saved.update({ mode });
+    if (mode === "issue")
+      saved.update({
+        mode,
+        repository: canWriteIssue ? repository : (writable[0]?.id ?? ""),
+        work: null,
+      });
   };
   const setRepository = (repository: string) => saved.update({ repository });
   const setPicked = (work: Work | null | undefined) =>
@@ -151,22 +171,34 @@ export function WorkspaceItemEditor({
             if (!checkpoint) return;
             const result = await commands.submitOrganization(
               organization,
-              {
-                kind: "item",
-                project: detail.project.id,
-                version,
-                repository: mode === "existing" ? repository : null,
-                item: {
-                  ...item,
-                  subject:
-                    mode === "existing" ? (picked?.subject ?? null) : null,
-                  title: mode === "existing" ? "" : item.title.trim(),
-                  body: mode === "existing" ? "" : item.body,
-                },
-              },
+              mode === "issue"
+                ? {
+                    kind: "create_issue",
+                    project: detail.project.id,
+                    repository,
+                    item: { ...item, subject: null, title: item.title.trim() },
+                    type_id: issueType ?? null,
+                  }
+                : {
+                    kind: "item",
+                    project: detail.project.id,
+                    version,
+                    repository: mode === "existing" ? repository : null,
+                    item: {
+                      ...item,
+                      subject:
+                        mode === "existing" ? (picked?.subject ?? null) : null,
+                      title: mode === "existing" ? "" : item.title.trim(),
+                      body: mode === "existing" ? "" : item.body,
+                    },
+                  },
               checkpoint,
             );
-            if (result?.outcome === "applied") onClose();
+            if (
+              result?.outcome === "applied" ||
+              result?.outcome === "issue_already_linked"
+            )
+              onClose();
           }}
         >
           {restricted ? (
@@ -185,6 +217,9 @@ export function WorkspaceItemEditor({
                       <TabsTrigger value="existing">
                         Issue or pull request
                       </TabsTrigger>
+                      {(writable.length > 0 || mode === "issue") && (
+                        <TabsTrigger value="issue">New issue</TabsTrigger>
+                      )}
                       <TabsTrigger value="draft">Draft note</TabsTrigger>
                     </TabsList>
                     <TabsContent value="existing">
@@ -268,6 +303,68 @@ export function WorkspaceItemEditor({
                         )}
                       </FieldGroup>
                     </TabsContent>
+                    <TabsContent value="issue">
+                      <FieldGroup className="pt-4">
+                        <Field>
+                          <FieldLabel htmlFor={`${id}-issue-repository`}>
+                            Repository
+                          </FieldLabel>
+                          <FieldSelect
+                            id={`${id}-issue-repository`}
+                            label="Issue repository"
+                            value={canWriteIssue ? repository : "choose"}
+                            onValueChange={setRepository}
+                            options={{
+                              choose: "Choose a repository",
+                              ...Object.fromEntries(
+                                writable.map((repo) => [
+                                  repo.id,
+                                  `${repo.owner}/${repo.name}`,
+                                ]),
+                              ),
+                            }}
+                          />
+                        </Field>
+                        {!writable.length && (
+                          <p className="text-sm text-muted-foreground">
+                            Write access to a linked organization repository is
+                            required.
+                          </p>
+                        )}
+                        {(typeChoices.length > 0 || issueType != null) && (
+                          <Field>
+                            <FieldLabel htmlFor={`${id}-issue-type`}>
+                              Issue type
+                            </FieldLabel>
+                            <FieldSelect
+                              id={`${id}-issue-type`}
+                              label="Issue type"
+                              value={issueType ?? "none"}
+                              options={{
+                                none: "No type",
+                                ...Object.fromEntries(
+                                  typeChoices.map((type) => [
+                                    type.id,
+                                    type.name,
+                                  ]),
+                                ),
+                                ...(issueType &&
+                                !typeChoices.some(
+                                  (type) => type.id === issueType,
+                                )
+                                  ? { [issueType]: "Unavailable type" }
+                                  : {}),
+                              }}
+                              onValueChange={(value) =>
+                                saved.update({
+                                  issueType: value === "none" ? null : value,
+                                })
+                              }
+                            />
+                          </Field>
+                        )}
+                      </FieldGroup>
+                    </TabsContent>
                     <TabsContent value="draft" className="pt-4">
                       <p className="text-sm text-muted-foreground">
                         Capture work before it has an issue. Draft notes belong
@@ -282,7 +379,7 @@ export function WorkspaceItemEditor({
                     #{picked.subject.number} · {picked.title}
                   </p>
                 ) : null}
-                {mode === "draft" && (
+                {mode !== "existing" && (
                   <>
                     <Field>
                       <FieldLabel htmlFor={`${id}-title`}>Title</FieldLabel>
@@ -460,6 +557,7 @@ export function WorkspaceItemEditor({
                 type="submit"
                 disabled={
                   commands.locked ||
+                  (mode === "issue" && !canWriteIssue) ||
                   (mode === "existing" ? !picked : !item.title.trim())
                 }
               >
@@ -467,7 +565,9 @@ export function WorkspaceItemEditor({
                   ? "Saving…"
                   : wasExisting
                     ? "Save item"
-                    : "Add to project"}
+                    : mode === "issue"
+                      ? "Create issue"
+                      : "Add to project"}
               </Button>
             )}
           </DialogFooter>
