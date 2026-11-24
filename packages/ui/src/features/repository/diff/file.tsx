@@ -42,6 +42,7 @@ export function DiffView({
   review,
   target,
   hideWhitespace,
+  mergedPull,
 }: {
   id: string;
   repo: Pick<Repository, "owner" | "name">;
@@ -54,6 +55,7 @@ export function DiffView({
   review?: DiffReviewState;
   target?: DiffTarget;
   hideWhitespace: boolean;
+  mergedPull?: number;
 }) {
   const panel = useRef<HTMLElement>(null);
   const [load, setLoad] = useState(eager);
@@ -103,9 +105,13 @@ export function DiffView({
     return () => observer.disconnect();
   }, [load]);
   const state = useRequest<Diff>(
-    load
-      ? endpoint(repo, "diff", { rev, base, path_hex: change.path_hex })
-      : null,
+    !load
+      ? null
+      : mergedPull === undefined
+        ? endpoint(repo, "diff", { rev, base, path_hex: change.path_hex })
+        : endpoint(repo, `pulls/${mergedPull}/merged-comparison/file`, {
+            path_hex: change.path_hex,
+          }),
   );
   const [style, setStyle] = useState<"unified" | "split">("split");
   const options = useMemo(

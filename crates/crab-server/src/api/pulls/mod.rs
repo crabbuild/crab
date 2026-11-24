@@ -38,6 +38,7 @@ mod codeowners;
 pub(crate) use branch_update::authorize_branch_update;
 pub(super) mod comments;
 mod git;
+mod merged_comparison;
 pub(super) use git::review_head;
 mod merge;
 mod merge_methods;
@@ -146,6 +147,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
             get(detail).patch(edit),
         )
         .merge(comments::routes())
+        .merge(merged_comparison::routes())
         .merge(head_branch::routes())
         .merge(branch_update::routes())
         .merge(base::routes())

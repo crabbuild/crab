@@ -18,8 +18,9 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
 - Merged pull requests retain access to check runs and commit statuses for
   the exact reviewed head and, when published, the tested candidate. The
   Checks tab separates these commits after squash or rebase and branch
-  cleanup. Historical code browsing for a now-unreachable head still needs
-  a Git retention policy.
+  cleanup. Files changed and inline review navigation use the pre-merge
+  comparison while its objects remain in storage. Historical commit browsing
+  and a durable Git retention policy are still open.
 - Writers can restore a missing head branch from a completed pull request.
   The panel shows the saved commit. Publication checks the current source
   repository, write grant and ref rules, and requires the branch name to be

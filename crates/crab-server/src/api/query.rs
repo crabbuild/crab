@@ -382,7 +382,7 @@ fn comparison_change(change: &TreeChange, view_identity: bool) -> serde_json::Va
     value
 }
 
-fn comparison_json(
+pub(super) fn comparison_json(
     comparison: crab_remote_git::Comparison,
     base_tip: Option<String>,
 ) -> serde_json::Value {
@@ -543,7 +543,7 @@ pub(super) async fn pull_comparison_base(
     operation.finish(result).await
 }
 
-async fn comparison_blobs_for_snapshots(
+pub(super) async fn comparison_blobs_for_snapshots(
     base: Option<&RemoteGitSnapshot>,
     head: &RemoteGitSnapshot,
     path: &GitPath,

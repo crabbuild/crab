@@ -98,7 +98,7 @@ async fn change(
                 return Err(Error::Invalid("Pending comment request IDs must match"));
             }
             let record = load_pull(&server, &repo, pull).await?;
-            let comparison = comparison(&server, &repo, &record).await?;
+            let comparison = comparison(&server, &principal, &repo, &record).await?;
             if !comparison.live {
                 return Err(Error::Conflict);
             }
@@ -171,7 +171,7 @@ async fn submit(
     let mut source_error = None;
     let source = if saved.version == Some(input.expected) && !saved.comments.is_empty() {
         let record = load_pull(&server, &repo, pull).await?;
-        match comparison(&server, &repo, &record).await {
+        match comparison(&server, &principal, &repo, &record).await {
             Ok(source) if source.live => Some((source.base_oid, source.head_oid)),
             Ok(_) => None,
             Err(error) => {

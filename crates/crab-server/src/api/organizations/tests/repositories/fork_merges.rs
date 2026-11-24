@@ -93,6 +93,7 @@ pub(super) async fn exercise(
     // Use the exact upstream base already fetched by stock Git and the fork's
     // proposal to obtain an independent expected tree for all three methods.
     git(fork_work, &["fetch", upstream_remote, "main"]).await;
+    let expected_ancestor = git(fork_work, &["merge-base", "FETCH_HEAD", &head]).await;
     let expected_tree = git(
         fork_work,
         &["merge-tree", "--write-tree", "FETCH_HEAD", &head],
@@ -311,6 +312,16 @@ pub(super) async fn exercise(
                     .await,
                     format!("{base}\trefs/heads/proposal")
                 );
+                let saved = format!("{pulls}/{number}/merged-comparison");
+                let comparison = h.json(&saved, alice).await;
+                assert_eq!(comparison["base"], expected_ancestor);
+                assert_eq!(comparison["base_tip"], base);
+                assert_eq!(comparison["commit"], head);
+                let path = crate::api::encode_hex(b"proposal/final");
+                let file = h
+                    .json(&format!("{saved}/file?path_hex={path}"), alice)
+                    .await;
+                assert_eq!(file["new"]["text"], "second fork change");
                 let mut restoration = h.json(&branch_path, alice).await["branch"].clone();
                 assert_eq!(restoration["action"], "restore");
                 restoration["request_id"] = json!(Uuid::now_v7());

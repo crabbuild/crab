@@ -19,11 +19,13 @@ Caller: authorize and resolve physical placement
   -> OperationContext::finish: result + locator close
 ```
 
-A repository handle pins caller-validated metadata. A snapshot pins a reachable
-commit and its root tree. This crate does not open a live stored manifest/ref
-journal or infer current authority from a locator. Product callers capture the
-Capsule view through crab-read and own freshness and remote retention. Empty
-captures open, but selecting a snapshot returns `EmptyRepository`.
+A repository handle pins caller-validated metadata. The ordinary snapshot pins
+a reachable commit and its root tree. `snapshot_retained` reads a separate root
+only when the caller has independent authority for that exact repository and
+commit, such as the source of a completed merge. This crate does not open a live
+stored manifest/ref journal or infer current authority from a locator. Product
+callers capture the Capsule view through crab-read and own freshness and remote
+retention. Empty captures open, but selecting a snapshot returns `EmptyRepository`.
 
 Snapshot constructors retain explicitly supplied commit-graph/path-state indexes
 only for their exact materialized Git state. Loading a graph shares the normal

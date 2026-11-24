@@ -154,12 +154,15 @@ export function PullReviewThreads({
     refresh();
   }
   const suggestions = useSuggestionBatch(repo, pull, csrf, refreshThreads);
-  const headRepo = pull.head_repository ?? repo;
+  const mergedPull = pull.merge ? pull.number : undefined;
+  const comparisonRepo =
+    mergedPull === undefined ? (pull.head_repository ?? repo) : repo;
   const comparison = usePullComparison(
-    headRepo,
+    comparisonRepo,
     pull.base_oid,
     pull.head_oid,
     pull.head_repository ? repo.id : undefined,
+    mergedPull,
   );
   const preview = comparison.data;
   const comparisonChanged =
@@ -415,12 +418,13 @@ export function PullReviewThreads({
       {viewed.status}
       <ChangeComparison
         state={comparison}
-        repo={headRepo}
+        repo={comparisonRepo}
         base={preview?.base}
         rev={preview?.commit ?? ""}
         theme={theme}
         codeThemes={codeThemes}
         review={review}
+        mergedPull={mergedPull}
       />
       {linkedThread.error && (
         <Failure

@@ -9,16 +9,19 @@ export function usePullComparison(
   base: string,
   head: string,
   upstream?: string,
+  mergedPull?: number,
 ) {
   return useRequest<Changes & { base: string; base_tip: string }>(
-    base && head
-      ? endpoint(repo, "changes", {
-          rev: head,
-          base,
-          merge_base: "true",
-          upstream,
-        })
-      : null,
+    mergedPull !== undefined
+      ? endpoint(repo, `pulls/${mergedPull}/merged-comparison`)
+      : base && head
+        ? endpoint(repo, "changes", {
+            rev: head,
+            base,
+            merge_base: "true",
+            upstream,
+          })
+        : null,
   );
 }
 
@@ -32,6 +35,7 @@ export function ChangeComparison({
   sticky = false,
   idPrefix,
   review,
+  mergedPull,
 }: {
   state: ReturnType<typeof useRequest<Changes>>;
   repo: Pick<Repository, "owner" | "name">;
@@ -42,6 +46,7 @@ export function ChangeComparison({
   sticky?: boolean;
   idPrefix?: string;
   review?: DiffReviewState;
+  mergedPull?: number;
 }) {
   return (
     <Result state={state}>
@@ -57,6 +62,7 @@ export function ChangeComparison({
           sticky={sticky}
           idPrefix={idPrefix}
           review={review}
+          mergedPull={mergedPull}
         />
       )}
     </Result>

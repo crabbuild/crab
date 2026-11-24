@@ -4333,8 +4333,14 @@ access.
 
 If either branch is deleted, the conversation and original OIDs remain visible.
 A completed merge retains its pre-merge base and head IDs after source deletion.
-File and commit browsing still needs reachable Git objects. The **Checks** tab
-can read stored reports for the recorded merge commits independently of Git reachability.
+**Files changed** reads the recorded comparison and inline anchors while its Git
+objects remain in storage, including after squash or rebase. The server uses the
+completed merge record to select both roots and checks current access to the PR
+repository and any source fork. The retained endpoints are
+`GET .../pulls/{number}/merged-comparison` and `GET .../pulls/{number}/merged-comparison/file?path_hex=...`.
+The file read is limited to paths changed by that comparison. Commit browsing
+still uses normal Git reachability. The **Checks** tab reads stored reports for
+the recorded merge commits independently of their Git objects.
 
 Reviews record `commented`, `approved`, or `changes_requested` against the exact current head. Pull authors cannot approve or request changes on their own pull. Advancing the head marks older reviews as not current.
 

@@ -20,6 +20,7 @@ export function ChangeWorkspace({
   sticky,
   idPrefix = "",
   review,
+  mergedPull,
 }: {
   changes: Change[];
   repo: Pick<Repository, "owner" | "name">;
@@ -30,6 +31,7 @@ export function ChangeWorkspace({
   sticky: boolean;
   idPrefix?: string;
   review?: DiffReviewState;
+  mergedPull?: number;
 }) {
   const diffPane = useRef<HTMLDivElement>(null);
   const heading = `${idPrefix}changed-files-heading`;
@@ -205,6 +207,7 @@ export function ChangeWorkspace({
                   codeThemes={codeThemes}
                   eager={index === 0}
                   review={review}
+                  mergedPull={mergedPull}
                   hideWhitespace={whitespace === "hide"}
                   target={change.path_hex === revealedPath ? target : undefined}
                 />

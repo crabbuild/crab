@@ -1057,7 +1057,32 @@ impl RemoteGitRepository {
         operation: &OperationContext,
     ) -> Result<RemoteGitSnapshot> {
         let resolved = self.resolve(revision, operation).await?;
-        let commit = operation.read_commit(resolved.commit).await?;
+        self.snapshot_commit(resolved.commit, operation).await
+    }
+
+    /// Open the exact retained commit named by a separately authorized record.
+    ///
+    /// The caller must independently authorize this commit in this repository
+    /// before calling. Inventory membership does not grant visibility. An
+    /// absent root is reported as [`Error::SnapshotUnavailable`].
+    pub async fn snapshot_retained(
+        &self,
+        commit: gix_hash::ObjectId,
+        operation: &OperationContext,
+    ) -> Result<RemoteGitSnapshot> {
+        ensure_operation(operation, &self.state)?;
+        match self.snapshot_commit(commit, operation).await {
+            Err(Error::ObjectNotFound { oid }) if oid == commit => Err(Error::SnapshotUnavailable),
+            outcome => outcome,
+        }
+    }
+
+    async fn snapshot_commit(
+        &self,
+        oid: gix_hash::ObjectId,
+        operation: &OperationContext,
+    ) -> Result<RemoteGitSnapshot> {
+        let commit = operation.read_commit(oid).await?;
         let pack_index_hash = match self.state.coverage() {
             Some(coverage) => coverage.pack_index_hash,
             None if self.state.reader.is_some() => self
