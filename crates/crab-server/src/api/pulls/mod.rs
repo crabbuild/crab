@@ -595,7 +595,10 @@ pub(crate) async fn authorize_merge_publication(
                 && pending.tested_candidate == publication.tested_candidate
                 && pull.head_ref == publication.head_ref
                 && pull.head_repository == publication.head_repository.as_ref().map(|fork| fork.id)
-                && pending.publication_plan.as_deref() == plan
+                // A tagged reservation has no plan. New receipt IDs for its
+                // webhooks or issue closures do not change its merge binding.
+                && pending.publication_plan == publication.plan_id
+                && publication.plan_id.as_deref().is_none_or(|id| plan == Some(id))
                 && update.name == pull.base_ref
                 && update
                     .new
