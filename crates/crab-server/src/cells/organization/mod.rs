@@ -473,6 +473,10 @@ pub(in crate::cells) fn dispatch_read(
         projects::GetHistory::ID => invoke_read::<projects::GetHistory>(context, input),
         projects::GetAccess::ID => invoke_read::<projects::GetAccess>(context, input),
         projects::GetDefaultAccess::ID => invoke_read::<projects::GetDefaultAccess>(context, input),
+        projects::GetWorkspace::ID => invoke_read::<projects::GetWorkspace>(context, input),
+        projects::InspectCollaborators::ID => {
+            invoke_read::<projects::InspectCollaborators>(context, input)
+        }
         projects::List::ID => invoke_read::<projects::List>(context, input),
         development::List::ID => invoke_read::<development::List>(context, input),
         development::Get::ID => invoke_read::<development::Get>(context, input),

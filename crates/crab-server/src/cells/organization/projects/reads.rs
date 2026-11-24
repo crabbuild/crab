@@ -8,7 +8,7 @@ use planning::grouping::{self, GroupBy};
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BulkSourceQuery {
-    pub actor: Uuid,
+    pub actor: AccessActor,
     pub project: Uuid,
     pub items: Vec<Uuid>,
 }
@@ -96,7 +96,7 @@ impl Read for GetAttachmentSources {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ListQuery {
-    pub actor: Uuid,
+    pub actor: AccessActor,
     pub archived: bool,
     pub search: String,
     pub after: Option<Uuid>,
@@ -107,6 +107,7 @@ pub(crate) struct Listing {
     pub items: Vec<Project>,
     pub next: Option<Uuid>,
     pub revision: u64,
+    pub can_create: bool,
 }
 pub(crate) struct List;
 impl Read for List {
@@ -158,13 +159,14 @@ impl Read for List {
             },
             items,
             revision: organization.version,
+            can_create: viewer.member(),
         })
     }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProjectKey {
-    pub actor: Uuid,
+    pub actor: AccessActor,
     pub project: Uuid,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -200,7 +202,7 @@ impl Read for Get {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ItemsQuery {
-    pub actor: Uuid,
+    pub actor: AccessActor,
     pub project: Uuid,
     pub after: Option<Uuid>,
     pub version: Option<u64>,
@@ -221,7 +223,7 @@ pub(crate) struct MatchedItems {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SourcesQuery {
-    pub actor: Uuid,
+    pub actor: AccessActor,
     pub project: Uuid,
     pub item: Option<Uuid>,
     pub include_pulls: bool,

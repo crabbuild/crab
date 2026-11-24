@@ -113,6 +113,9 @@ export type IssueTypeSchema = { version: number, definitions: Array<IssueType>, 
 export type ProjectAccessRole = "none" | "read" | "write" | "admin";
 
 // prettier-ignore
+export type OrganizationProjectWorkspace = { name: string, can_create: boolean, };
+
+// prettier-ignore
 export type OrganizationProjectPolicy = { version: number, role: ProjectAccessRole, affected_projects: number, scope: string, };
 
 // prettier-ignore

@@ -24,7 +24,7 @@ async fn organization_project_recovers_the_issue_after_the_repository_commits() 
     let root = format!("{org}/projects");
     let project = project_with_issue(&h, &alice, &root, repo, true, false).await;
     let organization = org.rsplit('/').next().unwrap().parse().unwrap();
-    let actor = h.json(&org, &alice).await["actor"]
+    let actor: Uuid = h.json(&org, &alice).await["actor"]
         .as_str()
         .unwrap()
         .parse()
@@ -45,12 +45,13 @@ async fn organization_project_recovers_the_issue_after_the_repository_commits() 
                 Address::Organization(organization),
                 app::mutation_identity().unwrap(),
                 workspace::Request {
-                    actor,
+                    actor: actor.into(),
                     request_id: body["request_id"].as_str().unwrap().parse().unwrap(),
                     command: serde_json::from_value(body["command"].clone()).unwrap(),
                     source_allowed: true,
                     attachment: None,
                     source_epoch: Some(epoch),
+                    eligible_outside: None,
                     cancel: false,
                 },
             )

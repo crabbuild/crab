@@ -150,12 +150,14 @@ export function ProjectHistory({
                         Repository access is required to view this source.
                       </p>
                     )}
-                    <CollapsibleTrigger asChild>
-                      <Button className="mt-2" variant="ghost" size="sm">
-                        View {event.changes.length} field changes
-                        <ChevronDownIcon data-icon="inline-end" />
-                      </Button>
-                    </CollapsibleTrigger>
+                    {event.changes.length > 0 && (
+                      <CollapsibleTrigger asChild>
+                        <Button className="mt-2" variant="ghost" size="sm">
+                          View {event.changes.length} field changes
+                          <ChevronDownIcon data-icon="inline-end" />
+                        </Button>
+                      </CollapsibleTrigger>
+                    )}
                     <CollapsibleContent>
                       <div className="mt-2 max-h-80 overflow-auto rounded-md border">
                         <Table>

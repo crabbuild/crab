@@ -20,7 +20,7 @@ import {
   EmptyDescription,
 } from "@/components/ui/empty";
 import { DiscussionMarkdown } from "@/components/discussion/markdown";
-import type { OrganizationView } from "@/lib/contracts";
+import type { OrganizationProjectWorkspace } from "@/lib/contracts";
 import { useProjectCommands } from "../commands";
 import { ProjectHistory } from "../history";
 import { ProjectViewTabs } from "../view-tabs";
@@ -67,20 +67,24 @@ export function OrganizationProjects({
   project?: string;
   url: URL;
 }) {
-  const own = useRequest<OrganizationView>(
-    `/api/organizations/${organization}`,
+  const own = useRequest<OrganizationProjectWorkspace>(
+    projectEndpoint({ organization }, "context"),
   );
   return (
     <Result state={own}>
-      {({ organization: record }) => (
+      {({ name, can_create }) => (
         <div className="organization-project-shell">
           <aside className="organization-project-nav">
-            <Link
-              className="organization-project-name"
-              href={`/-/organizations/${organization}`}
-            >
-              {record.name}
-            </Link>
+            {can_create ? (
+              <Link
+                className="organization-project-name"
+                href={`/-/organizations/${organization}`}
+              >
+                {name}
+              </Link>
+            ) : (
+              <span className="organization-project-name">{name}</span>
+            )}
             <nav aria-label="Organization workspace">
               <Button asChild variant="secondary">
                 <Link href={workspaceHref(organization)} aria-current="page">
@@ -88,12 +92,14 @@ export function OrganizationProjects({
                   Projects
                 </Link>
               </Button>
-              <Button asChild variant="ghost">
-                <Link href={`/-/organizations/${organization}?tab=people`}>
-                  <UsersIcon data-icon="inline-start" />
-                  People
-                </Link>
-              </Button>
+              {can_create && (
+                <Button asChild variant="ghost">
+                  <Link href={`/-/organizations/${organization}?tab=people`}>
+                    <UsersIcon data-icon="inline-start" />
+                    People
+                  </Link>
+                </Button>
+              )}
             </nav>
           </aside>
           <section

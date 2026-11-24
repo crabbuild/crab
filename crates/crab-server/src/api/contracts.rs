@@ -52,6 +52,7 @@ fn typescript() -> String {
         organization::issue_types::Definition::decl(&config),
         organization::issue_types::Schema::decl(&config),
         organization::projects::AccessRole::decl(&config),
+        organization::projects::WorkspaceAccess::decl(&config),
         organization::projects::DefaultAccessPreview::decl(&config),
         organizations::audit::AuditAction::decl(&config),
         organizations::audit::AuditRepository::decl(&config),

@@ -34,7 +34,7 @@ pub(super) async fn resolve(
     principal: &Principal,
     organization: Uuid,
     project: Uuid,
-    actor: Uuid,
+    actor: projects::AccessActor,
     input: &Filter,
 ) -> Result<Option<FilteredItems>> {
     let group_by_type = input.group_by == Some(source::grouping::GroupBy::IssueType);

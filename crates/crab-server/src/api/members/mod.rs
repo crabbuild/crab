@@ -182,9 +182,73 @@ async fn replace(
         Ok(value) => value,
         Err(response) => return *response,
     };
+    let scope = document
+        .repositories
+        .iter()
+        .find(|record| {
+            record.owner.eq_ignore_ascii_case(&owner) && record.name.eq_ignore_ascii_case(&name)
+        })
+        .and_then(crate::catalog::CatalogRecord::organization_id);
+    let Some(organization) = scope else {
+        return replace_authorized(
+            &server,
+            &principal,
+            &owner,
+            &name,
+            (catalog, document),
+            input,
+            None,
+        )
+        .await;
+    };
+    // Recheck the administrator and repository scope while holding the same
+    // policy lease as Project writes that depend on these direct grants.
+    match super::organizations::properties::policy_write(
+        server,
+        organization,
+        move |server, _, cancel| async move {
+            let (catalog, document) = match authorized(&server, &principal, &owner, &name).await {
+                Ok(value) => value,
+                Err(response) => return Ok(*response),
+            };
+            if !document.repositories.iter().any(|record| {
+                record.owner.eq_ignore_ascii_case(&owner)
+                    && record.name.eq_ignore_ascii_case(&name)
+                    && record.organization_id() == Some(organization)
+            }) {
+                return Err(app::Error::PageChanged);
+            }
+            Ok(replace_authorized(
+                &server,
+                &principal,
+                &owner,
+                &name,
+                (catalog, document),
+                input,
+                Some(&cancel),
+            )
+            .await)
+        },
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn replace_authorized(
+    server: &Server,
+    principal: &Principal,
+    owner: &str,
+    name: &str,
+    (catalog, document): (CatalogStore, CatalogDocument),
+    input: Result<Json<AccessUpdate>, JsonRejection>,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+) -> Response {
     if document.repositories.iter().any(|record| {
-        record.owner.eq_ignore_ascii_case(&owner)
-            && record.name.eq_ignore_ascii_case(&name)
+        record.owner.eq_ignore_ascii_case(owner)
+            && record.name.eq_ignore_ascii_case(name)
             && record.forked_from.is_some()
     }) {
         return error(
@@ -203,7 +267,7 @@ async fn replace(
             );
         }
     };
-    if !input.groups.is_empty() && !groups_supported(&server) {
+    if !input.groups.is_empty() && !groups_supported(server) {
         return error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "oidc_required",
@@ -235,11 +299,14 @@ async fn replace(
         .repositories
         .iter()
         .find(|record| {
-            record.owner.eq_ignore_ascii_case(&owner) && record.name.eq_ignore_ascii_case(&name)
+            record.owner.eq_ignore_ascii_case(owner) && record.name.eq_ignore_ascii_case(name)
         })
         .map(|record| (record.members.clone(), record.groups.clone()));
+    if cancel.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
+        return app::Error::MergeBusy.into_response();
+    }
     match catalog
-        .replace_access(&owner, &name, input, actor, server.auth.is_some())
+        .replace_access_under_policy(owner, name, input, actor, server.auth.is_some())
         .await
     {
         Ok(record) => {
@@ -256,8 +323,8 @@ async fn replace(
                 document.version + 1
             };
             let can_admin = match app::membership_snapshot(
-                &server,
-                &principal,
+                server,
+                principal,
                 &active,
                 record.access_snapshot(revision, &record),
             )
@@ -271,7 +338,7 @@ async fn replace(
                 members: record.members,
                 groups: record.groups,
                 can_admin,
-                groups_supported: groups_supported(&server),
+                groups_supported: groups_supported(server),
             })
             .into_response()
         }

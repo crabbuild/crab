@@ -548,6 +548,11 @@ properties, UUID-bound repository links/items, creator membership incarnations
 and permanent submissions. `api/organizations/projects/` composes independent
 source grants with bounded current work enrichment. `projects/access.rs` owns
 Project base roles, membership-incarnation grants, and effective team access.
+`api/organizations/projects/authority.rs` qualifies outside Project
+collaborators against current direct organization repository grants. The
+Organization Cell owns their per-Project role and prevents it from surviving a
+new membership incarnation. Guest writes and qualification changes share the
+organization policy lease used by repository access updates and transfers.
 `projects/policy.rs` owns the organization default and binds confirmation to
 the exact set of inheriting Projects.
 Project access cannot authorize a linked repository. Both project scopes share

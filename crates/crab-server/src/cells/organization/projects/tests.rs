@@ -69,13 +69,14 @@ async fn create_project(client: &CellClient, organization: Uuid, owner: Uuid, pr
 }
 fn request(actor: Uuid, command: Command) -> Request {
     Request {
-        actor,
+        actor: actor.into(),
         request_id: Uuid::now_v7(),
         command,
         cancel: false,
         source_allowed: true,
         attachment: None,
         source_epoch: None,
+        eligible_outside: None,
     }
 }
 fn work(repository: Uuid) -> Item {
@@ -243,7 +244,7 @@ async fn items(
             Address::Organization(organization),
             None,
             ItemsQuery {
-                actor: owner,
+                actor: owner.into(),
                 project,
                 after: None,
                 version: None,
@@ -588,7 +589,7 @@ async fn outsiders_cannot_read_projects_or_allocate_submissions() {
             Address::Organization(organization),
             None,
             ProjectKey {
-                actor: outsider,
+                actor: outsider.into(),
                 project,
             },
         )
@@ -681,7 +682,7 @@ async fn rejoining_does_not_restore_project_management_but_original_decisions_re
             Address::Organization(organization),
             None,
             ProjectKey {
-                actor: creator,
+                actor: creator.into(),
                 project,
             },
         )
@@ -725,7 +726,7 @@ async fn existing_organizations_require_explicit_idempotent_preparation() {
             Address::Organization(organization),
             None,
             ProjectKey {
-                actor: owner,
+                actor: owner.into(),
                 project,
             },
         )

@@ -3016,30 +3016,51 @@ Projects. Projects with explicit base roles keep them.
 
 In an organization Project, **Manage access** lets Project administrators set
 an explicit base role, select **Organization default**, or grant **Read**,
-**Write**, or **Admin** to current members and teams. **No access** hides the
-Project from members without a grant. A current direct grant takes precedence
+**Write**, or **Admin** to current members, teams, and outside collaborators.
+**No access** hides the Project from members without a grant. A current direct grant takes precedence
 over the base role. Active team memberships can add access. Organization
 owners and the creator's original membership retain administrative access.
 Write includes editing planning data and views. Admin also includes managing
 access and opening or archiving the Project. Linked issues and PRs still follow
-their repository permissions.
+their repository permissions. Work and history from an unreadable linked
+repository omit its identity, custom field values, and history field changes.
+
+To share a Project with a guest, select **Outside collaborator** and search by
+Crab username. The guest must have a current direct grant on a repository owned
+by the organization. The Project appears in the guest's organization Project
+library. Guests see only the Projects shared with them. They can neither create
+organization Projects nor access the organization roster. Project Admin grants
+let guests manage individual collaborators, with team grants reserved for
+organization members.
+
+Removing the last qualifying repository grant makes the saved Project role
+inactive immediately. Restoring repository access reactivates the saved role
+unless the Project grant was removed or the guest joined the organization in
+the meantime. Organization membership uses its own Project access rules.
 
 Project admins can call `GET /api/organizations/{id}/projects/{project}/access`
 to read the effective base role, optional override, organization default and
 its version, grants, and Project version. Post `set_access` to the organization
 Project command endpoint with `project`, `version`, `target` (`{kind:"base"}`,
-`{kind:"member",id}`, or `{kind:"team",id}`) and `role` (`none`, `read`, `write`,
-or `admin`). For a base role, pass `role: null` and the displayed `default_version`
-to inherit the current default. `none` removes a member or team grant.
+`{kind:"member",id}`, `{kind:"team",id}`, or `{kind:"outside",id}`) and `role`
+(`none`, `read`, `write`, or `admin`). For a base role, pass `role: null` and the
+displayed `default_version` to inherit the current default. `none` removes an
+explicit grant.
 A Project supports up to 100 explicit grants. A grant to a member expires when
 that membership ends. Team grants check the active roster on every operation.
+
+`GET /api/organizations/{id}/projects/context` returns the library name and
+whether the caller can create Projects. Project administrators can call
+`GET /api/organizations/{id}/projects/{project}/collaborators?q={prefix}` to
+find eligible guests and their account UUIDs. With `member=true`, the search
+returns current organization members matching the username prefix.
 
 Organization owners can call `GET /api/organizations/{id}/project-policy` for
 the current `role`, `version`, `affected_projects` count, and opaque `scope`.
 Submit `set_default_access` with the new `role` and the displayed `version`
 and `scope`. A different set of inheriting Projects or changed default requires
 a fresh confirmation. A successful change appears in the organization audit log.
-Upgrade all serving peers before saving Project access policies.
+Upgrade all serving peers before using Project access policies or guest links.
 
 With source repository triage access, drag an issue to another type group in
 a table or board, or use the **Change issue type** control in any layout.

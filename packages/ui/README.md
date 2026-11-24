@@ -410,13 +410,15 @@ and target controls constrain each other, and the native API validates ranges.
 
 Current organization members can create Projects. Organization owners set the
 default access in **Settings** → **Project policy**. Project administrators can
-inherit that default or set a base role and individual or team grants in
-**Manage access**. The creator in their original membership incarnation and
-organization owners retain administrative access. Project access grants no
-source repository access. Inaccessible work is redacted, and
-repository UUIDs prevent name reuse from redirecting project references. Source
-permissions are refreshed after enrichment; native organization authority is
-checked again before returning a composed response.
+inherit that default or set a base role and individual, team, or outside
+collaborator grants in **Manage access**. Outside collaborators must retain
+direct access to an organization repository. Their library shows only Projects
+explicitly shared with them. The creator in their original membership
+incarnation and organization owners retain administrative access. Source
+repository permissions still apply. Inaccessible work and history are redacted.
+Repository UUIDs prevent name reuse from redirecting project references. Source
+permissions are refreshed after enrichment, and native organization authority
+is checked again before returning a composed response.
 
 When a linked issue moves, its row opens the current issue while planning edits
 retain the stored project item and its history. A reader needs access to the

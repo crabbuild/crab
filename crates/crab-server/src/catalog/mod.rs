@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::{
     BranchProtection, RepositoryAccess, RepositoryConfig, RepositoryGroup, RepositoryMember,
-    storage_root::StorageRoot,
+    storage_root::{POLICY_LEASE_RESOURCE, POLICY_LEASE_TTL, StorageRoot},
 };
 
 const SCHEMA_VERSION: u32 = 3;
@@ -48,6 +48,8 @@ pub enum CatalogError {
     Metadata(#[from] crab_metadata::error::MetadataError),
     #[error("repository content validation failed")]
     Read(#[from] crab_read::ReadError),
+    #[error("organization access publication lease failed")]
+    AccessLease(#[source] crab_remote::publication::Error),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -771,6 +773,61 @@ impl CatalogStore {
     }
 
     pub async fn replace_access(
+        &self,
+        owner: &str,
+        name: &str,
+        input: AccessUpdate,
+        actor: MembershipActor,
+        require_administrator: bool,
+    ) -> Result<CatalogRecord, CatalogError> {
+        let (snapshot, _) = self.load_snapshot().await?;
+        if snapshot.version != input.expected_revision {
+            return Err(CatalogError::Conflict);
+        }
+        let organization = snapshot
+            .repositories
+            .iter()
+            .find(|record| {
+                record.owner.eq_ignore_ascii_case(owner) && record.name.eq_ignore_ascii_case(name)
+            })
+            .ok_or(CatalogError::NotFound)?
+            .organization_id();
+        let Some(organization) = organization else {
+            return self
+                .replace_access_under_policy(owner, name, input, actor, require_administrator)
+                .await;
+        };
+        let layout = self.root.organization_policy_layout(organization);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        // The operator CLI uses the same lease as browser ACL writes and guest
+        // Project commands. The catalog revision also fences ownership changes.
+        use crab_remote::publication::Error as LeaseError;
+        match crab_remote::publication::with_internal_lease(
+            layout.store(),
+            &layout,
+            POLICY_LEASE_RESOURCE,
+            POLICY_LEASE_TTL,
+            &cancel,
+            |cancel| async move {
+                if cancel.is_cancelled() {
+                    return Ok(Err(CatalogError::Conflict));
+                }
+                Ok(self
+                    .replace_access_under_policy(owner, name, input, actor, require_administrator)
+                    .await)
+            },
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(LeaseError::Coordination(crab_coordination::CoordinationError::PushLockHeld {
+                ..
+            })) => Err(CatalogError::Conflict),
+            Err(error) => Err(CatalogError::AccessLease(error)),
+        }
+    }
+
+    pub(crate) async fn replace_access_under_policy(
         &self,
         owner: &str,
         name: &str,

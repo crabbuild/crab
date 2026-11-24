@@ -11,7 +11,10 @@ mod issue_creation;
 mod policy;
 mod reads;
 use crate::cells::planning as ledger;
-pub(crate) use access::{AccessRole, AccessTarget, GetAccess};
+pub(crate) use access::{
+    AccessActor, AccessRole, AccessTarget, CollaboratorInspection, GetAccess, GetWorkspace,
+    InspectCollaborators, ProjectCaller, WorkspaceAccess,
+};
 pub(crate) use commands::{AttachmentCheck, Change, Command, Outcome, Request};
 pub(crate) use history::{GetHistory, HistoryQuery};
 pub(in crate::cells) use issue_creation::due;
@@ -95,7 +98,7 @@ fn epoch(context: &Transaction<'_>, person: Uuid) -> Result<u64> {
         .transpose()?
         .ok_or(Error::AccessDenied)
 }
-fn can_manage(context: &Transaction<'_>, person: Uuid, project: &Project) -> Result<bool> {
+fn can_manage(context: &Transaction<'_>, person: AccessActor, project: &Project) -> Result<bool> {
     Ok(access::effective_role(context, person, project)? >= AccessRole::Write)
 }
 fn load(context: &Transaction<'_>, project: Uuid) -> Result<Option<Project>> {
@@ -206,6 +209,8 @@ pub(in crate::cells::organization) fn handles(operation: u32, mutation: bool) ->
                 | BulkSources::ID
                 | GetAccess::ID
                 | GetDefaultAccess::ID
+                | GetWorkspace::ID
+                | InspectCollaborators::ID
         )
     }
 }
@@ -222,12 +227,12 @@ pub(in crate::cells::organization) fn authorize(
     }
     #[derive(Deserialize)]
     struct Person {
-        actor: Uuid,
+        actor: AccessActor,
         project: Option<Uuid>,
     }
     let who: Person = serde_json::from_value(input.clone())?;
-    actor(who.actor)?;
-    let membership = member(context, who.actor)?;
+    actor(who.actor.id())?;
+    let membership = member(context, who.actor.id())?;
     if operation == Prepare::ID {
         return if membership.is_some_and(|member| member.active && member.role == Role::Owner) {
             Ok(())
@@ -240,25 +245,24 @@ pub(in crate::cells::organization) fn authorize(
         let request: Request = serde_json::from_value(input.clone())?;
         // Minimal, actor-bound terminal outcomes remain recoverable after access
         // removal. No protected project or source content passes this exception.
-        if membership.is_some() && commands::recover(context, &request)?.is_some() {
-            return Ok(());
-        }
-        if request.cancel && membership.is_some() {
-            return Ok(());
-        }
-        let Some(membership) = membership.filter(|member| member.active) else {
-            return Err(Error::AccessDenied);
-        };
-        if matches!(request.command, Command::SetDefaultAccess { .. })
-            && membership.role != Role::Owner
+        if commands::recover(context, &request)?
+            .is_some_and(|receipt| membership.is_some() || receipt != Outcome::RequestConflict)
         {
-            return Err(Error::AccessDenied);
+            return Ok(());
         }
+        if request.cancel && (membership.is_some() || who.actor.guest()) {
+            return Ok(());
+        }
+        let active = membership.as_ref().filter(|member| member.active);
         if let Some(id) = request.command.project() {
             let Some(project) = load(context, id)? else {
                 return Err(Error::AccessDenied);
             };
             let required = match request.command {
+                Command::SetAccess {
+                    target: AccessTarget::Team { .. },
+                    ..
+                } if active.is_none() => return Err(Error::AccessDenied),
                 Command::SetAccess { .. } => AccessRole::Admin,
                 Command::Edit { archived, .. } if archived != project.archived => AccessRole::Admin,
                 _ => AccessRole::Write,
@@ -266,12 +270,19 @@ pub(in crate::cells::organization) fn authorize(
             if access::effective_role(context, who.actor, &project)? < required {
                 return Err(Error::AccessDenied);
             }
+        } else if active.is_none()
+            || (matches!(request.command, Command::SetDefaultAccess { .. })
+                && !active.is_some_and(|member| member.role == Role::Owner))
+        {
+            return Err(Error::AccessDenied);
         }
         return Ok(());
     }
-    if !membership.is_some_and(|member| {
+    let active = membership.is_some_and(|member| {
         member.active && (operation != GetDefaultAccess::ID || member.role == Role::Owner)
-    }) {
+    });
+    let guest = who.actor.guest() && !matches!(operation, GetDefaultAccess::ID);
+    if !(active || guest) {
         return Err(Error::AccessDenied);
     }
     if !matches!(operation, Get::ID | Items::ID | GetAccess::ID)

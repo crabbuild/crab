@@ -130,6 +130,10 @@ async function fixture(page: Page, movedIssue = false) {
           })),
         },
       });
+    if (path === `${root}/context`)
+      return route.fulfill({
+        json: { name: "Engineering", can_create: true },
+      });
     if (path === `/api/organizations/${organization}`)
       return route.fulfill({
         json: {
@@ -753,6 +757,13 @@ test("project history presents attributed field changes without overflowing a mo
                 { field: "/status", before: "Todo", after: "In progress" },
               ],
             },
+            {
+              version: 2,
+              at_ms: Date.UTC(2026, 10, 1),
+              actor: { id: actor, profile: { name: "Alice" } },
+              target: { kind: "repository", restricted: true },
+              changes: [],
+            },
           ],
           next: null,
         },
@@ -770,6 +781,12 @@ test("project history presents attributed field changes without overflowing a mo
   });
   await expect(history).toContainText("Alice");
   await expect(history).toContainText("Revision 3");
+  await expect(history).toContainText(
+    "Repository access is required to view this source.",
+  );
+  await expect(
+    history.getByRole("button", { name: "View 0 field changes", exact: true }),
+  ).toHaveCount(0);
   await history
     .getByRole("button", { name: "View 1 field changes", exact: true })
     .click();

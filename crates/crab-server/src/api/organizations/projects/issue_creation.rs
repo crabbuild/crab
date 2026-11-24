@@ -48,12 +48,14 @@ pub(super) async fn submit(
                 writable(&server, &principal, organization, repository).await?
             };
             let author = crate::cells::repository::RepositoryAuthor::from(&app::actor(&principal)?);
+            let actor = authority::viewer(&server, &principal, organization, actor).await?;
             let request = Request {
                 actor,
                 request_id: input.request_id,
                 source_allowed: repo.is_some(),
                 attachment: None,
                 source_epoch: repo.as_ref().map(|repo| repo.ownership_epoch),
+                eligible_outside: None,
                 cancel,
                 command: input.command.clone(),
             };
@@ -87,7 +89,7 @@ pub(super) async fn submit(
                     .filter(|repo| repo.ownership_epoch == ownership_epoch)
             };
             let can_manage = if current.is_some() {
-                match project(&server, organization, actor, project_id).await {
+                match project(&server, &principal, organization, actor, project_id).await {
                     Ok(view) => view.can_manage,
                     Err(Error::NotFound) => false,
                     Err(error) => return Err(error),
@@ -116,7 +118,7 @@ pub(super) async fn submit(
                             organization,
                             project: project_id,
                             request_id: request.request_id,
-                            actor_id: actor,
+                            actor_id: actor.id(),
                             actor: author,
                             title: item.title.clone(),
                             body: item.body.clone(),

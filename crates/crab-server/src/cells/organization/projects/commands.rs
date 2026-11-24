@@ -105,7 +105,7 @@ impl Command {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Request {
-    pub actor: Uuid,
+    pub actor: AccessActor,
     pub request_id: Uuid,
     pub command: Command,
     pub cancel: bool,
@@ -116,6 +116,8 @@ pub(crate) struct Request {
     pub attachment: Option<AttachmentCheck>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_epoch: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eligible_outside: Option<Uuid>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -156,7 +158,7 @@ pub(super) struct Saved {
 }
 fn digest(input: &Request) -> Result<String> {
     Ok(
-        blake3::hash(&serde_json::to_vec(&(input.actor, &input.command))?)
+        blake3::hash(&serde_json::to_vec(&(input.actor.id(), &input.command))?)
             .to_hex()
             .to_string(),
     )
@@ -197,7 +199,7 @@ impl Mutation for Change {
     type Output = Outcome;
     fn execute(context: &mut Transaction<'_>, input: Request) -> Result<MutationResult<Outcome>> {
         ensure_ready(context)?;
-        actor(input.actor)?;
+        actor(input.actor.id())?;
         actor(input.request_id)?;
         if let Some(outcome) = recover(context, &input)? {
             return Ok(MutationResult::Success(outcome));
@@ -235,7 +237,7 @@ fn apply_command(
         scope,
     } = command
     {
-        return match policy::change(context, input.actor, *version, *role, scope)? {
+        return match policy::change(context, input.actor.id(), *version, *role, scope)? {
             Some(version) => Ok(MutationResult::Success(Outcome::Applied {
                 project: None,
                 version,
@@ -278,7 +280,7 @@ fn apply_command(
             properties: Properties {
                 status: Status::Planned,
                 health: Health::OnTrack,
-                lead: Some(input.actor),
+                lead: Some(input.actor.id()),
                 start: None,
                 target: None,
             },
@@ -286,8 +288,8 @@ fn apply_command(
             archived: false,
             created_at: now,
             updated_at: now,
-            created_by: input.actor,
-            creator_epoch: epoch(context, input.actor)?,
+            created_by: input.actor.id(),
+            creator_epoch: epoch(context, input.actor.id())?,
             access: Default::default(),
         };
         save(context, &project)?;
@@ -301,7 +303,7 @@ fn apply_command(
         )?;
         advance(
             context,
-            input.actor,
+            input.actor.id(),
             Action::ProjectChanged {
                 project: project.id,
             },
@@ -397,11 +399,14 @@ fn apply_command(
             default_version,
             ..
         } => {
-            if let Some(reason) =
-                project
-                    .access
-                    .change(context, input.actor, *target, *role, *default_version)?
-            {
+            if let Some(reason) = project.access.change(
+                context,
+                input.actor.id(),
+                *target,
+                *role,
+                *default_version,
+                input.eligible_outside,
+            )? {
                 return Ok(rejected(reason));
             }
         }
@@ -614,7 +619,7 @@ fn apply_command(
     history::append(context, input, &project, event_target, before, after)?;
     advance(
         context,
-        input.actor,
+        input.actor.id(),
         Action::ProjectChanged {
             project: project_id,
         },

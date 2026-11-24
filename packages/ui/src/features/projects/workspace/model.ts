@@ -43,7 +43,7 @@ export const projectAccessRoles = {
   write: "Write",
   admin: "Admin",
 } satisfies Record<AccessRole, string>;
-export type GrantTarget = { kind: "member" | "team"; id: string };
+export type GrantTarget = { kind: "member" | "team" | "outside"; id: string };
 export type AccessTarget = { kind: "base" } | GrantTarget;
 export interface ProjectAccessView {
   version: number;
@@ -51,6 +51,7 @@ export interface ProjectAccessView {
   base_override: AccessRole | null;
   default_role: AccessRole;
   default_version: number;
+  can_manage_teams: boolean;
   grants: {
     target: GrantTarget;
     role: AccessRole;

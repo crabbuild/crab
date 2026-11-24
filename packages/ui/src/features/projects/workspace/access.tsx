@@ -11,7 +11,11 @@ import { FieldSelect } from "@/components/ui/field-select";
 import { Input } from "@/components/ui/input";
 import { Result } from "@/components/request/result";
 import { useRequest } from "@/lib/api";
-import type { OrganizationMembers, TeamListing } from "@/lib/contracts";
+import type {
+  ActorSummary,
+  OrganizationMembers,
+  TeamListing,
+} from "@/lib/contracts";
 import { short } from "@/lib/format";
 import { CommandError, useProjectCommands } from "../commands";
 import { projectEndpoint, type Project } from "../model";
@@ -95,11 +99,13 @@ export function ProjectAccess({
               />
               <AddGrant
                 organization={organization}
+                project={project.id}
+                canManageTeams={data.can_manage_teams}
                 disabled={commands.locked}
                 onSave={(target, role) => void save(data.version, target, role)}
               />
               <section className="grid gap-2" aria-label="Project grants">
-                <h3 className="text-sm font-medium">Members and teams</h3>
+                <h3 className="text-sm font-medium">Collaborators</h3>
                 {data.grants.length === 0 ? (
                   <p className="text-sm text-muted-foreground">
                     No explicit grants.
@@ -109,7 +115,7 @@ export function ProjectAccess({
                     {data.grants.map(({ target, role, active, label }) => {
                       const name =
                         label ??
-                        `${target.kind === "member" ? "Member" : "Team"} ${short(target.id)}`;
+                        `${target.kind === "member" ? "Member" : target.kind === "outside" ? "Outside collaborator" : "Team"} ${short(target.id)}`;
                       return (
                         <li
                           key={`${target.kind}-${target.id}`}
@@ -117,6 +123,12 @@ export function ProjectAccess({
                         >
                           <span className="min-w-28 flex-1 break-words text-sm">
                             {name}
+                            {target.kind === "outside" && label && (
+                              <span className="text-muted-foreground">
+                                {" "}
+                                · Outside collaborator
+                              </span>
+                            )}
                             {!active && (
                               <span className="text-muted-foreground">
                                 {" "}
@@ -210,10 +222,14 @@ function BaseRole({
 
 function AddGrant({
   organization,
+  project,
+  canManageTeams,
   disabled,
   onSave,
 }: {
   organization: string;
+  project: string;
+  canManageTeams: boolean;
   disabled: boolean;
   onSave: (target: GrantTarget, role: AccessRole) => void;
 }) {
@@ -225,16 +241,37 @@ function AddGrant({
   const [role, setRole] = useState<AccessRole>("write");
   const root = `/api/organizations/${organization}`;
   const params = new URLSearchParams(after ? { after } : {});
-  if (search) params.set(kind === "member" ? "q" : "search", search);
+  const viaDirectory =
+    kind === "outside" || (kind === "member" && !canManageTeams);
+  if (search) params.set(kind === "team" ? "search" : "q", search);
+  if (viaDirectory && kind === "member") params.set("member", "true");
   const members = useRequest<OrganizationMembers>(
-    kind === "member" ? `${root}/members?${params}` : null,
+    kind === "member" && !viaDirectory ? `${root}/members?${params}` : null,
   );
   const teams = useRequest<TeamListing>(
     kind === "team" ? `${root}/teams?${params}` : null,
   );
-  const state = kind === "member" ? members : teams;
-  const choices =
-    kind === "member"
+  const people = useRequest<{ items: ActorSummary[]; truncated: boolean }>(
+    viaDirectory && search
+      ? projectEndpoint(
+          { organization },
+          `${project}/collaborators`,
+          Object.fromEntries(params),
+        )
+      : null,
+  );
+  const state = viaDirectory ? people : kind === "member" ? members : teams;
+  const next = viaDirectory
+    ? undefined
+    : kind === "member"
+      ? members.data?.next
+      : teams.data?.next;
+  const choices = viaDirectory
+    ? people.data?.items.map((profile) => [
+        profile.id,
+        `${profile.name} (${profile.handle})`,
+      ])
+    : kind === "member"
       ? members.data?.items.map(({ actor, profile }) => [
           actor,
           profile
@@ -262,7 +299,11 @@ function AddGrant({
       >
         <FieldSelect
           label="Collaborator type"
-          options={{ member: "Member", team: "Team" }}
+          options={{
+            member: "Member",
+            ...(canManageTeams ? { team: "Team" } : {}),
+            outside: "Outside collaborator",
+          }}
           value={kind}
           disabled={disabled}
           onValueChange={(value) => {
@@ -274,6 +315,7 @@ function AddGrant({
         <Input
           type="search"
           aria-label="Find collaborator"
+          placeholder={viaDirectory ? "Search by username" : undefined}
           value={input}
           maxLength={100}
           className="min-w-28 flex-1"
@@ -284,6 +326,11 @@ function AddGrant({
           Search
         </Button>
       </form>
+      {viaDirectory && people.data?.truncated && (
+        <p className="text-sm text-muted-foreground">
+          Enter more of the username to narrow the search.
+        </p>
+      )}
       {state.error ? (
         <div className="flex flex-wrap items-center gap-2 text-sm">
           <p role="alert">{state.error}</p>
@@ -314,9 +361,11 @@ function AddGrant({
                 "",
                 state.loading
                   ? "Loading…"
-                  : choices?.length
-                    ? "Choose collaborator"
-                    : "No matches",
+                  : viaDirectory && !search
+                    ? "Enter a username"
+                    : choices?.length
+                      ? "Choose collaborator"
+                      : "No matches",
               ],
               ...(choices ?? []),
             ])}
@@ -334,7 +383,7 @@ function AddGrant({
           <Button type="submit" size="sm" disabled={disabled || !id}>
             Grant access
           </Button>
-          {state.data?.next && (
+          {next && (
             <Button
               type="button"
               variant="ghost"
@@ -342,7 +391,7 @@ function AddGrant({
               disabled={disabled}
               onClick={() => {
                 setId("");
-                setAfter(state.data?.next ?? "");
+                setAfter(next);
               }}
             >
               More choices
