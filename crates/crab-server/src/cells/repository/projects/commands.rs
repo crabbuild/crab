@@ -414,6 +414,16 @@ fn apply(
                     return Ok(rejected("This project has reached its 1,000-item limit"));
                 }
             }
+            // Rows already in the destination still need the same source and
+            // revision checks. Only changed rows should get a revision and Undo.
+            if matches!(input.command, Command::BulkFields { .. })
+                && previous.as_ref() == Some(entry)
+            {
+                return Ok(MutationResult::Success(Outcome::Applied {
+                    project: Some(project_id),
+                    version: project.version,
+                }));
+            }
             let mut entry = entry.clone();
             if let Command::CreateIssue {
                 parent, type_id, ..

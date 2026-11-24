@@ -7892,6 +7892,9 @@ main {
 .project-board-card[draggable="true"] {
   cursor: grab;
 }
+.project-board-card[data-state="selected"] {
+  border-color: var(--ring);
+}
 .project-board-card footer {
   display: flex;
   flex-wrap: wrap;

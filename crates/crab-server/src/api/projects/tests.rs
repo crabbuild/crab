@@ -106,12 +106,23 @@ async fn bulk_project_fields_apply_once_and_roll_back_on_a_stale_item() {
         h.json(&route, &alice).await["page"]["items"],
         page["page"]["items"]
     );
+    let unchanged = request([2, 2], json!({"field":"status","value":"Done"}));
+    assert_eq!(project_command(&h, &alice, unchanged).await, applied);
+    let stale_unchanged = request([2, 1], json!({"field":"status","value":"Done"}));
+    assert_eq!(
+        project_command(&h, &alice, stale_unchanged).await["outcome"],
+        "item_conflict"
+    );
+    assert_eq!(
+        h.json(&route, &alice).await["page"]["items"],
+        page["page"]["items"]
+    );
     h.close().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires agent-browser and the built embedded UI"]
-async fn browser_bulk_edits_and_undoes_two_project_items() {
+async fn browser_bulk_edits_moves_and_undoes_project_items() {
     use crate::test_support::http::browser::Browser;
     let h = Harness::new(false).await;
     let alice = h.login().await;
@@ -187,6 +198,57 @@ async fn browser_bulk_edits_and_undoes_two_project_items() {
             .unwrap()
             .iter()
             .all(|row| row["version"] == 3 && row["item"]["status"] == "Todo")
+    );
+    browser
+        .run(&["find", "role", "tab", "click", "--name", "Board", "--exact"])
+        .await;
+    browser
+        .run(&[
+            "wait",
+            "[role=checkbox][aria-label='Select all editable cards in Todo']",
+        ])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "checkbox",
+            "click",
+            "--name",
+            "Select all editable cards in Todo",
+            "--exact",
+        ])
+        .await;
+    browser.run(&["wait", "--text", "2 selected"]).await;
+    browser
+        .run(&[
+            "drag",
+            ".project-board-column[aria-label='Todo'] .project-board-card:first-child",
+            ".project-board-column[aria-label='Done']",
+        ])
+        .await;
+    browser.run(&["wait", "--fn", "document.querySelectorAll(\".project-board-column[aria-label='Done'] .project-board-card\").length === 2"]).await;
+    let moved = h.json(&route, &alice).await;
+    assert!(
+        moved["page"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["version"] == 4 && row["item"]["status"] == "Done")
+    );
+    browser
+        .run(&[
+            "find", "role", "button", "click", "--name", "Undo", "--exact",
+        ])
+        .await;
+    browser.run(&["wait", "--fn", "document.querySelectorAll(\".project-board-column[aria-label='Todo'] .project-board-card\").length === 2"]).await;
+    let restored = h.json(&route, &alice).await;
+    assert!(
+        restored["page"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["version"] == 5 && row["item"]["status"] == "Todo")
     );
     drop(browser);
     h.close().await;

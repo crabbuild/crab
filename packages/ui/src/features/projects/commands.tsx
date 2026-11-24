@@ -245,9 +245,10 @@ export function ProjectCommandsProvider({
         captured.body.command.kind === "bulk_fields"
       ) {
         const command = captured.body.command;
+        const count = captured.undo?.length ?? command.items.length;
         setNotice({
           title: "Project items updated",
-          message: `Saved ${command.items.length} Project item${command.items.length === 1 ? "" : "s"}.`,
+          message: `Saved ${count} Project item${count === 1 ? "" : "s"}.`,
         });
         if (captured.undo?.length) {
           setUndo({

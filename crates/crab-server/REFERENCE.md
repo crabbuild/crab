@@ -2979,6 +2979,14 @@ Project editors can drag work between status or custom field groups on a
 table or board. Dropping into **No value** clears the custom field. These
 moves use the versioned Project item command and preserve other item fields.
 
+On a board grouped by workflow status or a single-select Project field,
+select cards individually or with the checkbox in a column header. Drag any
+selected card to a destination, or choose a column under **Move selected to**.
+The selection covers editable cards on the current page, including selections
+from different columns. The move uses one bulk Project submission and offers
+**Undo** after saving. Cards already in the destination keep their revisions
+and still participate in the batch's conflict checks.
+
 Choose **Add work to** on a status or custom-field group to start an item
 with that value. The editor keeps the prefilled value when you switch work
 sources. Unfinished items started this way have separate recovery drafts.

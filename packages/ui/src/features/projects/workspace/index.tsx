@@ -44,7 +44,8 @@ import {
   selectedGrouping,
   type AddProjectGroupItem,
 } from "../grouping";
-import { ProjectBoard, ProjectTable, ProjectRoadmap } from "../views";
+import { ProjectBoard } from "../board";
+import { ProjectTable, ProjectRoadmap } from "../views";
 import { FieldSelect } from "@/components/ui/field-select";
 import { ProjectProperties } from "./forms";
 import { ProjectLibrary } from "./library";
@@ -563,7 +564,7 @@ function PlanningWorkspace({
                           page={page}
                           editable={editable}
                           bulkTarget={
-                            layout === "table" &&
+                            layout !== "roadmap" &&
                             detail.can_manage &&
                             !project.archived
                               ? { organization }

@@ -18,29 +18,44 @@ export function useProjectSelection(page: ItemPage) {
   const [selected, setSelected] = useState<Map<string, number>>(new Map());
   const rows = page.items.filter((row) => !row.restricted);
   const chosen = rows.filter((row) => selected.has(row.item.id));
+  function toggleGroup(group: Row[], checked: boolean) {
+    setSelected((previous) => {
+      const next = new Map(previous);
+      for (const row of group) {
+        if (row.restricted) continue;
+        if (checked) next.set(row.item.id, row.version);
+        else next.delete(row.item.id);
+      }
+      return next;
+    });
+  }
+  function groupState(group: Row[]) {
+    const eligible = group.filter((row) => !row.restricted);
+    const count = eligible.filter((row) => selected.has(row.item.id)).length;
+    return {
+      empty: !eligible.length,
+      checked:
+        count === 0
+          ? false
+          : count === eligible.length
+            ? true
+            : ("indeterminate" as const),
+    };
+  }
   return {
     chosen,
     stale: chosen.some((row) => selected.get(row.item.id) !== row.version),
     checked: (row: Row) => selected.has(row.item.id),
-    all:
-      chosen.length === 0
-        ? false
-        : chosen.length === rows.length
-          ? true
-          : ("indeterminate" as const),
+    all: groupState(rows).checked,
     empty: rows.length === 0,
     clear: () => setSelected(new Map()),
+    toggleGroup,
+    groupState,
     toggleAll: (checked: boolean) =>
       setSelected(
         new Map(checked ? rows.map((row) => [row.item.id, row.version]) : []),
       ),
-    toggle: (row: Row, checked: boolean) =>
-      setSelected((previous) => {
-        const next = new Map(previous);
-        if (checked) next.set(row.item.id, row.version);
-        else next.delete(row.item.id);
-        return next;
-      }),
+    toggle: (row: Row, checked: boolean) => toggleGroup([row], checked),
   };
 }
 
@@ -50,6 +65,42 @@ function original(item: Item, change: BulkField): BulkField {
   if (change.field === "status") return { ...change, value: item.status };
   if (change.field === "priority") return { ...change, value: item.priority };
   return { ...change, value: item[change.field] };
+}
+
+export function useProjectBulkChange(
+  target: ProjectTarget | undefined,
+  project: string,
+  clear: () => void,
+) {
+  const commands = useProjectCommands();
+  return async (rows: readonly Row[], change: BulkField) => {
+    if (!target) return;
+    const inverse = rows.flatMap((row) => {
+      const previous = original(row.item, change);
+      if (previous.value === change.value) return [];
+      return [
+        { item: row.item.id, version: row.version + 1, change: previous },
+      ];
+    });
+    if (!inverse.length) {
+      clear();
+      return;
+    }
+    const result = await commands.submitBulk(
+      target,
+      {
+        kind: "bulk_fields",
+        project,
+        items: rows.map((row) => ({
+          item: row.item.id,
+          version: row.version,
+          change,
+        })),
+      },
+      inverse,
+    );
+    if (result?.outcome === "applied") clear();
+  };
 }
 
 export function ProjectBulkEditor({
@@ -63,11 +114,11 @@ export function ProjectBulkEditor({
   selection: ReturnType<typeof useProjectSelection>;
   disabled: boolean;
 }) {
-  const commands = useProjectCommands();
   const dateId = useId();
   const [field, setField] = useState("status");
   const [value, setValue] = useState("");
   const { chosen, stale, clear } = selection;
+  const apply = useProjectBulkChange(target, project.id, clear);
   const fields = project.definition.fields;
   const custom = fields.find(({ id }) => field === `field:${id}`);
   const date =
@@ -110,36 +161,6 @@ export function ProjectBulkEditor({
           : value || null,
     };
 
-  async function apply(change: BulkField) {
-    const updates = chosen.flatMap((row) => {
-      const previous = original(row.item, change);
-      if (previous.value === change.value) return [];
-      return [{ item: row.item.id, version: row.version, change, previous }];
-    });
-    if (!updates.length) {
-      clear();
-      return;
-    }
-    const result = await commands.submitBulk(
-      target,
-      {
-        kind: "bulk_fields",
-        project: project.id,
-        items: updates.map(({ item, version, change }) => ({
-          item,
-          version,
-          change,
-        })),
-      },
-      updates.map(({ item, version, previous }) => ({
-        item,
-        version: version + 1,
-        change: previous,
-      })),
-    );
-    if (result?.outcome === "applied") clear();
-  }
-
   if (!chosen.length) return null;
   return (
     <form
@@ -147,7 +168,7 @@ export function ProjectBulkEditor({
       className="flex flex-wrap items-center gap-2 py-2"
       onSubmit={(event) => {
         event.preventDefault();
-        if (change && !disabled && !stale) void apply(change);
+        if (change && !disabled && !stale) void apply(chosen, change);
       }}
     >
       <span className="text-sm">{chosen.length} selected</span>

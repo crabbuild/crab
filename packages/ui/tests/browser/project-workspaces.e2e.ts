@@ -198,16 +198,29 @@ async function fixture(page: Page, movedIssue = false) {
               version: revisions.get(stale.item) ?? 0,
             };
           } else {
+            let changed = 0;
             for (const edit of command.items) {
               const row = items.find(({ item }) => item.id === edit.item);
-              if (!row || edit.change.field !== "status")
-                throw new Error("Unexpected Project bulk fixture edit");
-              row.item = { ...row.item, status: edit.change.value };
+              if (!row) throw new Error("Unexpected Project bulk fixture edit");
+              if (edit.change.field === "status") {
+                if (row.item.status === edit.change.value) continue;
+                row.item = { ...row.item, status: edit.change.value };
+              } else if (edit.change.field === "custom") {
+                const values = { ...row.item.values };
+                if ((values[edit.change.id] ?? null) === edit.change.value)
+                  continue;
+                if (edit.change.value === null) delete values[edit.change.id];
+                else values[edit.change.id] = edit.change.value;
+                row.item = { ...row.item, values };
+              } else {
+                throw new Error("Unexpected Project bulk fixture field");
+              }
               revisions.set(edit.item, edit.version + 1);
+              changed++;
             }
             project = {
               ...project,
-              version: project.version + command.items.length,
+              version: project.version + changed,
             };
             outcome = {
               outcome: "applied",
@@ -393,7 +406,7 @@ async function fixture(page: Page, movedIssue = false) {
   return {
     submissions,
     items,
-    addDraft(title: string) {
+    addDraft(title: string, status = "Todo", values: Item["values"] = {}) {
       const id = crypto.randomUUID();
       items.push({
         repository: null,
@@ -402,14 +415,24 @@ async function fixture(page: Page, movedIssue = false) {
           title,
           subject: null,
           body: "",
-          status: "Todo",
+          status,
           priority: 0,
           start: null,
           end: null,
-          values: {},
+          values,
         },
       });
       revisions.set(id, 1);
+      return id;
+    },
+    addStreamField() {
+      const id = crypto.randomUUID();
+      project.definition.fields.push({
+        id,
+        name: "Workstream",
+        definition: { kind: "select", options: ["Platform", "Application"] },
+      });
+      return id;
     },
     editFirstItem(title: string) {
       const row = items[0];
@@ -1098,6 +1121,113 @@ test("bulk Project edits recover the original submission and Undo after reload",
       { version: 2, change: { field: "status", value: "Todo" } },
     ],
   });
+});
+
+test("dragging a selected card moves the board selection in one Project command", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  const api = state.addDraft("Roll out API");
+  const client = state.addDraft("Roll out client", "In progress");
+  const shipped = state.addDraft("Already shipped", "Done");
+  state.addDraft("Unselected follow-up");
+  await page.goto(`${home}/${projectId}`);
+  const board = page.getByRole("region", { name: "Project board" });
+  const todo = board.getByRole("region", { name: "Todo", exact: true });
+  const progress = board.getByRole("region", {
+    name: "In progress",
+    exact: true,
+  });
+  const done = board.getByRole("region", { name: "Done", exact: true });
+  for (const name of ["Roll out API", "Roll out client", "Already shipped"])
+    await board
+      .getByRole("checkbox", { name: `Select ${name}`, exact: true })
+      .check();
+  await expect(page.getByText("3 selected", { exact: true })).toBeVisible();
+  await page.screenshot({
+    path: test.info().outputPath("board-selection-light.png"),
+  });
+  await todo
+    .locator("article")
+    .filter({ hasText: "Roll out API" })
+    .dragTo(done, { targetPosition: { x: 110, y: 230 } });
+  await expect(done.locator("article")).toHaveCount(3);
+  await expect(
+    todo.getByText("Unselected follow-up", { exact: true }),
+  ).toBeVisible();
+  expect(state.submissions).toHaveLength(1);
+  expect(state.submissions[0].command).toEqual({
+    kind: "bulk_fields",
+    project: projectId,
+    items: [api, client, shipped].map((item) => ({
+      item,
+      version: 1,
+      change: { field: "status", value: "Done" },
+    })),
+  });
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect(todo.getByText("Roll out API", { exact: true })).toBeVisible();
+  await expect(
+    progress.getByText("Roll out client", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    done.getByText("Already shipped", { exact: true }),
+  ).toBeVisible();
+});
+
+test("the board move menu clears a custom column with the keyboard on mobile", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  const field = state.addStreamField();
+  const api = state.addDraft("Build the API", "Todo", { [field]: "Platform" });
+  const client = state.addDraft("Ship the app", "In progress", {
+    [field]: "Application",
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${home}/${projectId}`);
+  await selectDarkTheme(page);
+  await chooseSelectOption(page.getByLabel("Group board by", { exact: true }), {
+    label: "Workstream",
+  });
+  const board = page.getByRole("region", { name: "Project board" });
+  await board
+    .getByRole("checkbox", { name: "Select all editable cards in Platform" })
+    .press("Space");
+  await board
+    .getByRole("checkbox", { name: "Select Ship the app" })
+    .press("Space");
+  const move = page.getByRole("button", {
+    name: "Move selected to",
+    exact: true,
+  });
+  await expect(move).toBeEnabled();
+  await expectNoAccessibilityViolations(page);
+  await page.screenshot({
+    path: test.info().outputPath("board-selection-mobile-dark.png"),
+  });
+  await move.press("Enter");
+  await page
+    .getByRole("menuitem", { name: "No value", exact: true })
+    .press("Enter");
+  const unassigned = board.getByRole("region", {
+    name: "No value",
+    exact: true,
+  });
+  await expect(unassigned.locator("article")).toHaveCount(2);
+  expect(state.submissions[0].command).toEqual({
+    kind: "bulk_fields",
+    project: projectId,
+    items: [api, client].map((item) => ({
+      item,
+      version: 1,
+      change: { field: "custom", id: field, value: null },
+    })),
+  });
+  expect(state.items.map(({ item }) => item.status)).toEqual([
+    "Todo",
+    "In progress",
+  ]);
 });
 
 test("a failed recovery checkpoint prevents the new native request", async ({

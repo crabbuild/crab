@@ -450,6 +450,16 @@ fn apply_command(
             };
             let repository_value = repository.map(blob).unwrap_or(SqlValue::Null);
             if next.subject.is_some() && !context.query("SELECT 1 FROM organization_project_items WHERE project=? AND repository=? AND kind=? AND number=? AND id!=?",&[blob(project_id),repository_value.clone(),kind.clone(),number.clone(),blob(next.id)])?.rows.is_empty() {return Ok(rejected("This work is already in the project"));}
+            // A no-op selection still participates in every permission and
+            // revision check above. It produces no history or new revision.
+            if matches!(input.command, Command::BulkFields { .. })
+                && old.as_ref().is_some_and(|saved| &saved.item == next)
+            {
+                return Ok(MutationResult::Success(Outcome::Applied {
+                    project: Some(project_id),
+                    version: project.version,
+                }));
+            }
             let data = Item {
                 repository: *repository,
                 item: next.clone(),
