@@ -17,7 +17,7 @@ mod stream;
 use buffer::ReconstructionBuffer;
 pub use stream::{ReconstructionStream, ReconstructionWork, verify_reconstruction_stream};
 
-use crab_cache_store::CachingStore;
+use crab_cache_store::{CachingStore, XorbReadMode};
 use crab_types::pointer::Pointer;
 use crab_xet::hash::MerkleHash;
 use xet_client::cas_client::adaptive_concurrency::AdaptiveConcurrencyController;
@@ -137,6 +137,21 @@ pub struct ShardHydrator {
 
 impl ShardHydrator {
     #[cfg(feature = "local-staging")]
+    pub(crate) fn authorized_cache_namespace(&self) -> Option<[u8; 32]> {
+        self.router.store().authorized_cache_namespace().copied()
+    }
+
+    #[cfg(feature = "local-staging")]
+    pub(crate) async fn check_read_authority(&self, cancel: &CancellationToken) -> Result<()> {
+        crate::read_retention::check_read_authority(
+            self.retention.as_ref(),
+            self.router.store(),
+            cancel,
+        )
+        .await
+    }
+
+    #[cfg(feature = "local-staging")]
     pub(crate) async fn read_lfs_range(
         &self,
         pointer: &crab_git::LfsPointer,
@@ -176,8 +191,13 @@ impl ShardHydrator {
         let store =
             crab_lfs::LfsObjectStore::new(self.router.store().clone(), self.router.repo_prefix());
         let read = async {
-            let (_, _, mut stream) = store
-                .get_stream_with_session(&pointer.oid, pointer.size, Some(range.clone()), session)
+            let (_, mut stream) = store
+                .stream_content(
+                    &pointer.oid,
+                    pointer.size,
+                    Some(range.clone()),
+                    Some(session),
+                )
                 .await?;
             let expected =
                 usize::try_from(range.end - range.start).map_err(std::io::Error::other)?;
@@ -315,9 +335,14 @@ impl ShardHydrator {
         if cancel.is_cancelled() {
             return Err(ReadError::Cancelled);
         }
-        let file = std::fs::File::create(dest)?;
-        self.reconstruct_to_writer_with_cancel(ptr, file, None, cancel)
-            .await
+        self.reconstruct_writer(
+            ptr,
+            |_| Ok(std::fs::File::create(dest)?),
+            None,
+            None,
+            cancel,
+        )
+        .await
     }
 
     /// Reconstruct `[start, end)` into `dest` without buffering the selected range.
@@ -338,37 +363,14 @@ impl ShardHydrator {
         dest: &std::path::Path,
     ) -> Result<u64> {
         let (start, end) = checked_range(ptr.size, start, end, "reconstruct_range_to_path")?;
-        let file = std::fs::File::create(dest)?;
-        if start >= end {
-            return Ok(0);
-        }
-
-        let file_hash = MerkleHash::from(ptr.file_hash);
-        let client = self
-            .store_client_for_pointer(ptr, None)
-            .with_selective_xorb_reads();
-        let cancel = CancellationToken::new();
-        let _cancel_on_drop = cancel.clone().drop_guard();
-        let (_, bytes_written) = self
-            .reconstruct_bounded_to_writer(
-                client,
-                file_hash,
-                file,
-                Some(FileRange::new(start, end)),
-                end - start,
-                &cancel,
-            )
-            .await?;
-        if bytes_written != end - start {
-            return Err(ReadError::CorruptObject {
-                path: file_hash.hex(),
-                reason: format!(
-                    "reconstruction size mismatch: expected {}, got {bytes_written}",
-                    end - start
-                ),
-            });
-        }
-        Ok(bytes_written)
+        self.reconstruct_writer(
+            ptr,
+            |_| Ok(std::fs::File::create(dest)?),
+            Some((FileRange::new(start, end), XorbReadMode::Selective)),
+            None,
+            &CancellationToken::new(),
+        )
+        .await
     }
 
     /// Reconstruct a pointer into a blocking writer and verify its hash.
@@ -391,7 +393,7 @@ impl ShardHydrator {
     where
         W: Write + Send + 'static,
     {
-        self.reconstruct_writer(ptr, writer, None, file_index_lookup, cancel)
+        self.reconstruct_writer(ptr, |_| Ok(writer), None, file_index_lookup, cancel)
             .await
     }
 
@@ -404,6 +406,21 @@ impl ShardHydrator {
         ptr: &Pointer,
         range: std::ops::Range<u64>,
         writer: W,
+        file_index_lookup: Option<&SharedFileIndexLookup>,
+        cancel: &CancellationToken,
+    ) -> Result<u64>
+    where
+        W: Write + Send + 'static,
+    {
+        self.reconstruct_range_writer(ptr, range, |_| Ok(writer), file_index_lookup, cancel)
+            .await
+    }
+
+    async fn reconstruct_range_writer<W>(
+        &self,
+        ptr: &Pointer,
+        range: std::ops::Range<u64>,
+        open_writer: impl FnOnce(&CancellationToken) -> Result<W> + Send,
         file_index_lookup: Option<&SharedFileIndexLookup>,
         cancel: &CancellationToken,
     ) -> Result<u64>
@@ -423,21 +440,31 @@ impl ShardHydrator {
         if range.is_empty() {
             return Ok(0);
         }
-        self.reconstruct_writer(ptr, writer, Some(range), file_index_lookup, cancel)
-            .await
+        self.reconstruct_writer(
+            ptr,
+            open_writer,
+            Some((
+                FileRange::new(range.start, range.end),
+                XorbReadMode::SelectiveCdn,
+            )),
+            file_index_lookup,
+            cancel,
+        )
+        .await
     }
 
     /// Stream an exact range with bounded backpressure and drop cancellation.
     ///
     /// Selected Xet chunks and the exact output length are verified. Source or
     /// integrity failures discovered after delivery starts are returned by the
-    /// stream, so callers must consume it through successful EOF.
+    /// stream, so callers must consume it through successful EOF. Queued bytes
+    /// and EOF require a current retention claim and online grant where bound.
     pub fn reconstruct_range_stream(
         &self,
         ptr: &Pointer,
         range: std::ops::Range<u64>,
     ) -> Result<ReconstructionStream> {
-        stream::reconstruct_range(self.clone(), ptr.clone(), range)
+        stream::reconstruct_range(self, ptr.clone(), range)
     }
 
     /// Prepare a verified content stream and its worker for a retained catalog.
@@ -458,16 +485,15 @@ impl ShardHydrator {
         let full = range == (0..pointer.size);
         let size = range.end.saturating_sub(range.start);
         let hash = pointer.file_hash;
-        let (stream, work) =
-            stream::prepare(self.clone(), pointer, range, Some(lookup), cancel.clone())?;
+        let (stream, work) = stream::prepare(self, pointer, range, Some(lookup), cancel.clone())?;
         Ok((verify_reconstruction_stream(stream, size, hash, full), work))
     }
 
     async fn reconstruct_writer<W>(
         &self,
         ptr: &Pointer,
-        writer: W,
-        range: Option<std::ops::Range<u64>>,
+        open_writer: impl FnOnce(&CancellationToken) -> Result<W> + Send,
+        range: Option<(FileRange, XorbReadMode)>,
         file_index_lookup: Option<&SharedFileIndexLookup>,
         cancel: &CancellationToken,
     ) -> Result<u64>
@@ -475,7 +501,7 @@ impl ShardHydrator {
         W: Write + Send + 'static,
     {
         crate::read_retention::read(self.retention.as_ref(), cancel, |pin, cancel| async move {
-            self.reconstruct_pinned_writer(ptr, writer, range, file_index_lookup, &cancel, pin)
+            self.reconstruct_pinned_writer(ptr, open_writer, range, file_index_lookup, &cancel, pin)
                 .await
         })
         .await
@@ -484,8 +510,8 @@ impl ShardHydrator {
     async fn reconstruct_pinned_writer<W>(
         &self,
         ptr: &Pointer,
-        writer: W,
-        range: Option<std::ops::Range<u64>>,
+        open_writer: impl FnOnce(&CancellationToken) -> Result<W> + Send,
+        range: Option<(FileRange, XorbReadMode)>,
         file_index_lookup: Option<&SharedFileIndexLookup>,
         cancel: &CancellationToken,
         pin: Option<Arc<crab_coordination::read_retention_runtime::ReadRetentionPin>>,
@@ -496,28 +522,27 @@ impl ShardHydrator {
         if cancel.is_cancelled() {
             return Err(ReadError::Cancelled);
         }
-        let expected_size = range
-            .as_ref()
-            .map_or(ptr.size, |range| range.end - range.start);
-        let full = range.is_none();
+        // A rejected retained read must not create or truncate its file.
+        let writer = open_writer(cancel)?;
+        let (range, mode) = range.map_or((None, XorbReadMode::Whole), |(range, mode)| {
+            (Some(range), mode)
+        });
+        let expected_size = range.map_or(ptr.size, |range| range.end - range.start);
+        if range.is_some() && expected_size == 0 {
+            return Ok(0);
+        }
         let file_hash = MerkleHash::from(ptr.file_hash);
         let client = self
             .store_client_for_pointer(ptr, file_index_lookup)
+            .with_xorb_read_mode(mode)
             .with_read_retention(pin)
             .with_cancellation(cancel.clone());
-        if full {
+        if range.is_none() {
             self.preflight_shard_coverage(&client, ptr).await?;
         }
 
         let (actual_hash, bytes_written) = self
-            .reconstruct_bounded_to_writer(
-                client,
-                file_hash,
-                writer,
-                range.map(|range| FileRange::new(range.start, range.end)),
-                expected_size,
-                cancel,
-            )
+            .reconstruct_bounded_to_writer(client, file_hash, writer, range, expected_size, cancel)
             .await?;
 
         if let Some(actual_hash) = actual_hash
@@ -548,8 +573,6 @@ impl ShardHydrator {
         end: u64,
     ) -> Result<Vec<u8>> {
         let ptr = Pointer::parse(pointer_bytes)?;
-        // VFS windows retain decoded Xet ranges and expect one non-installing
-        // whole-xorb source read. The path API opts into selective origin reads.
         let (start, end) = checked_range(ptr.size, start, end, "reconstruct_range_from_pointer")?;
         if start >= end {
             return Ok(Vec::new());
@@ -727,8 +750,21 @@ impl ShardHydrator {
     async fn preflight_shard_coverage(&self, client: &StoreClient, ptr: &Pointer) -> Result<()> {
         use xet_client::cas_client::Client;
         let file_hash = MerkleHash::from(ptr.file_hash);
-        let Ok(Some((info, _))) = client.get_file_reconstruction_info(&file_hash).await else {
-            return Ok(());
+        let info = match client.get_file_reconstruction_info(&file_hash).await {
+            Ok(Some((info, _))) => info,
+            Err(error) => {
+                let source = crate::error::ReconstructionError::from(
+                    xet_data::file_reconstruction::FileReconstructionError::from(error),
+                );
+                if crate::error::terminal_read_failure(&source) {
+                    return Err(ReadError::Reconstruction {
+                        file_hash: file_hash.hex(),
+                        source,
+                    });
+                }
+                return Ok(());
+            }
+            Ok(None) => return Ok(()),
         };
 
         let covered = info
@@ -894,6 +930,7 @@ mod tests {
     #[derive(Debug)]
     struct RejectFullXorbReads {
         inner: Arc<dyn object_store::ObjectStore>,
+        reject_head: bool,
     }
 
     impl std::fmt::Display for RejectFullXorbReads {
@@ -926,11 +963,13 @@ mod tests {
             location: &object_store::path::Path,
             options: object_store::GetOptions,
         ) -> object_store::Result<object_store::GetResult> {
-            if !options.head && options.range.is_none() && location.as_ref().contains("/xorbs/") {
+            if ((!options.head && options.range.is_none()) || (options.head && self.reject_head))
+                && location.as_ref().contains("/xorbs/")
+            {
                 return Err(object_store::Error::Generic {
                     store: "RejectFullXorbReads",
                     source: Box::new(std::io::Error::other(
-                        "test forbids complete xorb body reads",
+                        "test forbids this native xorb request",
                     )),
                 });
             }
@@ -981,10 +1020,19 @@ mod tests {
         reconstruction_fixture_with_origin(root, corrupt_origin, origin).await
     }
 
-    async fn reconstruction_fixture_with_origin(
+    pub(super) async fn reconstruction_fixture_with_origin(
         root: &std::path::Path,
         corrupt_origin: bool,
         origin: crab_storage::Store,
+    ) -> (super::ShardHydrator, crab_types::pointer::Pointer, Vec<u8>) {
+        reconstruction_fixture_with_recipe(root, corrupt_origin, origin, &[(0, 4)]).await
+    }
+
+    async fn reconstruction_fixture_with_recipe(
+        root: &std::path::Path,
+        corrupt_origin: bool,
+        origin: crab_storage::Store,
+        recipe: &[(u32, u32)],
     ) -> (super::ShardHydrator, crab_types::pointer::Pointer, Vec<u8>) {
         use crab_xet::shard::{
             FileDataSequenceEntry, FileDataSequenceHeader, MDBFileInfo, MDBXorbInfo, ShardWriter,
@@ -992,10 +1040,15 @@ mod tests {
         };
         use crab_xet::xorb::builder::{RunId, XorbBuilder};
 
+        const CHUNK_SIZE: usize = 32 * 1024;
         let payloads = (0_u8..4)
-            .map(|value| vec![42 + value; 32 * 1024])
+            .map(|value| vec![42 + value; CHUNK_SIZE])
             .collect::<Vec<_>>();
-        let data = payloads.concat();
+        let data = recipe
+            .iter()
+            .flat_map(|&(start, end)| payloads[start as usize..end as usize].iter().flatten())
+            .copied()
+            .collect::<Vec<_>>();
         let chunks = payloads
             .into_iter()
             .map(|payload| crab_xet::xorb::format::Chunk::new(bytes::Bytes::from(payload)))
@@ -1009,7 +1062,11 @@ mod tests {
         let mut shard = ShardWriter::new();
         shard
             .add_xorb(Arc::new(MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb.hash, chunks.len() as u32, data.len()),
+                metadata: XorbChunkSequenceHeader::new(
+                    xorb.hash,
+                    chunks.len() as u32,
+                    chunks.len() * CHUNK_SIZE,
+                ),
                 chunks: chunks
                     .iter()
                     .scan(0_u32, |offset, chunk| {
@@ -1026,13 +1083,19 @@ mod tests {
             .unwrap();
         shard
             .add_file(MDBFileInfo {
-                metadata: FileDataSequenceHeader::new(file_hash.into(), 1, false, false),
-                segments: vec![FileDataSequenceEntry::new(
-                    xorb.hash,
-                    data.len() as u32,
-                    0,
-                    chunks.len() as u32,
-                )],
+                metadata: FileDataSequenceHeader::new(
+                    file_hash.into(),
+                    recipe.len() as u32,
+                    false,
+                    false,
+                ),
+                segments: recipe
+                    .iter()
+                    .map(|&(start, end)| {
+                        let bytes = (end - start) * CHUNK_SIZE as u32;
+                        FileDataSequenceEntry::new(xorb.hash, bytes, start, end)
+                    })
+                    .collect(),
                 verification: vec![],
                 metadata_ext: None,
             })
@@ -1347,6 +1410,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconstruction_handles_repeated_xorb_starts_with_different_lengths() {
+        let directory = tempfile::tempdir().unwrap();
+        let origin = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let (hydrator, pointer, original) = reconstruction_fixture_with_recipe(
+            &directory.path().join("cache"),
+            false,
+            origin,
+            &[(0, 1), (0, 3)],
+        )
+        .await;
+        let pointer = pointer.serialize();
+        let start = 1024;
+        let end = 3 * 32 * 1024 + 1024;
+        assert_eq!(
+            hydrator
+                .reconstruct_range_from_pointer(&pointer, start as u64, end as u64)
+                .await
+                .unwrap(),
+            original[start..end],
+        );
+        assert_eq!(
+            hydrator.reconstruct_from_pointer(&pointer).await.unwrap(),
+            original,
+        );
+    }
+
+    #[tokio::test]
     async fn closed_retention_rejects_even_warm_reconstruction() {
         use crab_coordination::read_retention::{ReadRetentionLease, RetainedReadRoot};
         use crab_coordination::read_retention_runtime::ReadRetentionSession;
@@ -1379,6 +1469,52 @@ mod tests {
                 .await,
             Err(crate::ReadError::Retention(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn closed_retention_preserves_file_destinations() {
+        use crab_coordination::read_retention::{ReadRetentionLease, RetainedReadRoot};
+        use crab_coordination::read_retention_runtime::ReadRetentionSession;
+
+        let directory = tempfile::tempdir().unwrap();
+        let (hydrator, pointer, original) =
+            reconstruction_fixture(&directory.path().join("cache"), false).await;
+        let session = ReadRetentionSession::default();
+        let root = RetainedReadRoot::new(blake3::hash(b"capture").to_hex().to_string(), 7).unwrap();
+        let lease = ReadRetentionLease::create(
+            Arc::new(object_store::memory::InMemory::new()),
+            "repo/v2/readers/owner/claim".into(),
+            root,
+        )
+        .await
+        .unwrap();
+        let hydrator =
+            hydrator.with_read_retention(session.capture().unwrap().retain(lease).unwrap());
+        let destination = directory.path().join("selected");
+        let written = hydrator
+            .reconstruct_range_to_path(&pointer, 1024, 8192, &destination)
+            .await
+            .unwrap();
+        assert_eq!(written, 8192 - 1024);
+        assert_eq!(std::fs::read(&destination).unwrap(), original[1024..8192]);
+
+        session.shutdown().await.unwrap();
+        std::fs::write(&destination, b"existing data").unwrap();
+        for range in [Some((1024, 8192)), Some((7, 7)), None] {
+            let result = match range {
+                Some((start, end)) => {
+                    hydrator
+                        .reconstruct_range_to_path(&pointer, start, end, &destination)
+                        .await
+                }
+                None => hydrator.reconstruct_to_path(&pointer, &destination).await,
+            };
+            assert!(
+                matches!(result, Err(crate::ReadError::Retention(_))),
+                "{result:?}"
+            );
+            assert_eq!(std::fs::read(&destination).unwrap(), b"existing data");
+        }
     }
 
     #[tokio::test]
@@ -1453,13 +1589,11 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn pinned_file_index_lookup_keeps_reconstruction_on_captured_catalog() {
-        let directory = tempfile::tempdir().unwrap();
-        let (hydrator, mut pointer, expected) =
-            reconstruction_fixture(&directory.path().join("cache"), false).await;
+    async fn capture_fixture_catalog(
+        hydrator: &super::ShardHydrator,
+        pointer: &crab_types::pointer::Pointer,
+    ) -> crab_metadata::file_index_lookup::SharedFileIndexLookup {
         let shard_hash = pointer.shard_hint.expect("fixture shard hint");
-        pointer.shard_hint = None;
         let file_hash = crab_xet::hash::MerkleHash::from(pointer.file_hash);
         let mut catalog = crab_metadata::capsule_protocol::PointerCatalog::new();
         catalog
@@ -1562,9 +1696,18 @@ mod tests {
         let captured = control
             .pointer_catalog_lookup(&router, 1024 * 1024)
             .unwrap();
-        let lookup = crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
+        crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
             router, captured,
-        );
+        )
+    }
+
+    #[tokio::test]
+    async fn pinned_file_index_lookup_keeps_reconstruction_on_captured_catalog() {
+        let directory = tempfile::tempdir().unwrap();
+        let (hydrator, mut pointer, expected) =
+            reconstruction_fixture(&directory.path().join("cache"), false).await;
+        let lookup = capture_fixture_catalog(&hydrator, &pointer).await;
+        pointer.shard_hint = None;
         let hydrator = hydrator.with_file_index_lookup(lookup.clone());
 
         let mut inspected = pointer.clone();
@@ -1638,6 +1781,130 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn captured_shard_cdn_reconstructs_a_projected_file_and_keeps_denial_terminal() {
+        use crab_storage::cdn::{CdnAccess, CdnCredential, CdnCredentials, CdnRoute, CdnTransport};
+        use object_store::path::Path;
+        use std::time::Duration;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        struct ShardGrant(Path);
+
+        #[async_trait::async_trait]
+        impl CdnCredentials for ShardGrant {
+            async fn credential(
+                &self,
+                key: &Path,
+                rejected: Option<u64>,
+            ) -> crab_storage::Result<Option<CdnCredential>> {
+                Ok((key == &self.0 && rejected.is_none())
+                    .then(|| CdnCredential::bearer(0, "fixture-viewer".into())))
+            }
+        }
+
+        for (origin_shard, corrupt, denied) in [
+            (false, false, false),
+            (true, true, false),
+            (true, false, true),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let target = [1; 32];
+            let scope = crab_storage::StorageScope {
+                repo_prefix: format!("runtime-test/acl-views/v1/{}/1-fixture", "a".repeat(64)),
+                global_prefix: format!(
+                    "runtime-test/acl-views/v1/{}/1-fixture/.crab",
+                    "a".repeat(64)
+                ),
+                source_repo: "runtime-test".into(),
+                scope_hash: "a".repeat(64),
+            };
+            let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()))
+                .with_target_identity(target)
+                .with_storage_scope(scope.clone());
+            let (fixture, mut pointer, expected) = reconstruction_fixture_with_origin(
+                &directory.path().join("fixture-cache"),
+                false,
+                store.clone(),
+            )
+            .await;
+            let lookup = capture_fixture_catalog(&fixture, &pointer).await;
+            let location = lookup
+                .lookup_shard(&pointer.file_hash.into())
+                .await
+                .unwrap()
+                .unwrap();
+            let path = fixture.router.shard_path(&location.hash);
+            let (body, _) = store.get_with_etag(&path).await.unwrap();
+            assert_eq!(location.encoded_size, Some(body.len() as u64));
+            if !origin_shard {
+                store.delete(&path).await.unwrap();
+            }
+            // Force authoritative catalog selection even when a stale pointer hint is present.
+            pointer.shard_hint = Some([0xff; 32]);
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let transport = CdnTransport::loopback_fixture(listener.local_addr().unwrap()).unwrap();
+            let request_path = path.clone();
+            let response = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut request = String::new();
+                while !request.ends_with("\r\n\r\n") {
+                    assert_ne!(stream.read_line(&mut request).await.unwrap(), 0);
+                }
+                assert!(request.starts_with(&format!("GET /{request_path} HTTP/1.1\r\n")));
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains("authorization: bearer fixture-viewer\r\n")
+                );
+                if denied {
+                    stream
+                        .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+                        .await
+                        .unwrap();
+                } else {
+                    let mut body = body.to_vec();
+                    if corrupt {
+                        body[0] ^= 0xff;
+                    }
+                    let header =
+                        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+                    stream.write_all(header.as_bytes()).await.unwrap();
+                    stream.write_all(&body).await.unwrap();
+                }
+            });
+            let store = store
+                .with_cdn_route(CdnRoute::new(
+                    target,
+                    scope.repo_prefix,
+                    Some(scope.global_prefix),
+                    CdnAccess::Private(Arc::new(ShardGrant(path))),
+                    transport,
+                    Duration::from_secs(5),
+                ))
+                .unwrap();
+            let hydrator = runtime_with_origin(&directory.path().join("cache"), 1024 * 1024, store)
+                .with_file_index_lookup(lookup.clone());
+            let result = hydrator
+                .reconstruct_from_pointer(&pointer.serialize())
+                .await;
+            if denied {
+                assert!(matches!(
+                    crab_storage::store::cdn_read_rejection(&result.unwrap_err()),
+                    Some(crab_storage::StorageError::Forbidden { .. })
+                ));
+            } else {
+                assert_eq!(result.unwrap(), expected);
+            }
+            tokio::time::timeout(Duration::from_secs(2), response)
+                .await
+                .unwrap()
+                .unwrap();
+            lookup.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn reconstructed_ranges_match_exact_clamped_lengths() {
         let directory = tempfile::tempdir().unwrap();
         let (hydrator, pointer, original) =
@@ -1668,10 +1935,223 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sparse_range_stream_verifies_only_the_needed_xorb_bytes_from_cdn() {
+        for range_cap in [64, 1024] {
+            reconstruct_over_cdn(Some(1024..8192), range_cap, false).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_hydration_uses_cdn_ranges_when_full_get_is_disabled() {
+        reconstruct_over_cdn(None, 64, false).await;
+    }
+
+    #[tokio::test]
+    async fn range_stream_covering_every_chunk_uses_one_whole_cdn_get() {
+        reconstruct_over_cdn(Some(1..4 * 32 * 1024 - 1), 1024, true).await;
+    }
+
+    async fn reconstruct_over_cdn(
+        window: Option<std::ops::Range<u64>>,
+        range_cap: usize,
+        expect_whole_get: bool,
+    ) {
+        use crab_storage::cdn::{
+            CdnAccess, CdnCredential, CdnCredentials, CdnReadFamily, CdnRoute, CdnTransport,
+        };
+        use crab_xet::xorb::{
+            format::FOOTER_SIZE,
+            parser::{XorbParser, xorb_metadata_region},
+        };
+        use futures_util::TryStreamExt as _;
+        use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
+        use std::time::Duration;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        struct XorbGrant(Path);
+
+        #[async_trait::async_trait]
+        impl CdnCredentials for XorbGrant {
+            async fn credential(
+                &self,
+                path: &Path,
+                rejected: Option<u64>,
+            ) -> crab_storage::Result<Option<CdnCredential>> {
+                Ok((path == &self.0 && rejected.is_none())
+                    .then(|| CdnCredential::bearer(0, "fixture-viewer".into())))
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let native = Arc::new(InMemory::new());
+        let target = [17; 32];
+        let (fixture, mut pointer, original) = reconstruction_fixture_with_origin(
+            &directory.path().join("seed"),
+            false,
+            crab_storage::Store::new(native.clone()).with_target_identity(target),
+        )
+        .await;
+        let lookup = capture_fixture_catalog(&fixture, &pointer).await;
+        // Resolve the file through the authenticated catalog before selecting
+        // spans. Neither this metadata lookup nor the edge read needs a HEAD.
+        pointer.shard_hint = None;
+        let xorb = native
+            .list(Some(&Path::from(".crab/xorbs")))
+            .try_next()
+            .await
+            .unwrap()
+            .unwrap();
+        let body = native
+            .get(&xorb.location)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        let size = body.len();
+        let range_cap = range_cap.min(size);
+        let spans = if expect_whole_get {
+            Vec::new()
+        } else if window.is_some() {
+            let footer = size - FOOTER_SIZE..size;
+            let metadata = xorb_metadata_region(size, &body[footer.clone()]).unwrap();
+            let parsed = XorbParser::parse(body.clone()).unwrap();
+            let first = parsed.chunk_meta(0).unwrap();
+            let first_start = first.offset as usize;
+            let payload = first_start..first_start + first.compressed_len as usize;
+            let suffix = metadata.offset..size;
+            if suffix.len() <= range_cap {
+                vec![suffix, payload]
+            } else {
+                vec![
+                    footer,
+                    metadata.offset..metadata.offset + metadata.len,
+                    payload,
+                ]
+            }
+        } else {
+            std::iter::once(0..size).collect()
+        };
+        let mut expected = spans
+            .into_iter()
+            .flat_map(|range| {
+                (range.start..range.end)
+                    .step_by(range_cap)
+                    .map(move |start| Some((start, (start + range_cap).min(range.end) - 1)))
+            })
+            .collect::<Vec<_>>();
+        if expect_whole_get {
+            expected.push(None);
+        } else if window.is_some() {
+            assert!(
+                expected
+                    .iter()
+                    .flatten()
+                    .map(|(start, end)| end - start + 1)
+                    .sum::<usize>()
+                    < size
+            );
+        }
+
+        expected.sort_unstable();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let transport = CdnTransport::loopback_fixture(listener.local_addr().unwrap()).unwrap();
+        let path = xorb.location;
+        let full_limit = if window.is_some() { size } else { 0 };
+        let route = CdnRoute::new(
+            target,
+            "runtime-test".into(),
+            Some(".crab".into()),
+            CdnAccess::Private(Arc::new(XorbGrant(path.clone()))),
+            transport,
+            Duration::from_secs(10),
+        )
+        .with_loopback_read_limits(
+            CdnReadFamily::Xorb,
+            &format!("{full_limit} {size} {range_cap} 10000"),
+        )
+        .unwrap();
+        let origin = crab_storage::Store::new(Arc::new(RejectFullXorbReads {
+            inner: native,
+            reject_head: true,
+        }))
+        .with_target_identity(target)
+        .with_cdn_route(route)
+        .unwrap();
+        let requests = expected.len();
+        let edge = tokio::spawn(async move {
+            let mut observed = Vec::new();
+            for _ in 0..requests {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(socket);
+                let mut request = String::new();
+                while !request.ends_with("\r\n\r\n") {
+                    assert_ne!(stream.read_line(&mut request).await.unwrap(), 0);
+                }
+                assert!(request.starts_with(&format!("GET /{path} HTTP/1.1\r\n")));
+                let request = request.to_ascii_lowercase();
+                assert!(request.contains("authorization: bearer fixture-viewer\r\n"));
+                let range = request
+                    .lines()
+                    .find_map(|line| line.strip_prefix("range: bytes="))
+                    .map(|value| {
+                        let (start, end) = value.split_once('-').unwrap();
+                        (
+                            start.parse::<usize>().unwrap(),
+                            end.parse::<usize>().unwrap(),
+                        )
+                    });
+                let (status, bytes) = match range {
+                    Some((start, end)) => (
+                        format!("206 Partial Content\r\nContent-Range: bytes {start}-{end}/{size}"),
+                        &body[start..=end],
+                    ),
+                    None => ("200 OK".to_owned(), body.as_ref()),
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    bytes.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.write_all(bytes).await.unwrap();
+                observed.push(range);
+            }
+            observed.sort_unstable();
+            assert_eq!(observed, expected);
+        });
+        let hydrator = runtime_with_origin(&directory.path().join("cache"), 1024 * 1024, origin)
+            .with_file_index_lookup(lookup.clone());
+        if let Some(window) = window {
+            let expected = &original[window.start as usize..window.end as usize];
+            let result = hydrator
+                .reconstruct_range_stream(&pointer, window)
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            assert_eq!(result.concat(), expected);
+        } else {
+            let destination = directory.path().join("hydrated");
+            let size = hydrator
+                .reconstruct_to_path(&pointer, &destination)
+                .await
+                .unwrap();
+            assert_eq!(size, original.len() as u64);
+            assert_eq!(std::fs::read(destination).unwrap(), original);
+        }
+        tokio::time::timeout(Duration::from_secs(2), edge)
+            .await
+            .unwrap()
+            .unwrap();
+        lookup.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn range_to_path_returns_exact_bytes_without_full_xorb_reads() {
         let directory = tempfile::tempdir().unwrap();
         let guarded = Arc::new(RejectFullXorbReads {
             inner: Arc::new(object_store::memory::InMemory::new()),
+            reject_head: false,
         });
         let origin = crab_storage::Store::new(guarded);
         let (hydrator, pointer, original) =

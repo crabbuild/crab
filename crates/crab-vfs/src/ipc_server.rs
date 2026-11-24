@@ -386,6 +386,9 @@ async fn handle_mount(
     let mut config_for_handle = pipeline_config.clone();
 
     let mut pipeline = MountPipelineBuilder::new(pipeline_config).with_chunk_cache(chunk_cache);
+    let catalog = read_context
+        .as_ref()
+        .map(|context| Arc::clone(&context.catalog));
     if let Some(context) = read_context {
         pipeline = pipeline.with_read_context(context);
     }
@@ -393,6 +396,11 @@ async fn handle_mount(
     let output = match pipeline.execute() {
         Ok(o) => o,
         Err(e) => {
+            if let Some(catalog) = catalog
+                && let Err(cleanup) = catalog.shutdown().await
+            {
+                tracing::warn!(%cleanup, "failed to release rejected mount capture");
+            }
             release_mount_reservation(coordinator, reservation).await;
             return IpcResponse::err(format!("pipeline failed: {e}"));
         }

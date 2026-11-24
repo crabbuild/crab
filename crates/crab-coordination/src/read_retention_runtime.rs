@@ -9,6 +9,40 @@ use tokio_util::task::{TaskTracker, task_tracker::TaskTrackerToken};
 use crate::read_retention::{READ_RETENTION_TTL, ReadRetentionLease};
 use crate::{CoordinationError, Result};
 
+/// Owns conditional renewal and release of one acknowledged captured-read claim.
+#[async_trait::async_trait]
+pub trait RetentionOwner: Send + 'static {
+    fn path(&self) -> &str;
+
+    /// Return the renewal time and the conservative read deadline.
+    fn schedule(&self) -> Result<(Instant, Instant)>;
+
+    async fn renew(&mut self) -> Result<()>;
+
+    /// Release only the last acknowledged claim after all read pins drain.
+    async fn release(self) -> Result<()>;
+}
+
+#[async_trait::async_trait]
+impl RetentionOwner for ReadRetentionLease {
+    fn path(&self) -> &str {
+        self.path().as_ref()
+    }
+
+    fn schedule(&self) -> Result<(Instant, Instant)> {
+        let deadline = self.deadline()?;
+        Ok((deadline - READ_RETENTION_TTL / 3, deadline))
+    }
+
+    async fn renew(&mut self) -> Result<()> {
+        self.renew().await
+    }
+
+    async fn release(self) -> Result<()> {
+        self.release().await
+    }
+}
+
 /// Owns capture admission and all renewal/release tasks for one read session.
 ///
 /// Call shutdown after backend requests stop. Drop requests shutdown, but the
@@ -56,7 +90,8 @@ impl ReadRetentionSession {
     }
 
     /// Close admission, cancel reads, and await every admitted capture and release.
-    /// Cancellation of this wait does not interrupt cleanup.
+    /// Return the first unobserved failure after cleanup. Cancelling this wait
+    /// does not interrupt cleanup or consume the failure.
     pub async fn shutdown(&self) -> Result<()> {
         self.close();
         self.0.tasks.wait().await;
@@ -65,9 +100,9 @@ impl ReadRetentionSession {
             .failure
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
+            .take()
         {
-            Some(error) => Err(CoordinationError::ReadRetentionFailed(Arc::clone(error))),
+            Some(error) => Err(CoordinationError::ReadRetentionFailed(error)),
             None => Ok(()),
         }
     }
@@ -96,10 +131,12 @@ pub struct ReadRetentionCapture {
 }
 
 impl ReadRetentionCapture {
-    /// Transfer a created claim to its renewal owner before validating GC barriers.
-    /// The returned view must not escape until both barriers validate.
-    pub fn retain(self, lease: ReadRetentionLease) -> Result<RetainedRead> {
-        let deadline = lease.deadline().unwrap_or_else(|_| Instant::now());
+    /// Register a created claim before admitting any reads of its captured view.
+    /// The capture caller still owns verification of the view before returning it.
+    pub fn retain(self, lease: impl RetentionOwner) -> Result<RetainedRead> {
+        let deadline = lease
+            .schedule()
+            .map_or_else(|_| Instant::now(), |(_, end)| end);
         let reads = TaskTracker::new();
         reads.close();
         let health = Arc::new(Health {
@@ -246,15 +283,15 @@ impl Health {
 }
 
 async fn renew_and_release(
-    mut lease: ReadRetentionLease,
+    mut lease: impl RetentionOwner,
     health: &Health,
     dropped: &CancellationToken,
 ) -> Result<()> {
     let mut draining = false;
     let mut failure = None;
     loop {
-        let deadline = match lease.deadline() {
-            Ok(deadline) => deadline,
+        let (renew_at, deadline) = match lease.schedule() {
+            Ok(schedule) => schedule,
             Err(error) => {
                 let error = Arc::new(error);
                 health.fail(Arc::clone(&error));
@@ -274,19 +311,18 @@ async fn renew_and_release(
                 health.close();
                 draining = true;
             }
-            () = tokio::time::sleep_until(deadline - READ_RETENTION_TTL / 3) => {
-                let renewed = match tokio::time::timeout_at(deadline, lease.renew()).await {
-                    Ok(result) => result,
-                    Err(_) => Err(health.lost()),
-                };
-                if let Err(error) = renewed {
-                    let error = Arc::new(error);
-                    health.fail(Arc::clone(&error));
-                    failure = Some(error);
-                    health.reads.wait().await;
-                    break;
+            () = tokio::time::sleep_until(renew_at) => {
+                let renewed = renew_before(&mut lease, health, deadline).await;
+                match renewed {
+                    Ok(()) => {}
+                    Err(error) => {
+                        let error = Arc::new(error);
+                        health.fail(Arc::clone(&error));
+                        failure = Some(error);
+                        health.reads.wait().await;
+                        break;
+                    }
                 }
-                health.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).deadline = lease.deadline()?;
             }
         }
     }
@@ -300,6 +336,29 @@ async fn renew_and_release(
         Some(error) => Err(CoordinationError::ReadRetentionFailed(error)),
         None => released,
     }
+}
+
+async fn renew_before(
+    lease: &mut impl RetentionOwner,
+    health: &Health,
+    deadline: Instant,
+) -> Result<()> {
+    if Instant::now() >= deadline {
+        return Err(health.lost());
+    }
+    tokio::time::timeout_at(deadline, lease.renew())
+        .await
+        .map_err(|_| health.lost())??;
+    let (_, next) = lease.schedule()?;
+    let mut state = health
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if Instant::now() >= deadline.min(next) {
+        return Err(health.lost());
+    }
+    state.deadline = next;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -461,6 +520,7 @@ mod tests {
         assert!(matches!(error, CoordinationError::ReadRetentionFailed(_)));
         drop(pin);
         let error = session.shutdown().await.unwrap_err();
+        session.shutdown().await.unwrap();
         let mut source: &dyn std::error::Error = &error;
         let mut provider_error = false;
         loop {

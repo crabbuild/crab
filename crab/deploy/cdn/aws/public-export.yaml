@@ -1,0 +1,203 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Public CloudFront delivery from an isolated Crab v2 S3 export.
+
+Parameters:
+  SourceOrigin:
+    Type: String
+    Description: Logical native S3 source. The distribution reads the new export bucket.
+    AllowedPattern: 's3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]'
+  RepositoryPrefix:
+    Type: String
+    AllowedPattern: '(?!\.{1,2}(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.{1,2}(?:/|$))[A-Za-z0-9._-]+)*'
+    MaxLength: 255
+  ApprovedInventorySha256:
+    Type: String
+    Description: SHA-256 of the reviewed public export inventory.
+    AllowedPattern: '[a-f0-9]{64}'
+  ExportWriterRoleArn:
+    Type: String
+    Description: IAM role dedicated to publishing this export.
+    AllowedPattern: 'arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+'
+  EnablePublicDelivery:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['false', 'true']
+
+Conditions:
+  PublicDelivery: !Equals [!Ref EnablePublicDelivery, 'true']
+
+Resources:
+  ExportBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: AbortIncompleteExportUploads
+            Status: Enabled
+            Prefix: !Sub '${RepositoryPrefix}/'
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: CrabSourceOrigin
+          Value: !Ref SourceOrigin
+        - Key: CrabApprovedInventorySha256
+          Value: !Ref ApprovedInventorySha256
+
+  OriginAccess:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-s3'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  ImmutableRoute:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub '${AWS::StackName}-immutable'
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Permit exact repository-local immutable export paths.
+        Runtime: cloudfront-js-2.0
+      FunctionCode: !Sub |
+        function handler(event) {
+          const request = event.request;
+          const repo = '/${RepositoryPrefix}/';
+          const key = request.uri.startsWith(repo) ? request.uri.slice(repo.length) : '';
+          const git = key.match(/^v2\/(?:capsules|checkpoints|catalogs|pack-layers|history(?:\/source-roots)?)\/([a-f0-9]{2})\/([a-f0-9]{64})$/);
+          const lfs = key.match(/^lfs\/objects\/([a-f0-9]{2})\/([a-f0-9]{2})\/([a-f0-9]{64})$/);
+          const authorizedKey =
+            (git && git[0] === key && git[2].slice(0, 2) === git[1]) ||
+            (lfs && lfs[0] === key && lfs[3].slice(0, 4) === lfs[1] + lfs[2]);
+          if (request.method === 'GET' && Object.keys(request.querystring).length === 0 && authorizedKey) {
+            return request;
+          }
+          return { statusCode: 403, statusDescription: 'Forbidden' };
+        }
+
+  ImmutableCache:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub '${AWS::StackName}-immutable'
+        MinTTL: 0
+        DefaultTTL: 86400
+        MaxTTL: 86400
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingBrotli: false
+          EnableAcceptEncodingGzip: false
+          CookiesConfig: {CookieBehavior: none}
+          HeadersConfig: {HeaderBehavior: none}
+          QueryStringsConfig: {QueryStringBehavior: none}
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: !If [PublicDelivery, true, false]
+        Comment: !Sub '${AWS::StackName} Crab v2 public export'
+        Origins:
+          - Id: crab-export
+            DomainName: !GetAtt ExportBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt OriginAccess.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: crab-export
+          ViewerProtocolPolicy: https-only
+          AllowedMethods: [GET, HEAD]
+          CachedMethods: [GET, HEAD]
+          Compress: false
+          CachePolicyId: !Ref ImmutableCache
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt ImmutableRoute.FunctionARN
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 404
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 500
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 502
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 503
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 504
+            ErrorCachingMinTTL: 0
+
+  ExportPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ExportBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ReadApprovedFamiliesAtCloudFront
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource:
+              - !Sub '${ExportBucket.Arn}/${RepositoryPrefix}/v2/capsules/*'
+              - !Sub '${ExportBucket.Arn}/${RepositoryPrefix}/v2/checkpoints/*'
+              - !Sub '${ExportBucket.Arn}/${RepositoryPrefix}/v2/catalogs/*'
+              - !Sub '${ExportBucket.Arn}/${RepositoryPrefix}/v2/pack-layers/*'
+              - !Sub '${ExportBucket.Arn}/${RepositoryPrefix}/v2/history/*'
+              - !Sub '${ExportBucket.Arn}/${RepositoryPrefix}/lfs/objects/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}'
+          - Sid: RequireDedicatedWriter
+            Effect: Deny
+            Principal: '*'
+            Action: s3:PutObject
+            Resource: !Sub '${ExportBucket.Arn}/*'
+            Condition:
+              ArnNotEquals:
+                aws:PrincipalArn: !Ref ExportWriterRoleArn
+          - Sid: RequireCreateOnlyWrites
+            Effect: Deny
+            Principal: '*'
+            Action: s3:PutObject
+            Resource: !Sub '${ExportBucket.Arn}/*'
+            Condition:
+              Bool:
+                s3:ObjectCreationOperation: 'true'
+              StringNotEquals:
+                s3:if-none-match: '*'
+          - Sid: KeepWriterFromReplacingViaDelete
+            Effect: Deny
+            Principal:
+              AWS: !Ref ExportWriterRoleArn
+            Action: [s3:DeleteObject, s3:DeleteObjectVersion]
+            Resource: !Sub '${ExportBucket.Arn}/*'
+
+Outputs:
+  SourceOrigin:
+    Value: !Ref SourceOrigin
+  ExportOrigin:
+    Value: !Sub 's3://${ExportBucket}'
+  RepositoryPrefix:
+    Value: !Ref RepositoryPrefix
+  ApprovedInventorySha256:
+    Value: !Ref ApprovedInventorySha256
+  DistributionId:
+    Value: !Ref Distribution
+  BaseUrl:
+    Value: !Sub 'https://${Distribution.DomainName}'
+  PublicDeliveryEnabled:
+    Value: !Ref EnablePublicDelivery

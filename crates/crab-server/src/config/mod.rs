@@ -97,6 +97,10 @@ pub struct StorageConfig {
     /// S3 signing region; when absent, use the provider environment configuration.
     #[serde(default)]
     pub region: Option<String>,
+    /// Operator routes indexed by exact physical repository prefix.
+    #[cfg(feature = "provider-cdn")]
+    #[serde(default)]
+    pub cdn: std::collections::BTreeMap<String, crab_auth_store::operator_cdn::OperatorCdn>,
 }
 
 /// Local Cell storage and private fleet identity configuration.
@@ -350,6 +354,22 @@ impl Config {
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
         {
             return Err(Error::Config("storage.region must be an S3 signing region"));
+        }
+        #[cfg(feature = "provider-cdn")]
+        {
+            let selection = crate::storage_root::StorageRoot::selection(&self.storage)?;
+            let parent = format!("{}/", selection.repo_prefix);
+            let mut viewer_paths = HashSet::new();
+            for (prefix, binding) in &self.storage.cdn {
+                if !prefix.starts_with(&parent) {
+                    return Err(Error::Config(
+                        "CDN repository must be under the configured storage root",
+                    ));
+                }
+                if !viewer_paths.insert(binding.validate(prefix)?) {
+                    return Err(Error::Config("CDN viewer path is bound more than once"));
+                }
+            }
         }
         if let Some(auth) = &self.auth {
             validate_identity_url(&auth.public_url, true)?;

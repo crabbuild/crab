@@ -88,6 +88,23 @@ impl PointerReader {
         self.remote.is_some()
     }
 
+    /// Return the captured online target and scope identity for cached payloads.
+    #[must_use]
+    pub fn authorized_cache_namespace(&self) -> Option<[u8; 32]> {
+        self.remote.as_deref()?.authorized_cache_namespace()
+    }
+
+    /// Revalidate the captured claim and bound grant before delivering cached bytes.
+    pub async fn check_read_authority(&self, cancel: &CancellationToken) -> Result<()> {
+        if cancel.is_cancelled() {
+            return Err(ReadError::Cancelled);
+        }
+        if let Some(remote) = &self.remote {
+            remote.check_read_authority(cancel).await?;
+        }
+        Ok(())
+    }
+
     /// Retain unpublished local content for a descriptor without blocking staging writers.
     pub async fn pin_file(&self, pointer: &Pointer) -> Result<Option<StagedFilePin>> {
         self.pin_file_with_cancel(pointer, &CancellationToken::new())

@@ -334,16 +334,19 @@ jobs:
 
       - name: Build locked gateway image
         id: build
-        run: >-
-          docker build
-          --file crates/crab-s3-gateway/deploy/Dockerfile
-          --tag crab-s3-gateway:test
-          .
+        run: |
+          set -euo pipefail
+          git archive --format=tar HEAD | docker build \
+            --file crates/crab-s3-gateway/deploy/Dockerfile \
+            --build-arg "GIT_SHA=$(git rev-parse HEAD)" \
+            --tag crab-s3-gateway:test \
+            -
 
       - name: Verify runtime contract
         id: runtime
         run: |
           set -euo pipefail
+          test "$(docker image inspect crab-s3-gateway:test --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$(git rev-parse HEAD)"
           test "$(docker image inspect crab-s3-gateway:test --format '{{.Config.User}}')" = "crab:crab"
           test "$(docker image inspect crab-s3-gateway:test --format '{{.Config.StopSignal}}')" = "SIGTERM"
           docker image inspect crab-s3-gateway:test --format '{{json .Config.Healthcheck.Test}}' | grep -F -- '"--healthcheck"'

@@ -39,6 +39,7 @@ use crab::core::context::AppContext;
 use crab::core::error::{CrabError, Result};
 use crab::core::output::{ErrorInfo, JsonlStream, OutputMode, emit_error_json};
 use crab::git::remote_helper::{StdIo, run_remote_helper};
+use crab_remote::local::DIRECT_CDN_CHECKOUT_BINDING_ENV;
 
 /// Name Git uses when exec-ing the remote helper for `crab://` URLs.
 const REMOTE_HELPER_STEM: &str = "git-remote-crab";
@@ -312,6 +313,9 @@ enum Cmd {
         /// Run an opt-in cache-service write/read/cleanup probe.
         #[arg(long, conflicts_with_all = ["cost", "metadb", "support_bundle"])]
         cache_service_active_probe: bool,
+        /// Check an authorized provider CDN deployment with bounded, read-only probes.
+        #[arg(long, conflicts_with_all = ["cost", "metadb", "support_bundle"])]
+        cdn_probe: bool,
         /// Write the support bundle as pretty JSON.
         #[arg(long, value_name = "PATH", requires = "support_bundle")]
         output: Option<PathBuf>,
@@ -482,6 +486,9 @@ enum Cmd {
         #[arg(long, required = true)]
         json: bool,
     },
+    /// Return the explicit content source of the SDK's current worktree.
+    #[command(hide = true)]
+    SdkContentSource,
     /// List and install the self-contained skills shipped with Crab.
     #[command(subcommand)]
     Skills(crab::cmd::skills::SkillsCommand),
@@ -2237,6 +2244,7 @@ impl Cmd {
             Self::Release(command) => command.output_mode(),
             Self::Recover(command) => command.output_mode(),
             Self::Config(ConfigCmd::Get { json, .. }) => OutputMode::from_flags(*json, false),
+            Self::SdkContentSource => OutputMode::Json,
             Self::Replica(crab::cmd::replica::ReplicaCommand::Add(args)) => {
                 OutputMode::from_flags(args.json, false)
             }
@@ -2517,6 +2525,7 @@ impl Cmd {
             Self::FilterProcess => "filter-process",
             Self::Version { .. } => "version",
             Self::SdkCapabilities { .. } => "sdk-capabilities",
+            Self::SdkContentSource => "sdk-content-source",
             Self::Skills(crab::cmd::skills::SkillsCommand::List { .. }) => "skills.list",
             Self::Skills(crab::cmd::skills::SkillsCommand::Install(_)) => "skills.install",
             Self::Upgrade => "upgrade",
@@ -2661,7 +2670,10 @@ fn main() -> ExitCode {
     //
     // Each layer only fills in values not already set by a higher layer.
     // Silently ignored if no .env file exists at any layer.
-    load_env_layered();
+    // The internal source probe only reads explicit worktree configuration.
+    if std::env::args_os().nth(1).as_deref() != Some(OsStr::new("sdk-content-source")) {
+        load_env_layered();
+    }
 
     // Pre-scan argv for `--log-level <value>` so we can configure
     // tracing before clap (and the tokio runtime) are built. This
@@ -2849,6 +2861,16 @@ where
 /// Layer 1 (process env) wins implicitly because dotenvy never overrides.
 /// Layer 5 (AWS SDK credential chain) is handled by `object_store::from_env()`.
 fn load_env_layered() {
+    if std::env::var_os(DIRECT_CDN_CHECKOUT_BINDING_ENV).is_some_and(|path| !path.is_empty()) {
+        // Delegated children use the SDK's selected environment. Worktree and
+        // ancestor dotenv files could restore alternate provider credentials.
+        return;
+    }
+    // Reserve the internal handoff before reading any project-controlled file.
+    // dotenv preserves present variables, including an explicitly empty value.
+    let reserved = format!("{DIRECT_CDN_CHECKOUT_BINDING_ENV}=\n");
+    let _ = dotenvy::from_read(reserved.as_bytes());
+
     // Track which paths we've already loaded to avoid double-loading.
     let mut loaded: Vec<std::path::PathBuf> = Vec::new();
 
@@ -3271,6 +3293,13 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             key: "sdk-capabilities output".to_owned(),
             origin: "the versioned SDK handshake requires --json".to_owned(),
         }),
+        Some(Cmd::SdkContentSource) => {
+            let source = Config::sdk_worktree_content_source(&std::env::current_dir()?)?;
+            let encoded = serde_json::to_string(&source)
+                .map_err(|error| CrabError::Internal(error.to_string()))?;
+            println!("{encoded}");
+            Ok(ExitCode::SUCCESS)
+        }
         Some(Cmd::Skills(sub)) => {
             let _span = tracing::info_span!("skills").entered();
             crab::cmd::skills::run(sub)?;
@@ -3718,6 +3747,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             metadb,
             support_bundle,
             cache_service_active_probe,
+            cdn_probe,
             output,
             pricing_file,
             inventory_source,
@@ -3730,7 +3760,8 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                 cost,
                 metadb,
                 support_bundle,
-                cache_service_active_probe
+                cache_service_active_probe,
+                cdn_probe
             )
             .entered();
             let mode = OutputMode::from_flags(json, false);
@@ -3751,7 +3782,8 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             } else if support_bundle {
                 crab::cmd::doctor::run_cache_service_support_bundle(mode, output).await?;
             } else {
-                crab::cmd::doctor::run_doctor(mode, cache_service_active_probe).await?;
+                crab::cmd::doctor::run_doctor(mode, cache_service_active_probe, cdn_probe, &cancel)
+                    .await?;
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -6177,6 +6209,47 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    #[test]
+    fn sdk_checkout_binding_is_only_read_from_the_process_environment() {
+        const CASE: &str = "CRAB_TEST_CHECKOUT_DOTENV_CASE";
+        const ORDINARY_VALUE: &str = "CRAB_TEST_ORDINARY_DOTENV_VALUE";
+        let binding = super::DIRECT_CDN_CHECKOUT_BINDING_ENV;
+        if let Ok(case) = std::env::var(CASE) {
+            super::load_env_layered();
+            let (expected, ordinary) = if case == "delegated" {
+                ("operation-binding", None)
+            } else {
+                ("", Some("loaded"))
+            };
+            assert_eq!(std::env::var(binding).as_deref(), Ok(expected));
+            assert_eq!(std::env::var(ORDINARY_VALUE).ok().as_deref(), ordinary);
+            return;
+        }
+        let scratch = tempfile::tempdir().unwrap();
+        std::fs::write(
+            scratch.path().join(".env"),
+            format!("{binding}=dotenv-binding\n{ORDINARY_VALUE}=loaded\n"),
+        )
+        .unwrap();
+        for case in ["ordinary", "delegated"] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "tests::sdk_checkout_binding_is_only_read_from_the_process_environment",
+                ])
+                .current_dir(scratch.path())
+                .env("HOME", scratch.path())
+                .env(CASE, case)
+                .env_remove(binding)
+                .env_remove(ORDINARY_VALUE);
+            if case == "delegated" {
+                child.env(binding, "operation-binding");
+            }
+            assert!(child.status().unwrap().success(), "{case}");
+        }
     }
 
     #[test]

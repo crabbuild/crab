@@ -184,6 +184,8 @@ pub(super) fn memory_client() -> Client {
         namespace: "memory-test".to_owned(),
         #[cfg(feature = "files")]
         cache: None,
+        #[cfg(all(feature = "files", feature = "service"))]
+        retention: Default::default(),
         operations: crate::runtime::Operations::default(),
         git: Arc::new(crab_remote_git::RemoteGitRuntime::default()),
         direct_store_configured: true,
@@ -195,6 +197,10 @@ pub(super) fn memory_client() -> Client {
         local_execution_policy: crate::LocalExecutionPolicy::Untrusted,
         #[cfg(feature = "service")]
         managed: None,
+        #[cfg(feature = "service")]
+        direct_cdn: None,
+        #[cfg(feature = "service")]
+        cdn_consumer: crab_storage::cdn::CdnConsumer::Sdk,
     }))
 }
 

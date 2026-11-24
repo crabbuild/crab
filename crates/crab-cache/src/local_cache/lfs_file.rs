@@ -16,6 +16,11 @@ pub struct LfsCacheFile {
 }
 
 impl LfsCacheFile {
+    /// Fingerprint the pinned cache root without revealing its path.
+    pub fn root_fingerprint(&self) -> Result<[u8; 32]> {
+        self.entry.root_fingerprint()
+    }
+
     /// Open another reader of the captured object, without resolving its pathname.
     pub fn reader(&self) -> std::io::Result<std::fs::File> {
         self.file.try_clone()
@@ -55,6 +60,11 @@ pub struct LfsCacheFill {
 }
 
 impl LfsCacheFill {
+    /// Fingerprint the same root that owns this reservation.
+    pub fn root_fingerprint(&self) -> Result<[u8; 32]> {
+        self.pending.root_fingerprint()
+    }
+
     /// Drain admitted writes before releasing an unpublished fill.
     pub async fn abort(mut self) -> Result<()> {
         self.writer.flush().await?;
@@ -189,6 +199,36 @@ mod tests {
         fill.write(body).await.unwrap();
         fill.commit().await.unwrap();
         oid
+    }
+
+    #[tokio::test]
+    async fn lfs_read_and_reservation_report_the_same_physical_root() {
+        let first_dir = tempfile::tempdir().unwrap();
+        let second_dir = tempfile::tempdir().unwrap();
+        let root = cache(&first_dir);
+        let cache_a = Arc::new(root.for_authorized_reads(&[1; 32]));
+        let cache_b = Arc::new(root.for_authorized_reads(&[2; 32]));
+        let independent = cache(&second_dir);
+        let body = b"same LFS object";
+        let oid = Sha256::digest(body).into();
+        let size = body.len() as u64;
+        let mut fill = cache_a.begin_lfs_fill(&oid, size).await.unwrap().unwrap();
+        let root = fill.root_fingerprint().unwrap();
+        fill.write(body).await.unwrap();
+        fill.commit().await.unwrap();
+
+        let read = cache_a.open_lfs_file(&oid, size).await.unwrap().unwrap();
+        assert_eq!(read.root_fingerprint().unwrap(), root);
+        let other_namespace = cache_b.begin_lfs_fill(&oid, size).await.unwrap().unwrap();
+        assert_eq!(other_namespace.root_fingerprint().unwrap(), root);
+        other_namespace.abort().await.unwrap();
+        let other_root = independent
+            .begin_lfs_fill(&oid, size)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(other_root.root_fingerprint().unwrap(), root);
+        other_root.abort().await.unwrap();
     }
 
     #[tokio::test]

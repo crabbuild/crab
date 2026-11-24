@@ -1,6 +1,31 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Operator-approved file and digest of a sealed public CDN export receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CdnPublicationFile {
+    pub path: std::path::PathBuf,
+    pub sha256: String,
+}
+
+/// Check whether two canonical CDN origins use separate disclosure boundaries.
+///
+/// The caller validates both origin names. S3 and GCS isolate by bucket and
+/// Azure isolates by storage account because the account enables anonymous access.
+#[must_use]
+pub fn public_cdn_export_is_isolated(source: &str, export: &str) -> bool {
+    match (source.split_once("://"), export.split_once("://")) {
+        (Some(("s3", source)), Some(("s3", export)))
+        | (Some(("gs", source)), Some(("gs", export))) => source != export,
+        (Some(("https", source)), Some(("https", export))) => source
+            .split_once(".blob.core.windows.net/")
+            .zip(export.split_once(".blob.core.windows.net/"))
+            .is_some_and(|((source, _), (export, _))| source != export),
+        _ => false,
+    }
+}
+
 /// Physical storage provider behind a repository or object URL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

@@ -1,0 +1,106 @@
+<policies>
+  <inbound>
+    <choose>
+      <when condition='@{
+        var url = context.Request.OriginalUrl;
+        var range = context.Request.Headers.GetValueOrDefault("Range", "");
+        return context.Request.Method != "GET" ||
+          url.Scheme != "https" ||
+          url.Host != "__VIEWER_HOST__" ||
+          url.Port != 443 ||
+          !string.IsNullOrEmpty(url.QueryString) ||
+          (context.Request.Headers.ContainsKey("Range") &amp;&amp; !Regex.IsMatch(range, @"\Abytes=[0-9]+-[0-9]+\z")) ||
+          context.Request.Headers.Keys.Any(name =&gt; name.StartsWith("x-ms-", StringComparison.OrdinalIgnoreCase));
+      }'>
+        <return-response>
+          <set-status code="403" reason="Forbidden" />
+          <set-header name="Cache-Control" exists-action="override">
+            <value>private, no-store</value>
+          </set-header>
+        </return-response>
+      </when>
+    </choose>
+    <validate-jwt header-name="Authorization" require-scheme="Bearer"
+        require-expiration-time="true" require-signed-tokens="true" clock-skew="0"
+        failed-validation-httpcode="403" failed-validation-error-message="Forbidden"
+        output-token-variable-name="crab-viewer">
+      <issuer-signing-keys>
+        __SIGNING_KEYS__
+      </issuer-signing-keys>
+      <audiences>
+        <audience>https://__VIEWER_HOST__/crab</audience>
+      </audiences>
+      <issuers>
+        <issuer>https://__VIEWER_HOST__/crab</issuer>
+      </issuers>
+      <required-claims>
+        <claim name="origin" match="all">
+          <value>__BLOB_ORIGIN__</value>
+        </claim>
+      </required-claims>
+    </validate-jwt>
+    <set-variable name="crab-object-path" value='@{
+      var viewer = (Jwt)context.Variables["crab-viewer"];
+      var source = Encoding.UTF8.GetString(Convert.FromBase64String("__REPOSITORY_PREFIX_BASE64__"));
+      var suffix = Encoding.UTF8.GetString(Convert.FromBase64String("__PROTECTED_VIEW_SUFFIX_BASE64__"));
+      var repository = source + suffix;
+      var path = context.Request.OriginalUrl.Path;
+      if (viewer.Algorithm != "RS256" ||
+          viewer.Subject != repository ||
+          !Regex.IsMatch(source, @"\A[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*\z") ||
+          source.Split("/".ToCharArray()).Any(segment =&gt; segment == "." || segment == "..") ||
+          (suffix.Length != 0 &amp;&amp; !Regex.IsMatch(suffix, @"\A/acl-views/v2/[a-f0-9]{64}/(?:0|[1-9][0-9]{0,19})-[a-f0-9]{64}\z")) ||
+          !path.StartsWith("/crab/" + repository + "/", StringComparison.Ordinal)) {
+        return "";
+      }
+      var key = path.Substring(7 + repository.Length);
+      var git = Regex.Match(key, @"\A(?:(?&lt;kind&gt;v2/(?:capsules|checkpoints|catalogs|pack-layers))/|(?&lt;kind&gt;v2/history)/(?:source-roots/)?)(?&lt;fanout&gt;[a-f0-9]{2})/\k&lt;fanout&gt;[a-f0-9]{62}\z");
+      var lfs = Regex.Match(key, @"\A(?&lt;kind&gt;lfs/objects)/(?&lt;first&gt;[a-f0-9]{2})/(?&lt;second&gt;[a-f0-9]{2})/\k&lt;first&gt;\k&lt;second&gt;[a-f0-9]{60}\z");
+      var xet = Regex.Match(key, @"\A(?&lt;kind&gt;\.crab/(?:xorbs|shards|capsule-chunk-pages))/(?&lt;fanout&gt;[a-f0-9]{2})/\k&lt;fanout&gt;[a-f0-9]{62}\z");
+      var kind = git.Success ? git.Groups["kind"].Value : lfs.Success ? lfs.Groups["kind"].Value :
+          (suffix.Length != 0 &amp;&amp; xet.Success ? xet.Groups["kind"].Value : "");
+      if (kind.Length == 0 ||
+          !viewer.Claims.ContainsKey("prefix") ||
+          viewer.Claims["prefix"].Length != 1 ||
+          viewer.Claims["prefix"][0] != repository + "/" + kind + "/") {
+        return "";
+      }
+      return "/" + repository + "/" + key;
+    }' />
+    <choose>
+      <when condition='@(((string)context.Variables["crab-object-path"]).Length == 0)'>
+        <return-response>
+          <set-status code="403" reason="Forbidden" />
+          <set-header name="Cache-Control" exists-action="override">
+            <value>private, no-store</value>
+          </set-header>
+        </return-response>
+      </when>
+    </choose>
+    <set-header name="Authorization" exists-action="delete" />
+    <set-header name="Proxy-Authorization" exists-action="delete" />
+    <set-header name="Cookie" exists-action="delete" />
+    <set-header name="Ocp-Apim-Subscription-Key" exists-action="delete" />
+    <set-header name="Accept-Encoding" exists-action="override">
+      <value>identity</value>
+    </set-header>
+    <set-header name="x-ms-version" exists-action="override">
+      <value>2023-11-03</value>
+    </set-header>
+    <rewrite-uri template='@((string)context.Variables["crab-object-path"])' copy-unmatched-params="false" />
+    <set-backend-service base-url="https://__EDGE_HOST__" />
+  </inbound>
+  <backend>
+    <forward-request timeout="120" follow-redirects="false" buffer-response="false" />
+  </backend>
+  <outbound>
+    <set-header name="Cache-Control" exists-action="override">
+      <value>private, no-store</value>
+    </set-header>
+  </outbound>
+  <on-error>
+    <set-header name="Cache-Control" exists-action="override">
+      <value>private, no-store</value>
+    </set-header>
+  </on-error>
+</policies>

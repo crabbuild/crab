@@ -1,0 +1,225 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Private CloudFront delivery for one isolated Crab v2 qualification repository.
+
+Parameters:
+  RepositoryPrefix:
+    Type: String
+    Description: Logical repository prefix in this stack's S3 bucket.
+    AllowedPattern: '(?!\.{1,2}(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.{1,2}(?:/|$))[A-Za-z0-9._-]+)*'
+    MaxLength: 255
+  ProtectedViewSuffix:
+    Type: String
+    Description: Exact suffix of one materialized v2 view, including its leading slash. Empty selects the repository-local profile.
+    Default: ''
+    AllowedPattern: '(?:/acl-views/v2/[a-f0-9]{64}/(?:0|[1-9][0-9]{0,19})-[a-f0-9]{64})?'
+  ViewerPublicKey:
+    Type: String
+    Description: Primary PEM public key for the operator's CloudFront cookie issuer.
+    Default: ''
+  SecondaryViewerPublicKey:
+    Type: String
+    Description: Secondary PEM public key for overlapping signing key rotation.
+    Default: ''
+
+Rules:
+  DistinctViewerKeys:
+    Assertions:
+      - Assert: !Not [!Equals [!Ref ViewerPublicKey, !Ref SecondaryViewerPublicKey]]
+        AssertDescription: Provide at least one viewer public key. When using both slots, provide distinct keys.
+
+Conditions:
+  ProtectedView: !Not [!Equals [!Ref ProtectedViewSuffix, '']]
+  PrimaryViewerKey: !Not [!Equals [!Ref ViewerPublicKey, '']]
+  SecondaryViewerKey: !Not [!Equals [!Ref SecondaryViewerPublicKey, '']]
+
+Resources:
+  Origin:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  OriginAccess:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-s3'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  ViewerKey:
+    Type: AWS::CloudFront::PublicKey
+    Condition: PrimaryViewerKey
+    Properties:
+      PublicKeyConfig:
+        CallerReference: !Ref AWS::StackId
+        Name: !Sub '${AWS::StackName}-viewer'
+        EncodedKey: !Ref ViewerPublicKey
+
+  ViewerKeySecondary:
+    Type: AWS::CloudFront::PublicKey
+    Condition: SecondaryViewerKey
+    Properties:
+      PublicKeyConfig:
+        CallerReference: !Sub '${AWS::StackId}-secondary'
+        Name: !Sub '${AWS::StackName}-viewer-secondary'
+        EncodedKey: !Ref SecondaryViewerPublicKey
+
+  ViewerKeyGroup:
+    Type: AWS::CloudFront::KeyGroup
+    Properties:
+      KeyGroupConfig:
+        Name: !Sub '${AWS::StackName}-viewers'
+        Items:
+          - !If [PrimaryViewerKey, !Ref ViewerKey, !Ref 'AWS::NoValue']
+          - !If [SecondaryViewerKey, !Ref ViewerKeySecondary, !Ref 'AWS::NoValue']
+
+  ImmutableRoute:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub '${AWS::StackName}-immutable'
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Restrict the distribution to approved immutable object shapes.
+        Runtime: cloudfront-js-2.0
+      FunctionCode: !Sub |
+        function handler(event) {
+          const request = event.request;
+          const repo = '/${RepositoryPrefix}${ProtectedViewSuffix}/';
+          const key = request.uri.startsWith(repo) ? request.uri.slice(repo.length) : '';
+          const git = key.match(/^v2\/(?:capsules|checkpoints|catalogs|pack-layers|history(?:\/source-roots)?)\/([a-f0-9]{2})\/([a-f0-9]{64})$/);
+          const lfs = key.match(/^lfs\/objects\/([a-f0-9]{2})\/([a-f0-9]{2})\/([a-f0-9]{64})$/);
+          const xet = '${ProtectedViewSuffix}' !== '' && key.match(/^\.crab\/(?:xorbs|shards|capsule-chunk-pages)\/([a-f0-9]{2})\/([a-f0-9]{64})$/);
+          const authorizedKey =
+            (git && git[0] === key && git[2].slice(0, 2) === git[1]) ||
+            (lfs && lfs[0] === key && lfs[3].slice(0, 4) === lfs[1] + lfs[2]) ||
+            (xet && xet[0] === key && xet[2].slice(0, 2) === xet[1]);
+          if (request.method === 'GET' && Object.keys(request.querystring).length === 0 && authorizedKey) {
+            return request;
+          }
+          return { statusCode: 403, statusDescription: 'Forbidden' };
+        }
+
+  ImmutableCache:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub '${AWS::StackName}-immutable'
+        MinTTL: 0
+        DefaultTTL: 86400
+        MaxTTL: 86400
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingBrotli: false
+          EnableAcceptEncodingGzip: false
+          CookiesConfig: {CookieBehavior: none}
+          HeadersConfig: {HeaderBehavior: none}
+          QueryStringsConfig: {QueryStringBehavior: none}
+
+  ViewerHeaders:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: !Sub '${AWS::StackName}-private'
+        ServerTimingHeadersConfig:
+          Enabled: true
+          SamplingRate: 0
+        CustomHeadersConfig:
+          Items:
+            - Header: Cache-Control
+              Value: 'private, no-store'
+              Override: true
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub '${AWS::StackName} Crab v2'
+        Origins:
+          - Id: crab-origin
+            DomainName: !GetAtt Origin.RegionalDomainName
+            OriginAccessControlId: !GetAtt OriginAccess.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: crab-origin
+          ViewerProtocolPolicy: https-only
+          AllowedMethods: [GET, HEAD]
+          CachedMethods: [GET, HEAD]
+          Compress: false
+          CachePolicyId: !Ref ImmutableCache
+          ResponseHeadersPolicyId: !Ref ViewerHeaders
+          TrustedKeyGroups: [!Ref ViewerKeyGroup]
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt ImmutableRoute.FunctionARN
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 404
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 500
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 502
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 503
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 504
+            ErrorCachingMinTTL: 0
+
+  OriginReadPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref Origin
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource:
+              - !Sub '${Origin.Arn}/${RepositoryPrefix}${ProtectedViewSuffix}/v2/capsules/*'
+              - !Sub '${Origin.Arn}/${RepositoryPrefix}${ProtectedViewSuffix}/v2/checkpoints/*'
+              - !Sub '${Origin.Arn}/${RepositoryPrefix}${ProtectedViewSuffix}/v2/catalogs/*'
+              - !Sub '${Origin.Arn}/${RepositoryPrefix}${ProtectedViewSuffix}/v2/pack-layers/*'
+              - !Sub '${Origin.Arn}/${RepositoryPrefix}${ProtectedViewSuffix}/v2/history/*'
+              - !Sub '${Origin.Arn}/${RepositoryPrefix}${ProtectedViewSuffix}/lfs/objects/*'
+              - !If [ProtectedView, !Sub '${Origin.Arn}/${RepositoryPrefix}${ProtectedViewSuffix}/.crab/xorbs/*', !Ref 'AWS::NoValue']
+              - !If [ProtectedView, !Sub '${Origin.Arn}/${RepositoryPrefix}${ProtectedViewSuffix}/.crab/shards/*', !Ref 'AWS::NoValue']
+              - !If [ProtectedView, !Sub '${Origin.Arn}/${RepositoryPrefix}${ProtectedViewSuffix}/.crab/capsule-chunk-pages/*', !Ref 'AWS::NoValue']
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}'
+
+Outputs:
+  Bucket:
+    Value: !Ref Origin
+  RepositoryPrefix:
+    Value: !Ref RepositoryPrefix
+  PhysicalRepositoryPrefix:
+    Value: !Sub '${RepositoryPrefix}${ProtectedViewSuffix}'
+  ProtectedGlobalPrefix:
+    Condition: ProtectedView
+    Value: !Sub '${RepositoryPrefix}${ProtectedViewSuffix}/.crab'
+  DistributionId:
+    Value: !Ref Distribution
+  BaseUrl:
+    Value: !Sub 'https://${Distribution.DomainName}'
+  ViewerKeyId:
+    Condition: PrimaryViewerKey
+    Value: !Ref ViewerKey
+  SecondaryViewerKeyId:
+    Condition: SecondaryViewerKey
+    Value: !Ref ViewerKeySecondary

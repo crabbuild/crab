@@ -19,6 +19,30 @@ the default refreshable AWS credential chain, endpoint/addressing policy,
 multipart support and transport identity. This lets generated server config
 carry its discovered region into independent administration processes.
 
+`CdnTransport` reads exact-length immutable bodies and ranges over HTTPS.
+`StoreLayout::cdn_object_namespace` classifies the physical repository and
+global keys eligible for this transport. The composing reader must establish
+whole-object access and verify the returned bytes against authenticated
+metadata. Conditional operations and origin receipts use the provider store.
+For transport failures, only the initial edge GET can authorize an origin
+restart. A private viewer denial requires a successful recheck at the same
+edge. Credential and recheck errors stay terminal through range batches.
+Each release row limits full-object bytes, the total size of a ranged object,
+the bytes in each range, and the operation deadline. The limits use sizes from
+the read owner and apply before obtaining an edge viewer credential. A native
+read selected upfront keeps its ordinary deadline.
+Streamed LFS and file-backed reads split an admitted object into requests no
+larger than the qualified range size or the 8 MiB transport buffer.
+File-backed transfers drain staging writes and recheck bound read authority
+within the same deadline before returning the staged result.
+CDN transfer diagnostics retain SHA-256 request fingerprints for joining
+qualification fetches to provider logs. They include the requested byte
+offset and length. CloudFront and Front Door use
+response request IDs. The Cloud CDN measurement worker opts into a
+per-request User-Agent tag, which the backend bucket excludes from its cache key.
+The public export digest comes from the verified receipt attached to the
+selected route. Qualification compares it independently of the viewer URL.
+
 ## Why it exists
 
 Every higher layer needs object storage, but none should duplicate provider
@@ -141,6 +165,10 @@ credentials, so file rotation cannot redirect an already identified target.
 This digest is separate from the established `BucketIdentity` used for logical
 cross-scheme comparison and cache keys. Raw `Store::new` wrappers have no target
 identity; integrity callers must not infer one from their display text.
+
+Public Azure CDN activation accepts management-plane authorization from its
+caller. Storage verifies the ARM resource documents against the sealed receipt
+and the selected data-plane endpoint before installing the route.
 
 ### Upload integrity and multipart transfer
 

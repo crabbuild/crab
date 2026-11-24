@@ -412,6 +412,9 @@ and session migration paths are supported.
 ## Invariants
 
 - Keep transport identity/session checks and repository authorization before storage or Git effects; inspect auth and app boundary together.
+- The `provider-cdn` qualification feature is operator-owned and bound to an
+  exact native catalog placement. Attach it to verified browse and upload-pack
+  readers. Catalog records, Cellar, receive, and maintenance use origin layouts.
   Source: `crates/crab-server/src/app.rs`.
 - Git receive validation, publication outcome, and protocol acknowledgement are distinct steps; trace validate/publish and fault tests before changing error mapping.
   Source: `crates/crab-server/src/git/receive/mod.rs`.

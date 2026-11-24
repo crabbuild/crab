@@ -14,14 +14,16 @@ path = "src/lib.rs"
 
 [features]
 default = []
-aws-oidc-client = ["oidc-client", "dep:sha2", "dep:tokio"]
+aws-oidc-client = ["oidc-client", "dep:tokio"]
 azure-entra-client = ["oidc-client", "dep:tokio"]
+azure-management = ["dep:azure_identity", "dep:reqwest"]
 crab-auth-client = ["oidc-client", "dep:tokio"]
 gcp-workload-identity-client = ["oidc-client", "dep:tokio"]
-oidc-client = ["dep:reqwest", "dep:tokio"]
+oidc-client = ["dep:reqwest", "dep:sha2", "dep:tokio"]
 
 [dependencies]
 async-trait = { workspace = true }
+azure_identity = { workspace = true, optional = true }
 base64 = "0.22"
 bstr = { version = "1", default-features = false, features = ["std"] }
 chacha20poly1305 = "0.10.1"

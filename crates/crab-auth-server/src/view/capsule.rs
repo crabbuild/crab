@@ -33,6 +33,21 @@ fn ready_path(router: &StoreLayout) -> object_store::path::Path {
 }
 
 pub(super) async fn verify_ready(router: &StoreLayout, source_digest: &str) -> Result<()> {
+    verify_ready_record(router, source_digest).await?;
+    let root = crab_metadata::capsule_protocol::load_root(router).await?;
+    crab_read::capsule_protocol::open_view_from_root_with_control(
+        router,
+        root,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+            max_frontier_bytes: 2 * 1024 * 1024 * 1024,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+pub(super) async fn verify_ready_record(router: &StoreLayout, source_digest: &str) -> Result<()> {
     let (bytes, _) = router
         .store()
         .get_with_etag_bounded(&ready_path(router), 4096)
@@ -48,16 +63,6 @@ pub(super) async fn verify_ready(router: &StoreLayout, source_digest: &str) -> R
             reason: "capsule view readiness does not match its source state".to_owned(),
         });
     }
-    let root = crab_metadata::capsule_protocol::load_root(router).await?;
-    crab_read::capsule_protocol::open_view_from_root_with_control(
-        router,
-        root,
-        crab_read::capsule_protocol::CapsuleReadLimits {
-            max_capsule_bytes: 2 * 1024 * 1024 * 1024,
-            max_frontier_bytes: 2 * 1024 * 1024 * 1024,
-        },
-    )
-    .await?;
     Ok(())
 }
 

@@ -4,7 +4,7 @@
 //! machine-local key. Each provider gets its own file:
 //! `{cache_dir}/{provider_name}.json.enc`.
 //!
-//! File-level locking (`flock` on Unix) prevents concurrent crab processes
+//! File-level locking prevents concurrent crab processes
 //! from corrupting the cache during login/logout/refresh.
 
 use std::fs;
@@ -29,7 +29,7 @@ const NONCE_SIZE: usize = 12;
 /// Tokens are stored as JSON files encrypted with a machine-local key.
 /// Each provider gets its own file: `{cache_dir}/{provider_name}.json.enc`.
 ///
-/// File-level locking (`flock` on Unix) prevents concurrent crab
+/// File-level locking prevents concurrent crab
 /// processes from corrupting the cache during login/logout/refresh.
 pub struct TokenCache {
     cache_dir: PathBuf,
@@ -89,6 +89,14 @@ pub fn expand_token_cache_path(path: &str) -> PathBuf {
 }
 
 impl TokenCache {
+    #[cfg(all(test, feature = "crab-auth-client"))]
+    pub(crate) fn test_cache(cache_dir: PathBuf) -> Self {
+        Self {
+            cache_dir,
+            key: [46; 32],
+        }
+    }
+
     /// Create or open the token cache at the given directory.
     ///
     /// Creates the directory if it doesn't exist. Loads (or generates) the
@@ -144,9 +152,73 @@ impl TokenCache {
             issued_at,
             expires_at,
         };
+        self.persist_tokens(provider, &cached, None)
+    }
 
+    /// Atomically replaces the login used for a managed OIDC refresh.
+    ///
+    /// The returned tokens must belong to the original issuer and subject. A
+    /// newer login or sign-out aborts publication of the refresh response.
+    #[cfg(feature = "oidc-client")]
+    pub fn store_refreshed_oidc_tokens(
+        &self,
+        provider: &str,
+        issuer: &str,
+        previous: &CachedTokens,
+        tokens: &crate::OidcTokens,
+    ) -> Result<()> {
+        self.store_oidc_refresh(provider, issuer, previous, tokens, true)
+    }
+
+    #[cfg(feature = "crab-auth-client")]
+    pub(crate) fn store_refreshed_id_token(
+        &self,
+        provider: &str,
+        issuer: &str,
+        previous: &CachedTokens,
+        tokens: &crate::OidcTokens,
+    ) -> Result<()> {
+        self.store_oidc_refresh(provider, issuer, previous, tokens, false)
+    }
+
+    #[cfg(feature = "oidc-client")]
+    fn store_oidc_refresh(
+        &self,
+        provider: &str,
+        issuer: &str,
+        previous: &CachedTokens,
+        tokens: &crate::OidcTokens,
+        include_access_token: bool,
+    ) -> Result<()> {
+        let identity = Self::oidc_identity(&tokens.id_token, issuer)?;
+        if identity.subject != Self::oidc_identity(&previous.id_token, issuer)?.subject {
+            return Err(AuthError::CredentialsExpired(
+                "OIDC refresh changed the login identity".into(),
+            ));
+        }
+        let issued_at = unix_now();
+        let cached = CachedTokens {
+            id_token: tokens.id_token.clone(),
+            access_token: include_access_token.then(|| tokens.access_token.clone()),
+            refresh_token: tokens
+                .refresh_token
+                .clone()
+                .or_else(|| previous.refresh_token.clone()),
+            identity,
+            issued_at,
+            expires_at: include_access_token.then(|| issued_at.saturating_add(tokens.expires_in)),
+        };
+        self.persist_tokens(provider, &cached, Some(previous))
+    }
+
+    fn persist_tokens(
+        &self,
+        provider: &str,
+        cached: &CachedTokens,
+        previous: Option<&CachedTokens>,
+    ) -> Result<()> {
         let plaintext =
-            serde_json::to_vec(&cached).map_err(|source| AuthError::SerializeTokens { source })?;
+            serde_json::to_vec(cached).map_err(|source| AuthError::SerializeTokens { source })?;
 
         let ciphertext = self.encrypt(&plaintext)?;
         let path = self.token_path(provider);
@@ -157,8 +229,21 @@ impl TokenCache {
         tmp.write_all(&ciphertext)?;
         tmp.flush()?;
 
-        // flock the target file's parent dir to serialize concurrent writes.
-        let _lock = flock_dir(&dir)?;
+        // Serialize the comparison and replacement with login and sign-out.
+        let _lock = lock_dir(&dir)?;
+        if let Some(previous) = previous
+            && !self.load_locked(&path)?.is_some_and(|current| {
+                current.id_token == previous.id_token
+                    && current.access_token == previous.access_token
+                    && current.refresh_token == previous.refresh_token
+                    && current.issued_at == previous.issued_at
+                    && current.expires_at == previous.expires_at
+            })
+        {
+            return Err(AuthError::CredentialsExpired(
+                "cached OIDC login changed during refresh".into(),
+            ));
+        }
         tmp.persist(&path).map_err(|e| AuthError::Io(e.error))?;
         Ok(())
     }
@@ -169,10 +254,14 @@ impl TokenCache {
     /// does not exist. Lock, read, decryption, and parse failures remain errors.
     pub fn load(&self, provider: &str) -> Result<Option<CachedTokens>> {
         let path = self.token_path(provider);
-        let _lock = flock_dir(&self.cache_dir)?;
+        let _lock = lock_dir(&self.cache_dir)?;
+        self.load_locked(&path)
+    }
+
+    fn load_locked(&self, path: &Path) -> Result<Option<CachedTokens>> {
         // Classify absence while holding the same lock as logout. An earlier
         // existence probe can race deletion and also conceal filesystem errors.
-        let ciphertext = match fs::read(&path) {
+        let ciphertext = match fs::read(path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
@@ -200,7 +289,7 @@ impl TokenCache {
     /// Delete tokens for the given provider.
     pub fn delete(&self, provider: &str) -> Result<()> {
         let path = self.token_path(provider);
-        let _lock = flock_dir(&self.cache_dir)?;
+        let _lock = lock_dir(&self.cache_dir)?;
         match fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -218,7 +307,7 @@ impl TokenCache {
 
     /// Delete tokens for all providers.
     pub fn delete_all(&self) -> Result<()> {
-        let _lock = flock_dir(&self.cache_dir)?;
+        let _lock = lock_dir(&self.cache_dir)?;
         let entries = match fs::read_dir(&self.cache_dir) {
             Ok(entries) => entries,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -241,6 +330,30 @@ impl TokenCache {
     /// extracts `sub`, `email`, `name` fields. No signature verification —
     /// the IdP already validated it.
     pub fn parse_identity(id_token: &str) -> Result<TokenIdentity> {
+        let claims = Self::decode_id_token_claims(id_token)?;
+        Self::identity_from_claims(&claims)
+    }
+
+    /// Reads the subject of an issuer-bound ID token obtained during OIDC login.
+    ///
+    /// The parsed claims identify the cached session. The API still verifies
+    /// the access token before accepting any request.
+    #[cfg(feature = "oidc-client")]
+    pub fn oidc_identity(id_token: &str, issuer: &str) -> Result<TokenIdentity> {
+        let claims = Self::decode_id_token_claims(id_token)?;
+        if claims.get("iss").and_then(serde_json::Value::as_str) != Some(issuer) {
+            return Err(AuthError::CredentialsExpired(
+                "cached ID token issuer changed".into(),
+            ));
+        }
+        let identity = Self::identity_from_claims(&claims)?;
+        if identity.subject.is_empty() {
+            return Err(AuthError::InvalidJwt("empty OIDC subject claim".into()));
+        }
+        Ok(identity)
+    }
+
+    fn decode_id_token_claims(id_token: &str) -> Result<serde_json::Value> {
         let parts: Vec<&str> = id_token.splitn(3, '.').collect();
         if parts.len() < 2 {
             return Err(AuthError::InvalidJwt(
@@ -252,9 +365,11 @@ impl TokenCache {
             .decode(parts[1])
             .map_err(|source| AuthError::JwtPayloadBase64 { source })?;
 
-        let claims: serde_json::Value = serde_json::from_slice(&payload_bytes)
-            .map_err(|source| AuthError::JwtPayloadJson { source })?;
+        serde_json::from_slice(&payload_bytes)
+            .map_err(|source| AuthError::JwtPayloadJson { source })
+    }
 
+    fn identity_from_claims(claims: &serde_json::Value) -> Result<TokenIdentity> {
         let subject = claims
             .get("sub")
             .and_then(|v| v.as_str())
@@ -468,7 +583,7 @@ fn hex_to_key(hex: &str) -> Result<[u8; 32]> {
 fn file_based_key() -> Result<[u8; 32]> {
     let key_dir = dirs_key_dir()?;
     fs::create_dir_all(&key_dir)?;
-    let _lock = flock_dir(&key_dir)?;
+    let _lock = lock_dir(&key_dir)?;
     let key_path = key_dir.join(".token-key");
 
     if key_path.exists() {
@@ -532,56 +647,15 @@ fn dirs_key_dir() -> Result<PathBuf> {
 // File-level locking
 // ---------------------------------------------------------------------------
 
-/// RAII guard for an `flock`-based directory lock.
-///
-/// On Unix, opens a `.lock` file in the directory and holds an exclusive
-/// `flock` until dropped. On non-Unix, this is a no-op.
-struct FlockGuard {
-    #[cfg(unix)]
-    _file: fs::File,
-}
-
-/// Acquire an exclusive `flock` on a `.lock` file inside `dir`.
-fn flock_dir(dir: &Path) -> Result<FlockGuard> {
-    #[cfg(unix)]
-    {
-        let lock_path = dir.join(".lock");
-        let file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)?;
-
-        // SAFETY: `flock` is a POSIX API. We pass a valid fd obtained from
-        // `File::open`. `LOCK_EX` blocks until the lock is acquired.
-        let ret =
-            unsafe { libc::flock(std::os::unix::io::AsRawFd::as_raw_fd(&file), libc::LOCK_EX) };
-        if ret != 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-
-        Ok(FlockGuard { _file: file })
-    }
-
-    #[cfg(not(unix))]
-    {
-        let _ = dir;
-        Ok(FlockGuard {})
-    }
-}
-
-#[cfg(unix)]
-impl Drop for FlockGuard {
-    fn drop(&mut self) {
-        // Unlock is automatic when the fd is closed, but be explicit.
-        // Ignore errors on drop — nothing useful to do.
-        unsafe {
-            libc::flock(
-                std::os::unix::io::AsRawFd::as_raw_fd(&self._file),
-                libc::LOCK_UN,
-            );
-        }
-    }
+/// Holds the exclusive cache lock until the file handle closes.
+fn lock_dir(dir: &Path) -> Result<fs::File> {
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join(".lock"))?;
+    file.lock()?;
+    Ok(file)
 }
 
 #[cfg(test)]
@@ -852,6 +926,99 @@ mod tests {
 
         assert_eq!(loaded.access_token.as_deref(), Some("access"));
         assert_eq!(loaded.expires_at, Some(loaded.issued_at + 600));
+    }
+
+    #[cfg(feature = "oidc-client")]
+    #[test]
+    fn managed_refresh_cannot_replace_a_changed_or_removed_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = TokenCache {
+            cache_dir: dir.path().to_path_buf(),
+            key: [43u8; 32],
+        };
+        let key = "managed-crab.build";
+        let issuer = "https://idp.example.com";
+        let alice = make_jwt(r#"{"iss":"https://idp.example.com","sub":"alice"}"#);
+        cache
+            .store_oidc_tokens(key, &alice, "initial", Some("refresh"), 600)
+            .unwrap();
+        let previous = cache.load(key).unwrap().unwrap();
+        let mut renewal = crate::OidcTokens {
+            id_token: make_jwt(r#"{"iss":"https://idp.example.com","sub":"alice","iat":42}"#),
+            access_token: "rotated".into(),
+            refresh_token: None,
+            expires_in: 900,
+            token_type: "Bearer".into(),
+        };
+        let bob = make_jwt(r#"{"iss":"https://idp.example.com","sub":"bob"}"#);
+        let other_issuer = make_jwt(r#"{"iss":"https://other.example.com","sub":"alice"}"#);
+        for replacement in [&bob, &other_issuer] {
+            let mut wrong_identity = renewal.clone();
+            wrong_identity.id_token.clone_from(replacement);
+            assert!(matches!(
+                cache.store_refreshed_oidc_tokens(key, issuer, &previous, &wrong_identity),
+                Err(AuthError::CredentialsExpired(_)),
+            ));
+        }
+        cache
+            .store_refreshed_oidc_tokens(key, issuer, &previous, &renewal)
+            .unwrap();
+        let current = cache.load(key).unwrap().unwrap();
+        assert_eq!(current.access_token.as_deref(), Some("rotated"));
+        assert_eq!(current.refresh_token.as_deref(), Some("refresh"));
+
+        cache
+            .store_oidc_tokens(key, &bob, "new-login", Some("new-refresh"), 600)
+            .unwrap();
+        renewal.access_token = "stale-renewal".into();
+        assert!(matches!(
+            cache.store_refreshed_oidc_tokens(key, issuer, &current, &renewal),
+            Err(AuthError::CredentialsExpired(_)),
+        ));
+        assert_eq!(cache.load(key).unwrap().unwrap().identity.subject, "bob");
+
+        cache.delete(key).unwrap();
+        assert!(matches!(
+            cache.store_refreshed_oidc_tokens(key, issuer, &current, &renewal),
+            Err(AuthError::CredentialsExpired(_)),
+        ));
+        assert!(cache.load(key).unwrap().is_none());
+    }
+
+    #[cfg(feature = "crab-auth-client")]
+    #[test]
+    fn direct_oidc_refresh_keeps_id_token_only_cache_and_preserves_sign_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = TokenCache::test_cache(dir.path().to_path_buf());
+        let key = "crab-auth";
+        let issuer = "https://idp.example.com";
+        let original = make_jwt(r#"{"iss":"https://idp.example.com","sub":"alice","iat":1}"#);
+        cache
+            .store(key, &original, Some("fixture-refresh"))
+            .unwrap();
+        let previous = cache.load(key).unwrap().unwrap();
+        let renewal = crate::OidcTokens {
+            id_token: make_jwt(r#"{"iss":"https://idp.example.com","sub":"alice","iat":2}"#),
+            access_token: "fixture-unused-access".into(),
+            refresh_token: None,
+            expires_in: 600,
+            token_type: "Bearer".into(),
+        };
+        cache
+            .store_refreshed_id_token(key, issuer, &previous, &renewal)
+            .unwrap();
+        let current = cache.load(key).unwrap().unwrap();
+        assert!(current.id_token == renewal.id_token);
+        assert!(current.access_token.is_none());
+        assert!(current.expires_at.is_none());
+        assert!(current.refresh_token.as_deref() == Some("fixture-refresh"));
+
+        cache.delete(key).unwrap();
+        assert!(matches!(
+            cache.store_refreshed_id_token(key, issuer, &current, &renewal),
+            Err(AuthError::CredentialsExpired(_)),
+        ));
+        assert!(cache.load(key).unwrap().is_none());
     }
 
     #[cfg(unix)]

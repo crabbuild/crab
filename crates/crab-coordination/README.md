@@ -93,6 +93,11 @@ the caller validates both after creating the claim, before admitting reads.
 cannot let stale retirement overwrite a fresh renewal. Cancelled, uncertain or
 late renewals permanently lose local ownership. Callers must stop and drain
 reads before release; this primitive does not run a renewal worker.
+Trusted services can carry an acknowledged incarnation and sequence between
+requests. Renewal checks backend age and performs conditional update on that
+exact revision. Release checks the same revision and can acknowledge a replay
+of an already released claim. The caller authenticates the holder and binds
+the revision to the native target and path.
 `ReadRetentionSession` owns that worker and tracks capture admission through
 claim registration. Captured views retain renewal through clones; operation
 pins retain claims through child workers after the caller stops waiting.

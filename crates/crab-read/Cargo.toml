@@ -51,4 +51,5 @@ xet-data = { workspace = true, optional = true }
 xet-runtime = { workspace = true, optional = true }
 
 [dev-dependencies]
+crab-storage = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt"] }

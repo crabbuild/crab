@@ -40,6 +40,9 @@ pub enum Error {
     Host(#[from] s3s::host::DomainError),
     #[error("object storage configuration failed")]
     Storage(#[from] crab_storage::StorageError),
+    #[cfg(feature = "provider-cdn")]
+    #[error(transparent)]
+    OperatorCdn(#[from] crab_auth_store::operator_cdn::OperatorCdnError),
     #[error("repository reader configuration failed")]
     Remote(#[from] crab_remote_git::Error),
     #[error("repository read publication failed")]

@@ -6,7 +6,12 @@ license.workspace = true
 description = "S3-compatible gateway for Crab repositories."
 publish = false
 
+[features]
+provider-cdn = ["dep:crab-auth-store", "crab-auth-store/operator-cdn", "crab-cache-store/lfs"]
+provider-cdn-qualification = ["provider-cdn", "crab-storage/provider-cdn-qualification"]
+
 [dependencies]
+crab-auth-store = { workspace = true, optional = true }
 async-trait = { workspace = true }
 base64 = "0.22"
 bytes = { workspace = true }
@@ -54,9 +59,10 @@ tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-mu
 tokio-util = { workspace = true, features = ["io", "rt"] }
 toml = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 ulid = "1"
 url = "2.5"
 
 [dev-dependencies]
+crab-storage = { workspace = true, features = ["test-support"] }
 gix-pack = { workspace = true, features = ["sha1"] }

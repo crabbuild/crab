@@ -227,6 +227,7 @@ impl MountPipelineBuilder {
 
         // Step 2: Resolve HEAD → (oid, ref).
         let (head_oid, head_ref) = self.step_resolve_head()?;
+        validate_mount_head(self.read_context.as_ref(), config, &head_oid, &head_ref)?;
 
         // Step 3: Build snapshot from HEAD tree.
         let snapshot = self.step_build_snapshot(&head_oid, &head_ref)?;
@@ -480,6 +481,20 @@ impl MountPipelineBuilder {
             ),
         ))
     }
+}
+
+pub(crate) fn validate_mount_head(
+    context: Option<&MountReadContext>,
+    config: &PipelineConfig,
+    head_oid: &str,
+    head_ref: &str,
+) -> Result<()> {
+    if let (GitMetadataOwnership::Mount, Some(context)) = (config.git_metadata, context) {
+        context
+            .catalog
+            .validate_git_head(head_ref, head_oid, config.read_only)?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

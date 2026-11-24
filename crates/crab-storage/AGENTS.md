@@ -67,6 +67,18 @@ dependency source before asserting provider behavior.
 - Logical bucket identity and credential-free transport target identity serve different consumers; do not derive the latter from display text.
   Source: `crates/crab-storage/src/identity.rs`.
 
+- Explicit CDN diagnostics use only admitted immutable read forms. They
+  prove both edge reads against a bounded, verified native object before
+  checking mutable-root denial with the same viewer. Only the diagnostic
+  path sends a mutable GET to the edge and it inspects status.
+  Sources: `crates/crab-storage/src/store/cdn_read.rs`, `crab/src/cmd/doctor/cdn.rs`.
+
+- HTTPS public CDN routes pin the operator-approved publication receipt before
+  use. Check the selected physical origin, viewer and repository binding, then
+  require exact key membership and descriptor size before sending an edge GET
+  or range. Unlisted native objects remain readable through the selected origin.
+  Sources: `crates/crab-storage/src/cdn/publication.rs`, `crates/crab-storage/src/store/cdn_read.rs`.
+
 - Private spill writes admit live bytes first; reads verify committed length/hash.
   Blocking workers pin directory ownership through cancelled futures. Await close
   on normal and returned-error paths; drop defers cleanup until the last worker owner
@@ -74,7 +86,14 @@ dependency source before asserting provider behavior.
 
 ## Features and platform
 
-Empty default; `test-support` exposes shared test helpers. S3/GCS/Azure/fs capabilities are dependency features, not crate flags. Read the locked object_store ObjectStore/PutMode/UpdateVersion contract before changing conditions or error mapping. Live provider behavior needs dedicated credentials and CI, not just in-memory tests.
+Empty default; `test-support` exposes shared test helpers.
+`provider-cdn-qualification` enables HTTPS fixture routes and is reserved for
+dedicated qualification builds. Release HTTPS routes require an exact match
+to a provider, access mode, consumer, immutable family and authorization profile
+in `src/cdn/qualified-scopes.txt`. S3/GCS/Azure/fs capabilities are dependency
+features. Read the locked object_store ObjectStore/PutMode/UpdateVersion
+contract before changing conditions or error mapping. Live provider behavior
+needs dedicated credentials and CI.
 
 ## Verification
 

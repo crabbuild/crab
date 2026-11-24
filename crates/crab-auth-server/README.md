@@ -80,6 +80,19 @@ or repairing missing LFS objects from the source. Lookup cleanup runs after
 successful builds, cache hits and errors. GC retention during construction and
 resource limits still require separate qualification.
 
+`crab-auth-view retention` reads one bounded JSON request from the trusted
+issuer over stdin. The issuer supplies `repo_url`, `provider`, `scope_hash`,
+`source_generation`, `source_digest`, and a `reader` ID derived from the
+authenticated identity. The `operation` object names `acquire`, `renew`, or
+`release` in `action`. Renew and release also supply `revision`. The helper
+derives the claim owner from the reader ID and native transport target.
+Acquisition confirms the current source generation and digest, checks the
+projected view's readiness record, and registers its exact catalog under both
+GC barriers. Renewal and release require the last acknowledged revision.
+The caller must bind that revision to the approved principal and view, and
+anchor the returned `remaining_ms` at the start of its own request. These
+commands use issuer credentials and hand out no native write authority.
+
 View repacking verifies source bytes into an operation-owned anonymous file,
 then chunks them incrementally off the async runtime. Cancellation propagates
 to reconstruction and the chunking worker. This avoids retaining a whole
@@ -104,11 +117,15 @@ cleanup warnings can appear on stderr even when the result succeeds.
 | CAS conflict or non-fast-forward | Receive | `conflict:` | 2 |
 | Corrupt object, missing object, invalid configuration | Receive | `invalid:` | 1 |
 | Other errors | Receive | `error:` | 1 |
-| Any error | View | `error:` | 1 |
+| Stale or unavailable native revision, or conditional conflict | View retention | `conflict:` | 2 |
+| Other failures | View retention | `error:` | 1 |
+| Any error | View materialization and doctor | `error:` | 1 |
 
-Consumers must check the exit code before parsing stdout. Error constructors
-must keep credentials out of messages; the output boundary prints their display
-text. JSON serialization failures also follow the helper's error path.
+Consumers must check the exit code before parsing stdout. View retention prints
+generic errors to keep provider diagnostics out of the HTTP issuer. The other
+commands print their errors' display text, so error constructors must keep
+credentials out of messages. JSON serialization failures follow the same
+output policy.
 
 ## Usage
 

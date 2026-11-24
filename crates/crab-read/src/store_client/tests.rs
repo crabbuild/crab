@@ -96,7 +96,12 @@ async fn load_shard_checks_availability_before_fetching_external_object() {
     let client = client.with_availability(Arc::new(RecordingAvailability(Arc::clone(&calls))));
     let shard_hash = hash_from_seed(77);
 
-    let _ = client.load_shard(&shard_hash).await;
+    let _ = client
+        .load_shard(ShardLocation {
+            hash: shard_hash,
+            encoded_size: None,
+        })
+        .await;
 
     assert_eq!(
         calls.lock().expect("recording lock").as_slice(),
@@ -108,10 +113,11 @@ async fn load_shard_checks_availability_before_fetching_external_object() {
 fn xorb_url_round_trip_single_range() {
     let hash = hash_from_seed(42);
     let range = ChunkRange::new(3, 10);
-    let url = xorb_url(&hash, &[range]);
-    let (parsed_hash, parsed_ranges) = parse_xorb_url(&url).expect("parse");
+    let url = xorb_url(&hash, &[range], Some(11));
+    let (parsed_hash, parsed_ranges, count) = parse_xorb_url(&url).expect("parse");
     assert_eq!(parsed_hash, hash);
     assert_eq!(parsed_ranges, vec![range]);
+    assert_eq!(count, Some(11));
 }
 
 #[test]
@@ -122,10 +128,11 @@ fn xorb_url_round_trip_multi_range() {
         ChunkRange::new(8, 12),
         ChunkRange::new(20, 21),
     ];
-    let url = xorb_url(&hash, &ranges);
-    let (parsed_hash, parsed_ranges) = parse_xorb_url(&url).expect("parse");
+    let url = xorb_url(&hash, &ranges, None);
+    let (parsed_hash, parsed_ranges, count) = parse_xorb_url(&url).expect("parse");
     assert_eq!(parsed_hash, hash);
     assert_eq!(parsed_ranges, ranges);
+    assert_eq!(count, None);
 }
 
 #[test]
@@ -171,7 +178,7 @@ fn build_response_v2_covers_every_segment() {
 
     let fetches_a = &response.xorbs[&HexMerkleHash::from(xorb_a)];
     assert_eq!(fetches_a.len(), 1);
-    let (parsed_hash, parsed_ranges) =
+    let (parsed_hash, parsed_ranges, _) =
         parse_xorb_url(&fetches_a[0].url).expect("url encodes xorb ref");
     assert_eq!(parsed_hash, xorb_a);
     assert_eq!(parsed_ranges, vec![ChunkRange::new(0, 4)]);
@@ -240,6 +247,10 @@ fn reconstruction_ranges_preserve_segment_offsets_and_eof() {
         let actual = build_range_response_v2(&info, &shard, FileRange::new(start, end))
             .unwrap()
             .map(|response| {
+                for fetch in response.xorbs.values().flatten() {
+                    let (hash, _, count) = parse_xorb_url(&fetch.url).unwrap();
+                    assert_eq!(count, Some(if hash == xorb_a { 4 } else { 13 }));
+                }
                 (
                     response.offset_into_first_range,
                     response
@@ -605,7 +616,7 @@ async fn file_index_resolution_agrees_between_term_and_reconstruction_batches() 
         .expect("xorb fetch info");
     assert_eq!(fetches.len(), 1);
     assert_eq!(fetches[0].range, ChunkRange::new(2, 6));
-    let (parsed_hash, parsed_ranges) = parse_xorb_url(&fetches[0].url).expect("fetch url");
+    let (parsed_hash, parsed_ranges, _) = parse_xorb_url(&fetches[0].url).expect("fetch url");
     assert_eq!(parsed_hash, xorb_hash);
     assert_eq!(parsed_ranges, vec![ChunkRange::new(2, 6)]);
 }
@@ -641,7 +652,7 @@ async fn get_file_term_data_offsets_match_xet_core_contract() {
 
     // Single-range URL spanning every chunk in the xorb.
     let range = ChunkRange::new(0, 5);
-    let url = xorb_url(&xorb.hash, std::slice::from_ref(&range));
+    let url = xorb_url(&xorb.hash, std::slice::from_ref(&range), None);
 
     let permit = client
         .acquire_download_permit()
@@ -723,7 +734,7 @@ async fn get_file_term_data_recovers_corruption_without_installing_full_xorb() {
         .expect("seed corrupt store xorb");
 
     let range = ChunkRange::new(0, chunks.len() as u32);
-    let url = xorb_url(&xorb.hash, std::slice::from_ref(&range));
+    let url = xorb_url(&xorb.hash, std::slice::from_ref(&range), None);
 
     let permit = client
         .acquire_download_permit()

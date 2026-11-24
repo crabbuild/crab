@@ -146,7 +146,24 @@ pub(crate) async fn materialize(
         record.application == crate::catalog::RepositoryApplicationState::CellReady
     }) {
         let repository = materialize_record(catalog, &record).await?;
-        repositories.insert((record.owner, record.name), Arc::new(repository));
+        // Pending imports use the native materializer before the catalog
+        // publishes readiness. Attach viewer bindings only in the live index.
+        let root = catalog.root();
+        let read_layout = crate::server::storage::repository_read_layout(root, &repository.layout)
+            .await?
+            .map(|layout| {
+                RepositoryIdentity::new(
+                    format!("cdn:{}", root.provider_namespace),
+                    layout.repo_prefix().to_owned(),
+                    record.placement_generation,
+                )
+                .map(|identity| (layout, identity))
+            })
+            .transpose()?;
+        repositories.insert(
+            (record.owner, record.name),
+            Arc::new(repository.with_read_layout(read_layout)),
+        );
     }
     Ok(RepositoryIndex::new(version, repositories))
 }

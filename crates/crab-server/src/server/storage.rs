@@ -6,6 +6,32 @@ use bytes::Bytes;
 use crab_storage::StorageError;
 use uuid::Uuid;
 
+pub(crate) async fn repository_read_layout(
+    root: &crate::storage_root::StorageRoot,
+    origin: &crab_storage::StoreLayout<crab_storage::Store>,
+) -> Result<Option<crab_storage::StoreLayout<crab_storage::Store>>> {
+    #[cfg(feature = "provider-cdn")]
+    if let Some(binding) = root.cdn.get(origin.repo_prefix()) {
+        let store = binding
+            .read_store(
+                origin.store(),
+                origin.repo_prefix(),
+                env!("CARGO_PKG_VERSION"),
+                std::time::Duration::from_secs(300),
+                crab_storage::cdn::CdnConsumer::Server,
+            )
+            .await?;
+        return Ok(Some(crab_storage::StoreLayout::with_global_prefix(
+            store,
+            origin.repo_prefix().to_owned(),
+            origin.global_prefix().to_owned(),
+        )));
+    }
+    #[cfg(not(feature = "provider-cdn"))]
+    let _ = (root, origin);
+    Ok(None)
+}
+
 pub(super) fn transfer_admission(catalog: &CatalogStore) -> TransferAdmission {
     TransferAdmission::new(
         catalog.root().store.clone(),
@@ -80,5 +106,77 @@ mod tests {
             .await
             .unwrap();
         assert!(objects.is_empty());
+    }
+
+    #[cfg(feature = "provider-cdn-qualification")]
+    #[tokio::test]
+    async fn read_layout_selects_exact_catalog_placement_and_keeps_control_on_origin() {
+        use object_store::path::Path;
+
+        let directory = tempfile::tempdir().unwrap();
+        let prefix = "repositories/org/models";
+        let hash = "a".repeat(64);
+        let relative = format!("v2/history/aa/{hash}");
+        let approval = crab_storage::cdn::write_publication_fixture(
+            directory.path().join("receipt.json"),
+            "gs://fixture-bucket",
+            "gs://approved-export",
+            prefix,
+            "https://downloads.example.com",
+            &relative,
+            6,
+        )
+        .unwrap();
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+            .with_target_identity([9; 32])
+            .with_bucket_identity(crab_storage::BucketIdentity::new(
+                crab_storage::StorageProviderKind::Gcs,
+                "fixture-bucket",
+                "fixture-bucket",
+            ))
+            .with_native_cdn_origin(Some("gs://fixture-bucket".into()));
+        let mut root = crate::storage_root::StorageRoot::memory(store, "repositories");
+        root.cdn = Arc::new(
+            toml::from_str(&format!(
+                r#"
+["repositories/org/models"]
+origin = "gs://fixture-bucket"
+export_origin = "gs://approved-export"
+base_url = "https://downloads.example.com"
+access = "public"
+publication = {{ path = {path:?}, sha256 = {digest:?} }}
+"#,
+                path = approval.path,
+                digest = approval.sha256,
+            ))
+            .unwrap(),
+        );
+        let key = |prefix: &str| Path::from(format!("{prefix}/{relative}"));
+        let origin = root.repository_layout(prefix.into());
+        let route = repository_read_layout(&root, &origin)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(route.global_prefix(), "repositories/.crab");
+        assert!(origin.store().cdn_attempt(&key(prefix)).is_none());
+        assert!(route.store().cdn_attempt(&key(prefix)).is_some());
+        assert!(
+            route
+                .store()
+                .cdn_attempt(&Path::from(format!("{prefix}/v2/root")))
+                .is_none()
+        );
+        assert!(
+            route
+                .store()
+                .cdn_attempt(&Path::from(format!("repositories/.crab/xorbs/aa/{hash}")))
+                .is_none()
+        );
+
+        let sibling = "repositories/org/models-archive";
+        let unrelated = repository_read_layout(&root, &root.repository_layout(sibling.into()))
+            .await
+            .unwrap();
+        assert!(unrelated.is_none());
     }
 }

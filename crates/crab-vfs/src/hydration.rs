@@ -116,6 +116,7 @@ struct InflightEntry {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ReadWindowKey {
+    authority: Option<[u8; 32]>,
     file_hash: PointerIdentity,
     start: u64,
     end: u64,
@@ -397,6 +398,13 @@ impl HydrationService {
         })
     }
 
+    pub(crate) async fn check_read_authority(&self) -> Result<()> {
+        if let Some(reader) = &self.pointer_reader {
+            reader.check_read_authority(&self.state.cancel).await?;
+        }
+        Ok(())
+    }
+
     /// Start the owned queue workers once; calls after shutdown do nothing.
     ///
     /// Await [`Self::shutdown`] to finish both workers and read-window prefetch.
@@ -527,6 +535,7 @@ impl HydrationService {
         };
 
         let key = ReadWindowKey {
+            authority: hydrator.authorized_cache_namespace(),
             file_hash: pointer.identity(),
             start: window.window_start,
             end: window.window_end,
@@ -699,6 +708,7 @@ impl HydrationService {
         }
 
         let key = ReadWindowKey {
+            authority: hydrator.authorized_cache_namespace(),
             file_hash: pointer.identity(),
             start: window.window_start,
             end: window.window_end,
@@ -717,7 +727,7 @@ impl HydrationService {
         pointer: &FilePointer,
         key: &ReadWindowKey,
     ) -> Result<Bytes> {
-        if let Some(bytes) = self.cached_read_window(key) {
+        if let Some(bytes) = self.cached_read_window(hydrator, key).await? {
             self.state.read_stats.record_read_window_cache_hit();
             return Ok(bytes);
         }
@@ -730,7 +740,7 @@ impl HydrationService {
         // The guard drops before its claim, including cancellation while
         // waiting. Queued readers retain the same lock until the last exits.
         let _guard = claim.lock.lock().await;
-        if let Some(bytes) = self.cached_read_window(key) {
+        if let Some(bytes) = self.cached_read_window(hydrator, key).await? {
             return Ok(bytes);
         }
         if self.state.cancel.is_cancelled() {
@@ -761,6 +771,7 @@ impl HydrationService {
                 reason: format!("expected {expected_len} bytes, got {}", read.bytes.len()),
             });
         }
+        hydrator.check_read_authority(&self.state.cancel).await?;
         if read.from_store {
             self.state
                 .read_stats
@@ -774,12 +785,22 @@ impl HydrationService {
         Ok(read.bytes)
     }
 
-    fn cached_read_window(&self, key: &ReadWindowKey) -> Option<Bytes> {
-        self.state
+    async fn cached_read_window(
+        &self,
+        reader: &crab_read::PointerReader,
+        key: &ReadWindowKey,
+    ) -> Result<Option<Bytes>> {
+        let bytes = self
+            .state
             .read_windows
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(key)
+            .get(key);
+        if bytes.is_some() {
+            // The shared cache outlives individual captured views and grants.
+            reader.check_read_authority(&self.state.cancel).await?;
+        }
+        Ok(bytes)
     }
 
     pub(crate) async fn pin_file(
@@ -1731,6 +1752,7 @@ mod tests {
                 .await;
         let service = window_service(tmp.path(), &stored, CancellationToken::new());
         let key = ReadWindowKey {
+            authority: None,
             file_hash: crate::blob::PointerIdentity::Crab(stored.pointer.file_hash),
             start: 0,
             end: stored.pointer.size,
@@ -1873,6 +1895,167 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    struct WindowGrant(std::sync::atomic::AtomicBool);
+
+    #[async_trait::async_trait]
+    impl crab_storage::ReadAuthorization for WindowGrant {
+        async fn check(&self) -> crab_storage::Result<()> {
+            if self.0.load(AtomicOrdering::Relaxed) {
+                return Ok(());
+            }
+            Err(crab_storage::StorageError::Forbidden {
+                path: "mount fixture".into(),
+            })
+        }
+    }
+
+    fn window_reader(store: Store, root: &Path, prefix: &str) -> crab_read::ShardHydrator {
+        let layout = StoreLayout::new(store.clone(), prefix.to_owned());
+        let cache = crab_cache_store::CachingStore::new_with_local_cache(
+            store,
+            crab_cache_store::CacheConfig::default(),
+            Arc::new(LocalCache::new(root.to_owned())),
+        )
+        .unwrap();
+        crab_read::ReadRuntimeBuilder::new(cache, layout, 2)
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn warm_xet_and_lfs_windows_reject_lost_authority() {
+        use sha2::{Digest, Sha256};
+
+        let root = tempfile::tempdir().unwrap();
+        let payload = Bytes::from_static(b"protected mount contents");
+        let stored =
+            crate::test_support::StoredPointer::new(&root.path().join("native"), payload.clone())
+                .await;
+        let layout = &stored.context.store_layout;
+        let lfs = crab_git::LfsPointer {
+            oid: Sha256::digest(&payload).into(),
+            size: payload.len() as u64,
+            extensions: Vec::new(),
+        };
+        crab_lfs::LfsObjectStore::new(layout.store().clone(), layout.repo_prefix())
+            .put(&lfs.oid, payload.clone())
+            .await
+            .unwrap();
+        let grant = Arc::new(WindowGrant(true.into()));
+        let store = layout
+            .store()
+            .clone()
+            .with_target_identity([1; 32])
+            .with_read_authorization(grant.clone(), layout.repo_prefix())
+            .unwrap();
+        let remote = window_reader(store, &root.path().join("authorized"), layout.repo_prefix());
+        let reader = Arc::new(crab_read::PointerReader::new(
+            Some(Arc::new(remote)),
+            None,
+            None,
+        ));
+        let service =
+            window_service(root.path(), &stored, CancellationToken::new()).for_reader(reader);
+        let pointers = [
+            FilePointer::Crab(stored.pointer.clone()),
+            FilePointer::Lfs(lfs),
+        ];
+        for pointer in &pointers {
+            assert_eq!(service.read_range(pointer, 0, 1024).await.unwrap(), payload);
+        }
+        let count = stored.origin.requests().len();
+        grant.0.store(false, AtomicOrdering::Relaxed);
+        for pointer in &pointers {
+            assert!(matches!(
+                service.read_range(pointer, 0, 1024).await,
+                Err(CrabError::Read(crab_read::ReadError::Storage(
+                    crab_storage::StorageError::ReadRejected { .. },
+                )))
+            ));
+        }
+        assert_eq!(stored.origin.requests().len(), count);
+        service.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn warm_window_rejects_a_closed_captured_view() {
+        use crab_coordination::{
+            read_retention::{ReadRetentionLease, RetainedReadRoot},
+            read_retention_runtime::ReadRetentionSession,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let payload = Bytes::from_static(b"retained mount contents");
+        let stored =
+            crate::test_support::StoredPointer::new(&root.path().join("native"), payload.clone())
+                .await;
+        let layout = &stored.context.store_layout;
+        let claim = ReadRetentionLease::create(
+            layout.store().inner().clone(),
+            layout.read_retention_claim_path("fixture"),
+            RetainedReadRoot::new("a".repeat(64), 1).unwrap(),
+        )
+        .await
+        .unwrap();
+        let retention = ReadRetentionSession::default();
+        let remote = stored
+            .context
+            .hydrator
+            .as_ref()
+            .clone()
+            .with_read_retention(retention.capture().unwrap().retain(claim).unwrap());
+        let reader = Arc::new(crab_read::PointerReader::new(
+            Some(Arc::new(remote)),
+            None,
+            None,
+        ));
+        let service =
+            window_service(root.path(), &stored, CancellationToken::new()).for_reader(reader);
+        let pointer = FilePointer::Crab(stored.pointer.clone());
+        assert_eq!(
+            service.read_range(&pointer, 0, 1024).await.unwrap(),
+            payload
+        );
+
+        retention.shutdown().await.unwrap();
+        assert!(matches!(
+            service.read_range(&pointer, 0, 1024).await,
+            Err(CrabError::Read(crab_read::ReadError::Retention(_)))
+        ));
+        service.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn warm_window_cannot_supply_a_different_captured_target() {
+        let root = tempfile::tempdir().unwrap();
+        let payload = Bytes::from_static(b"present only at the first target");
+        let stored =
+            crate::test_support::StoredPointer::new(&root.path().join("native"), payload.clone())
+                .await;
+        let layout = &stored.context.store_layout;
+        let grant = Arc::new(WindowGrant(true.into()));
+        let reader = |store: Store, identity, cache| {
+            let store = store
+                .with_target_identity([identity; 32])
+                .with_read_authorization(grant.clone(), layout.repo_prefix())
+                .unwrap();
+            let remote = window_reader(store, &root.path().join(cache), layout.repo_prefix());
+            Arc::new(crab_read::PointerReader::new(
+                Some(Arc::new(remote)),
+                None,
+                None,
+            ))
+        };
+        let shared = window_service(root.path(), &stored, CancellationToken::new());
+        let first = shared.for_reader(reader(layout.store().clone(), 1, "first"));
+        let other = shared.for_reader(reader(Store::new(Arc::new(InMemory::new())), 2, "other"));
+        let pointer = FilePointer::Crab(stored.pointer.clone());
+        assert_eq!(first.read_range(&pointer, 0, 1024).await.unwrap(), payload);
+
+        assert!(other.read_range(&pointer, 0, 1024).await.is_err());
+        shared.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2031,6 +2214,7 @@ mod tests {
     #[test]
     fn verified_windows_evict_least_recently_used_bytes_within_budget() {
         let key = |index| ReadWindowKey {
+            authority: None,
             file_hash: crate::blob::PointerIdentity::Crab([index; 32]),
             start: 0,
             end: READ_THROUGH_WINDOW_SIZE,
@@ -2058,6 +2242,7 @@ mod tests {
         for start in 0..MAX_READ_WINDOW_ENTRIES as u64 + 17 {
             cache.insert(
                 ReadWindowKey {
+                    authority: None,
                     file_hash: crate::blob::PointerIdentity::Crab([0; 32]),
                     start,
                     end: start + 1,
@@ -2468,6 +2653,7 @@ mod tests {
     fn read_window_prefetch_claims_each_window_once_until_failure() {
         let (_cache_dir, service) = test_service_without_pointer_reader();
         let key = ReadWindowKey {
+            authority: None,
             file_hash: crate::blob::PointerIdentity::Crab([0xAB; 32]),
             start: READ_THROUGH_WINDOW_SIZE,
             end: READ_THROUGH_WINDOW_SIZE * 2,
@@ -2487,6 +2673,7 @@ mod tests {
 
         for i in 0..=MAX_READ_WINDOW_PREFETCH_KEYS {
             let key = ReadWindowKey {
+                authority: None,
                 file_hash: crate::blob::PointerIdentity::Crab([0xCD; 32]),
                 start: i as u64 * READ_THROUGH_WINDOW_SIZE,
                 end: (i as u64 + 1) * READ_THROUGH_WINDOW_SIZE,

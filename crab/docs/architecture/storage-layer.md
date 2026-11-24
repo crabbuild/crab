@@ -99,6 +99,61 @@ repository-open authority.
 Xet reconstruction coalesces adjacent chunk ranges before it reaches the
 store. The storage layer does not reinterpret shard terms or recipe pages.
 
+## CDN read routing
+
+Direct repositories can opt in through the user-owned Crab config. Each
+`[[cdn]]` entry matches one resolved native origin and source repository
+prefix. Repository config overlays and remote config cannot add CDN bindings.
+
+```toml
+[[cdn]]
+origin = "s3://example-repository-bucket"
+repo_prefix = "org/models"
+base_url = "https://downloads.example.com"
+access = "private"
+approval_sha256 = "<reviewed private-binding receipt SHA-256>"
+```
+
+Use `gs://<bucket>` for GCS or
+`https://<account>.blob.core.windows.net/<container>` for Azure. Private access
+uses the Crab Auth issuer in the same trusted user config to obtain a scoped
+viewer grant. Set `approval_sha256` to the digest reviewed by the operator
+and pinned in that issuer. Crab accepts a viewer grant only when the
+issuer confirms the selected entry's digest. A private binding without
+an approval digest uses the issuer's native authorization.
+Public access requires `access = "public"` and an
+`export_origin` that names a separate native bucket or container in the
+same cloud. Keep `origin` set to the live repository's storage. To enable
+public acceleration, set `publication = { path = "/absolute/path/to/publication.json",
+sha256 = "<publisher-reported digest>" }` in the same trusted binding.
+Crab checks the receipt digest, source, destination, viewer URL and repository
+prefix. It uses the edge only for listed keys whose total size matches the
+read descriptor. A binding without publication approval and an unlisted
+object both use native storage. An unreadable, invalid or mismatched receipt
+fails the read. Live metadata, writes and
+maintenance use native credentials. A ready direct
+replica can use its own private binding for the replica's native origin and
+physical repository prefix. The issuer must authorize that same target and
+layout before Crab reads the replica's current root. Reads under a private
+replica binding stay on that replica, including recovery from a transient
+edge failure at its native origin.
+
+The direct read path covers authenticated history segments, checkpoint and
+capsule controls, layered Git pack windows, lazy Git indexes, scoped Xet shards and xorbs,
+and full LFS downloads to a local file. Pack and LFS file transfers fetch
+batches of four 8 MiB ranges and verify staged bytes before publication. Xet
+selective reads verify metadata and requested chunks from the same source.
+Shard reads require the file's authenticated catalog binding, exact encoded
+size, and Xet content hash. Pointer hints alone can only select origin reads.
+An allowed restart at the selected origin shares the edge attempt's deadline.
+File transfers cancel pending reads and drain local writes before returning.
+Historical recovery and checkpoint consolidation use the selected origin.
+Cold-clone sidecar bundles and LFS streams requiring origin validators also use
+that path. Provider HTTPS routing is disabled in default builds while these
+profiles are unqualified. Dedicated builds enable `provider-cdn-qualification`.
+Check provider qualification in
+[Plan 021](../../../plans/021-provider-cdn-support.md).
+
 ## Multipart uploads
 
 Multipart retries restart the complete upload attempt. `object_store` assigns

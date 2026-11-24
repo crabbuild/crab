@@ -720,6 +720,11 @@ pub async fn run_post_fetch_shard_sync(
     metrics: Option<Arc<Metrics>>,
     emit_progress: bool,
 ) -> Result<SyncStats> {
+    // A projected view's shard offsets belong to its own physical scope.
+    // The shared bucket index would expose them to other readers and writers.
+    if router.store().storage_scope().is_some() {
+        return Ok(SyncStats::default());
+    }
     let shard_hashes = load_published_shards(&router).await?;
 
     if shard_hashes.is_empty() {

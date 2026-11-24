@@ -18,11 +18,12 @@ from typing import Any
 import yaml
 import structlog
 
+from src.cdn import CdnExport
 from src.repo_url import RepoUrlError, parse_repo_url
 
 logger = structlog.get_logger()
 
-POLICY_KEYS = frozenset({"version", "default_provider", "protected_repos", "rules", "deny"})
+POLICY_KEYS = frozenset({"version", "default_provider", "protected_repos", "rules", "deny", "cdn"})
 RULE_KEYS = frozenset({
     "identity",
     "group",
@@ -108,11 +109,13 @@ class PolicyEngine:
         deny_rules: list[PolicyRule],
         protected_repos: list[str] | None = None,
         default_provider: str = "aws",
+        cdn_exports: tuple[CdnExport, ...] = (),
     ) -> None:
         self._rules = rules
         self._deny_rules = deny_rules
         self._protected_repos = protected_repos or []
         self._default_provider = default_provider
+        self.cdn_exports = cdn_exports
 
     @classmethod
     def from_file(cls, path: str | Path) -> PolicyEngine:
@@ -134,36 +137,16 @@ class PolicyEngine:
         if not isinstance(data, dict):
             raise ValueError(f"Policy file must be a YAML mapping, got {type(data)}")
 
-        version = data.get("version", "1")
-        if version != "1":
-            raise ValueError(f"Unsupported policy version: {version}")
-
-        _validate_policy_keys(data)
-        default_provider = _parse_provider(data.get("default_provider", "aws"), "default_provider")
-        rules = _parse_rules(data.get("rules", []), "rules")
-        deny_rules = _parse_rules(data.get("deny", []), "deny")
-        protected_repos = _parse_pattern_list(
-            data.get("protected_repos", []),
-            "protected_repos",
-            pattern_kind="repo",
-            allow_empty=True,
-        )
-
+        policy = cls.from_dict(data)
         logger.info(
             "policy_loaded",
             path=str(path),
-            rules=len(rules),
-            deny_rules=len(deny_rules),
-            protected_repos=len(protected_repos),
-            default_provider=default_provider,
+            rules=len(policy._rules),
+            deny_rules=len(policy._deny_rules),
+            protected_repos=len(policy._protected_repos),
+            default_provider=policy._default_provider,
         )
-
-        return cls(
-            rules=rules,
-            deny_rules=deny_rules,
-            protected_repos=protected_repos,
-            default_provider=default_provider,
-        )
+        return policy
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PolicyEngine:
@@ -187,6 +170,7 @@ class PolicyEngine:
             deny_rules=deny_rules,
             protected_repos=protected_repos,
             default_provider=default_provider,
+            cdn_exports=_parse_cdn_exports(data.get("cdn", [])),
         )
 
     def providers(self) -> set[str]:
@@ -753,6 +737,26 @@ def _extract_repo_path(repo_url: str) -> str:
         return parse_repo_url(repo_url).prefix
     except RepoUrlError as e:
         raise ValueError(str(e)) from e
+
+
+def _parse_cdn_exports(value: Any) -> tuple[CdnExport, ...]:
+    if not isinstance(value, list):
+        raise ValueError("CDN policy must be a list of exports")
+    try:
+        exports = tuple(CdnExport.model_validate(entry) for entry in value)
+    except ValueError:
+        raise ValueError("Invalid CDN export in auth policy") from None
+    if len({(item.origin, item.repo_prefix) for item in exports}) != len(exports):
+        raise ValueError("Duplicate origin and repository prefix in CDN exports")
+    viewer_routes = {f"{item.base_url}/{item.repo_prefix}" for item in exports}
+    if len(viewer_routes) != len(exports):
+        raise ValueError("A CDN viewer path is bound more than once")
+    physical_routes = {
+        f"{item.base_url}/{item.repo_prefix}{item.protected_view_suffix}" for item in exports
+    }
+    if len(physical_routes) != len(exports):
+        raise ValueError("A physical CDN viewer path is bound more than once")
+    return exports
 
 
 def _operation_to_permissions(operation: str) -> list[str]:

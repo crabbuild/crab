@@ -17,6 +17,11 @@ pub struct MountReadContext {
 pub trait MountCatalogCapture: Send + Sync {
     async fn capture(&self) -> Result<Arc<crab_read::ShardHydrator>>;
 
+    /// Verify a mount-owned Git revision before publishing a filesystem snapshot.
+    fn validate_git_head(&self, _reference: &str, _oid: &str, _read_only: bool) -> Result<()> {
+        Ok(())
+    }
+
     /// Drain retained captures after backend requests and hydration workers stop.
     async fn shutdown(&self) -> Result<()>;
 }

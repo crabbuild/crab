@@ -6,13 +6,14 @@ use std::time::SystemTime;
 
 use bytes::Bytes;
 use crab_sdk::remote::{ContentKind, EntryMode, PageRequest, Snapshot};
-use crab_sdk::storage::{ContentCache, DirectStoreOptions};
-use crab_sdk::{Client, GitPath, OpenOptions, RepositoryLocator, Revision};
+use crab_sdk::storage::ContentCache;
+use crab_sdk::{Client, GitPath, OpenOptions, Revision};
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
 use crate::{AgentError, Result};
 
+mod browse_auth;
 mod content;
 mod files;
 mod native;
@@ -62,21 +63,7 @@ pub struct FileMetadata {
 }
 
 pub fn token_cache_directory() -> Result<PathBuf> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| AgentError::Other("cannot determine home directory".into()))?;
-    let configuration = home.join(".config/crab/config.toml");
-    let text = match std::fs::read_to_string(configuration) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(error.into()),
-    };
-    let config: toml::Value = toml::from_str(&text)?;
-    let path = config
-        .get("auth")
-        .and_then(|auth| auth.get("token_cache_path"))
-        .and_then(toml::Value::as_str)
-        .unwrap_or("~/.config/crab/tokens/");
-    Ok(crab_auth::token_cache::expand_token_cache_path(path))
+    Ok(browse_auth::UserConfiguration::load()?.token_cache_directory())
 }
 
 impl BrowseSession {
@@ -108,75 +95,16 @@ impl BrowseSession {
 
     pub(crate) async fn open_url(url: &str, scope: &ReadScope) -> Result<Self> {
         scope.check()?;
-        let cache = token_cache_directory()?;
+        let configuration = browse_auth::UserConfiguration::load()?;
+        let cache = configuration.token_cache_directory();
         let managed = crab_sdk::managed::Options::new(&cache)?;
         let content_root = crab_cache::default_cache_root();
         // Remote reconstruction uses the same product root inspected and cleaned
         // by Settings; each storage identity retains a separate SDK namespace.
         let content = ContentCache::new(&content_root, None)?;
-        let mut builder = Client::builder().managed(managed).content_cache(content);
-        let locator = if let Some(connection) = crate::storage_auth::current() {
-            builder = builder.direct_store(connection.options()?);
-            RepositoryLocator::new(&connection.repository_prefix(url)?)?
-        } else if url.starts_with("crab://") {
-            let resolver = crab_auth_store::ManagedRepositoryResolver::new(cache);
-            match resolver
-                .classify(url)
-                .map_err(crate::managed_service::managed_repository_error)?
-            {
-                crab_git::RepositoryLocator::Managed(repo) => RepositoryLocator::managed(
-                    &repo.authority,
-                    &repo.organization,
-                    &repo.repository,
-                )?,
-                crab_git::RepositoryLocator::Direct(repo) => {
-                    let options = match crab_storage::resolve_static_env_provider()? {
-                        crab_storage::StorageProviderKind::S3 => {
-                            DirectStoreOptions::s3_from_env(&repo.bucket)?
-                        }
-                        crab_storage::StorageProviderKind::Gcs => {
-                            DirectStoreOptions::gcs_from_env(&repo.bucket)?
-                        }
-                        crab_storage::StorageProviderKind::Azure => {
-                            let account = std::env::var("AZURE_STORAGE_ACCOUNT_NAME").map_err(|_| AgentError::Other("AZURE_STORAGE_ACCOUNT_NAME is required for default Azure credentials".into()))?;
-                            DirectStoreOptions::azure_from_env(&account, &repo.bucket)?
-                        }
-                        crab_storage::StorageProviderKind::Local => {
-                            return Err(AgentError::Other(
-                                "Local storage is not a cloud repository provider".into(),
-                            ));
-                        }
-                    };
-                    builder = builder.direct_store(options);
-                    RepositoryLocator::new(&repo.repo_prefix)?
-                }
-            }
-        } else {
-            let parsed = crab_git::RepositoryUrl::parse(url)?;
-            let scheme = url.split_once("://").map(|p| p.0).unwrap_or_default();
-            let mut prefix = parsed.repo_prefix.clone();
-            let store = match scheme {
-                "s3" => DirectStoreOptions::s3_from_env(&parsed.bucket)?,
-                "gs" | "gcs" => DirectStoreOptions::gcs_from_env(&parsed.bucket)?,
-                "az" | "azure" => {
-                    let (container, repository) =
-                        parsed.repo_prefix.split_once('/').ok_or_else(|| {
-                            AgentError::Other(
-                                "Azure URLs require an account, container, and repository".into(),
-                            )
-                        })?;
-                    prefix = repository.to_owned();
-                    DirectStoreOptions::azure_from_env(&parsed.bucket, container)?
-                }
-                _ => {
-                    return Err(AgentError::Other(
-                        "unsupported remote repository scheme".into(),
-                    ));
-                }
-            };
-            builder = builder.direct_store(store);
-            RepositoryLocator::new(&prefix)?
-        };
+        let builder = Client::builder().managed(managed).content_cache(content);
+        let (builder, locator) =
+            configuration.select(url, cache, crate::storage_auth::current().as_ref(), builder)?;
         let client = builder.build()?;
         let repository = match client
             .open(OpenOptions::remote(locator))
@@ -523,6 +451,7 @@ async fn git_batch(root: &Path, mode: &str, oids: &[&str]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crab_sdk::{RepositoryLocator, storage::DirectStoreOptions};
 
     async fn text(session: &BrowseSession, path: &str, rev: Option<&str>) -> Result<String> {
         let source = FileSource::capture(session, path, rev, session.read_scope()).await?;

@@ -1,0 +1,58 @@
+name: Qualify provider CDN transport
+
+on:
+  workflow_call:
+    inputs:
+      provider:
+        required: true
+        type: string
+      native_artifact:
+        required: true
+        type: string
+      native_result:
+        required: true
+        type: string
+      cache_reuse:
+        required: true
+        type: boolean
+    secrets:
+      CRAB_CDN_TRANSPORT_VIEWER:
+        required: false
+      CRAB_CDN_TRANSPORT_UNRELATED_VIEWER:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  prime:
+    name: Prime the private fixture
+    if: inputs.cache_reuse
+    uses: ./.github/workflows/provider-cdn-transport.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      provider: ${{ inputs.provider }}
+      native_artifact: ${{ inputs.native_artifact }}
+      native_result: ${{ inputs.native_result }}
+      cache_role: primary
+
+  transport:
+    name: Verify CDN transport
+    needs: prime
+    if: >-
+      !cancelled() && ((inputs.cache_reuse && needs.prime.result == 'success') ||
+                       (!inputs.cache_reuse && needs.prime.result == 'skipped'))
+    uses: ./.github/workflows/provider-cdn-transport.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      provider: ${{ inputs.provider }}
+      native_artifact: ${{ inputs.native_artifact }}
+      native_result: ${{ inputs.native_result }}
+      cache_role: ${{ inputs.cache_reuse && 'second' || '' }}
+    secrets:
+      CRAB_CDN_TRANSPORT_VIEWER: ${{ secrets.CRAB_CDN_TRANSPORT_VIEWER }}
+      CRAB_CDN_TRANSPORT_UNRELATED_VIEWER: ${{ secrets.CRAB_CDN_TRANSPORT_UNRELATED_VIEWER }}

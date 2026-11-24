@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -9,6 +12,7 @@ from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
 
 import src.app as app_module
+import src.cdn_approval as cdn_approval
 from src.auth import TokenClaims
 from src.providers import CredentialResult
 from src.receive_helper import (
@@ -20,6 +24,7 @@ from src.receive_helper import (
     ReceiveVerifyResult,
 )
 from src.view_helper import ViewMaterializationResult, ViewRuntimeStatus
+from src.view_retention import NATIVE_RETENTION_REPLY, RetentionConflict
 
 
 class FakeVerifier:
@@ -29,16 +34,21 @@ class FakeVerifier:
         error: str | None = None,
         email: str = "alice@corp.example.com",
         groups: list[str] | None = None,
+        subject: str = "user-123",
+        issuer: str = "https://idp.example.com",
     ) -> None:
         self._error = error
         self._email = email
         self._groups = ["platform-admins"] if groups is None else groups
+        self._subject = subject
+        self._issuer = issuer
 
     async def verify(self, token: str) -> TokenClaims:
         if self._error:
             raise ValueError(self._error)
         return TokenClaims(
-            subject="user-123",
+            issuer=self._issuer,
+            subject=self._subject,
             email=self._email,
             name=None,
             groups=self._groups,
@@ -96,6 +106,13 @@ class FakeProvider:
         if self._cleanup_error:
             raise self._cleanup_error
         return 2
+
+
+class LiveExpiryProvider(FakeProvider):
+    async def generate(self, *args, **kwargs):
+        result = await super().generate(*args, **kwargs)
+        result.expires_at = (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat()
+        return result
 
 
 class FakeReceiveHelper:
@@ -204,6 +221,7 @@ class FakeViewHelper:
     def __init__(self, *, error: Exception | None = None) -> None:
         self._error = error
         self.calls = []
+        self.source_generation = 7
 
     def materialize(
         self,
@@ -223,13 +241,15 @@ class FakeViewHelper:
             "read_paths": read_paths,
             "denied_read_paths": denied_read_paths,
         })
+        digest = "b" * 64
+        prefix = f"restricted/repo/acl-views/v2/{scope_hash}/{self.source_generation}-{digest}"
         return ViewMaterializationResult(
-            repo_prefix=f"restricted/repo/acl-views/v1/{scope_hash}/7-deadbeef",
-            global_prefix=f"restricted/repo/acl-views/v1/{scope_hash}/7-deadbeef/.crab",
+            repo_prefix=prefix,
+            global_prefix=f"{prefix}/.crab",
             source_repo="restricted/repo",
             scope_hash=scope_hash,
-            source_generation=7,
-            source_manifest_hash="deadbeef",
+            source_generation=self.source_generation,
+            source_manifest_hash=digest,
             cache_hit=True,
         )
 
@@ -538,7 +558,7 @@ def test_issue_credentials_path_scoped_read_uses_filtered_view(monkeypatch):
     assert body["permissions"] == ["read"]
     scope = body["storage_scope"]
     assert scope["source_repo"] == "restricted/repo"
-    assert scope["repo_prefix"].startswith("restricted/repo/acl-views/v1/")
+    assert scope["repo_prefix"].startswith("restricted/repo/acl-views/v2/")
     assert scope["global_prefix"] == f"{scope['repo_prefix']}/.crab"
     assert view.calls == [{
         "repo_url": "crab://bucket/restricted/repo",
@@ -549,6 +569,47 @@ def test_issue_credentials_path_scoped_read_uses_filtered_view(monkeypatch):
     }]
     assert provider.calls[0]["repo_url"] == f"crab://bucket/{scope['repo_prefix']}"
     assert provider.calls[0]["permissions"] == ["read"]
+
+
+@pytest.mark.parametrize("misbound", ["source", "sibling", "generation", "digest", "global"])
+def test_issue_credentials_refuses_a_misbound_projected_view(monkeypatch, misbound):
+    provider = FakeProvider()
+    view = FakeViewHelper()
+    materialize = view.materialize
+
+    def misbound_view(**kwargs):
+        result = materialize(**kwargs)
+        if misbound in {"source", "sibling"}:
+            prefix = result.source_repo if misbound == "source" else "restricted/sibling"
+            return replace(result, repo_prefix=prefix, global_prefix=f"{prefix}/.crab")
+        if misbound == "generation":
+            return replace(result, source_generation=result.source_generation + 1)
+        if misbound == "digest":
+            return replace(result, source_manifest_hash="a" * 64)
+        return replace(result, global_prefix=f"{result.source_repo}/.crab")
+
+    monkeypatch.setattr(view, "materialize", misbound_view)
+    monkeypatch.setattr(app_module, "get_view_helper", lambda: view)
+    monkeypatch.setattr(app_module, "get_provider", lambda name: provider)
+    app_module._policy = app_module.PolicyEngine.from_dict({
+        "default_provider": "aws",
+        "rules": [{
+            "group": "platform-admins",
+            "repos": ["restricted/repo"],
+            "operations": ["mount"],
+            "read_paths": ["src/**"],
+        }],
+    })
+
+    response = TestClient(app_module.app).post("/v1/credentials", json={
+        "id_token": "token",
+        "repo_url": "crab://bucket/restricted/repo",
+        "operation": "mount",
+    })
+
+    assert response.status_code == 500
+    assert response.json()["detail"]["message"] == "ACL-filtered repository view scope mismatch"
+    assert not provider.calls
 
 
 def test_issue_credentials_path_scoped_read_audits_view_scope(monkeypatch):
@@ -633,6 +694,167 @@ def test_issue_credentials_path_scoped_read_does_not_mint_on_view_failure(monkey
     assert response.status_code == 500
     assert response.json()["detail"]["error"] == "internal"
     assert provider.calls == []
+
+
+def retention_policy(paths=None, operations=("mount",)):
+    rule = {"group": "platform-admins", "repos": ["restricted/repo"], "operations": list(operations)}
+    if paths is not None:
+        rule["read_paths"] = paths
+    return app_module.PolicyEngine.from_dict({"default_provider": "aws", "rules": [rule]})
+
+
+@pytest.fixture
+def retention_client(monkeypatch):
+    app_module._policy = retention_policy(["src/**"])
+    app_module._rate_limiter = app_module.RateLimiter(rate_per_minute=0, burst=20)
+    scope = app_module._read_scope_hash(source_repo="restricted/repo", read_paths=["src/**"], denied_read_paths=[])
+    payload = {
+        "id_token": "token",
+        "repo_url": "crab://bucket/restricted/repo",
+        "view_prefix": f"restricted/repo/acl-views/v2/{scope}/7-{'b' * 64}",
+        "reader_nonce": "a" * 64,
+        "target": "d" * 64,
+        "read_operation": "mount",
+    }
+    calls = []
+    incarnation = "0" * 8 + "-0000-7000-8000-" + "0" * 12
+    active = False
+
+    def retain(request):
+        nonlocal active
+        calls.append(request)
+        if request["reader"] != calls[0]["reader"]:
+            raise RetentionConflict("native reader changed")
+        operation = request["operation"]
+        match operation["action"]:
+            case "acquire":
+                active = True
+                reply = {"action": "acquired", "repo_prefix": payload["view_prefix"],
+                         "view_state_digest": "c" * 64, "remaining_ms": 149_000,
+                         "revision": {"incarnation": incarnation, "sequence": 0}}
+            case "renew":
+                reply = {"action": "renewed", "remaining_ms": 149_000,
+                         "revision": {"incarnation": incarnation, "sequence": operation["revision"]["sequence"] + 1}}
+            case "release":
+                active = False
+                reply = {"action": "released"}
+            case "verify":
+                if not active or operation["incarnation"] != incarnation:
+                    raise RetentionConflict("native claim inactive")
+                reply = {"action": "verified", "repo_prefix": payload["view_prefix"], "remaining_ms": 149_000}
+        return NATIVE_RETENTION_REPLY.validate_python(reply)
+
+    helper = FakeViewHelper()
+    monkeypatch.setattr(helper, "retention", retain, raising=False)
+    app_module._view_helper = helper
+    client = TestClient(app_module.app)
+
+    def post(action, revision=None, **changes):
+        operation = {"action": action}
+        if revision is not None:
+            operation["revision"] = revision
+        result = client.post("/v1/views/retention", json=payload | {"operation": operation} | changes)
+        assert result.headers["Cache-Control"] == "no-store"
+        return result
+
+    return post, helper, calls
+
+
+def test_retention_keeps_one_reader_for_the_same_verified_issuer_and_subject(retention_client):
+    post, helper, calls = retention_client
+    acquired = post("acquire")
+    assert acquired.status_code == 200
+    app_module._verifier = FakeVerifier(email="new-email@corp.example.com")
+    renewed = post("renew", acquired.json()["revision"])
+    assert renewed.status_code == 200
+    assert post("release", renewed.json()["revision"]).json() == {"action": "released"}
+    assert len({call["reader"] for call in calls}) == 1
+    assert all(call["source_generation"] == 7 and call["source_digest"] == "b" * 64 for call in calls)
+    assert all(call["target"] == "d" * 64 for call in calls)
+    assert all({"id_token", "reader_nonce"}.isdisjoint(call) for call in calls)
+    assert helper.calls == []  # Retention uses native view proofs without rebuilding a projection.
+
+
+@pytest.mark.parametrize("read_operation", ["mount", "fetch"])
+def test_read_credentials_keep_the_verified_projection_until_release(retention_client, monkeypatch, read_operation):
+    post, helper, calls = retention_client
+    app_module._policy = retention_policy(["src/**"], ["mount", "fetch"])
+    acquired = post("acquire", read_operation=read_operation).json()
+    provider = FakeProvider()
+    monkeypatch.setattr(app_module, "get_provider", lambda name: provider)
+    client = TestClient(app_module.app)
+    request = {
+        "id_token": "token", "repo_url": "crab://bucket/restricted/repo", "operation": read_operation,
+        "retained_view": {
+            "view_prefix": acquired["repo_prefix"], "reader_nonce": "a" * 64, "target": "d" * 64,
+            "incarnation": acquired["revision"]["incarnation"],
+        },
+    }
+    renewed = post("renew", acquired["revision"], read_operation=read_operation).json()
+    response = client.post("/v1/credentials", json=request)
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.json()["storage_scope"]["repo_prefix"] == acquired["repo_prefix"]
+    assert provider.calls[0]["repo_url"] == f"crab://bucket/{acquired['repo_prefix']}"
+    assert calls[-1]["operation"] == {"action": "verify", "incarnation": acquired["revision"]["incarnation"]}
+
+    other = "fetch" if read_operation == "mount" else "mount"
+    assert post("renew", renewed["revision"], read_operation=other).status_code == 409
+    assert client.post("/v1/credentials", json=request | {"operation": other}).status_code == 409
+
+    app_module._verifier = FakeVerifier(subject="different-principal")
+    assert client.post("/v1/credentials", json=request).status_code == 409
+    app_module._verifier = FakeVerifier()
+    assert post("release", renewed["revision"], read_operation=read_operation).status_code == 200
+    assert client.post("/v1/credentials", json=request).status_code == 409
+    assert helper.calls == []
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.parametrize("changed", ["issuer", "subject"])
+def test_retention_rejects_another_principal_with_the_same_email_and_nonce(retention_client, changed):
+    post, _, calls = retention_client
+    acquired = post("acquire")
+    app_module._verifier = FakeVerifier(**{changed: "other-verified-principal"})
+    denied = post("renew", acquired.json()["revision"])
+    assert denied.status_code == 409
+    assert denied.json()["detail"]["error"] == "retention_revision_lost"
+    assert calls[-1]["reader"] != calls[0]["reader"]
+
+
+@pytest.mark.parametrize("paths,operations", [(["different/**"], ["mount"]), (None, ["mount"]), (["src/**"], ["fetch"])])
+def test_retention_reevaluates_mount_policy_before_touching_a_claim(retention_client, paths, operations):
+    post, _, calls = retention_client
+    acquired = post("acquire")
+    app_module._policy = retention_policy(paths, operations)
+    assert post("renew", acquired.json()["revision"]).status_code == 403
+    assert len(calls) == 1
+
+
+def test_retention_fetch_claim_requires_fetch_policy(retention_client):
+    post, _, calls = retention_client
+    assert post("acquire", read_operation="fetch").status_code == 403
+    assert not calls
+
+
+def test_retention_rejects_client_selected_owner_and_unscoped_prefix(retention_client):
+    post, _, calls = retention_client
+    assert post("acquire", reader="a" * 64).status_code == 400
+    assert post("acquire", view_prefix="restricted/repo").status_code == 403
+    assert calls == []
+
+
+def test_retention_never_echoes_native_helper_errors(retention_client, monkeypatch):
+    post, helper, _ = retention_client
+
+    def bad_helper(payload):
+        raise RuntimeError("opaque backend authorization")
+
+    monkeypatch.setattr(helper, "retention", bad_helper)
+    with capture_logs() as logs:
+        error = post("acquire")
+    assert error.status_code == 503
+    assert "opaque backend authorization" not in error.text and "opaque backend authorization" not in repr(logs)
 
 
 def test_issue_credentials_repo_wide_read_skips_view_helper(monkeypatch):
@@ -941,15 +1163,10 @@ def test_push_prepare_passes_filtered_read_scope_to_receive_helper(monkeypatch):
     assert response.status_code == 200
     assert view.calls[0]["read_paths"] == ["src/**"]
     view_scope = receive.prepare_calls[0]["view_scope"]
+    prefix = f"restricted/repo/acl-views/v2/{view.calls[0]['scope_hash']}/7-{'b' * 64}"
     assert view_scope == {
-        "repo_prefix": view.calls[0]["repo_url"].replace(
-            "crab://bucket/", ""
-        )
-        + f"/acl-views/v1/{view.calls[0]['scope_hash']}/7-deadbeef",
-        "global_prefix": (
-            "restricted/repo/acl-views/v1/"
-            f"{view.calls[0]['scope_hash']}/7-deadbeef/.crab"
-        ),
+        "repo_prefix": prefix,
+        "global_prefix": f"{prefix}/.crab",
         "source_repo": "restricted/repo",
         "scope_hash": view.calls[0]["scope_hash"],
     }
@@ -2111,3 +2328,125 @@ def test_ready_does_not_require_unused_default_provider(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["provider_config"] == "ok"
+
+
+def test_issue_credentials_negotiates_cdn_after_origin_authorization(tmp_path, monkeypatch, approve_cdn):
+    provider = LiveExpiryProvider()
+    monkeypatch.setattr(app_module, "get_provider", lambda name: provider)
+    key = tmp_path / "cdn-key"
+    key.write_bytes(base64.urlsafe_b64encode(bytes(range(16))))
+    export = {
+        "provider": "cloud_cdn", "origin": "gs://test-bucket", "repo_prefix": "org/repo",
+        "base_url": "https://downloads.example.com", "allow_unfiltered": True, "key_id": "test-key", "key_file": key,
+    }
+    policy = {
+        "default_provider": "gcp",
+        "rules": [{"group": "platform-admins", "repos": ["org/repo"], "operations": ["fetch"]}],
+    }
+    app_module._policy = app_module.PolicyEngine.from_dict(policy | {"cdn": [export]})
+    app_module._rate_limiter = app_module.RateLimiter(rate_per_minute=0, burst=20)
+    client = TestClient(app_module.app)
+    payload = {"id_token": "token", "repo_url": "crab://test-bucket/org/repo", "operation": "fetch"}
+    assert "cdn" not in client.post("/v1/credentials", json=payload).json()
+    headers = {"X-Crab-CDN-Grant-Version": "1"}
+    native = client.post("/v1/credentials", json=payload, headers=headers)
+    assert native.status_code == 200
+    assert "cdn" not in native.json()
+    assert "credentials" in native.json()
+    observed = []
+    monkeypatch.setattr(cdn_approval, "_gcp", lambda binding: observed.append(binding) is None)
+    approval = approve_cdn(export)
+    app_module._policy = app_module.PolicyEngine.from_dict(policy | {"cdn": [export | {"approval": approval}]})
+    no_pin = client.post("/v1/credentials", json=payload, headers=headers)
+    assert no_pin.status_code == 200
+    assert "cdn" not in no_pin.json()
+    assert "X-Crab-CDN-Approval-Sha256" not in no_pin.headers
+    conflicting = headers | {"X-Crab-CDN-Approval-Sha256": "f" * 64}
+    assert client.post("/v1/credentials", json=payload, headers=conflicting).status_code == 409
+    assert not observed
+    headers |= {"X-Crab-CDN-Approval-Sha256": approval["sha256"]}
+    response = client.post("/v1/credentials", json=payload, headers=headers)
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["X-Crab-CDN-Approval-Sha256"] == approval["sha256"]
+    grant = response.json()["cdn"]
+    assert grant["repo_prefix"] == "org/repo"
+    assert grant["origin"] == "gs://test-bucket"
+    assert grant["grants"][0]["prefix"] == "org/repo/v2/capsules/"
+    assert all("/.crab/" not in item["prefix"] for item in grant["grants"])
+
+    other_bucket = payload | {"repo_url": "crab://other-bucket/org/repo"}
+    response = client.post("/v1/credentials", json=other_bucket, headers=headers)
+    assert response.headers["Cache-Control"] == "no-store"
+    assert "cdn" not in response.json()
+    denied = payload | {"repo_url": "crab://test-bucket/org/other"}
+    assert client.post("/v1/credentials", json=denied, headers=headers).status_code == 403
+    assert len(provider.calls) == 6
+    assert len(observed) == 1
+
+    # A changed approval is terminal and cannot produce a viewer credential.
+    approval["path"].write_text("{}")
+    mismatch = client.post("/v1/credentials", json=payload, headers=headers)
+    assert mismatch.status_code == 500
+    assert "cdn" not in mismatch.json()
+    assert "credentials" not in mismatch.json()
+    assert len(observed) == 1
+
+
+def test_issue_credentials_pins_cdn_to_approved_view_generation(tmp_path, monkeypatch, approve_cdn):
+    provider = LiveExpiryProvider()
+    view = FakeViewHelper()
+    monkeypatch.setattr(app_module, "get_provider", lambda name: provider)
+    monkeypatch.setattr(app_module, "get_view_helper", lambda: view)
+    config = {
+        "default_provider": "gcp",
+        "rules": [{
+            "group": "platform-admins",
+            "repos": ["restricted/repo"],
+            "operations": ["fetch"],
+            "read_paths": ["src/**"],
+        }],
+    }
+    app_module._policy = app_module.PolicyEngine.from_dict(config)
+    app_module._rate_limiter = app_module.RateLimiter(rate_per_minute=0, burst=20)
+    client = TestClient(app_module.app)
+    payload = {
+        "id_token": "token",
+        "repo_url": "crab://test-bucket/restricted/repo",
+        "operation": "fetch",
+    }
+    headers = {"X-Crab-CDN-Grant-Version": "1"}
+    native = client.post("/v1/credentials", json=payload, headers=headers)
+    assert native.status_code == 200
+    assert "cdn" not in native.json()
+    approved = native.json()["storage_scope"]
+    key = tmp_path / "cdn-key"
+    key.write_bytes(base64.urlsafe_b64encode(bytes(range(16))))
+    export = {
+        "provider": "cloud_cdn",
+        "origin": "gs://test-bucket",
+        "repo_prefix": approved["source_repo"],
+        "protected_view_suffix": approved["repo_prefix"].removeprefix(approved["source_repo"]),
+        "base_url": "https://downloads.example.com",
+        "key_id": "test-key",
+        "key_file": key,
+    }
+    monkeypatch.setattr(cdn_approval, "_gcp", lambda binding: True)
+    approval = approve_cdn(export)
+    app_module._policy = app_module.PolicyEngine.from_dict(config | {"cdn": [export | {"approval": approval}]})
+    headers |= {"X-Crab-CDN-Approval-Sha256": approval["sha256"]}
+
+    response = client.post("/v1/credentials", json=payload, headers=headers)
+    assert response.status_code == 200
+    grant = response.json()["cdn"]
+    assert grant["repo_prefix"] == approved["repo_prefix"]
+    assert grant["global_prefix"] == approved["global_prefix"]
+    assert f"{approved['global_prefix']}/shards/" in {item["prefix"] for item in grant["grants"]}
+
+    view.source_generation += 1
+    response = client.post("/v1/credentials", json=payload, headers=headers)
+    assert response.status_code == 200
+    assert "cdn" not in response.json()
+    current = response.json()["storage_scope"]
+    assert current["repo_prefix"] != approved["repo_prefix"]
+    assert provider.calls[-1]["repo_url"] == f"crab://test-bucket/{current['repo_prefix']}"

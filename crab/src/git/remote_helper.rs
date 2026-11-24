@@ -17,6 +17,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tracing::{Instrument, warn};
 
 use crate::audit::default_log_path;
+use crate::core::cdn::{
+    qualification_target, verify_qualification_cache, verify_qualification_read,
+    verify_qualification_target,
+};
 use crate::core::error::{CrabError, Result};
 use crate::core::metrics::{Metrics, MetricsSummary, persist_metrics_delta};
 use crate::core::output::{JsonlStream, OutputMode};
@@ -28,6 +32,9 @@ use crate::git::push::{
     record_push_audit_event,
 };
 use crate::git::push_staging::PushStaging;
+use crate::replication::fetch::{
+    primary_store_for_batch, read_store_for_batch_with_selector, select_fetch_replica,
+};
 use crate::storage::StoreLayout;
 use crab_metadata::commit_graph::CommitGraphTraversal;
 #[cfg(test)]
@@ -677,6 +684,7 @@ pub async fn run_remote_helper(
 
     // Resolve config early — needed for store construction and CachingStore.
     let config = resolve_remote_helper_config()?;
+    verify_qualification_cache(&config.cache)?;
 
     let (mut reader, mut writer) = io.split();
     let mut options = HelperOptions::default();
@@ -726,11 +734,11 @@ pub async fn run_remote_helper(
         crab_git::RepositoryLocator::Managed(repository) => Some(repository.clone()),
         crab_git::RepositoryLocator::Direct(_) => None,
     };
-
     let resolved = crate::auth::build_repository_store(
         &config,
         locator,
         crab_auth::TransferOperation::Fetch,
+        crab_storage::cdn::CdnConsumer::Cli,
         &cancel,
     )
     .await?;
@@ -862,7 +870,7 @@ where
             };
             if replica_discovery_pending && uses_read_routing {
                 replica_discovery_pending = false;
-                load_replica_discovery_for_session(
+                crate::replication::discovery::load_if_unconfigured(
                     &store,
                     &prefix,
                     &invocation_url,
@@ -884,6 +892,7 @@ where
                         &cancel,
                     )
                     .await?;
+                    verify_qualification_read(selected.store.as_storage())?;
                     // Bind the cache facade to the selected primary or replica.
                     // Reusing the primary facade after replica routing would read
                     // a different repository view than the pinned layout.
@@ -954,44 +963,6 @@ where
     // cache waiters. Drain them before process exit can strand their leases.
     git_runtime.shutdown().await;
     result
-}
-
-async fn load_replica_discovery_for_session(
-    store: &crate::storage::store::Store,
-    prefix: &str,
-    invocation_url: &str,
-    config: &mut crate::core::config::Config,
-) -> Result<()> {
-    let layout = StoreLayout::new(store.clone(), prefix.to_owned());
-    let discovered = match crate::replication::discovery::load(store, &layout, invocation_url).await
-    {
-        Ok(discovered) => discovered,
-        Err(
-            error @ (CrabError::NetworkTransient(_)
-            | CrabError::Throttled { .. }
-            | CrabError::Forbidden { .. }
-            | CrabError::NoCredentials
-            | CrabError::AuthFailed { .. }
-            | CrabError::AuthExpired { .. }
-            | CrabError::Io(_)
-            | CrabError::Storage(_)),
-        ) => {
-            tracing::debug!(
-                error = %error,
-                discovery_path = %layout.replica_discovery_path(),
-                "replica discovery unavailable; using primary"
-            );
-            return Ok(());
-        }
-        Err(error) => return Err(error),
-    };
-    if crate::replication::discovery::apply_if_unconfigured(config, discovered) {
-        tracing::debug!(
-            discovery_path = %layout.replica_discovery_path(),
-            "loaded replica routing from primary discovery"
-        );
-    }
-    Ok(())
 }
 
 fn push_repo_root() -> Result<std::path::PathBuf> {
@@ -1370,7 +1341,13 @@ async fn dispatch_capabilities<W: tokio::io::AsyncWrite + Unpin>(
         let captured_before_probe = cache.read_capture.is_some();
         let maximum = capsule_fetch_maximum(cache.config());
         let probe = async {
-            let capture = capsule_read_capture(&mut cache.read_capture, router, root).await?;
+            let capture = capsule_read_capture(
+                &mut cache.read_capture,
+                router,
+                root,
+                cache.config.cache.max_bytes,
+            )
+            .await?;
             if !capture.may_have_layered_cold_clone_packs() {
                 return Ok::<_, CrabError>(None);
             }
@@ -1562,6 +1539,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                         &mut cache.read_capture,
                         &selected.router,
                         &selected.capsule_root,
+                        cache.config.cache.max_bytes,
                     )
                     .await
                     .map_err(map_missing_capsule_root)?;
@@ -1591,10 +1569,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                     cache,
                     remote_url,
                     cancel,
-                    |config, parsed, cancel| async move {
-                        crate::replication::select_read_store(&config, &parsed, "fetch", &cancel)
-                            .await
-                    },
+                    select_fetch_replica,
                 )
                 .await
             }
@@ -1681,6 +1656,23 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                     ));
                 }
                 let config = cache.config().clone();
+                // The guarded workload proves one native ref-head CAS.
+                // A delegated writer can publish beyond the resolved store.
+                let delegated_writer = config.auth.provider
+                    == crate::core::config::AuthProvider::CrabAuth
+                    || config
+                        .replication
+                        .as_ref()
+                        .is_some_and(|replication| replication.is_active_active());
+                if requires_repository
+                    && (delegated_writer || managed_repository.is_some())
+                    && qualification_target()?.is_some()
+                {
+                    return Err(CrabError::AuthFailed {
+                        path: "the CDN qualification workload requires a single native writer"
+                            .into(),
+                    });
+                }
                 let mut push_config = PushConfig::from_config(&config);
                 let mut push_setup_error = if requires_repository {
                     configure_active_active_push_coordinator(
@@ -1797,6 +1789,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                                 key: "capsule-protocol push store".to_owned(),
                                 origin: "push requires a resolved object store".to_owned(),
                             })?;
+                    verify_qualification_target(push_store.as_storage(), router.repo_prefix())?;
                     // Git owns stdout and negotiates quiet/progress per session.
                     // Keep the shared publisher's display on this caller's stderr.
                     push_config.progress = options.progress.then(|| {
@@ -2009,6 +2002,7 @@ where
         };
         let router = selected.router;
         let root = selected.capsule_root;
+        verify_qualification_read(router.store().as_storage())?;
         // Classic, constrained and raw-object fetches share one admission
         // owner. Direct pack installation must not bypass the repository's
         // reader limit or acquire a separate ticket for each pack source.
@@ -2076,9 +2070,7 @@ async fn read_store_for_list_batch(
         config,
         for_push,
         cancel,
-        |config, parsed, cancel| async move {
-            crate::replication::select_read_store(&config, &parsed, "fetch", &cancel).await
-        },
+        select_fetch_replica,
     )
     .await
 }
@@ -2106,7 +2098,10 @@ where
         // advertisement is part of write admission, so stale replicas are
         // unsafe even when they are healthy enough for clone/fetch reads.
         ListReadAuthority::Primary => {
-            primary_store_for_batch(primary_store, prefix, primary_root, cancel).await
+            let origin = crate::storage::store::Store::from_storage(
+                primary_store.as_storage().clone().without_cdn_route(),
+            );
+            primary_store_for_batch(&origin, prefix, primary_root, cancel).await
         }
         ListReadAuthority::ReplicaEligible => {
             read_store_for_batch_with_selector(
@@ -2119,86 +2114,6 @@ where
                 select_read,
             )
             .await
-        }
-    }
-}
-
-async fn primary_store_for_batch(
-    primary_store: &crate::storage::store::Store,
-    prefix: &str,
-    primary_root: Option<&crab_metadata::capsule_protocol::RootSnapshot>,
-    cancel: &tokio_util::sync::CancellationToken,
-) -> Result<crate::replication::ReadStoreSelection> {
-    let router = StoreLayout::new(primary_store.clone(), prefix.to_owned());
-    let capsule_root = match primary_root {
-        Some(root) => root.clone(),
-        None => {
-            let layout = crab_storage::StoreLayout::with_global_prefix(
-                primary_store.as_storage().clone(),
-                router.repo_prefix().to_owned(),
-                router.global_prefix().to_owned(),
-            );
-            tokio::select! {
-                biased;
-                () = cancel.cancelled() => return Err(CrabError::Cancelled),
-                result = crab_write::capsule_protocol::open_root(&layout) => result?,
-            }
-        }
-    };
-    Ok(crate::replication::ReadStoreSelection {
-        store: primary_store.clone(),
-        router,
-        source: crate::replication::ReadSource::Primary,
-        capsule_root,
-    })
-}
-
-async fn read_store_for_batch_with_selector<F, Fut>(
-    primary_store: &crate::storage::store::Store,
-    prefix: &str,
-    primary_root: Option<&crab_metadata::capsule_protocol::RootSnapshot>,
-    remote_url: Option<&str>,
-    config: &crate::core::config::Config,
-    cancel: &tokio_util::sync::CancellationToken,
-    select_read: F,
-) -> Result<crate::replication::ReadStoreSelection>
-where
-    F: FnOnce(
-        crate::core::config::Config,
-        crate::git::url::CrabUrl,
-        tokio_util::sync::CancellationToken,
-    ) -> Fut,
-    Fut: Future<Output = Result<crate::replication::ReadStoreSelection>>,
-{
-    // Managed grants already bind this store to one physical repository view.
-    // Re-parsing the logical URL as a direct bucket would bypass that scope.
-    if primary_store.storage_scope().is_some() {
-        return primary_store_for_batch(primary_store, prefix, primary_root, cancel).await;
-    }
-    if config
-        .replication
-        .as_ref()
-        .is_none_or(|replication| !replication.has_read_replicas())
-    {
-        return primary_store_for_batch(primary_store, prefix, primary_root, cancel).await;
-    }
-    let Some(url) = remote_url else {
-        return primary_store_for_batch(primary_store, prefix, primary_root, cancel).await;
-    };
-    let Ok(parsed) = crate::git::url::CrabUrl::parse(url) else {
-        return primary_store_for_batch(primary_store, prefix, primary_root, cancel).await;
-    };
-
-    match select_read(config.clone(), parsed, cancel.clone()).await {
-        Ok(selection) => {
-            if let crate::replication::ReadSource::Replica { name } = &selection.source {
-                tracing::debug!(replica = %name, "selected read replica for remote-helper batch");
-            }
-            Ok(selection)
-        }
-        Err(e) => {
-            tracing::debug!(error = %e, "replica read selection failed; using primary");
-            primary_store_for_batch(primary_store, prefix, primary_root, cancel).await
         }
     }
 }
@@ -2220,9 +2135,7 @@ async fn pinned_read_store_for_batch(
         remote_url,
         config,
         cancel,
-        |config, parsed, cancel| async move {
-            crate::replication::select_read_store(&config, &parsed, "fetch", &cancel).await
-        },
+        select_fetch_replica,
     )
     .await
 }
@@ -2725,7 +2638,13 @@ async fn fetch_packs(
         }
     }
     let cached_view = cache.capsule_view.take();
-    let capture = capsule_read_capture(&mut cache.read_capture, router, root).await?;
+    let capture = capsule_read_capture(
+        &mut cache.read_capture,
+        router,
+        root,
+        cache.config.cache.max_bytes,
+    )
+    .await?;
     if raw_object_fetch {
         fetch_capsule_promisor_objects(
             router,
@@ -2794,10 +2713,14 @@ async fn capsule_read_capture<'a>(
     captured: &'a mut Option<crab_read::capsule_protocol::CapsuleRepositoryCapture>,
     router: &StoreLayout,
     root: &crab_metadata::capsule_protocol::RootSnapshot,
+    cache_max_bytes: Option<u64>,
 ) -> Result<&'a crab_read::capsule_protocol::CapsuleRepositoryCapture> {
     if captured.is_none() {
         let layout = crab_storage::StoreLayout::with_global_prefix(
-            router.store().as_storage().clone(),
+            crab_cache_store::cache_capsule_controls(
+                router.store().as_storage().clone(),
+                cache_max_bytes,
+            ),
             router.repo_prefix().to_owned(),
             router.global_prefix().to_owned(),
         );
@@ -4631,6 +4554,7 @@ mod tests {
                     );
                     let capsule_root = crab_metadata::capsule_protocol::load_root(&layout).await?;
                     Ok(crate::replication::ReadStoreSelection {
+                        view_retention: None,
                         capsule_root,
                         store: replica_store,
                         router: replica_router,
@@ -4819,6 +4743,7 @@ mod tests {
                     );
                     let capsule_root = crab_metadata::capsule_protocol::load_root(&layout).await?;
                     Ok(crate::replication::ReadStoreSelection {
+                        view_retention: None,
                         capsule_root,
                         store: replica_store,
                         router: replica_router,
@@ -4874,6 +4799,7 @@ mod tests {
             .expect("replica root");
         let mut context = test_context(primary, "org/repo");
         context.cache.read_repository = Some(crate::replication::ReadStoreSelection {
+            view_retention: None,
             store: replica,
             router,
             capsule_root,
@@ -4977,6 +4903,7 @@ mod tests {
                     );
                     let capsule_root = crab_metadata::capsule_protocol::load_root(&layout).await?;
                     Ok(crate::replication::ReadStoreSelection {
+                        view_retention: None,
                         capsule_root,
                         store: replica_store,
                         router: replica_router,
@@ -5059,6 +4986,34 @@ mod tests {
 
         assert!(matches!(error, CrabError::Protocol(message) if message.contains("not visible")));
         assert!(writer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_store_selection_does_not_fall_back_after_replica_authorization_denial() {
+        let (primary_store, _) = memory_store_with_manifest(
+            "refs/heads/main",
+            "6666666666666666666666666666666666666666",
+        )
+        .await;
+        let config = config_with_read_replica();
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        let result = read_store_for_batch_with_selector(
+            &primary_store,
+            "org/repo",
+            None,
+            Some("crab://primary/org/repo"),
+            &config,
+            &cancel,
+            |_, _, _| async {
+                Err(CrabError::AuthFailed {
+                    path: "replica viewer".into(),
+                })
+            },
+        )
+        .await;
+
+        assert!(matches!(result, Err(CrabError::AuthFailed { path }) if path == "replica viewer"));
     }
 
     async fn memory_store_with_manifest(

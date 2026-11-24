@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use crab_remote_git::{
-    ContentClassification, OperationKind, RemoteGitRepository, RemoteGitSnapshot,
+    ContentClassification, OperationContext, OperationKind, RemoteGitRepository, RemoteGitSnapshot,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -22,8 +22,9 @@ const OUTPUT_CHUNK_BYTES: usize = 64 * 1024;
 
 /// Verified logical file bytes with tracked cleanup and bounded delivery.
 ///
-/// Observe EOF or close explicitly to receive finalization errors. Ordinary
-/// Git objects are decoded within the owner's per-object memory bound.
+/// Observe EOF or close explicitly to receive finalization errors. Losing a
+/// projected view's retention claim stops delivery, including queued chunks.
+/// Ordinary Git objects are decoded within the owner's per-object memory bound.
 pub struct ContentStream(StreamReceiver<Bytes>);
 
 impl ContentStream {
@@ -46,7 +47,7 @@ impl ContentStream {
     ///
     /// Closing early does not verify unread bytes; observe successful EOF before
     /// claiming full-file integrity.
-    pub async fn close(self) -> Result<()> {
+    pub async fn close(mut self) -> Result<()> {
         self.0.close().await
     }
 }
@@ -56,11 +57,17 @@ pub(crate) async fn open(
     repository: Arc<RemoteGitRepository>,
     snapshot: RemoteGitSnapshot,
     path: GitPath,
-    options: ReadOptions,
+    mut options: ReadOptions,
+    read_authority: Option<crab_storage::Store>,
     #[cfg(feature = "files")] runtime: Arc<crab::ContentRuntime>,
 ) -> Result<ContentStream> {
+    if read_authority.is_some() {
+        options.operation = options.operation.with_owner_deadline()?;
+    }
     let (send, entries) = mpsc::channel(1);
     let (ready, started) = oneshot::channel();
+    #[cfg(all(feature = "files", feature = "service"))]
+    let retention = runtime.retained_view();
     let mut task = operations.start(options.operation.clone(), move |cancel| async move {
         let path = crab_remote_git::GitPath::new(path.as_bytes().to_vec()).map_err(remote_error)?;
         let operation = options
@@ -113,7 +120,7 @@ pub(crate) async fn open(
             deliver_bytes(
                 blob.bytes.slice(range.start as usize..range.end as usize),
                 &send,
-                operation.cancellation(),
+                &operation,
             )
             .await?;
             Ok(())
@@ -141,34 +148,31 @@ pub(crate) async fn open(
             }
         }
     }
-    Ok(ContentStream(StreamReceiver {
-        progress: task.progress(),
-        delivered_bytes: 0,
-        delivered_items: 0,
-        id,
+    Ok(ContentStream(StreamReceiver::new(
         entries,
-        task: Some(task),
-    }))
+        task,
+        read_authority,
+        #[cfg(all(feature = "files", feature = "service"))]
+        retention,
+    )))
 }
 
 async fn deliver_bytes(
     bytes: Bytes,
     send: &mpsc::Sender<Bytes>,
-    cancellation: &tokio_util::sync::CancellationToken,
+    operation: &OperationContext,
 ) -> crab_remote_git::Result<()> {
     let mut offset = 0;
     while offset < bytes.len() {
         let end = offset.saturating_add(OUTPUT_CHUNK_BYTES).min(bytes.len());
         let chunk = bytes.slice(offset..end);
-        tokio::select! {
+        let permit = tokio::select! {
             biased;
-            () = cancellation.cancelled() => return Err(crab_remote_git::Error::Cancelled),
-            result = send.send(chunk) => {
-                if result.is_err() {
-                    return Err(crab_remote_git::Error::Cancelled);
-                }
-            }
-        }
+            () = operation.cancellation().cancelled() => return Err(crab_remote_git::Error::Cancelled),
+            result = send.reserve() => result.map_err(|_| crab_remote_git::Error::Cancelled)?,
+        };
+        operation.check_read_authority().await?;
+        permit.send(chunk);
         offset = end;
     }
     Ok(())

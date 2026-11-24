@@ -114,9 +114,12 @@ pub async fn run_fetch_in(root: &Path, args: &FetchArgs, cancel: &CancellationTo
     }
 
     check_cancelled(cancel)?;
-    let parsed = read_remote(root)?;
+    let (parsed, operation) = match crate::auth::cdn_checkout::Checkout::load()? {
+        Some(checkout) => (checkout.source_url().into(), "fetch-content"),
+        None => (read_remote(root)?, "fetch"),
+    };
     let selection =
-        crate::replication::select_read_store(&config, &parsed, "fetch", cancel).await?;
+        crate::replication::select_read_store(&config, &parsed, operation, cancel).await?;
     if let crate::replication::ReadSource::Replica { name } = &selection.source {
         tracing::debug!(replica = %name, "selected read replica for fetch");
     }

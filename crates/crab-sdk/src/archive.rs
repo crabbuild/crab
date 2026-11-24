@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use crab_remote_git::{OperationKind, OperationLimits, RemoteGitRepository, RemoteGitSnapshot};
+use crab_remote_git::{OperationKind, RemoteGitRepository, RemoteGitSnapshot};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::remote_error::{consumer_error, remote_error};
@@ -31,6 +31,8 @@ pub enum ArchiveEvent {
 }
 
 /// Bounded archive frames sharing one operation budget and cleanup lifetime.
+///
+/// Losing a projected view's retention claim stops delivery of queued frames.
 pub struct ArchiveStream(StreamReceiver<ArchiveEvent>);
 
 impl ArchiveStream {
@@ -55,7 +57,7 @@ impl ArchiveStream {
     /// Stop traversal and drain cleanup without verifying unread content.
     ///
     /// Returns finalization failures not already observed through `next`.
-    pub async fn close(self) -> Result<()> {
+    pub async fn close(mut self) -> Result<()> {
         self.0.close().await
     }
 }
@@ -64,13 +66,19 @@ pub(crate) async fn open(
     operations: &Operations,
     repository: Arc<RemoteGitRepository>,
     snapshot: RemoteGitSnapshot,
-    options: ReadOptions,
-    limits: OperationLimits,
+    mut options: ReadOptions,
     mode: ContentMode,
+    read_authority: Option<crab_storage::Store>,
     #[cfg(feature = "files")] runtime: Arc<crate::content::crab::ContentRuntime>,
 ) -> Result<ArchiveStream> {
+    let limits = options.limits()?;
+    if read_authority.is_some() {
+        options.operation = options.operation.with_owner_deadline()?;
+    }
     let (send, entries) = mpsc::channel(1);
     let (ready, started) = oneshot::channel();
+    #[cfg(all(feature = "files", feature = "service"))]
+    let retention = runtime.retained_view();
     let mut task = operations.start(options.operation.clone(), move |cancel| async move {
         let operation = options
             .operation
@@ -155,14 +163,13 @@ pub(crate) async fn open(
         task.wait().await?;
         return Err(Error::new(ErrorKind::Io, "archive ended before opening").with_operation(id));
     }
-    Ok(ArchiveStream(StreamReceiver {
-        progress: task.progress(),
-        delivered_bytes: 0,
-        delivered_items: 0,
-        id,
+    Ok(ArchiveStream(StreamReceiver::new(
         entries,
-        task: Some(task),
-    }))
+        task,
+        read_authority,
+        #[cfg(all(feature = "files", feature = "service"))]
+        retention,
+    )))
 }
 
 async fn emit(

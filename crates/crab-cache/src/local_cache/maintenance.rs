@@ -12,6 +12,7 @@ const OBJECT_FAMILIES: &[&str] = &[
     "xorbs",
     "shards",
     "ref-transactions",
+    "capsule-controls",
     "git-packs",
     "lfs",
 ];
@@ -20,6 +21,7 @@ const VERIFIABLE_FAMILIES: &[&str] = &[
     "xorbs",
     "shards",
     "ref-transactions",
+    "capsule-controls",
     "git-packs",
     "lfs",
     #[cfg(feature = "xet-chunk-cache")]
@@ -243,6 +245,7 @@ impl LocalCache {
                             "shards",
                             "xorbs",
                             "ref-transactions",
+                            "capsule-controls",
                             "git-packs",
                             "lfs",
                             "stages",
@@ -257,6 +260,10 @@ impl LocalCache {
                                 Some("ref-transactions") => (
                                     &mut stats.ref_transaction_bytes,
                                     &mut stats.ref_transaction_count,
+                                ),
+                                Some("capsule-controls") => (
+                                    &mut stats.capsule_control_bytes,
+                                    &mut stats.capsule_control_count,
                                 ),
                                 Some("git-packs") => {
                                     (&mut stats.git_pack_bytes, &mut stats.git_pack_count)
@@ -357,6 +364,7 @@ fn object_kind(path: &Path) -> Option<PruneObjectKind> {
         Some("shards") => Some(PruneObjectKind::Shard),
         Some("xorbs") => Some(PruneObjectKind::Xorb),
         Some("ref-transactions") => Some(PruneObjectKind::RefTransaction),
+        Some("capsule-controls") => Some(PruneObjectKind::CapsuleControl),
         Some("git-packs") => Some(PruneObjectKind::GitPack),
         Some("lfs") => Some(PruneObjectKind::Lfs),
         _ => None,
@@ -366,7 +374,7 @@ fn object_kind(path: &Path) -> Option<PruneObjectKind> {
 fn uses_shard_budget(kind: PruneObjectKind) -> bool {
     matches!(
         kind,
-        PruneObjectKind::Shard | PruneObjectKind::RefTransaction
+        PruneObjectKind::Shard | PruneObjectKind::RefTransaction | PruneObjectKind::CapsuleControl
     )
 }
 
@@ -437,6 +445,7 @@ fn evict_oldest(
             PruneObjectKind::Shard => stats.shards_evicted += 1,
             PruneObjectKind::Xorb => stats.xorbs_evicted += 1,
             PruneObjectKind::RefTransaction => stats.ref_transactions_evicted += 1,
+            PruneObjectKind::CapsuleControl => stats.capsule_controls_evicted += 1,
             PruneObjectKind::GitPack => stats.git_packs_evicted += 1,
             PruneObjectKind::Lfs => stats.lfs_objects_evicted += 1,
         }
@@ -473,6 +482,16 @@ fn verify_file(
     cancel: &CancellationToken,
 ) -> Result<bool> {
     let bytes = file.metadata()?.len();
+    if kind == PruneObjectKind::CapsuleControl {
+        if bytes > super::capsule_control::MAX_FILE_BYTES {
+            return Ok(false);
+        }
+        let expected = plain_blake3_hash(path)?;
+        let mut body = Vec::new();
+        file.take(bytes + 1).read_to_end(&mut body)?;
+        check_cancelled(cancel)?;
+        return Ok(body.len() as u64 == bytes && super::capsule_control::valid(&body, &expected));
+    }
     if matches!(
         kind,
         PruneObjectKind::RefTransaction | PruneObjectKind::GitPack
@@ -542,7 +561,10 @@ fn verify_file(
     let limit = match kind {
         PruneObjectKind::Chunk => MAX_CACHE_CHUNK_BYTES,
         PruneObjectKind::Shard => MAX_CACHE_SHARD_BYTES,
-        PruneObjectKind::RefTransaction | PruneObjectKind::GitPack | PruneObjectKind::Lfs => {
+        PruneObjectKind::RefTransaction
+        | PruneObjectKind::GitPack
+        | PruneObjectKind::Lfs
+        | PruneObjectKind::CapsuleControl => {
             return Err(CacheError::Internal(
                 "plain-Blake3 object bypassed its native hash verifier".into(),
             ));

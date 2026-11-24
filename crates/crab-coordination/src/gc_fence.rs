@@ -416,7 +416,7 @@ impl Drop for GcFenceHeartbeat {
     }
 }
 
-fn gc_fence_path(domain: &str) -> Result<String> {
+pub(crate) fn gc_fence_path(domain: &str) -> Result<String> {
     Ok(format!(
         "{}/internal/gc-fence/state",
         push_locks_prefix(domain)?

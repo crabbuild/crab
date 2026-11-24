@@ -9,6 +9,9 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from release_cli_features import UNIX_CLI_FLAGS, WINDOWS_CLI_FLAGS  # noqa: E402
+
 
 FORBIDDEN_CLI_ARCHIVE_BINARIES = (
     "crab-cache-server",
@@ -166,6 +169,7 @@ def check_release_script(root: Path) -> list[str]:
         'local nfs_path="$TARGET_DIR/$triple/release/crab-nfs-mount"',
         'local bin_path="$TARGET_DIR/$triple/release/crab.exe"',
         'local nfs_path="$TARGET_DIR/$triple/release/crab-nfs-mount.exe"',
+        f'CRAB_CLI_FEATURES_NO_FUSE="{UNIX_CLI_FLAGS}"',
         'package_darwin_binaries "$bin_path" "$fuse_path" "$nfs_path" "$archive"',
         'ln -sf "$(basename "$bin_path")" "$nfs_path"',
         '--mount "type=bind,source=$WORKSPACE_DIR,target=/workspace,readonly"',
@@ -178,7 +182,7 @@ def check_release_script(root: Path) -> list[str]:
         'cp "$binary_dir/crab" /dist/crab',
         'ln -sf crab "$DIST_DIR/crab-nfs-mount"',
         "-p crab --bin crab-nfs-mount",
-        "--no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch",
+        f"--no-default-features --features {WINDOWS_CLI_FLAGS}",
     ):
         if needle not in text:
             errors.append(f"release.sh: expected {needle!r}")
@@ -197,6 +201,20 @@ def check_release_workflow(root: Path) -> list[str]:
     path = root / ".github" / "workflows" / "release.yml"
     text = read_text(path)
     errors: list[str] = []
+    prepared_checkout = re.compile(
+        r"(?m)^      - uses: actions/checkout@[^\n]+\n"
+        r"        with:\n"
+        r"(?:          [^\n]+\n)*?"
+        r"          ref: \$\{\{ needs\.prepare\.outputs\.source_sha \}\}$"
+    )
+    for job_name in ("build", "publish"):
+        try:
+            job = workflow_job(text, job_name)
+        except ValueError as error:
+            errors.append(f"release.yml: {error}")
+        else:
+            if not prepared_checkout.search(job):
+                errors.append(f"release.yml {job_name}: checkout must use the verified source SHA")
 
     # Rollback reads are qualified against a tagged artifact, never a mutable
     # rebuilt checkout. Keep its identity and verification part of this gate.
@@ -269,8 +287,8 @@ def check_release_workflow(root: Path) -> list[str]:
             'if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then',
             "export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=cc",
             "export CC_aarch64_unknown_linux_gnu=cc",
-            'no_fuse_features="simd-accel,tier,replication-s3-control-plane,replication-gcs-control-plane,replication-azure-control-plane,coordinator-dynamodb,coordinator-spanner,coordinator-cosmosdb,watch,nfs,gix-pathmatch"',
-            "--no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch",
+            f'no_fuse_features="{UNIX_CLI_FLAGS}"',
+            f"--no-default-features --features {WINDOWS_CLI_FLAGS}",
             '--no-default-features --features "$no_fuse_features"',
             "-p crab --bin crab-nfs-mount",
             "ln -sf crab target/${{ matrix.target }}/release/crab-nfs-mount",

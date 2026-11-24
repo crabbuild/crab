@@ -8,18 +8,31 @@ import ipaddress
 import json
 import math
 import os
+import re
 import secrets
 import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import structlog
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from jwt import PyJWTError
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.auth import JWTVerifier, TokenClaims
+from src.cdn import (
+    APPROVAL_HEADER,
+    CAPABILITY_HEADER,
+    CAPABILITY_VERSION,
+    ApprovalConflict,
+    CdnGrant,
+    issue_viewer_grant,
+    requested_approvals,
+    resolve_export,
+)
 from src.policy import PolicyEngine, PolicyDecision
 from src.providers import get_provider
 from src.receive_helper import (
@@ -39,6 +52,18 @@ from src.view_helper import (
     ViewMaterializationResult,
     ViewRuntimeStatus,
 )
+from src.view_retention import (
+    ChangeRetention,
+    NativeRetentionReply,
+    RetainedViewCredentials,
+    RetentionAcquired,
+    RetentionAction,
+    RetentionConflict,
+    RetentionRenewed,
+    RetentionReply,
+    RetentionVerified,
+    ViewRetentionBinding,
+)
 
 logger = structlog.get_logger()
 
@@ -50,6 +75,8 @@ MAX_REF_NAME_LEN = 512
 MAX_REF_UPDATES = 32
 MAX_CHANGED_PATHS = 10000
 MAX_CHANGED_PATH_LEN = 4096
+VIEW_RETENTION_PATH = "/v1/views/retention"
+NO_STORE_HEADERS = {"Cache-Control": "no-store"}
 DEFAULT_STAGING_TTL_SECONDS = 86400
 DEFAULT_RATE_LIMIT_MAX_KEYS = 10000
 RATE_LIMIT_IDLE_TTL_SECONDS = 3600
@@ -89,6 +116,7 @@ async def validation_exception_handler(
     )
     return JSONResponse(
         status_code=400,
+        headers=NO_STORE_HEADERS if request.url.path == VIEW_RETENTION_PATH else None,
         content={
             "detail": {
                 "error": "invalid_request",
@@ -364,6 +392,7 @@ class AuthRequest(RequestModel):
     repo_url: RepoUrlField
     operation: OperationField
     client_version: ClientVersionField = ""
+    retained_view: RetainedViewCredentials | None = Field(default=None, repr=False)
 
 
 class StorageScope(BaseModel):
@@ -379,6 +408,14 @@ class AuthResponse(BaseModel):
     expires_at: str
     permissions: list[str]
     storage_scope: StorageScope | None = None
+    cdn: CdnGrant | None = Field(default=None, repr=False)
+
+
+class ViewRetentionRequest(ViewRetentionBinding):
+    id_token: IdTokenField = Field(repr=False)
+    repo_url: RepoUrlField
+    read_operation: Literal["mount", "fetch"]
+    operation: RetentionAction
 
 
 class PushRefUpdate(RequestModel):
@@ -482,7 +519,10 @@ async def _materialize_filtered_read_scope(
                 "message": "Failed to materialize ACL-filtered repository view",
             },
         )
-    expected_global_prefix = f"{view.repo_prefix}/.crab"
+    source_digest = view.source_manifest_hash
+    generation = view.source_generation
+    expected_view = f"{parsed.prefix}/acl-views/v2/{scope_hash}/{generation}-{source_digest}"
+    expected_global_prefix = f"{expected_view}/.crab"
     try:
         parse_repo_url(f"crab://{parsed.bucket}/{view.repo_prefix}")
     except RepoUrlError as e:
@@ -504,6 +544,11 @@ async def _materialize_filtered_read_scope(
     if (
         view.scope_hash != scope_hash
         or view.source_repo != parsed.prefix
+        or type(generation) is not int
+        or not 0 <= generation < 2**64
+        or not isinstance(source_digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", source_digest) is None
+        or view.repo_prefix != expected_view
         or view.global_prefix != expected_global_prefix
     ):
         log.error(
@@ -704,7 +749,9 @@ def _raise_provider_env(provider: str, name: str) -> None:
         429: {"model": ErrorResponse},
     },
 )
-async def issue_credentials(body: AuthRequest, request: Request) -> AuthResponse:
+async def issue_credentials(
+    body: AuthRequest, request: Request, response: Response
+) -> AuthResponse:
     start = time.time()
     log = logger.bind(
         repo_url=body.repo_url,
@@ -722,13 +769,18 @@ async def issue_credentials(body: AuthRequest, request: Request) -> AuthResponse
             },
         )
 
-    claims, decision = await _authorize_request(
-        id_token=body.id_token,
-        repo_url=body.repo_url,
-        operation=body.operation,
-        request=request,
-        log=log,
-    )
+    try:
+        claims, decision = await _authorize_request(
+            id_token=body.id_token,
+            repo_url=body.repo_url,
+            operation=body.operation,
+            request=request,
+            log=log,
+        )
+    except HTTPException as error:
+        if body.retained_view is not None:
+            error.headers = dict(error.headers or {}) | NO_STORE_HEADERS
+        raise
     if "immutable-write" in decision.permissions:
         log.warning(
             "protected_repo_credentials_write_rejected",
@@ -746,12 +798,28 @@ async def issue_credentials(body: AuthRequest, request: Request) -> AuthResponse
             },
         )
 
-    credential_repo_url, storage_scope, view = await _materialize_filtered_read_scope(
-        repo_url=body.repo_url,
-        claims=claims,
-        decision=decision,
-        log=log,
-    )
+    view = None
+    retained_until = None
+    if body.retained_view is not None:
+        response.headers.update(NO_STORE_HEADERS)
+        retained = body.retained_view
+        native, storage_scope = _retention_binding(
+            body.repo_url, retained, claims, decision, body.operation.strip().lower(),
+        )
+        started = time.monotonic()
+        verified = await _run_retention(native, {"action": "verify", "incarnation": retained.incarnation}, log)
+        if not isinstance(verified, RetentionVerified) or verified.repo_prefix != storage_scope.repo_prefix:
+            raise _retention_failure(503, "retention_invalid_reply")
+        retained_until = started + verified.remaining_ms / 1000
+        parsed = parse_repo_url(body.repo_url)
+        credential_repo_url = f"crab://{parsed.bucket}/{storage_scope.repo_prefix}"
+    else:
+        credential_repo_url, storage_scope, view = await _materialize_filtered_read_scope(
+            repo_url=body.repo_url,
+            claims=claims,
+            decision=decision,
+            log=log,
+        )
 
     provider = get_provider(decision.provider)
     try:
@@ -771,6 +839,53 @@ async def issue_credentials(body: AuthRequest, request: Request) -> AuthResponse
             },
         )
 
+    cdn = None
+    if request.headers.get(CAPABILITY_HEADER) == CAPABILITY_VERSION:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            approvals = requested_approvals(request.headers.getlist(APPROVAL_HEADER))
+        except ValueError:
+            raise HTTPException(status_code=400, detail={"error": "invalid_cdn_approval_list"},
+                                headers={"Cache-Control": "no-store"}) from None
+        source = parse_repo_url(body.repo_url)
+        export = resolve_export(
+            get_policy().cdn_exports,
+            decision.provider,
+            source.bucket,
+            source.prefix,
+            result.credentials,
+        )
+        if export is not None:
+            try:
+                cdn = await asyncio.to_thread(
+                    issue_viewer_grant,
+                    export,
+                    operation=body.operation,
+                    permissions=decision.permissions,
+                    parent_expiry=result.expires_at,
+                    view_repo_prefix=storage_scope.repo_prefix if storage_scope else None,
+                    view_global_prefix=storage_scope.global_prefix if storage_scope else None,
+                    credentials=result.credentials,
+                    approvals=approvals,
+                    now=datetime.now(timezone.utc),
+                )
+                if cdn is not None and export.approval is not None:
+                    response.headers[APPROVAL_HEADER] = export.approval.sha256
+            except ApprovalConflict:
+                raise HTTPException(status_code=409, detail={"error": "cdn_approval_conflict"},
+                                    headers={"Cache-Control": "no-store"}) from None
+            except (OSError, ValueError, PyJWTError) as e:
+                log.error("cdn_grant_issue_failed", error_type=type(e).__name__)
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        "error": "internal",
+                        "message": "Failed to issue CDN viewer credentials",
+                    },
+                ) from None
+
+    if retained_until is not None and time.monotonic() >= retained_until:
+        raise _retention_failure(409, "retention_revision_lost")
     elapsed_ms = (time.time() - start) * 1000
     log.info(
         "credentials_issued",
@@ -790,7 +905,87 @@ async def issue_credentials(body: AuthRequest, request: Request) -> AuthResponse
         expires_at=result.expires_at,
         permissions=decision.permissions,
         storage_scope=storage_scope,
+        cdn=cdn,
     )
+
+
+@app.post(VIEW_RETENTION_PATH, response_model=RetentionReply)
+async def retain_projected_view(
+    body: ViewRetentionRequest, request: Request, response: Response,
+) -> RetentionReply:
+    operation = body.operation
+    log = logger.bind(action=operation.action)
+    try:
+        claims, decision = await _authorize_request(
+            id_token=body.id_token, repo_url=body.repo_url, operation=body.read_operation, request=request, log=log,
+        )
+    except HTTPException as error:
+        error.headers = dict(error.headers or {}) | NO_STORE_HEADERS
+        raise
+
+    native, _ = _retention_binding(body.repo_url, body, claims, decision, body.read_operation)
+    reply = await _run_retention(native, operation.model_dump(), log)
+    expected = {"acquire": "acquired", "renew": "renewed", "release": "released"}[operation.action]
+    if isinstance(reply, RetentionVerified) or reply.action != expected:
+        raise _retention_failure(503, "retention_invalid_reply")
+    if isinstance(reply, RetentionAcquired) and (
+        reply.repo_prefix != body.view_prefix or reply.revision.sequence != 0
+    ):
+        raise _retention_failure(503, "retention_invalid_reply")
+    if isinstance(reply, RetentionRenewed) and isinstance(operation, ChangeRetention) and (
+        reply.revision.incarnation != operation.revision.incarnation
+        or reply.revision.sequence != operation.revision.sequence + 1
+    ):
+        raise _retention_failure(503, "retention_invalid_reply")
+    response.headers.update(NO_STORE_HEADERS)
+    return reply
+
+
+def _retention_binding(
+    repo_url: str, binding: ViewRetentionBinding, claims: TokenClaims, decision: PolicyDecision, read_operation: str,
+) -> tuple[dict[str, Any], StorageScope]:
+    if (read_operation not in {"mount", "fetch"} or decision.permissions != ["read"]
+        or not claims.issuer or not claims.subject or not _requires_filtered_read_view(decision)):
+        raise _retention_failure(403, "projected_read_required")
+    parsed = parse_repo_url(repo_url)
+    repo_url = f"crab://{parsed.bucket}/{parsed.prefix}"
+    scope_hash = _read_scope_hash(
+        source_repo=parsed.prefix, read_paths=decision.read_paths, denied_read_paths=decision.denied_read_paths,
+    )
+    prefix = f"{parsed.prefix}/acl-views/v2/{scope_hash}/"
+    selection = re.fullmatch(r"(0|[1-9][0-9]{0,19})-([0-9a-f]{64})", binding.view_prefix.removeprefix(prefix))
+    if not binding.view_prefix.startswith(prefix) or selection is None or int(selection[1]) >= 2**64:
+        raise _retention_failure(403, "retention_scope_mismatch")
+
+    # Only the issuer derives ownership. Client-controlled nonces and native
+    # revisions are insufficient to select another principal's claim.
+    reader = hashlib.sha256(json.dumps([
+        "crab retention reader v1", claims.issuer, claims.subject, decision.provider, read_operation,
+        repo_url, binding.view_prefix, binding.target, binding.reader_nonce,
+    ], separators=(",", ":")).encode()).hexdigest()
+    return {
+        "repo_url": repo_url, "provider": decision.provider, "scope_hash": scope_hash,
+        "source_generation": int(selection[1]), "source_digest": selection[2],
+        "reader": reader, "target": binding.target,
+    }, StorageScope(
+        repo_prefix=binding.view_prefix, global_prefix=f"{binding.view_prefix}/.crab",
+        source_repo=parsed.prefix, scope_hash=scope_hash,
+    )
+
+
+async def _run_retention(
+    native: dict[str, Any], operation: dict[str, Any], log: Any,
+) -> NativeRetentionReply:
+    try:
+        return await asyncio.to_thread(get_view_helper().retention, native | {"operation": operation})
+    except RetentionConflict:
+        raise _retention_failure(409, "retention_revision_lost") from None
+    except Exception as error:
+        log.error("view_retention_helper_failed", error_type=type(error).__name__)
+        raise _retention_failure(503, "retention_unavailable") from None
+
+def _retention_failure(status: int, code: str) -> HTTPException:
+    return HTTPException(status_code=status, detail={"error": code}, headers=NO_STORE_HEADERS)
 
 
 @app.post(

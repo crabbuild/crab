@@ -76,6 +76,11 @@ Resources:
           Properties:
             Path: /v1/credentials
             Method: POST
+        ViewRetention:
+          Type: HttpApi
+          Properties:
+            Path: /v1/views/retention
+            Method: POST
         PushPrepare:
           Type: HttpApi
           Properties:

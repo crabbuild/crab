@@ -88,6 +88,7 @@ async fn run_managed_login(args: LoginArgs, config: &Config) -> Result<()> {
         .await?
     };
 
+    let identity = TokenCache::oidc_identity(&tokens.id_token, &discovery.document.oidc.issuer)?;
     let cache = TokenCache::new(cache_dir)?;
     let token_key = managed_token_cache_key(&authority)?;
     cache.store_oidc_tokens(
@@ -102,7 +103,6 @@ async fn run_managed_login(args: LoginArgs, config: &Config) -> Result<()> {
         return Err(error.into());
     }
 
-    let identity = TokenCache::parse_identity(&tokens.id_token)?;
     let display_name = identity.email.as_deref().unwrap_or(&identity.subject);
     eprintln!("Authenticated as {display_name} ({authority})");
     record_managed_login_audits(

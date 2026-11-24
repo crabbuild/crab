@@ -238,6 +238,25 @@ async fn post_fetch_sync_reads_v2_pointer_catalog_without_manifest() {
 }
 
 #[tokio::test]
+async fn post_fetch_sync_keeps_projected_shards_out_of_the_bucket_cache() {
+    let (router, cache, _dir) = setup();
+    publish_v2_shard(&router, b"projected shard").await;
+    let scope = crab_types::storage::StorageScope {
+        repo_prefix: router.repo_prefix().to_owned(),
+        global_prefix: "views/one".into(),
+        source_repo: "team/models".into(),
+        scope_hash: "1".repeat(64),
+    };
+    let store = router.store().clone().with_storage_scope(scope);
+    let router = StoreLayout::new(store, "repo".to_owned());
+
+    run_post_fetch_shard_sync(router, "repo-hash", cache.root(), None, false)
+        .await
+        .unwrap();
+    assert!(!cache.root().exists());
+}
+
+#[tokio::test]
 async fn corrupt_v2_root_does_not_fall_back_to_v1_shards() {
     let (router, _cache, _dir) = setup();
     let manifest = Manifest::default_for_repo("refs/heads/main");

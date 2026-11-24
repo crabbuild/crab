@@ -389,11 +389,32 @@ pub(crate) async fn download_object(
     let cancel = server.cancellation.child_token();
     let permit = server.acquire_transfer(&cancel).await?;
     let guard = cancel.clone().drop_guard();
-    let lfs = LfsObjectStore::new(entry.store.clone(), &entry.config.prefix);
+    let store = if method == Method::GET {
+        let layout = entry.read_layout();
+        if range.is_none() {
+            layout.observe_cdn_read_target(crab_storage::cdn::CdnConsumer::Server);
+        }
+        layout.store()
+    } else {
+        &entry.store
+    };
+    let lfs = LfsObjectStore::new(store.clone(), &entry.config.prefix);
     let deadline = tokio::time::Instant::now() + BUDGET;
-    let (_, delivered_range, stream) = tokio::select! {
+    let read = async {
+        #[cfg(feature = "provider-cdn")]
+        if method == Method::GET
+            && let Some(cache) = &server.lfs_read_cache
+        {
+            return cache
+                .stream_content(&lfs, &pointer.oid, pointer.size, range.clone())
+                .await;
+        }
+        lfs.stream_content(&pointer.oid, pointer.size, range.clone(), None)
+            .await
+    };
+    let (delivered_range, stream) = tokio::select! {
         () = cancel.cancelled() => return Err(Error::Cancelled),
-        result = tokio::time::timeout_at(deadline, lfs.get_stream(&pointer.oid, pointer.size, range.clone())) => result.map_err(|_| Error::Cancelled)??,
+        result = tokio::time::timeout_at(deadline, read) => result.map_err(|_| Error::Cancelled)??,
     };
     let stream = stream.take_until(async move {
         tokio::select! { () = cancel.cancelled() => {}, () = tokio::time::sleep_until(deadline) => {} }

@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
 from typing import Any
+
+from cdn_qualification import CdnEvidenceError, decode, release_scopes, verify_cdn_report
 
 
 SCHEMA = "crab.provider-qualification"
@@ -155,9 +158,24 @@ def main() -> int:
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--run-attempt", required=True)
+    parser.add_argument("--cdn-report", type=Path)
+    parser.add_argument("--cdn-scope", metavar="PROVIDER/ACCESS/CONSUMER/FAMILY/PROFILE")
+    parser.add_argument("--cdn-configuration-sha256")
+    parser.add_argument("--cdn-platform")
+    parser.add_argument("--cdn-benchmark-registration", type=Path)
+    parser.add_argument("--cdn-release-policy", type=Path)
     args = parser.parse_args()
+    cdn_args = (args.cdn_report, args.cdn_scope, args.cdn_configuration_sha256,
+                args.cdn_platform, args.cdn_benchmark_registration)
+    if any(value is not None for value in cdn_args) and not all(cdn_args):
+        parser.error("CDN qualification requires all five --cdn-* options")
+    if args.cdn_release_policy is not None and not args.cdn_report:
+        parser.error("--cdn-release-policy requires CDN qualification options")
     try:
-        report = json.loads(args.report.read_text(encoding="utf-8"))
+        if args.cdn_release_policy is not None and args.cdn_scope not in release_scopes(args.cdn_release_policy):
+            raise EvidenceError("CDN qualification scope is absent from the release policy")
+        origin_bytes = args.report.read_bytes()
+        report = decode(origin_bytes)
         if not isinstance(report, dict):
             raise EvidenceError("report root must be an object")
         result = verify_report(
@@ -167,7 +185,17 @@ def main() -> int:
             run_id=args.run_id,
             run_attempt=args.run_attempt,
         )
-    except (OSError, json.JSONDecodeError, EvidenceError) as error:
+        if args.cdn_report is not None:
+            result["cdn"] = verify_cdn_report(
+                decode(args.cdn_report.read_bytes()), scope=args.cdn_scope,
+                configuration_sha256=args.cdn_configuration_sha256, platform=args.cdn_platform,
+                provider=args.provider, verified_origin=result,
+                origin_sha256=hashlib.sha256(origin_bytes).hexdigest(), source_sha=args.source_sha,
+                run_id=args.run_id, run_attempt=args.run_attempt, directory=args.cdn_report.parent,
+                registration=decode(args.cdn_benchmark_registration.read_bytes()),
+                policy=args.cdn_release_policy,
+            )
+    except (OSError, UnicodeError, json.JSONDecodeError, EvidenceError, CdnEvidenceError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     print(json.dumps(result, sort_keys=True))

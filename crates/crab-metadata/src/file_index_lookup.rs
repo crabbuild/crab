@@ -23,6 +23,7 @@ const DB_LABEL: &str = "file_index_db";
 const GET_BATCH_CONCURRENCY: usize = 256;
 const SHARD_SEARCH_CONCURRENCY: usize = 4;
 const MAX_VERIFIED_CATALOG_FILES: usize = 4096;
+const MAX_VERIFIED_CATALOG_XORBS: usize = 4096;
 static SHARD_SCANS: LazyLock<Arc<tokio::sync::Semaphore>> =
     LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(SHARD_SEARCH_CONCURRENCY)));
 
@@ -147,9 +148,26 @@ impl CommittedShardAnchor {
 
 #[derive(Debug, Default)]
 struct FileLookupCache {
-    found: HashMap<MerkleHash, MerkleHash>,
+    found: HashMap<MerkleHash, ShardLocation>,
     missing: HashSet<MerkleHash>,
+    xorb_sizes: HashMap<MerkleHash, u64>,
     shard_visits: usize,
+}
+
+/// Shard identity for a file and its encoded size when committed by a native catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ShardLocation {
+    pub hash: MerkleHash,
+    pub encoded_size: Option<u64>,
+}
+
+impl ShardLocation {
+    fn origin(hash: MerkleHash) -> Self {
+        Self {
+            hash,
+            encoded_size: None,
+        }
+    }
 }
 
 fn validate_record(
@@ -437,9 +455,14 @@ impl FileIndexLookupSession {
 
     /// Look up one file hash in the open session.
     pub async fn lookup(&self, file_hash: &MerkleHash) -> Result<Option<MerkleHash>> {
+        Ok(self.lookup_shard(file_hash).await?.map(|shard| shard.hash))
+    }
+
+    /// Resolve one file's shard and any size authenticated by the selected catalog.
+    pub async fn lookup_shard(&self, file_hash: &MerkleHash) -> Result<Option<ShardLocation>> {
         if self.catalog.is_some() {
             return Ok(self
-                .lookup_batch(&[*file_hash])
+                .lookup_shards_batch(&[*file_hash])
                 .await?
                 .into_iter()
                 .next()
@@ -449,14 +472,15 @@ impl FileIndexLookupSession {
             && let Some(record) =
                 lookup_committed_record(reader, *file_hash, self.anchor.as_ref()).await?
         {
-            return Ok(Some(record.shard_hash));
+            return Ok(Some(ShardLocation::origin(record.shard_hash)));
         }
         Ok(self
             .manifest_scoped_lookup_batch(&[*file_hash])
             .await?
             .into_iter()
             .next()
-            .flatten())
+            .flatten()
+            .map(ShardLocation::origin))
     }
 
     /// Look up file hashes in one bounded-parallel batch.
@@ -466,6 +490,19 @@ impl FileIndexLookupSession {
         &self,
         file_hashes: &[MerkleHash],
     ) -> Result<Vec<Option<MerkleHash>>> {
+        Ok(self
+            .lookup_shards_batch(file_hashes)
+            .await?
+            .into_iter()
+            .map(|shard| shard.map(|shard| shard.hash))
+            .collect())
+    }
+
+    /// Resolve file shard identities and committed sizes in input order.
+    pub async fn lookup_shards_batch(
+        &self,
+        file_hashes: &[MerkleHash],
+    ) -> Result<Vec<Option<ShardLocation>>> {
         check_limit(file_hashes.len(), self.limits.max_files, "file queries")?;
         if file_hashes.is_empty() {
             return Ok(Vec::new());
@@ -476,7 +513,7 @@ impl FileIndexLookupSession {
         let records = self.lookup_committed_records_batch(file_hashes).await?;
         let mut out = records
             .into_iter()
-            .map(|record| record.map(|record| record.shard_hash))
+            .map(|record| record.map(|record| ShardLocation::origin(record.shard_hash)))
             .collect::<Vec<_>>();
         let misses = out
             .iter()
@@ -489,7 +526,7 @@ impl FileIndexLookupSession {
         let missing_hashes = misses.iter().map(|(_, hash)| *hash).collect::<Vec<_>>();
         let repaired = self.manifest_scoped_lookup_batch(&missing_hashes).await?;
         for ((index, _), shard_hash) in misses.into_iter().zip(repaired) {
-            out[index] = shard_hash;
+            out[index] = shard_hash.map(ShardLocation::origin);
         }
         Ok(out)
     }
@@ -498,7 +535,7 @@ impl FileIndexLookupSession {
         &self,
         lookup: &crate::capsule_protocol::PointerCatalogLookup,
         hashes: &[MerkleHash],
-    ) -> Result<Vec<Option<MerkleHash>>> {
+    ) -> Result<Vec<Option<ShardLocation>>> {
         let mut output = vec![None; hashes.len()];
         let missing = {
             let cache = self.resolved_files.lock().await;
@@ -529,17 +566,47 @@ impl FileIndexLookupSession {
                 .files()
                 .get(&hash.hex())
                 .map(|entry| {
-                    MerkleHash::from_hex(entry.shard_hash()).map_err(|source| {
+                    let hash = MerkleHash::from_hex(entry.shard_hash()).map_err(|source| {
                         MetadataError::CorruptObject {
                             path: "capsule-protocol pointer catalog".to_owned(),
                             reason: format!("invalid shard hash {}: {source}", entry.shard_hash()),
                         }
+                    })?;
+                    let shard = selected.shards().get(entry.shard_hash()).ok_or_else(|| {
+                        MetadataError::CorruptObject {
+                            path: "capsule-protocol pointer catalog".to_owned(),
+                            reason: "file binding has no authenticated shard descriptor".to_owned(),
+                        }
+                    })?;
+                    Ok::<_, MetadataError>(ShardLocation {
+                        hash,
+                        encoded_size: Some(shard.encoded_size()),
                     })
                 })
                 .transpose()?;
         }
         if !missing.is_empty() {
+            let xorb_sizes = selected
+                .xorbs()
+                .iter()
+                .take(MAX_VERIFIED_CATALOG_XORBS)
+                .map(|(key, entry)| {
+                    let hash = MerkleHash::from_hex(key).map_err(|source| {
+                        MetadataError::CorruptObject {
+                            path: "capsule-protocol pointer catalog".to_owned(),
+                            reason: format!("invalid xorb hash {key}: {source}"),
+                        }
+                    })?;
+                    Ok((hash, entry.encoded_size()))
+                })
+                .collect::<Result<Vec<_>>>()?;
             let mut cache = self.resolved_files.lock().await;
+            // Preserve bounded lengths from the authenticated dependency closure.
+            // A missing size must not trigger another catalog traversal per xorb.
+            if cache.xorb_sizes.len() + xorb_sizes.len() > MAX_VERIFIED_CATALOG_XORBS {
+                cache.xorb_sizes.clear();
+            }
+            cache.xorb_sizes.extend(xorb_sizes);
             for (index, hash) in missing {
                 if cache.found.contains_key(&hash) || cache.missing.contains(&hash) {
                     continue;
@@ -693,7 +760,11 @@ impl FileIndexLookupSession {
                         .or_insert(shard_hash);
                 }
             }
-            cache.found.extend(found);
+            cache.found.extend(
+                found
+                    .into_iter()
+                    .map(|(file, shard)| (file, ShardLocation::origin(shard))),
+            );
             for file_hash in &unresolved {
                 if !cache.found.contains_key(file_hash) {
                     cache.missing.insert(*file_hash);
@@ -715,7 +786,7 @@ impl FileIndexLookupSession {
         }
         Ok(file_hashes
             .iter()
-            .map(|file_hash| cache.found.get(file_hash).copied())
+            .map(|file_hash| cache.found.get(file_hash).map(|shard| shard.hash))
             .collect())
     }
 
@@ -928,6 +999,11 @@ impl SharedFileIndexLookup {
         self.session().await?.lookup(file_hash).await
     }
 
+    /// Resolve a shard and its committed size through the shared reader.
+    pub async fn lookup_shard(&self, file_hash: &MerkleHash) -> Result<Option<ShardLocation>> {
+        self.session().await?.lookup_shard(file_hash).await
+    }
+
     /// Look up file hashes through the shared reader.
     ///
     /// The output vector is aligned with the input slice.
@@ -939,6 +1015,34 @@ impl SharedFileIndexLookup {
             return Ok(Vec::new());
         }
         self.session().await?.lookup_batch(file_hashes).await
+    }
+
+    /// Resolve shared shard locations in input order.
+    pub async fn lookup_shards_batch(
+        &self,
+        file_hashes: &[MerkleHash],
+    ) -> Result<Vec<Option<ShardLocation>>> {
+        if file_hashes.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.session().await?.lookup_shards_batch(file_hashes).await
+    }
+
+    /// Return an encoded size already authenticated by a file dependency lookup.
+    /// An unopened or closed session and a cache miss return no size without storage I/O.
+    pub async fn cached_xorb_encoded_size(&self, hash: &MerkleHash) -> Option<u64> {
+        let guard = self.inner.session.read().await;
+        if self.inner.closed.load(Ordering::Acquire) {
+            return None;
+        }
+        let session = guard.get()?;
+        session
+            .resolved_files
+            .lock()
+            .await
+            .xorb_sizes
+            .get(hash)
+            .copied()
     }
 
     async fn session(&self) -> Result<tokio::sync::RwLockReadGuard<'_, FileIndexLookupSession>> {

@@ -218,6 +218,12 @@ resource "aws_apigatewayv2_route" "credentials" {
   target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
 }
 
+resource "aws_apigatewayv2_route" "view_retention" {
+  api_id    = aws_apigatewayv2_api.auth.id
+  route_key = "POST /v1/views/retention"
+  target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+}
+
 resource "aws_apigatewayv2_route" "push_prepare" {
   api_id    = aws_apigatewayv2_api.auth.id
   route_key = "POST /v1/push/prepare"

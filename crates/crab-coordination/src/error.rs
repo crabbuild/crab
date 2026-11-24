@@ -82,6 +82,9 @@ pub enum CoordinationError {
     #[error("captured-read retention failed: {0}")]
     ReadRetentionFailed(#[source] std::sync::Arc<CoordinationError>),
 
+    #[error("captured-read retention issuer failed: {0}")]
+    ReadRetentionIssuer(#[source] Box<dyn std::error::Error + Send + Sync>),
+
     #[error("malformed read retention claim at {path}: {reason}")]
     ReadRetentionMalformed { path: String, reason: String },
 }

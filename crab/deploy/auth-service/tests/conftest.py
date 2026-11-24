@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 
 import jwt as pyjwt
@@ -134,3 +136,37 @@ SAMPLE_POLICY = {
 def sample_policy() -> dict:
     """Sample RBAC policy for testing."""
     return SAMPLE_POLICY
+
+
+@pytest.fixture
+def approve_cdn(tmp_path):
+    def create(entry, **observed):
+        path = tmp_path / "private-binding.json"
+        edge = entry["provider"].replace("_", "-")
+        bucket = entry["origin"].rsplit("/", 1)[-1]
+        azure_group = "/subscriptions/00000000-0000-0000-0000-000000000001/resourcegroups/test"
+        account = "account"
+        resources = {
+            "cloudfront": ("arn:aws:cloudfront::123456789012:distribution/EDIST",
+                           f"accounts/123456789012/buckets/{bucket}", "us-west-2"),
+            "cloud_cdn": ("projects/test-project/global/backendBuckets/test-backend",
+                          f"projects/123456789/buckets/{bucket}", "US"),
+            "front_door": (f"{azure_group}/providers/microsoft.cdn/profiles/test/afdendpoints/test/routes/test",
+                           f"{azure_group}/providers/microsoft.storage/storageaccounts/{account}/blobservices/default/containers/{bucket}",
+                           "westus2"),
+        }
+        deployment, native_resource, native_location = resources[entry["provider"]]
+        binding = {
+            "deployment": deployment, "native_resource": native_resource, "native_location": native_location,
+            "native_origin": entry["origin"], "repo_prefix": entry["repo_prefix"],
+            "view_suffix": entry.get("protected_view_suffix", ""), "base_url": entry["base_url"],
+        } | observed
+        raw = (json.dumps({
+            "schema": "crab.cdn-private-binding-candidate/v1", "binding": binding,
+            "edge": edge,
+            "configuration_sha256": "a" * 64, "deployment_policy_sha256": "b" * 64,
+            "object": {"key_sha256": "d" * 64, "body_sha256": "e" * 64, "bytes": 8},
+        }, sort_keys=True) + "\n").encode()
+        path.write_bytes(raw)
+        return {"path": path, "sha256": hashlib.sha256(raw).hexdigest()}
+    return create

@@ -10,7 +10,7 @@ Owns composition from resolved cloud credentials/managed grants to Store, includ
 ## Read first
 
 1. `crates/crab-auth-store/src/lib.rs` — `build_store_from_credentials / build_protected_push_store`: credential conversion and store construction.
-2. `crates/crab-auth-store/src/refreshing_store.rs` — `RefreshingObjectStore::refresh_parts`: refresh/retry and target binding.
+2. `crates/crab-auth-store/src/refreshing_store.rs` — `RefreshingObjectStore::backend`: refresh/retry and target binding.
 3. `crates/crab-auth-store/src/gateway_store.rs` — `GatewayObjectStore`: scoped HTTP object adapter.
 4. `crates/crab-auth-store/src/managed_repository.rs` — `ManagedRepositoryResolver`: managed discovery, grants, and push finalization.
 
@@ -32,12 +32,18 @@ function in `crates/crab-auth-store/src/lib.rs` → provider construction in
   Source: `crates/crab-auth-store/src/lib.rs`.
 - Refresh may replace secrets for the same target; reject a changed target before replacing the active store or retrying requests.
   Source: `crates/crab-auth-store/src/refreshing_store.rs`.
+- Negotiated direct reads and managed v2 direct reads refresh origin and viewer authority as one generation. A changed view, deployment, or permissions retire the bound read store.
+  Source: `crates/crab-auth-store/src/cdn.rs`, `crates/crab-auth-store/src/managed_read.rs` and `crates/crab-auth-store/src/refreshing_store.rs`.
 - Gateway paths must remain inside the grant repository/staging scope; inspect rejection-before-network tests when changing path mapping.
   Source: `crates/crab-auth-store/src/gateway_store.rs`.
 
 ## Features and platform
 
-Empty default. `refreshing-store` enables object-store/HTTP wrappers; `managed-service` also enables refreshing-store and managed resolution with auth OIDC support. Check that exact slice for managed changes. Live refresh/grant behavior needs dedicated identity-service proof.
+Empty default. `refreshing-store` enables object-store/HTTP wrappers. The
+`managed-service` feature adds managed API resolution. The `operator-cdn`
+feature adds trusted service configuration and direct Crab Auth viewer grants
+for an independently authorized native store. Live refresh and grant behavior
+needs dedicated identity-service proof.
 
 ## Verification
 

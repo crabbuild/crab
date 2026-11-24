@@ -46,6 +46,7 @@ fn repository() -> LogicalRepository {
         revision: 1,
         transfer_modes: vec![TransferMode::Gateway],
         protected_push: true,
+        cdn_read_binding: None,
     }
 }
 
@@ -164,6 +165,8 @@ async fn transfer_grant_issue_is_not_retried_and_refreshes_with_new_request() {
                 token: SecretString::new("grant-token").unwrap(),
             },
         },
+        cdn: None,
+        cdn_approval_sha256: None,
     };
     let capabilities = ServiceCapabilities {
         schema_version: 1,
@@ -188,6 +191,7 @@ async fn transfer_grant_issue_is_not_retried_and_refreshes_with_new_request() {
             repository_id,
             TransferOperation::Fetch,
             &capabilities,
+            None,
         )
         .await
         .unwrap();
@@ -198,13 +202,333 @@ async fn transfer_grant_issue_is_not_retried_and_refreshes_with_new_request() {
             repository_id,
             TransferOperation::Fetch,
             &capabilities,
+            None,
         )
         .await
         .unwrap();
 
     assert_eq!(issued.grant_id, first);
     assert_eq!(refreshed.grant_id, second);
-    assert_eq!(transport.requests.lock().unwrap().len(), 2);
+    let requests = transport.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let v1_body =
+        format!(r#"{{"schema_version":1,"repository_id":"{repository_id}","operation":"fetch"}}"#);
+    for request in requests.iter() {
+        assert_eq!(request.body.as_deref(), Some(v1_body.as_bytes()));
+    }
+}
+
+fn direct_cdn_capabilities() -> ServiceCapabilities {
+    ServiceCapabilities {
+        schema_version: 1,
+        api_versions: vec![1],
+        transfer_grant_versions: vec![1, 2],
+        transfer_modes: vec![TransferMode::DirectS3],
+        capabilities: vec![],
+        max_page_size: 100,
+        max_grant_lifetime_seconds: 900,
+    }
+}
+
+fn current_cdn_grant() -> TransferGrant {
+    let mut grant: TransferGrant = serde_json::from_str(include_str!(
+        "../../tests/fixtures/managed-v2/transfer-grant-direct-cdn.json"
+    ))
+    .unwrap();
+    let now = OffsetDateTime::now_utc();
+    grant.expires_at = now + time::Duration::minutes(5);
+    grant.cdn.as_mut().unwrap().expires_at = (now + time::Duration::minutes(2))
+        .unix_timestamp()
+        .try_into()
+        .unwrap();
+    grant
+}
+
+#[tokio::test]
+async fn native_read_captures_the_resolved_approval_for_v2_and_refresh() {
+    let grant = current_cdn_grant();
+    let repository = cdn_repository();
+    let mut resolved = response(StatusCode::OK, &repository);
+    resolved.etag = Some("\"revision-7\"".into());
+    let (client, transport) = client(vec![
+        resolved,
+        response(StatusCode::CREATED, &grant),
+        response(StatusCode::CREATED, &grant),
+    ]);
+    let resolved = client
+        .resolve_repository("acme", "models")
+        .await
+        .unwrap()
+        .value;
+    let approval = resolved.cdn_read_binding.as_ref().unwrap();
+    let issued = client
+        .issue_transfer_grant(
+            "acme",
+            "models",
+            resolved.repository_id,
+            TransferOperation::Clone,
+            &direct_cdn_capabilities(),
+            Some(approval),
+        )
+        .await
+        .unwrap();
+    assert_eq!(issued, grant);
+    client
+        .refresh_transfer_grant(
+            "acme",
+            "models",
+            resolved.repository_id,
+            TransferOperation::Clone,
+            &direct_cdn_capabilities(),
+            Some(approval),
+        )
+        .await
+        .unwrap();
+    let requests = transport.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].endpoint.path(), "/v1/repositories/acme/models");
+    for request in &requests[1..] {
+        let request: TransferGrantRequest =
+            serde_json::from_slice(request.body.as_deref().unwrap()).unwrap();
+        assert_eq!(request.schema_version, 2);
+        assert_eq!(
+            request.cdn_approval_sha256.as_deref(),
+            Some(approval.approval_sha256.as_str())
+        );
+    }
+}
+
+fn cdn_repository() -> LogicalRepository {
+    serde_json::from_str(include_str!(
+        "../../tests/fixtures/managed-v2/logical-repository-cdn.json"
+    ))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn repository_resolution_rejects_approval_for_an_unadvertised_mode() {
+    let mut repository = cdn_repository();
+    repository.transfer_modes = vec![TransferMode::Gateway];
+    let mut resolved = response(StatusCode::OK, &repository);
+    resolved.etag = Some("\"revision-7\"".into());
+    let (client, transport) = client(vec![resolved]);
+    let error = client
+        .resolve_repository("acme", "models")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("advertised native mode"));
+    assert_eq!(transport.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn native_read_without_an_approved_native_mode_keeps_the_v1_request() {
+    let repository = cdn_repository();
+    let mut grant = current_cdn_grant();
+    grant.schema_version = 1;
+    grant.cdn = None;
+    grant.cdn_approval_sha256 = None;
+    let binding = repository.cdn_read_binding.as_ref();
+    for (capabilities, binding) in [
+        (direct_cdn_capabilities(), None),
+        (
+            ServiceCapabilities {
+                transfer_grant_versions: vec![1],
+                ..direct_cdn_capabilities()
+            },
+            binding,
+        ),
+    ] {
+        let (client, transport) = client(vec![response(StatusCode::CREATED, &grant)]);
+        client
+            .issue_transfer_grant(
+                "acme",
+                "models",
+                repository.repository_id,
+                TransferOperation::Clone,
+                &capabilities,
+                binding,
+            )
+            .await
+            .unwrap();
+        let sent = transport.requests.lock().unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(sent[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"schema_version": 1, "repository_id": repository.repository_id, "operation": "clone"})
+        );
+    }
+}
+
+#[tokio::test]
+async fn denied_or_invalid_v2_grants_never_downgrade_or_replay() {
+    let grant = current_cdn_grant();
+    let mut malformed = serde_json::to_value(&grant).unwrap();
+    malformed["cdn"] = serde_json::json!("fixture-do-not-log");
+    let mut v1 = grant.clone();
+    v1.schema_version = 1;
+    v1.cdn = None;
+    v1.cdn_approval_sha256 = None;
+    let mut foreign_approval = grant.clone();
+    foreign_approval.cdn_approval_sha256 = Some("b".repeat(64));
+    let repository = cdn_repository();
+    for response in [
+        service_error(StatusCode::FORBIDDEN, true),
+        response(StatusCode::CREATED, &malformed),
+        response(StatusCode::CREATED, &v1),
+        response(StatusCode::CREATED, &foreign_approval),
+    ] {
+        let (client, transport) = client(vec![response]);
+        let error = client
+            .issue_transfer_grant(
+                "acme",
+                "models",
+                grant.repository_id,
+                TransferOperation::Clone,
+                &direct_cdn_capabilities(),
+                repository.cdn_read_binding.as_ref(),
+            )
+            .await
+            .unwrap_err();
+        assert!(!format!("{error:?}").contains("fixture-do-not-log"));
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let request: TransferGrantRequest =
+            serde_json::from_slice(requests[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(request.schema_version, 2);
+    }
+}
+
+#[tokio::test]
+async fn managed_read_observes_actual_status_and_approval_without_credentials() {
+    #[derive(Default)]
+    struct Capture(Mutex<Vec<BTreeMap<String, String>>>);
+
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.target() == CDN_OBSERVATION_TARGET
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::Id {
+            tracing::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::Id, _: &tracing::Id) {}
+        fn enter(&self, _: &tracing::Id) {}
+        fn exit(&self, _: &tracing::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            if event.metadata().target() != CDN_OBSERVATION_TARGET {
+                return;
+            }
+            struct Fields(BTreeMap<String, String>);
+            impl tracing::field::Visit for Fields {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    self.0.insert(field.name().to_owned(), format!("{value:?}"));
+                }
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    self.0.insert(field.name().to_owned(), value.to_owned());
+                }
+            }
+            let mut fields = Fields(BTreeMap::new());
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields.0);
+        }
+    }
+
+    let repository = cdn_repository();
+    let binding = repository.cdn_read_binding.as_ref().unwrap();
+    let mut resolved = response(StatusCode::OK, &repository);
+    resolved.etag = Some("\"revision-7\"".to_owned());
+    let v2 = current_cdn_grant();
+    let mut v1 = v2.clone();
+    v1.schema_version = 1;
+    v1.cdn = None;
+    v1.cdn_approval_sha256 = None;
+    let mut foreign = v2.clone();
+    let foreign_approval = "b".repeat(64);
+    foreign.cdn_approval_sha256 = Some(foreign_approval.clone());
+    let (client, transport) = client(vec![
+        resolved,
+        response(StatusCode::CREATED, &v2),
+        response(StatusCode::CREATED, &v1),
+        service_error(StatusCode::FORBIDDEN, true),
+        response(StatusCode::CREATED, &foreign),
+    ]);
+    let capture = Arc::new(Capture::default());
+    // Keep callsite interest dynamic while other test threads use a silent subscriber.
+    let _silent = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let dispatcher = tracing::Dispatch::new(capture.clone());
+    let _guard = tracing::dispatcher::set_default(&dispatcher);
+    let resolved = client
+        .resolve_repository("acme", "models")
+        .await
+        .unwrap()
+        .value;
+    for (approved, outcome) in [
+        (Some(binding), true),
+        (None, true),
+        (Some(binding), false),
+        (Some(binding), false),
+    ] {
+        let result = client
+            .issue_transfer_grant(
+                "acme",
+                "models",
+                resolved.repository_id,
+                TransferOperation::Clone,
+                &direct_cdn_capabilities(),
+                approved,
+            )
+            .await;
+        assert_eq!(result.is_ok(), outcome);
+    }
+    assert_eq!(transport.requests.lock().unwrap().len(), 5);
+    let seen = capture.0.lock().unwrap();
+    assert_eq!(seen.len(), 5, "managed resolution and grant events");
+    let [resolution, approved, peer, denied, rejected] = seen.as_slice() else {
+        panic!("expected one resolution and four grant observations");
+    };
+    assert_eq!(
+        resolution["binding_approval_sha256"],
+        binding.approval_sha256
+    );
+    assert_eq!(
+        approved["grant_origin_sha256"],
+        sha256(binding.origin.as_bytes())
+    );
+    assert_eq!(
+        peer["grant_prefix_sha256"],
+        sha256(binding.repository_prefix.as_bytes())
+    );
+    for (event, status, request, response, accepted) in [
+        (approved, "201", "2", "2", "true"),
+        (peer, "201", "1", "1", "true"),
+        (denied, "403", "2", "0", "false"),
+        (rejected, "201", "2", "2", "false"),
+    ] {
+        assert_eq!(event["repository_sha256"], resolution["repository_sha256"]);
+        assert_eq!(event["status"], status);
+        assert_eq!(event["request_version"], request);
+        assert_eq!(event["grant_version"], response);
+        assert_eq!(event["accepted"], accepted);
+    }
+    assert_eq!(rejected["grant_approval_sha256"], foreign_approval);
+    assert!(rejected["grant_origin_sha256"].is_empty());
+    let formatted = format!("{seen:?}");
+    for private in [
+        "secret-token",
+        "fixture-session-token",
+        "crab://crab.build/acme/models",
+        binding.origin.as_str(),
+        binding.base_url.as_str(),
+    ] {
+        assert!(!formatted.contains(private));
+    }
 }
 
 #[tokio::test]
@@ -228,6 +552,7 @@ async fn transfer_grant_failure_requires_explicit_refresh_attempt() {
             repository_id,
             TransferOperation::Fetch,
             &capabilities,
+            None,
         )
         .await
         .unwrap_err();
@@ -264,6 +589,8 @@ async fn push_prepare_retries_same_request_and_resumes_same_session_with_fresh_g
                 token: SecretString::new("grant-token").unwrap(),
             },
         },
+        cdn: None,
+        cdn_approval_sha256: None,
     };
     let prepared = |grant_id| PushPrepareResponse {
         schema_version: 1,

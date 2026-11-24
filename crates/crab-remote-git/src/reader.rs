@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod deep_delta_tests;
 mod delta_plan;
+mod edge_batch;
+mod edge_entry;
 mod index_batch;
 
 use std::collections::{HashMap, HashSet};
@@ -141,6 +143,11 @@ struct CoalescedRange {
     end: u64,
     extra_bytes: u64,
     entries: Vec<CoalescedRangeEntry>,
+}
+
+struct PackedRangePlan {
+    ranges: Vec<CoalescedRange>,
+    selected: HashMap<PackedEntryKey, (gix_hash::ObjectId, GitObjectLocator)>,
 }
 
 struct DeltaReadState {
@@ -289,6 +296,7 @@ pub struct RemoteGitPackSource {
 
 #[derive(Debug, Clone)]
 struct LazyPackSidecars {
+    source_size: u64,
     window: std::ops::Range<u64>,
     index: RemoteGitSidecarRange,
     reverse_index: RemoteGitSidecarRange,
@@ -297,11 +305,19 @@ struct LazyPackSidecars {
 
 #[derive(Debug, Clone)]
 struct LazyPackIndex {
+    source_size: u64,
     index: RemoteGitSidecarRange,
     reverse_index: RemoteGitSidecarRange,
 }
 
 impl RemoteGitPackSource {
+    fn authenticated_object_size(&self) -> Option<u64> {
+        self.lazy_sidecars
+            .as_ref()
+            .map(|sidecars| sidecars.source_size)
+            .or_else(|| self.lazy_index.as_ref().map(|index| index.source_size))
+    }
+
     /// Bind a pack to a byte range in an immutable object-store object.
     pub fn embedded(
         path: ObjectPath,
@@ -392,6 +408,7 @@ impl RemoteGitPackSource {
             reverse_index: None,
             kind_metadata: None,
             lazy_sidecars: Some(LazyPackSidecars {
+                source_size,
                 window: window_start..window_end,
                 index,
                 reverse_index,
@@ -449,6 +466,7 @@ impl RemoteGitPackSource {
             kind_metadata: None,
             lazy_sidecars: None,
             lazy_index: Some(LazyPackIndex {
+                source_size,
                 index,
                 reverse_index,
             }),
@@ -826,6 +844,10 @@ impl RemoteGitReader {
                 check_limit(REQUESTED_OBJECT_SIZE, size, maximum)?;
                 check_limit("decoded object bytes", size, self.limits.max_object_bytes)?;
             }
+            if object.kind == gix_object::Kind::Blob {
+                self.store
+                    .observe_verified_git_cache_hit(requested.as_bytes());
+            }
             return Ok(object.as_ref().clone());
         }
         if self.runtime.exact_miss_is_cached(&key).await {
@@ -835,11 +857,25 @@ impl RemoteGitReader {
             let locator = self
                 .locate(session, requested, budget, cancellation)
                 .await?;
+            if root_size_limit.is_some() {
+                // A size-capped root can be skipped before verifying its OID.
+                // Only the pinned origin entry may make that admission decision.
+                return self
+                    .read_origin_locator(
+                        session,
+                        (requested, locator),
+                        self.limits.max_object_bytes,
+                        root_size_limit,
+                        budget,
+                        cancellation,
+                    )
+                    .await;
+            }
             self.read_resolved_locator(
                 session,
-                (requested, locator),
+                requested,
+                locator,
                 self.limits.max_object_bytes,
-                root_size_limit,
                 budget,
                 cancellation,
             )
@@ -950,15 +986,8 @@ impl RemoteGitReader {
         let locator = self
             .locate(session, requested, budget, cancellation)
             .await?;
-        self.read_resolved_locator(
-            session,
-            (requested, locator),
-            maximum,
-            None,
-            budget,
-            cancellation,
-        )
-        .await
+        self.read_resolved_locator(session, requested, locator, maximum, budget, cancellation)
+            .await
     }
 
     async fn lookup_batch_for_read(
@@ -1509,25 +1538,16 @@ impl RemoteGitReader {
             .collect::<Result<Vec<_>>>()?;
         // Batch delta dependencies with the selected entries. Resolving them
         // one object at a time multiplies locator and range reads on deep history.
-        let packed = self
-            .read_packed_many_with_session_and_locators(
+        let read: futures_util::future::BoxFuture<'_, Result<Vec<GitObject>>> =
+            Box::pin(self.read_verified_packed_batch(
+                session,
                 &missing,
                 &locators,
                 concurrency,
                 budget,
                 cancellation,
-            )
-            .await?;
-        let objects = self
-            .materialize_packed_entries(
-                session,
-                packed,
-                &missing,
-                concurrency,
-                budget,
-                cancellation,
-            )
-            .await?;
+            ));
+        let objects = read.await?;
         for object in objects {
             completed.insert(object.oid, object);
         }
@@ -1569,159 +1589,13 @@ impl RemoteGitReader {
         if requested.is_empty() {
             return Ok(Vec::new());
         }
-        if requested.len() != locators.len() {
-            return Err(Error::Corrupt {
-                stage: CorruptionStage::Locator,
-            });
-        }
-        let mut ready = Vec::new();
-        ready
-            .try_reserve_exact(requested.len())
-            .map_err(|source| Error::Allocation {
-                requested: requested
-                    .len()
-                    .saturating_mul(std::mem::size_of::<(gix_hash::ObjectId, GitObjectLocator)>()),
-                source,
-            })?;
-        let mut selected_base_oids = HashMap::with_capacity(requested.len());
-        for (oid, locator) in requested.iter().copied().zip(locators.iter().copied()) {
-            check_limit(
-                "packed entry bytes",
-                locator.location.entry_len,
-                self.limits.max_packed_entry_bytes,
-            )?;
-            if selected_base_oids
-                .insert(
-                    (locator.pack_id, locator.location.pack_offset),
-                    (oid, locator),
-                )
-                .is_some_and(|(previous, _)| previous != oid)
-            {
-                return Err(Error::Corrupt {
-                    stage: CorruptionStage::Locator,
-                });
-            }
-            ready.push((oid, locator));
-        }
-        let ranges = self.coalesce_reader_ranges(ready)?;
-        let caller_cancellation = cancellation.clone();
-        let results = stream::iter(ranges.into_iter().map(|range| {
-            let reader = Arc::clone(self);
-            let caller_cancellation = caller_cancellation.clone();
-            let selected_base_oids = &selected_base_oids;
-            async move {
-                let bytes = reader
-                    .read_coalesced_range(&range, budget, &caller_cancellation)
-                    .await?;
-                let mut entries = Vec::with_capacity(range.entries.len());
-                for entry in range.entries {
-                    let relative_start =
-                        entry
-                            .source_start
-                            .checked_sub(range.start)
-                            .ok_or(Error::Corrupt {
-                                stage: CorruptionStage::PackEntry,
-                            })?;
-                    let relative_end = relative_start
-                        .checked_add(entry.locator.location.entry_len)
-                        .ok_or(Error::Corrupt {
-                            stage: CorruptionStage::PackEntry,
-                        })?;
-                    let start = usize::try_from(relative_start).map_err(|_| Error::Corrupt {
-                        stage: CorruptionStage::PackEntry,
-                    })?;
-                    let end = usize::try_from(relative_end).map_err(|_| Error::Corrupt {
-                        stage: CorruptionStage::PackEntry,
-                    })?;
-                    let entry_bytes = bytes.get(start..end).ok_or(Error::Corrupt {
-                        stage: CorruptionStage::PackEntry,
-                    })?;
-                    reader
-                        .verify_packed_entry_crc(entry.oid, &entry.locator, entry_bytes)
-                        .await?;
-                    let parsed = gix_pack::data::Entry::from_bytes(
-                        entry_bytes,
-                        entry.locator.location.pack_offset,
-                        20,
-                    )
-                    .map_err(|source| Error::PackEntry {
-                        oid: entry.oid,
-                        source,
-                    })?;
-                    let maximum = if parsed.header.as_kind().is_some() {
-                        reader
-                            .limits
-                            .max_inflated_entry_bytes
-                            .min(reader.limits.max_object_bytes)
-                    } else {
-                        reader.limits.max_inflated_entry_bytes
-                    };
-                    check_limit(
-                        "inflated pack entry bytes",
-                        parsed.decompressed_size,
-                        maximum,
-                    )?;
-                    let header_size = parsed.header_size();
-                    if header_size >= entry_bytes.len() {
-                        return Err(Error::Corrupt {
-                            stage: CorruptionStage::PackEntry,
-                        });
-                    }
-                    let local_base = match parsed.header {
-                        Header::OfsDelta { base_distance } => {
-                            let base_offset = Header::verified_base_pack_offset(
-                                entry.locator.location.pack_offset,
-                                base_distance,
-                            )
-                            .ok_or(Error::Corrupt {
-                                stage: CorruptionStage::Delta,
-                            })?;
-                            // Selected authenticated locations need no index reload.
-                            match selected_base_oids.get(&(entry.locator.pack_id, base_offset)) {
-                                Some(base) => Some(*base),
-                                None => {
-                                    reader
-                                        .local_delta_base(
-                                            entry.locator.pack_id,
-                                            entry.locator.location.pack_offset,
-                                            parsed.header,
-                                            budget,
-                                            &caller_cancellation,
-                                        )
-                                        .await?
-                                }
-                            }
-                        }
-                        Header::RefDelta { .. } => None,
-                        Header::Commit | Header::Tree | Header::Blob | Header::Tag => None,
-                    };
-                    let base_oid = local_base.map(|(oid, _)| oid).or(match parsed.header {
-                        Header::RefDelta { base_id } => Some(base_id),
-                        _ => None,
-                    });
-                    entries.push(RemoteGitPackedEntry {
-                        pack_id: entry.locator.pack_id,
-                        base_locator: local_base.map(|(_, locator)| locator),
-                        oid: entry.oid,
-                        pack_offset: entry.locator.location.pack_offset,
-                        header: parsed.header,
-                        decompressed_size: parsed.decompressed_size,
-                        header_size,
-                        base_oid,
-                        bytes: Bytes::copy_from_slice(entry_bytes),
-                    });
-                }
-                Ok::<_, Error>(entries)
-            }
-        }))
-        .buffer_unordered(concurrency)
-        .collect::<Vec<_>>()
-        .await;
+        let plan = self.plan_packed_ranges(requested, locators)?;
+        let entries = self
+            .read_packed_ranges_at_origin(&plan, concurrency, budget, cancellation)
+            .await?;
         let mut completed = HashMap::with_capacity(requested.len());
-        for result in results {
-            for entry in result? {
-                completed.insert((entry.pack_id, entry.pack_offset), entry);
-            }
+        for entry in entries {
+            completed.insert((entry.pack_id, entry.pack_offset), entry);
         }
         locators
             .iter()
@@ -1736,6 +1610,189 @@ impl RemoteGitReader {
             .collect()
     }
 
+    fn plan_packed_ranges(
+        &self,
+        requested: &[gix_hash::ObjectId],
+        locators: &[GitObjectLocator],
+    ) -> Result<PackedRangePlan> {
+        if requested.len() != locators.len() {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::Locator,
+            });
+        }
+        let mut ready = Vec::new();
+        ready
+            .try_reserve_exact(requested.len())
+            .map_err(|source| Error::Allocation {
+                requested: requested
+                    .len()
+                    .saturating_mul(std::mem::size_of::<(gix_hash::ObjectId, GitObjectLocator)>()),
+                source,
+            })?;
+        let mut selected = HashMap::with_capacity(requested.len());
+        for (oid, locator) in requested.iter().copied().zip(locators.iter().copied()) {
+            check_limit(
+                "packed entry bytes",
+                locator.location.entry_len,
+                self.limits.max_packed_entry_bytes,
+            )?;
+            if selected
+                .insert(
+                    (locator.pack_id, locator.location.pack_offset),
+                    (oid, locator),
+                )
+                .is_some_and(|(previous, _)| previous != oid)
+            {
+                return Err(Error::Corrupt {
+                    stage: CorruptionStage::Locator,
+                });
+            }
+            ready.push((oid, locator));
+        }
+        Ok(PackedRangePlan {
+            ranges: self.coalesce_reader_ranges(ready)?,
+            selected,
+        })
+    }
+
+    async fn read_packed_ranges_at_origin(
+        &self,
+        plan: &PackedRangePlan,
+        concurrency: usize,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<RemoteGitPackedEntry>> {
+        let results = stream::iter(0..plan.ranges.len())
+            .map(|index| async move {
+                let range = &plan.ranges[index];
+                let bytes = self
+                    .read_coalesced_range(range, budget, cancellation)
+                    .await?;
+                let parsed = self
+                    .parse_packed_range(range, bytes, &plan.selected, budget, cancellation)
+                    .await;
+                if matches!(parsed, Err(Error::PackedEntryCrcMismatch { .. })) {
+                    self.runtime.discard_pack_windows().await;
+                }
+                parsed
+            })
+            .buffer_unordered(concurrency)
+            .collect::<Vec<_>>()
+            .await;
+        let mut entries = Vec::with_capacity(plan.selected.len());
+        for result in results {
+            entries.extend(result?);
+        }
+        Ok(entries)
+    }
+
+    async fn parse_packed_range(
+        &self,
+        range: &CoalescedRange,
+        bytes: Bytes,
+        selected: &HashMap<PackedEntryKey, (gix_hash::ObjectId, GitObjectLocator)>,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<RemoteGitPackedEntry>> {
+        let mut entries = Vec::with_capacity(range.entries.len());
+        for entry in &range.entries {
+            let relative_start =
+                entry
+                    .source_start
+                    .checked_sub(range.start)
+                    .ok_or(Error::Corrupt {
+                        stage: CorruptionStage::PackEntry,
+                    })?;
+            let relative_end = relative_start
+                .checked_add(entry.locator.location.entry_len)
+                .ok_or(Error::Corrupt {
+                    stage: CorruptionStage::PackEntry,
+                })?;
+            let start = usize::try_from(relative_start).map_err(|_| Error::Corrupt {
+                stage: CorruptionStage::PackEntry,
+            })?;
+            let end = usize::try_from(relative_end).map_err(|_| Error::Corrupt {
+                stage: CorruptionStage::PackEntry,
+            })?;
+            let entry_bytes = bytes.get(start..end).ok_or(Error::Corrupt {
+                stage: CorruptionStage::PackEntry,
+            })?;
+            if gix_features::hash::crc32(entry_bytes) != entry.locator.location.crc32 {
+                return Err(Error::PackedEntryCrcMismatch { oid: entry.oid });
+            }
+            let parsed = gix_pack::data::Entry::from_bytes(
+                entry_bytes,
+                entry.locator.location.pack_offset,
+                20,
+            )
+            .map_err(|source| Error::PackEntry {
+                oid: entry.oid,
+                source,
+            })?;
+            let maximum = if parsed.header.as_kind().is_some() {
+                self.limits
+                    .max_inflated_entry_bytes
+                    .min(self.limits.max_object_bytes)
+            } else {
+                self.limits.max_inflated_entry_bytes
+            };
+            check_limit(
+                "inflated pack entry bytes",
+                parsed.decompressed_size,
+                maximum,
+            )?;
+            let header_size = parsed.header_size();
+            if header_size >= entry_bytes.len() {
+                return Err(Error::Corrupt {
+                    stage: CorruptionStage::PackEntry,
+                });
+            }
+            let local_base = match parsed.header {
+                Header::OfsDelta { base_distance } => {
+                    let base_offset = Header::verified_base_pack_offset(
+                        entry.locator.location.pack_offset,
+                        base_distance,
+                    )
+                    .ok_or(Error::Corrupt {
+                        stage: CorruptionStage::Delta,
+                    })?;
+                    // Selected authenticated locations need no index reload.
+                    match selected.get(&(entry.locator.pack_id, base_offset)) {
+                        Some(base) => Some(*base),
+                        None => {
+                            self.local_delta_base(
+                                entry.locator.pack_id,
+                                entry.locator.location.pack_offset,
+                                parsed.header,
+                                budget,
+                                cancellation,
+                            )
+                            .await?
+                        }
+                    }
+                }
+                Header::RefDelta { .. } => None,
+                Header::Commit | Header::Tree | Header::Blob | Header::Tag => None,
+            };
+            let base_oid = local_base.map(|(oid, _)| oid).or(match parsed.header {
+                Header::RefDelta { base_id } => Some(base_id),
+                _ => None,
+            });
+            entries.push(RemoteGitPackedEntry {
+                pack_id: entry.locator.pack_id,
+                base_locator: local_base.map(|(_, locator)| locator),
+                oid: entry.oid,
+                pack_offset: entry.locator.location.pack_offset,
+                header: parsed.header,
+                decompressed_size: parsed.decompressed_size,
+                header_size,
+                base_oid,
+                bytes: bytes.slice(start..end),
+            });
+        }
+        Ok(entries)
+    }
+
     pub(crate) async fn materialize_packed_entries(
         self: &Arc<Self>,
         session: &GitObjectLocatorSession,
@@ -1745,8 +1802,37 @@ impl RemoteGitReader {
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<Vec<GitObject>> {
+        self.materialize_packed_entries_with_edge(
+            session,
+            initial_entries,
+            requested,
+            concurrency,
+            budget,
+            cancellation,
+            None,
+        )
+        .await?
+        .ok_or(Error::InternalInvariant {
+            invariant: "native packed object materialization requested an edge restart",
+        })
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the existing materializer shares one optional edge attempt with dependency reads"
+    )]
+    async fn materialize_packed_entries_with_edge(
+        self: &Arc<Self>,
+        session: &GitObjectLocatorSession,
+        initial_entries: Vec<RemoteGitPackedEntry>,
+        requested: &[gix_hash::ObjectId],
+        concurrency: usize,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+        mut edge: Option<&mut edge_batch::EdgePackedBatch<'_>>,
+    ) -> Result<Option<Vec<GitObject>>> {
         if requested.is_empty() {
-            return Ok(Vec::new());
+            return Ok(Some(Vec::new()));
         }
         let mut entries = HashMap::with_capacity(initial_entries.len());
         let mut selected = HashMap::with_capacity(initial_entries.len());
@@ -1935,15 +2021,25 @@ impl RemoteGitReader {
                     .iter()
                     .map(|(_, locator)| *locator)
                     .collect::<Vec<_>>();
-                let fetched = self
-                    .read_packed_many_with_session_and_locators(
-                        &oids,
-                        &locators,
-                        concurrency,
-                        budget,
-                        cancellation,
-                    )
-                    .await?;
+                let plan = self.plan_packed_ranges(&oids, &locators)?;
+                let fetched = if let Some(attempt) = edge.as_deref_mut() {
+                    let Some(fetched) = self
+                        .read_packed_ranges_with_edge(
+                            attempt,
+                            &plan,
+                            concurrency,
+                            budget,
+                            cancellation,
+                        )
+                        .await?
+                    else {
+                        return Ok(None);
+                    };
+                    fetched
+                } else {
+                    self.read_packed_ranges_at_origin(&plan, concurrency, budget, cancellation)
+                        .await?
+                };
                 for entry in fetched {
                     entries.insert((entry.pack_id, entry.pack_offset), entry);
                 }
@@ -1964,7 +2060,7 @@ impl RemoteGitReader {
             let requested_chunk = requested_chunk.to_vec();
             let token = cancellation.clone();
             let max_inflated = budget.remaining(BudgetDimension::InflatedBytes).await;
-            let (next_resolver, result) = self
+            let (next_resolver, (result, inflated_bytes)) = self
                 .runtime
                 .run_cpu(cancellation, move || {
                     let mut resolver = resolver;
@@ -1973,25 +2069,28 @@ impl RemoteGitReader {
                 })
                 .await?;
             resolver = next_resolver;
-            let (mut chunk_objects, inflated_bytes) = result?;
+            // A failed signature check can still spend the decode budget.
+            // Charge that attempt before the caller can restart at origin.
             budget
                 .charge(BudgetDimension::InflatedBytes, inflated_bytes)
                 .await?;
+            let mut chunk_objects = result?;
             objects.append(&mut chunk_objects);
         }
         // Retain verified dependencies as well as requested objects. Later
         // batches often use an earlier delta base, just like the single reader.
         for object in resolver.objects.values() {
+            check_cancelled(cancellation)?;
             let key =
                 crate::runtime::ObjectCacheKey::new(&self.identity, self.generation, object.oid);
             self.runtime
                 .insert_object(key, Arc::new(object.clone()))
                 .await;
         }
-        Ok(objects)
+        Ok(Some(objects))
     }
 
-    async fn read_resolved_locator(
+    async fn read_origin_locator(
         self: &Arc<Self>,
         session: &GitObjectLocatorSession,
         root: (gix_hash::ObjectId, GitObjectLocator),
@@ -2007,6 +2106,7 @@ impl RemoteGitReader {
                 session,
                 requested,
                 locator,
+                None,
                 DeltaReadState {
                     max_object_bytes,
                     root_size_limit,
@@ -2051,6 +2151,7 @@ impl RemoteGitReader {
             session,
             requested,
             locator,
+            None,
             DeltaReadState {
                 max_object_bytes,
                 root_size_limit,
@@ -2065,11 +2166,16 @@ impl RemoteGitReader {
         .await
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "shared edge and origin delta resolution state"
+    )]
     async fn read_from_locator(
         self: &Arc<Self>,
         session: &GitObjectLocatorSession,
         requested: gix_hash::ObjectId,
         locator: GitObjectLocator,
+        mut first_entry: Option<PackedEntry>,
         mut delta: DeltaReadState,
         budget: &OperationBudget,
         cancellation: &CancellationToken,
@@ -2088,12 +2194,22 @@ impl RemoteGitReader {
                     stage: CorruptionStage::Delta,
                 });
             }
-            let packed = if let Some(maximum) = delta.root_size_limit.take() {
-                self.read_capped_entry(oid, locator, maximum, budget, cancellation)
+            let packed = match (first_entry.take(), delta.root_size_limit.take()) {
+                (Some(entry), _) => entry,
+                (None, Some(maximum)) => {
+                    self.read_capped_entry(oid, locator, maximum, budget, cancellation)
+                        .await?
+                }
+                (None, None) => {
+                    self.read_packed_entry(
+                        oid,
+                        locator,
+                        delta.max_object_bytes,
+                        budget,
+                        cancellation,
+                    )
                     .await?
-            } else {
-                self.read_packed_entry(oid, locator, delta.max_object_bytes, budget, cancellation)
-                    .await?
+                }
             };
             if let Some(kind) = packed.header.as_kind() {
                 let object = GitObject {
@@ -2424,23 +2540,7 @@ impl RemoteGitReader {
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<PackedEntry> {
-        check_limit(
-            "packed entry bytes",
-            locator.location.entry_len,
-            self.limits.max_packed_entry_bytes,
-        )?;
-        check_limit(
-            "fetched bytes",
-            locator.location.entry_len,
-            budget.remaining(BudgetDimension::FetchedBytes).await,
-        )?;
-        let end = locator
-            .location
-            .pack_offset
-            .checked_add(locator.location.entry_len)
-            .ok_or(Error::Corrupt {
-                stage: CorruptionStage::PackEntry,
-            })?;
+        let end = self.checked_packed_entry_end(locator, budget).await?;
         let runtime = Arc::clone(&self.runtime);
         let work_runtime = Arc::clone(&self.runtime);
         let cache_key = crate::runtime::ObjectCacheKey::new(&self.identity, self.generation, oid);
@@ -2553,6 +2653,80 @@ impl RemoteGitReader {
             header: packed.header,
             inflated: packed.inflated.clone(),
         })
+    }
+
+    async fn checked_packed_entry_end(
+        &self,
+        locator: GitObjectLocator,
+        budget: &OperationBudget,
+    ) -> Result<u64> {
+        check_limit(
+            "packed entry bytes",
+            locator.location.entry_len,
+            self.limits.max_packed_entry_bytes,
+        )?;
+        check_limit(
+            "fetched bytes",
+            locator.location.entry_len,
+            budget.remaining(BudgetDimension::FetchedBytes).await,
+        )?;
+        locator
+            .location
+            .pack_offset
+            .checked_add(locator.location.entry_len)
+            .ok_or(Error::Corrupt {
+                stage: CorruptionStage::PackEntry,
+            })
+    }
+
+    fn checked_inflated_size(
+        &self,
+        oid: gix_hash::ObjectId,
+        locator: GitObjectLocator,
+        bytes: &[u8],
+        max_object_bytes: u64,
+    ) -> Result<u64> {
+        if bytes.len() as u64 != locator.location.entry_len {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::PackEntry,
+            });
+        }
+        if gix_features::hash::crc32(bytes) != locator.location.crc32 {
+            return Err(Error::PackedEntryCrcMismatch { oid });
+        }
+        packed_entry_allocation_bytes(
+            oid,
+            locator.location.pack_offset,
+            bytes,
+            self.limits.max_inflated_entry_bytes,
+            max_object_bytes,
+        )
+    }
+
+    async fn inflate_packed_entry(
+        &self,
+        oid: gix_hash::ObjectId,
+        offset: u64,
+        bytes: Bytes,
+        max_object_bytes: u64,
+        cancellation: &CancellationToken,
+    ) -> Result<PackedEntry> {
+        let token = cancellation.clone();
+        let max_inflated = self.limits.max_inflated_entry_bytes;
+        let resident = self.runtime.resident.clone();
+        self.runtime
+            .run_cpu(cancellation, move || {
+                inflate_entry(
+                    oid,
+                    offset,
+                    bytes,
+                    max_inflated,
+                    max_object_bytes,
+                    &token,
+                    &resident,
+                )
+            })
+            .await
     }
 
     async fn read_capped_entry(
@@ -2670,23 +2844,7 @@ impl RemoteGitReader {
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<Bytes> {
-        check_limit(
-            "packed entry bytes",
-            locator.location.entry_len,
-            self.limits.max_packed_entry_bytes,
-        )?;
-        check_limit(
-            "fetched bytes",
-            locator.location.entry_len,
-            budget.remaining(BudgetDimension::FetchedBytes).await,
-        )?;
-        let end = locator
-            .location
-            .pack_offset
-            .checked_add(locator.location.entry_len)
-            .ok_or(Error::Corrupt {
-                stage: CorruptionStage::PackEntry,
-            })?;
+        let end = self.checked_packed_entry_end(locator, budget).await?;
         let bytes = self
             .read_pack_range(
                 &locator.pack_id,
@@ -2886,6 +3044,7 @@ impl RemoteGitReader {
                                     &store,
                                     &runtime,
                                     &path,
+                                    lazy.source_size,
                                     &lazy.index,
                                     admission,
                                     &shared_cancellation,
@@ -3273,6 +3432,7 @@ impl RemoteGitReader {
                     &self.store,
                     &self.runtime,
                     &path,
+                    lazy.source_size,
                     &lazy.index,
                     budget.read_admission(cancellation.clone()),
                     cancellation,
@@ -3369,6 +3529,7 @@ impl RemoteGitReader {
                     &self.store,
                     &self.runtime,
                     &path,
+                    lazy.source_size,
                     &lazy.reverse_index,
                     budget.read_admission(cancellation.clone()),
                     cancellation,
@@ -3688,90 +3849,125 @@ async fn read_lazy_sidecars_from_store(
     admission: Arc<dyn crab_storage::ReadAdmission>,
     cancellation: &CancellationToken,
 ) -> Result<(Bytes, Bytes, Bytes)> {
-    let bytes = read_index_window_from_store(
+    read_index_window_from_store(
         store,
         runtime,
         path,
+        Some(lazy.source_size),
         lazy.window.clone(),
         admission,
         cancellation,
+        move |bytes, cancel| {
+            let index = verified_lazy_sidecar(&bytes, lazy.window.start, &lazy.index, cancel)?;
+            let reverse =
+                verified_lazy_sidecar(&bytes, lazy.window.start, &lazy.reverse_index, cancel)?;
+            let kinds =
+                verified_lazy_sidecar(&bytes, lazy.window.start, &lazy.kind_metadata, cancel)?;
+            Ok((index, reverse, kinds))
+        },
     )
-    .await?;
-    let index = copy_lazy_sidecar(&bytes, lazy.window.start, &lazy.index)?;
-    let reverse_index = copy_lazy_sidecar(&bytes, lazy.window.start, &lazy.reverse_index)?;
-    let kind_metadata = copy_lazy_sidecar(&bytes, lazy.window.start, &lazy.kind_metadata)?;
-    Ok((index, reverse_index, kind_metadata))
+    .await
 }
 
 async fn read_lazy_range_from_store(
     store: &Store,
     runtime: &Arc<RemoteGitRuntime>,
     path: &ObjectPath,
+    source_size: u64,
     range: &RemoteGitSidecarRange,
     admission: Arc<dyn crab_storage::ReadAdmission>,
     cancellation: &CancellationToken,
 ) -> Result<Bytes> {
+    let range = range.clone();
     let end = range
         .offset
         .checked_add(range.length)
         .ok_or(Error::Corrupt {
             stage: CorruptionStage::PackIndex,
         })?;
-    let bytes = read_index_window_from_store(
+    read_index_window_from_store(
         store,
         runtime,
         path,
+        Some(source_size),
         range.offset..end,
         admission,
         cancellation,
+        move |bytes, cancel| verified_lazy_sidecar(&bytes, range.offset, &range, cancel),
     )
-    .await?;
-    let expected = blake3::Hash::from_hex(&range.blake3).map_err(|_| Error::Corrupt {
-        stage: CorruptionStage::PackIndex,
-    })?;
-    if blake3::hash(&bytes) != expected {
-        return Err(Error::Corrupt {
-            stage: CorruptionStage::PackIndex,
-        });
-    }
-    Ok(bytes)
+    .await
 }
 
-async fn read_index_window_from_store(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "range transport and caller's verifier"
+)]
+async fn read_index_window_from_store<T: Send + 'static>(
     store: &Store,
     runtime: &Arc<RemoteGitRuntime>,
     path: &ObjectPath,
+    source_size: Option<u64>,
     range: std::ops::Range<u64>,
     admission: Arc<dyn crab_storage::ReadAdmission>,
     cancellation: &CancellationToken,
-) -> Result<Bytes> {
+    verify: impl Fn(Bytes, &CancellationToken) -> Result<T> + Send + Sync + 'static,
+) -> Result<T> {
     let expected = range.end.checked_sub(range.start).ok_or(Error::Corrupt {
         stage: CorruptionStage::PackIndex,
     })?;
-    let buffer = runtime
-        .reserve_bytes(usize_limit(expected, "resident read bytes")?)
-        .await?;
+    // Either verification attempt may return slices that retain this admitted
+    // window. The edge attempt releases its bytes before an origin retry.
+    let buffer = Arc::new(
+        runtime
+            .reserve_bytes(usize_limit(expected, "resident read bytes")?)
+            .await?,
+    );
     let store = store.clone().with_read_admission(admission);
     let origin_permit = runtime.origin_permit(cancellation).await?;
-    let bytes = tokio::select! {
+    let verify = Arc::new(verify);
+    let verify = |bytes: Bytes| {
+        let verify = verify.clone();
+        let token = cancellation.clone();
+        let buffer = buffer.clone();
+        async move {
+            if bytes.len() as u64 != expected {
+                return Err(Error::Corrupt {
+                    stage: CorruptionStage::PackIndex,
+                });
+            }
+            let bytes = buffer.bind_shared(bytes)?;
+            runtime
+                .run_cpu(cancellation, move || {
+                    check_cancelled(&token)?;
+                    verify(bytes, &token)
+                })
+                .await
+        }
+    };
+    let transfer = async {
+        if let Some(source_size) = source_size {
+            store
+                .read_verified(path, source_size, Some(range), &verify)
+                .await
+        } else {
+            verify(store.range_get(path, range).await?).await
+        }
+    };
+    let verified = tokio::select! {
         biased;
         () = cancellation.cancelled() => return Err(Error::Cancelled),
-        bytes = store.range_get(path, range) => bytes?,
+        result = transfer => result?,
     };
     drop(origin_permit);
-    observe_storage_read("range_get", bytes.len() as u64);
-    if bytes.len() as u64 != expected {
-        return Err(Error::Corrupt {
-            stage: CorruptionStage::PackIndex,
-        });
-    }
-    buffer.bind(bytes)
+    observe_storage_read("range_get", expected);
+    Ok(verified)
 }
 
-fn copy_lazy_sidecar(
+fn verified_lazy_sidecar(
     window: &Bytes,
     window_start: u64,
     range: &RemoteGitSidecarRange,
+    cancel: &CancellationToken,
 ) -> Result<Bytes> {
     let relative = range
         .offset
@@ -3794,7 +3990,12 @@ fn copy_lazy_sidecar(
     let expected = blake3::Hash::from_hex(&range.blake3).map_err(|_| Error::Corrupt {
         stage: CorruptionStage::PackIndex,
     })?;
-    if blake3::hash(bytes) != expected {
+    let mut hash = blake3::Hasher::new();
+    for chunk in bytes.chunks(PACK_FILE_BUFFER_BYTES) {
+        check_cancelled(cancel)?;
+        hash.update(chunk);
+    }
+    if hash.finalize() != expected {
         return Err(Error::Corrupt {
             stage: CorruptionStage::PackIndex,
         });
@@ -4078,36 +4279,34 @@ impl PackedEntryResolver {
         requested: &[PackedEntryKey],
         max_inflated_bytes: u64,
         cancellation: &CancellationToken,
-    ) -> Result<(Vec<GitObject>, u64)> {
-        let mut objects = Vec::with_capacity(requested.len());
+    ) -> (Result<Vec<GitObject>>, u64) {
         let mut inflated_bytes = 0u64;
-        for oid in requested {
-            let (object, added_bytes) =
-                self.resolve(*oid, 0, inflated_bytes, max_inflated_bytes, cancellation)?;
-            inflated_bytes =
-                inflated_bytes
-                    .checked_add(added_bytes)
-                    .ok_or(Error::LimitExceeded {
-                        limit: "inflated bytes",
-                        actual: u64::MAX,
-                        maximum: max_inflated_bytes,
-                    })?;
-            objects.push(object);
-        }
-        Ok((objects, inflated_bytes))
+        let result = requested
+            .iter()
+            .map(|key| {
+                self.resolve(
+                    *key,
+                    0,
+                    &mut inflated_bytes,
+                    max_inflated_bytes,
+                    cancellation,
+                )
+            })
+            .collect();
+        (result, inflated_bytes)
     }
 
     fn resolve(
         &mut self,
         key: PackedEntryKey,
         depth: usize,
-        inflated_bytes: u64,
+        inflated_bytes: &mut u64,
         max_inflated_bytes: u64,
         cancellation: &CancellationToken,
-    ) -> Result<(GitObject, u64)> {
+    ) -> Result<GitObject> {
         check_cancelled(cancellation)?;
         if let Some(object) = self.objects.get(&key) {
-            return Ok((object.clone(), 0));
+            return Ok(object.clone());
         }
         if !self.resolving.insert(key) {
             return Err(Error::Corrupt {
@@ -4122,8 +4321,7 @@ impl PackedEntryResolver {
                 invariant: "packed resolver is missing an entry",
             })?;
         let oid = entry.oid;
-        let entry_bytes = entry.decompressed_size;
-        ensure_inflated_budget(inflated_bytes, entry_bytes, max_inflated_bytes)?;
+        charge_inflated_bytes(inflated_bytes, entry.decompressed_size, max_inflated_bytes)?;
         let packed = inflate_entry(
             oid,
             entry.pack_offset,
@@ -4133,7 +4331,6 @@ impl PackedEntryResolver {
             cancellation,
             &self.resident,
         )?;
-        let mut added_bytes = entry_bytes;
         let object = if let Some(kind) = packed.header.as_kind() {
             verify_object(oid, kind, &packed.inflated)?;
             GitObject {
@@ -4152,8 +4349,8 @@ impl PackedEntryResolver {
             let base_oid = entry.base_oid.ok_or(Error::Corrupt {
                 stage: CorruptionStage::Delta,
             })?;
-            let (base, base_bytes) = match self.bases.get(&base_oid) {
-                Some(base) => (base.clone(), 0),
+            let base = match self.bases.get(&base_oid) {
+                Some(base) => base.clone(),
                 None => {
                     let locator = entry.base_locator.ok_or(Error::Corrupt {
                         stage: CorruptionStage::Delta,
@@ -4161,7 +4358,7 @@ impl PackedEntryResolver {
                     self.resolve(
                         (locator.pack_id, locator.location.pack_offset),
                         depth.saturating_add(1),
-                        inflated_bytes.saturating_add(entry_bytes),
+                        inflated_bytes,
                         max_inflated_bytes,
                         cancellation,
                     )?
@@ -4171,30 +4368,14 @@ impl PackedEntryResolver {
             let instructions = packed.inflated;
             let parsed = delta::parse(&instructions, maximum)
                 .map_err(|error| map_delta_error(error, oid))?;
-            let result_size = parsed.result_size as u64;
-            ensure_inflated_budget(
-                inflated_bytes.saturating_add(entry_bytes),
-                base_bytes,
+            charge_inflated_bytes(
+                inflated_bytes,
+                parsed.result_size as u64,
                 max_inflated_bytes,
             )?;
-            ensure_inflated_budget(
-                inflated_bytes
-                    .saturating_add(entry_bytes)
-                    .saturating_add(base_bytes),
-                result_size,
-                max_inflated_bytes,
-            )?;
-            let reservation = self.resident.reserve(result_size as usize)?;
+            let reservation = self.resident.reserve(parsed.result_size)?;
             let data = delta::apply(&base.data, parsed, || cancellation.is_cancelled())
                 .map_err(|error| map_delta_error(error, oid))?;
-            added_bytes = added_bytes
-                .checked_add(base_bytes)
-                .and_then(|value| value.checked_add(result_size))
-                .ok_or(Error::LimitExceeded {
-                    limit: "inflated bytes",
-                    actual: u64::MAX,
-                    maximum: max_inflated_bytes,
-                })?;
             verify_object(oid, base.kind, &data)?;
             GitObject {
                 oid,
@@ -4202,14 +4383,13 @@ impl PackedEntryResolver {
                 data: reservation.bind(Bytes::from(data))?,
             }
         };
-        ensure_inflated_budget(inflated_bytes, added_bytes, max_inflated_bytes)?;
         self.resolving.remove(&key);
         self.objects.insert(key, object.clone());
-        Ok((object, added_bytes))
+        Ok(object)
     }
 }
 
-fn ensure_inflated_budget(current: u64, additional: u64, maximum: u64) -> Result<()> {
+fn charge_inflated_bytes(current: &mut u64, additional: u64, maximum: u64) -> Result<()> {
     let actual = current
         .checked_add(additional)
         .ok_or(Error::LimitExceeded {
@@ -4224,6 +4404,7 @@ fn ensure_inflated_budget(current: u64, additional: u64, maximum: u64) -> Result
             maximum,
         });
     }
+    *current = actual;
     Ok(())
 }
 
@@ -5216,6 +5397,69 @@ mod tests {
         let usage = budget.usage().await;
         assert_eq!(usage.amount(BudgetDimension::StorageRequests), 1);
         assert_eq!(usage.amount(BudgetDimension::FetchedBytes), 0);
+    }
+
+    #[tokio::test]
+    async fn lazy_pack_sidecar_cdn_restarts_corruption_and_preserves_edge_denial() {
+        use crab_storage::StoreLayout;
+        use crab_storage::cdn::{CdnAccess, CdnRoute, CdnTransport};
+        use std::time::Duration;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let target = [1; 32];
+        let origin = Store::new(Arc::new(InMemory::new())).with_target_identity(target);
+        let layout = StoreLayout::new(origin, "repository".to_owned());
+        let path = layout.capsule_pack_layer_path(&"a".repeat(64));
+        layout
+            .store()
+            .create_strict(&path, Bytes::from_static(b"pack-index-footer"))
+            .await
+            .unwrap();
+        let sidecar = RemoteGitSidecarRange {
+            offset: 5,
+            length: 5,
+            blake3: blake3::hash(b"index").to_hex().to_string(),
+        };
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        for (reply, restart) in [
+            (b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 5-9/17\r\nContent-Length: 5\r\n\r\nwrong".as_slice(), true),
+            (b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n".as_slice(), false),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let transport = CdnTransport::loopback_fixture(listener.local_addr().unwrap()).unwrap();
+            let request_path = path.clone();
+            let edge = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut request = String::new();
+                while !request.ends_with("\r\n\r\n") {
+                    assert_ne!(stream.read_line(&mut request).await.unwrap(), 0);
+                }
+                assert!(request.starts_with(&format!("GET /{request_path} HTTP/1.1\r\n")));
+                assert!(request.to_ascii_lowercase().contains("range: bytes=5-9\r\n"));
+                stream.write_all(reply).await.unwrap();
+            });
+            let store = layout.store().clone().with_cdn_route(CdnRoute::new(
+                target, layout.repo_prefix().to_owned(), None, CdnAccess::Public,
+                transport, Duration::from_secs(2),
+            )).unwrap();
+            let cancel = CancellationToken::new();
+            let budget = OperationBudget::new(crate::OperationLimits::default(), runtime.clone());
+            let result = read_lazy_range_from_store(
+                &store, &runtime, &path, 17, &sidecar,
+                budget.read_admission(cancel.clone()), &cancel,
+            ).await;
+            if restart {
+                assert_eq!(result.unwrap(), Bytes::from_static(b"index"));
+            } else {
+                assert!(crab_storage::store::cdn_read_rejection(&result.unwrap_err()).is_some());
+            }
+            let usage = budget.usage().await;
+            assert_eq!(usage.amount(BudgetDimension::StorageRequests), if restart { 2 } else { 1 });
+            assert_eq!(usage.amount(BudgetDimension::FetchedBytes), if restart { 10 } else { 0 });
+            tokio::time::timeout(Duration::from_secs(2), edge).await.unwrap().unwrap();
+        }
+        runtime.shutdown().await;
     }
 
     #[tokio::test]

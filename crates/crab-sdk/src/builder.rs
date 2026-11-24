@@ -12,6 +12,10 @@ pub struct ClientBuilder {
     pub(crate) local_execution_policy: crate::LocalExecutionPolicy,
     #[cfg(feature = "service")]
     pub(crate) managed: Option<crate::ManagedOptions>,
+    #[cfg(feature = "service")]
+    pub(crate) direct_cdn: Option<crate::storage::DirectCdnOptions>,
+    #[cfg(feature = "service")]
+    pub(crate) desktop_browsing: bool,
 }
 
 impl ClientBuilder {
@@ -19,6 +23,22 @@ impl ClientBuilder {
     #[must_use]
     pub fn direct_store(mut self, options: DirectStoreOptions) -> Self {
         self.store = Some(options);
+        self
+    }
+
+    /// Select an explicit CDN export for native direct reads of one repository.
+    #[cfg(feature = "service")]
+    #[must_use]
+    pub fn direct_cdn(mut self, options: crate::storage::DirectCdnOptions) -> Self {
+        self.direct_cdn = Some(options);
+        self
+    }
+
+    /// Use the desktop browse qualification scope for this native sidecar client.
+    #[cfg(feature = "service")]
+    #[must_use]
+    pub fn for_desktop_browsing(mut self) -> Self {
+        self.desktop_browsing = true;
         self
     }
 

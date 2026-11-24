@@ -42,7 +42,7 @@ application.
 | `files` | Verified file streams, ranges, and caching for Git, Crab/Xet, and Git LFS | `remote` |
 | `publish` | Remote initialization, commit creation, atomic ref updates, and recovery | `remote` |
 | `local` | Local clone, fetch, edit, integration, hydration, and push workflows | `publish`, `files` |
-| `service` | Managed repository resolution and lifecycle administration | `remote` |
+| `service` | Managed repository resolution, lifecycle administration, and direct CDN bindings | `remote` |
 
 Existing Cargo dependencies must replace `content` with `files`, `write` with
 `publish`, and `managed` with `service`. The old feature names are removed.
@@ -122,6 +122,64 @@ latest visible generation.
 `Snapshot::read_blob` returns exact Git blob bytes. With `files` enabled,
 `Snapshot::open_file` streams verified logical content for regular Git blobs,
 Crab pointers, and Git LFS pointers.
+
+With `service` enabled, pass `DirectCdnOptions` from `crab_sdk::storage` to
+`ClientBuilder::direct_cdn`. Bind the export to the exact native origin
+and source repository prefix selected by `direct_store`.
+
+```rust,no_run
+use crab_sdk::Client;
+use crab_sdk::storage::{CdnIssuerOptions, DirectCdnOptions, DirectStoreOptions};
+use std::path::Path;
+
+fn build_client(token_cache: &Path, approval_sha256: &str) -> crab_sdk::Result<Client> {
+    let issuer = CdnIssuerOptions::new(
+        "https://auth.example.com/v1/credentials",
+        "https://identity.example.com",
+        "crab-client",
+        token_cache,
+    )?;
+    let binding = DirectCdnOptions::private_export(
+        "s3://my-bucket",
+        "repositories/example",
+        "https://downloads.example.com",
+        issuer,
+        Some(approval_sha256),
+    )?;
+    Client::builder()
+        .direct_store(DirectStoreOptions::s3_from_env("my-bucket")?)
+        .direct_cdn(binding)
+        .build()
+}
+```
+
+Use `gs://<bucket>` for GCS or
+`https://<account>.blob.core.windows.net/<container>` for Azure. A private
+binding uses the issuer's native credentials and resolved physical view for
+matching reads. Pass the same reviewed approval digest pinned by the issuer
+to enable viewer negotiation. The origin and viewer credentials rotate together. If the
+issuer changes the target, view, or viewer permissions, open a new repository
+handle. Pass the absolute location of an existing OIDC token cache.
+Use `DirectCdnOptions::public_export` with a `CdnPublicationFile` containing
+the publisher's absolute receipt path and SHA-256. The SDK routes only
+receipted objects of the expected size to the edge. Unlisted objects and
+other repository prefixes follow the client's ordinary direct route.
+
+Use `provider-cdn-qualification` to exercise the HTTPS data path. Default SDK
+builds read from origin and preserve any private issuer's native authorization.
+Typed bindings cover native remote reads, SDK fetch, and SDK clone. A direct
+CDN clone uses a Crab executable that advertises `direct-cdn-checkout-v1`.
+For checkout, pull, hydration, and content prefetch in an existing worktree,
+use an executable that advertises `direct-cdn-worktree-read-v1`. The worktree
+must declare the matching Crab content URL in `crab.toml` or its shared
+`.crab/local.toml`. Git filters and content commands receive a temporary
+binding for the captured storage target and view. Private children check
+the parent's principal fingerprint against the installed login before
+obtaining a grant. They run without ambient cloud credential variables or
+the SDK's explicit storage credentials. Delegated commands skip dotenv
+imports. Local tool invocations clear inherited checkout bindings.
+See the
+[provider CDN qualification plan](../../plans/021-provider-cdn-support.md).
 
 Remote writes use a prepare-then-execute flow. Persist the prepared mutation's
 recovery token before calling `execute`. See the

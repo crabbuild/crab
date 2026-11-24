@@ -74,11 +74,15 @@ impl ObjectPages {
         if let Some(node) = self.cached(reference, kind)? {
             return Ok(node);
         }
-        let bytes = store
-            .get_with_etag_bounded(&self.path(&reference.hash), u64::from(reference.bytes))
-            .await?
-            .0;
-        let node = Arc::new(decode(&bytes, reference, kind)?);
+        let path = self.path(&reference.hash);
+        let node = store
+            .read_verified(
+                &path,
+                u64::from(reference.bytes),
+                None,
+                |bytes| async move { decode(&bytes, reference, kind).map(Arc::new) },
+            )
+            .await?;
         self.retain(reference, kind, node.clone())?;
         Ok(node)
     }

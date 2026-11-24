@@ -4,12 +4,110 @@ on:
   pull_request:
     paths:
       - ".github/workflows/pb-provider-qualification.yml"
+      - ".github/workflows/provider-cdn-transport.yml"
+      - ".github/workflows/provider-cdn-qualification.yml"
       - "crab/tests/provider_qualification.rs"
+      - "crab/Cargo.toml"
       - "crab/scripts/verify-provider-qualification-report.py"
+      - "crab/scripts/cdn_qualification.py"
+      - "crab/scripts/release_cli_features.py"
+      - "crab/scripts/release/verify-cdn-release-evidence.py"
+      - "crab/scripts/e2e/test_cdn_qualification.py"
+      - "crab/scripts/e2e/test_cdn_release_qualification.py"
+      - "crab/scripts/e2e/run_cdn_transport_checks.py"
+      - "crab/scripts/e2e/cdn_viewer_issuer.py"
+      - "crab/scripts/e2e/test_cdn_viewer_issuer_qualification.py"
+      - "crab/scripts/e2e/collect_private_cdn_binding.py"
+      - "crab/scripts/e2e/test_cdn_private_binding_qualification.py"
+      - "crab/scripts/e2e/collect_cdn_key_rotation.py"
+      - "crab/scripts/e2e/collect_cdn_cache_reuse.py"
+      - "crab/scripts/e2e/collect_cdn_managed_issuer.py"
+      - "crab/scripts/e2e/test_cdn_managed_issuer_qualification.py"
+      - "crab/scripts/e2e/collect_cdn_scoped_view.py"
+      - "crab/scripts/e2e/collect_cdn_historical_origin.py"
+      - "crab/scripts/e2e/test_cdn_historical_origin_qualification.py"
+      - "crab/scripts/e2e/test_cdn_transport_qualification.py"
+      - "crab/scripts/e2e/collect_cloudfront_deployment_policy.py"
+      - "crab/scripts/e2e/collect_cdn_viewer_requests.py"
+      - "crab/scripts/e2e/collect_cloudfront_access_logs.py"
+      - "crab/scripts/e2e/collect_azure_access_logs.py"
+      - "crab/scripts/e2e/test_cdn_viewer_requests_qualification.py"
+      - "crab/scripts/e2e/test_cdn_cloudfront_deployment_qualification.py"
+      - "crab/scripts/e2e/cdn_deployment_policy_cli.py"
+      - "crab/scripts/e2e/collect_cloud_cdn_deployment_policy.py"
+      - "crab/scripts/e2e/test_cdn_cloud_cdn_deployment_qualification.py"
+      - "crab/scripts/e2e/collect_front_door_deployment_policy.py"
+      - "crab/scripts/e2e/test_cdn_front_door_deployment_qualification.py"
+      - "crab/deploy/cdn/**"
+      - "crab/scripts/e2e/collect_cdn_fixture_cleanup.py"
+      - "crab/scripts/e2e/test_cdn_fixture_cleanup_qualification.py"
+      - "crab/scripts/e2e/assemble_cdn_qualification.py"
+      - "crab/scripts/e2e/test_cdn_assembly_qualification.py"
+      - "crab/scripts/e2e/collect_cdn_product_metrics.py"
+      - "crab/scripts/e2e/test_cdn_product_qualification.py"
+      - "crab/scripts/e2e/run_cdn_git_workload.py"
+      - "crab/scripts/e2e/run_cdn_sdk_workload.py"
+      - "crab/scripts/e2e/run_cdn_desktop_workload.py"
+      - "crab/scripts/e2e/test_cdn_desktop_workload_qualification.py"
+      - "crab/scripts/e2e/run_cdn_sdk_hydration.py"
+      - "crab/scripts/e2e/run_cdn_mount_workload.py"
+      - "crab/scripts/e2e/test_cdn_sdk_workload_qualification.py"
+      - "crab/scripts/e2e/test_cdn_sdk_hydration_qualification.py"
+      - "crab/scripts/e2e/run_cdn_service_read.py"
+      - "crab/scripts/e2e/verify_cdn_service_lifecycle.py"
+      - "crab/scripts/e2e/test_cdn_service_read_qualification.py"
+      - "crates/crab-sdk/examples/cdn-sdk-read.rs"
+      - "crates/crab-sdk/build.rs"
+      - "crates/crab-remote-git/src/reader/edge_entry.rs"
+      - "crates/crab-read/Cargo.toml"
+      - "crates/crab-read/src/capsule_payload.rs"
+      - "crates/crab-read/src/hydrator.rs"
+      - "crates/crab-read/src/hydrator/**"
+      - "crates/crab-read/src/read_retention.rs"
+      - "crates/crab-read/src/store_client.rs"
+      - "crates/crab-read/src/store_client/**"
+      - "crab/scripts/e2e/collect_cdn_git_native_ref.py"
+      - "crab/examples/cdn-native-ref.rs"
+      - "crab/scripts/e2e/test_cdn_git_workload_qualification.py"
+      - "crab/scripts/e2e/collect_cdn_git_performance.py"
+      - "crab/scripts/e2e/test_cdn_git_performance_qualification.py"
       - "crab/scripts/e2e/test_verify_provider_qualification_report.py"
       - "crab/scripts/e2e/run_add_commit_push_rustfs_smoke.py"
       - "crab/scripts/e2e/test_add_commit_push_source.py"
       - "crates/crab-storage/**"
+      - "crates/crab-lfs/src/object_store.rs"
+      - "crates/crab-lfs/src/object_store/stream_tests.rs"
+      - "crates/crab-lfs/tests/cdn_observation.rs"
+      - "crates/crab-cache-store/Cargo.toml"
+      - "crates/crab-cache-store/src/lfs.rs"
+      - "crates/crab-cache-store/src/xorb_read.rs"
+      - "crates/crab-cache/src/local_cache/lfs_file.rs"
+      - "crates/crab-cache/src/private_fs.rs"
+      - "crates/crab-cache/src/private_fs/windows.rs"
+      - "crates/crab-auth/src/cdn.rs"
+      - "crates/crab-auth/src/crab_auth_client.rs"
+      - "crates/crab-auth/src/managed/**"
+      - "crates/crab-auth/Cargo.toml"
+      - "crates/crab-auth-store/src/cdn.rs"
+      - "crates/crab-auth-store/src/managed_read.rs"
+      - "crates/crab-auth-store/src/managed_repository.rs"
+      - "crates/crab-auth-store/src/refreshing_store.rs"
+      - "crates/crab-sdk/Cargo.toml"
+      - "crates/build/service_metadata.rs"
+      - "crates/crab-server/Cargo.toml"
+      - "crates/crab-server/build.rs"
+      - "crates/crab-server/src/cli/mod.rs"
+      - "crates/crab-server/src/git/lfs/mod.rs"
+      - "crates/crab-server/src/repository/mod.rs"
+      - "crates/crab-server/src/repository/tests/cdn.rs"
+      - "crates/crab-server/src/server/capacity.rs"
+      - "crates/crab-server/src/server/mod.rs"
+      - "crates/crab-s3-gateway/Cargo.toml"
+      - "crates/crab-s3-gateway/build.rs"
+      - "crates/crab-s3-gateway/src/main.rs"
+      - "crates/crab-s3-gateway/src/gateway.rs"
+      - "crates/crab-s3-gateway/src/gateway/cdn_tests.rs"
+      - "packages/desktop/agent/Cargo.toml"
       - "crates/crab-metadata/src/pack_origin.rs"
       - "crates/crab-metadata/src/receipts.rs"
       - "crab/docs/guides/provider-qualification.md"
@@ -17,12 +115,110 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/pb-provider-qualification.yml"
+      - ".github/workflows/provider-cdn-transport.yml"
+      - ".github/workflows/provider-cdn-qualification.yml"
       - "crab/tests/provider_qualification.rs"
+      - "crab/Cargo.toml"
       - "crab/scripts/verify-provider-qualification-report.py"
+      - "crab/scripts/cdn_qualification.py"
+      - "crab/scripts/release_cli_features.py"
+      - "crab/scripts/release/verify-cdn-release-evidence.py"
+      - "crab/scripts/e2e/test_cdn_qualification.py"
+      - "crab/scripts/e2e/test_cdn_release_qualification.py"
+      - "crab/scripts/e2e/run_cdn_transport_checks.py"
+      - "crab/scripts/e2e/cdn_viewer_issuer.py"
+      - "crab/scripts/e2e/test_cdn_viewer_issuer_qualification.py"
+      - "crab/scripts/e2e/collect_private_cdn_binding.py"
+      - "crab/scripts/e2e/test_cdn_private_binding_qualification.py"
+      - "crab/scripts/e2e/collect_cdn_key_rotation.py"
+      - "crab/scripts/e2e/collect_cdn_cache_reuse.py"
+      - "crab/scripts/e2e/collect_cdn_managed_issuer.py"
+      - "crab/scripts/e2e/test_cdn_managed_issuer_qualification.py"
+      - "crab/scripts/e2e/collect_cdn_scoped_view.py"
+      - "crab/scripts/e2e/collect_cdn_historical_origin.py"
+      - "crab/scripts/e2e/test_cdn_historical_origin_qualification.py"
+      - "crab/scripts/e2e/test_cdn_transport_qualification.py"
+      - "crab/scripts/e2e/collect_cloudfront_deployment_policy.py"
+      - "crab/scripts/e2e/collect_cdn_viewer_requests.py"
+      - "crab/scripts/e2e/collect_cloudfront_access_logs.py"
+      - "crab/scripts/e2e/collect_azure_access_logs.py"
+      - "crab/scripts/e2e/test_cdn_viewer_requests_qualification.py"
+      - "crab/scripts/e2e/test_cdn_cloudfront_deployment_qualification.py"
+      - "crab/scripts/e2e/cdn_deployment_policy_cli.py"
+      - "crab/scripts/e2e/collect_cloud_cdn_deployment_policy.py"
+      - "crab/scripts/e2e/test_cdn_cloud_cdn_deployment_qualification.py"
+      - "crab/scripts/e2e/collect_front_door_deployment_policy.py"
+      - "crab/scripts/e2e/test_cdn_front_door_deployment_qualification.py"
+      - "crab/deploy/cdn/**"
+      - "crab/scripts/e2e/collect_cdn_fixture_cleanup.py"
+      - "crab/scripts/e2e/test_cdn_fixture_cleanup_qualification.py"
+      - "crab/scripts/e2e/assemble_cdn_qualification.py"
+      - "crab/scripts/e2e/test_cdn_assembly_qualification.py"
+      - "crab/scripts/e2e/collect_cdn_product_metrics.py"
+      - "crab/scripts/e2e/test_cdn_product_qualification.py"
+      - "crab/scripts/e2e/run_cdn_git_workload.py"
+      - "crab/scripts/e2e/run_cdn_sdk_workload.py"
+      - "crab/scripts/e2e/run_cdn_desktop_workload.py"
+      - "crab/scripts/e2e/test_cdn_desktop_workload_qualification.py"
+      - "crab/scripts/e2e/run_cdn_sdk_hydration.py"
+      - "crab/scripts/e2e/run_cdn_mount_workload.py"
+      - "crab/scripts/e2e/test_cdn_sdk_workload_qualification.py"
+      - "crab/scripts/e2e/test_cdn_sdk_hydration_qualification.py"
+      - "crab/scripts/e2e/run_cdn_service_read.py"
+      - "crab/scripts/e2e/verify_cdn_service_lifecycle.py"
+      - "crab/scripts/e2e/test_cdn_service_read_qualification.py"
+      - "crates/crab-sdk/examples/cdn-sdk-read.rs"
+      - "crates/crab-sdk/build.rs"
+      - "crates/crab-remote-git/src/reader/edge_entry.rs"
+      - "crates/crab-read/Cargo.toml"
+      - "crates/crab-read/src/capsule_payload.rs"
+      - "crates/crab-read/src/hydrator.rs"
+      - "crates/crab-read/src/hydrator/**"
+      - "crates/crab-read/src/read_retention.rs"
+      - "crates/crab-read/src/store_client.rs"
+      - "crates/crab-read/src/store_client/**"
+      - "crab/scripts/e2e/collect_cdn_git_native_ref.py"
+      - "crab/examples/cdn-native-ref.rs"
+      - "crab/scripts/e2e/test_cdn_git_workload_qualification.py"
+      - "crab/scripts/e2e/collect_cdn_git_performance.py"
+      - "crab/scripts/e2e/test_cdn_git_performance_qualification.py"
       - "crab/scripts/e2e/test_verify_provider_qualification_report.py"
       - "crab/scripts/e2e/run_add_commit_push_rustfs_smoke.py"
       - "crab/scripts/e2e/test_add_commit_push_source.py"
       - "crates/crab-storage/**"
+      - "crates/crab-lfs/src/object_store.rs"
+      - "crates/crab-lfs/src/object_store/stream_tests.rs"
+      - "crates/crab-lfs/tests/cdn_observation.rs"
+      - "crates/crab-cache-store/Cargo.toml"
+      - "crates/crab-cache-store/src/lfs.rs"
+      - "crates/crab-cache-store/src/xorb_read.rs"
+      - "crates/crab-cache/src/local_cache/lfs_file.rs"
+      - "crates/crab-cache/src/private_fs.rs"
+      - "crates/crab-cache/src/private_fs/windows.rs"
+      - "crates/crab-auth/src/cdn.rs"
+      - "crates/crab-auth/src/crab_auth_client.rs"
+      - "crates/crab-auth/src/managed/**"
+      - "crates/crab-auth/Cargo.toml"
+      - "crates/crab-auth-store/src/cdn.rs"
+      - "crates/crab-auth-store/src/managed_read.rs"
+      - "crates/crab-auth-store/src/managed_repository.rs"
+      - "crates/crab-auth-store/src/refreshing_store.rs"
+      - "crates/crab-sdk/Cargo.toml"
+      - "crates/build/service_metadata.rs"
+      - "crates/crab-server/Cargo.toml"
+      - "crates/crab-server/build.rs"
+      - "crates/crab-server/src/cli/mod.rs"
+      - "crates/crab-server/src/git/lfs/mod.rs"
+      - "crates/crab-server/src/repository/mod.rs"
+      - "crates/crab-server/src/repository/tests/cdn.rs"
+      - "crates/crab-server/src/server/capacity.rs"
+      - "crates/crab-server/src/server/mod.rs"
+      - "crates/crab-s3-gateway/Cargo.toml"
+      - "crates/crab-s3-gateway/build.rs"
+      - "crates/crab-s3-gateway/src/main.rs"
+      - "crates/crab-s3-gateway/src/gateway.rs"
+      - "crates/crab-s3-gateway/src/gateway/cdn_tests.rs"
+      - "packages/desktop/agent/Cargo.toml"
       - "crates/crab-metadata/src/pack_origin.rs"
       - "crates/crab-metadata/src/receipts.rs"
       - "crab/docs/guides/provider-qualification.md"
@@ -40,13 +236,25 @@ on:
           - s3
           - gcs
           - azure
+      cdn_transport:
+        description: Check the selected providers' approved CDN fixtures
+        type: boolean
+        default: false
+      cdn_cache_reuse:
+        description: Include the two protected viewer jobs for private CDN fixtures
+        type: boolean
+        default: false
+      publish_cdn_evidence:
+        description: Assemble and publish measured CDN release evidence for this attempt
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # RustFS 1.0.0 GA; this immutable index covers Linux amd64 and arm64.
@@ -56,18 +264,140 @@ jobs:
   evidence-contract:
     name: Evidence contract
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 35
     steps:
+      - name: Validate CDN dispatch options
+        if: github.event_name == 'workflow_dispatch' && inputs.cdn_cache_reuse && !inputs.cdn_transport
+        run: |
+          echo '::error::Select cdn_transport to collect private cache reuse evidence.'
+          exit 1
+
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Verify evidence schema tests
         run: |
           python3 -m unittest crab/scripts/e2e/test_verify_provider_qualification_report.py
+          python3 -m unittest discover -s crab/scripts/e2e -p 'test_cdn*qualification.py'
           python3 -m unittest discover -s crab/scripts/e2e -p test_add_commit_push_source.py
           python3 -m py_compile \
             crab/scripts/verify-provider-qualification-report.py \
             crab/scripts/e2e/test_verify_provider_qualification_report.py
+
+      - name: Verify CDN fixture policy and public publishers
+        run: |
+          node crab/deploy/cdn/aws/check_fixture.mjs
+          python3 -m venv "$RUNNER_TEMP/cdn-publisher-python"
+          publisher_python="$RUNNER_TEMP/cdn-publisher-python/bin/python"
+          "$publisher_python" -m pip install --disable-pip-version-check 'google-cloud-storage==3.17.1'
+          for provider in aws gcp/public-export azure/public-export; do
+            "$publisher_python" -B "crab/deploy/cdn/$provider/test_publish_export.py"
+          done
+
+      - name: Verify CloudFront fixture templates
+        run: |
+          tools="$RUNNER_TEMP/cdn-cfn-lint"
+          python3 -m venv "$tools"
+          "$tools/bin/python" -m pip install --disable-pip-version-check 'cfn-lint==1.61.0'
+          "$tools/bin/cfn-lint" --regions us-east-1 --template \
+            crab/deploy/cdn/aws/cloudfront.yaml \
+            crab/deploy/cdn/aws/public-export.yaml \
+            crab/deploy/cdn/aws/qualification-logs.yaml
+
+      - name: Verify Cloud CDN fixture plans
+        shell: bash
+        env:
+          TF_IN_AUTOMATION: "1"
+          CHECKPOINT_DISABLE: "1"
+        run: |
+          tools=$(mktemp -d "$RUNNER_TEMP/crab-cdn-terraform.XXXXXX")
+          curl -fsSLo "$tools/terraform.zip" \
+            https://releases.hashicorp.com/terraform/1.13.3/terraform_1.13.3_linux_amd64.zip
+          printf '%s  %s\n' 71fc43d92ea09907be5d416d2405a6a9c2d1ceaed633f5e175c0af26e8c4b365 \
+            "$tools/terraform.zip" | sha256sum --check
+          unzip -q "$tools/terraform.zip" terraform -d "$tools"
+          for module in crab/deploy/cdn/gcp crab/deploy/cdn/gcp/public-export; do
+            "$tools/terraform" -chdir="$module" init -backend=false -input=false -no-color
+            "$tools/terraform" -chdir="$module" validate -no-color
+            "$tools/terraform" -chdir="$module" test -no-color
+          done
+
+      - name: Verify Front Door fixture templates
+        shell: bash
+        run: |
+          tools=$(mktemp -d "$RUNNER_TEMP/crab-cdn-bicep.XXXXXX")
+          curl -fsSLo "$tools/bicep" \
+            https://github.com/Azure/bicep/releases/download/v0.47.16/bicep-linux-x64
+          printf '%s  %s\n' 64c345a58e0c3e48b1bc98a4e62d6b3adb1d238281297de3400aeafb2697aa5a \
+            "$tools/bicep" | sha256sum --check
+          chmod +x "$tools/bicep"
+          for fixture in crab/deploy/cdn/azure crab/deploy/cdn/azure/public-export; do
+            "$tools/bicep" build "$fixture/main.bicep" --outfile "$tools/fixture.json"
+            python3 -B "$fixture/tests/check_fixture.py" "$tools/fixture.json"
+          done
+
+      - name: Check default and qualification CDN builds
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/provider-cdn-features
+        run: |
+          set -euo pipefail
+          for package in crab crab-sdk crab-desktop-agent crab-server crab-s3-gateway; do
+            feature_args=()
+            case "$package" in
+              crab-sdk) feature_args=(--features service) ;;
+              crab-server|crab-s3-gateway) feature_args=(--features provider-cdn) ;;
+            esac
+            baseline=$(cargo tree --locked -p "$package" -i crab-storage -e features "${feature_args[@]}")
+            qualification=$(cargo tree --locked -p "$package" -i crab-storage -e features \
+              --features provider-cdn-qualification)
+            feature='crab-storage feature "provider-cdn-qualification"'
+            [[ "$baseline" != *"$feature"* ]]
+            [[ "$qualification" == *"$feature"* ]]
+          done
+          cargo test --locked -p crab-storage --lib 'cdn::'
+          cargo test --locked -p crab-auth --lib --features crab-auth-client managed::client::tests
+          cargo test --locked -p crab-auth --lib --features crab-auth-client crab_auth_client::tests
+          cargo test --locked -p crab-auth-store --lib --features managed-service,operator-cdn
+          cargo test --locked -p crab-storage --lib --features provider-cdn-qualification 'cdn::'
+          cargo test --locked -p crab-read --lib \
+            --features local-staging,crab-storage/provider-cdn-qualification 'hydrator::'
+          cargo test --locked -p crab-read --lib \
+            --features local-staging,crab-storage/provider-cdn-qualification layered_payload_cdn_verifies_the_window
+          cargo test --locked -p crab-sdk --features local,service --example cdn-sdk-read
+          cargo test --locked -p crab-lfs --test cdn_observation
+          cargo test --locked -p crab-lfs --test cdn_observation --features crab-storage/provider-cdn-qualification
+          cargo test --locked -p crab-lfs -p crab-cache-store --lib \
+            --features crab-cache-store/lfs after_grant_loss
+          cargo test --locked -p crab-cache --lib --features local-cache \
+            lfs_read_and_reservation_report_the_same_physical_root
+
+      - name: Set up repository frontend toolchain
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/ui/package-lock.json
+
+      - name: Build embedded repository frontend
+        run: |
+          npm ci --prefix packages/ui
+          npm run build --prefix packages/ui
+
+      - name: Exercise CDN delivery through both service interfaces
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/provider-cdn-features
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          smoke() {
+            cargo test --locked -p "$1" --lib --features provider-cdn-qualification "$2" -- --exact \
+              | tee "$RUNNER_TEMP/cdn-service-smoke.log"
+            grep -Eq 'test result: ok\. 1 passed; 0 failed;' "$RUNNER_TEMP/cdn-service-smoke.log"
+          }
+          cargo check --locked -p crab-server -p crab-s3-gateway \
+            --features crab-server/provider-cdn-qualification,crab-s3-gateway/provider-cdn-qualification --bins
+          smoke crab-server repository::tests::cdn::ordinary_http_reads_use_verified_edge_bodies_and_keep_native_controls
+          smoke crab-s3-gateway gateway::cdn_tests::authorized_gateway_reads_verified_git_and_lfs_from_the_edge
 
   rustfs:
     name: S3-compatible RustFS
@@ -93,7 +423,7 @@ jobs:
       CRAB_PROVIDER_QUALIFICATION_WORKFLOW_RUN_ID: ${{ github.run_id }}
       CRAB_PROVIDER_QUALIFICATION_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
       CRAB_PROVIDER_QUALIFICATION_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}-s3
-      CRAB_PROVIDER_QUALIFICATION_REPORT: ${{ github.workspace }}/.ci/provider-qualification/s3/report.json
+      CRAB_PROVIDER_QUALIFICATION_REPORT: ${{ github.workspace }}/provider-qualification-evidence/rustfs/report.json
       CARGO_TARGET_DIR: ${{ github.workspace }}/.ci/cargo-target-provider-qualification-s3
     steps:
       - name: Checkout
@@ -173,7 +503,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: provider-qualification-s3-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ github.workspace }}/.ci/provider-qualification/s3/**
+          path: ${{ github.workspace }}/provider-qualification-evidence/rustfs/**
           if-no-files-found: error
           retention-days: 90
 
@@ -187,6 +517,80 @@ jobs:
           path: |
             ${{ runner.temp }}/provider-qualification/s3/canary/gha-${{ github.run_id }}-${{ github.run_attempt }}/artifacts/report.json
             ${{ runner.temp }}/provider-qualification/s3/canary/gha-${{ github.run_id }}-${{ github.run_attempt }}/logs/*.log
+          if-no-files-found: error
+          retention-days: 90
+
+  s3:
+    name: Amazon S3
+    if: >-
+      vars.CRAB_PROVIDER_S3_ENABLED == 'true' &&
+      (github.event_name == 'schedule' ||
+       (github.event_name == 'workflow_dispatch' &&
+        (inputs.provider == 'all' || inputs.provider == 's3')))
+    needs: evidence-contract
+    runs-on: ubuntu-latest
+    environment: provider-qualification-s3
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      CRAB_PROVIDER_QUALIFICATION_PROVIDER: s3
+      CRAB_PROVIDER_QUALIFICATION_BUCKET: ${{ vars.CRAB_PROVIDER_S3_BUCKET }}
+      CRAB_PROVIDER_QUALIFICATION_SERVICE: amazon-s3
+      CRAB_PROVIDER_QUALIFICATION_REGION: ${{ vars.CRAB_PROVIDER_S3_REGION }}
+      CRAB_PROVIDER_QUALIFICATION_SOURCE_SHA: ${{ github.sha }}
+      CRAB_PROVIDER_QUALIFICATION_WORKFLOW_RUN_ID: ${{ github.run_id }}
+      CRAB_PROVIDER_QUALIFICATION_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+      CRAB_PROVIDER_QUALIFICATION_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}-amazon-s3
+      CRAB_PROVIDER_QUALIFICATION_REPORT: ${{ github.workspace }}/provider-qualification-evidence/amazon-s3/report.json
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.ci/cargo-target-provider-qualification-amazon-s3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build provider contract
+        run: cargo test -p crab --test provider_qualification --locked --no-run
+
+      - name: Request credentials for the qualification bucket
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.CRAB_PROVIDER_S3_ROLE_ARN }}
+          aws-region: ${{ vars.CRAB_PROVIDER_S3_REGION }}
+          allowed-account-ids: ${{ vars.CRAB_PROVIDER_S3_ACCOUNT_ID }}
+          role-session-name: crab-provider-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Run provider contract
+        env:
+          EXPECTED_BUCKET_OWNER: ${{ vars.CRAB_PROVIDER_S3_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          test -n "$EXPECTED_BUCKET_OWNER"
+          test -n "$CRAB_PROVIDER_QUALIFICATION_BUCKET"
+          prefix="crab-provider-qualification/$CRAB_PROVIDER_QUALIFICATION_RUN_ID/"
+          count="$(aws s3api list-objects-v2 --bucket "$CRAB_PROVIDER_QUALIFICATION_BUCKET" \
+            --expected-bucket-owner "$EXPECTED_BUCKET_OWNER" --prefix "$prefix" \
+            --cli-input-json '{"MaxKeys":1}' --no-paginate --query KeyCount --output text --no-cli-pager)"
+          test "$count" = 0
+          cargo test -p crab --test provider_qualification --locked \
+            -- --ignored --exact provider_contracts --nocapture
+
+      - name: Verify retained evidence
+        run: |
+          python3 crab/scripts/verify-provider-qualification-report.py \
+            "$CRAB_PROVIDER_QUALIFICATION_REPORT" \
+            --provider s3 \
+            --source-sha "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT"
+
+      - name: Upload retained evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: provider-qualification-amazon-s3-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.CRAB_PROVIDER_QUALIFICATION_REPORT }}
           if-no-files-found: error
           retention-days: 90
 
@@ -210,7 +614,7 @@ jobs:
       CRAB_PROVIDER_QUALIFICATION_WORKFLOW_RUN_ID: ${{ github.run_id }}
       CRAB_PROVIDER_QUALIFICATION_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
       CRAB_PROVIDER_QUALIFICATION_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}-gcs
-      CRAB_PROVIDER_QUALIFICATION_REPORT: ${{ github.workspace }}/.ci/provider-qualification/gcs/report.json
+      CRAB_PROVIDER_QUALIFICATION_REPORT: ${{ github.workspace }}/provider-qualification-evidence/gcs/report.json
       CARGO_TARGET_DIR: ${{ github.workspace }}/.ci/cargo-target-provider-qualification-gcs
     steps:
       - name: Checkout
@@ -238,7 +642,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: provider-qualification-gcs-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ github.workspace }}/.ci/provider-qualification/gcs/**
+          path: ${{ env.CRAB_PROVIDER_QUALIFICATION_REPORT }}
           if-no-files-found: error
           retention-days: 90
 
@@ -263,7 +667,7 @@ jobs:
       CRAB_PROVIDER_QUALIFICATION_WORKFLOW_RUN_ID: ${{ github.run_id }}
       CRAB_PROVIDER_QUALIFICATION_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
       CRAB_PROVIDER_QUALIFICATION_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}-azure
-      CRAB_PROVIDER_QUALIFICATION_REPORT: ${{ github.workspace }}/.ci/provider-qualification/azure/report.json
+      CRAB_PROVIDER_QUALIFICATION_REPORT: ${{ github.workspace }}/provider-qualification-evidence/azure/report.json
       CARGO_TARGET_DIR: ${{ github.workspace }}/.ci/cargo-target-provider-qualification-azure
     steps:
       - name: Checkout
@@ -292,6 +696,161 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: provider-qualification-azure-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ github.workspace }}/.ci/provider-qualification/azure/**
+          path: ${{ env.CRAB_PROVIDER_QUALIFICATION_REPORT }}
+          if-no-files-found: error
+          retention-days: 90
+
+  cdn-s3:
+    if: >-
+      !cancelled() && github.event_name == 'workflow_dispatch' && inputs.cdn_transport &&
+      (inputs.provider == 'all' || inputs.provider == 's3')
+    needs: s3
+    uses: ./.github/workflows/provider-cdn-qualification.yml
+    permissions:
+      contents: read
+      id-token: write
+    secrets:
+      CRAB_CDN_TRANSPORT_VIEWER: ${{ secrets.CRAB_CDN_TRANSPORT_VIEWER }}
+      CRAB_CDN_TRANSPORT_UNRELATED_VIEWER: ${{ secrets.CRAB_CDN_TRANSPORT_UNRELATED_VIEWER }}
+    with:
+      provider: s3
+      native_artifact: amazon-s3
+      native_result: ${{ needs.s3.result }}
+      cache_reuse: ${{ inputs.cdn_cache_reuse }}
+
+  cdn-gcs:
+    if: >-
+      !cancelled() && github.event_name == 'workflow_dispatch' && inputs.cdn_transport &&
+      (inputs.provider == 'all' || inputs.provider == 'gcs')
+    needs: gcs
+    uses: ./.github/workflows/provider-cdn-qualification.yml
+    permissions:
+      contents: read
+      id-token: write
+    secrets:
+      CRAB_CDN_TRANSPORT_VIEWER: ${{ secrets.CRAB_CDN_TRANSPORT_VIEWER }}
+      CRAB_CDN_TRANSPORT_UNRELATED_VIEWER: ${{ secrets.CRAB_CDN_TRANSPORT_UNRELATED_VIEWER }}
+    with:
+      provider: gcs
+      native_artifact: gcs
+      native_result: ${{ needs.gcs.result }}
+      cache_reuse: ${{ inputs.cdn_cache_reuse }}
+
+  cdn-azure:
+    if: >-
+      !cancelled() && github.event_name == 'workflow_dispatch' && inputs.cdn_transport &&
+      (inputs.provider == 'all' || inputs.provider == 'azure')
+    needs: azure
+    uses: ./.github/workflows/provider-cdn-qualification.yml
+    permissions:
+      contents: read
+      id-token: write
+    secrets:
+      CRAB_CDN_TRANSPORT_VIEWER: ${{ secrets.CRAB_CDN_TRANSPORT_VIEWER }}
+      CRAB_CDN_TRANSPORT_UNRELATED_VIEWER: ${{ secrets.CRAB_CDN_TRANSPORT_UNRELATED_VIEWER }}
+    with:
+      provider: azure
+      native_artifact: azure
+      native_result: ${{ needs.azure.result }}
+      cache_reuse: ${{ inputs.cdn_cache_reuse }}
+
+  publish-cdn-evidence:
+    name: Publish CDN release evidence
+    if: >-
+      !cancelled() && github.event_name == 'workflow_dispatch' && inputs.publish_cdn_evidence &&
+      needs.evidence-contract.result == 'success' && !contains(needs.*.result, 'failure') &&
+      (!inputs.cdn_transport || (
+        ((inputs.provider != 'all' && inputs.provider != 's3') || needs.cdn-s3.result == 'success') &&
+        ((inputs.provider != 'all' && inputs.provider != 'gcs') || needs.cdn-gcs.result == 'success') &&
+        ((inputs.provider != 'all' && inputs.provider != 'azure') || needs.cdn-azure.result == 'success')
+      ))
+    needs: [evidence-contract, s3, gcs, azure, cdn-s3, cdn-gcs, cdn-azure]
+    runs-on:
+      group: provider-cdn-qualification
+      labels: linux
+    environment: provider-cdn-release-qualification
+    timeout-minutes: 390
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Prepare evidence scratch directory
+        id: scratch
+        shell: bash
+        run: |
+          evidence=$(mktemp -d "$RUNNER_TEMP/crab-cdn-evidence.XXXXXX")
+          printf 'path=%s\n' "$evidence" >> "$GITHUB_OUTPUT"
+
+      - name: Download same-attempt Amazon S3 evidence
+        if: needs.s3.result == 'success'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: provider-qualification-amazon-s3-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.scratch.outputs.path }}/native/s3
+
+      - name: Download same-attempt Google Cloud Storage evidence
+        if: needs.gcs.result == 'success'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: provider-qualification-gcs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.scratch.outputs.path }}/native/gcs
+
+      - name: Download same-attempt Azure Blob evidence
+        if: needs.azure.result == 'success'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: provider-qualification-azure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.scratch.outputs.path }}/native/azure
+
+      - name: Download same-attempt CloudFront canary
+        if: needs.cdn-s3.result == 'success'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: provider-cdn-transport-s3-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.scratch.outputs.path }}/transport/s3
+
+      - name: Download same-attempt Cloud CDN canary
+        if: needs.cdn-gcs.result == 'success'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: provider-cdn-transport-gcs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.scratch.outputs.path }}/transport/gcs
+
+      - name: Download same-attempt Front Door canary
+        if: needs.cdn-azure.result == 'success'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: provider-cdn-transport-azure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.scratch.outputs.path }}/transport/azure
+
+      - name: Assemble and verify the release bundle
+        shell: bash
+        env:
+          SCRATCH: ${{ steps.scratch.outputs.path }}
+          MEASURED_INPUTS_ROOT: ${{ vars.CRAB_CDN_MEASURED_INPUTS_ROOT }}
+          BENCHMARKS_SHA256: ${{ vars.CRAB_CDN_BENCHMARKS_SHA256 }}
+        run: |
+          : "${MEASURED_INPUTS_ROOT:?Set CRAB_CDN_MEASURED_INPUTS_ROOT in the release qualification environment.}"
+          : "${BENCHMARKS_SHA256:?Set CRAB_CDN_BENCHMARKS_SHA256 in the release qualification environment.}"
+          if [[ ! -d "$MEASURED_INPUTS_ROOT" ]]; then
+            echo '::error::The runner cannot access the CDN measurement root.'
+            exit 1
+          fi
+          measured="$MEASURED_INPUTS_ROOT/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT"
+          args=(--inputs "$measured" --native-reports "$SCRATCH/native" --output "$SCRATCH/artifact")
+          if [[ -d "$SCRATCH/transport" ]]; then
+            args+=(--transport-traces "$SCRATCH/transport")
+          fi
+          python3 -B crab/scripts/e2e/assemble_cdn_qualification.py "${args[@]}" \
+            --benchmarks-sha256 "$BENCHMARKS_SHA256" --source-sha "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --wait-for-inputs-seconds 21600
+
+      - name: Upload verified CDN release evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cdn-release-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.scratch.outputs.path }}/artifact
           if-no-files-found: error
           retention-days: 90

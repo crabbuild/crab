@@ -41,7 +41,8 @@ pub struct AzureEntraConfig {
 }
 
 /// Crab Auth credential-provider configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CrabAuthClientConfig {
     pub endpoint: String,
     pub issuer_url: String,

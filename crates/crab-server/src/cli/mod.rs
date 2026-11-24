@@ -5,8 +5,12 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand};
 use crab_server::catalog::CatalogStore;
 use crab_server::{RepositoryAccess, RepositoryMember};
+use crab_storage::cdn::{CdnConsumer, is_read_evidence_target, observe_service_build};
 use serde::Deserialize;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{
+    EnvFilter, Layer as _, filter::filter_fn, layer::SubscriberExt as _,
+    util::SubscriberInitExt as _,
+};
 
 mod assignments;
 mod ecs;
@@ -324,14 +328,24 @@ fn read_members(mut reader: impl Read) -> crab_server::Result<Vec<RepositoryMemb
 }
 
 pub(super) async fn run() -> crab_server::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
+    let output = tracing_subscriber::fmt::layer()
         .with_target(false)
         .with_writer(std::io::stderr)
+        .with_filter(filter_fn(|event| !is_read_evidence_target(event.target())));
+    let evidence = tracing_subscriber::fmt::layer()
+        .json()
+        .with_current_span(false)
+        .with_span_list(false)
+        .with_writer(std::io::stderr)
+        .with_filter(filter_fn(|event| is_read_evidence_target(event.target())));
+    tracing_subscriber::registry()
+        .with(output)
+        .with(evidence)
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .try_init()
-        .map_err(|source| crab_server::Error::Logging { source })?;
+        .map_err(|source| crab_server::Error::Logging {
+            source: Box::new(source),
+        })?;
     let arguments = Arguments::parse();
     arguments.validate()?;
     if arguments.container_setup {
@@ -350,7 +364,16 @@ pub(super) async fn run() -> crab_server::Result<()> {
     }
     config.set_cell_failure_zone(arguments.cell_failure_zone.as_deref())?;
     match arguments.command.unwrap_or(Command::Serve) {
-        Command::Serve => crab_server::serve(config).await,
+        Command::Serve => {
+            observe_service_build(
+                CdnConsumer::Server,
+                env!("CRAB_SERVICE_SOURCE_SHA"),
+                env!("CRAB_SERVICE_TARGET"),
+                env!("CRAB_SERVICE_PROFILE"),
+                env!("CRAB_SERVICE_FEATURES"),
+            );
+            crab_server::serve(config).await
+        }
         Command::Healthcheck => healthcheck(&config).await,
         Command::StorageProbe => crab_server::probe_storage(&config).await,
         Command::TeamPreflight => team_preflight(&config).await,

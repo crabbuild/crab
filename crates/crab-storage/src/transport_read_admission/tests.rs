@@ -136,6 +136,79 @@ fn request() -> HttpRequest {
     request
 }
 
+#[tokio::test]
+async fn connector_records_native_body_receipts_without_a_read_admission() {
+    #[derive(Default)]
+    struct Capture(Mutex<Vec<std::collections::BTreeMap<String, String>>>);
+
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.target() == "crab_storage::native_read"
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::Id {
+            tracing::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::Id, _: &tracing::Id) {}
+        fn enter(&self, _: &tracing::Id) {}
+        fn exit(&self, _: &tracing::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Fields(std::collections::BTreeMap<String, String>);
+
+            impl tracing::field::Visit for Fields {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    self.0.insert(field.name().to_owned(), format!("{value:?}"));
+                }
+            }
+
+            assert!(event.is_root());
+            let mut fields = Fields(Default::default());
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields.0);
+        }
+    }
+
+    let capture = Arc::new(Capture::default());
+    let dispatcher = tracing::Dispatch::new(capture.clone());
+    let _guard = tracing::dispatcher::set_default(&dispatcher);
+    let service = ReadAdmissionService(HttpClient::new(StaticService {
+        calls: Arc::new(AtomicU64::new(0)),
+    }));
+    for uri in [
+        "https://storage.googleapis.com/bucket/object?private=param",
+        "https://oauth2.googleapis.com/credential",
+        "https://storage.googleapis.com/bucket/object?private=param",
+    ] {
+        let mut request = request();
+        *request.uri_mut() = uri.parse().unwrap();
+        let response = service.call(request).await.unwrap();
+        assert!(
+            response
+                .extensions()
+                .get::<TransportReadAccounted>()
+                .is_none()
+        );
+        assert_eq!(response.into_body().bytes().await.unwrap(), "body");
+    }
+    let expected = [
+        ("message", "Native object store read"),
+        ("method", "\"get\""),
+        ("provider", "\"gcs\""),
+        ("status", "200"),
+        ("bytes", "4"),
+    ]
+    .map(|(key, value)| (key.to_owned(), value.to_owned()))
+    .into_iter()
+    .collect();
+    assert_eq!(*capture.0.lock().unwrap(), vec![expected; 2]);
+}
+
 fn object_store_error(error: HttpError) -> object_store::Error {
     object_store::Error::Generic {
         store: "transport admission test",
@@ -185,7 +258,7 @@ async fn origin_receipts_survive_partial_drop_transport_failure_and_cancel_after
         });
         let context = TransportReadContext::new(admission.clone());
         let mut stream =
-            HttpResponseBody::new(AdmissionBody::new(inner, vec![context])).bytes_stream();
+            HttpResponseBody::new(AdmissionBody::new(inner, vec![context], None)).bytes_stream();
         if outcome == "cancel" {
             assert!(stream.next().await.unwrap().is_err());
         } else {
@@ -210,6 +283,7 @@ async fn rejected_origin_bytes_are_observed_before_budget_admission() {
     let body = HttpResponseBody::new(AdmissionBody::new(
         Bytes::from_static(b"body").into(),
         vec![context],
+        None,
     ));
     assert!(body.bytes().await.is_err());
     assert_eq!(admission.received.load(Ordering::Relaxed), 4);

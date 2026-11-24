@@ -18,6 +18,7 @@ class TestTokenClaims:
 
     def test_identity_prefers_email(self):
         claims = TokenClaims(
+            issuer="https://idp.example.com",
             subject="user-123",
             email="alice@example.com",
             name="Alice",
@@ -27,6 +28,7 @@ class TestTokenClaims:
 
     def test_identity_falls_back_to_subject(self):
         claims = TokenClaims(
+            issuer="https://idp.example.com",
             subject="user-123",
             email=None,
             name=None,
@@ -36,6 +38,7 @@ class TestTokenClaims:
 
     def test_groups_default_empty(self):
         claims = TokenClaims(
+            issuer="https://idp.example.com",
             subject="user-123",
             email=None,
             name=None,

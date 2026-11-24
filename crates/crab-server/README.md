@@ -419,6 +419,53 @@ and a canonical HTTPS origin. For container deployment, use the
 [container instructions](REFERENCE.md#run-the-container), and
 [example configuration](deploy/server.example.toml).
 
+## Provider CDN qualification
+
+Build with `--features provider-cdn-qualification` to test CDN delivery for
+verified repository reads. Bind the exact physical catalog prefix, including the
+root from `storage.url`. For example, a server rooted at
+`gs://team-repos/repositories` can configure this private binding.
+
+```toml
+[storage.cdn."repositories/org/models"]
+origin = "gs://team-repos"
+base_url = "https://downloads.example.com"
+access = "private"
+approval_sha256 = "<reviewed private-binding receipt SHA-256>"
+
+[storage.cdn."repositories/org/models".issuer]
+endpoint = "https://auth.example.com/v1/credentials"
+oidc_issuer = "https://login.example.com"
+client_id = "crab-server"
+token_cache_directory = "/var/lib/crab/server/issuer-tokens"
+```
+
+Use an installed Crab Auth login for the server process that authorizes
+the exact full repository and deployment. Pin the same private approval
+digest in the issuer. Explicit `access = "public"`
+requires `export_origin` for a separate approved bucket or container in the
+same cloud. To accelerate a public binding, add `publication` with the
+absolute receipt `path` and publisher-reported `sha256`. Unlisted objects
+use native storage. Storage origins can
+be native S3, GCS, or Azure Blob Storage. Browser and native Git read
+handlers authorize the requesting user, then verified immutable Git and full
+LFS downloads can use CDN. Complete eligible LFS downloads can populate a
+verified disk cache within the Cellar data directory. The service reserves
+up to 512 MiB from its measured disk capacity for this cache while preserving
+capacity for a Git receive. Partial LFS requests keep their native version
+proof. Catalog and Cellar operations, ref controls, writes and maintenance
+use the native storage paths. Container builds include `provider-cdn` and
+enable only qualified scopes. Pass the checkout's full commit as the
+`GIT_SHA` Docker build argument to capture build identity for qualification.
+See [Plan 021](../../plans/021-provider-cdn-support.md) for the live
+qualification requirements.
+
+The repository HTTP smoke test covers full Git and LFS delivery with native
+body reads blocked, a verified LFS cache repeat, native LFS ranges, and
+Git and LFS rollback with the same ETags.
+Run `ordinary_http_reads_use_verified_edge_bodies_and_keep_native_controls`
+from the library test suite after building the embedded UI.
+
 ## Find the relevant contract
 
 Read [CELLAR.md](CELLAR.md) for the native runtime, storage, and lifecycle

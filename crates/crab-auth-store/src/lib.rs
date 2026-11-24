@@ -1,11 +1,21 @@
 //! Auth credential to storage-store adapter.
 
+#[cfg(feature = "azure-cdn-placement")]
+pub mod azure_cdn;
+#[cfg(feature = "refreshing-store")]
+pub mod cdn;
 #[cfg(feature = "refreshing-store")]
 mod gateway_store;
 #[cfg(feature = "managed-service")]
+mod managed_read;
+#[cfg(feature = "managed-service")]
 mod managed_repository;
+#[cfg(feature = "operator-cdn")]
+pub mod operator_cdn;
 #[cfg(feature = "refreshing-store")]
 pub mod refreshing_store;
+#[cfg(feature = "view-retention")]
+pub mod view_retention;
 
 use crab_auth::{AzureToken, CloudCredentials};
 #[cfg(feature = "refreshing-store")]
@@ -40,69 +50,13 @@ pub fn build_store_from_transfer_grant(
     gateway_client: reqwest::Client,
 ) -> Result<ManagedStore> {
     let repository_prefix = grant.storage_scope.repository_prefix.clone();
-    let global_prefix = format!("{repository_prefix}/.crab");
-    let expires_at = std::time::UNIX_EPOCH
-        .checked_add(std::time::Duration::from_secs(
-            grant.expires_at.unix_timestamp().try_into().map_err(|_| {
-                AuthStoreError::InvalidCredentials {
-                    reason: "managed transfer grant expiry predates the Unix epoch".to_owned(),
-                }
-            })?,
-        ))
-        .ok_or_else(|| AuthStoreError::InvalidCredentials {
-            reason: "managed transfer grant expiry is outside the platform range".to_owned(),
-        })?;
+    let expires_at = managed_grant_expiry(grant)?;
     let store = match &grant.transport {
-        TransferTransport::Direct { direct } => {
-            let credentials = match &direct.credentials {
-                ProviderCredentials::Aws {
-                    access_key_id,
-                    secret_access_key,
-                    session_token,
-                } => CloudCredentials::Aws {
-                    access_key_id: access_key_id.expose_secret().to_owned(),
-                    secret_access_key: secret_access_key.expose_secret().to_owned(),
-                    session_token: Some(session_token.expose_secret().to_owned()),
-                    expires_at,
-                    region: direct.region.clone().ok_or_else(|| {
-                        AuthStoreError::InvalidCredentials {
-                            reason: "managed AWS grant omitted its region".to_owned(),
-                        }
-                    })?,
-                },
-                ProviderCredentials::Gcp { access_token } => CloudCredentials::Gcp {
-                    access_token: access_token.expose_secret().to_owned(),
-                    expires_at,
-                },
-                ProviderCredentials::Azure { account, token } => CloudCredentials::Azure {
-                    account: account.clone(),
-                    token: AzureToken::Bearer(token.expose_secret().to_owned()),
-                    expires_at,
-                },
-            };
-            let built = crab_storage::build_object_store_with_endpoint(
-                &direct.container,
-                object_store_credentials(credentials)?,
-                direct.endpoint.as_deref(),
-            )?;
-            let identity = crab_storage::BucketIdentity::new(
-                built.provider,
-                direct.endpoint.as_deref().unwrap_or(&direct.container),
-                &direct.container,
-            );
-            let multipart_identity = built.multipart_identity;
-            let mut store = Store::new(built.inner)
-                .with_bucket_identity(identity)
-                .with_target_identity(built.target_identity)
-                .with_immutable_write_verification(built.immutable_write_verification);
-            if let Some(signer) = built.signer {
-                store = store.with_signer(signer);
-            }
-            if let (Some(multipart), Some(identity)) = (built.multipart, multipart_identity) {
-                store = store.with_multipart(multipart, identity);
-            }
-            store
-        }
+        TransferTransport::Direct { direct } => store_from_built(
+            &direct.container,
+            direct.endpoint.as_deref(),
+            build_managed_direct(direct, expires_at)?,
+        ),
         TransferTransport::Gateway { gateway } => {
             let inner = std::sync::Arc::new(gateway_store::GatewayObjectStore::new(
                 gateway_client,
@@ -121,16 +75,77 @@ pub fn build_store_from_transfer_grant(
                 .with_target_identity(target_identity)
         }
     }
-    .with_storage_scope(crab_types::storage::StorageScope {
-        repo_prefix: repository_prefix.clone(),
-        global_prefix,
-        source_repo: repository_prefix.clone(),
-        scope_hash: grant.repository_id.simple().to_string().repeat(2),
-    });
+    .with_storage_scope(managed_grant_scope(grant));
     Ok(ManagedStore {
         store,
         repository_prefix,
     })
+}
+
+#[cfg(feature = "refreshing-store")]
+fn managed_grant_scope(grant: &TransferGrant) -> crab_storage::StorageScope {
+    let repo_prefix = &grant.storage_scope.repository_prefix;
+    crab_storage::StorageScope {
+        repo_prefix: repo_prefix.clone(),
+        global_prefix: format!("{repo_prefix}/.crab"),
+        source_repo: repo_prefix.clone(),
+        scope_hash: grant.repository_id.simple().to_string().repeat(2),
+    }
+}
+
+#[cfg(feature = "refreshing-store")]
+fn managed_grant_expiry(grant: &TransferGrant) -> Result<std::time::SystemTime> {
+    std::time::UNIX_EPOCH
+        .checked_add(std::time::Duration::new(
+            grant.expires_at.unix_timestamp().try_into().map_err(|_| {
+                AuthStoreError::InvalidCredentials {
+                    reason: "managed transfer grant expiry predates the Unix epoch".to_owned(),
+                }
+            })?,
+            grant.expires_at.nanosecond(),
+        ))
+        .ok_or_else(|| AuthStoreError::InvalidCredentials {
+            reason: "managed transfer grant expiry is outside the platform range".to_owned(),
+        })
+}
+
+#[cfg(feature = "refreshing-store")]
+fn build_managed_direct(
+    direct: &crab_auth::DirectObjectCredentials,
+    expires_at: std::time::SystemTime,
+) -> Result<BuiltObjectStore> {
+    let credentials = match &direct.credentials {
+        ProviderCredentials::Aws {
+            access_key_id,
+            secret_access_key,
+            session_token,
+        } => CloudCredentials::Aws {
+            access_key_id: access_key_id.expose_secret().to_owned(),
+            secret_access_key: secret_access_key.expose_secret().to_owned(),
+            session_token: Some(session_token.expose_secret().to_owned()),
+            expires_at,
+            region: direct
+                .region
+                .clone()
+                .ok_or_else(|| AuthStoreError::InvalidCredentials {
+                    reason: "managed AWS grant omitted its region".to_owned(),
+                })?,
+        },
+        ProviderCredentials::Gcp { access_token } => CloudCredentials::Gcp {
+            access_token: access_token.expose_secret().to_owned(),
+            expires_at,
+        },
+        ProviderCredentials::Azure { account, token } => CloudCredentials::Azure {
+            account: account.clone(),
+            token: AzureToken::Bearer(token.expose_secret().to_owned()),
+            expires_at,
+        },
+    };
+    Ok(crab_storage::build_object_store_with_endpoint(
+        &direct.container,
+        object_store_credentials(credentials)?,
+        direct.endpoint.as_deref(),
+    )?)
 }
 
 /// Composes canonical reads with immutable writes under one push session.
@@ -203,11 +218,17 @@ pub fn build_object_store_from_credentials(
 /// Builds a storage-domain store from resolved auth credentials.
 pub fn build_store_from_credentials(bucket: &str, credentials: CloudCredentials) -> Result<Store> {
     let built = build_object_store_from_credentials(bucket, credentials)?;
-    let identity = crab_storage::BucketIdentity::new(built.provider, bucket, bucket);
+    Ok(store_from_built(bucket, None, built))
+}
+
+fn store_from_built(bucket: &str, endpoint: Option<&str>, built: BuiltObjectStore) -> Store {
+    let identity =
+        crab_storage::BucketIdentity::new(built.provider, endpoint.unwrap_or(bucket), bucket);
     let multipart_identity = built.multipart_identity;
     let mut store = Store::new(built.inner)
         .with_bucket_identity(identity)
         .with_target_identity(built.target_identity)
+        .with_native_cdn_authority(built.native_cdn_origin)
         .with_immutable_write_verification(built.immutable_write_verification);
     if let Some(signer) = built.signer {
         store = store.with_signer(signer);
@@ -215,7 +236,7 @@ pub fn build_store_from_credentials(bucket: &str, credentials: CloudCredentials)
     if let (Some(multipart), Some(identity)) = (built.multipart, multipart_identity) {
         store = store.with_multipart(multipart, identity);
     }
-    Ok(store)
+    store
 }
 
 /// Builds a protected-push store, including scoped Azure read routes when present.
@@ -272,6 +293,7 @@ pub fn build_protected_push_store(
             let store = Store::new(default_read)
                 .with_bucket_identity(identity)
                 .with_target_identity(write.target_identity)
+                .with_native_cdn_authority(write.native_cdn_origin)
                 .with_read_routes(read_routes);
             Ok(store.with_staging_write_store(upload_prefix.to_owned(), write.inner))
         }
@@ -430,6 +452,10 @@ mod tests {
 
         assert_eq!(store.staging_write_prefix(), Some("repo/staging"));
         assert_eq!(
+            store.native_cdn_origin(),
+            Some("https://account.blob.core.windows.net/container")
+        );
+        assert_eq!(
             store.bucket_identity(),
             crab_storage::BucketIdentity::new(StorageProviderKind::Azure, "container", "container")
         );
@@ -457,6 +483,8 @@ mod tests {
                     token: SecretString::new("grant-token").expect("valid test token"),
                 },
             },
+            cdn: None,
+            cdn_approval_sha256: None,
         };
 
         let managed = build_store_from_transfer_grant(&grant, reqwest::Client::new())
@@ -499,6 +527,8 @@ mod tests {
                     token: SecretString::new("push-token").expect("valid test token"),
                 },
             },
+            cdn: None,
+            cdn_approval_sha256: None,
         };
 
         let managed = build_push_store_from_transfer_grant(read, &grant, reqwest::Client::new())

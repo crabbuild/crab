@@ -53,6 +53,16 @@ hit, verifies a range hit, and removes exactly that probe object. Use it during
 rollout with an admin-capable cache credential; normal `crab doctor` remains
 read-only.
 
+`--cdn-probe` checks an authorized CloudFront, Cloud CDN, or Front Door
+deployment using the same primary or read replica selected by Git fetch. Use
+a build with `provider-cdn-qualification` to exercise HTTPS delivery. The probe
+compares an admitted full CDN GET or one-byte range with verified origin bytes
+for a root-referenced Git object up to 1 MiB. It prefers a sample that admits
+both forms and warns about skipped forms. It reports private viewer credential
+lifetime. When both immutable reads pass, it checks that the same viewer gets
+HTTP 401 or 403 for the mutable repository root.
+Use it on a qualification deployment containing the sample object.
+
 For conceptual background, see [Health Check](/docs/cli/diagnostics/health-check).
 
 ## Options
@@ -64,6 +74,7 @@ For conceptual background, see [Health Check](/docs/cli/diagnostics/health-check
 | `--metadb` | `false` | Report SlateDB metadata state instead of standard checks |
 | `--support-bundle` | `false` | Collect a redacted cache-service support bundle |
 | `--cache-service-active-probe` | `false` | Run an opt-in cache-service write/read/range/cleanup probe |
+| `--cdn-probe` | `false` | Verify provider CDN routing and byte delivery for an authorized deployment |
 | `--output <PATH>` | | Write the support bundle as pretty JSON |
 
 ## Examples
@@ -90,6 +101,12 @@ crab doctor --support-bundle --output cache-service-support.json
 
 ```bash
 crab doctor --cache-service-active-probe --json
+```
+
+### Check a provider CDN deployment
+
+```bash
+crab doctor --cdn-probe --json
 ```
 
 ## Related Commands

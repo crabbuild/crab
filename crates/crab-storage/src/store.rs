@@ -15,7 +15,11 @@
 //!   coordination pointers, and `update` uses `PutMode::Update(etag)`.
 //!   Callers never hand-build `PutOptions`.
 
+mod cdn_read;
 mod parallel_read;
+pub use cdn_read::{
+    CDN_PROBE_MAX_BYTES, CdnBindingInfo, CdnProbeResult, CdnReadAttempt, cdn_read_rejection,
+};
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -142,6 +146,7 @@ pub struct Store {
     /// explicit identity — typically tests and the in-memory store.
     identity: BucketIdentity,
     target_identity: Option<[u8; 32]>,
+    pub(crate) native_cdn_origin: Option<Arc<crate::cdn::NativeCdnOrigin>>,
     immutable_write_verification: ImmutableWriteVerification,
     /// Optional parallel handle to the same underlying store viewed
     /// as a [`object_store::signer::Signer`]. Populated by storage
@@ -166,6 +171,10 @@ pub struct Store {
     storage_scope: Option<StorageScope>,
     read_routes: Option<Arc<Vec<ReadRoute>>>,
     staging_writes: Option<Arc<StagingWriteState>>,
+    cdn: Option<Arc<crate::cdn::CdnRoute>>,
+    capsule_control_cache: Option<Arc<dyn crate::cdn::CapsuleControlCache>>,
+    pub(crate) read_authorization: Option<crate::read_authorization::BoundReadAuthorization>,
+    direct_read_admissions: Vec<Arc<dyn crate::ReadAdmission>>,
     read_byte_observer: Option<Arc<dyn Fn(u64) + Send + Sync>>,
     read_request_observer: Option<Arc<dyn Fn(StorageReadKind) + Send + Sync>>,
 }
@@ -218,6 +227,7 @@ impl Store {
             retry: RetryPolicy::DEFAULT,
             identity: BucketIdentity::local_unset(),
             target_identity: None,
+            native_cdn_origin: None,
             immutable_write_verification: ImmutableWriteVerification::ReadbackRequired,
             signer: None,
             read_wrapped: false,
@@ -226,6 +236,10 @@ impl Store {
             storage_scope: None,
             read_routes: None,
             staging_writes: None,
+            cdn: None,
+            capsule_control_cache: None,
+            read_authorization: None,
+            direct_read_admissions: Vec::new(),
             read_byte_observer: None,
             read_request_observer: None,
         }
@@ -265,6 +279,7 @@ impl Store {
             retry,
             identity: BucketIdentity::local_unset(),
             target_identity: None,
+            native_cdn_origin: None,
             immutable_write_verification: ImmutableWriteVerification::ReadbackRequired,
             signer: None,
             read_wrapped: false,
@@ -273,6 +288,10 @@ impl Store {
             storage_scope: None,
             read_routes: None,
             staging_writes: None,
+            cdn: None,
+            capsule_control_cache: None,
+            read_authorization: None,
+            direct_read_admissions: Vec::new(),
             read_byte_observer: None,
             read_request_observer: None,
         }
@@ -312,6 +331,32 @@ impl Store {
     #[must_use]
     pub fn target_identity(&self) -> Option<&[u8; 32]> {
         self.target_identity.as_ref()
+    }
+
+    /// Propagate the native cloud origin recorded by the resolved provider builder.
+    #[must_use]
+    pub fn with_native_cdn_authority(
+        mut self,
+        origin: Option<crate::cdn::NativeCdnOrigin>,
+    ) -> Self {
+        self.native_cdn_origin = origin.map(Arc::new);
+        self.cdn = None;
+        self
+    }
+
+    /// Install a simulated origin in a test without cloud credentials.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn with_native_cdn_origin(self, origin: Option<String>) -> Self {
+        self.with_native_cdn_authority(origin.map(crate::cdn::NativeCdnOrigin::fixture))
+    }
+
+    /// Canonical origin for CDN binding when native provider placement is known.
+    #[must_use]
+    pub fn native_cdn_origin(&self) -> Option<&str> {
+        self.native_cdn_origin
+            .as_deref()
+            .map(crate::cdn::NativeCdnOrigin::address)
     }
 
     /// Return target proof only when every read beneath `prefix` uses the bound transport.
@@ -375,6 +420,9 @@ impl Store {
 
     #[must_use]
     pub fn with_storage_scope(mut self, scope: StorageScope) -> Self {
+        if self.storage_scope.as_ref() != Some(&scope) {
+            self.cdn = None;
+        }
         self.storage_scope = Some(scope);
         self
     }
@@ -416,6 +464,7 @@ impl Store {
     #[must_use]
     pub fn with_read_admission(mut self, admission: Arc<dyn crate::ReadAdmission>) -> Self {
         self.read_wrapped = true;
+        self.direct_read_admissions.push(Arc::clone(&admission));
         let wrap = |inner: Arc<dyn ObjectStore>| -> Arc<dyn ObjectStore> {
             Arc::new(crate::read_admission::AdmittedStore {
                 inner,
@@ -3162,6 +3211,9 @@ impl Store {
             let mut buffer = vec![0_u8; 1024 * 1024];
             let mut size = 0_u64;
             loop {
+                if cancel.is_cancelled() {
+                    return Err(StorageError::Cancelled);
+                }
                 let read = input.read(&mut buffer).await?;
                 if read == 0 {
                     break;
@@ -3237,7 +3289,7 @@ impl Store {
             let destination = target.path.to_owned();
             let range = range.clone();
             async move {
-                let response = tokio::select! {
+                let (response, mut observation) = tokio::select! {
                     biased;
                     () = cancel.cancelled() => return Err(StorageError::Cancelled),
                     result = self.download_signed_response_stream(&client, &url, &path, range.clone()) => result?,
@@ -3267,6 +3319,9 @@ impl Store {
                                 source: Box::new(error),
                             },
                         })?;
+                        if let Some(observation) = &mut observation {
+                            observation.received(chunk.len());
+                        }
                         let next_size = size.checked_add(chunk.len() as u64).ok_or_else(|| {
                             StorageError::CorruptObject {
                                 path: path.clone(),
@@ -3319,8 +3374,10 @@ impl Store {
         path: &str,
         range: std::ops::Range<u64>,
     ) -> Result<Bytes> {
-        self.download_signed_response_stream(client, url, path, range)
-            .await?
+        let (response, mut observation) = self
+            .download_signed_response_stream(client, url, path, range)
+            .await?;
+        let bytes = response
             .bytes()
             .await
             .map_err(|error| StorageError::NetworkTransient {
@@ -3328,7 +3385,11 @@ impl Store {
                     store: "signed object range read",
                     source: Box::new(error),
                 },
-            })
+            })?;
+        if let Some(observation) = &mut observation {
+            observation.received(bytes.len());
+        }
+        Ok(bytes)
     }
 
     async fn download_signed_response_stream(
@@ -3337,9 +3398,17 @@ impl Store {
         url: &url::Url,
         path: &str,
         range: std::ops::Range<u64>,
-    ) -> Result<reqwest::Response> {
+    ) -> Result<(
+        reqwest::Response,
+        Option<crate::native_read_telemetry::NativeReadObservation>,
+    )> {
         let range_header = format!("bytes={}-{}", range.start, range.end - 1);
         self.record_read_request(StorageReadKind::Range);
+        let mut observation = crate::native_read_telemetry::NativeReadObservation::start(
+            &reqwest::Method::GET,
+            Some(url.scheme()),
+            url.host_str(),
+        );
         let response = client
             .get(url.clone())
             .header(reqwest::header::RANGE, range_header)
@@ -3352,6 +3421,9 @@ impl Store {
                 },
             })?;
         let status = response.status();
+        if let Some(observation) = &mut observation {
+            observation.status(status.as_u16());
+        }
         if status == reqwest::StatusCode::NOT_FOUND {
             return Err(StorageError::NotFound {
                 path: path.to_owned(),
@@ -3381,24 +3453,7 @@ impl Store {
         }
         // A same-length response can still contain bytes from another offset.
         // Direct HTTP must retain the range validation of the provider transport.
-        let mut ranges = response
-            .headers()
-            .get_all(reqwest::header::CONTENT_RANGE)
-            .iter();
-        let actual = ranges.next().and_then(|value| {
-            let value = value.to_str().ok()?.trim().strip_prefix("bytes ")?;
-            let (offsets, size) = value.split_once('/')?;
-            let (start, end) = offsets.split_once('-')?;
-            Some((
-                start.parse::<u64>().ok()?,
-                end.parse::<u64>().ok()?.checked_add(1)?,
-                size.parse::<u64>().ok()?,
-            ))
-        });
-        if ranges.next().is_some()
-            || !actual.is_some_and(|(start, end, size)| {
-                start == range.start && end == range.end && size >= end
-            })
+        if !crate::cdn::content_range(response.headers()).is_some_and(|(actual, _)| actual == range)
         {
             return Err(StorageError::CorruptObject {
                 path: path.to_owned(),
@@ -3415,7 +3470,7 @@ impl Store {
                 ),
             });
         }
-        Ok(response)
+        Ok((response, observation))
     }
 }
 

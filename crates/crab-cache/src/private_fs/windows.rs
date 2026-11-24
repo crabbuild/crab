@@ -77,6 +77,14 @@ pub(super) struct Directory {
 }
 
 impl Directory {
+    #[cfg(feature = "local-cache")]
+    pub(super) fn identity(&self) -> Result<super::FileIdentity> {
+        let file = self.chain.last().ok_or_else(|| {
+            CacheError::Internal("Windows cache directory lost its handle".into())
+        })?;
+        super::FileIdentity::capture(file)
+    }
+
     pub(super) fn root(path: &Path, create: bool) -> Result<Self> {
         let absolute = std::path::absolute(path)?;
         let mut current = PathBuf::new();

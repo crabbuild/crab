@@ -1,7 +1,11 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
+#[path = "../build/service_metadata.rs"]
+mod service_metadata;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    service_metadata::emit("../build/service_metadata.rs")?;
     let manifest = std::env::var("CARGO_MANIFEST_DIR")?;
     let root = Path::new(&manifest).join("../../packages/ui/dist");
     println!("cargo:rerun-if-changed={}", root.display());

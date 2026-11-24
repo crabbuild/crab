@@ -1,10 +1,13 @@
 import subprocess
 
+import pytest
+
 from src.view_helper import (
     SubprocessViewHelper,
     _doctor_result,
     _materialize_result,
 )
+from src.view_retention import RetentionConflict
 
 
 def test_materialize_result_rejects_unknown_top_level_field():
@@ -96,3 +99,14 @@ def test_subprocess_run_maps_timeout_to_runtime_error(monkeypatch):
         assert str(err) == "view helper timed out"
     else:
         raise AssertionError("view helper timeout must fail cleanly")
+
+
+def test_subprocess_retention_reads_stdin_and_redacts_conflicts(monkeypatch):
+    def conflict(command, **kwargs):
+        assert command == ["crab-auth-view", "retention"]
+        assert kwargs["input"] == '{"reader": "native reader digest"}'
+        return subprocess.CompletedProcess(command, 2, "", "opaque backend authorization")
+
+    monkeypatch.setattr(subprocess, "run", conflict)
+    with pytest.raises(RetentionConflict, match="^view retention revision was not acknowledged$"):
+        SubprocessViewHelper().retention({"reader": "native reader digest"})

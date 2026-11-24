@@ -191,6 +191,11 @@ crab mount --repo crab://bucket/repo --mountpoint /mnt/browse --read-only
 Mutating filesystem calls in read-only mode fail with the platform read-only
 filesystem error.
 
+Remote mounts of a filtered Crab Auth view require `--read-only`. The issuer
+must authorize `mount` and provide retention for the selected view. Crab
+checks the mounted Git revision against that view and stops admitting new
+Xet reads if it loses the retention lease.
+
 ## Mountpoint Safety
 
 By default, `crab mount` refuses to mount inside an existing git or crab

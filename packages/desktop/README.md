@@ -164,6 +164,15 @@ then exercises the real CLI and sidecar repository writes/reads on AlmaLinux 8,
 Debian 12, and Amazon Linux 2023. This gate covers the GNU native payload;
 Alpine/musl and Electron/native Node modules need separate qualification.
 
+Launch the sidecar with `--log-json` for headless qualification. This makes
+stderr emit one structured tracing event per line and keeps stdout available
+for the usual NDJSON-RPC frames. `CRAB_DESKTOP_LOG` selects tracing targets
+and levels. For CDN reads, include `crab_sdk::cdn::read_target=debug` and
+`crab_storage::cdn::transfer=debug` in the filter.
+The sidecar's `--cdn-build-info` command reports its compiled source, target,
+profile, features, and CDN policy without opening user settings. Set `GIT_SHA`
+to the full checkout commit before building a local qualification candidate.
+
 The desktop logo comes from `packages/web/crab.optimized.svg`. Run
 `npm run build:icons` after changing it; this requires `rsvg-convert` and uses
 macOS `iconutil` to regenerate the checked-in `.icns` file.
@@ -290,6 +299,22 @@ saved static credentials do not bypass it. Local connections are device-local
 and are never forwarded to SSH hosts. Forge tokens remain separate. Re-enter legacy desktop cloud-keychain credentials
 in the connection form; v1 `.crab/config.toml` is no longer read. Repository
 configuration uses v2 `crab.toml`.
+
+Remote browsing reads `[[cdn]]` bindings from the user Crab configuration
+at `~/.config/crab/config.toml` when it opens a repository. A binding must
+match the repository prefix and native S3, GCS, or Azure origin. For a
+`crab://` URL with default credentials, `[auth].storage_provider` selects the
+provider when set. Azure also takes its account from
+`[auth.azure].storage_account` or `AZURE_STORAGE_ACCOUNT_NAME`.
+
+For a private export, select **Use default credentials** and sign in through
+the configured Crab Auth issuer. Set `approval_sha256` in the private binding
+to the reviewed digest pinned in the issuer. A sidecar built with
+`provider-cdn-qualification` obtains the viewer grant and keeps it in memory.
+Default builds use the authorized origin. An approved public export can use
+the selected connection's native credentials. Set the receipt's absolute
+`path` and publisher-reported `sha256` in the public binding's
+`publication` field. Managed repositories use their managed service grants.
 
 ## Checks
 

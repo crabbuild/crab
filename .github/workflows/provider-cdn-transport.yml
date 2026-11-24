@@ -1,0 +1,217 @@
+name: Provider CDN transport canary
+
+on:
+  workflow_call:
+    inputs:
+      provider:
+        required: true
+        type: string
+      native_artifact:
+        required: true
+        type: string
+      native_result:
+        required: true
+        type: string
+      cache_role:
+        type: string
+        default: ''
+    secrets:
+      CRAB_CDN_TRANSPORT_VIEWER:
+        required: false
+      CRAB_CDN_TRANSPORT_UNRELATED_VIEWER:
+        required: false
+      CRAB_CDN_CACHE_REUSE_PRINCIPALS:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  collect:
+    name: Collect CDN transport traces (${{ inputs.provider }})
+    runs-on: ${{ inputs.cache_role == '' && 'ubuntu-latest' || fromJSON('{"group":"provider-cdn-qualification","labels":"cdn-cache-reuse"}') }}
+    timeout-minutes: 30
+    environment: ${{ format('provider-cdn-qualification-{0}{1}', inputs.provider, inputs.cache_role == 'primary' && '-cache-primary' || '') }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Require successful native qualification
+        env:
+          NATIVE_RESULT: ${{ inputs.native_result }}
+        run: |
+          if [[ "$NATIVE_RESULT" != success ]]; then
+            echo '::error::CDN transport requires a successful native provider job in this attempt.'
+            exit 1
+          fi
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Download native report for this attempt
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: provider-qualification-${{ inputs.native_artifact }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cdn-native-report
+
+      - name: Verify native evidence
+        env:
+          PROVIDER: ${{ inputs.provider }}
+        run: |
+          python3 -B crab/scripts/verify-provider-qualification-report.py \
+            "$RUNNER_TEMP/cdn-native-report/report.json" --provider "$PROVIDER" \
+            --source-sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
+
+      - name: Validate approved CDN fixture
+        id: fixture
+        shell: bash
+        env:
+          PROVIDER: ${{ inputs.provider }}
+          CACHE_ROLE: ${{ inputs.cache_role }}
+          FIXTURE_JSON: ${{ vars.CRAB_CDN_TRANSPORT_FIXTURE }}
+          FIXTURE_SHA256: ${{ vars.CRAB_CDN_TRANSPORT_FIXTURE_SHA256 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s' "$FIXTURE_JSON" > "$RUNNER_TEMP/cdn-transport-fixture.json"
+          unset FIXTURE_JSON
+          PYTHONPATH=crab/scripts/e2e python3 -B - <<'PY'
+          import os
+          from pathlib import Path
+          from run_cdn_transport_checks import approved_fixture, deployment_target
+          from cdn_qualification import PROVIDER_FOR_EDGE, require, scope_parts
+
+          env = os.environ
+          fixture = approved_fixture(Path(env["RUNNER_TEMP"]) / "cdn-transport-fixture.json", env["FIXTURE_SHA256"])
+          edge, _, _, _, _ = scope_parts(fixture["scope"])
+          require(PROVIDER_FOR_EDGE[edge] == env["PROVIDER"], "fixture must use the selected native provider")
+          require(env["CACHE_ROLE"] in ("", "primary", "second"), "invalid cache reuse role")
+          if env["CACHE_ROLE"]:
+              require("viewer_issuer" in fixture, "cache reuse requires an approved private fixture with an issuer")
+          target = deployment_target(fixture, edge)
+          if edge == "front-door":
+              from collect_front_door_deployment_policy import SUBSCRIPTION
+              require(SUBSCRIPTION.fullmatch(target["subscription"]) is not None, "invalid Azure subscription")
+              with open(env["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+                  print(f"subscription={target['subscription']}", file=output)
+          PY
+
+      - name: Authenticate AWS deployment inspector
+        if: inputs.provider == 's3'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.CRAB_CDN_AWS_INSPECTOR_ROLE_ARN }}
+          aws-region: us-east-1
+          role-session-name: crab-cdn-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Authenticate Google Cloud deployment inspector
+        if: inputs.provider == 'gcs'
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.CRAB_CDN_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.CRAB_CDN_GCP_INSPECTOR_SERVICE_ACCOUNT }}
+
+      - name: Set up Google Cloud CLI
+        if: inputs.provider == 'gcs'
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Authenticate Azure deployment inspector
+        if: inputs.provider == 'azure'
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
+        env:
+          AZURE_CORE_OUTPUT: none
+        with:
+          client-id: ${{ vars.CRAB_CDN_AZURE_INSPECTOR_CLIENT_ID }}
+          tenant-id: ${{ vars.CRAB_CDN_AZURE_TENANT_ID }}
+          subscription-id: ${{ steps.fixture.outputs.subscription }}
+
+      - name: Download the same-attempt primary observation
+        if: inputs.cache_role == 'second'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: provider-cdn-cache-primary-${{ inputs.provider }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cdn-cache-primary
+
+      - name: Verify authenticated cache reuse arm
+        if: inputs.cache_role != ''
+        shell: bash
+        env:
+          CACHE_ROLE: ${{ inputs.cache_role }}
+          FIXTURE_SHA256: ${{ vars.CRAB_CDN_TRANSPORT_FIXTURE_SHA256 }}
+          PRINCIPALS: ${{ secrets.CRAB_CDN_CACHE_REUSE_PRINCIPALS }}
+          CACHE_REUSE_SHA256: ${{ vars.CRAB_CDN_CACHE_REUSE_SHA256 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          principals=$(mktemp "$RUNNER_TEMP/cdn-cache-principals.XXXXXX")
+          trap 'rm -f -- "$principals"' EXIT
+          printf '%s' "$PRINCIPALS" > "$principals"
+          unset PRINCIPALS
+          args=()
+          if [[ "$CACHE_ROLE" == second ]]; then
+            args+=(--primary-observation "$RUNNER_TEMP/cdn-cache-primary/cdn-cache-primary.json")
+          fi
+          python3 -B crab/scripts/e2e/collect_cdn_cache_reuse.py \
+            --fixture "$RUNNER_TEMP/cdn-transport-fixture.json" --configuration-sha256 "$FIXTURE_SHA256" \
+            --principals "$principals" --cache-reuse-sha256 "$CACHE_REUSE_SHA256" \
+            --source-sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --github-role "$CACHE_ROLE" --output "$RUNNER_TEMP/cdn-cache-$CACHE_ROLE.json" "${args[@]}"
+
+      - name: Upload redacted primary observation
+        if: inputs.cache_role == 'primary'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: provider-cdn-cache-primary-${{ inputs.provider }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cdn-cache-primary.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Attest deployment and probe approved CDN fixture
+        if: inputs.cache_role != 'primary'
+        shell: bash
+        env:
+          PROVIDER: ${{ inputs.provider }}
+          CACHE_ROLE: ${{ inputs.cache_role }}
+          FIXTURE_SHA256: ${{ vars.CRAB_CDN_TRANSPORT_FIXTURE_SHA256 }}
+          VIEWER: ${{ secrets.CRAB_CDN_TRANSPORT_VIEWER }}
+          UNRELATED_VIEWER: ${{ secrets.CRAB_CDN_TRANSPORT_UNRELATED_VIEWER }}
+        run: |
+          set -euo pipefail
+          umask 077
+          scratch=$(mktemp -d "$RUNNER_TEMP/cdn-transport-input.XXXXXX")
+          trap 'rm -rf -- "$scratch"' EXIT
+          args=(
+            --provider "$PROVIDER"
+            --fixture "$RUNNER_TEMP/cdn-transport-fixture.json"
+            --configuration-sha256 "$FIXTURE_SHA256"
+            --trace-directory "$RUNNER_TEMP/cdn-transport-traces"
+            --attest-deployment
+            --github-viewer
+            --native-identity-read
+            --source-sha "$GITHUB_SHA"
+            --run-id "$GITHUB_RUN_ID"
+            --run-attempt "$GITHUB_RUN_ATTEMPT"
+          )
+          if [[ -n "$VIEWER" ]]; then
+            printf '%s' "$VIEWER" > "$scratch/viewer"
+            args+=(--viewer-file "$scratch/viewer")
+          fi
+          if [[ -n "$UNRELATED_VIEWER" ]]; then
+            printf '%s' "$UNRELATED_VIEWER" > "$scratch/unrelated-viewer"
+            args+=(--unrelated-viewer-file "$scratch/unrelated-viewer")
+          fi
+          unset VIEWER UNRELATED_VIEWER
+          python3 -B crab/scripts/e2e/run_cdn_transport_checks.py "${args[@]}"
+          if [[ "$CACHE_ROLE" == second ]]; then
+            mv -- "$RUNNER_TEMP/cdn-cache-second.json" "$RUNNER_TEMP/cdn-transport-traces/authorized_cache_reuse.json"
+          fi
+
+      - name: Upload redacted transport traces
+        if: inputs.cache_role != 'primary'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: provider-cdn-transport-${{ inputs.provider }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cdn-transport-traces
+          if-no-files-found: error
+          retention-days: 90

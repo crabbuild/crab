@@ -44,6 +44,7 @@ pub(super) enum PackIndexRead {
 
 pub(super) struct IndexWindow {
     path: ObjectPath,
+    source_size: Option<u64>,
     range: std::ops::Range<u64>,
     extra_bytes: u64,
     members: Vec<(GitPackInventoryEntry, RemoteGitSidecarRange)>,
@@ -84,17 +85,18 @@ impl RemoteGitReader {
                 lazy.index.length,
                 self.limits.max_pack_index_bytes,
             )?;
-            by_source
-                .entry(path.clone())
-                .or_default()
-                .push((inventory[&pack_id], lazy.index.clone()));
+            by_source.entry(path.clone()).or_default().push((
+                inventory[&pack_id],
+                lazy.index.clone(),
+                lazy.source_size,
+            ));
         }
         for (path, mut members) in by_source {
-            members.sort_unstable_by_key(|(entry, index)| (index.offset, entry.pack_id));
+            members.sort_unstable_by_key(|(entry, index, _)| (index.offset, entry.pack_id));
             let mut current: Option<IndexWindow> = None;
-            for member in members {
-                let start = member.1.offset;
-                let end = start.checked_add(member.1.length).ok_or(Error::Corrupt {
+            for (entry, index, source_size) in members {
+                let start = index.offset;
+                let end = start.checked_add(index.length).ok_or(Error::Corrupt {
                     stage: CorruptionStage::PackIndex,
                 })?;
                 let can_extend = current.as_ref().is_some_and(|window| {
@@ -116,16 +118,19 @@ impl RemoteGitReader {
                         .extra_bytes
                         .saturating_add(start.saturating_sub(window.range.end));
                     window.range.end = window.range.end.max(end);
-                    window.members.push(member);
+                    // Exact CDN Content-Range needs one agreed total for the object.
+                    window.source_size = window.source_size.filter(|size| *size == source_size);
+                    window.members.push((entry, index));
                 } else {
                     if let Some(window) = current.take() {
                         reads.push(PackIndexRead::Window(window));
                     }
                     current = Some(IndexWindow {
                         path: path.clone(),
+                        source_size: Some(source_size),
                         range: start..end,
                         extra_bytes: 0,
-                        members: vec![member],
+                        members: vec![(entry, index)],
                     });
                 }
             }
@@ -159,6 +164,7 @@ impl RemoteGitReader {
         let mut digest = blake3::Hasher::new();
         digest.update(&(window.path.as_ref().len() as u64).to_le_bytes());
         digest.update(window.path.as_ref().as_bytes());
+        digest.update(&window.source_size.unwrap_or(0).to_le_bytes());
         for (entry, range) in &window.members {
             digest.update(entry.pack_id.hex().as_bytes());
             digest.update(&entry.object_count.to_le_bytes());
@@ -194,13 +200,30 @@ impl RemoteGitReader {
                         return Ok(cached);
                     }
                     drop(cached);
-                    let bytes = read_index_window_from_store(
+                    let window = Arc::new(window);
+                    let committed = window.clone();
+                    let verified = read_index_window_from_store(
                         &store,
                         &runtime,
                         &window.path,
+                        window.source_size,
                         window.range.clone(),
                         budget,
                         &cancellation,
+                        move |bytes, cancel| {
+                            committed
+                                .members
+                                .iter()
+                                .map(|(_, range)| {
+                                    verified_lazy_sidecar(
+                                        &bytes,
+                                        committed.range.start,
+                                        range,
+                                        cancel,
+                                    )
+                                })
+                                .collect::<Result<Vec<_>>>()
+                        },
                     )
                     .await?;
                     let mut reservations = Vec::with_capacity(window.members.len());
@@ -216,15 +239,14 @@ impl RemoteGitReader {
                         .run_cpu(&cancellation, move || {
                             window
                                 .members
-                                .into_iter()
+                                .iter()
+                                .zip(verified)
                                 .zip(reservations)
-                                .map(|((entry, range), memory)| {
+                                .map(|(((entry, _), index), memory)| {
                                     check_cancelled(&token)?;
-                                    let index =
-                                        copy_lazy_sidecar(&bytes, window.range.start, &range)?;
                                     let parsed = parse_pack_index(
                                         entry.pack_id,
-                                        entry,
+                                        *entry,
                                         index,
                                         None,
                                         &token,

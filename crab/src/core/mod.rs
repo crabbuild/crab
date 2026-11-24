@@ -1,5 +1,6 @@
 //! Shared building blocks: config, metrics, progress, error types.
 
+pub mod cdn;
 pub mod config;
 pub mod context;
 pub(crate) mod cow_clone;

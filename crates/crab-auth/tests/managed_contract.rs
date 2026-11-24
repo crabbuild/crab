@@ -4,8 +4,8 @@ use std::fmt::Debug;
 use crab_auth::{
     ApiError, ApiErrorEnvelope, AuthFlow, CapabilityName, DirectObjectCredentials, DiscoveryCache,
     DiscoveryDocument, EntityTag, GatewayAccess, GrantValidationContext, IdempotencyKey,
-    LogicalRepository, OidcClientDiscovery, PageCursor, ProviderCredentials, RepositoryState,
-    SecretString, ServiceCapabilities, StagingScope, TransferGrant, TransferMode,
+    LogicalRepository, ManagedCdnBinding, OidcClientDiscovery, PageCursor, ProviderCredentials,
+    RepositoryState, SecretString, ServiceCapabilities, StagingScope, TransferGrant, TransferMode,
     TransferOperation, TransferPermission, TransferScope, TransferTransport,
     managed_openapi_breaking_changes, managed_openapi_json,
 };
@@ -20,6 +20,8 @@ const GRANT_ID: &str = "01900000-0000-7000-8000-000000000003";
 const PUSH_ID: &str = "01900000-0000-7000-8000-000000000004";
 const REPOSITORY_PREFIX: &str =
     "environments/env-1/repositories/01900000-0000-7000-8000-000000000001";
+const CDN_GRANT: &str = include_str!("fixtures/managed-v2/transfer-grant-direct-cdn.json");
+const CDN_REPOSITORY: &str = include_str!("fixtures/managed-v2/logical-repository-cdn.json");
 
 #[test]
 fn managed_v1_fixtures_match_the_strict_wire_contract() {
@@ -85,6 +87,139 @@ fn direct_grant_validates_all_caller_held_facts() {
 #[test]
 fn gateway_grant_validates_exact_push_scope() {
     gateway_grant().validate(push_context()).unwrap();
+}
+
+#[test]
+fn managed_v2_direct_viewer_grant_matches_the_versioned_wire_contract() {
+    let repository: LogicalRepository = serde_json::from_str(CDN_REPOSITORY).unwrap();
+    repository.validate().unwrap();
+    assert_fixture(CDN_REPOSITORY, &repository);
+    let binding = repository.cdn_read_binding.as_ref().unwrap();
+    let grant: TransferGrant = serde_json::from_str(CDN_GRANT).unwrap();
+    assert_fixture(CDN_GRANT, &grant);
+    grant.validate(cdn_read_context(binding)).unwrap();
+    assert!(grant.validate(read_context()).is_err());
+    let debug = format!("{grant:?}");
+    assert!(!debug.contains("fixture-viewer-signature"));
+    assert!(debug.contains("<redacted>"));
+}
+
+#[test]
+fn managed_v2_accepts_gcs_and_azure_only_with_their_matching_provider_contracts() {
+    let fixture: serde_json::Value = serde_json::from_str(CDN_GRANT).unwrap();
+    for (credentials, provider, origin, token) in [
+        (
+            serde_json::json!({"provider": "gcp", "access_token": "fixture-oauth"}),
+            "cloud_cdn",
+            "gs://crab-managed-prod",
+            "Cloud-CDN-Cookie=URLPrefix=encoded:Expires=1893455800:KeyName=test:Signature=opaque",
+        ),
+        (
+            serde_json::json!({"provider": "azure", "account": "crabmanaged", "token": "fixture-oauth"}),
+            "front_door",
+            "https://crabmanaged.blob.core.windows.net/crab-managed-prod",
+            "header.payload.signature",
+        ),
+    ] {
+        let mut grant = fixture.clone();
+        grant["transport"]["direct"]["credentials"] = credentials;
+        let aws = cdn_binding();
+        assert!(
+            serde_json::from_value::<TransferGrant>(grant.clone())
+                .unwrap()
+                .validate(cdn_read_context(&aws))
+                .is_err()
+        );
+        grant["cdn"]["provider"] = serde_json::json!(provider);
+        grant["cdn"]["origin"] = serde_json::json!(origin);
+        grant["cdn"]["grants"][0]["credential"] = serde_json::json!(token);
+        let binding = ManagedCdnBinding {
+            provider: serde_json::from_value(serde_json::json!(provider)).unwrap(),
+            origin: origin.into(),
+            s3_region: None,
+            ..aws
+        };
+        serde_json::from_value::<TransferGrant>(grant)
+            .unwrap()
+            .validate(cdn_read_context(&binding))
+            .unwrap();
+    }
+}
+
+#[test]
+fn managed_v2_rejects_widened_viewer_authority() {
+    let fixture: serde_json::Value = serde_json::from_str(CDN_GRANT).unwrap();
+    let binding = cdn_binding();
+    for (pointer, value) in [
+        ("/cdn/origin", serde_json::json!("s3://other-bucket")),
+        ("/cdn/global_prefix", serde_json::json!(".crab")),
+        ("/cdn/repo_prefix", serde_json::json!("another/repo")),
+        ("/cdn/expires_at", serde_json::json!(1_893_456_001u64)),
+        (
+            "/cdn/base_url",
+            serde_json::json!("https://other.example/path?token=value"),
+        ),
+        (
+            "/cdn/base_url",
+            serde_json::json!("https://other.example/path"),
+        ),
+        ("/cdn_approval_sha256", serde_json::json!("b".repeat(64))),
+        ("/cdn_approval_sha256", serde_json::Value::Null),
+        ("/transport/direct/region", serde_json::json!("us-east-1")),
+        (
+            "/transport/direct/container",
+            serde_json::json!("different-bucket"),
+        ),
+        (
+            "/cdn/grants/0/prefix",
+            serde_json::json!(format!("{REPOSITORY_PREFIX}/v2/")),
+        ),
+    ] {
+        let mut value_fixture = fixture.clone();
+        *value_fixture.pointer_mut(pointer).unwrap() = value;
+        let grant: TransferGrant = serde_json::from_value(value_fixture).unwrap();
+        assert!(
+            grant.validate(cdn_read_context(&binding)).is_err(),
+            "{pointer}"
+        );
+    }
+
+    let mut endpoint_override = fixture.clone();
+    endpoint_override["transport"]["direct"]["endpoint"] =
+        serde_json::json!("https://storage.example.com");
+    assert!(
+        serde_json::from_value::<TransferGrant>(endpoint_override)
+            .unwrap()
+            .validate(cdn_read_context(&binding))
+            .is_err()
+    );
+
+    let mut gateway = fixture.clone();
+    gateway["transport"] = serde_json::json!({
+        "transport": "gateway",
+        "gateway": { "service_url": "https://gateway.crab.build/v1/objects", "token": "fixture-token" }
+    });
+    let gateway: TransferGrant = serde_json::from_value(gateway).unwrap();
+    assert!(gateway.validate(cdn_read_context(&binding)).is_err());
+
+    let mut v1 = fixture;
+    v1["schema_version"] = serde_json::json!(1);
+    let v1: TransferGrant = serde_json::from_value(v1).unwrap();
+    assert!(v1.validate(read_context()).is_err());
+}
+
+#[test]
+fn managed_v2_rejects_a_self_consistent_grant_for_a_different_physical_repository() {
+    let fixture = CDN_GRANT.replace(REPOSITORY_PREFIX, "environments/env-1/repositories/other");
+    let grant: TransferGrant = serde_json::from_str(&fixture).unwrap();
+    let error = grant
+        .validate(cdn_read_context(&cdn_binding()))
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("conflicts with the approved managed CDN deployment")
+    );
 }
 
 #[test]
@@ -450,6 +585,7 @@ fn logical_repository() -> LogicalRepository {
         revision: 7,
         transfer_modes: vec![TransferMode::DirectS3],
         protected_push: true,
+        cdn_read_binding: None,
     }
 }
 
@@ -494,6 +630,8 @@ fn direct_grant() -> TransferGrant {
                 },
             },
         },
+        cdn: None,
+        cdn_approval_sha256: None,
     }
 }
 
@@ -519,6 +657,8 @@ fn gateway_grant() -> TransferGrant {
                 token: secret("fixture-gateway-token"),
             },
         },
+        cdn: None,
+        cdn_approval_sha256: None,
     }
 }
 
@@ -529,9 +669,11 @@ fn read_context() -> GrantValidationContext<'static> {
         TransferPermission::ListPrefix,
     ];
     GrantValidationContext {
+        schema_version: 1,
         repository_id: uuid(REPOSITORY_ID),
         operation: TransferOperation::Clone,
         repository_prefix: REPOSITORY_PREFIX,
+        cdn_binding: None,
         push_id: None,
         allowed_permissions: &ALLOWED,
         now: timestamp(1_893_455_100),
@@ -542,13 +684,30 @@ fn read_context() -> GrantValidationContext<'static> {
 fn push_context() -> GrantValidationContext<'static> {
     static ALLOWED: [TransferPermission; 1] = [TransferPermission::CreateImmutableObject];
     GrantValidationContext {
+        schema_version: 1,
         repository_id: uuid(REPOSITORY_ID),
         operation: TransferOperation::PushUpload,
         repository_prefix: REPOSITORY_PREFIX,
+        cdn_binding: None,
         push_id: Some(uuid(PUSH_ID)),
         allowed_permissions: &ALLOWED,
         now: timestamp(1_893_455_100),
         not_after: timestamp(1_893_456_600),
+    }
+}
+
+fn cdn_binding() -> ManagedCdnBinding {
+    serde_json::from_str::<LogicalRepository>(CDN_REPOSITORY)
+        .unwrap()
+        .cdn_read_binding
+        .unwrap()
+}
+
+fn cdn_read_context(binding: &ManagedCdnBinding) -> GrantValidationContext<'_> {
+    GrantValidationContext {
+        schema_version: 2,
+        cdn_binding: Some(binding),
+        ..read_context()
     }
 }
 

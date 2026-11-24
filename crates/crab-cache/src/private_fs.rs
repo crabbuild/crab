@@ -143,6 +143,29 @@ pub(crate) fn open_database(
 
 impl PinnedRoot {
     #[cfg(feature = "local-cache")]
+    pub(crate) fn fingerprint(&self) -> Result<[u8; 32]> {
+        #[cfg(any(unix, windows))]
+        {
+            use sha2::{Digest as _, Sha256};
+
+            let identity = self.0.identity()?;
+            let mut digest = Sha256::new();
+            digest.update(b"crab cache root v1");
+            digest.update(identity.volume.to_le_bytes());
+            digest.update(identity.file);
+            digest.update(identity.created.as_secs().to_le_bytes());
+            digest.update(identity.created.subsec_nanos().to_le_bytes());
+            Ok(digest.finalize().into())
+        }
+        #[cfg(not(any(unix, windows)))]
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "cache root identity is unavailable",
+        )
+        .into())
+    }
+
+    #[cfg(feature = "local-cache")]
     pub(crate) fn with_subdirectory<T: Default>(
         &self,
         relative: &Path,
@@ -510,6 +533,11 @@ mod platform {
     }
 
     impl Directory {
+        #[cfg(feature = "local-cache")]
+        pub(super) fn identity(&self) -> Result<super::FileIdentity> {
+            super::FileIdentity::capture(&self.file)
+        }
+
         fn stat_component(&self, name: &CStr) -> io::Result<libc::stat> {
             let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
             // SAFETY: the parent descriptor and NUL-terminated name are live;

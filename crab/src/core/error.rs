@@ -2236,7 +2236,8 @@ impl From<crab_coordination::error::CoordinationError> for CrabError {
                     origin: "captured read retention was lost; reopen the mount".to_owned(),
                 }
             }
-            error @ crab_coordination::error::CoordinationError::ReadRetentionFailed(_) => {
+            error @ (crab_coordination::error::CoordinationError::ReadRetentionFailed(_)
+            | crab_coordination::error::CoordinationError::ReadRetentionIssuer(_)) => {
                 Self::Io(std::io::Error::other(error))
             }
             crab_coordination::error::CoordinationError::ReadRetentionMalformed {

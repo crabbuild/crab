@@ -34,6 +34,7 @@ use crab_xet::xorb::builder::FOOTER_SIZE;
 use crab_xet::xorb::format::{ChunkMeta, MAX_XORB_SIZE, MerkleHash};
 use crab_xet::xorb::parser::XorbParser;
 
+mod capsule_control;
 mod git_pack_file;
 mod lfs_file;
 mod maintenance;
@@ -76,6 +77,8 @@ pub struct PruneStats {
     pub xorbs_evicted: u64,
     /// Number of immutable ref-journal transaction files evicted.
     pub ref_transactions_evicted: u64,
+    /// Number of verified capsule control windows evicted.
+    pub capsule_controls_evicted: u64,
     /// Number of native Git pack files evicted.
     pub git_packs_evicted: u64,
     /// Number of complete LFS objects evicted.
@@ -102,6 +105,7 @@ pub enum PruneObjectKind {
     Shard,
     Xorb,
     RefTransaction,
+    CapsuleControl,
     GitPack,
     Lfs,
 }
@@ -114,6 +118,7 @@ impl PruneObjectKind {
             Self::Shard => "shard",
             Self::Xorb => "xorb",
             Self::RefTransaction => "ref-transaction",
+            Self::CapsuleControl => "capsule-control",
             Self::GitPack => "git-pack",
             Self::Lfs => "lfs",
         }
@@ -136,6 +141,7 @@ impl PruneStats {
             + self.shards_evicted
             + self.xorbs_evicted
             + self.ref_transactions_evicted
+            + self.capsule_controls_evicted
             + self.git_packs_evicted
             + self.lfs_objects_evicted
     }
@@ -171,6 +177,10 @@ pub struct CacheStats {
     pub ref_transaction_bytes: u64,
     /// Number of cached immutable ref-journal transactions.
     pub ref_transaction_count: u64,
+    /// Total bytes retained for capsule control windows.
+    pub capsule_control_bytes: u64,
+    /// Number of cached capsule control windows.
+    pub capsule_control_count: u64,
     /// Total bytes used by native Git pack files.
     pub git_pack_bytes: u64,
     /// Number of cached native Git pack files.
@@ -246,6 +256,16 @@ impl LocalCache {
         }
         let relative_root = PathBuf::from("namespaces").join(namespace);
         Ok(Self::at(catalog, relative_root, None))
+    }
+
+    /// Isolate an authorized view while retaining the current catalog and limits.
+    #[must_use]
+    pub fn for_authorized_reads(&self, namespace: &[u8; 32]) -> Self {
+        let mut hash = blake3::Hasher::new_derive_key("crab cache source v1");
+        hash.update(namespace);
+        hash.update(self.relative_root.as_os_str().as_encoded_bytes());
+        let root = PathBuf::from("namespaces").join(hash.finalize().to_hex().as_str());
+        Self::at(self.catalog.clone(), root, self.shard_max_bytes)
     }
 
     fn at(
@@ -1136,6 +1156,7 @@ fn cache_family_for_path(root: &Path, path: &Path) -> &'static str {
         Some("xorbs") => "xorb",
         Some("shards") => "shard",
         Some("ref-transactions") => "ref-transaction",
+        Some("capsule-controls") => "capsule-control",
         Some("manifests") => "manifest",
         Some("stages") => "stage",
         _ => "other",

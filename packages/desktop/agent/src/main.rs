@@ -227,8 +227,21 @@ fn main() -> std::io::Result<()> {
     if std::env::args_os().nth(1).as_deref()
         == Some(std::ffi::OsStr::new(native_process::mutation::worker::ARG))
     {
-        init_tracing(None);
+        init_tracing(None, false);
         return native_process::mutation::worker::serve();
+    }
+    // Build inspection runs without opening desktop settings, caches or credentials.
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--cdn-build-info")) {
+        use std::io::Write as _;
+        let build = serde_json::json!({
+            "source_sha": env!("CRAB_SERVICE_SOURCE_SHA"),
+            "target_triple": env!("CRAB_SERVICE_TARGET"),
+            "cargo_profile": env!("CRAB_SERVICE_PROFILE"),
+            "cargo_features": env!("CRAB_SERVICE_FEATURES"),
+            "qualification_feature": crab_storage::cdn::qualification_enabled(),
+            "release_policy_sha256": crab_storage::cdn::release_policy_sha256(),
+        });
+        return writeln!(std::io::stdout().lock(), "{build}");
     }
     // Handle --version early, before any other initialization.
     if std::env::args().any(|a| a == "--version") {
@@ -244,7 +257,8 @@ async fn run_sidecar() -> std::io::Result<()> {
         return preview::query::run_live_worker().await;
     }
     let log_file = path_argument("--log-file")?;
-    init_tracing(log_file.as_deref());
+    let log_json = std::env::args_os().any(|arg| arg == "--log-json");
+    init_tracing(log_file.as_deref(), log_json);
     info!(
         version = env!("CARGO_PKG_VERSION"),
         "crab-desktop-agent starting"
@@ -452,16 +466,27 @@ fn path_argument(flag: &str) -> std::io::Result<Option<String>> {
     Ok(None)
 }
 
-fn init_tracing(log_file: Option<&str>) {
-    use tracing_subscriber::layer::SubscriberExt;
+fn init_tracing(log_file: Option<&str>, log_json: bool) {
+    use tracing_subscriber::layer::{Layer, SubscriberExt};
     use tracing_subscriber::util::SubscriberInitExt;
 
     // Logs go to stderr. stdout is reserved for NDJSON RPC frames.
     let filter = tracing_subscriber::EnvFilter::try_from_env("CRAB_DESKTOP_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
-    let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
-
+    let stderr_layer = if log_json {
+        tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(std::io::stderr)
+            .boxed()
+    } else {
+        tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr)
+            .boxed()
+    };
+    let subscriber = tracing_subscriber::registry()
+        .with(filter)
+        .with(stderr_layer);
     match log_file {
         Some(file_path) => {
             // Set up a rolling file appender: 10 MB × 5 files.
@@ -486,17 +511,10 @@ fn init_tracing(log_file: Option<&str>) {
                 .with_writer(file_appender)
                 .with_ansi(false);
 
-            let _ = tracing_subscriber::registry()
-                .with(filter)
-                .with(stderr_layer)
-                .with(file_layer)
-                .try_init();
+            let _ = subscriber.with(file_layer).try_init();
         }
         None => {
-            let _ = tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .with_writer(std::io::stderr)
-                .try_init();
+            let _ = subscriber.try_init();
         }
     }
 }

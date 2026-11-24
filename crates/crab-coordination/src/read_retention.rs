@@ -9,7 +9,8 @@ use object_store::{ObjectStore, ObjectStoreExt, UpdateVersion, path::Path};
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
-use crate::push_lock::{create_strict, store_error, update};
+use crate::gc_fence::gc_fence_path;
+use crate::push_lock::{backend_unix_time, create_strict, store_error, update};
 use crate::{CoordinationError, DEFAULT_GC_FENCE_QUARANTINE, Result};
 
 /// Backend lifetime of an active read claim between conditional renewals.
@@ -103,6 +104,16 @@ impl Claim {
     }
 }
 
+/// The last acknowledged incarnation and sequence of one retained read claim.
+/// A service must authenticate its holder and bind this revision to the exact
+/// native target and claim path before accepting it on another request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadRetentionRevision {
+    incarnation: String,
+    sequence: u64,
+}
+
 /// Exclusive renewal owner for one reader's private conditional claim.
 ///
 /// The caller publishes its immutable descriptor first, then validates both GC
@@ -172,6 +183,81 @@ impl ReadRetentionLease {
     pub fn deadline(&self) -> Result<Instant> {
         self.ensure_valid()?;
         self.deadline.ok_or_else(|| lost(&self.path))
+    }
+
+    /// Return a revision a trusted holder may use for the next request.
+    pub fn revision(&self) -> Result<ReadRetentionRevision> {
+        self.ensure_valid()?;
+        Ok(ReadRetentionRevision {
+            incarnation: self.claim.incarnation.clone(),
+            sequence: self.claim.sequence,
+        })
+    }
+
+    /// Conditionally renew a previously acknowledged revision across requests.
+    /// Uses the repository's native GC clock and returns ownership only after
+    /// a successful conditional write. An uncertain or stale revision is lost.
+    pub async fn renew_acknowledged(
+        store: Arc<dyn ObjectStore>,
+        path: Path,
+        repository: &str,
+        revision: &ReadRetentionRevision,
+    ) -> Result<Self> {
+        let started = Instant::now();
+        let (claim, version, modified) = load_acknowledged(&store, &path, revision).await?;
+        let deadline =
+            active_deadline(&store, &path, repository, &claim, started, modified).await?;
+        let mut lease = Self {
+            store,
+            path,
+            claim,
+            version,
+            deadline: Some(deadline),
+        };
+        lease.renew().await?;
+        Ok(lease)
+    }
+
+    /// Verify one active incarnation for issuer credential renewal without changing
+    /// its claim. A concurrent lease renewal can advance its sequence. The caller
+    /// must already authenticate the holder and select the exact native claim path.
+    pub async fn verify_active_incarnation(
+        store: &Arc<dyn ObjectStore>,
+        path: &Path,
+        repository: &str,
+        incarnation: &str,
+    ) -> Result<Instant> {
+        let started = Instant::now();
+        let (claim, _, modified) = load_claim(store, path).await?;
+        if claim.incarnation != incarnation {
+            return Err(lost(path));
+        }
+        active_deadline(store, path, repository, &claim, started, modified).await
+    }
+
+    /// Release a specific acknowledged revision after readers have drained.
+    /// Repeating its completed release succeeds until GC removes the claim.
+    pub async fn release_acknowledged(
+        store: Arc<dyn ObjectStore>,
+        path: Path,
+        revision: &ReadRetentionRevision,
+    ) -> Result<()> {
+        let (claim, version, _) = load_acknowledged(&store, &path, revision).await?;
+        if claim.state == ClaimState::Released {
+            return Ok(());
+        }
+        if claim.state != ClaimState::Active {
+            return Err(lost(&path));
+        }
+        Self {
+            store,
+            path,
+            claim,
+            version,
+            deadline: None,
+        }
+        .release()
+        .await
     }
 
     /// Renew by changing the sequence under the last acknowledged provider version.
@@ -272,6 +358,18 @@ pub async fn load_read_retention_root(
     Ok((claim.state != ClaimState::Released).then_some(claim.root))
 }
 
+async fn load_acknowledged(
+    store: &Arc<dyn ObjectStore>,
+    path: &Path,
+    revision: &ReadRetentionRevision,
+) -> Result<(Claim, UpdateVersion, i64)> {
+    let (claim, version, modified) = load_claim(store, path).await?;
+    if claim.incarnation != revision.incarnation || claim.sequence != revision.sequence {
+        return Err(lost(path));
+    }
+    Ok((claim, version, modified))
+}
+
 async fn load_claim(
     store: &Arc<dyn ObjectStore>,
     path: &Path,
@@ -315,6 +413,42 @@ fn renewal_deadline(path: &Path) -> Result<Instant> {
     // before this new deadline precedes expiry of the last acknowledged claim.
     Instant::now()
         .checked_add(READ_RETENTION_TTL / 2)
+        .ok_or_else(|| lost(path))
+}
+
+async fn active_deadline(
+    store: &Arc<dyn ObjectStore>,
+    path: &Path,
+    repository: &str,
+    claim: &Claim,
+    started: Instant,
+    modified: i64,
+) -> Result<Instant> {
+    if claim.state != ClaimState::Active {
+        return Err(lost(path));
+    }
+    let clock = Path::from(gc_fence_path(repository)?);
+    let now = backend_unix_time(store, &clock).await?;
+    acknowledged_deadline(path, started, modified, now)
+}
+
+fn acknowledged_deadline(
+    path: &Path,
+    started: Instant,
+    modified: i64,
+    backend_now: i64,
+) -> Result<Instant> {
+    let elapsed = backend_now
+        .checked_sub(modified)
+        .and_then(|seconds| u64::try_from(seconds).ok())
+        .and_then(|seconds| seconds.checked_add(1))
+        .ok_or_else(|| lost(path))?;
+    // Charge the provider clock's whole-second precision and all time since
+    // request entry before allowing the next conditional write.
+    (READ_RETENTION_TTL / 2)
+        .checked_sub(Duration::from_secs(elapsed))
+        .and_then(|remaining| started.checked_add(remaining))
+        .filter(|deadline| Instant::now() < *deadline)
         .ok_or_else(|| lost(path))
 }
 
@@ -363,6 +497,104 @@ mod tests {
         );
         lease.release().await.unwrap();
         assert_eq!(retained_read_root(&store, &path, now).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn acknowledged_requests_renew_once_and_release_only_the_last_revision() {
+        let (store, path, lease) = fixture().await;
+        let initial = lease.revision().unwrap();
+        drop(lease);
+
+        let (left, right) = tokio::join!(
+            ReadRetentionLease::renew_acknowledged(store.clone(), path.clone(), "repo", &initial),
+            ReadRetentionLease::renew_acknowledged(store.clone(), path.clone(), "repo", &initial),
+        );
+        let renewed = match (left, right) {
+            (Ok(lease), Err(_)) | (Err(_), Ok(lease)) => lease.revision().unwrap(),
+            _ => panic!("exactly one request may renew a claim revision"),
+        };
+        assert_ne!(renewed, initial);
+        assert!(matches!(
+            ReadRetentionLease::release_acknowledged(store.clone(), path.clone(), &initial).await,
+            Err(CoordinationError::ReadRetentionLost { .. })
+        ));
+        for _ in 0..2 {
+            ReadRetentionLease::release_acknowledged(store.clone(), path.clone(), &renewed)
+                .await
+                .unwrap();
+        }
+        assert!(matches!(
+            ReadRetentionLease::renew_acknowledged(store, path, "repo", &renewed).await,
+            Err(CoordinationError::ReadRetentionLost { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn credential_verification_observes_one_incarnation_without_changing_its_revision() {
+        let (store, path, mut lease) = fixture().await;
+        let initial = lease.revision().unwrap();
+        lease.renew().await.unwrap();
+        ReadRetentionLease::verify_active_incarnation(&store, &path, "repo", &initial.incarnation)
+            .await
+            .unwrap();
+        assert!(matches!(
+            ReadRetentionLease::verify_active_incarnation(&store, &path, "repo", "wrong").await,
+            Err(CoordinationError::ReadRetentionLost { .. })
+        ));
+        // The native version last acknowledged by the reader still releases.
+        lease.release().await.unwrap();
+        assert!(matches!(
+            ReadRetentionLease::verify_active_incarnation(
+                &store,
+                &path,
+                "repo",
+                &initial.incarnation
+            )
+            .await,
+            Err(CoordinationError::ReadRetentionLost { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn acknowledged_request_cannot_revive_a_gc_retired_claim() {
+        let (store, path, lease) = fixture().await;
+        let revision = lease.revision().unwrap();
+        let modified = store.head(&path).await.unwrap().last_modified.timestamp();
+        let expired = modified + i64::try_from(READ_RETENTION_TTL.as_secs()).unwrap();
+        retained_read_root(&store, &path, expired).await.unwrap();
+
+        assert!(matches!(
+            ReadRetentionLease::renew_acknowledged(store.clone(), path.clone(), "repo", &revision)
+                .await,
+            Err(CoordinationError::ReadRetentionLost { .. })
+        ));
+        assert!(matches!(
+            ReadRetentionLease::release_acknowledged(store.clone(), path.clone(), &revision).await,
+            Err(CoordinationError::ReadRetentionLost { .. })
+        ));
+        assert_eq!(
+            load_read_retention_root(&store, &path).await.unwrap(),
+            Some(root())
+        );
+    }
+
+    #[test]
+    fn acknowledged_deadline_rejects_unknown_backend_age_or_a_late_request() {
+        let path = Path::from("repo/reader/claim");
+        let start = Instant::now();
+        let half_life = i64::try_from((READ_RETENTION_TTL / 2).as_secs()).unwrap();
+        let modified = 1_000;
+        assert!(acknowledged_deadline(&path, start, modified, modified).is_ok());
+        for (started, now) in [
+            (start, modified - 1),
+            (start, modified + half_life - 1),
+            (start - Duration::from_secs(2), modified + half_life - 2),
+        ] {
+            assert!(matches!(
+                acknowledged_deadline(&path, started, modified, now),
+                Err(CoordinationError::ReadRetentionLost { .. })
+            ));
+        }
     }
 
     #[tokio::test]

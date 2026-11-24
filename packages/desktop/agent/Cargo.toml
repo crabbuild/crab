@@ -9,6 +9,9 @@ description = "JSON-RPC sidecar for Crab Desktop. Speaks NDJSON over stdio and d
 name = "crab-desktop-agent"
 path = "src/main.rs"
 
+[features]
+provider-cdn-qualification = ["crab-sdk/provider-cdn-qualification"]
+
 [dependencies]
 # Read-side verbs go through the SDK.
 crab-sdk = { workspace = true, features = ["files", "service", "local", "results"] }
@@ -43,7 +46,7 @@ serde_json = { workspace = true }
 # Errors + logs, matching workspace conventions.
 thiserror = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
 
 # HTTP client for forge + experiment provider APIs.

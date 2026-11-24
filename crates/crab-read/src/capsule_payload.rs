@@ -195,10 +195,51 @@ async fn read_window(
     directory: Arc<tempfile::TempDir>,
     cancel: &CancellationToken,
 ) -> Result<LayeredPayloadRead> {
+    let edge = store
+        .cdn_attempt(&window.path)
+        .filter(|edge| edge.admits_range_batches(window.source_size));
+    let transfer = async |cancel: &CancellationToken| {
+        if let Some(edge) = &edge {
+            let body = edge
+                .range_batches(window.source_size, window.range.clone())?
+                .flat_map(|batch| {
+                    let chunks = match batch {
+                        Ok(Some(chunks)) => {
+                            chunks.into_iter().map(|bytes| Ok(Some(bytes))).collect()
+                        }
+                        Ok(None) => vec![Ok(None)],
+                        Err(error) => vec![Err(error)],
+                    };
+                    futures_util::stream::iter(chunks)
+                });
+            match read_window_body(&window, &directory, body, cancel).await {
+                Ok(Some(read)) => return Ok(read),
+                Ok(None) | Err(ReadError::CorruptObject { .. }) => {
+                    // A rejected attempt has drained its private output. The
+                    // origin restarts the entire window and rewrites its files.
+                    tracing::debug!("restarting layered payload window at the selected origin");
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        read_origin_window(store, &window, &directory, cancel).await
+    };
+    match &edge {
+        Some(edge) => edge.with_file_deadline(cancel, transfer).await,
+        None => transfer(cancel).await,
+    }
+}
+
+async fn read_origin_window(
+    store: &Store,
+    window: &Window,
+    directory: &Arc<tempfile::TempDir>,
+    cancel: &CancellationToken,
+) -> Result<LayeredPayloadRead> {
     if cancel.is_cancelled() {
         return Err(ReadError::Cancelled);
     }
-    let (meta, actual, mut body) = store
+    let (meta, actual, body) = store
         .get_parallel_range_stream(&window.path, window.range.clone(), None, cancel)
         .await
         .map_err(|error| match error {
@@ -211,17 +252,38 @@ async fn read_window(
             "layered source size or range differs from its descriptor",
         ));
     }
+    read_window_body(window, directory, body.map(|chunk| chunk.map(Some)), cancel)
+        .await?
+        .ok_or_else(|| ReadError::internal("origin payload stream ended before verification"))
+}
+
+async fn read_window_body(
+    window: &Window,
+    directory: &Arc<tempfile::TempDir>,
+    body: impl futures_util::Stream<Item = crab_storage::Result<Option<Bytes>>>,
+    cancel: &CancellationToken,
+) -> Result<Option<LayeredPayloadRead>> {
+    tokio::pin!(body);
     let mut position = window.range.start;
     let mut section_index = 0;
     let mut output = None;
     let mut hasher = blake3::Hasher::new();
     let mut read = LayeredPayloadRead::default();
     let result = async {
-        while let Some(chunk) = body.next().await {
-            let chunk = chunk.map_err(|error| match error {
+        loop {
+            let next = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(ReadError::Cancelled),
+                next = body.next() => next,
+            };
+            let Some(chunk) = next else { break };
+            let Some(chunk) = chunk.map_err(|error| match error {
                 crab_storage::StorageError::Cancelled => ReadError::Cancelled,
                 other => other.into(),
-            })?;
+            })?
+            else {
+                return Ok(false);
+            };
             let mut bytes = chunk.as_ref();
             while !bytes.is_empty() {
                 let Some(section) = window.sections.get(section_index) else {
@@ -314,14 +376,128 @@ async fn read_window(
                 "layered source range returned an unexpected length",
             ));
         }
-        Ok(())
+        Ok(true)
     }
     .await;
     let flushed = match output.as_mut() {
         Some(output) => output.flush().await,
         None => Ok(()),
     };
-    result.and(flushed)?;
+    flushed?;
+    let complete = result?;
+    if !complete {
+        return Ok(None);
+    }
     read.bytes = position - window.range.start;
-    Ok(read)
+    Ok(Some(read))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crab_storage::cdn::{CdnAccess, CdnRoute, CdnTransport};
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    #[tokio::test]
+    async fn layered_payload_cdn_verifies_the_window_before_returning_staged_files() {
+        for (response, origin, authorized) in [
+            ("206 Partial Content", false, true),
+            ("206 Partial Content", true, true),
+            ("403 Forbidden", true, false),
+        ] {
+            let target = [1; 32];
+            let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+                .with_target_identity(target);
+            let layout = StoreLayout::new(store, "repository".to_owned());
+            let path = layout.capsule_pack_layer_path(&"b".repeat(64));
+            if origin {
+                layout
+                    .store()
+                    .create_strict(&path, Bytes::from_static(b"pack-indextail"))
+                    .await
+                    .unwrap();
+            }
+
+            let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let edge = CdnTransport::loopback_fixture(socket.local_addr().unwrap()).unwrap();
+            let route_path = path.clone();
+            let request = tokio::spawn(async move {
+                let (stream, _) = socket.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut request = String::new();
+                while !request.ends_with("\r\n\r\n") {
+                    assert_ne!(stream.read_line(&mut request).await.unwrap(), 0);
+                }
+                assert!(request.starts_with(&format!("GET /{route_path} HTTP/1.1\r\n")));
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains("range: bytes=0-9\r\n")
+                );
+                let (headers, body) = if !authorized {
+                    ("Content-Length: 0", "")
+                } else {
+                    (
+                        "Content-Length: 10\r\nContent-Range: bytes 0-9/14",
+                        if origin { "pack-wrong" } else { "pack-index" },
+                    )
+                };
+                let reply = format!("HTTP/1.1 {response}\r\n{headers}\r\n\r\n{body}");
+                stream.write_all(reply.as_bytes()).await.unwrap();
+            });
+            let store = layout
+                .store()
+                .clone()
+                .with_cdn_route(CdnRoute::new(
+                    target,
+                    layout.repo_prefix().to_owned(),
+                    None,
+                    CdnAccess::Public,
+                    edge,
+                    Duration::from_secs(2),
+                ))
+                .unwrap();
+            let directory = Arc::new(tempfile::tempdir().unwrap());
+            let window = Window {
+                path,
+                range: 0..10,
+                source_size: 14,
+                sections: vec![
+                    Section {
+                        member: 0,
+                        kind: SectionKind::Pack,
+                        range: PackRange::new(0, b"pack").unwrap(),
+                    },
+                    Section {
+                        member: 0,
+                        kind: SectionKind::Index,
+                        range: PackRange::new(5, b"index").unwrap(),
+                    },
+                ],
+            };
+            let result =
+                read_window(&store, window, directory.clone(), &CancellationToken::new()).await;
+            if authorized {
+                let output = result.unwrap();
+                assert_eq!(
+                    output.sidecar(0, SectionKind::Index).unwrap(),
+                    Bytes::from_static(b"index")
+                );
+                let path = output
+                    .pack(0)
+                    .unwrap()
+                    .materialize(directory.path())
+                    .unwrap();
+                assert_eq!(std::fs::read(path).unwrap(), b"pack");
+            } else {
+                assert!(crab_storage::store::cdn_read_rejection(&result.err().unwrap()).is_some());
+                assert!(!directory.path().join("0.pack").exists());
+            }
+            tokio::time::timeout(Duration::from_secs(2), request)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
 }

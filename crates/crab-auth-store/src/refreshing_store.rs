@@ -1,11 +1,15 @@
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
-use futures_util::{StreamExt, stream};
+use futures_util::{
+    FutureExt, StreamExt,
+    future::{BoxFuture, Shared},
+    stream,
+};
 use object_store::multipart::{MultipartStore, PartId};
 use object_store::path::Path;
 use object_store::signer::Signer;
@@ -13,10 +17,11 @@ use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartId, MultipartUpload, ObjectMeta,
     ObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
-use crab_auth::{CredentialProvider, CredentialResolution};
+use crab_auth::{CredentialProvider, CredentialResolution, cdn::CdnViewerGrant};
+use crab_storage::{BuiltObjectStore, StorageError, StorageScope};
 
 use crate::Result;
 
@@ -34,6 +39,83 @@ pub struct RefreshingStoreParts {
 }
 
 type StoreBuilder = dyn Fn(CredentialResolution) -> Result<RefreshingStoreParts> + Send + Sync;
+type RefreshBackend<P> =
+    dyn Fn(Arc<P>) -> BoxFuture<'static, object_store::Result<Backend>> + Send + Sync;
+type Pending = Shared<BoxFuture<'static, std::result::Result<Backend, Arc<object_store::Error>>>>;
+
+#[derive(Clone)]
+struct Backend {
+    parts: RefreshingStoreParts,
+    generation: u64,
+    authority: Option<ReadAuthority>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ReadAuthority {
+    pub(crate) scope: Option<StorageScope>,
+    origin: Option<String>,
+    pub(crate) viewer: Option<CdnViewerGrant>,
+    refresh_at: SystemTime,
+}
+
+impl ReadAuthority {
+    pub(crate) fn new(
+        store: &BuiltObjectStore,
+        scope: Option<StorageScope>,
+        viewer: Option<CdnViewerGrant>,
+        expires_at: SystemTime,
+    ) -> Result<Self> {
+        let now = SystemTime::now();
+        if expires_at <= now {
+            return Err(StorageError::AuthExpired {
+                path: "read grant".into(),
+            }
+            .into());
+        }
+        let origin = store
+            .native_cdn_origin
+            .as_ref()
+            .map(|native| native.address());
+        if viewer
+            .as_ref()
+            .is_some_and(|grant| origin != Some(grant.origin.as_str()))
+        {
+            return Err(crate::cdn::scope_changed().into());
+        }
+        let mut refresh_at = expires_at - Duration::from_secs(15);
+        if let Some(viewer) = &viewer {
+            let viewer_refresh = viewer
+                .refresh_at(now)
+                .ok_or_else(crate::cdn::scope_changed)?;
+            refresh_at = refresh_at.min(viewer_refresh);
+        }
+        Ok(Self {
+            scope,
+            origin: origin.map(str::to_owned),
+            viewer,
+            refresh_at,
+        })
+    }
+
+    fn same_route(&self, next: &Self) -> bool {
+        self.scope == next.scope
+            && self.origin == next.origin
+            && match (&self.viewer, &next.viewer) {
+                (Some(previous), Some(next)) => previous.same_authority(next),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+
+    fn needs_refresh(&self) -> bool {
+        self.refresh_at <= SystemTime::now()
+    }
+}
+
+struct RefreshState {
+    active: Backend,
+    pending: Option<Pending>,
+}
 
 /// Refreshes credentials for one target, with one auth retry for unary calls.
 ///
@@ -41,23 +123,17 @@ type StoreBuilder = dyn Fn(CredentialResolution) -> Result<RefreshingStoreParts>
 /// streams and `MultipartUpload` handles keep their original backend; this
 /// wrapper does not replay them after a later authentication failure. A failed
 /// retry is returned directly, even if it is another authentication error.
-pub struct RefreshingObjectStore<P>
-where
-    P: CredentialProvider + ?Sized,
-{
+pub struct RefreshingObjectStore<P: ?Sized> {
     provider: Arc<P>,
     bucket: String,
     prefix: String,
     operation: String,
-    state: Arc<RwLock<RefreshingStoreParts>>,
-    refresh_lock: Arc<Mutex<()>>,
-    build: Arc<StoreBuilder>,
+    state: Arc<Mutex<RefreshState>>,
+    refresh: Arc<RefreshBackend<P>>,
+    needs_refresh: fn(&P) -> bool,
 }
 
-impl<P> Clone for RefreshingObjectStore<P>
-where
-    P: CredentialProvider + ?Sized,
-{
+impl<P: ?Sized> Clone for RefreshingObjectStore<P> {
     fn clone(&self) -> Self {
         Self {
             provider: Arc::clone(&self.provider),
@@ -65,15 +141,15 @@ where
             prefix: self.prefix.clone(),
             operation: self.operation.clone(),
             state: Arc::clone(&self.state),
-            refresh_lock: Arc::clone(&self.refresh_lock),
-            build: Arc::clone(&self.build),
+            refresh: Arc::clone(&self.refresh),
+            needs_refresh: self.needs_refresh,
         }
     }
 }
 
 impl<P> RefreshingObjectStore<P>
 where
-    P: CredentialProvider + ?Sized,
+    P: CredentialProvider + ?Sized + 'static,
 {
     /// Binds an initial backend and its rebuild function to one credential scope.
     ///
@@ -89,58 +165,211 @@ where
         initial: RefreshingStoreParts,
         build: Arc<StoreBuilder>,
     ) -> Self {
+        let request = (bucket.clone(), prefix.clone(), operation.clone());
+        Self::with_backend(
+            provider,
+            bucket,
+            prefix,
+            operation,
+            Backend {
+                parts: initial,
+                generation: 0,
+                authority: None,
+            },
+            P::needs_refresh,
+            move |provider| {
+                let (bucket, prefix, operation) = request.clone();
+                let build = Arc::clone(&build);
+                async move {
+                    let resolution = provider
+                        .refresh_for(&bucket, &prefix, &operation)
+                        .await
+                        .map_err(to_object_store_error)?;
+                    Ok(Backend {
+                        parts: build(resolution).map_err(to_object_store_error)?,
+                        generation: 0,
+                        authority: None,
+                    })
+                }
+                .boxed()
+            },
+        )
+    }
+}
+
+impl<P: Send + Sync + ?Sized + 'static> RefreshingObjectStore<P> {
+    pub(crate) fn new_bound(
+        provider: Arc<P>,
+        bucket: String,
+        prefix: String,
+        operation: String,
+        initial: (RefreshingStoreParts, ReadAuthority),
+        refresh: impl Fn(
+            Arc<P>,
+        ) -> BoxFuture<
+            'static,
+            object_store::Result<(RefreshingStoreParts, ReadAuthority)>,
+        > + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self::with_backend(
+            provider,
+            bucket,
+            prefix,
+            operation,
+            Backend {
+                parts: initial.0,
+                generation: 0,
+                authority: Some(initial.1),
+            },
+            |_| false,
+            move |provider| {
+                let replacement = refresh(provider);
+                async move {
+                    let (parts, authority) = replacement.await?;
+                    Ok(Backend {
+                        parts,
+                        generation: 0,
+                        authority: Some(authority),
+                    })
+                }
+                .boxed()
+            },
+        )
+    }
+
+    fn with_backend(
+        provider: Arc<P>,
+        bucket: String,
+        prefix: String,
+        operation: String,
+        initial: Backend,
+        needs_refresh: fn(&P) -> bool,
+        refresh: impl Fn(Arc<P>) -> BoxFuture<'static, object_store::Result<Backend>>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
         Self {
             provider,
             bucket,
             prefix,
             operation,
-            state: Arc::new(RwLock::new(initial)),
-            refresh_lock: Arc::new(Mutex::new(())),
-            build,
+            state: Arc::new(Mutex::new(RefreshState {
+                active: initial,
+                pending: None,
+            })),
+            refresh: Arc::new(refresh),
+            needs_refresh,
         }
     }
 
     /// Reports signing support in the current backend without refreshing it.
     pub async fn has_signer(&self) -> bool {
-        self.state.read().await.signer.is_some()
+        self.state.lock().await.active.parts.signer.is_some()
     }
 
     /// Reports stable multipart support and identity without refreshing them.
     pub async fn has_multipart(&self) -> bool {
-        let state = self.state.read().await;
+        let state = self.state.lock().await;
+        let state = &state.active.parts;
         state.multipart.is_some() && state.multipart_identity.is_some()
     }
 
     async fn parts_for_operation(&self) -> object_store::Result<RefreshingStoreParts> {
-        if self.provider.needs_refresh() {
-            self.refresh_parts(false).await
-        } else {
-            Ok(self.state.read().await.clone())
+        Ok(self.backend(None).await?.parts)
+    }
+
+    pub(crate) async fn viewer(
+        &self,
+        rejected: Option<u64>,
+    ) -> object_store::Result<(u64, Option<CdnViewerGrant>)> {
+        let backend = self.backend(rejected).await?;
+        Ok((
+            backend.generation,
+            backend.authority.and_then(|authority| authority.viewer),
+        ))
+    }
+
+    async fn backend(&self, rejected: Option<u64>) -> object_store::Result<Backend> {
+        loop {
+            let mut state = self.state.lock().await;
+            let needs_refresh = state.active.authority.as_ref().map_or_else(
+                || (self.needs_refresh)(&self.provider),
+                ReadAuthority::needs_refresh,
+            );
+            if state.pending.is_none()
+                && rejected != Some(state.active.generation)
+                && !needs_refresh
+            {
+                return Ok(state.active.clone());
+            }
+            let pending = state
+                .pending
+                .get_or_insert_with(|| self.start_refresh())
+                .clone();
+            drop(state);
+            let result = pending.clone().await;
+            let mut state = self.state.lock().await;
+            let still_pending = state
+                .pending
+                .as_ref()
+                .is_some_and(|active| active.ptr_eq(&pending));
+            if result.is_ok() && !still_pending {
+                continue;
+            }
+            let bound = state.active.authority.is_some();
+            let next = result
+                .map_err(|source| {
+                    if bound {
+                        object_store::Error::PermissionDenied {
+                            path: "bound credential refresh failed; resolve a new operation".into(),
+                            source: Box::new(source),
+                        }
+                    } else {
+                        to_object_store_error(source)
+                    }
+                })
+                .and_then(|next| Self::validate_backend(&state.active, next));
+            if !bound && still_pending {
+                state.pending = None;
+            }
+            // Once a bound generation is rejected, both origin and viewer must
+            // retire it even if refresh fails or every waiter was cancelled.
+            let next = next?;
+            state.active = next.clone();
+            state.pending = None;
+            return Ok(next);
         }
     }
 
-    async fn refresh_parts(&self, force: bool) -> object_store::Result<RefreshingStoreParts> {
-        let _guard = self.refresh_lock.lock().await;
-        if !force && !self.provider.needs_refresh() {
-            return Ok(self.state.read().await.clone());
-        }
-
+    fn start_refresh(&self) -> Pending {
         debug!(
             bucket = %self.bucket,
             prefix = %self.prefix,
             operation = %self.operation,
-            force,
             "refreshing object-store credentials"
         );
+        (self.refresh)(Arc::clone(&self.provider))
+            .map(|result| result.map_err(Arc::new))
+            .boxed()
+            .shared()
+    }
 
-        let resolution = self
-            .provider
-            .refresh_for(&self.bucket, &self.prefix, &self.operation)
-            .await
-            .map_err(to_object_store_error)?;
-        let parts = (self.build)(resolution).map_err(to_object_store_error)?;
-        let mut state = self.state.write().await;
-        if parts.multipart_identity != state.multipart_identity {
+    fn validate_backend(initial: &Backend, mut next: Backend) -> object_store::Result<Backend> {
+        if let (Some(previous), Some(replacement)) = (&initial.authority, &next.authority)
+            && (next.parts.target_identity != initial.parts.target_identity
+                || next.parts.multipart_identity != initial.parts.multipart_identity
+                || !previous.same_route(replacement))
+        {
+            return Err(object_store::Error::PermissionDenied {
+                path: "credential refresh changed the authorized route; resolve a new operation"
+                    .into(),
+                source: Box::new(crate::cdn::scope_changed()),
+            });
+        }
+        if next.parts.multipart_identity != initial.parts.multipart_identity {
             return Err(object_store::Error::Generic {
                 store: "refreshing",
                 source: std::io::Error::new(
@@ -152,14 +381,14 @@ where
         }
         // A credential rotation may not redirect an operation whose snapshot and
         // publication proof were bound to the initial provider target.
-        if parts.target_identity != state.target_identity {
+        if next.parts.target_identity != initial.parts.target_identity {
             return Err(to_object_store_error(crate::AuthStoreError::AuthFailed {
                 path: "credential refresh changed the storage target; resolve a new operation"
                     .to_owned(),
             }));
         }
-        *state = parts.clone();
-        Ok(parts)
+        next.generation = initial.generation.wrapping_add(1);
+        Ok(next)
     }
 
     async fn retryable_unary<T, F, Fut>(&self, op: F) -> object_store::Result<T>
@@ -167,28 +396,30 @@ where
         F: Fn(RefreshingStoreParts) -> Fut,
         Fut: Future<Output = object_store::Result<T>>,
     {
-        let parts = self.parts_for_operation().await?;
-        match op(parts).await {
+        let backend = self.backend(None).await?;
+        let bound = backend.authority.is_some();
+        match op(backend.parts).await {
             Ok(value) => Ok(value),
-            Err(err) if self.should_retry_auth_error(&err) => {
+            Err(err) if self.should_retry_auth_error(&err, bound) => {
                 warn!(
-                    error = %err,
                     bucket = %self.bucket,
                     prefix = %self.prefix,
                     operation = %self.operation,
                     "object-store auth failed; refreshing credentials and retrying once"
                 );
-                let parts = self.refresh_parts(true).await?;
-                op(parts).await
+                let next = self.backend(Some(backend.generation)).await?;
+                op(next.parts).await
             }
             Err(err) => Err(err),
         }
     }
 
-    fn should_retry_auth_error(&self, err: &object_store::Error) -> bool {
+    fn should_retry_auth_error(&self, err: &object_store::Error, bound: bool) -> bool {
         match err {
             object_store::Error::Unauthenticated { .. } => true,
-            object_store::Error::PermissionDenied { .. } => self.provider.needs_refresh(),
+            object_store::Error::PermissionDenied { .. } => {
+                !bound && (self.needs_refresh)(&self.provider)
+            }
             object_store::Error::Generic { source, .. } => {
                 let msg = source.to_string().to_lowercase();
                 msg.contains("expired") && msg.contains("token")
@@ -200,7 +431,7 @@ where
 
 impl<P> fmt::Debug for RefreshingObjectStore<P>
 where
-    P: CredentialProvider + ?Sized,
+    P: ?Sized,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RefreshingObjectStore")
@@ -213,7 +444,7 @@ where
 
 impl<P> fmt::Display for RefreshingObjectStore<P>
 where
-    P: CredentialProvider + ?Sized,
+    P: ?Sized,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "RefreshingObjectStore({}/{})", self.bucket, self.prefix)
@@ -223,7 +454,7 @@ where
 #[async_trait]
 impl<P> ObjectStore for RefreshingObjectStore<P>
 where
-    P: CredentialProvider + ?Sized + 'static,
+    P: Send + Sync + ?Sized + 'static,
 {
     async fn put_opts(
         &self,
@@ -329,7 +560,7 @@ where
 #[async_trait]
 impl<P> Signer for RefreshingObjectStore<P>
 where
-    P: CredentialProvider + ?Sized + 'static,
+    P: Send + Sync + ?Sized + 'static,
 {
     async fn signed_url(
         &self,
@@ -349,7 +580,7 @@ where
 #[async_trait]
 impl<P> MultipartStore for RefreshingObjectStore<P>
 where
-    P: CredentialProvider + ?Sized + 'static,
+    P: Send + Sync + ?Sized + 'static,
 {
     async fn create_multipart(&self, path: &Path) -> object_store::Result<MultipartId> {
         self.retryable_multipart_unary(|multipart| {
@@ -415,7 +646,7 @@ where
 
 impl<P> RefreshingObjectStore<P>
 where
-    P: CredentialProvider + ?Sized,
+    P: Send + Sync + ?Sized + 'static,
 {
     async fn retryable_signer_unary<T, F, Fut>(&self, op: F) -> object_store::Result<T>
     where
@@ -464,7 +695,7 @@ fn multipart_not_supported() -> object_store::Error {
     }
 }
 
-fn to_object_store_error<E>(err: E) -> object_store::Error
+pub(crate) fn to_object_store_error<E>(err: E) -> object_store::Error
 where
     E: std::error::Error + Send + Sync + 'static,
 {
@@ -781,7 +1012,10 @@ mod tests {
                 source.downcast_ref::<crate::AuthStoreError>(),
                 Some(crate::AuthStoreError::AuthFailed { .. })
             ));
-            assert_eq!(store.state.read().await.target_identity, [1; 32]);
+            assert_eq!(
+                store.state.lock().await.active.parts.target_identity,
+                [1; 32]
+            );
         }
     }
 

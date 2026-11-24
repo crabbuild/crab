@@ -61,6 +61,7 @@ libc = "0.2"
 nix = { version = "0.29", default-features = false, features = ["signal"] }
 
 [dev-dependencies]
+crab-coordination = { workspace = true, features = ["object-store-lock"] }
 crab-metadata = { workspace = true }
 crab-storage = { workspace = true, features = ["test-support"] }
 proptest = "1"

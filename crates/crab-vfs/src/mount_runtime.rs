@@ -133,6 +133,7 @@ pub(crate) async fn publish_runtime_snapshot(
 ) -> Result<MountRuntimeUpdate> {
     // Authenticate the next read view before publishing any visible tree state.
     // Failure keeps the prior resolver and its captured reader together.
+    crate::pipeline::validate_mount_head(output.read_context.as_ref(), config, head_oid, head_ref)?;
     let hydration = capture_hydration(
         &output.hydration,
         output.read_context.as_ref(),
@@ -188,6 +189,7 @@ pub async fn adopt_published_snapshot(
     head_oid: &str,
     head_ref: &str,
 ) -> Result<MountRuntimeUpdate> {
+    crate::pipeline::validate_mount_head(output.read_context.as_ref(), config, head_oid, head_ref)?;
     let hydration = capture_hydration(
         &output.hydration,
         output.read_context.as_ref(),

@@ -32,6 +32,7 @@ use tower::ServiceExt;
 use crate::test_support::git::history as git_history;
 
 mod browse;
+mod cdn;
 
 mod probes;
 

@@ -5,6 +5,8 @@ use url::Url;
 use utoipa::ToSchema;
 
 use super::api::{invalid, require_v1};
+#[cfg(feature = "oidc-client")]
+use super::{MANAGED_SCHEMA_VERSION, transfer::CDN_TRANSFER_GRANT_VERSION};
 use crate::error::Result;
 
 /// Named managed-service capability. Unknown valid names are intentionally retained.
@@ -193,6 +195,19 @@ impl ServiceCapabilities {
             return invalid("capability limits must be positive");
         }
         Ok(())
+    }
+
+    #[cfg(feature = "oidc-client")]
+    pub(super) fn read_grant_version(&self, approved_mode: Option<TransferMode>) -> u16 {
+        if self
+            .transfer_grant_versions
+            .contains(&CDN_TRANSFER_GRANT_VERSION)
+            && approved_mode.is_some_and(|mode| self.transfer_modes.contains(&mode))
+        {
+            CDN_TRANSFER_GRANT_VERSION
+        } else {
+            MANAGED_SCHEMA_VERSION
+        }
     }
 }
 

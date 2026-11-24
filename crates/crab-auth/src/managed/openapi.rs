@@ -7,12 +7,13 @@ use super::{
     ApiErrorEnvelope, AuditDecision, AuditEvent, AuditEventPage, AuditExportFormat,
     AuditExportOperation, AuditExportRequest, AuthFlow, CapabilityName, DirectObjectCredentials,
     DiscoveryCache, DiscoveryDocument, EntityTag, GatewayAccess, IdempotencyKey, JobActionRequest,
-    JobPage, JobState, JobSummary, LogicalRepository, OidcClientDiscovery, PageCursor,
-    PromoteReplicaRequest, PromoteReplicaResponse, ProviderCredentials, PushAbortResponse,
-    PushAdmissionPlan, PushFinalizeRequest, PushPrepareRequest, PushPrepareResponse,
-    PushReplicationRequest, RepositoryState, SecretString, ServiceCapabilities, StagingScope,
-    TransferGrant, TransferGrantRequest, TransferMode, TransferOperation, TransferPermission,
-    TransferScope, TransferTransport, UsageCategory, UsageReport, UsageTotal,
+    JobPage, JobState, JobSummary, LogicalRepository, ManagedCdnBinding, OidcClientDiscovery,
+    PageCursor, PromoteReplicaRequest, PromoteReplicaResponse, ProviderCredentials,
+    PushAbortResponse, PushAdmissionPlan, PushFinalizeRequest, PushPrepareRequest,
+    PushPrepareResponse, PushReplicationRequest, RepositoryState, SecretString,
+    ServiceCapabilities, StagingScope, TransferGrant, TransferGrantRequest, TransferMode,
+    TransferOperation, TransferPermission, TransferScope, TransferTransport, UsageCategory,
+    UsageReport, UsageTotal,
 };
 use crate::PushFinalizeResponse;
 
@@ -56,7 +57,7 @@ fn service_capabilities() {}
         ("repository" = String, Path, description = "Repository slug")
     ),
     responses(
-        (status = 200, description = "Logical repository", body = LogicalRepository),
+        (status = 200, description = "Logical repository with optional approved private read placement", body = LogicalRepository),
         (status = 401, description = "Authentication required", body = ApiErrorEnvelope),
         (status = 404, description = "Repository absent or inaccessible", body = ApiErrorEnvelope)
     ),
@@ -78,7 +79,7 @@ fn resolve_repository() {}
     ),
     request_body = TransferGrantRequest,
     responses(
-        (status = 201, description = "Short-lived transfer grant", body = TransferGrant),
+        (status = 201, description = "Short-lived grant in the requested version. Version 2 direct reads confirm the requested deployment approval and can include CDN viewer authority.", body = TransferGrant),
         (status = 400, description = "Invalid grant request", body = ApiErrorEnvelope),
         (status = 401, description = "Authentication required", body = ApiErrorEnvelope),
         (status = 403, description = "Transfer is not authorized", body = ApiErrorEnvelope),
@@ -506,6 +507,7 @@ impl Modify for SecurityAddon {
             JobState,
             JobSummary,
             LogicalRepository,
+            ManagedCdnBinding,
             OidcClientDiscovery,
             PageCursor,
             ProviderCredentials,

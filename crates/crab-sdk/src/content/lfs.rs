@@ -35,6 +35,7 @@ pub(crate) async fn deliver(
     }
     let range = options.byte_range(pointer.size).map_err(consumer_error)?;
     let cancellation = operation.cancellation();
+    operation.check_read_authority().await?;
     let cache = runtime.local_cache().await.map_err(consumer_error)?;
     if let Some(cache) = cache
         && let Some((source, session, first)) = open_cached(
@@ -47,16 +48,8 @@ pub(crate) async fn deliver(
         .await?
     {
         let _ = ready.send(());
-        let result = deliver_cached(
-            &source,
-            &session,
-            &pointer,
-            range,
-            first,
-            &send,
-            cancellation,
-        )
-        .await;
+        let result =
+            deliver_cached(&source, &session, &pointer, range, first, &send, operation).await;
         // Drain descriptor readers before releasing the captured cache lease.
         // Shared block proofs retain no filesystem handles between operations.
         session.close().await;
@@ -96,12 +89,12 @@ pub(crate) async fn deliver(
     );
     let session = crab_lfs::LfsReadSession::new(runtime.lfs_proofs.clone());
     let result = async {
-        let (_, _, mut stream) = tokio::select! {
+        let (_, mut stream) = tokio::select! {
             biased;
             () = cancellation.cancelled() => {
                 return Err(crab_remote_git::Error::Cancelled);
             }
-            result = store.get_stream_with_session(&pointer.oid, pointer.size, Some(range), &session) => {
+            result = store.stream_content(&pointer.oid, pointer.size, Some(range), Some(&session)) => {
                 result.map_err(lfs_error)?
             }
         };
@@ -122,7 +115,7 @@ pub(crate) async fn deliver(
                         tracing::warn!(%error, "LFS cache fill failed");
                         abort_fill(fill.take()).await;
                     }
-                    super::deliver_bytes(bytes, &send, cancellation).await?;
+                    super::deliver_bytes(bytes, &send, operation).await?;
                 }
                 Some(Err(error)) => return Err(lfs_error(error)),
                 None => {
@@ -190,10 +183,11 @@ async fn deliver_cached(
     range: Range<u64>,
     first: Bytes,
     send: &mpsc::Sender<Bytes>,
-    cancel: &tokio_util::sync::CancellationToken,
+    operation: &OperationContext,
 ) -> std::result::Result<(), CachedError> {
+    let cancel = operation.cancellation();
     let mut offset = range.start + first.len() as u64;
-    super::deliver_bytes(first, send, cancel)
+    super::deliver_bytes(first, send, operation)
         .await
         .map_err(CachedError::Delivery)?;
     while offset < range.end {
@@ -201,7 +195,7 @@ async fn deliver_cached(
         let bytes = read_cached(source, session, pointer, offset..end, cancel)
             .await
             .map_err(CachedError::Read)?;
-        super::deliver_bytes(bytes, send, cancel)
+        super::deliver_bytes(bytes, send, operation)
             .await
             .map_err(CachedError::Delivery)?;
         offset = end;

@@ -11856,6 +11856,7 @@ async fn publish_project_replica_discovery(root: &Path, cancel: &CancellationTok
         &config,
         locator,
         crab_auth::TransferOperation::PushUpload,
+        crab_storage::cdn::CdnConsumer::Cli,
         cancel,
     )
     .await?;

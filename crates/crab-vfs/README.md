@@ -17,15 +17,19 @@ than putting filesystem lifecycle policy into the storage or Xet layers.
 Git LFS pointer blobs expose their declared payload size and verified content.
 Snapshot walking and late blob classification share one typed content identity;
 Crab BLAKE3 and LFS SHA-256 addresses cannot share a read-window entry. Ordinary
-Git bytes retain their existing object-ID verification.
+Git bytes retain their existing object-ID verification. Mounted Git file and
+symlink reads also check the grant and retention claim of their captured
+snapshot before reading the Git object and again before delivery.
 
 LFS reads use canonical `crab-read`/`crab-lfs` verification. A selected local
 payload must pass complete SHA-256 and exact-size verification; only absence
 selects the captured remote store. Git storage configuration is resolved before
 native callbacks start, including common-directory and existing storage overrides.
 Remote streams must reach verified EOF before their bytes enter the immutable
-window cache. COW streams these same windows to owned backing storage. Shared
-shutdown drains admitted LFS verification jobs before releasing cache ownership.
+window cache. Cached Xet and LFS windows are keyed by bound native target and
+scope, and delivery checks the current grant and retained catalog claim. COW
+streams these same windows to owned backing storage. Shared shutdown drains
+admitted LFS verification jobs before releasing cache ownership.
 
 LFS extensions require a smudge implementation and are rejected explicitly.
 Cold local windows reuse session-owned block proofs after complete initial

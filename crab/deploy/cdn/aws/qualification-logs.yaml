@@ -1,0 +1,133 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Private viewer and origin log destination for one Crab CloudFront qualification fixture.
+
+Parameters:
+  DistributionId:
+    Type: String
+    Description: DistributionId output from the dedicated qualification stack.
+    AllowedPattern: '[A-Z0-9]{8,32}'
+  OriginBucketName:
+    Type: String
+    Description: Private S3 origin of the same fixture, in us-east-1.
+    AllowedPattern: '[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]'
+
+Rules:
+  LogDeliveryRegion:
+    Assertions:
+      - Assert: !Equals [!Ref 'AWS::Region', us-east-1]
+        AssertDescription: CloudFront log delivery and the qualification origin must be in us-east-1.
+
+Resources:
+  LogBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireRawQualificationLogs
+            Status: Enabled
+            ExpirationInDays: 14
+
+  ViewerSource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub 'crab-cdn-${DistributionId}'
+      ResourceArn: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${DistributionId}'
+      LogType: ACCESS_LOGS
+
+  LogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LogBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowViewerLogDeliveryCheck
+            Effect: Allow
+            Principal:
+              Service: delivery.logs.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt LogBucket.Arn
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref 'AWS::AccountId'
+              ArnEquals:
+                aws:SourceArn: !GetAtt ViewerSource.Arn
+          - Sid: AllowViewerLogDeliveryWrites
+            Effect: Allow
+            Principal:
+              Service: delivery.logs.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub '${LogBucket.Arn}/AWSLogs/${AWS::AccountId}/CloudFront/*'
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref 'AWS::AccountId'
+                s3:x-amz-acl: bucket-owner-full-control
+              ArnEquals:
+                aws:SourceArn: !GetAtt ViewerSource.Arn
+          - Sid: AllowOriginLogDeliveryWrites
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub '${LogBucket.Arn}/origin/*'
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref 'AWS::AccountId'
+              ArnEquals:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:s3:::${OriginBucketName}'
+
+  ViewerDestination:
+    Type: AWS::Logs::DeliveryDestination
+    Properties:
+      Name: !Sub 'crab-cdn-${DistributionId}-s3'
+      DeliveryDestinationType: S3
+      DestinationResourceArn: !Sub '${LogBucket.Arn}/AWSLogs/${AWS::AccountId}/CloudFront'
+      OutputFormat: w3c
+
+  ViewerDelivery:
+    Type: AWS::Logs::Delivery
+    DependsOn: LogBucketPolicy
+    Properties:
+      DeliverySourceName: !Ref ViewerSource
+      DeliveryDestinationArn: !GetAtt ViewerDestination.Arn
+      FieldDelimiter: "\t"
+      S3EnableHiveCompatiblePath: false
+      S3SuffixPath: '{yyyy}/{MM}/{dd}/{HH}/'
+      RecordFields:
+        - date
+        - time
+        - x-edge-request-id
+        - x-host-header
+        - cs-method
+        - cs-uri-stem
+        - cs-protocol
+        - sc-status
+        - sc-bytes
+        - x-edge-response-result-type
+        - sc-content-len
+        - sc-range-start
+        - sc-range-end
+
+Outputs:
+  LogBucket:
+    Value: !Ref LogBucket
+  ViewerLogPrefix:
+    Value: !Sub 'AWSLogs/${AWS::AccountId}/CloudFront/'
+  OriginLogPrefix:
+    Value: origin/
+  OriginBucket:
+    Value: !Ref OriginBucketName
+  DistributionId:
+    Value: !Ref DistributionId

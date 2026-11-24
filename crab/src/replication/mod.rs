@@ -4,8 +4,9 @@
 //! view and every referenced immutable dependency are known to be present.
 
 pub(crate) mod discovery;
+pub(crate) mod fetch;
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -22,10 +23,15 @@ use tokio_util::sync::CancellationToken;
 
 use crab_read::{
     ReadReplicaCandidate, ReadReplicaFallback, ReadReplicaProbeResult, ReadStoreChoice,
-    ReadStoreTarget, check_capsule_read_replica_readiness, select_read_store_choice,
+    ReadStoreTarget, check_capsule_read_replica_readiness, select_read_replicas,
+    select_read_store_choice,
 };
 pub use crab_read::{ReadRoutingPolicy, ReadSource, ReadinessCheckOptions};
 
+use crate::core::cdn::{
+    QualificationTarget, qualification_target, reject_managed_qualification,
+    verify_qualification_target,
+};
 use crate::core::config::Config;
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::git::url::{Cloud, CrabUrl, ObjectUrl, UrlForm};
@@ -8303,6 +8309,7 @@ fn ensure_active_active_mutation_admitted_with_status(
 /// Verified repository authority selected for one read operation.
 #[derive(Clone)]
 pub struct ReadStoreSelection {
+    pub(crate) view_retention: Option<crab_auth::crab_auth_client::ViewRetention>,
     pub store: Store,
     pub router: StoreLayout,
     pub source: ReadSource,
@@ -8365,6 +8372,35 @@ impl<'a> StoreResolver<'a> {
 
     /// Selects a replica-aware store for read operations.
     pub async fn read_store(&self, operation: &str) -> Result<ReadStoreSelection> {
+        self.read_store_with_primary_fallback(operation)
+            .await
+            .map(|(selection, _)| selection)
+    }
+
+    /// Retain the independently authorized primary for native replica retries.
+    pub(crate) async fn read_store_with_primary_fallback(
+        &self,
+        operation: &str,
+    ) -> Result<(ReadStoreSelection, Option<ReadStoreSelection>)> {
+        if matches!(operation, "hydrate" | "smudge" | "fetch-content")
+            && let Some(checkout) = crate::auth::cdn_checkout::Checkout::load()?
+        {
+            reject_managed_qualification()?;
+            // The SDK has already selected the origin and captured the exact view.
+            let resolved = checkout
+                .open(self.config, &self.primary_url, self.cancel)
+                .await?;
+            return Ok((
+                ReadStoreSelection {
+                    view_retention: None,
+                    router: StoreLayout::new(resolved.store.clone(), resolved.repository_prefix),
+                    store: resolved.store,
+                    source: ReadSource::Primary,
+                    capsule_root: resolved.capsule_root,
+                },
+                None,
+            ));
+        }
         let cache_dir =
             crab_auth::token_cache::expand_token_cache_path(&self.config.auth.token_cache_path);
         let resolver = crab_auth_store::ManagedRepositoryResolver::new(cache_dir);
@@ -8372,21 +8408,26 @@ impl<'a> StoreResolver<'a> {
             "crab://{}/{}",
             self.primary_url.bucket, self.primary_url.repo_path
         ))?;
+        let direct = matches!(&locator, crab_git::RepositoryLocator::Direct(_));
+        let transfer_operation = managed_read_operation(operation);
+        let cdn_consumer = crate::auth::cdn_consumer(operation);
         let resolved = crate::auth::build_repository_store(
             self.config,
             locator,
-            managed_read_operation(operation),
+            transfer_operation,
+            cdn_consumer,
             self.cancel,
         )
         .await?;
         let primary = ReadStoreSelection {
+            view_retention: resolved.view_retention,
             router: StoreLayout::new(resolved.store.clone(), resolved.repository_prefix.clone()),
             store: resolved.store,
             source: ReadSource::Primary,
             capsule_root: resolved.capsule_root,
         };
         if primary.store.storage_scope().is_some() {
-            return Ok(primary);
+            return Ok((primary, None));
         }
         let policy = match self.read_policy.as_ref() {
             Some(policy) => policy.clone(),
@@ -8394,53 +8435,107 @@ impl<'a> StoreResolver<'a> {
         };
 
         let Some(replication) = self.config.replication.as_ref() else {
-            return Ok(primary);
+            return Ok((primary, None));
         };
 
+        let qualification = qualification_target()?;
         let selection = select_read_store_with_replicas(
-            primary.store.clone(),
+            Store::from_storage(primary.store.as_storage().clone().without_cdn_route()),
             &resolved.repository_prefix,
             replication.replicas.iter(),
             operation,
             policy,
+            qualification.as_ref(),
             build_replica_store,
         )
         .await?;
-        let capsule_root = match &selection.source {
-            ReadSource::Primary => primary.capsule_root,
+        let repo_prefix = selection.router.repo_prefix().to_owned();
+        // The selected authority must own the captured root. A primary snapshot
+        // can name retired objects that a currently ready replica never needed.
+        let (store, capsule_root, primary_fallback) = match &selection.source {
+            ReadSource::Primary => (
+                selection
+                    .store
+                    .into_storage()
+                    .inherit_cdn_route(primary.store.as_storage()),
+                primary.capsule_root,
+                None,
+            ),
             ReadSource::Replica { name } => {
-                match validate_read_replica_store(&selection.store, &selection.router).await {
-                    Ok(root) => root,
-                    Err(error) => {
-                        tracing::warn!(replica = %name, error = %error, "replica read-layout validation failed; using primary");
-                        if let Some(replica) = replication
-                            .replicas
-                            .iter()
-                            .find(|replica| replica.name == *name)
-                        {
-                            record_replica_read_event(
-                                replica,
-                                selection.router.repo_prefix(),
-                                operation,
-                                ReplicaReadOutcome::Fallback,
-                                None,
-                                None,
-                                Some(format!("replica read-layout validation failed: {error}")),
-                            );
+                if direct
+                    && let Some(authorized) = crate::auth::authorize_replica_cdn(
+                        self.config,
+                        &selection.store,
+                        &repo_prefix,
+                        transfer_operation,
+                        cdn_consumer,
+                        self.cancel,
+                    )
+                    .await?
+                {
+                    // A private binding authorizes this replica only. Failure
+                    // under that authority cannot select the bootstrap principal.
+                    let root = tokio::select! {
+                        biased;
+                        () = self.cancel.cancelled() => return Err(CrabError::Cancelled),
+                        root = validate_read_replica_store(&authorized, &selection.router) => root?,
+                    };
+                    (authorized.into_storage(), root, None)
+                } else {
+                    let root = match validate_read_replica_store(
+                        &selection.store,
+                        &selection.router,
+                    )
+                    .await
+                    {
+                        Ok(root) => root,
+                        Err(error) => {
+                            tracing::warn!(replica = %name, error = %error, "replica read-layout validation failed; using primary");
+                            if let Some(replica) = replication
+                                .replicas
+                                .iter()
+                                .find(|replica| replica.name == *name)
+                            {
+                                record_replica_read_event(
+                                    replica,
+                                    &repo_prefix,
+                                    operation,
+                                    ReplicaReadOutcome::Fallback,
+                                    None,
+                                    None,
+                                    Some(format!("replica read-layout validation failed: {error}")),
+                                );
+                            }
+                            return Ok((primary, None));
                         }
-                        return Ok(primary);
+                    };
+                    let mut store = selection.store.into_storage();
+                    if direct {
+                        store = crate::core::cdn::CdnBinding::attach_public(
+                            &self.config.cdn,
+                            store,
+                            &repo_prefix,
+                            self.config.operation_timeout,
+                            cdn_consumer,
+                        )
+                        .await?;
                     }
+                    (store, root, Some(primary))
                 }
             }
         };
-        // The selected provider must own the captured root. A primary snapshot
-        // can name retired objects that a currently ready replica never needed.
-        Ok(ReadStoreSelection {
-            store: selection.store,
-            router: selection.router,
-            source: selection.source,
-            capsule_root,
-        })
+        let store = Store::from_storage(store);
+        verify_qualification_target(store.as_storage(), &repo_prefix)?;
+        Ok((
+            ReadStoreSelection {
+                view_retention: None,
+                router: StoreLayout::new(store.clone(), repo_prefix),
+                store,
+                source: selection.source,
+                capsule_root,
+            },
+            primary_fallback,
+        ))
     }
 
     /// Selects the primary store for write-class operations.
@@ -8504,6 +8599,7 @@ async fn select_read_store_with_replicas<'replicas, I, F>(
     replicas: I,
     operation: &str,
     policy: ReadRoutingPolicy,
+    qualification: Option<&QualificationTarget>,
     mut build_replica: F,
 ) -> Result<crab_read::ReadStoreSelection<Store, StoreLayout>>
 where
@@ -8520,12 +8616,36 @@ where
         return Ok(primary_selection);
     }
 
-    let replicas = replicas
+    let replicas: Vec<_> = replicas
         .into_iter()
-        .map(ReadReplicaCandidate::from_replica_config_ref);
+        .map(ReadReplicaCandidate::from_replica_config_ref)
+        .collect();
+    // A qualification run has one physical fixture. Check every eligible
+    // target before readiness can read metadata under a different prefix.
+    let qualified_replicas = qualification
+        .map(|target| {
+            select_read_replicas(replicas.clone(), &policy)?
+                .into_iter()
+                .map(|replica| {
+                    let (store, prefix) = build_replica(replica, primary_repo_path)?;
+                    target.verify(store.as_storage(), &prefix)?;
+                    Ok((replica.name.as_str(), (store, prefix)))
+                })
+                .collect::<Result<BTreeMap<_, _>>>()
+        })
+        .transpose()?;
     let readiness_options = readiness_check_options_from_env()?;
     let choice = select_read_store_choice(primary_selection, replicas, &policy, |replica| {
-        let built = build_replica(replica, primary_repo_path);
+        let built = match &qualified_replicas {
+            Some(qualified) => qualified
+                .get(replica.name.as_str())
+                .cloned()
+                .ok_or_else(|| CrabError::AuthFailed {
+                    path: "replica was not checked against the approved CDN qualification fixture"
+                        .into(),
+                }),
+            None => build_replica(replica, primary_repo_path),
+        };
         let primary_store = primary_store.clone();
         let primary_router = primary_router.clone();
 
@@ -8658,8 +8778,7 @@ fn record_replica_fallback_events(
     }
 }
 
-/// Pick the first ready read replica. Falls back to the primary for all
-/// failures so reads never lose correctness due to replication lag.
+/// Pick the first ready read replica, with primary fallback on readiness failure.
 pub async fn select_read_store<U>(
     config: &Config,
     primary_url: U,
@@ -13658,6 +13777,7 @@ mod tests {
                 replicas.iter(),
                 operation,
                 ReadRoutingPolicy::PreferLocal,
+                None,
                 |_, _| Ok((replica_store.clone(), "org/repo".to_owned())),
             )
             .await
@@ -13676,6 +13796,43 @@ mod tests {
                 .expect("read replica marker");
             assert_eq!(marker.as_ref(), b"replica");
         }
+    }
+
+    #[tokio::test]
+    async fn cdn_qualification_rejects_neighbor_replica_before_any_readiness_reads() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let approved = QualificationTarget {
+            origin: "s3://qualification-bucket".into(),
+            repository_prefix: "crab-cdn-qualification/current".into(),
+            read: None,
+            managed_url: None,
+        };
+        let reads = Arc::new(AtomicUsize::new(0));
+        let store = || {
+            let count = Arc::clone(&reads);
+            Store::from_storage(
+                crab_storage::Store::new(Arc::new(InMemory::new()))
+                    .with_target_identity([1; 32])
+                    .with_native_cdn_origin(Some(approved.origin.clone()))
+                    .with_read_request_observer(Arc::new(move |_| {
+                        count.fetch_add(1, Ordering::Relaxed);
+                    })),
+            )
+        };
+        let candidates = [named_test_replica("neighbor")];
+        let result = select_read_store_with_replicas(
+            store(),
+            &approved.repository_prefix,
+            &candidates,
+            "fetch",
+            ReadRoutingPolicy::PreferLocal,
+            Some(&approved),
+            |_, _| Ok((store(), "crab-cdn-qualification/neighbor".into())),
+        )
+        .await;
+        assert!(matches!(result, Err(CrabError::AuthFailed { .. })));
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
@@ -13703,6 +13860,7 @@ mod tests {
                 replicas.iter(),
                 "hydrate",
                 policy,
+                None,
                 |_, _| panic!("primary policy must not build replica clients"),
             )
             .await
@@ -13753,6 +13911,7 @@ mod tests {
             replicas.iter(),
             "fetch",
             ReadRoutingPolicy::ReplicaName(west.name.clone()),
+            None,
             |replica, _| {
                 if replica.name == east.name {
                     Ok((east_store.clone(), "org/repo".to_owned()))
@@ -14044,6 +14203,7 @@ mod tests {
                 replicas.iter(),
                 operation,
                 ReadRoutingPolicy::PreferLocal,
+                None,
                 |_, _| Ok((replica_store.clone(), "org/repo".to_owned())),
             )
             .await
@@ -14096,6 +14256,7 @@ mod tests {
                 replicas.iter(),
                 operation,
                 ReadRoutingPolicy::PreferLocal,
+                None,
                 |replica, _| {
                     Err(CrabError::AuthFailed {
                         path: replica.url.clone(),
@@ -14157,6 +14318,7 @@ mod tests {
                 replicas.iter(),
                 operation,
                 ReadRoutingPolicy::PreferLocal,
+                None,
                 |_, _| Ok((replica_store.clone(), "org/repo".to_owned())),
             )
             .await

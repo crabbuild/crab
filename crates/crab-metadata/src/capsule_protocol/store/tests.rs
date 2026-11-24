@@ -92,6 +92,128 @@ async fn run_pointer_binding_is_identical_for_full_and_control_reads() {
     }
 }
 
+fn admission_leaf(sequence: usize) -> CapsuleRun {
+    let pack = crate::capsule_protocol::CapsuleGitPack::new(
+        bytes::Bytes::from_static(b"PACK"),
+        bytes::Bytes::from_static(b"index"),
+        bytes::Bytes::from_static(b"reverse"),
+        bytes::Bytes::from_static(b"locator"),
+        "3".repeat(40),
+        1,
+    )
+    .unwrap();
+    let transaction = CapsuleTransaction::new(
+        &"1".repeat(64),
+        vec![CapsuleRefEdit::new(
+            "refs/heads/main",
+            None,
+            Some(format!("{sequence:040x}")),
+            None,
+        )],
+    )
+    .unwrap();
+    let capsule = Capsule::build(&transaction, vec![pack], vec![]).unwrap();
+    CapsuleRun::leaf_with_member_oids(capsule, vec![vec![[7; 20]]]).unwrap()
+}
+
+#[tokio::test]
+async fn git_leaf_control_verifies_edge_admission_before_accepting_the_single_range() {
+    use crab_storage::cdn::{CdnAccess, CdnRoute, CdnTransport};
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let run = admission_leaf(1);
+    let pointer = crate::capsule_protocol::CapsulePointer::new(
+        run.hash(),
+        run.bytes().len() as u64,
+        run.control_offset(),
+        run.control_size(),
+        run.footer_hash(),
+        run.level(),
+        run.transaction_ids(),
+        run.newest_base_root_digest(),
+    )
+    .unwrap();
+    let start = pointer.control_offset();
+    let end = pointer.size();
+    let trailer = run.bytes().len() - CapsuleRunControl::trailer_bytes() as usize;
+    let footer = CapsuleRunControl::footer_range(&run.bytes()[trailer..], &pointer).unwrap();
+    let admission_bytes = (footer.start - start) as usize;
+    assert!(admission_bytes > 0 && pointer.control_size() <= crate::pages::READ_AHEAD_BYTES);
+
+    for corrupt_admission in [false, true] {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let observed = reads.clone();
+        let target = [7; 32];
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let transport = CdnTransport::loopback_fixture(listener.local_addr().unwrap()).unwrap();
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+            .with_target_identity(target)
+            .with_read_request_observer(Arc::new(move |_| {
+                observed.fetch_add(1, Ordering::Relaxed);
+            }))
+            .with_cdn_route(CdnRoute::new(
+                target,
+                "repositories/control-admission".into(),
+                None,
+                CdnAccess::Public,
+                transport,
+                Duration::from_secs(3),
+            ))
+            .unwrap();
+        let layout = StoreLayout::new(store, "repositories/control-admission".into());
+        let path = layout.capsule_path(run.hash());
+        layout
+            .store()
+            .create_strict(&path, run.bytes().clone())
+            .await
+            .unwrap();
+        reads.store(0, Ordering::Relaxed);
+
+        let mut body = run.bytes()[start as usize..].to_vec();
+        if corrupt_admission {
+            body[..admission_bytes].fill(0);
+        }
+        let serve = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut request = String::new();
+            while !request.ends_with("\r\n\r\n") {
+                assert_ne!(stream.read_line(&mut request).await.unwrap(), 0);
+            }
+            assert!(request.starts_with(&format!("GET /{path} HTTP/1.1\r\n")));
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains(&format!("range: bytes={start}-{}\r\n", end - 1))
+            );
+            let header = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{}/{end}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                end - 1,
+                body.len()
+            );
+            stream.write_all(header.as_bytes()).await.unwrap();
+            stream.write_all(&body).await.unwrap();
+        });
+        let (control, _) = load_capsule_run_git_control(&layout, &pointer)
+            .await
+            .unwrap();
+        assert_eq!(control.git_packs(), run.git_packs());
+        tokio::time::timeout(Duration::from_secs(3), serve)
+            .await
+            .unwrap()
+            .unwrap();
+        // The observer counts the loopback edge request and any native restart.
+        assert_eq!(
+            reads.load(Ordering::Relaxed),
+            1 + usize::from(corrupt_admission)
+        );
+    }
+}
+
 #[tokio::test]
 async fn run_control_includes_verified_member_admission_in_one_read() {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -103,31 +225,7 @@ async fn run_control_includes_verified_member_admission_in_one_read() {
                 observed.fetch_add(1, Ordering::SeqCst);
             }));
         let layout = StoreLayout::new(store, "repositories/control-admission".to_owned());
-        let pack = crate::capsule_protocol::CapsuleGitPack::new(
-            bytes::Bytes::from_static(b"PACK"),
-            bytes::Bytes::from_static(b"index"),
-            bytes::Bytes::from_static(b"reverse"),
-            bytes::Bytes::from_static(b"locator"),
-            "3".repeat(40),
-            1,
-        )
-        .unwrap();
-        let mut leaves = (1..=count)
-            .map(|sequence| {
-                let transaction = CapsuleTransaction::new(
-                    &"1".repeat(64),
-                    vec![CapsuleRefEdit::new(
-                        "refs/heads/main",
-                        None,
-                        Some(format!("{sequence:040x}")),
-                        None,
-                    )],
-                )
-                .unwrap();
-                let capsule = Capsule::build(&transaction, vec![pack.clone()], vec![]).unwrap();
-                CapsuleRun::leaf_with_member_oids(capsule, vec![vec![[7; 20]]]).unwrap()
-            })
-            .collect::<Vec<_>>();
+        let mut leaves = (1..=count).map(admission_leaf).collect::<Vec<_>>();
         let run = if count == 1 {
             leaves.remove(0)
         } else {

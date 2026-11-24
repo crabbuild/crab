@@ -12,6 +12,7 @@ from typing import Any
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "verify-provider-qualification-report.py"
+sys.path.insert(0, str(SCRIPT.parent))
 SPEC = importlib.util.spec_from_file_location("verify_provider_qualification", SCRIPT)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError(f"cannot import {SCRIPT}")

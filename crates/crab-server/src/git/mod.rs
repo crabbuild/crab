@@ -286,7 +286,7 @@ pub(crate) async fn upload_pack_read(
         ));
     }
     let (view, repository) = entry
-        .open_capsule_repository(&server, upload_pack_repository_options()?, &cancel)
+        .open_capsule_read_repository(&server, upload_pack_repository_options()?, &cancel)
         .await?;
     let scoped_refs = if let Some((name, target)) = scope {
         let reference = repository

@@ -8,9 +8,13 @@ COPY vendor/nfs3_server/ vendor/nfs3_server/
 COPY crab/ crab/
 COPY crates/ crates/
 COPY packages/desktop/agent/ packages/desktop/agent/
-RUN cargo build --release --locked -p crab-s3-gateway
+ARG GIT_SHA=unknown
+RUN GIT_SHA="$GIT_SHA" cargo build --release --locked -p crab-s3-gateway --features provider-cdn
 
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+
+ARG GIT_SHA=unknown
+LABEL org.opencontainers.image.revision="$GIT_SHA"
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates git \

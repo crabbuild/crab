@@ -191,6 +191,94 @@ Repository URLs must include a non-empty repo prefix, for example
 `crab://bucket/team/repo`. Bucket-root and container-root repo URLs are rejected
 because they cannot be safely scoped as an enterprise repo boundary.
 
+Before minting credentials for a path-scoped read, the issuer verifies that
+the view helper returned the exact Capsule v2 namespace for the authorized
+repository, scope hash, source generation, and source digest. The view's
+content prefix must be its `.crab` child.
+
+### CDN viewer grants
+
+Add a `cdn` entry to the issuer's trusted policy file for each approved
+repository export. The origin must match the cloud provider selected by policy
+and the exact physical bucket or container used for origin credentials.
+Each viewer URL path can identify one export. The issuer rejects aliases
+formed by moving part of the repository prefix into `base_url`.
+
+```yaml
+cdn:
+  - provider: cloudfront
+    origin: s3://example-repository-bucket
+    repo_prefix: org/models
+    base_url: https://downloads.example.com
+    allow_unfiltered: true
+    approval:
+      path: /etc/crab-auth/private-binding.json
+      sha256: <sha256-of-the-reviewed-binding-file>
+    key_id: EXAMPLEPUBLICKEYID
+    key_file: /run/secrets/cloudfront-viewer-key.pem
+    ttl_seconds: 300
+```
+
+After the private deployment passes its control-plane and transport
+probes, review the resulting binding candidate and mount its exact bytes
+as the approval file. Configure the SHA-256 from that review. Use the
+operator collector for customer repositories. It can sign the initial
+probe with the local operator key while the issuer is gated. Once approval
+is installed, verify a grant from the issuer. [Customer repository approval](../../docs/guides/provider-qualification.md#collect-approval-for-a-customer-repository) · [Qualification fixture approval](../../docs/guides/provider-qualification.md#inspect-a-private-deployment-binding)
+
+The issuer checks the approval after authorizing the native credentials
+and selecting the repository or view. It checks the selected placement
+before opening the signing key. An export with no approval serves native
+credentials only. A configured approval with mismatched bytes, route, or
+placement fails the request. Withdraw approval before changing deployment
+trust and approve the replacement after rerunning the probes.
+
+Grant the service identity metadata read access only on the approved
+targets. S3 uses `s3:GetBucketLocation` with the expected bucket owner and
+the region selected by the AWS credential provider. GCS uses
+`storage.buckets.get` to check the owning project and location. Azure uses
+`Microsoft.Storage/storageAccounts/read` and
+`Microsoft.Storage/storageAccounts/blobServices/containers/read` to check
+the configured subscription, account, primary location and container.
+These lookups run when issuing a viewer grant. [S3 expected bucket owner](https://docs.aws.amazon.com/cli/latest/reference/s3api/get-bucket-location.html) · [GCS bucket metadata](https://docs.cloud.google.com/storage/docs/json_api/v1/buckets/get) · [Azure storage account properties](https://learn.microsoft.com/en-us/rest/api/storagerp/storage-accounts/get-properties)
+
+Mount signing material from the provider's secret manager. CloudFront uses
+an RSA 2048 PEM key whose public key belongs to the distribution's trusted
+key group. For Google Cloud CDN use `provider: cloud_cdn`, `origin: gs://...`,
+the backend bucket's key name, and the base64url form of its 16-byte key.
+For Front Door use `provider: front_door` and
+`origin: https://<account>.blob.core.windows.net/<container>`. Mount an RSA
+2048 PEM key and give the Azure API Management gateway the corresponding
+public key and key ID. The gateway validates the CDN base URL as issuer and
+audience, the full physical `origin`, and the slash-terminated `prefix`
+claim against every requested object path before forwarding to Front Door.
+
+`allow_unfiltered` defaults to false. Enable it only if the entire physical
+repository export, including packs and historical data, is appropriate for
+every principal authorized for repository-wide reads. For a protected export,
+keep `repo_prefix` set to the logical source repository and set
+`protected_view_suffix` to the exact deployed suffix from the authorized
+`storage_scope.repo_prefix`, including the leading `/acl-views/v2/`. Set
+only one delivery mode per origin and logical repository. The issuer grants
+that exact materialized view and its view-local content prefix. Other scopes
+and generations keep their authorized native origin credentials.
+
+Configure the same suffix on the distribution or gateway. It must enforce
+exact immutable key shapes and authorize every viewer request before cache
+access. The private fixtures cover repository-local or projected-view data.
+Bucket-global content needs a separately qualified physical export.
+
+Clients opt in with the `X-Crab-CDN-Grant-Version: 1` header on
+`/v1/credentials` and send their pinned `X-Crab-CDN-Approval-Sha256`
+digest. For a locator that maps to multiple approved deployments, the
+client sends its allowed digests as one comma-delimited header. The issuer
+confirms the selected deployment digest in the response header when it
+returns the `cdn` envelope. Missing approval pins leave the read on native
+authorization. A conflicting explicit pin fails the request.
+Viewer expiry is bounded by the origin credentials and the configured TTL,
+with a maximum of 15 minutes. Clients select one credential by physical key
+and keep it in memory.
+
 ### Local RustFS Smoke
 
 For a local S3-compatible setup with real Crab CLI operations and no cloud
@@ -279,6 +367,49 @@ Path-scoped reads include `storage_scope` and return credentials scoped to the
 materialized filtered view. Clients must use the returned `repo_prefix` and
 `global_prefix`; the original repo prefix and bucket-level `.crab` globals are
 not readable with view credentials.
+
+### Retain a projected read view
+
+`POST /v1/views/retention` takes the same `id_token` and source `repo_url` as
+the credentials endpoint. The request also includes `view_prefix` from
+`storage_scope.repo_prefix`, a fresh `reader_nonce` of 32 random bytes encoded
+as lowercase hexadecimal, the `target` digest of the selected native storage
+transport (also 32 bytes encoded as lowercase hexadecimal), `read_operation`
+set to `mount` or `fetch`, and an `operation` object.
+
+| `operation.action` | Additional operation field | Successful response |
+| --- | --- | --- |
+| `acquire` | — | `acquired`, `repo_prefix`, `view_state_digest`, `revision`, `remaining_ms` |
+| `renew` | `revision` from the preceding response | `renewed`, `revision`, `remaining_ms` |
+| `release` | `revision` from the last acknowledged response | `released` |
+
+The caller keeps the same nonce, native target, and projected view for the
+life of the claim. Crab Auth checks the verified issuer, subject, and policy
+for the same `read_operation` on every request. The native helper compares the target against its
+resolved transport before accessing the claim and confirms that the source
+still matches the view on acquisition. Renewal keeps the exact admitted view
+while the same scope remains authorized, even if the source advances.
+
+Use the request's monotonic start time plus the returned `remaining_ms` as
+the local deadline. Stop serving new reads after denial, loss of the acknowledged
+revision, or expiry. Drain outstanding reads before release. A `409` indicates
+that the helper could not acknowledge the requested view or revision. A `503`
+leaves its outcome uncertain. A subsequent `acquire` uses a fresh nonce.
+
+For storage credential renewal, send `retained_view` to `/v1/credentials`
+with the same `mount` or `fetch` operation. This object holds `view_prefix`, `target`,
+`reader_nonce`, and the `incarnation` returned by acquisition. The issuer
+evaluates the current read policy and verifies that the exact native claim is
+still active before issuing read-only credentials for the retained prefix. A
+lease renewal can advance its sequence while a credential request is in flight.
+The verified incarnation stays the same until that claim ends.
+
+The helper runs with the issuer's native storage identity. For each deployed
+view it needs the same source and view reads as materialization, plus writes
+to the view's `v2/readers/` subtree and repository GC clock. AWS Lambda
+operators must scope that native access to the function execution role. The
+existing permission to assume the role for viewer credentials covers a
+separate part of the request. The retention reply contains lease metadata only.
 
 ### Push Flow
 

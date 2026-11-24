@@ -46,6 +46,11 @@ this crate opens no stored manifest or ref journal.
 - Range coalescing limits merging, not individual entry admission. Keep per-entry ReaderLimits and aggregate OperationBudget checks before fetching; do not split or truncate a valid larger pack entry to fit the merge threshold.
   Source: `crates/crab-remote-git/src/reader.rs`.
 
+- Edge batch reads verify all reconstructed objects before publication. A
+  recoverable range waits for in-flight edge responses. Denial stops the read,
+  and a permitted origin restart inherits the same deadline and budget.
+  Source: `crates/crab-remote-git/src/reader/edge_batch.rs`.
+
 - Canonical, embedded and cached large pack downloads share the storage range
   stream. Preserve the complete Git/content hashes, byte budgets and file flush
   on every returned exit. Sources: `reader.rs` and `pack.rs`.

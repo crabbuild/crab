@@ -8,7 +8,11 @@ use uuid::Uuid;
 
 use super::api::{invalid, require_v1};
 use super::discovery::validate_https_url;
+use super::{MANAGED_SCHEMA_VERSION, ManagedCdnBinding};
+use crate::cdn::{CdnProvider, CdnViewerGrant};
 use crate::error::Result;
+
+pub(crate) const CDN_TRANSFER_GRANT_VERSION: u16 = 2;
 
 /// Opaque secret transported only inside a short-lived grant.
 #[derive(Clone, PartialEq, Eq, Serialize, ToSchema)]
@@ -192,25 +196,50 @@ pub struct TransferGrant {
     pub permissions: Vec<TransferPermission>,
     pub storage_scope: TransferScope,
     pub transport: TransferTransport,
+    /// Present only on a v2 native direct read grant.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_cdn"
+    )]
+    #[schema(value_type = CdnViewerGrant, required = false)]
+    pub cdn: Option<CdnViewerGrant>,
+    /// Echo of the requested deployment approval, present only on v2 reads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cdn_approval_sha256: Option<String>,
+}
+
+fn deserialize_cdn<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<CdnViewerGrant>, D::Error> {
+    CdnViewerGrant::deserialize(deserializer)
+        .map(Some)
+        .map_err(|_| serde::de::Error::custom("invalid CDN viewer grant"))
 }
 
 /// Operation-bound request for a managed transfer grant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TransferGrantRequest {
+    /// Version 1, or version 2 for reads when advertised by capabilities.
     pub schema_version: u16,
     pub repository_id: Uuid,
     pub operation: TransferOperation,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub push_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cdn_approval_sha256: Option<String>,
 }
 
 /// Client-side facts required to validate a grant before store construction.
 #[derive(Debug, Clone, Copy)]
 pub struct GrantValidationContext<'a> {
+    /// Exact version selected for this transfer request.
+    pub schema_version: u16,
     pub repository_id: Uuid,
     pub operation: TransferOperation,
     pub repository_prefix: &'a str,
+    pub cdn_binding: Option<&'a ManagedCdnBinding>,
     pub push_id: Option<Uuid>,
     pub allowed_permissions: &'a [TransferPermission],
     pub now: OffsetDateTime,
@@ -220,7 +249,21 @@ pub struct GrantValidationContext<'a> {
 impl TransferGrant {
     /// Validates version, repository, operation, expiry, scope, and transport before use.
     pub fn validate(&self, context: GrantValidationContext<'_>) -> Result<()> {
-        require_v1(self.schema_version, "transfer grant")?;
+        if self.schema_version != context.schema_version {
+            return invalid("transfer grant version does not match the requested version");
+        }
+        match (self.schema_version, context.cdn_binding) {
+            (MANAGED_SCHEMA_VERSION, None)
+                if self.cdn.is_none() && self.cdn_approval_sha256.is_none() => {}
+            (CDN_TRANSFER_GRANT_VERSION, Some(binding)) if self.operation.is_read() => {
+                binding.validate_grant(self)?;
+            }
+            _ => {
+                return invalid(
+                    "transfer grant version or CDN authority is invalid for this operation",
+                );
+            }
+        }
         if self.grant_id.is_nil() || self.repository_id.is_nil() {
             return invalid("transfer grant IDs must not be nil");
         }
@@ -245,6 +288,12 @@ impl TransferGrant {
         self.storage_scope.validate(context)?;
         self.transport
             .validate(&self.storage_scope, self.operation)?;
+        if let Some(cdn) = &self.cdn {
+            let TransferTransport::Direct { direct } = &self.transport else {
+                return invalid("gateway transfer cannot authorize a CDN route");
+            };
+            direct.validate_cdn(cdn, context.repository_prefix, self.expires_at, context.now)?;
+        }
         Ok(())
     }
 }
@@ -297,6 +346,45 @@ impl TransferTransport {
 }
 
 impl DirectObjectCredentials {
+    fn validate_cdn(
+        &self,
+        cdn: &CdnViewerGrant,
+        repository_prefix: &str,
+        parent_expiry: OffsetDateTime,
+        now: OffsetDateTime,
+    ) -> Result<()> {
+        if self.endpoint.is_some() {
+            return invalid("CDN transfer requires a native endpoint without overrides");
+        }
+        let (provider, origin) = self.cdn_origin();
+        cdn.validate_authority(provider)?;
+        if cdn.origin != origin {
+            return invalid("CDN viewer grant does not match the managed origin");
+        }
+        cdn.validate_scope(repository_prefix, None)?;
+        let expiry = i64::try_from(cdn.expires_at).ok();
+        if !expiry.is_some_and(|expiry| {
+            expiry > now.unix_timestamp() && expiry <= parent_expiry.unix_timestamp()
+        }) {
+            return invalid("CDN viewer grant expires outside its managed read authorization");
+        }
+        Ok(())
+    }
+
+    pub(super) fn cdn_origin(&self) -> (CdnProvider, String) {
+        let container = &self.container;
+        match &self.credentials {
+            ProviderCredentials::Aws { .. } => {
+                (CdnProvider::Cloudfront, format!("s3://{container}"))
+            }
+            ProviderCredentials::Gcp { .. } => (CdnProvider::CloudCdn, format!("gs://{container}")),
+            ProviderCredentials::Azure { account, .. } => (
+                CdnProvider::FrontDoor,
+                format!("https://{account}.blob.core.windows.net/{container}"),
+            ),
+        }
+    }
+
     fn validate(&self, scope: &TransferScope, operation: TransferOperation) -> Result<()> {
         if let Some(endpoint) = &self.endpoint {
             validate_https_url(endpoint, "direct endpoint")?;

@@ -65,6 +65,10 @@ pub struct RepositoryConfig {
     pub provider: StorageProviderKind,
     pub bucket: String,
     pub prefix: String,
+    /// Trusted export for verified reads from this repository placement.
+    #[cfg(feature = "provider-cdn")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cdn: Option<crab_auth_store::operator_cdn::OperatorCdn>,
     #[serde(default = "default_branch")]
     pub default_branch: String,
     #[serde(default)]
@@ -185,6 +189,8 @@ impl Config {
         }
         let mut names = HashSet::new();
         let mut placements = HashSet::new();
+        #[cfg(feature = "provider-cdn")]
+        let mut viewer_paths = HashSet::new();
         for repository in &self.repositories {
             if repository.provider == StorageProviderKind::Local {
                 return Err(Error::Config(
@@ -215,6 +221,12 @@ impl Config {
                 return Err(Error::Config(
                     "max_active_multipart_uploads must be between 1 and 10000",
                 ));
+            }
+            #[cfg(feature = "provider-cdn")]
+            if let Some(binding) = &repository.cdn
+                && !viewer_paths.insert(binding.validate(&repository.prefix)?)
+            {
+                return Err(Error::Config("CDN viewer path is bound more than once"));
             }
             if !(1..=MAX_CONFIGURABLE_GIT_BLOB_BYTES).contains(&repository.git_blob_max_bytes) {
                 return Err(Error::Config(
@@ -359,6 +371,8 @@ mod tests {
                 principal: "test-principal".to_owned(),
             }],
             repositories: vec![RepositoryConfig {
+                #[cfg(feature = "provider-cdn")]
+                cdn: None,
                 name: "test-repository".to_owned(),
                 provider: StorageProviderKind::S3,
                 bucket: "test-storage".to_owned(),

@@ -168,7 +168,7 @@ fn coordination_kind(source: &crab_coordination::CoordinationError) -> ErrorKind
         | C::ReadRetentionMalformed { .. } => ErrorKind::Corruption,
         C::GcFenceLost { .. } | C::ReadRetentionLost { .. } => ErrorKind::Cancelled,
         C::ReadRetentionFailed(source) => coordination_kind(source),
-        C::Serialize { .. } => ErrorKind::Io,
+        C::ReadRetentionIssuer(_) | C::Serialize { .. } => ErrorKind::Io,
     }
 }
 
@@ -220,6 +220,12 @@ mod tests {
                         }),
                     },
                     ErrorKind::Timeout,
+                ),
+                (
+                    C::ReadRetentionIssuer(Box::new(std::io::Error::from(
+                        std::io::ErrorKind::ConnectionReset,
+                    ))),
+                    ErrorKind::Io,
                 ),
             ];
             for (source, expected) in cases {

@@ -6,28 +6,34 @@ use async_trait::async_trait;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, ETAG, HeaderName, IF_MATCH, RETRY_AFTER};
 use reqwest::{Method, StatusCode, Url};
 use serde::de::DeserializeOwned;
+use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::{
     AddOrganizationMemberRequest, ApiError, ApiErrorEnvelope, CreateOrganizationRequest,
     CreateRepositoryRequest, CreateServiceAccountRequest, DiscoveryDocument, EntityTag,
-    GrantValidationContext, IdempotencyKey, IssuedServiceToken, LogicalRepository, Organization,
-    OrganizationMemberPage, OrganizationMembership, OrganizationPage, OrganizationRole, PageCursor,
-    PushAbortResponse, PushFinalizeRequest, PushPrepareRequest, PushPrepareResponse,
-    RepositoryPage, RepositoryRequestedState, RotateServiceTokenRequest, ServiceAccount,
-    ServiceAccountKind, ServiceAccountList, ServiceCapabilities, ServiceProfile, TransferGrant,
-    TransferGrantRequest, TransferMode, TransferOperation, TransferPermission, TransferTransport,
-    UpdateOrganizationMemberRequest, UpdateOrganizationRequest, UpdateRepositoryRequest,
-    managed_http_client,
+    GrantValidationContext, IdempotencyKey, IssuedServiceToken, LogicalRepository,
+    ManagedCdnBinding, Organization, OrganizationMemberPage, OrganizationMembership,
+    OrganizationPage, OrganizationRole, PageCursor, PushAbortResponse, PushFinalizeRequest,
+    PushPrepareRequest, PushPrepareResponse, RepositoryPage, RepositoryRequestedState,
+    RotateServiceTokenRequest, ServiceAccount, ServiceAccountKind, ServiceAccountList,
+    ServiceCapabilities, ServiceProfile, TransferGrant, TransferGrantRequest, TransferMode,
+    TransferOperation, TransferPermission, TransferTransport, UpdateOrganizationMemberRequest,
+    UpdateOrganizationRequest, UpdateRepositoryRequest, managed_http_client,
 };
-use crate::error::AuthError;
 use crate::{PushFinalizeResponse, validate_push_finalize_response};
+use crate::{cdn::valid_approval_digest, error::AuthError};
 
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_ATTEMPTS: u8 = 3;
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(2);
 const IDEMPOTENCY_KEY: HeaderName = HeaderName::from_static("idempotency-key");
+const CDN_OBSERVATION_TARGET: &str = "crab_auth::managed::cdn";
+
+fn sha256(value: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(value))
+}
 
 pub type ManagedApiResult<T> = std::result::Result<T, ManagedApiError>;
 
@@ -137,6 +143,8 @@ pub struct ManagedEntity<T> {
 pub struct ManagedApiClient {
     authority: String,
     api_base: Url,
+    issuer_identity_sha256: String,
+    issuer_version: String,
     bearer: BearerToken,
     transport: Arc<dyn ApiTransport>,
 }
@@ -157,9 +165,33 @@ impl ManagedApiClient {
         let transport = Arc::new(ReqwestApiTransport {
             client: managed_http_client(profile)?,
         });
+        let issuer_identity_sha256 = sha256(
+            [
+                profile.authority.as_str(),
+                api_base.as_str(),
+                &discovery.oidc.issuer,
+            ]
+            .join("\0")
+            .as_bytes(),
+        );
+        let version = &discovery.service_version;
+        let issuer_version = if version.len() <= 80
+            && version
+                .as_bytes()
+                .first()
+                .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            && version.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_.-".contains(&byte)
+            }) {
+            version.clone()
+        } else {
+            String::new()
+        };
         Ok(Self {
             authority: profile.authority.clone(),
             api_base,
+            issuer_identity_sha256,
+            issuer_version,
             bearer,
             transport,
         })
@@ -418,7 +450,7 @@ impl ManagedApiClient {
         .await
     }
 
-    /// Resolves one logical repository without exposing its physical placement.
+    /// Resolves one logical repository and any private binding authorized for the reader.
     pub async fn resolve_repository(
         &self,
         organization: &str,
@@ -443,7 +475,20 @@ impl ManagedApiClient {
                 reason: "resolved repository canonical URL does not match the request".to_owned(),
             });
         }
-        response.require_etag()
+        let repository = response.require_etag()?;
+        let binding = repository.value.cdn_read_binding.as_ref();
+        tracing::debug!(
+            target: CDN_OBSERVATION_TARGET,
+            issuer_identity_sha256 = %self.issuer_identity_sha256,
+            issuer_version = %self.issuer_version,
+            repository_sha256 = %sha256(repository.value.repository_id.as_bytes()),
+            binding_approval_sha256 = binding.map_or("", |value| value.approval_sha256.as_str()),
+            binding_origin_sha256 = %binding.map_or_else(String::new, |value| sha256(value.origin.as_bytes())),
+            binding_prefix_sha256 = %binding.map_or_else(String::new, |value| sha256(value.repository_prefix.as_bytes())),
+            binding_viewer_sha256 = %binding.map_or_else(String::new, |value| sha256(value.base_url.as_bytes())),
+            "Managed CDN repository resolution"
+        );
+        Ok(repository)
     }
 
     /// Lists one cursor page of repositories visible in an organization.
@@ -734,7 +779,9 @@ impl ManagedApiClient {
         .await
     }
 
-    /// Issues a new short-lived read grant. Grant POSTs are never auto-retried.
+    /// Issues a read grant using the captured approval when the service advertises its mode.
+    ///
+    /// Grant POSTs are never auto-retried. Obtain the binding from authenticated resolution.
     pub async fn issue_transfer_grant(
         &self,
         organization: &str,
@@ -742,6 +789,7 @@ impl ManagedApiClient {
         repository_id: Uuid,
         operation: TransferOperation,
         capabilities: &ServiceCapabilities,
+        cdn_binding: Option<&ManagedCdnBinding>,
     ) -> ManagedApiResult<TransferGrant> {
         validate_slug(organization, "organization")?;
         validate_slug(repository, "repository")?;
@@ -754,29 +802,78 @@ impl ManagedApiClient {
                 reason: "read grant client cannot request a push operation".to_owned(),
             });
         }
+        let schema_version =
+            capabilities.read_grant_version(cdn_binding.map(ManagedCdnBinding::mode));
+        let cdn_binding =
+            cdn_binding.filter(|_| schema_version == super::transfer::CDN_TRANSFER_GRANT_VERSION);
+        if let Some(binding) = cdn_binding {
+            binding.validate()?;
+        }
         let body = serde_json::to_vec(&TransferGrantRequest {
-            schema_version: 1,
+            schema_version,
             repository_id,
             operation,
             push_id: None,
+            cdn_approval_sha256: cdn_binding.map(|binding| binding.approval_sha256.clone()),
         })
         .map_err(|source| ManagedApiError::Encode { source })?;
-        let grant = self
-            .execute::<TransferGrant>(
-                ApiRequest::post(
-                    self.endpoint(&format!(
-                        "repositories/{organization}/{repository}/transfer-grants"
-                    ))?,
-                    self.bearer.clone(),
-                    body,
-                ),
-                &[StatusCode::CREATED],
-                RetrySafety::Never,
-            )
-            .await?
-            .value;
-        validate_grant(&grant, repository_id, operation, capabilities)?;
-        Ok(grant)
+        let request = ApiRequest::post(
+            self.endpoint(&format!(
+                "repositories/{organization}/{repository}/transfer-grants"
+            ))?,
+            self.bearer.clone(),
+            body,
+        );
+        // Keep the response status even if decoding or grant validation rejects it.
+        // This POST has no retry or downgrade path.
+        let response = self.transport.send(request).await;
+        let status = response
+            .as_ref()
+            .map_or(0, |response| response.status.as_u16());
+        let decoded = response.and_then(|response| {
+            decode_response::<TransferGrant>(response, &[StatusCode::CREATED])
+        });
+        let grant = decoded.as_ref().ok().map(|value| &value.value);
+        let validation = grant
+            .map(|grant| {
+                validate_grant(
+                    grant,
+                    schema_version,
+                    repository_id,
+                    operation,
+                    capabilities,
+                    cdn_binding,
+                )
+            })
+            .transpose();
+        let accepted = grant.is_some() && validation.is_ok();
+        let native = grant
+            .filter(|_| accepted)
+            .and_then(|value| match &value.transport {
+                TransferTransport::Direct { direct } if direct.endpoint.is_none() => {
+                    Some((direct, &value.storage_scope))
+                }
+                _ => None,
+            });
+        tracing::debug!(
+            target: CDN_OBSERVATION_TARGET,
+            issuer_identity_sha256 = %self.issuer_identity_sha256,
+            issuer_version = %self.issuer_version,
+            repository_sha256 = %sha256(repository_id.as_bytes()),
+            operation = ?operation,
+            request_version = schema_version,
+            request_approval_sha256 = cdn_binding.map_or("", |binding| binding.approval_sha256.as_str()),
+            status,
+            grant_version = grant.map_or(0, |value| value.schema_version),
+            grant_approval_sha256 = grant.and_then(|value| value.cdn_approval_sha256.as_deref())
+                .filter(|value| valid_approval_digest(value)).unwrap_or_default(),
+            grant_origin_sha256 = %native.map_or_else(String::new, |(direct, _)| sha256(direct.cdn_origin().1.as_bytes())),
+            grant_prefix_sha256 = %native.map_or_else(String::new, |(_, scope)| sha256(scope.repository_prefix.as_bytes())),
+            accepted,
+            "Managed CDN read grant exchange"
+        );
+        validation?;
+        Ok(decoded?.value)
     }
 
     /// Refreshes a read grant by issuing a new independently validated grant.
@@ -787,6 +884,7 @@ impl ManagedApiClient {
         repository_id: Uuid,
         operation: TransferOperation,
         capabilities: &ServiceCapabilities,
+        cdn_binding: Option<&ManagedCdnBinding>,
     ) -> ManagedApiResult<TransferGrant> {
         self.issue_transfer_grant(
             organization,
@@ -794,6 +892,7 @@ impl ManagedApiClient {
             repository_id,
             operation,
             capabilities,
+            cdn_binding,
         )
         .await
     }
@@ -1079,6 +1178,8 @@ impl ManagedApiClient {
         Self {
             authority: authority.to_owned(),
             api_base: Url::parse(&format!("https://api.{authority}/v1/")).unwrap(),
+            issuer_identity_sha256: "a".repeat(64),
+            issuer_version: "fixture".to_owned(),
             bearer,
             transport,
         }
@@ -1087,9 +1188,11 @@ impl ManagedApiClient {
 
 fn validate_grant(
     grant: &TransferGrant,
+    schema_version: u16,
     repository_id: Uuid,
     operation: TransferOperation,
     capabilities: &ServiceCapabilities,
+    cdn_binding: Option<&ManagedCdnBinding>,
 ) -> ManagedApiResult<()> {
     let mode = transfer_mode(grant);
     if !capabilities.transfer_modes.contains(&mode) {
@@ -1109,9 +1212,13 @@ fn validate_grant(
         TransferPermission::ListPrefix,
     ];
     grant.validate(GrantValidationContext {
+        schema_version,
         repository_id,
         operation,
-        repository_prefix: &grant.storage_scope.repository_prefix,
+        repository_prefix: cdn_binding.map_or(&grant.storage_scope.repository_prefix, |binding| {
+            &binding.repository_prefix
+        }),
+        cdn_binding,
         push_id: None,
         allowed_permissions: &allowed,
         now,
@@ -1196,9 +1303,11 @@ fn validate_push_prepare_response(
         TransferPermission::CreateImmutableObject,
     ];
     prepared.staging_grant.validate(GrantValidationContext {
+        schema_version: super::MANAGED_SCHEMA_VERSION,
         repository_id,
         operation: TransferOperation::PushUpload,
         repository_prefix: &prepared.staging_grant.storage_scope.repository_prefix,
+        cdn_binding: None,
         push_id: Some(prepared.push_id),
         allowed_permissions: &allowed,
         now,

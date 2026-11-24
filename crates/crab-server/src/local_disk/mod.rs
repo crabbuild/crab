@@ -190,6 +190,11 @@ impl LocalStaging {
         staging
     }
 
+    #[cfg(all(test, feature = "provider-cdn"))]
+    pub(crate) fn test_cache_root(&self) -> PathBuf {
+        self.root.join("lfs-read-cache")
+    }
+
     pub(crate) async fn create(
         &self,
         bytes: u64,

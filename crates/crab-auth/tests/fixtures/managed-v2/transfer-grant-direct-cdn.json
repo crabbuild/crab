@@ -1,0 +1,44 @@
+{
+  "schema_version": 2,
+  "grant_id": "01900000-0000-7000-8000-000000000003",
+  "repository_id": "01900000-0000-7000-8000-000000000001",
+  "operation": "clone",
+  "expires_at": "2030-01-01T00:00:00Z",
+  "permissions": [
+    "read_object",
+    "read_metadata",
+    "list_prefix"
+  ],
+  "storage_scope": {
+    "repository_prefix": "environments/env-1/repositories/01900000-0000-7000-8000-000000000001"
+  },
+  "transport": {
+    "transport": "direct",
+    "direct": {
+      "region": "us-west-2",
+      "container": "crab-managed-prod",
+      "object_prefix": "environments/env-1/repositories/01900000-0000-7000-8000-000000000001",
+      "credentials": {
+        "provider": "aws",
+        "access_key_id": "fixture-access-key-id",
+        "secret_access_key": "fixture-secret-access-key",
+        "session_token": "fixture-session-token"
+      }
+    }
+  },
+  "cdn": {
+    "provider": "cloudfront",
+    "origin": "s3://crab-managed-prod",
+    "base_url": "https://cdn.example.com",
+    "repo_prefix": "environments/env-1/repositories/01900000-0000-7000-8000-000000000001",
+    "global_prefix": null,
+    "expires_at": 1893455800,
+    "grants": [
+      {
+        "prefix": "environments/env-1/repositories/01900000-0000-7000-8000-000000000001/v2/pack-layers/",
+        "credential": "CloudFront-Policy=fixture-policy; CloudFront-Signature=fixture-viewer-signature; CloudFront-Key-Pair-Id=test-key; CloudFront-Hash-Algorithm=SHA256"
+      }
+    ]
+  },
+  "cdn_approval_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}

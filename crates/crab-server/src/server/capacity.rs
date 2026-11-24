@@ -60,8 +60,17 @@ impl CellRuntimeBudget {
             disk_reserve_bytes,
         })
     }
-    pub(crate) fn local_disk(self) -> crate::local_disk::DiskBudget {
-        crate::local_disk::DiskBudget::new(self.local_disk_bytes)
+    pub(super) fn lfs_cache_bytes(self) -> u64 {
+        if !cfg!(feature = "provider-cdn") {
+            return 0;
+        }
+        // Preserve admission for one Git receive on small volumes.
+        let spare = self.local_disk_bytes - crate::git::receive::INITIAL_RECEIVE_RESERVATION;
+        (spare / 16).min(512 * MIB)
+    }
+
+    pub(super) fn local_disk(self) -> crate::local_disk::DiskBudget {
+        crate::local_disk::DiskBudget::new(self.local_disk_bytes - self.lfs_cache_bytes())
     }
 
     pub(crate) fn pressure(self) -> cellar::sdk::PressureConfig {
@@ -201,10 +210,14 @@ mod tests {
             let budget =
                 CellRuntimeBudget::from_resources(local_resources(3 * GIB, free_disk, 10_000))
                     .unwrap();
-            assert!(budget.local_disk_bytes >= crate::git::receive::INITIAL_RECEIVE_RESERVATION);
+            assert!(
+                budget.local_disk().capacity() >= crate::git::receive::INITIAL_RECEIVE_RESERVATION
+            );
             assert!(budget.disk_reserve_bytes >= GIB);
             assert_eq!(
-                budget.local_disk_bytes + budget.disk_reserve_bytes,
+                budget.local_disk().capacity()
+                    + budget.lfs_cache_bytes()
+                    + budget.disk_reserve_bytes,
                 free_disk
             );
         }

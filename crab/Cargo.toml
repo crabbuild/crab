@@ -52,6 +52,8 @@ simd-accel = []
 # release binary doesn't pull in async-trait / futures just for tests.
 testing = ["dep:futures", "crab-workflow/testing"]
 
+provider-cdn-qualification = ["crab-storage/provider-cdn-qualification"]
+
 # FUSE virtual filesystem mount with on-demand hydration.
 # Included in `default` so macOS and Linux get VFS out of the box.
 # Windows builds must use `--no-default-features` and re-enable the
@@ -151,7 +153,7 @@ gix-all = [
 [dependencies]
 # Shared cross-crate contracts.
 crab-auth = { workspace = true, features = ["aws-oidc-client", "azure-entra-client", "crab-auth-client", "gcp-workload-identity-client"] }
-crab-auth-store = { workspace = true, features = ["managed-service"] }
+crab-auth-store = { workspace = true, features = ["azure-cdn-placement", "managed-service", "view-retention"] }
 crab-cache = { workspace = true, features = ["local-cache", "remote-client", "xet-chunk-cache"] }
 crab-cache-store = { workspace = true, features = ["remote-client"] }
 crab-coordination = { workspace = true, features = ["object-store-lock"] }

@@ -38,12 +38,23 @@ pub(crate) struct Repository {
     pub(crate) config: RepositoryConfig,
     pub(crate) store: Store,
     pub(crate) layout: StoreLayout<Store>,
+    pub(crate) edge_reader: Option<RepositoryEdgeReader>,
     pub(crate) identity: RepositoryIdentity,
     pub(crate) read_views: Arc<crate::repository::ReadViewCache>,
     pub(crate) attributes: Arc<crate::attributes::Cache>,
     pub(crate) maintenance: Arc<crate::repository::WriteMaintenance>,
     hydrator: Arc<crab_read::ShardHydrator>,
     lfs: Arc<crab_lfs::LfsObjectStore>,
+}
+
+#[derive(Clone)]
+pub(crate) struct RepositoryEdgeReader {
+    pub(crate) layout: StoreLayout<Store>,
+    pub(crate) identity: RepositoryIdentity,
+    pub(crate) views: Arc<crate::repository::ReadViewCache>,
+    lfs: Arc<crab_lfs::LfsObjectStore>,
+    #[cfg(feature = "provider-cdn")]
+    lfs_cache: Arc<crab_cache_store::lfs::LfsPayloadCache>,
 }
 
 impl Repository {
@@ -58,12 +69,13 @@ impl Repository {
             ..StoreCacheConfig::default()
         };
         let caching = CachingStore::new_with_local_cache(store.clone(), cache_config, local_cache)?;
-        Self::new_with_caching_store(config, store, caching)
+        Self::new_with_caching_store(config, store, None, caching)
     }
 
     pub(crate) fn new_with_cache_observer(
         config: RepositoryConfig,
         store: Store,
+        read_store: Option<Store>,
         local_cache: Arc<LocalCache>,
         observer: Arc<dyn CacheObserver>,
     ) -> crate::Result<Self> {
@@ -71,41 +83,67 @@ impl Repository {
             max_bytes: local_cache.max_bytes(),
             ..StoreCacheConfig::default()
         };
-        let caching = CachingStore::new_with_local_cache(store.clone(), cache_config, local_cache)?
-            .with_cache_observer(observer);
-        Self::new_with_caching_store(config, store, caching)
+        let caching = CachingStore::new_with_local_cache(
+            read_store.as_ref().unwrap_or(&store).clone(),
+            cache_config,
+            local_cache,
+        )?
+        .with_cache_observer(observer);
+        Self::new_with_caching_store(config, store, read_store, caching)
     }
 
     fn new_with_caching_store(
         config: RepositoryConfig,
         store: Store,
+        read_store: Option<Store>,
         caching: CachingStore,
     ) -> crate::Result<Self> {
         let layout = StoreLayout::new(store.clone(), config.prefix.clone());
-        let read_layout = crab_read::ReadStoreLayout::with_global_prefix(
-            store.clone(),
+        let hydration_layout = crab_read::ReadStoreLayout::with_global_prefix(
+            read_store.as_ref().unwrap_or(&store).clone(),
             layout.repo_prefix().to_owned(),
             layout.global_prefix().to_owned(),
         );
+        let namespace = format!("{}:{}", provider_name(config.provider), config.bucket);
+        let edge_reader = if let Some(read_store) = read_store {
+            Some(RepositoryEdgeReader {
+                lfs: Arc::new(crab_lfs::LfsObjectStore::new(
+                    read_store.clone(),
+                    &config.prefix,
+                )),
+                #[cfg(feature = "provider-cdn")]
+                lfs_cache: Arc::new(crab_cache_store::lfs::LfsPayloadCache::new(Arc::clone(
+                    caching.local_cache(),
+                ))),
+                layout: StoreLayout::new(read_store, config.prefix.clone()),
+                // Cache entries proved by the edge must never substitute for
+                // an origin-only mutation or maintenance read.
+                identity: RepositoryIdentity::new(
+                    format!("cdn:{namespace}"),
+                    config.prefix.clone(),
+                    1,
+                )?,
+                views: Arc::new(crate::repository::ReadViewCache::new()),
+            })
+        } else {
+            None
+        };
         Ok(Self {
             attributes: Arc::new(crate::attributes::Cache::new(layout.clone())),
             hydrator: Arc::new(
-                crab_read::ReadRuntimeBuilder::new(caching, read_layout, 16).build()?,
+                crab_read::ReadRuntimeBuilder::new(caching, hydration_layout, 16).build()?,
             ),
             lfs: Arc::new(crab_lfs::LfsObjectStore::new(
                 store.clone(),
                 layout.repo_prefix(),
             )),
-            identity: RepositoryIdentity::new(
-                format!("{}:{}", provider_name(config.provider), config.bucket),
-                config.prefix.clone(),
-                1,
-            )?,
+            identity: RepositoryIdentity::new(namespace, config.prefix.clone(), 1)?,
             read_views: Arc::new(crate::repository::ReadViewCache::new()),
             maintenance: Arc::new(crate::repository::WriteMaintenance::new()),
             config,
             store,
             layout,
+            edge_reader,
         })
     }
 
@@ -222,11 +260,26 @@ impl ReadContent {
                 })))
             }
             Self::LfsPointer(pointer) => {
-                let (_, actual, stream) = repository
-                    .lfs
-                    .get_stream(&pointer.oid, pointer.size, Some(range.clone()))
-                    .await
-                    .map_err(|error| gateway_error(error.into()))?;
+                let result = match repository.edge_reader.as_ref() {
+                    #[cfg(feature = "provider-cdn")]
+                    Some(reader) => {
+                        reader
+                            .lfs_cache
+                            .stream_content(
+                                &reader.lfs,
+                                &pointer.oid,
+                                pointer.size,
+                                Some(range.clone()),
+                            )
+                            .await
+                    }
+                    reader => {
+                        let lfs = reader.map_or(&repository.lfs, |reader| &reader.lfs);
+                        lfs.stream_content(&pointer.oid, pointer.size, Some(range.clone()), None)
+                            .await
+                    }
+                };
+                let (actual, stream) = result.map_err(|error| gateway_error(error.into()))?;
                 if actual != range {
                     return Err(s3_error!(InvalidObjectState));
                 }
@@ -308,7 +361,11 @@ impl ReadContent {
 }
 
 impl Gateway {
-    pub(crate) fn new(config: Config, cancellation: CancellationToken) -> crate::Result<Self> {
+    pub(crate) async fn new(
+        config: Config,
+        cancellation: CancellationToken,
+        configure_read_cdn: bool,
+    ) -> crate::Result<Self> {
         let auth = GatewayAuth::load(&config)?;
         let region = Arc::from(config.region.clone());
         let metrics = Metrics::new()?;
@@ -332,9 +389,11 @@ impl Gateway {
                     store
                 }
             };
+            let read_store = repository_read_store(&entry, &store, configure_read_cdn).await?;
             let repository = Repository::new_with_cache_observer(
                 entry.clone(),
                 store,
+                read_store,
                 Arc::clone(&local_cache),
                 metrics.cache_observer(),
             )?;
@@ -669,13 +728,7 @@ impl Gateway {
 
     async fn open(&self, repository: &Repository) -> S3Result<Arc<crate::repository::ReadView>> {
         repository
-            .read_views
-            .current(
-                repository,
-                Arc::clone(&self.runtime),
-                self.options,
-                &self.cancellation,
-            )
+            .client_read_view(Arc::clone(&self.runtime), self.options, &self.cancellation)
             .await
             .map_err(gateway_error)
     }
@@ -999,6 +1052,30 @@ fn build_store(entry: &RepositoryConfig) -> crate::Result<Store> {
     Ok(build_static_env_store(&entry.bucket, entry.provider)?)
 }
 
+pub(crate) async fn repository_read_store(
+    entry: &RepositoryConfig,
+    origin: &Store,
+    configure_cdn: bool,
+) -> crate::Result<Option<Store>> {
+    #[cfg(feature = "provider-cdn")]
+    if configure_cdn && let Some(binding) = &entry.cdn {
+        return Ok(Some(
+            binding
+                .read_store(
+                    origin,
+                    &entry.prefix,
+                    env!("CARGO_PKG_VERSION"),
+                    Duration::from_secs(300),
+                    crab_storage::cdn::CdnConsumer::S3Gateway,
+                )
+                .await?,
+        ));
+    }
+    #[cfg(not(feature = "provider-cdn"))]
+    let _ = (entry, origin, configure_cdn);
+    Ok(None)
+}
+
 fn classify_blob(blob: crab_remote_git::Blob) -> S3Result<(ReadContent, u64)> {
     let physical_size = u64::try_from(blob.bytes.len()).map_err(|_| s3_error!(EntityTooLarge))?;
     let logical_size = blob.metadata.logical_size.unwrap_or(physical_size);
@@ -1272,6 +1349,11 @@ impl S3 for Gateway {
         let permit = self.admit(RequestClass::Read).await?;
         reject_get_extensions(&req.input)?;
         let repository = self.repository(&req, &req.input.bucket, RepositoryAccess::Read)?;
+        let layout = repository
+            .edge_reader
+            .as_ref()
+            .map_or(&repository.layout, |reader| &reader.layout);
+        layout.observe_cdn_read_target(crab_storage::cdn::CdnConsumer::S3Gateway);
         let object = self.read_object(repository, &req.input.key).await?;
         let tag_count = tag_count(object.attributes.as_ref())?;
         evaluate_conditions(
@@ -4848,6 +4930,8 @@ mod tests {
         ));
         let repository = Repository::new_with_cache(
             RepositoryConfig {
+                #[cfg(feature = "provider-cdn")]
+                cdn: None,
                 name: "repo".to_owned(),
                 provider: StorageProviderKind::Local,
                 bucket: "memory".to_owned(),
@@ -5382,6 +5466,8 @@ mod tests {
         let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
         let repository = Repository::new(
             RepositoryConfig {
+                #[cfg(feature = "provider-cdn")]
+                cdn: None,
                 name: "repo".to_owned(),
                 provider: StorageProviderKind::Local,
                 bucket: "memory".to_owned(),
@@ -5446,6 +5532,8 @@ mod tests {
         let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
         let repository = Repository::new(
             RepositoryConfig {
+                #[cfg(feature = "provider-cdn")]
+                cdn: None,
                 name: "repo".to_owned(),
                 provider: StorageProviderKind::Local,
                 bucket: "memory".to_owned(),
@@ -5564,6 +5652,8 @@ mod tests {
     async fn published_frozen_multipart_recovers_without_a_client_retry() {
         let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
         let repository_config = RepositoryConfig {
+            #[cfg(feature = "provider-cdn")]
+            cdn: None,
             name: "repo".to_owned(),
             provider: StorageProviderKind::Local,
             bucket: "memory".to_owned(),
@@ -6222,3 +6312,6 @@ mod tests {
         assert_eq!(page, [0, 1, 2]);
     }
 }
+
+#[cfg(all(test, feature = "provider-cdn"))]
+mod cdn_tests;

@@ -125,6 +125,13 @@ for (const [name, prefix] of [["crab", "crab"], ["crab-desktop-agent", "crab-des
   const actual = execFileSync(path.join(destination, name + extension), ["--version"], { encoding: "utf8" }).trim();
   if (actual !== `${prefix} ${version}`) throw new Error(`Desktop ${version} cannot bundle ${actual}`);
 }
+const sidecar = path.join(destination, `crab-desktop-agent${extension}`);
+const build = JSON.parse(execFileSync(sidecar, ["--cdn-build-info"], { encoding: "utf8" }));
+const sourceSha = environment.GIT_SHA ?? "";
+if (build.cargo_profile !== "release" || build.qualification_feature !== false
+    || (/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sourceSha) && build.source_sha !== sourceSha)) {
+  throw new Error("Desktop runtime must contain the ordinary sidecar from the selected build source.");
+}
 await writeFile(path.join(destination, "runtime.json"), JSON.stringify({ version, platform: process.platform, arch: process.arch, hashes }, null, 2) + "\n");
 if (process.platform !== "win32") await stageRemoteRuntime(destination, path.join(desktop, "release", "remote-runtime"));
 console.log(`Crab ${version} desktop runtime staged in ${destination}`);

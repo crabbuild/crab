@@ -251,19 +251,23 @@ pub async fn load_history_segment(
     pointer: &HistorySegmentPointer,
 ) -> Result<HistorySegment> {
     let path = router.capsule_history_segment_path(pointer.hash());
-    let (bytes, _) = router
-        .store()
-        .get_with_etag_bounded(&path, pointer.size().min(MAX_HISTORY_SEGMENT_BYTES))
-        .await?;
-    let segment = HistorySegment::decode(bytes)?;
-    let actual = segment.pointer()?;
-    if &actual != pointer {
-        return Err(corrupt(
-            &path,
-            "history segment does not match its authenticated pointer",
-        ));
+    if pointer.size() > MAX_HISTORY_SEGMENT_BYTES {
+        return Err(corrupt(&path, "history segment exceeds format byte bounds"));
     }
-    Ok(segment)
+    router
+        .store()
+        .read_verified(&path, pointer.size(), None, |bytes| async {
+            let segment = HistorySegment::decode(bytes)?;
+            let actual = segment.pointer()?;
+            if &actual != pointer {
+                return Err(corrupt(
+                    &path,
+                    "history segment does not match its authenticated pointer",
+                ));
+            }
+            Ok(segment)
+        })
+        .await
 }
 
 /// Load an authenticated newest-to-oldest history chain within caller bounds.
@@ -368,24 +372,30 @@ pub async fn load_layered_checkpoint_control(
         ));
     }
     let path = router.capsule_checkpoint_path(pointer.hash());
-    let bytes = router
+    router
         .store()
-        .range_get(&path, pointer.control_offset()..pointer.size())
-        .await?;
-    let checkpoint = LayeredCheckpoint::decode_control(
-        bytes,
-        pointer.size(),
-        pointer.control_offset(),
-        pointer.hash(),
-        pointer.footer_hash(),
-    )?;
-    if !checkpoint.matches_pointer(pointer)? {
-        return Err(corrupt(
+        .read_verified(
             &path,
-            "layered checkpoint control does not match its authenticated pointer",
-        ));
-    }
-    Ok(checkpoint)
+            pointer.size(),
+            Some(pointer.control_offset()..pointer.size()),
+            |bytes| async {
+                let checkpoint = LayeredCheckpoint::decode_control(
+                    bytes,
+                    pointer.size(),
+                    pointer.control_offset(),
+                    pointer.hash(),
+                    pointer.footer_hash(),
+                )?;
+                if !checkpoint.matches_pointer(pointer)? {
+                    return Err(corrupt(
+                        &path,
+                        "layered checkpoint control does not match its authenticated pointer",
+                    ));
+                }
+                Ok(checkpoint)
+            },
+        )
+        .await
 }
 
 /// Load and verify one immutable capsule run against its authenticated pointer.
@@ -403,25 +413,32 @@ pub async fn load_capsule_run_control(
 ) -> Result<(CapsuleRunControl, Vec<CapsuleControl>)> {
     super::root::validate_capsule_pointer(pointer)?;
     let path = router.capsule_path(pointer.hash());
-    let suffix = router
+    let control = router
         .store()
-        .range_get(&path, pointer.control_offset()..pointer.size())
-        .await?;
-    let control = CapsuleRunControl::decode_suffix(
-        suffix,
-        pointer.size(),
-        pointer.hash(),
-        pointer.level(),
-        pointer.transaction_ids(),
-        pointer.newest_base_root_digest(),
-    )?;
-    if control.footer_hash() != pointer.footer_hash() {
-        return Err(corrupt(
+        .read_verified(
             &path,
-            "capsule pointer footer hash does not match the authenticated run suffix",
-        ));
-    }
-    let detached = load_detached_control_sections(router, &path, &control).await?;
+            pointer.size(),
+            Some(pointer.control_offset()..pointer.size()),
+            |suffix| async {
+                let control = CapsuleRunControl::decode_suffix(
+                    suffix,
+                    pointer.size(),
+                    pointer.hash(),
+                    pointer.level(),
+                    pointer.transaction_ids(),
+                    pointer.newest_base_root_digest(),
+                )?;
+                if control.footer_hash() != pointer.footer_hash() {
+                    return Err(corrupt(
+                        &path,
+                        "capsule pointer footer hash does not match the authenticated run suffix",
+                    ));
+                }
+                Ok(control)
+            },
+        )
+        .await?;
+    let detached = load_detached_control_sections(router, &path, pointer.size(), &control).await?;
     super::decode::run(move || {
         let capsules = control.materialize_capsules_with_external_controls(&detached)?;
         Ok((control, capsules))
@@ -451,43 +468,67 @@ pub(super) async fn load_run_git_control(
     let path = router.capsule_path(pointer.hash());
     // A publication leaf can share one control read with its small admission
     // pages. Compacted histories retain selected-member paging.
-    let prefetch = pointer.level() == 0 && pointer.control_size() <= crate::pages::READ_AHEAD_BYTES;
-    let start = if prefetch {
-        pointer.control_offset()
+    let control = if pointer.level() == 0
+        && pointer.control_size() <= crate::pages::READ_AHEAD_BYTES
+    {
+        let start = pointer.control_offset();
+        let path = &path;
+        router
+            .store()
+            .read_verified(
+                path,
+                pointer.size(),
+                Some(start..pointer.size()),
+                |body| async move {
+                    if body.len() as u64 != pointer.control_size() {
+                        return Err(corrupt(path, "capsule control read is truncated"));
+                    }
+                    let trailer_start = body
+                        .len()
+                        .saturating_sub(CapsuleRunControl::trailer_bytes() as usize);
+                    let range = CapsuleRunControl::footer_range(&body[trailer_start..], pointer)?;
+                    let offset = (range.start - start) as usize;
+                    let control = CapsuleRunControl::decode_footer(body.slice(offset..), pointer)?;
+                    verify_run_admission(router, path, &control, Some(body.slice(..offset)))
+                        .await?;
+                    Ok(control)
+                },
+            )
+            .await?
     } else {
-        pointer
+        let start = pointer
             .size()
             .checked_sub(CapsuleRunControl::trailer_bytes())
-            .ok_or_else(|| corrupt(&path, "capsule run is shorter than its trailer"))?
+            .ok_or_else(|| corrupt(&path, "capsule run is shorter than its trailer"))?;
+        let trailer = router
+            .store()
+            .range_get(&path, start..pointer.size())
+            .await?;
+        let range = CapsuleRunControl::footer_range(&trailer, pointer)?;
+        let control = router
+            .store()
+            .read_verified(&path, pointer.size(), Some(range), |footer| async {
+                CapsuleRunControl::decode_footer(footer, pointer)
+            })
+            .await?;
+        verify_run_admission(router, &path, &control, None).await?;
+        control
     };
-    let body = router
-        .store()
-        .range_get(&path, start..pointer.size())
-        .await?;
-    if body.len() as u64 != pointer.size() - start {
-        return Err(corrupt(&path, "capsule control read is truncated"));
-    }
-    let trailer_start = body
-        .len()
-        .saturating_sub(CapsuleRunControl::trailer_bytes() as usize);
-    let range = CapsuleRunControl::footer_range(&body[trailer_start..], pointer)?;
-    let (footer, admission) = if prefetch {
-        let offset = usize::try_from(range.start - start)
-            .map_err(|_| corrupt(&path, "capsule footer offset cannot be represented"))?;
-        let admission_start = usize::try_from(pointer.control_offset() - start)
-            .map_err(|_| corrupt(&path, "capsule admission offset cannot be represented"))?;
-        (
-            body.slice(offset..),
-            Some(body.slice(admission_start..offset)),
-        )
-    } else {
-        (router.store().range_get(&path, range).await?, None)
-    };
-    let control = CapsuleRunControl::decode_footer(footer, pointer)?;
+    // A rejected edge response must not consume the caller's visibility headroom.
+    let capsules = control.materialize_capsules_with_paged_visibility(router, read_ahead)?;
+    Ok((control, capsules))
+}
+
+async fn verify_run_admission(
+    router: &StoreLayout<Store>,
+    path: &object_store::path::Path,
+    control: &CapsuleRunControl,
+    prefetched: Option<bytes::Bytes>,
+) -> Result<()> {
     if let Some(mut reader) =
         control.admission_reader(router, super::run::MAX_RUN_FOOTER_BYTES as u64)?
     {
-        if let Some(body) = admission {
+        if let Some(body) = prefetched {
             reader.prefetch(body)?;
         }
         let counts = reader.counts(router.store()).await?;
@@ -498,18 +539,18 @@ pub(super) async fn load_run_git_control(
                 .any(|(count, member)| *count != member.object_count())
         {
             return Err(corrupt(
-                &path,
+                path,
                 "capsule member counts do not match its authenticated pack directory",
             ));
         }
     }
-    let capsules = control.materialize_capsules_with_paged_visibility(router, read_ahead)?;
-    Ok((control, capsules))
+    Ok(())
 }
 
 async fn load_detached_control_sections(
     router: &StoreLayout<Store>,
     path: &object_store::path::Path,
+    source_size: u64,
     control: &CapsuleRunControl,
 ) -> Result<BTreeMap<(String, CapsuleSectionKind), bytes::Bytes>> {
     let ranges = control
@@ -522,15 +563,23 @@ async fn load_detached_control_sections(
             .offset()
             .checked_add(range.length())
             .ok_or_else(|| corrupt(path, "detached capsule control range overflows"))?;
-        let bytes = router.store().range_get(path, range.offset()..end).await?;
-        if bytes.len() as u64 != range.length()
-            || blake3::hash(&bytes).to_hex().as_str() != range.blake3()
-        {
-            return Err(corrupt(
-                path,
-                "detached capsule control range does not match its commitment",
-            ));
-        }
+        let bytes = router
+            .store()
+            .read_verified(path, source_size, Some(range.offset()..end), |bytes| {
+                let range = &range;
+                async move {
+                    if bytes.len() as u64 != range.length()
+                        || blake3::hash(&bytes).to_hex().as_str() != range.blake3()
+                    {
+                        return Err(corrupt(
+                            path,
+                            "detached capsule control range does not match its commitment",
+                        ));
+                    }
+                    Ok(bytes)
+                }
+            })
+            .await?;
         Ok(((hash, kind), bytes))
     }))
     .buffer_unordered(8)

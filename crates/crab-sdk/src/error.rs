@@ -90,7 +90,11 @@ impl Error {
 
     #[cfg(feature = "remote")]
     pub(crate) fn with_cleanup(mut self, cleanup: Error) -> Self {
-        self.cleanup = Some(Box::new(cleanup));
+        let mut next = &mut self.cleanup;
+        while let Some(error) = next {
+            next = &mut error.cleanup;
+        }
+        *next = Some(Box::new(cleanup));
         self
     }
 

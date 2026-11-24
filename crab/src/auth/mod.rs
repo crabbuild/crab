@@ -3,6 +3,7 @@
 //! This module adapts Crab's CLI auth config into credential providers and
 //! composes resolved credentials with storage construction.
 
+pub(crate) mod cdn_checkout;
 #[cfg(feature = "gix-credentials")]
 pub mod gix_credentials_adapter;
 mod managed;
@@ -11,11 +12,13 @@ pub mod oidc;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use crab_storage::cdn::{CdnConsumer, CdnPolicy, CdnProfile, CdnVisibility};
 use object_store::ObjectStore;
 #[cfg(feature = "tier-s3")]
 use object_store::aws::AwsCredential;
 use tokio_util::sync::CancellationToken;
 
+use crate::core::cdn::CdnBinding;
 use crate::core::config::{AuthConfig, AuthProvider, Config};
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::storage::store::{BucketIdentity, Store};
@@ -25,6 +28,7 @@ pub use ::crab_auth::{
     CrabAuthClientConfig, CredentialProvider, CredentialProviderConfig, CredentialResolution,
     GcpWorkloadIdentityConfig, StaticAuthConfig,
 };
+use crab_auth::crab_auth_client::CdnViewerDeployment;
 use crab_auth_store::{
     AuthStoreError, ManagedRepositoryError, ManagedRepositoryResolver, RefreshingObjectStore,
     RefreshingStoreParts,
@@ -87,8 +91,11 @@ fn crab_error_provider(
 }
 
 #[async_trait]
-impl CredentialProvider
-    for CrabErrorProvider<Box<dyn CredentialProvider<Error = ::crab_auth::error::AuthError>>>
+impl<P> CredentialProvider for CrabErrorProvider<P>
+where
+    P: std::ops::Deref<Target: CredentialProvider<Error = ::crab_auth::error::AuthError>>
+        + Send
+        + Sync,
 {
     type Error = CrabError;
 
@@ -280,11 +287,41 @@ pub async fn build_store(
     operation: &str,
     cancel: &CancellationToken,
 ) -> Result<Store> {
+    build_store_for_consumer(
+        config,
+        url.into(),
+        operation,
+        cdn_consumer(operation),
+        cancel,
+    )
+    .await
+    .map(|resolved| resolved.store)
+}
+
+pub(crate) fn cdn_consumer(operation: &str) -> CdnConsumer {
+    if operation == "mount" {
+        CdnConsumer::Mount
+    } else {
+        CdnConsumer::Cli
+    }
+}
+
+struct DirectStore {
+    store: Store,
+    view_retention: Option<crab_auth::crab_auth_client::ViewRetention>,
+}
+
+async fn build_store_for_consumer(
+    config: &Config,
+    url: crab_git::url::CrabUrl,
+    operation: &str,
+    consumer: CdnConsumer,
+    cancel: &CancellationToken,
+) -> Result<DirectStore> {
     if cancel.is_cancelled() {
         return Err(CrabError::Cancelled);
     }
 
-    let url = url.into();
     if url.bucket.eq_ignore_ascii_case("crab.build") {
         let (organization, repository) = url
             .repo_path
@@ -298,14 +335,144 @@ pub async fn build_store(
             },
         ));
     }
+    let read = matches!(
+        operation,
+        "clone" | "fetch" | "hydrate" | "pull" | "mount" | "smudge"
+    );
+    let cdn = if read {
+        CdnBinding::private_request(&config.cdn, &url.bucket, &url.repo_path)?
+    } else {
+        None
+    };
+    build_store_for_url(config, url, operation, read, cdn, consumer, cancel).await
+}
+
+/// Authorize an exact private CDN binding after its native replica is ready.
+pub(crate) async fn authorize_replica_cdn(
+    config: &Config,
+    selected: &Store,
+    repo_prefix: &str,
+    operation: crab_auth::TransferOperation,
+    consumer: CdnConsumer,
+    cancel: &CancellationToken,
+) -> Result<Option<Store>> {
+    check_cancelled(cancel)?;
+    let Some((deployment, issuer)) = CdnBinding::private_request_for_selected_origin(
+        &config.cdn,
+        selected.as_storage(),
+        repo_prefix,
+    )?
+    else {
+        return Ok(None);
+    };
+    let url = crab_git::CrabUrl {
+        bucket: deployment.bucket.clone(),
+        repo_path: repo_prefix.to_owned(),
+    };
+    let authorized = build_store_for_url(
+        config,
+        url,
+        managed::transfer_operation_name(operation, consumer),
+        true,
+        Some((vec![deployment], issuer)),
+        consumer,
+        cancel,
+    )
+    .await?
+    .store;
+    // Replica readiness was proved for this physical target and its unfiltered
+    // layout. The issuer's credentials must authorize that same layout.
+    validate_replica_cdn_authority(selected.as_storage(), authorized.as_storage())?;
+    Ok(Some(authorized))
+}
+
+fn validate_replica_cdn_authority(
+    selected: &crab_storage::Store,
+    authorized: &crab_storage::Store,
+) -> Result<()> {
+    if authorized.storage_scope() != selected.storage_scope()
+        || selected.target_identity().is_none()
+        || authorized.target_identity() != selected.target_identity()
+        || authorized.native_cdn_origin() != selected.native_cdn_origin()
+    {
+        return Err(CrabError::AuthFailed {
+            path: "CDN issuer changed the selected replica's native origin or repository view"
+                .into(),
+        });
+    }
+    Ok(())
+}
+
+async fn build_store_for_url(
+    config: &Config,
+    url: crab_git::CrabUrl,
+    operation: &str,
+    read: bool,
+    cdn: Option<(Vec<CdnViewerDeployment>, &AuthConfig)>,
+    consumer: CdnConsumer,
+    cancel: &CancellationToken,
+) -> Result<DirectStore> {
+    if cdn.is_some() && config.auth.provider != AuthProvider::CrabAuth {
+        return Err(CrabError::Configuration {
+            key: "cdn".into(),
+            origin: "private CDN bindings require a configured Crab Auth issuer".into(),
+        });
+    }
     let aws_sdk_store = build_aws_sdk_store(config, &url.bucket).await?;
     let (storage_scope, credential_provider, mut built) = if let Some(built) = aws_sdk_store {
         (None, None, built)
     } else {
-        let provider = create_provider(config)?;
-        let resolution = provider
-            .resolve(&url.bucket, &url.repo_path, operation)
-            .await?;
+        let bound_issuer = cdn.is_some();
+        let issuer = if let Some((deployments, issuer)) = cdn {
+            // The capability header does not select a provider. The
+            // issuer can choose any bound deployment for this locator.
+            let allow_viewer_grants = deployments.iter().all(|deployment| {
+                deployment.storage_provider().is_some_and(|provider| {
+                    CdnPolicy {
+                        provider,
+                        consumer,
+                        profile: CdnProfile::Direct,
+                        visibility: CdnVisibility::Private,
+                    }
+                    .enabled()
+                })
+            });
+            Some(Arc::new(
+                crab_auth::create_crab_auth_provider(crab_auth_client_config(issuer)?)?
+                    .with_cdn_deployments(deployments)?
+                    .with_viewer_grants(allow_viewer_grants),
+            ))
+        } else if operation == "mount" && config.auth.provider == AuthProvider::CrabAuth {
+            Some(Arc::new(crab_auth::create_crab_auth_provider(
+                crab_auth_client_config(&config.auth)?,
+            )?))
+        } else {
+            None
+        };
+        let provider: Arc<dyn CredentialProvider<Error = CrabError>> = match &issuer {
+            Some(issuer) => Arc::new(CrabErrorProvider {
+                inner: Arc::clone(issuer),
+            }),
+            None => Arc::from(create_provider(config)?),
+        };
+        let mount_issuer = issuer.filter(|_| operation == "mount");
+        let resolution = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(CrabError::Cancelled),
+            result = provider.resolve(&url.bucket, &url.repo_path, operation) => result?,
+        };
+        if bound_issuer || (mount_issuer.is_some() && resolution.storage_scope.is_some()) {
+            let store = crab_auth_store::cdn::build_direct_cdn_store(
+                provider,
+                url.bucket.clone(),
+                url.repo_path.clone(),
+                operation.to_owned(),
+                resolution,
+                config.operation_timeout,
+                consumer,
+            )?;
+            return direct_store(Store::from_storage(store), mount_issuer, &url);
+        }
         let storage_scope = resolution.storage_scope.clone();
         let credential_provider: Option<Arc<dyn CredentialProvider<Error = CrabError>>> =
             if !config.auth.provider.uses_token_cache() || storage_scope.is_some() {
@@ -313,7 +480,7 @@ pub async fn build_store(
                 // Refreshing one without rebuilding the other can only fail closed.
                 None
             } else {
-                Some(Arc::from(provider))
+                Some(Arc::clone(&provider))
             };
         let built = build_object_store(&url.bucket, resolution.credentials)?;
         (storage_scope, credential_provider, built)
@@ -328,6 +495,12 @@ pub async fn build_store(
         let bucket = url.bucket.clone();
         let builder_bucket = bucket.clone();
         let builder = Arc::new(move |resolution: CredentialResolution| {
+            if resolution.storage_scope.is_some() {
+                return Err(crab_auth_store::AuthStoreError::AuthFailed {
+                    path: "credential refresh changed the repository view; resolve a new operation"
+                        .into(),
+                });
+            }
             crab_auth_store::build_object_store_from_credentials(
                 &builder_bucket,
                 resolution.credentials,
@@ -379,7 +552,52 @@ pub async fn build_store(
     if let Some(scope) = storage_scope {
         store = store.with_storage_scope(scope);
     }
-    Ok(store)
+    let mut store = store
+        .into_storage()
+        .with_native_cdn_authority(built.native_cdn_origin);
+    if read {
+        store = CdnBinding::attach_public(
+            &config.cdn,
+            store,
+            &url.repo_path,
+            config.operation_timeout,
+            consumer,
+        )
+        .await?;
+    }
+    Ok(DirectStore {
+        store: Store::from_storage(store),
+        view_retention: None,
+    })
+}
+
+fn direct_store(
+    store: Store,
+    mount_issuer: Option<Arc<crab_auth::CrabAuthProvider>>,
+    url: &crab_git::CrabUrl,
+) -> Result<DirectStore> {
+    let view_retention = if let (Some(issuer), Some(scope)) = (mount_issuer, store.storage_scope())
+    {
+        let target = store
+            .as_storage()
+            .target_identity()
+            .ok_or_else(|| CrabError::AuthFailed {
+                path: "projected mount has no native storage target".into(),
+            })?;
+        Some(crab_auth::crab_auth_client::ViewRetention::new(
+            issuer,
+            format!("crab://{}/{}", url.bucket, url.repo_path),
+            scope.repo_prefix.clone(),
+            blake3::Hash::from_bytes(*target).to_hex().to_string(),
+            crab_auth::crab_auth_client::ViewReadOperation::Mount,
+        )?)
+    } else {
+        None
+    };
+    Ok(DirectStore {
+        store,
+        view_retention,
+    })
 }
 
 #[cfg(feature = "tier-s3")]
@@ -494,6 +712,7 @@ pub(crate) async fn open_repository_root(
     remote_url: &str,
 ) -> Result<crab_metadata::capsule_protocol::RootSnapshot> {
     let router = crate::storage::StoreLayout::new(store.clone(), repository_prefix.to_owned());
+    crate::core::cdn::verify_qualification_target(store.as_storage(), router.repo_prefix())?;
     let layout = crab_storage::StoreLayout::with_global_prefix(
         store.as_storage().clone(),
         router.repo_prefix().to_owned(),
@@ -568,6 +787,38 @@ mod tests {
     use std::sync::{LazyLock, Mutex, MutexGuard};
 
     static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    #[test]
+    fn replica_cdn_rejects_changed_target_or_view() {
+        let selected = crab_storage::Store::new(Arc::new(InMemory::new()))
+            .with_target_identity([1; 32])
+            .with_native_cdn_origin(Some("gs://replica-bucket".to_owned()));
+        validate_replica_cdn_authority(&selected, &selected).unwrap();
+
+        let view = format!(
+            "org/repo/acl-views/v2/{}/7-{}",
+            "1".repeat(64),
+            "2".repeat(64)
+        );
+        let scoped = selected.clone().with_storage_scope(StorageScope {
+            global_prefix: format!("{view}/.crab"),
+            repo_prefix: view,
+            source_repo: "org/repo".into(),
+            scope_hash: "1".repeat(64),
+        });
+        for other in [
+            scoped,
+            selected.clone().with_target_identity([2; 32]),
+            selected
+                .clone()
+                .with_native_cdn_origin(Some("s3://replica-bucket".into())),
+        ] {
+            assert!(matches!(
+                validate_replica_cdn_authority(&selected, &other),
+                Err(CrabError::AuthFailed { .. })
+            ));
+        }
+    }
 
     #[tokio::test]
     async fn direct_repository_cancellation_precedes_profile_and_credentials() {

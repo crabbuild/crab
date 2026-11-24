@@ -46,6 +46,31 @@ One attempt never mixes cache and origin bytes. Corrupt or unreadable cache
 entries are bypassed even when eviction fails; corrupt origin bytes return
 `CacheStoreError::OriginIntegrity` with their verification error retained.
 Transport retry policy remains owned by `crab-storage`.
+Sparse CDN reads authenticate the footer and chunk table, then fetch the
+selected compressed spans. Span requests that exceed the qualified range
+size are split before decoding. The edge attempt reuses the encoded size
+from a captured file catalog when available. Otherwise it uses a native
+HEAD before requesting bytes. If the authenticated shard shows that a single
+span covers every chunk of an xorb, the reader can use an admitted whole GET
+directly. Other high-coverage reads can choose a whole GET after validating
+the chunk table.
+Complete reads can also assemble a bounded xorb from admitted CDN
+ranges and verify the full body before returning chunks. SDK and mount
+range hydration keeps its decoded-chunk cache policy.
+
+Small qualified capsule ranges accepted from the CDN are retained in the
+private disk catalog. The next reader checks its active authority and
+authenticates the retained range against the current capsule pointer.
+Keys bind the physical target, binding, authorized view, publication and
+exact range. Cache validation and failure handling use the same budget and
+file ownership as other local payloads.
+
+The optional `lfs` feature composes full CDN-eligible LFS reads with the
+caller's bounded disk cache. Repositories, viewer bindings, and public
+receipts have separate namespaces under the shared budget. Local delivery
+verifies the captured descriptor. The cache checks the grant before lookup
+and again before returning queued bytes from disk or a remote fill. Remote
+delivery retains an object only after its complete SHA-256 and size checks.
 
 Catalog replacement also fails closed: a live generation lease prevents
 rebinding, and retained recovery files still prevent rebinding after that lease
@@ -94,6 +119,7 @@ no duplicate full xorb; decoded-range caching belongs to `crab-read`'s runtime.
 | `object_store()` with mutable paths | Always origin, including HEAD. |
 | `object_store()` with conditions or a version | Entire request goes to origin, including HEAD and ranges. |
 | Unconditional immutable adapter reads | Cache hits and materialized local-cache reads have synthetic metadata; streamed origin misses retain the origin metadata. |
+| Bound online grants | Check the captured scope and renew the grant before cache lookup. Keep local payloads in the physical target's view namespace with the existing shared retention catalog. |
 | Unconditional immutable adapter HEAD | Cache-service hits have synthetic metadata; origin misses retain the actual ETag, version, and modification time. |
 
 Full reads without a local-cache key, and bounded range misses, forward the

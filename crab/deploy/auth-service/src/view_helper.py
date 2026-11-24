@@ -8,6 +8,8 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from src.view_retention import NATIVE_RETENTION_REPLY, NativeRetentionReply, RetentionConflict
+
 _MATERIALIZE_FIELDS = frozenset({
     "repo_prefix",
     "global_prefix",
@@ -50,6 +52,8 @@ class ViewHelper(Protocol):
 
     def check_runtime(self) -> ViewRuntimeStatus: ...
 
+    def retention(self, payload: dict[str, Any]) -> NativeRetentionReply: ...
+
 
 class SubprocessViewHelper:
     """Calls the packaged `crab-auth-view` Rust helper."""
@@ -87,10 +91,14 @@ class SubprocessViewHelper:
         output = self._run(["doctor"])
         return _doctor_result(output)
 
-    def _run(self, args: list[str]) -> dict[str, Any]:
+    def retention(self, payload: dict[str, Any]) -> NativeRetentionReply:
+        return NATIVE_RETENTION_REPLY.validate_python(self._run(["retention"], payload))
+
+    def _run(self, args: list[str], payload: dict[str, Any] | None = None) -> dict[str, Any]:
         try:
             completed = subprocess.run(
                 [self._binary, *args],
+                input=json.dumps(payload) if payload is not None else None,
                 check=False,
                 capture_output=True,
                 text=True,
@@ -101,6 +109,10 @@ class SubprocessViewHelper:
         except subprocess.TimeoutExpired as e:
             raise RuntimeError("view helper timed out") from e
         if completed.returncode != 0:
+            if payload is not None:
+                if completed.returncode == 2:
+                    raise RetentionConflict("view retention revision was not acknowledged")
+                raise RuntimeError("view retention helper failed")
             raise RuntimeError(completed.stderr.strip() or "view helper failed")
         try:
             output = json.loads(completed.stdout)

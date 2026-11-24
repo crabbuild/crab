@@ -49,17 +49,19 @@ impl CatalogPages {
         work.admit_object(self.hash, self.bytes)?;
         let mut opened = self.opened.lock().await;
         if !*opened {
-            let body = store
-                .get_with_etag_bounded(&self.pages.path(&self.hash), self.bytes)
-                .await?
-                .0;
-            if blake3::hash(&body).as_bytes() != &self.hash
-                || Descriptor::decode(&body)? != self.descriptor
-            {
-                return Err(corrupt(
-                    "stored catalog descriptor differs from its commitment",
-                ));
-            }
+            let path = self.pages.path(&self.hash);
+            store
+                .read_verified(&path, self.bytes, None, |body| async move {
+                    if blake3::hash(&body).as_bytes() != &self.hash
+                        || Descriptor::decode(&body)? != self.descriptor
+                    {
+                        return Err(corrupt(
+                            "stored catalog descriptor differs from its commitment",
+                        ));
+                    }
+                    Ok(())
+                })
+                .await?;
             *opened = true;
         }
         Ok(())

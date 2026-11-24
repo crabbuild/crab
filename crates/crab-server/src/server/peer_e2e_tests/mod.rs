@@ -46,6 +46,8 @@ impl Host {
             listen: public.local_addr().unwrap(),
             management_listen: management.local_addr().unwrap(),
             storage: crate::StorageConfig {
+                #[cfg(feature = "provider-cdn")]
+                cdn: Default::default(),
                 url: "s3://test/repositories".into(),
                 region: None,
             },

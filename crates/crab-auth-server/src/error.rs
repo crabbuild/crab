@@ -16,6 +16,9 @@ pub enum AuthServerError {
     #[error("authentication failed for {path}")]
     AuthFailed { path: String },
 
+    #[error("invalid view retention request")]
+    ViewRetentionRequest(#[source] serde_json::Error),
+
     #[error("forbidden: {path}")]
     Forbidden { path: String },
 

@@ -5,8 +5,10 @@ use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
 use crab_cache::CacheKey;
-use crab_cache_store::CachingStore;
-use crab_metadata::file_index_lookup::{FileIndexLookupSession, SharedFileIndexLookup};
+use crab_cache_store::{CachingStore, XorbReadHint, XorbReadMode};
+use crab_metadata::file_index_lookup::{
+    FileIndexLookupSession, ShardLocation, SharedFileIndexLookup,
+};
 use crab_xet::hash::MerkleHash;
 use crab_xet::shard::{MDBFileInfo, ShardReader};
 use crab_xet::shard_parse::MAX_SHARD_SIZE_BYTES;
@@ -60,12 +62,13 @@ pub struct StoreClient {
     concurrency: Arc<AdaptiveConcurrencyController>,
     file_index_lookup: Option<SharedFileIndexLookup>,
     shard_hints: SharedShardHints,
+    captured_shard: tokio::sync::Mutex<Option<(ShardLocation, Arc<ShardReader>)>>,
     metrics: Option<Arc<dyn ReadMetrics>>,
     availability: Option<Arc<dyn XorbAvailability>>,
     failures: Option<Arc<crate::error::OperationFailures>>,
     cancellation: CancellationToken,
     chunk_cache: Option<term_cache::TermCache>,
-    selective_xorb_reads: bool,
+    xorb_read_mode: XorbReadMode,
     // Xet tasks may outlive the caller future. Its shared client keeps the
     // admitted read pinned until the last source worker exits.
     _retention: Option<Arc<crab_coordination::read_retention_runtime::ReadRetentionPin>>,
@@ -84,12 +87,13 @@ impl StoreClient {
             concurrency,
             file_index_lookup: None,
             shard_hints: Arc::new(RwLock::new(HashMap::new())),
+            captured_shard: tokio::sync::Mutex::new(None),
             metrics: None,
             availability: None,
             failures: None,
             cancellation: CancellationToken::new(),
             chunk_cache: None,
-            selective_xorb_reads: false,
+            xorb_read_mode: XorbReadMode::Whole,
             _retention: None,
         }
     }
@@ -159,10 +163,8 @@ impl StoreClient {
         self
     }
 
-    pub(crate) fn with_selective_xorb_reads(mut self) -> Self {
-        // Whole-file hydration avoids storing a second complete xorb beside its
-        // output. Range hydration opts in so cold reads fetch only needed payload.
-        self.selective_xorb_reads = true;
+    pub(crate) fn with_xorb_read_mode(mut self, mode: XorbReadMode) -> Self {
+        self.xorb_read_mode = mode;
         self
     }
 
@@ -196,9 +198,18 @@ impl StoreClient {
     async fn load_shard_for_file(
         &self,
         file_hash: &MerkleHash,
-    ) -> ClientResult<Option<(ShardReader, MerkleHash)>> {
-        if let Some(hint_hash) = self.shard_hint(file_hash) {
-            match self.load_shard(&hint_hash).await {
+    ) -> ClientResult<Option<(Arc<ShardReader>, MerkleHash)>> {
+        // A pointer hint alone cannot authorize an edge request or supply a size.
+        if let Some(hint_hash) = self.shard_hint(file_hash)
+            && !self.shard_uses_cdn(&hint_hash)
+        {
+            match self
+                .load_shard(ShardLocation {
+                    hash: hint_hash,
+                    encoded_size: None,
+                })
+                .await
+            {
                 Ok(shard) if shard.has_file(file_hash) => {
                     debug!(
                         file_hash = %file_hash.hex(),
@@ -236,13 +247,15 @@ impl StoreClient {
             }
         }
 
-        let shard_hash = match self.resolve_file_index(file_hash).await {
-            Ok(h) => h,
+        let location = match self.resolve_file_index(file_hash).await {
+            Ok(location) => location,
             Err(ReadError::NotFound { .. }) => return Ok(None),
             Err(e) => return Err(self.map_read_error(e)),
         };
 
-        if !self.store.has_cache_service()
+        let shard_hash = location.hash;
+        if !(location.encoded_size.is_some() && self.shard_uses_cdn(&shard_hash))
+            && !self.store.has_cache_service()
             && !self
                 .store
                 .local_cache()
@@ -279,22 +292,22 @@ impl StoreClient {
             }
         }
 
-        match self.load_shard(&shard_hash).await {
+        match self.load_shard(location).await {
             Ok(shard) => Ok(Some((shard, shard_hash))),
             Err(ReadError::NotFound { .. }) => Ok(None),
             Err(e) => Err(self.map_read_error(e)),
         }
     }
 
-    async fn resolve_file_index(&self, file_hash: &MerkleHash) -> Result<MerkleHash> {
+    async fn resolve_file_index(&self, file_hash: &MerkleHash) -> Result<ShardLocation> {
         let hit = match &self.file_index_lookup {
-            Some(lookup) => lookup.lookup(file_hash).await?,
+            Some(lookup) => lookup.lookup_shard(file_hash).await?,
             None => {
                 let storage = self.store.cache_aware_storage();
                 let session =
                     FileIndexLookupSession::open_for_storage(&storage, self.router.repo_prefix())
                         .await?;
-                let result = session.lookup(file_hash).await;
+                let result = session.lookup_shard(file_hash).await;
                 if let Err(close_error) = session.close().await {
                     warn!(error = %close_error, "read store_client: file-index lookup close failed");
                 }
@@ -313,15 +326,18 @@ impl StoreClient {
     async fn resolve_file_indexes_batch(
         &self,
         file_hashes: &[MerkleHash],
-    ) -> Result<Vec<Option<MerkleHash>>> {
+    ) -> Result<Vec<Option<ShardLocation>>> {
         if let Some(lookup) = &self.file_index_lookup {
-            return lookup.lookup_batch(file_hashes).await.map_err(Into::into);
+            return lookup
+                .lookup_shards_batch(file_hashes)
+                .await
+                .map_err(Into::into);
         }
 
         let storage = self.store.cache_aware_storage();
         let session =
             FileIndexLookupSession::open_for_storage(&storage, self.router.repo_prefix()).await?;
-        let result = session.lookup_batch(file_hashes).await;
+        let result = session.lookup_shards_batch(file_hashes).await;
         if let Err(close_err) = session.close().await {
             warn!(
                 err = %close_err,
@@ -331,8 +347,15 @@ impl StoreClient {
         result.map_err(Into::into)
     }
 
-    async fn load_shard(&self, shard_hash: &MerkleHash) -> Result<ShardReader> {
-        let path = self.router.shard_path(shard_hash);
+    fn shard_uses_cdn(&self, hash: &MerkleHash) -> bool {
+        self.store
+            .origin()
+            .cdn_attempt(&self.router.shard_path(hash))
+            .is_some()
+    }
+
+    async fn load_shard(&self, location: ShardLocation) -> Result<Arc<ShardReader>> {
+        let path = self.router.shard_path(&location.hash);
         if let Some(availability) = &self.availability {
             tokio::select! {
                 biased;
@@ -340,17 +363,37 @@ impl StoreClient {
                 result = availability.ensure_available(&path) => result?,
             }
         }
-        debug!(shard_hash = %shard_hash.hex(), "read store_client: downloading shard");
-        let (data, _) = self
-            .store
-            .get_with_etag_bounded(&path, MAX_SHARD_SIZE_BYTES as u64)
-            .await?;
-
-        Ok(ShardReader::from_bytes(data, *shard_hash))
+        tokio::select! {
+            biased;
+            () = self.cancellation.cancelled() => Err(ReadError::Cancelled),
+            result = async {
+                debug!(shard_hash = %location.hash.hex(), "read store_client: downloading shard");
+                if let Some(size) = location.encoded_size
+                    && self.store.origin().cdn_attempt(&path).is_some()
+                {
+                    // The coverage preflight and Xet term queries share the
+                    // same verified reader, including for diskless scoped shards.
+                    let mut cached = self.captured_shard.lock().await;
+                    self.store.origin().check_cached_read(&path).await?;
+                    if let Some((selected, reader)) = cached.as_ref()
+                        && *selected == location
+                    {
+                        return Ok(reader.clone());
+                    }
+                    *cached = None;
+                    let data = self.store.get_captured_shard(&path, location.hash, size).await?;
+                    let reader = Arc::new(ShardReader::from_bytes(data, location.hash));
+                    *cached = Some((location, reader.clone()));
+                    return Ok(reader);
+                }
+                let (data, _) = self.store.get_with_etag_bounded(&path, MAX_SHARD_SIZE_BYTES as u64).await?;
+                Ok(Arc::new(ShardReader::from_bytes(data, location.hash)))
+            } => result,
+        }
     }
 }
 
-fn xorb_url(hash: &MerkleHash, chunks: &[ChunkRange]) -> String {
+fn xorb_url(hash: &MerkleHash, chunks: &[ChunkRange], chunk_count: Option<usize>) -> String {
     let mut url = format!("{XORB_URL_PREFIX}{}", hash.hex());
     if !chunks.is_empty() {
         url.push_str("?chunks=");
@@ -360,11 +403,15 @@ fn xorb_url(hash: &MerkleHash, chunks: &[ChunkRange]) -> String {
             }
             url.push_str(&range.to_string());
         }
+        if let Some(count) = chunk_count {
+            use std::fmt::Write as _;
+            let _ = write!(url, "&entries={count}");
+        }
     }
     url
 }
 
-fn parse_xorb_url(url: &str) -> ClientResult<(MerkleHash, Vec<ChunkRange>)> {
+fn parse_xorb_url(url: &str) -> ClientResult<(MerkleHash, Vec<ChunkRange>, Option<usize>)> {
     let body = url
         .strip_prefix(XORB_URL_PREFIX)
         .ok_or_else(|| ClientError::Other(format!("unrecognized xorb url: {url}")))?;
@@ -377,6 +424,18 @@ fn parse_xorb_url(url: &str) -> ClientResult<(MerkleHash, Vec<ChunkRange>)> {
     let hash = MerkleHash::from_hex(hex)
         .map_err(|e| ClientError::Other(format!("invalid xorb url hash: {e}")))?;
 
+    let (chunks_part, chunk_count) = match chunks_part.and_then(|part| part.split_once("&entries="))
+    {
+        Some((ranges, count)) => (
+            Some(ranges),
+            Some(
+                count
+                    .parse()
+                    .map_err(|_| ClientError::Other("invalid xorb chunk count".to_owned()))?,
+            ),
+        ),
+        None => (chunks_part, None),
+    };
     let ranges = match chunks_part {
         None => Vec::new(),
         Some(s) => s
@@ -389,7 +448,22 @@ fn parse_xorb_url(url: &str) -> ClientResult<(MerkleHash, Vec<ChunkRange>)> {
             .collect::<ClientResult<Vec<_>>>()?,
     };
 
-    Ok((hash, ranges))
+    Ok((hash, ranges, chunk_count))
+}
+
+fn retain_longest_fetches<T>(
+    xorbs: &mut HashMap<HexMerkleHash, Vec<T>>,
+    chunk_range: impl Fn(&T) -> ChunkRange,
+) {
+    // Xet reuses each download by xorb and start chunk. The shared
+    // fetch must cover every term with that start.
+    for fetches in xorbs.values_mut() {
+        fetches.sort_unstable_by_key(|fetch| {
+            let range = chunk_range(fetch);
+            (range.start, std::cmp::Reverse(range.end))
+        });
+        fetches.dedup_by_key(|fetch| chunk_range(fetch).start);
+    }
 }
 
 fn build_response_v2(file_info: &MDBFileInfo) -> QueryReconstructionResponseV2 {
@@ -405,7 +479,7 @@ fn build_response_v2(file_info: &MDBFileInfo) -> QueryReconstructionResponseV2 {
         });
 
         let fetch = XorbMultiRangeFetch {
-            url: xorb_url(&seg.xorb_hash, std::slice::from_ref(&chunks)),
+            url: xorb_url(&seg.xorb_hash, std::slice::from_ref(&chunks), None),
             ranges: vec![XorbRangeDescriptor {
                 chunks,
                 bytes: HttpRange::new(0, u64::from(seg.unpacked_segment_bytes)),
@@ -417,6 +491,7 @@ fn build_response_v2(file_info: &MDBFileInfo) -> QueryReconstructionResponseV2 {
             .push(fetch);
     }
 
+    retain_longest_fetches(&mut xorbs, |fetch| fetch.ranges[0].chunks);
     QueryReconstructionResponseV2 {
         offset_into_first_range: 0,
         terms,
@@ -553,7 +628,11 @@ fn build_range_response_v2(
             .entry(HexMerkleHash::from(segment.xorb_hash))
             .or_default()
             .push(XorbMultiRangeFetch {
-                url: xorb_url(&segment.xorb_hash, std::slice::from_ref(&chunks)),
+                url: xorb_url(
+                    &segment.xorb_hash,
+                    std::slice::from_ref(&chunks),
+                    Some(xorb.chunks.len()),
+                ),
                 ranges: vec![XorbRangeDescriptor {
                     chunks,
                     // This adapter encodes chunk addressing in its private URL;
@@ -564,6 +643,7 @@ fn build_range_response_v2(
         segment_start = segment_end;
     }
 
+    retain_longest_fetches(&mut xorbs, |fetch| fetch.ranges[0].chunks);
     Ok(Some(QueryReconstructionResponseV2 {
         offset_into_first_range: offset_into_first_range.unwrap_or(0),
         terms,
@@ -634,19 +714,22 @@ impl Client for StoreClient {
             return Ok(BatchQueryReconstructionResponse { files, fetch_info });
         }
 
-        let shard_hashes = self
+        let shard_locations = self
             .resolve_file_indexes_batch(file_ids)
             .await
             .map_err(|error| self.map_read_error(error))?;
-        let mut files_by_shard: HashMap<MerkleHash, Vec<MerkleHash>> = HashMap::new();
-        for (file_id, shard_hash) in file_ids.iter().zip(shard_hashes) {
-            if let Some(shard_hash) = shard_hash {
-                files_by_shard.entry(shard_hash).or_default().push(*file_id);
+        let mut files_by_shard: HashMap<ShardLocation, Vec<MerkleHash>> = HashMap::new();
+        for (file_id, shard_location) in file_ids.iter().zip(shard_locations) {
+            if let Some(shard_location) = shard_location {
+                files_by_shard
+                    .entry(shard_location)
+                    .or_default()
+                    .push(*file_id);
             }
         }
 
-        for (shard_hash, shard_file_ids) in files_by_shard {
-            let shard = match self.load_shard(&shard_hash).await {
+        for (location, shard_file_ids) in files_by_shard {
+            let shard = match self.load_shard(location).await {
                 Ok(shard) => shard,
                 Err(ReadError::NotFound { .. }) => continue,
                 Err(e) => return Err(self.map_read_error(e)),
@@ -659,7 +742,7 @@ impl Client for StoreClient {
                 else {
                     warn!(
                         file_hash = %file_id.hex(),
-                        shard_hash = %shard_hash.hex(),
+                        shard_hash = %location.hash.hex(),
                         "file-index points at shard that does not contain the file"
                     );
                     continue;
@@ -681,6 +764,7 @@ impl Client for StoreClient {
             }
         }
 
+        retain_longest_fetches(&mut fetch_info, |fetch| fetch.range);
         Ok(BatchQueryReconstructionResponse { files, fetch_info })
     }
 
@@ -712,14 +796,22 @@ impl Client for StoreClient {
             .retrieve_url()
             .await
             .map_err(|error| self.record_error(error))?;
-        let (xorb_hash, chunk_ranges) =
+        let (xorb_hash, chunk_ranges, chunk_count) =
             parse_xorb_url(&url).map_err(|error| self.record_error(error))?;
 
+        let xorb_path = self.router.xorb_path(&xorb_hash);
+        self.store.origin().check_cached_read(&xorb_path).await
+            .map_err(ReadError::from)
+            .map_err(|error| self.map_read_error(error))?;
         if let Some(cache) = &self.chunk_cache
             && let Some(cached) = cache.read(xorb_hash, &chunk_ranges).await {
+            // Disk cache checks its stored data. Hydration still verifies the
+            // reconstructed file hash before publishing these decoded chunks.
+            if !cached.0.is_empty() {
+                self.store.origin().observe_verified_xorb_cache_hit(&xorb_path);
+            }
             return Ok(cached);
         }
-        let xorb_path = self.router.xorb_path(&xorb_hash);
         if let Some(availability) = &self.availability {
             availability
                 .ensure_available(&xorb_path)
@@ -730,15 +822,16 @@ impl Client for StoreClient {
             .iter()
             .map(|range| (range.start, range.end))
             .collect::<Vec<_>>();
-        let decoded = if self.selective_xorb_reads {
-            self.store
-                .get_xorb_chunks(&xorb_path, &xorb_hash, &ranges)
-                .await
-        } else {
-            self.store
-                .get_xorb_chunks_without_install(&xorb_path, &xorb_hash, &ranges)
-                .await
-        }
+        let encoded_size = match &self.file_index_lookup {
+            Some(lookup) if self.store.origin().cdn_attempt(&xorb_path).is_some() => {
+                lookup.cached_xorb_encoded_size(&xorb_hash).await
+            }
+            _ => None,
+        };
+        let decoded = self.store
+            .get_xorb_chunks_with_mode(&xorb_path, &xorb_hash, &ranges, self.xorb_read_mode,
+                                       XorbReadHint { encoded_size, chunk_count })
+            .await
             .map_err(ReadError::from)
             .map_err(|error| self.map_read_error(error))?;
         // Keep cache publication within the download and decoded-buffer admission.

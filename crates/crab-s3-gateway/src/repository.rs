@@ -12,7 +12,6 @@ use crab_remote_git::{
     OperationContext, RemoteGitRepository, RemoteGitRuntime, RemoteGitSnapshot, RepositoryOptions,
     Revision,
 };
-#[cfg(test)]
 use crab_storage::{Store, StoreLayout};
 use tokio::sync::{Mutex, OnceCell, RwLock};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -239,6 +238,26 @@ impl ReadViewCache {
         options: RepositoryOptions,
         cancel: &CancellationToken,
     ) -> crate::Result<Arc<ReadView>> {
+        self.current_from(
+            &repository.layout,
+            &repository.layout,
+            &repository.identity,
+            runtime,
+            options,
+            cancel,
+        )
+        .await
+    }
+
+    async fn current_from(
+        &self,
+        origin: &StoreLayout<Store>,
+        read_layout: &StoreLayout<Store>,
+        identity: &crab_remote_git::RepositoryIdentity,
+        runtime: Arc<RemoteGitRuntime>,
+        options: RepositoryOptions,
+        cancel: &CancellationToken,
+    ) -> crate::Result<Arc<ReadView>> {
         let requested_at = tokio::time::Instant::now();
         let _refresh = self.refresh.lock().await;
         if let Some(view) = self.observed_since(requested_at).await {
@@ -247,7 +266,7 @@ impl ReadViewCache {
         // Coalesce only requests that began before this observation started.
         // A write can finish while immutable metadata is being assembled.
         let observed_at = tokio::time::Instant::now();
-        let root = crab_metadata::capsule_protocol::load_root(&repository.layout).await?;
+        let root = crab_metadata::capsule_protocol::load_root(origin).await?;
         let cached = self
             .cached
             .read()
@@ -256,8 +275,7 @@ impl ReadViewCache {
             .map(|cached| Arc::clone(&cached.view));
         if let Some(view) = cached {
             let activity =
-                crab_read::capsule_protocol::read_activity_from_root(&repository.layout, &root)
-                    .await?;
+                crab_read::capsule_protocol::read_activity_from_root(origin, &root).await?;
             // The owner fingerprint covers the root and every visible
             // ref transaction. Recheck it on every request; a TTL would
             // hide another gateway's acknowledged publication.
@@ -270,7 +288,7 @@ impl ReadViewCache {
             }
         }
         let capsule = crab_read::capsule_protocol::open_git_view_from_root(
-            &repository.layout,
+            read_layout,
             root,
             crab_read::capsule_protocol::CapsuleReadLimits {
                 max_capsule_bytes: MAX_CAPSULE_READ_BYTES,
@@ -287,8 +305,8 @@ impl ReadViewCache {
             .collect();
         let remote = capsule
             .git_repository_from_store(
-                repository.layout.clone(),
-                repository.identity.clone(),
+                read_layout.clone(),
+                identity.clone(),
                 runtime,
                 options,
                 MAX_CAPSULE_READ_BYTES,
@@ -321,6 +339,40 @@ impl ReadViewCache {
             .as_ref()
             .filter(|cached| cached.observed_at >= requested_at)
             .map(|cached| Arc::clone(&cached.view))
+    }
+}
+
+impl Repository {
+    pub(crate) async fn client_read_view(
+        &self,
+        runtime: Arc<RemoteGitRuntime>,
+        options: RepositoryOptions,
+        cancel: &CancellationToken,
+    ) -> crate::Result<Arc<ReadView>> {
+        let Some(reader) = &self.edge_reader else {
+            return self
+                .read_views
+                .current(self, runtime, options, cancel)
+                .await;
+        };
+        reader
+            .views
+            .current_from(
+                &self.layout,
+                &reader.layout,
+                &reader.identity,
+                runtime,
+                options,
+                cancel,
+            )
+            .await
+    }
+
+    pub(crate) async fn invalidate_read_views(&self) {
+        self.read_views.invalidate().await;
+        if let Some(reader) = &self.edge_reader {
+            reader.views.invalidate().await;
+        }
     }
 }
 
@@ -388,6 +440,8 @@ mod tests {
 
     fn repository_config(prefix: &str) -> RepositoryConfig {
         RepositoryConfig {
+            #[cfg(feature = "provider-cdn")]
+            cdn: None,
             name: "repo".to_owned(),
             provider: crab_storage::StorageProviderKind::Local,
             bucket: "memory".to_owned(),

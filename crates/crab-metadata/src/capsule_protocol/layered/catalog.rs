@@ -213,7 +213,7 @@ impl LayeredCheckpoint {
         Ok(())
     }
 
-    /// Materialize the catalog from its authenticated origin with one aggregate page budget.
+    /// Materialize the authenticated catalog with one aggregate page budget.
     #[cfg(feature = "storage")]
     pub async fn pointer_catalog_from_store(
         &self,
@@ -244,7 +244,7 @@ impl LayeredCheckpoint {
         };
         source
             .reader(layout)?
-            .inspected_objects(layout.store(), maximum_bytes)
+            .inspected_objects(&layout.store().clone().without_cdn_route(), maximum_bytes)
             .await
     }
 }
@@ -288,9 +288,11 @@ pub async fn fold_checkpoint_catalog(
         return Ok(prepared.source);
     };
     let mut work = crate::pages::PageWork::new(maximum_bytes, 0);
+    // A durable checkpoint can retain only pages proved present at the origin.
+    let origin = layout.store().clone().without_cdn_route();
     let descriptor = existing
         .reader(layout)?
-        .apply(layout.store(), deltas, &mut work)
+        .apply(&origin, deltas, &mut work)
         .await?;
     if descriptor == existing.pages {
         return Ok(Some(existing.clone()));
@@ -320,15 +322,16 @@ pub async fn merge_checkpoint_catalogs(
     maximum_bytes: u64,
 ) -> Result<Option<CheckpointCatalog>> {
     let mut work = crate::pages::PageWork::new(maximum_bytes, 0);
+    let origin = layout.store().clone().without_cdn_route();
     let older_reader = older.map(|source| source.reader(layout)).transpose()?;
     let newer_reader = newer.map(|source| source.reader(layout)).transpose()?;
     if let Some(reader) = &older_reader {
-        reader.verify(layout.store(), &mut work).await?;
+        reader.verify(&origin, &mut work).await?;
     }
     if let Some(reader) = &newer_reader
         && older != newer
     {
-        reader.verify(layout.store(), &mut work).await?;
+        reader.verify(&origin, &mut work).await?;
     }
     let (Some(older_reader), Some(newer_reader)) = (older_reader, newer_reader) else {
         return Ok(newer.or(older).cloned());
@@ -337,7 +340,7 @@ pub async fn merge_checkpoint_catalogs(
         return Ok(newer.cloned());
     }
     let descriptor = older_reader
-        .merge(layout.store(), &newer_reader, &mut work)
+        .merge(&origin, &newer_reader, &mut work)
         .await?;
     if newer.is_some_and(|source| descriptor == source.pages) {
         return Ok(newer.cloned());

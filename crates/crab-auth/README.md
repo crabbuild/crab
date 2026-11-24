@@ -54,6 +54,36 @@ protected-push, and administrative contracts. OIDC and provider-specific
 clients are opt-in features so a minimal static-credentials build does not
 pull in network clients.
 
+Managed services can advertise transfer-grant versions `[1, 2]` through
+authenticated capabilities. For an authorized read, repository resolution can
+also return a `cdn_read_binding` with the approved native origin, physical
+repository prefix, viewer URL, and operator approval digest. S3 bindings
+also identify the signing region. Crab requests v2 only when the binding's
+direct mode is eligible. The request carries `cdn_approval_sha256` and the
+grant echoes it. A viewer envelope is optional and its expiry is bounded by
+the parent grant.
+
+Issue the binding only to readers of the selected repository and only after
+verifying the operator's deployment approval. Recheck placement before
+issuing a v2 grant. If approval changed, reject the request. The client
+holds the same binding across renewals and rejects a different version,
+placement, viewer URL, or approval digest. V1 reads and staging grants keep
+their original wire shape. Each transfer grant POST is issued once.
+
+The `crab_auth::managed::cdn` debug target reports authenticated resolution
+and the observed status, schema versions, and acceptance decision for each
+read grant exchange. It uses fingerprints for the issuer, repository, and
+native or viewer placement. Qualification uses these observations to check
+v2 reads, v1 peers, and terminal denial.
+
+The encrypted token cache commits managed OIDC refresh responses only for the
+current login. The response preserves the original issuer and subject.
+Private direct CDN reads also pin the original issuer and subject. They use
+the same conditional cache write for ID-token refresh and retain the
+ID-token-only cache format. A fresh read is required after a login change.
+Origin-only builds omit viewer negotiation while keeping that principal and
+the issuer's native read scope.
+
 ## Usage
 
 Resolve static environment credentials through the same interface used by
@@ -111,6 +141,8 @@ keys and temporary directories; they do not qualify live Keychain integration.
 
 ## Boundaries
 
+- `azure-management` acquires a sensitive bearer header for Azure Resource
+  Manager. Public CDN placement reads use this opt-in credential path.
 - Use [`crab-types`](../crab-types/README.md) for shared storage and scope
   types, not ad-hoc provider strings.
 - Use [`crab-auth-store`](../crab-auth-store/README.md) to turn a resolution

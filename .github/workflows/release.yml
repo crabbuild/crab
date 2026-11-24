@@ -170,6 +170,13 @@ jobs:
             echo "source_short_sha=$source_short_sha"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Verify enabled CDN release scopes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CRAB_CDN_RELEASE_EVIDENCE: ${{ vars.CRAB_CDN_RELEASE_EVIDENCE }}
+          RELEASE_SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+        run: python3 -B crab/scripts/release/verify-cdn-release-evidence.py --source-sha "$RELEASE_SOURCE_SHA"
+
   desktop:
     name: Build desktop release
     needs: prepare
@@ -883,7 +890,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          ref: ${{ needs.prepare.outputs.tag }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
 
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
@@ -1470,7 +1477,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          ref: ${{ needs.prepare.outputs.tag }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
 
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:

@@ -1,8 +1,12 @@
 use std::path::PathBuf;
 
 use clap::Parser;
+use crab_storage::cdn::{CdnConsumer, is_read_evidence_target, observe_service_build};
 use tracing::Level;
-use tracing_subscriber::{Layer as _, layer::SubscriberExt as _, util::SubscriberInitExt as _};
+use tracing_subscriber::{
+    EnvFilter, Layer as _, filter::filter_fn, layer::SubscriberExt as _,
+    util::SubscriberInitExt as _,
+};
 
 #[derive(Debug, Parser)]
 #[command(about = "Serve Crab repositories through the S3 protocol")]
@@ -28,12 +32,22 @@ async fn main() -> Result<(), Box<crab_s3_gateway::Error>> {
     let output = tracing_subscriber::fmt::layer()
         .with_target(false)
         .with_writer(std::io::stderr)
-        .with_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
-            dependency_event_is_safe(metadata.target(), metadata.level())
+        .with_filter(filter_fn(|metadata| {
+            !is_read_evidence_target(metadata.target())
+                && dependency_event_is_safe(metadata.target(), metadata.level())
+        }));
+    let evidence = tracing_subscriber::fmt::layer()
+        .json()
+        .with_current_span(false)
+        .with_span_list(false)
+        .with_writer(std::io::stderr)
+        .with_filter(filter_fn(|metadata| {
+            is_read_evidence_target(metadata.target())
         }));
     tracing_subscriber::registry()
         .with(output)
+        .with(evidence)
+        .with(EnvFilter::from_default_env())
         .try_init()
         .map_err(|source| crab_s3_gateway::Error::Logging {
             source: Box::new(source),
@@ -51,6 +65,13 @@ async fn main() -> Result<(), Box<crab_s3_gateway::Error>> {
     } else if args.readiness_check {
         crab_s3_gateway::check_readiness(&config).await?;
     } else {
+        observe_service_build(
+            CdnConsumer::S3Gateway,
+            env!("CRAB_SERVICE_SOURCE_SHA"),
+            env!("CRAB_SERVICE_TARGET"),
+            env!("CRAB_SERVICE_PROFILE"),
+            env!("CRAB_SERVICE_FEATURES"),
+        );
         crab_s3_gateway::serve(config).await?;
     }
     Ok(())

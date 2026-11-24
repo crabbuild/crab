@@ -247,7 +247,24 @@ async fn provider_contracts() {
     let read_metrics = Arc::clone(&metrics);
     let read_request_metrics = Arc::clone(&metrics);
     let store = build_static_env_store(&bucket, provider)
-        .unwrap_or_else(|error| panic!("build {provider:?} store: {error}"))
+        .unwrap_or_else(|error| panic!("build {provider:?} store: {error}"));
+    let real_provider = match service.as_str() {
+        "amazon-s3" => Some(StorageProviderKind::S3),
+        "google-cloud-storage" => Some(StorageProviderKind::Gcs),
+        "azure-blob-storage" => Some(StorageProviderKind::Azure),
+        _ => None,
+    };
+    if let Some(real_provider) = real_provider {
+        assert_eq!(
+            provider, real_provider,
+            "real-cloud service label does not match the configured provider"
+        );
+        assert!(
+            store.native_cdn_origin().is_some(),
+            "real-cloud qualification requires a native endpoint"
+        );
+    }
+    let store = store
         .with_read_byte_observer(Arc::new(move |bytes| {
             read_metrics.read_bytes.fetch_add(bytes, Ordering::Relaxed);
         }))
@@ -278,6 +295,13 @@ async fn provider_contracts() {
         }
     })
     .await;
+    // A failed preflight leaves ownership unproven. Never mutate or clean
+    // up this prefix, even if it has the qualification namespace's shape.
+    assert!(
+        checks[0].ok,
+        "qualification prefix preflight failed before any writes: {}",
+        checks[0].error.as_deref().unwrap_or("unknown error")
+    );
 
     run_check(&mut checks, "create_only", || async {
         let path = harness.path("conditional/create-only");

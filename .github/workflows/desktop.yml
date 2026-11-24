@@ -63,6 +63,10 @@ jobs:
           ref: ${{ inputs.source_ref || github.sha }}
       - name: Set isolated Cargo target directory
         run: echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-native-runtime-target" >> "$GITHUB_ENV"
+      - name: Pin the native build to the checked-out source
+        run: |
+          source_sha=$(git rev-parse --verify HEAD)
+          echo "GIT_SHA=$source_sha" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version-file: packages/desktop/.nvmrc

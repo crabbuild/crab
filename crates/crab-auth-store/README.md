@@ -64,6 +64,33 @@ Azure split credentials are intentionally accepted only by
 exact prepared upload prefix uses the write token. A mismatched prefix is an
 authorization error, not a fallback to a broader store.
 
+For direct reads negotiated with Crab Auth and managed v2 direct reads, the
+origin store and viewer route share one credential generation. Concurrent
+refreshes share the same issuer request and result, including when a waiter
+cancels. A replacement must preserve the provider target, physical view,
+deployment and permissions. If refresh fails, the bound read store requires
+fresh resolution. The same origin refresh works without a viewer grant.
+Viewer renewal starts up to 15 seconds before expiry, using at most half the
+grant's remaining lifetime at capture. This leaves time to use short grants.
+Online cache readers share the bound store's renewal check. A warm cache can
+reuse verified bytes while its grant is current and retains the captured view.
+
+Managed grant renewal uses the installed login's original OIDC issuer and
+subject. It refreshes an expiring access token before requesting a new grant.
+The token cache accepts a refresh response only if that login is still current.
+The grant request is issued once. Managed viewer grants cover repository-local
+object families.
+
+The `operator-cdn` feature composes trusted per-repository deployments for
+services that already have independently authorized native storage. It
+compares the issuer's placement and full-repository scope before attaching
+viewer authority to a read store. The service keeps its own native origin
+credentials.
+
+For public Azure exports, the `azure-cdn-placement` feature supplies the
+operator's Azure Resource Manager authorization to storage. Storage checks
+the receipt's account, container, primary location, and Blob endpoint.
+
 ## Usage
 
 Build a canonical store from a resolution produced by `crab-auth`:
@@ -117,3 +144,7 @@ crab-auth-store = { workspace = true, features = ["refreshing-store"] }
 - Keep ref CAS and push serialization in
   [`crab-coordination`](../crab-coordination/README.md); a valid store does
   not by itself make a write safe.
+
+The `view-retention` feature registers Crab Auth's projected-view claim with
+the shared read session. The session renews and releases the issuer claim
+after all admitted read pins drain.

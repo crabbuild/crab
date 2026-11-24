@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::{LocalRepository, ensure_supported_mutation, local_error};
+use super::{LocalRepository, child_read::WorktreeRead, ensure_supported_mutation, local_error};
 use crate::{CommitIdentity, Error, ErrorKind, ObjectId, OperationOptions, Result};
 
 /// One path reported by Git's porcelain-v2 status contract.
@@ -506,6 +506,7 @@ impl LocalRepository {
         let tools = self.tools()?.clone();
         let root = self.root.clone();
         let common = self.common_dir.clone();
+        let state = self.client.0.clone();
         let trusted = self.client.0.local_execution_policy.is_trusted();
         self.client
             .0
@@ -520,9 +521,10 @@ impl LocalRepository {
                     args.extend(["-b".into(), branch.into()]);
                 }
                 args.extend([revision.into(), "--".into()]);
-                tools
-                    .owner
-                    .run_git(Some(&root), args, trusted, &cancel)
+                let read =
+                    WorktreeRead::prepare(&state, &tools.owner, &root, false, &cancel).await?;
+                read.tools
+                    .run_git_with_env(Some(&root), args, read.environment(), trusted, &cancel)
                     .await
                     .map_err(local_error)?;
                 head(&tools.owner, &root, &cancel).await
@@ -581,6 +583,8 @@ impl LocalRepository {
                     |branch| format!("refs/remotes/{remote}/{branch}"),
                 );
                 let fetched = git_commit(&tools.owner, &root, &fetched_ref, &cancel).await?;
+                let read =
+                    WorktreeRead::prepare(&state, &tools.owner, &root, false, &cancel).await?;
                 let fetched_text = fetched.to_string();
                 let kind = match options.mode {
                     PullMode::FastForwardOnly => None,
@@ -606,9 +610,9 @@ impl LocalRepository {
                     }
                     PullMode::Rebase => vec!["rebase".into(), fetched_text.into()],
                 };
-                let result = tools
-                    .owner
-                    .run_git(Some(&root), integrate, trusted, &cancel)
+                let result = read
+                    .tools
+                    .run_git_with_env(Some(&root), integrate, read.environment(), trusted, &cancel)
                     .await;
                 if let Err(error) = result {
                     if let Some(intent) = integration
@@ -629,18 +633,24 @@ impl LocalRepository {
                 let hydration = if options.hydrate
                     && (root.join(".crab").exists() || root.join("crab.toml").exists())
                 {
-                    match tools
-                        .owner
-                        .run_crab(
-                            Some(&root),
-                            ["hydrate", "--all", "--json"],
-                            trusted,
-                            &cancel,
-                        )
-                        .await
-                    {
+                    let hydration = async {
+                        let late_read;
+                        let read = if read.environment().is_some() {
+                            &read
+                        } else {
+                            // Preserve the integration result if only the
+                            // post-pull hydration needs authorization.
+                            late_read =
+                                WorktreeRead::prepare(&state, &tools.owner, &root, true, &cancel)
+                                    .await?;
+                            &late_read
+                        };
+                        read.run_content(&root, ["hydrate", "--all", "--json"], trusted, &cancel)
+                            .await
+                    };
+                    match hydration.await {
                         Ok(_) => HydrationState::Ready,
-                        Err(error) => HydrationState::Failed(local_error(error)),
+                        Err(error) => HydrationState::Failed(error),
                     }
                 } else {
                     HydrationState::NotRequested
@@ -678,6 +688,7 @@ impl LocalRepository {
         let root = self.root.clone();
         let common = self.common_dir.clone();
         let git_dir = self.git_dir.clone();
+        let state = self.client.0.clone();
         let trusted = self.client.0.local_execution_policy.is_trusted();
         self.client
             .0
@@ -689,7 +700,7 @@ impl LocalRepository {
                 ensure_supported_mutation(&tools.owner, &root, &cancel).await?;
                 let intent = read_integration_intent(&git_dir).await?;
                 ensure_integration_id(&intent, &id)?;
-                let Some(state) =
+                let Some(conflict) =
                     conflict_state(&tools.owner, &root, &git_dir, &intent, &cancel).await?
                 else {
                     return Err(Error::new(
@@ -697,19 +708,19 @@ impl LocalRepository {
                         "no integration is in progress",
                     ));
                 };
-                let args = match state.kind {
+                let args = match conflict.kind {
                     IntegrationKind::Merge => vec![OsString::from("commit"), "--no-edit".into()],
                     IntegrationKind::Rebase => vec![OsString::from("rebase"), "--continue".into()],
                 };
-                let result = tools
-                    .owner
-                    .run_git_with_env(
-                        Some(&root),
-                        args,
-                        [("GIT_EDITOR", "true")],
-                        trusted,
-                        &cancel,
-                    )
+                let read =
+                    WorktreeRead::prepare(&state, &tools.owner, &root, false, &cancel).await?;
+                let environment = read
+                    .environment()
+                    .into_iter()
+                    .chain([("GIT_EDITOR", OsString::from("true"))]);
+                let result = read
+                    .tools
+                    .run_git_with_env(Some(&root), args, environment, trusted, &cancel)
                     .await;
                 if let Err(error) = result {
                     if let Some(conflict) =
@@ -749,6 +760,7 @@ impl LocalRepository {
         let root = self.root.clone();
         let common = self.common_dir.clone();
         let git_dir = self.git_dir.clone();
+        let state = self.client.0.clone();
         let trusted = self.client.0.local_execution_policy.is_trusted();
         self.client
             .0
@@ -760,7 +772,7 @@ impl LocalRepository {
                 ensure_supported_mutation(&tools.owner, &root, &cancel).await?;
                 let intent = read_integration_intent(&git_dir).await?;
                 ensure_integration_id(&intent, &id)?;
-                let Some(state) =
+                let Some(conflict) =
                     conflict_state(&tools.owner, &root, &git_dir, &intent, &cancel).await?
                 else {
                     return Err(Error::new(
@@ -768,7 +780,7 @@ impl LocalRepository {
                         "no integration is in progress",
                     ));
                 };
-                let args = match state.kind {
+                let args = match conflict.kind {
                     IntegrationKind::Merge => ["merge", "--abort"],
                     IntegrationKind::Rebase => ["rebase", "--abort"],
                 };
@@ -780,9 +792,10 @@ impl LocalRepository {
                         "tracked files changed after the integration conflict",
                     ));
                 }
-                tools
-                    .owner
-                    .run_git(Some(&root), args, trusted, &cancel)
+                let read =
+                    WorktreeRead::prepare(&state, &tools.owner, &root, false, &cancel).await?;
+                read.tools
+                    .run_git_with_env(Some(&root), args, read.environment(), trusted, &cancel)
                     .await
                     .map_err(local_error)?;
                 remove_integration_intent(&git_dir).await?;
@@ -831,6 +844,7 @@ impl LocalRepository {
         let tools = self.tools()?.clone();
         let root = self.root.clone();
         let common = self.common_dir.clone();
+        let state = self.client.0.clone();
         let trusted = self.client.0.local_execution_policy.is_trusted();
         self.client
             .0
@@ -850,6 +864,11 @@ impl LocalRepository {
                         }
                         args.push(path.into_os_string());
                     }
+                }
+                if matches!(command, "hydrate" | "fetch") {
+                    let read =
+                        WorktreeRead::prepare(&state, &tools.owner, &root, true, &cancel).await?;
+                    return read.run_content(&root, args, trusted, &cancel).await;
                 }
                 tools
                     .owner

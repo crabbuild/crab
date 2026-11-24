@@ -50,7 +50,15 @@ pub async fn read_pack_ranges(
         return Err(corrupt(source, "pack or sidecar range is outside its source").into());
     }
     let length = source.pack.end - source.pack.start;
+    let cache = cache.filter(|cache| {
+        cache.origin.authorized_cache_namespace() == origin.authorized_cache_namespace()
+    });
     if let Some(cache) = cache {
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(StorageError::Cancelled.into()),
+            check = origin.check_cached_read(source.path) => check?,
+        }
         let hit = cache
             .local_cache
             .copy_git_pack_if_present(&source.pack_hash, length, destination)
@@ -68,13 +76,103 @@ pub async fn read_pack_ranges(
             if hit { length } else { 0 },
         );
         if hit {
-            return read_sidecars(origin, source, cancel).await;
+            let sidecars = read_sidecars(origin, source, cancel).await?;
+            if let Some(observation) = origin
+                .cdn_attempt(source.path)
+                .and_then(|edge| edge.payload_observation())
+            {
+                observation.record_local();
+            }
+            return Ok(sidecars);
         }
         tokio::fs::File::create(destination)
             .await
             .map_err(StorageError::from)?;
     }
 
+    let edge = origin
+        .cdn_attempt(source.path)
+        .filter(|edge| edge.admits_range_batches(source.size));
+    let transfer = async |cancel: &CancellationToken| {
+        if let Some(edge) = &edge {
+            let mut hasher = blake3::Hasher::new();
+            if edge
+                .download(
+                    source.size,
+                    source.pack.clone(),
+                    destination,
+                    cancel,
+                    |bytes| {
+                        hasher.update(bytes);
+                    },
+                )
+                .await?
+            {
+                let actual = hasher.finalize();
+                if actual == source.pack_hash {
+                    // Sidecars have their own descriptor verification on the
+                    // existing origin path, within the same transfer deadline.
+                    return Ok((
+                        read_sidecars(origin, source, cancel).await?,
+                        actual,
+                        edge.payload_observation(),
+                    ));
+                }
+                tokio::fs::File::create(destination)
+                    .await
+                    .map_err(StorageError::from)?;
+                tracing::warn!("CDN pack digest mismatch; restarting from selected origin");
+            }
+        }
+        download_origin_pack(origin, source, length, destination, cancel)
+            .await
+            .map(|(sidecars, hash)| (sidecars, hash, None))
+    };
+    let (sidecars, actual_hash, observation) = match &edge {
+        Some(edge) => edge.with_file_deadline(cancel, transfer).await?,
+        None => transfer(cancel).await?,
+    };
+    if actual_hash != source.pack_hash {
+        return Err(corrupt(
+            source,
+            "pack content hash does not match its authenticated descriptor",
+        )
+        .into());
+    }
+    if sidecars.len() as u64 != source.sidecars.end - source.sidecars.start {
+        return Err(corrupt(source, "sidecar response has an unexpected length").into());
+    }
+    if cancel.is_cancelled() {
+        return Err(StorageError::Cancelled.into());
+    }
+    if let Some(cache) = cache
+        && let Err(error) = cache
+            .local_cache
+            .put_git_pack_file(&source.pack_hash, destination, length)
+            .await
+    {
+        cache.observe_local_write_failure();
+        tracing::warn!(%error, "verified Git pack remains usable after cache persistence failure");
+    }
+    if cancel.is_cancelled() {
+        return Err(StorageError::Cancelled.into());
+    }
+    if let Some(edge) = &edge {
+        edge.check_deadline()?;
+    }
+    if let Some(observation) = observation {
+        observation.record_verified_git_pack(actual_hash, source.path.as_ref());
+    }
+    Ok(sidecars)
+}
+
+async fn download_origin_pack(
+    origin: &Store,
+    source: &GitPackSource<'_>,
+    length: u64,
+    destination: &Path,
+    cancel: &CancellationToken,
+) -> Result<(Bytes, blake3::Hash)> {
     let accelerated = origin
         .try_download_signed_ranges_to_path(
             source.path,
@@ -86,7 +184,7 @@ pub async fn read_pack_ranges(
             cancel,
         )
         .await;
-    let (sidecars, actual_hash) = match accelerated {
+    let downloaded = match accelerated {
         Ok(Some(downloaded)) => downloaded,
         Ok(None) | Err(StorageError::NotSupported { .. }) => {
             // Retain the bounded parallel origin plan used by uncached clones;
@@ -135,32 +233,7 @@ pub async fn read_pack_ranges(
         }
         Err(error) => return Err(error.into()),
     };
-    if actual_hash != source.pack_hash {
-        return Err(corrupt(
-            source,
-            "pack content hash does not match its authenticated descriptor",
-        )
-        .into());
-    }
-    if sidecars.len() as u64 != source.sidecars.end - source.sidecars.start {
-        return Err(corrupt(source, "sidecar response has an unexpected length").into());
-    }
-    if cancel.is_cancelled() {
-        return Err(StorageError::Cancelled.into());
-    }
-    if let Some(cache) = cache
-        && let Err(error) = cache
-            .local_cache
-            .put_git_pack_file(&source.pack_hash, destination, length)
-            .await
-    {
-        cache.observe_local_write_failure();
-        tracing::warn!(%error, "verified Git pack remains usable after cache persistence failure");
-    }
-    if cancel.is_cancelled() {
-        return Err(StorageError::Cancelled.into());
-    }
-    Ok(sidecars)
+    Ok(downloaded)
 }
 
 async fn read_sidecars(

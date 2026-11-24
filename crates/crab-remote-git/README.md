@@ -70,6 +70,17 @@ page-only snapshots without pack sidecars. Repacking materializes displaced
 dependencies before combining representations, preventing valid source chains
 from becoming response-pack cycles.
 
+Lazy pack indexes and reverse indexes can use the selected CDN. Each consumed
+slice must match the BLAKE3 digest in the captured descriptor. A coalesced
+window needs one authenticated source length to check the edge's Content-Range.
+Point reads and coalesced object batches can fetch packed entries from layered
+sources with authenticated lengths. The reader verifies each Git object ID
+after inflation and any delta reconstruction before returning or caching it.
+A failed content check can restart the read at the selected origin within
+the same deadline and read budget. An edge denial stops the read, including
+when a parallel range returns a recoverable error. Raw pack passthrough reads
+its packed windows from origin.
+
 Capsule graphs retain an immutable paged reader and captured commit roots;
 membership reads exact ancestor sets rather than allocating a full reachability
 bitmap. A full commit ID matching a verified captured root reuses that visibility

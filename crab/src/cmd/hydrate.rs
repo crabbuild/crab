@@ -2235,6 +2235,9 @@ fn refresh_pointer_attributes(root: &Path, mode: OutputMode) {
 
 /// Parse the configured hydration remote, distinguishing absence from invalid policy.
 pub fn resolve_hydrate_remote_url(config: &Config) -> Result<Option<crate::git::url::CrabUrl>> {
+    if let Some(checkout) = crate::auth::cdn_checkout::Checkout::load()? {
+        return Ok(Some(checkout.source_url().into()));
+    }
     let Some(url) = config.remote_url.as_deref() else {
         return Ok(None);
     };

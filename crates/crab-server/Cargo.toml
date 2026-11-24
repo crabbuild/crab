@@ -6,7 +6,14 @@ license.workspace = true
 description = "Self-hosted repository web application backed by Crab object storage."
 publish = false
 
+[features]
+provider-cdn = ["dep:crab-auth-store", "crab-auth-store/operator-cdn", "dep:crab-cache", "dep:crab-cache-store", "crab-cache-store/lfs"]
+provider-cdn-qualification = ["provider-cdn", "crab-storage/provider-cdn-qualification"]
+
 [dependencies]
+crab-auth-store = { workspace = true, optional = true }
+crab-cache = { workspace = true, features = ["local-cache"], optional = true }
+crab-cache-store = { workspace = true, optional = true }
 crab-workflow = { workspace = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 bytes = { workspace = true }
@@ -71,12 +78,13 @@ tokio-rustls = "0.26"
 tokio-util = { workspace = true, features = ["io", "rt"] }
 toml = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { workspace = true }
 x509-cert = "0.2.5"
 zip = { version = "6.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
+crab-storage = { workspace = true, features = ["test-support"] }
 ts-rs = { version = "=12.0.1", features = ["uuid-impl"] }
 async-trait = { workspace = true }
 http-body-util = "0.1"

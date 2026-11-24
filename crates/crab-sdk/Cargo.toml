@@ -17,11 +17,12 @@ default = []
 remote = ["dep:crab-read", "dep:tokio", "dep:tokio-util", "dep:crab-remote-git", "dep:crab-storage", "dep:crab-metadata", "dep:object_store", "dep:blake3"]
 publish = ["remote", "crab-read/hydration", "dep:crab-remote", "crab-remote/publication", "dep:crab-write", "dep:crab-coordination", "dep:crab-git", "dep:crab-lfs", "dep:crab-staging", "dep:crab-xet", "crab-xet/chunker", "dep:crab-types", "dep:serde", "dep:serde_json", "dep:uuid", "dep:tempfile", "dep:gix-object"]
 local = ["publish", "files", "crab-remote/local", "dep:dunce", "dep:toml"]
-service = ["remote", "dep:crab-auth", "dep:crab-auth-store", "dep:crab-git", "dep:uuid"]
+service = ["remote", "dep:crab-auth", "crab-auth/crab-auth-client", "dep:crab-auth-store", "crab-auth-store/azure-cdn-placement", "dep:crab-git", "dep:sha2", "dep:tracing", "dep:uuid"]
+provider-cdn-qualification = ["service", "crab-storage/provider-cdn-qualification"]
 
 results = ["remote", "dep:crab-workflow", "dep:serde", "dep:serde_json"]
 
-files = ["remote", "crab-read/hydration", "crab-metadata/file-index-reader", "dep:crab-lfs", "dep:crab-git", "dep:futures-util", "dep:crab-cache", "dep:crab-cache-store", "dep:crab-types", "dep:tracing"]
+files = ["remote", "crab-read/hydration", "crab-metadata/file-index-reader", "crab-auth-store?/view-retention", "dep:crab-coordination", "dep:crab-lfs", "dep:crab-git", "dep:futures-util", "dep:crab-cache", "dep:crab-cache-store", "dep:crab-types", "dep:tracing"]
 
 [dependencies]
 crab-workflow = { workspace = true, optional = true }
@@ -49,6 +50,7 @@ crab-lfs = { workspace = true, optional = true }
 crab-git = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
+sha2 = { version = "0.10", optional = true }
 crab-read = { workspace = true, optional = true }
 crab-cache = { workspace = true, optional = true }
 crab-cache-store = { workspace = true, optional = true }
@@ -60,6 +62,8 @@ crab-auth-store = { workspace = true, optional = true, features = ["managed-serv
 toml = { workspace = true, optional = true }
 
 [dev-dependencies]
+async-trait = { workspace = true }
+crab-storage = { workspace = true, features = ["test-support"] }
 sha2 = "0.10"
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "test-util", "time", "macros"] }
 tempfile = { workspace = true }
@@ -67,12 +71,17 @@ crab-git = { workspace = true }
 crab-xet = { workspace = true }
 futures-util = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+serde = { workspace = true }
 serde_json = { workspace = true }
 
 [[example]]
 name = "remote_read"
 required-features = ["remote"]
+
+[[example]]
+name = "cdn-sdk-read"
+required-features = ["service", "local"]
 
 [[example]]
 name = "remote_archive"

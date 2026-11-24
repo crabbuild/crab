@@ -26,7 +26,14 @@ Hydration can carry a caller-registered retained capture. Its read pin follows
 the shared Xet client through background source tasks, so cancellation cannot
 release remote dependencies while a worker still needs them. Closed or expired
 retention rejects new reconstruction, including warm cache hits; provider failures
-remain typed errors. Capture registration and authorization stay with the caller.
+remain typed errors. `retain_pointer_catalog` registers the catalog and claim
+under both GC barriers. Callers supply the authorized native store and keep the
+retention session alive through reader teardown.
+`acquire_pointer_retention` shares the capture path for issuer-owned leases
+that must renew across requests. It returns the exact view digest and native
+claim after the same barrier checks. `load_retained_pointer_catalog` holds a read
+pin while verifying that the locally opened catalog matches the issuer's digest.
+
 `ArtifactPointer` binds a selected Git pointer's hash and logical size to a
 captured catalog. `CapturedArtifact` prepares its retained stream using private
 staging for metadata. The caller keeps staging alive until the worker closes the
@@ -324,10 +331,17 @@ async fn example(pointer_bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>>
 Use `reconstruct_range_from_pointer` for bounded in-memory partial reads,
 `reconstruct_range_to_path` for large partial reads, and `reconstruct_to_path`
 for complete large files. Range reconstruction limits the recipe to the Xet
-chunks overlapping the selected byte interval. The path API makes cold,
-low-coverage reads with bounded xorb requests; high-coverage reads may cache a
-complete verified xorb. The in-memory API retains its non-installing whole-xorb
-source read so VFS windows preserve one-request fetch and decoded-range reuse.
+chunks overlapping the selected byte interval. Terms with the same xorb and
+start chunk share the longest required fetch and retain their recipe order.
+The path API makes cold, low-coverage reads with bounded xorb requests.
+High-coverage reads may cache a complete verified xorb. The in-memory API
+retains its non-installing whole-xorb source read so VFS windows preserve
+one-request fetch and decoded-range reuse.
+With a retained view, reconstruction checks the claim before opening a file
+destination and holds it through worker completion. Range streams recheck the
+claim and any bound online grant before delivering queued bytes or returning
+successful EOF. Claim loss cancels the producer while it waits for space in
+the output queue.
 
 The pointer and metadata remain the source of truth; caches only change where
 immutable bytes are fetched from.

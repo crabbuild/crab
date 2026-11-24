@@ -26,6 +26,7 @@ operations in `crates/crab-auth-server/src/receive/git_workspace.rs`.
 | --- | --- | --- |
 | Receive command | `crates/crab-auth-server/src/bin/crab_auth_receive.rs` | `crates/crab-auth-server/src/receive.rs` |
 | Scoped view | `crates/crab-auth-server/src/bin/crab_auth_view.rs` | `crates/crab-auth-server/src/view.rs` |
+| Scoped view retention | `crates/crab-auth-server/src/view/retention.rs` | `crates/crab-read/src/read_retention.rs`, `crates/crab-coordination/src/read_retention.rs` |
 | Git validation | `crates/crab-auth-server/src/receive/git_workspace.rs` | `crates/crab-git/src/pack.rs` |
 
 ## Invariants
