@@ -12,12 +12,14 @@ export function useMutation(
   const [conflict, setConflict] = useState(false);
   const [status, setStatus] = useState<number>();
   const [code, setCode] = useState<string>();
+  const [existingPull, setExistingPull] = useState<number>();
   const [rejected, setRejected] = useState(false);
   function reset() {
     setError(undefined);
     setConflict(false);
     setStatus(undefined);
     setCode(undefined);
+    setExistingPull(undefined);
     setRejected(false);
   }
   const active = useRef(true);
@@ -96,10 +98,19 @@ export function useMutation(
           );
         }
         const failure = body as {
-          error?: { message?: string; code?: string };
+          error?: { message?: string; code?: string; pull_number?: number };
         } | null;
         if (active.current) {
           setCode(failure?.error?.code);
+          const number = failure?.error?.pull_number;
+          if (
+            failure?.error?.code === "open_pull_exists" &&
+            typeof number === "number" &&
+            Number.isSafeInteger(number) &&
+            number > 0
+          ) {
+            setExistingPull(number);
+          }
           setConflict(
             response.status === 409 && failure?.error?.code === "conflict",
           );
@@ -123,7 +134,17 @@ export function useMutation(
       if (active.current) setPending(false);
     }
   }
-  return { run, pending, error, conflict, status, code, rejected, reset };
+  return {
+    run,
+    pending,
+    error,
+    conflict,
+    status,
+    code,
+    existingPull,
+    rejected,
+    reset,
+  };
 }
 
 export function ConflictReview<

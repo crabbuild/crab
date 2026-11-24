@@ -462,7 +462,8 @@ mod operations;
 mod release_notes;
 pub(crate) mod reopen;
 pub(crate) use operations::{
-    CreatePull, GetPull, GetPullSubmission, ListPulls, RejectStalePullComparison, UpdatePull,
+    CreatePull, CreatePullWithLinks, GetPull, GetPullSubmission, ListPulls,
+    RejectStalePullComparison, UpdatePull,
 };
 #[cfg(test)]
 pub(crate) use release_notes::SeedHistoricalMerges;

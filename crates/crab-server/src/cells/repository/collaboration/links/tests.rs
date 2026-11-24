@@ -114,6 +114,139 @@ async fn activity(cell: &RepositoryCell, subject: Option<Subject>) -> Vec<activi
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn opening_a_pull_promotes_only_matching_active_or_committed_branch_links() {
+    use branches::{Branch, Edit, Get, Set, creation};
+    let server = fixtures::fixture().await;
+    let cell = cell(&server);
+    let repository = server.repositories.values()[0].id;
+    let fork = Uuid::now_v7();
+    seed(&cell, 3).await;
+    let branch = |repository| Branch {
+        repository,
+        reference: "refs/heads/rollout".into(),
+    };
+    for (issue, repository) in [(1, repository), (2, fork)] {
+        assert!(matches!(
+            write::<Set>(
+                &cell,
+                Edit {
+                    issue,
+                    branch: branch(repository),
+                    active: true,
+                    version: 0,
+                }
+            )
+            .await,
+            branches::Decision::Applied(1)
+        ));
+    }
+    let request = Uuid::now_v7();
+    assert!(matches!(
+        write::<creation::Reserve>(
+            &cell,
+            creation::Request {
+                id: request,
+                issue: 3,
+                branch: branch(repository),
+                commit: "a".repeat(40),
+                actor: crate::cells::directory::IdentityKey {
+                    issuer: actor().issuer,
+                    subject: actor().subject
+                },
+                target_epoch: 0,
+            }
+        )
+        .await,
+        creation::Decision::Saved(creation::Status::Pending)
+    ));
+    let pull_input = CreatePullInput {
+        code_owner_requests: Default::default(),
+        metadata: Default::default(),
+        draft: false,
+        submission_id: *Uuid::now_v7().as_bytes(),
+        author: actor(),
+        title: "Roll out the feature".into(),
+        body: String::new(),
+        base_ref: "refs/heads/main".into(),
+        head_ref: "refs/heads/rollout".into(),
+        head_repository: None,
+        base_oid: "a".repeat(40),
+        head_oid: "b".repeat(40),
+    };
+    assert!(matches!(
+        write::<CreatePull>(&cell, pull_input.clone()).await,
+        CreatePullOutcome::Created(_)
+    ));
+    let pull = subject(SubjectKind::Pull, 2);
+    let first = list(&cell, pull, None, 10).await;
+    assert_eq!(first.items.len(), 1);
+    assert_eq!(first.items[0].work.subject.number, 1);
+    assert!(first.items[0].from_branch && first.items[0].closes_on_merge);
+    let jobs = cell
+        .client
+        .query::<creation::PendingForPull>(&cell.target, None, 2)
+        .await
+        .unwrap()
+        .output;
+    assert_eq!(jobs.iter().map(|job| job.id).collect::<Vec<_>>(), [request]);
+
+    assert_eq!(
+        write::<creation::Settle>(&cell, (request, creation::Resolution::Committed)).await,
+        Some(creation::Status::Created)
+    );
+    let pending = list(&cell, subject(SubjectKind::Issue, 3), None, 10).await;
+    assert_eq!(pending.items[0].work.subject, pull);
+    assert!(
+        cell.client
+            .query::<creation::PendingForPull>(&cell.target, None, 2)
+            .await
+            .unwrap()
+            .output
+            .is_empty()
+    );
+    for (number, remaining) in [(1, 0), (2, 1), (3, 0)] {
+        let view = cell
+            .client
+            .query::<Get>(&cell.target, None, number)
+            .await
+            .unwrap()
+            .output
+            .unwrap();
+        assert_eq!(view.state.branches.len(), remaining);
+        assert!(view.pending.is_none());
+    }
+
+    let mut unlink = selection(1, false, 1);
+    unlink.pair.pull = 2;
+    assert!(matches!(
+        write::<SetLink>(&cell, unlink).await,
+        Outcome::Applied(_)
+    ));
+    assert!(matches!(
+        write::<CreatePull>(&cell, pull_input.clone()).await,
+        CreatePullOutcome::Created(_)
+    ));
+    assert_eq!(list(&cell, pull, None, 10).await.items.len(), 1);
+
+    let fork_pull = CreatePullInput {
+        submission_id: *Uuid::now_v7().as_bytes(),
+        head_repository: Some(fork),
+        ..pull_input
+    };
+    assert!(matches!(
+        write::<CreatePull>(&cell, fork_pull).await,
+        CreatePullOutcome::Created(_)
+    ));
+    let attached = list(&cell, subject(SubjectKind::Issue, 2), None, 10).await;
+    assert_eq!(
+        attached.items[0].work.subject,
+        subject(SubjectKind::Pull, 3)
+    );
+    assert!(attached.items[0].from_branch);
+    fixtures::close(&server).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn links_are_bidirectional_versioned_and_record_one_event_in_both_timelines() {
     let server = fixtures::fixture().await;
     let cell = cell(&server);

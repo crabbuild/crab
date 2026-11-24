@@ -245,9 +245,10 @@ export function ActivityItem({
           <>
             {" via commit "}
             <Link
-              href={repoHref(repo, {
+              href={repoHref(event.action.commit_repository ?? repo, {
                 view: "commit",
                 rev: event.action.commit,
+                repository_id: event.action.commit_repository?.id,
               })}
             >
               <code>{event.action.commit.slice(0, 7)}</code>

@@ -72,6 +72,19 @@ test("notifications preserve unread state and open the exact review reply", asyn
       title: "Assigned issue",
       reason: "assigned",
     },
+    {
+      repository: second,
+      sender: actor.name,
+      id: "notice-1",
+      subject: { kind: "issue_transfer", number: 4 },
+      href: "/team/library/issues/4",
+      updated: { id: "activity-1", created_at_ms: 1_699_999_800_000 },
+      read: false,
+      saved: false,
+      done: false,
+      title: "Moved issue",
+      reason: "issue_transferred",
+    },
   ];
   let failPage = true;
   let loseReadReply = true;
@@ -189,6 +202,16 @@ test("notifications preserve unread state and open the exact review reply", asyn
   await page.reload();
   await expect(reason).toHaveText("Assignments");
   await expectNoAccessibilityViolations(page);
+  await chooseSelectOption(reason, "issue_transferred");
+  const transferred = page.getByRole("link", { name: "Moved issue" });
+  await expect(transferred).toHaveAttribute("href", "/team/library/issues/4");
+  const transferRow = page.getByRole("listitem").filter({ has: transferred });
+  await expect(
+    transferRow.getByText(/Issue transferred · Updated by Alice/),
+  ).toBeVisible();
+  await expect(
+    transferRow.getByRole("button", { name: "Unsubscribe" }),
+  ).toHaveCount(0);
   await chooseSelectOption(reason, "");
   await page.getByRole("button", { name: "Load older notifications" }).click();
   await expect(page.getByRole("alert")).toContainText("Inbox unavailable");

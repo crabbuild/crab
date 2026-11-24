@@ -74,6 +74,7 @@ fn native_plan_id(
 
 pub(super) enum Publication {
     NativePush,
+    IssueBranch(super::IssueBranchPublication),
     PullBranch(super::PullBranchPublication),
     ReviewSuggestions(super::SuggestionPublication),
     BranchUpdate(super::BranchUpdatePublication),
@@ -88,6 +89,7 @@ impl Publication {
     fn plan_id(&self) -> Option<String> {
         match self {
             Self::NativePush => None,
+            Self::IssueBranch(branch) => Some(branch.request.plan(branch.source.id)),
             Self::PullBranch(edit) => Some(edit.plan_id.clone()),
             Self::ReviewSuggestions(batch) => Some(batch.plan_id.clone()),
             Self::BranchUpdate(update) => Some(update.plan_id.clone()),
@@ -102,6 +104,7 @@ impl Publication {
     ) -> &'a CancellationToken {
         match self {
             Self::NativePush
+            | Self::IssueBranch(_)
             | Self::PullBranch(_)
             | Self::ReviewSuggestions(_)
             | Self::BranchUpdate(_)
@@ -361,6 +364,12 @@ async fn run_request(
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>> {
     let entry = super::target(server, principal, key).ok_or(ReceiveError::NotFound)?;
+    if matches!(&input.publication, Publication::IssueBranch(branch)
+        if branch.request.branch.repository != entry.id
+            || branch.request.target_epoch != entry.ownership_epoch)
+    {
+        return Err(ReceiveError::NotFound);
+    }
     if matches!(&input.publication, Publication::BranchUpdate(update) if update.repository != entry.id)
         || matches!(&input.publication, Publication::PullBranch(edit)
             if edit.source.id != entry.id || edit.source.ownership_epoch != entry.ownership_epoch
@@ -442,6 +451,7 @@ async fn run_request(
         )
         .chain(match &input.publication {
             Publication::NativePush
+            | Publication::IssueBranch(_)
             | Publication::PullBranch(_)
             | Publication::ReviewSuggestions(_)
             | Publication::ForkSync { .. } => None,
@@ -665,6 +675,7 @@ struct RefMutation<'a> {
     initial_head: Option<(crab_write::capsule_protocol::RootSnapshot, String, String)>,
     closing_ref: Option<&'a crab_git::receive_plan::RefUpdate>,
     closing_issues: BTreeMap<u64, String>,
+    qualified_closing_issues: BTreeMap<keywords::Qualified, String>,
     linear_history: Option<BTreeMap<String, bool>>,
 }
 
@@ -970,6 +981,7 @@ async fn publish_attempt(
         initial_head,
         closing_ref,
         closing_issues: BTreeMap::new(),
+        qualified_closing_issues: BTreeMap::new(),
         linear_history: None,
     };
     let policy = if defer_readiness {
@@ -1030,7 +1042,12 @@ async fn publish_attempt(
         inspect_visible_tip,
         linear_refs,
     );
-    let closing_issues = Arc::new(Mutex::new(BTreeMap::new()));
+    let closing_issues = Arc::new(Mutex::new((BTreeMap::new(), BTreeMap::new())));
+    let observe_qualified = entry.organization.is_some()
+        && current
+            .principal
+            .related_issue_writer(entry.id, entry.id)
+            .is_some();
     let commit_observer = closing_ref.map(|update| {
         let issues = Arc::clone(&closing_issues);
         let observe: Box<crab_git::receive_plan::CommitObserver<'static>> =
@@ -1039,10 +1056,19 @@ async fn publish_attempt(
                     let mut issues = issues
                         .lock()
                         .map_err(|_| crab_git::receive_plan::ReceivePlanError::Cancelled)?;
-                    for number in keywords::numbers(&String::from_utf8_lossy(message)) {
+                    let (issues, qualified) = &mut *issues;
+                    let message = String::from_utf8_lossy(message);
+                    for number in keywords::numbers(&message) {
                         issues.entry(number).or_insert_with(|| oid.to_string());
                     }
-                    if issues.len() > commits::MAX_CLOSURES {
+                    if observe_qualified && message.contains('/') {
+                        for target in
+                            keywords::qualified_with_limit(&message, commits::MAX_CLOSURES + 1)
+                        {
+                            qualified.entry(target).or_insert_with(|| oid.to_string());
+                        }
+                    }
+                    if issues.len() + qualified.len() > commits::MAX_CLOSURES {
                         return Err(crab_git::receive_plan::ReceivePlanError::Limit(
                             "closing issue references",
                         ));
@@ -1091,7 +1117,7 @@ async fn publish_attempt(
         }
         Err(error) => return Err(error),
     };
-    mutation.closing_issues =
+    (mutation.closing_issues, mutation.qualified_closing_issues) =
         std::mem::take(&mut *closing_issues.lock().map_err(|_| ReceiveError::Cancelled)?);
     let changed_path_hashes = prepared.plan().changed_path_hashes().clone();
     mutation.linear_history = Some(prepared.plan().linear_history().clone());
@@ -1382,6 +1408,10 @@ async fn commit_authorized(
     {
         return Err(ReceiveError::Archived);
     }
+    if let Publication::IssueBranch(branch) = mutation.publication {
+        crate::repository::development_branches::authorize(server, entry, principal, branch)
+            .await?;
+    }
     let closure_default = if tracks_issue_closures(server, principal, mutation.updates) {
         Some(entry.default_ref().await?)
     } else {
@@ -1423,6 +1453,12 @@ async fn commit_authorized(
         if let Some(candidate) = &pull.candidate {
             crate::api::authorize_merge_candidate(server, entry, pull, candidate).await?;
         } else {
+            // Preserve the linked-issue closure when branch Git publication
+            // finished before its issue-side receipt was acknowledged.
+            crate::repository::development_branches::recover_for_pull(server, entry, pull.number)
+                .await?;
+            crate::repository::development_branches::promotion::finish(server, entry, pull.number)
+                .await?;
             let linear = mutation
                 .linear_history
                 .as_ref()
@@ -1480,30 +1516,43 @@ async fn commit_authorized(
         webhooks::reserve_publication(server, entry, plan, mutation.updates).await?;
     }
     let mut closing_publication = None;
-    if let Some(update) = closing_ref
-        && !mutation.closing_issues.is_empty()
-    {
-        let plan = plan_id.ok_or(ReceiveError::Request(
-            "Missing issue closure publication plan",
-        ))?;
-        let publication = commits::Publication {
-            plan: plan.to_owned(),
-            reference: update.name.clone(),
-            before: update.old.map(|old| old.to_string()),
-            after: update.new.ok_or(ReceiveError::BranchChanged)?.to_string(),
+    if let Some(update) = closing_ref {
+        let pull = match mutation.publication {
+            Publication::PullRequest(pull) if pull.candidate.is_none() => Some(pull.number),
+            _ => None,
         };
-        if commit_closures::reserve(
+        let cross = commit_closures::capture(
             server,
             entry,
-            commits::Reservation {
-                publication: publication.clone(),
-                actor: (&identity).into(),
-                issues: mutation.closing_issues,
-            },
+            &current.principal,
+            pull,
+            mutation.qualified_closing_issues,
         )
-        .await?
-        {
-            closing_publication = Some(publication);
+        .await?;
+        if !mutation.closing_issues.is_empty() || cross.is_some() {
+            let plan = plan_id.ok_or(ReceiveError::Request(
+                "Missing issue closure publication plan",
+            ))?;
+            let publication = commits::Publication {
+                plan: plan.to_owned(),
+                reference: update.name.clone(),
+                before: update.old.map(|old| old.to_string()),
+                after: update.new.ok_or(ReceiveError::BranchChanged)?.to_string(),
+            };
+            if commit_closures::reserve(
+                server,
+                entry,
+                commits::Reservation {
+                    publication: publication.clone(),
+                    actor: (&identity).into(),
+                    issues: mutation.closing_issues,
+                    cross,
+                },
+            )
+            .await?
+            {
+                closing_publication = Some(publication);
+            }
         }
     }
     if let Some(plan) = plan_id

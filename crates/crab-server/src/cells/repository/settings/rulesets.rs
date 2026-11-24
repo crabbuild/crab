@@ -118,6 +118,41 @@ impl<'a> BypassContext<'a> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum ReviewDismissalActor {
+    User { id: Uuid },
+    Team { id: Uuid },
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+pub(crate) enum ReviewDismissalPolicy {
+    #[default]
+    Unrestricted,
+    Administrator,
+    Restricted(bool),
+}
+
+impl ReviewDismissalPolicy {
+    pub(crate) fn combine(self, other: Self) -> Self {
+        use ReviewDismissalPolicy::*;
+        match (self, other) {
+            (Restricted(left), Restricted(right)) => Restricted(left && right),
+            (explicit @ Restricted(_), _) | (_, explicit @ Restricted(_)) => explicit,
+            (Administrator, _) | (_, Administrator) => Administrator,
+            _ => Unrestricted,
+        }
+    }
+
+    pub(crate) fn allows(self, admin: bool, classic_protection: bool) -> bool {
+        match self {
+            Self::Restricted(allowed) => allowed,
+            Self::Administrator => admin,
+            Self::Unrestricted => !classic_protection || admin,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Ruleset {
@@ -146,6 +181,8 @@ pub(crate) struct Ruleset {
     pub required_integrations: Vec<Uuid>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bypass_actors: Vec<BypassGrant>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_dismissal: Option<Vec<ReviewDismissalActor>>,
 }
 
 impl Ruleset {
@@ -161,6 +198,22 @@ impl Ruleset {
 
     pub(crate) fn allows_bypass(&self, context: BypassContext<'_>, pull: bool) -> bool {
         context.allows(&self.bypass_actors, pull)
+    }
+
+    pub(crate) fn dismissal_policy(
+        &self,
+        actor: Option<Uuid>,
+        teams: &[Uuid],
+    ) -> ReviewDismissalPolicy {
+        use ReviewDismissalPolicy::*;
+        match &self.review_dismissal {
+            Some(allowed) => Restricted(allowed.iter().any(|entry| match entry {
+                ReviewDismissalActor::User { id } => actor == Some(*id),
+                ReviewDismissalActor::Team { id } => teams.contains(id),
+            })),
+            None if self.requires_pull() => Administrator,
+            None => Unrestricted,
+        }
     }
 
     pub(crate) fn violation(
@@ -202,6 +255,16 @@ impl Ruleset {
             && self.name.trim() == self.name
             && !self.name.chars().any(char::is_control)
             && (!self.requires_pull() || self.target == Target::Branch)
+            && self.review_dismissal.as_ref().is_none_or(|entries| {
+                let mut unique = HashSet::new();
+                self.target == Target::Branch
+                    && self.requires_pull()
+                    && entries.len() <= 64
+                    && entries.iter().all(|entry| {
+                        let (ReviewDismissalActor::User { id } | ReviewDismissalActor::Team { id }) = entry;
+                        !id.is_nil() && unique.insert(entry)
+                    })
+            })
             && (self.requires_pull()
                 || self.restrict_creations
                 || self.restrict_updates
@@ -346,11 +409,6 @@ impl<'a> ActiveRulesets<'a> {
             (entry.include.iter().any(matches) && !entry.exclude.iter().any(matches))
                 .then_some(entry.ruleset)
         })
-    }
-
-    pub(crate) fn requires_pull(&self, reference: &str, default_ref: &str) -> bool {
-        self.matches(reference, default_ref)
-            .any(Ruleset::requires_pull)
     }
 
     pub(crate) fn approval_count(&self, reference: &str, default_ref: &str) -> u8 {

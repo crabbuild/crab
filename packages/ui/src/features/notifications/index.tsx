@@ -1,19 +1,26 @@
 import { FieldSelect } from "@/components/ui/field-select";
 import { useEffect, useRef, useState } from "react";
-import {
-  AtSignIcon,
-  BellIcon,
-  GitPullRequestIcon,
-  TagIcon,
-  UserRoundIcon,
-} from "lucide-react";
+import { BellIcon } from "lucide-react";
 import { useMutation } from "@/components/discussion/mutations";
 import { RelativeTime } from "@/components/discussion/time";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { navigate, useRequest } from "@/lib/api";
+import { navigate, useRequest, type Repository } from "@/lib/api";
+import {
+  criteriaAt,
+  inboxHref,
+  inboxQuery,
+  isReason,
+  kinds,
+  reasons,
+  views,
+  type Criteria,
+  type Reason,
+  type View,
+} from "./filters";
+import { SavedFilters } from "./saved-filters";
 
 import {
   bulkActions,
@@ -42,37 +49,6 @@ type InboxPage = { items: Notice[]; next: string | null };
 
 function titleOf(repo: Pick<Address, "owner" | "name">) {
   return `${repo.owner}/${repo.name}`;
-}
-
-const reasons = {
-  release: { label: "Releases", summary: "Release published", icon: TagIcon },
-  subscribed: {
-    label: "Watched updates",
-    summary: "Watched discussion",
-    icon: BellIcon,
-  },
-  assigned: {
-    label: "Assignments",
-    summary: "Assignment",
-    icon: UserRoundIcon,
-  },
-  review_requested: {
-    label: "Review requests",
-    summary: "Review request",
-    icon: GitPullRequestIcon,
-  },
-  mention: { label: "Mentions", summary: "Mention", icon: AtSignIcon },
-  team_mention: {
-    label: "Team mentions",
-    summary: "Team mention",
-    icon: AtSignIcon,
-  },
-};
-
-type Reason = keyof typeof reasons;
-
-function isReason(value: string | null): value is Reason {
-  return value !== null && Object.hasOwn(reasons, value);
 }
 
 const MAX_SELECTION = 50;
@@ -135,31 +111,10 @@ export function NotificationLink({ current }: { current: boolean }) {
   );
 }
 
-const views = {
-  unread: { label: "Unread", empty: "No unread notifications." },
-  all: { label: "All", empty: "No notifications yet." },
-  saved: { label: "Saved", empty: "No saved notifications." },
-  done: { label: "Done", empty: "No completed notifications." },
-} as const;
-
-type View = keyof typeof views;
-
-function isView(value: string | null): value is View {
-  return value !== null && Object.hasOwn(views, value);
-}
-
-function inboxHref(view: View, repository: string, reason: Reason | "") {
-  const query = new URLSearchParams();
-  if (view !== "unread") query.set("tab", view);
-  if (repository) query.set("repository", repository);
-  if (reason) query.set("reason", reason);
-  return `/-/notifications${query.size ? `?${query}` : ""}`;
-}
-
 function visibleIn(view: View, state: NoticeState) {
   if (view === "saved") return state.saved;
   if (view === "done") return state.done;
-  return !state.done && (view === "all" || !state.read);
+  return !state.done && (view === "all" || state.read === (view === "read"));
 }
 
 export function Notifications({
@@ -169,16 +124,14 @@ export function Notifications({
 }: {
   csrf: string;
   url: URL;
-  repositories: Address[];
+  repositories: Repository[];
 }) {
   const tab = url.searchParams.get("tab");
   const transfers = tab === "transfers";
   const invitations = tab === "organization-invitations";
   const discussions = !transfers && !invitations;
-  const view = isView(tab) ? tab : "unread";
-  const repository = url.searchParams.get("repository") ?? "";
-  const selectedReason = url.searchParams.get("reason");
-  const reason = isReason(selectedReason) ? selectedReason : "";
+  const criteria = criteriaAt(url);
+  const { view, repository, kind, organization, author } = criteria;
   return (
     <section
       className="mx-auto grid max-w-4xl gap-5 px-4 py-6 sm:px-8"
@@ -189,24 +142,20 @@ export function Notifications({
           Notifications
         </h1>
         <nav className="flex flex-wrap gap-1" aria-label="Notification views">
-          {Object.keys(views)
-            .filter(isView)
-            .map((item) => (
-              <Button
-                key={item}
-                asChild
-                variant={discussions && view === item ? "secondary" : "ghost"}
+          {(["unread", "all", "saved", "done"] as const).map((item) => (
+            <Button
+              key={item}
+              asChild
+              variant={discussions && view === item ? "secondary" : "ghost"}
+            >
+              <Link
+                href={inboxHref({ ...criteria, view: item })}
+                aria-current={discussions && view === item ? "page" : undefined}
               >
-                <Link
-                  href={inboxHref(item, repository, reason)}
-                  aria-current={
-                    discussions && view === item ? "page" : undefined
-                  }
-                >
-                  {views[item].label}
-                </Link>
-              </Button>
-            ))}
+                {views[item].label}
+              </Link>
+            </Button>
+          ))}
           <Button asChild variant={transfers ? "secondary" : "ghost"}>
             <Link
               href={transfersHref()}
@@ -233,6 +182,14 @@ export function Notifications({
           <Link href="/-/notifications/watched">Watched repositories</Link>
         </Button>
         {csrf && <EmailNotifications csrf={csrf} />}
+        {csrf && discussions && (
+          <SavedFilters
+            csrf={csrf}
+            criteria={criteria}
+            preset={url.searchParams.get("preset")}
+            repositories={repositories}
+          />
+        )}
       </div>
       {transfers && (
         <IncomingTransfers before={url.searchParams.get("before")} />
@@ -245,17 +202,54 @@ export function Notifications({
         </p>
       )}
       {discussions && repository && (
-        <Link className="w-fit underline" href={inboxHref(view, "", reason)}>
+        <Link
+          className="w-fit underline"
+          href={inboxHref({ ...criteria, repository: undefined })}
+        >
           Clear repository filter
         </Link>
       )}
+      {discussions && (organization || kind || author || view === "read") && (
+        <div className="flex flex-wrap items-center gap-3 text-sm">
+          {organization && (
+            <Link
+              className="underline"
+              href={inboxHref({ ...criteria, organization: undefined })}
+            >
+              Clear organization filter
+            </Link>
+          )}
+          {kind && (
+            <Link
+              className="underline"
+              href={inboxHref({ ...criteria, kind: undefined })}
+            >
+              Clear type filter ({kinds[kind]})
+            </Link>
+          )}
+          {author && (
+            <Link
+              className="underline"
+              href={inboxHref({ ...criteria, author: undefined })}
+            >
+              Clear author filter
+            </Link>
+          )}
+          {view === "read" && (
+            <Link
+              className="underline"
+              href={inboxHref({ ...criteria, view: "all" })}
+            >
+              Clear read filter
+            </Link>
+          )}
+        </div>
+      )}
       {discussions && (
         <NotificationList
-          key={inboxHref(view, repository, reason)}
+          key={inboxHref(criteria)}
           csrf={csrf}
-          view={view}
-          repository={repository}
-          reason={reason}
+          criteria={criteria}
           repositories={repositories}
         />
       )}
@@ -265,17 +259,14 @@ export function Notifications({
 
 function NotificationList({
   csrf,
-  view,
-  repository,
-  reason,
+  criteria,
   repositories,
 }: {
   csrf: string;
-  view: View;
-  repository: string;
-  reason: Reason | "";
+  criteria: Criteria;
   repositories: Address[];
 }) {
+  const { view, repository, reason } = criteria;
   const [cursor, setCursor] = useState<string>();
   const [older, setOlder] = useState<Notice[]>([]);
   const [confirmed, setConfirmed] = useState<Record<string, NoticeState>>({});
@@ -287,11 +278,8 @@ function NotificationList({
   const [bulkAction, setBulkAction] = useState<BulkAction | "">("");
   const [intent, setIntent] = useState<BulkIntent>();
   const bulk = useMutation(csrf, null);
-  const canUnsubscribe = view === "all" || view === "unread";
-  const filters = new URLSearchParams({ unread: String(view === "unread") });
-  if (view === "saved" || view === "done") filters.set("view", view);
-  if (repository) filters.set("repository", repository);
-  if (reason) filters.set("reason", reason);
+  const canUnsubscribe = view !== "saved" && view !== "done";
+  const filters = inboxQuery(criteria);
   const initial = useRequest<InboxPage>(`/api/notifications?${filters}`);
   if (cursor) filters.set("before", cursor);
   const page = useRequest<InboxPage>(
@@ -385,7 +373,10 @@ function NotificationList({
         );
         const selectionCanUnsubscribe =
           canUnsubscribe &&
-          selected.every((item) => item.subject.kind !== "release");
+          selected.every(
+            (item) =>
+              item.subject.kind === "issue" || item.subject.kind === "pull",
+          );
         const firstRows = visible.slice(0, MAX_SELECTION);
         const allSelected =
           firstRows.length > 0 &&
@@ -401,9 +392,14 @@ function NotificationList({
               <FieldSelect
                 ref={repositoryFilter}
                 id="inbox-repository"
-                value={repository}
-                onValueChange={(nextValue) =>
-                  navigate(inboxHref(view, nextValue, reason))
+                value={repository ?? ""}
+                onValueChange={(value) =>
+                  navigate(
+                    inboxHref({
+                      ...criteria,
+                      repository: value || undefined,
+                    }),
+                  )
                 }
                 options={[
                   { value: "", label: "All repositories" },
@@ -418,11 +414,13 @@ function NotificationList({
               </label>
               <FieldSelect
                 id="inbox-reason"
-                value={reason}
-                onValueChange={(nextValue) => {
-                  const value = nextValue;
+                value={reason ?? ""}
+                onValueChange={(value) => {
                   navigate(
-                    inboxHref(view, repository, isReason(value) ? value : ""),
+                    inboxHref({
+                      ...criteria,
+                      reason: isReason(value) ? value : undefined,
+                    }),
                   );
                 }}
                 options={[
@@ -562,7 +560,9 @@ function NotificationList({
                         }
                         actionsDisabled={!!intent || selected.length > 0}
                         onUnsubscribe={
-                          canUnsubscribe && item.subject.kind !== "release"
+                          canUnsubscribe &&
+                          (item.subject.kind === "issue" ||
+                            item.subject.kind === "pull")
                             ? () =>
                                 void applyBulk(
                                   notificationIntent("unsubscribe", [item]),

@@ -142,6 +142,9 @@ Capsule plan. Retry reads its durable branch receipt before checking live tips.
 `git/receive/recent_pushes.rs` records candidates before Git publication.
 `api/pulls/recent_pushes.rs` checks committed receipts and live ref transactions
 before offering comparison links. Intent recording is advisory for Git receive.
+`pulls/branch.rs` owns open-comparison lookup by repository-qualified head and
+base. PR creation checks it inside the Cell transaction and records duplicate
+rejections through the existing submission ledger.
 `pulls/viewed.rs` owns actor-scoped review progress,
 bound to stable comparison file identities. Browse projection reads and
 writes belong to `projection/`. `dispatch.rs` alone decodes operation IDs. `search/` owns the shared issue/PR
@@ -278,9 +281,22 @@ their qualified identity before scheduling delivery. Watch outbox events carry
 the activity number and advance by bounded pages after Directory delivery.
 The mention outbox pins enrollment sources to committed activity and gates
 later watch pages until the inbox delivery and follow commit. The Directory
-groups inbox entries by typed discussion. `notifications/triage.rs` binds all
+groups inbox entries by typed discussion. Issue transfer receipts capture
+mentions from the source description. Destination publication enqueues them
+in the same transaction that installs the issue. Transfer inbox entries
+carry their source repository and require current grants to both repositories
+for delivery, viewing, and triage. An opted-in email uses the same notice ID.
+The sender rechecks both grants and the destination issue before sending an
+authenticated inbox link. `api/issues/transferred.rs` follows committed issue
+moves to the published location and rechecks every traversed repository grant
+before disclosure. `notifications/triage.rs` binds all
 selected rows to observed activity in one transaction. `notifications/filing.rs`
 retains saved and completed conversations with private activity-order indexes.
+`notifications/filters.rs` owns account-private, revisioned inbox filters.
+Applying a filter uses the ordinary inbox query and its current repository
+grants. The filter stores repository and organization IDs without labels.
+Author filters bind the viewer or public actor ID to a qualified identity.
+The Repository Cell matches the original discussion or release author.
 `notifications/retention.rs` sweeps expired completions and fences replay.
 `collaboration/watches/inbox.rs` commits inbox dismissal with the Repository
 watch preference. `api/notifications/` checks repository access and mute state before listing
@@ -426,6 +442,10 @@ and session migration paths are supported.
 | Management and capacity | `crates/crab-server/src/server/management/mod.rs` | `src/server/capacity.rs`, `src/metrics/mod.rs` |
 | Git imports and private organization forks | `crates/crab-server/src/git_import/mod.rs` | `src/git_import/source.rs` (validation), `src/git_import/git.rs` (process isolation), `src/git/receive/fork_lfs.rs` (fork LFS copy), `crates/crab-remote/src/prepare/capsule.rs` (shared Xet verification), `src/catalog/mod.rs` (fork lineage and access) |
 | Fork branch synchronization | `crates/crab-server/src/api/fork_sync.rs` | `src/git/receive/fork_sync.rs` (upstream pack and branch lease), `src/git/receive/publish.rs` (policy and receipts) |
+| Create a branch from an issue | `crates/crab-server/src/api/links/branches.rs` | `src/repository/development_branches.rs` (publication authorization and reconciliation), `src/cells/repository/collaboration/links/branches/creation.rs` (reservation and link), `src/api/links/branches/tests.rs` (Git and browser proof) |
+| Open a pull request from a linked branch | `crates/crab-server/src/cells/repository/collaboration/links/branches/promotion.rs` | `src/cells/repository/pulls/operations.rs` (atomic promotion), `src/git/receive/publish.rs` (receipt recovery before merge closure) |
+| Link an issue and a pull request across repositories | `crates/crab-server/src/api/links/cross_repository.rs` | `src/cells/organization/development.rs` (relationship and indexes), `src/cells/repository/issues/transfer/publication.rs` (stable issue origin) |
+| Resolve qualified closing references | `crates/crab-server/src/repository/development_references.rs` | `src/cells/repository/collaboration/links/keywords/` (projection and publication), `src/cells/organization/development/descriptions.rs` (reverse index) |
 | Fork pull request merges | `crates/crab-server/src/api/pulls/merge/mod.rs` | `src/git/receive/fork_merge.rs` (exact fork dependencies), `src/git/receive/publish.rs` (upstream policy and both ref leases) |
 | Commit review suggestions | `crates/crab-server/src/api/pulls/review_threads/suggestions.rs` | `src/git/receive/publish.rs` (target lease and fresh review checks), `packages/ui/src/features/pull-requests/reviews/suggestion.tsx` (destination and commit dialog) |
 | Browse APIs | `crates/crab-server/src/api/mod.rs` | `src/api/query.rs` (Git queries), `src/api/representation.rs` (encoding/ranges) |
@@ -520,6 +540,8 @@ source grants with bounded current work enrichment. Both project scopes share
 canonical source metadata in `cells/repository/projects/reads.rs`; never copy
 source titles/states into organization records or treat project access as a
 repository grant. Private preparation is `cells prepare-organization-projects`.
+`api/organizations/projects/work.rs` resolves moved issues at their published
+location and keeps their stored project address for planning edits.
 The browser workspace lives under `packages/ui/src/features/projects/workspace/`;
 its shared submission controller retains the original organization/account/body.
 

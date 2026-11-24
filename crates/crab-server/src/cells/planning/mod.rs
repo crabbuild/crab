@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+pub(crate) mod bulk;
+
 const KEY: &str = "planning/v2/state";
 const FRAME: usize = 64;
 const MAX_VERSION: u64 = 9_007_199_254_740_991;

@@ -4,7 +4,10 @@ use reqwest::{Client, StatusCode, header, redirect::Policy};
 use serde::Serialize;
 use url::Url;
 
-use super::{Server, mentions::current_grants};
+use super::{
+    Server,
+    mentions::{current_grants, recipient_has_grant},
+};
 use crate::{
     NotificationEmailConfig,
     app::{self, Error},
@@ -16,7 +19,7 @@ use crate::{
                 ClaimMail, FinishMail, Job, MailAttempt, MailDestination, MailFinish, MailPending,
             },
         },
-        repository::collaboration::watches,
+        repository::{GetIssue, collaboration::watches},
     },
 };
 
@@ -44,6 +47,7 @@ pub(crate) struct Sender {
     from: String,
     text: String,
     transfer_text: String,
+    issue_transfer_text: String,
     invitation_text: String,
 }
 
@@ -93,6 +97,9 @@ impl Sender {
         let invitations = public
             .join("/-/notifications?tab=organization-invitations")
             .map_err(|error| crate::Error::Maintenance(Box::new(error)))?;
+        let issue_transfers = public
+            .join("/-/notifications?reason=issue_transferred")
+            .map_err(|error| crate::Error::Maintenance(Box::new(error)))?;
         Ok(Self {
             client,
             endpoint,
@@ -103,6 +110,9 @@ impl Sender {
             text: format!("You have new activity in Crab.\n\nOpen your notifications: {inbox}\n"),
             transfer_text: format!(
                 "You have a repository transfer offer in Crab.\n\nOpen your notifications: {transfers}\n"
+            ),
+            issue_transfer_text: format!(
+                "An issue that mentions you moved to another repository.\n\nOpen your notifications: {issue_transfers}\n"
             ),
             invitation_text: format!(
                 "You have an organization invitation in Crab.\n\nOpen your notifications: {invitations}\n"
@@ -115,6 +125,8 @@ impl Sender {
             ("New organization invitation in Crab", &self.invitation_text)
         } else if job.transfer.is_some() {
             ("New repository transfer in Crab", &self.transfer_text)
+        } else if job.issue_transfer.is_some() {
+            ("Issue transferred in Crab", &self.issue_transfer_text)
         } else {
             ("New activity in Crab", &self.text)
         };
@@ -279,37 +291,33 @@ async fn can_deliver(server: &Server, cells: &CellClient, job: &Job) -> Result<b
     let Some(repo) = server.repositories.by_id(job.repository) else {
         return Ok(false);
     };
-    let Some(grants) = current_grants(server, &repo).await? else {
-        return Ok(false);
-    };
-    let direct = grants
-        .members
-        .iter()
-        .any(|member| member.subject == identity.subject);
-    if !direct {
-        let team = if let Some(organization) = &grants.organization {
-            match app::repository_team_access(server, organization, Some(job.id.actor), false).await
-            {
-                Ok(access) => access.owner || !access.teams.is_empty(),
-                Err(Error::Cell(
-                    crate::cells::Error::NotInitialized | crate::cells::Error::AccessDenied,
-                )) => false,
-                Err(error) => return Err(error.into()),
-            }
-        } else {
-            false
+    if let Some(source) = job.issue_transfer {
+        let Some(origin) = server.repositories.by_id(source.origin) else {
+            return Ok(false);
         };
-        if !team
-            && (!auth.is_oidc()
-                || grants.groups.is_empty()
-                || auth
-                    .mention_group(&identity.subject, &grants.groups)
-                    .await
-                    .map_err(Error::from)?
-                    .is_none())
+        let cell = app::repository_cell(server, &repo)?;
+        if app::query_output(
+            cell.client
+                .query::<GetIssue>(&cell.target, None, source.number)
+                .await,
+        )?
+        .is_none()
         {
             return Ok(false);
         }
+        // The receiver can act on the link only while both grants are current.
+        let Some(grants) = current_grants(server, &origin).await? else {
+            return Ok(false);
+        };
+        if !recipient_has_grant(server, &grants, job.id.actor, identity).await? {
+            return Ok(false);
+        }
+    }
+    let Some(grants) = current_grants(server, &repo).await? else {
+        return Ok(false);
+    };
+    if !recipient_has_grant(server, &grants, job.id.actor, identity).await? {
+        return Ok(false);
     }
     let preference = app::query_output(
         cells

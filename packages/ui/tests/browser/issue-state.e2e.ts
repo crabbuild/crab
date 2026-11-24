@@ -163,3 +163,67 @@ test("a delayed close response cannot replace a newer refreshed issue", async ({
     page.getByRole("heading", { name: "A newer title #1" }),
   ).toBeVisible();
 });
+
+test("a transferred issue preserves its comment link and conceals an unreadable destination", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const { lifecycle } = await mockPullRequest(page);
+  const library = {
+    id: "00000000-0000-4000-8000-000000000014",
+    owner: "team",
+    name: "library",
+  };
+  await page.route(
+    (url) => url.pathname === "/api/repos",
+    (route) =>
+      route.fulfill({
+        json: {
+          repositories: [
+            {
+              id: lifecycle.repositoryId,
+              owner: "team",
+              name: "project",
+              access: "write",
+              archived: false,
+            },
+            { ...library, access: "read", archived: false },
+          ],
+        },
+      }),
+  );
+  let transfer: Record<string, unknown> = { state: "unavailable" };
+  await page.route(
+    (url) => url.pathname === "/api/repos/team/project/issues/1",
+    (route) => route.fulfill({ json: { transfer } }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/repos/team/library/issues/2",
+    (route) => route.fulfill({ json: { ...record(), number: 2 } }),
+  );
+  await page.goto("/team/project/issues/1#comment-1");
+  await expect(
+    page.getByText(
+      "This issue was transferred to a repository you can’t access.",
+    ),
+  ).toBeVisible();
+  await expect(page.locator('a[href*="/team/library"]')).toHaveCount(0);
+  await expectNoAccessibilityViolations(page);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(
+    390,
+  );
+
+  transfer = { state: "pending" };
+  await page.reload();
+  await expect(
+    page.getByText("This issue is being transferred."),
+  ).toBeVisible();
+  transfer = { state: "ready", repository: library, number: 2 };
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect(page).toHaveURL(
+    `/team/library/issues/2?repository_id=${library.id}#comment-1`,
+  );
+  await expect(
+    page.getByRole("heading", { name: "Issue lifecycle #2" }),
+  ).toBeVisible();
+});

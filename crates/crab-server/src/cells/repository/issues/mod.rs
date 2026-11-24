@@ -3,6 +3,7 @@ pub(crate) mod issue_type;
 pub(crate) mod lifecycle;
 pub(crate) mod pins;
 mod reads;
+pub(crate) mod transfer;
 use crate::cells::repository::collaboration::{
     Target,
     activity::{self, Action},
@@ -90,9 +91,16 @@ impl CreateIssue {
                         vec![integer(number)?],
                     )],
                 })?;
-                let issue = current[0].rows.first().ok_or(crate::cells::Error::Invalid(
-                    "repository issue submission has no issue row",
-                ))?;
+                let Some(issue) = current[0].rows.first() else {
+                    if transfer::publication::moved(context, number)?.is_some() {
+                        return Ok(MutationResult::Success(CreateIssueOutcome::Transferred(
+                            number,
+                        )));
+                    }
+                    return Err(crate::cells::Error::Invalid(
+                        "repository issue submission has no issue row",
+                    ));
+                };
                 return Ok(MutationResult::Success(CreateIssueOutcome::Created(
                     Box::new(issue_from_row(issue)?),
                 )));
@@ -123,24 +131,7 @@ impl CreateIssue {
         };
         let milestone = input.metadata.selection.milestone;
         let now = timestamp(context.now_ms())?;
-        let sequence = context.sql(&SqlBatch {
-            statements: vec![
-                statement(
-                    "UPDATE repository_sequences SET last = last + 1 WHERE kind = 'issue' AND last < 9007199254740991",
-                    vec![],
-                ),
-                statement(
-                    "SELECT last FROM repository_sequences WHERE kind = 'issue'",
-                    vec![],
-                ),
-            ],
-        })?;
-        if sequence[0].rows_affected != 1 {
-            return Err(crate::cells::Error::Invalid(
-                "repository issue numbering is exhausted",
-            ));
-        }
-        let number = result_u64(&sequence, 1, 0)?;
+        let number = allocate_issue(context)?;
         let record = IssueRecord {
             number,
             author: input.author,
@@ -192,6 +183,27 @@ impl CreateIssue {
             Box::new(record),
         )))
     }
+}
+
+fn allocate_issue(context: &Transaction<'_>) -> crate::cells::Result<u64> {
+    let sequence = context.sql(&SqlBatch {
+        statements: vec![
+            statement(
+                "UPDATE repository_sequences SET last = last + 1 WHERE kind = 'issue' AND last < 9007199254740991",
+                vec![],
+            ),
+            statement(
+                "SELECT last FROM repository_sequences WHERE kind = 'issue'",
+                vec![],
+            ),
+        ],
+    })?;
+    if sequence[0].rows_affected != 1 {
+        return Err(crate::cells::Error::Invalid(
+            "repository issue numbering is exhausted",
+        ));
+    }
+    result_u64(&sequence, 1, 0)
 }
 
 pub(crate) struct CreateComment;
@@ -529,6 +541,9 @@ impl UpdateIssue {
             }
         }
         if was_closed != (issue.state != 0) {
+            // A deferred merge applies to the observed open state even when
+            // the issue title or other metadata changes while it is pending.
+            lifecycle::store_state_version(context, issue.number, Some(issue.version))?;
             let action = if issue.state == 0 {
                 Action::Reopened
             } else {
@@ -538,11 +553,15 @@ impl UpdateIssue {
                         .ok_or(crate::cells::Error::Invalid("new closure has no reason"))?,
                     pull: closing_source.and_then(|source| match source {
                         ClosingSource::Pull(number) => Some(number),
-                        ClosingSource::Commit(_) => None,
+                        _ => None,
                     }),
                     commit: closing_source.and_then(|source| match source {
                         ClosingSource::Commit(oid) => Some(oid.to_owned()),
-                        ClosingSource::Pull(_) => None,
+                        _ => None,
+                    }),
+                    external_commit: closing_source.and_then(|source| match source {
+                        ClosingSource::ExternalCommit(commit) => Some(commit.clone()),
+                        _ => None,
                     }),
                 }
             };
@@ -574,6 +593,8 @@ impl UpdateIssue {
 pub(in crate::cells::repository) enum ClosingSource<'a> {
     Pull(u64),
     Commit(&'a str),
+    ExternalPull,
+    ExternalCommit(&'a activity::ExternalCommit),
 }
 
 pub(in crate::cells::repository) fn close_linked_issue(

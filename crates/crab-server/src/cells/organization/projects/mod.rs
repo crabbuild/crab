@@ -9,13 +9,13 @@ mod history;
 mod issue_creation;
 mod reads;
 use crate::cells::planning as ledger;
-pub(crate) use commands::{Change, Command, Outcome, Request};
+pub(crate) use commands::{AttachmentCheck, Change, Command, Outcome, Request};
 pub(crate) use history::{GetHistory, HistoryQuery};
 pub(in crate::cells) use issue_creation::due;
 pub(crate) use issue_creation::{ResolveInput, ResolveIssue};
 pub(crate) use reads::{
-    Get, Items, ItemsQuery, List, ListQuery, MatchedItems, ProjectKey, TypeSources,
-    TypeSourcesQuery, View,
+    BulkSourceQuery, BulkSources, Get, GetAttachmentSources, Items, ItemsQuery, List, ListQuery,
+    MatchedItems, ProjectKey, Sources, SourcesQuery, View, WorkSource,
 };
 
 const READY: &str = "organization/projects/v1/ready";
@@ -193,7 +193,14 @@ pub(in crate::cells::organization) fn handles(operation: u32, mutation: bool) ->
     } else {
         matches!(
             operation,
-            GetPreparation::ID | List::ID | Get::ID | Items::ID | GetHistory::ID | TypeSources::ID
+            GetPreparation::ID
+                | List::ID
+                | Get::ID
+                | Items::ID
+                | GetHistory::ID
+                | Sources::ID
+                | GetAttachmentSources::ID
+                | BulkSources::ID
         )
     }
 }

@@ -8,10 +8,197 @@ use crate::{
     test_support::{git, http::Harness},
 };
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn issue_transfer_notices_follow_membership_in_both_repositories() {
+    let h = Harness::new(false).await;
+    h.add_repository("library").await;
+    let alice = h.login().await;
+    let original: Value = h
+        .write(
+            Method::POST,
+            "/api/profile",
+            &alice,
+            json!({"request_id":Uuid::now_v7(),"handle":"alice","name":"Alice"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    *h.provider.mode.lock().await = "outsider".into();
+    let outsider = h.login().await;
+    for (cookie, handle) in [(&bob, "bob"), (&outsider, "outside-reader")] {
+        h.write(
+            Method::POST,
+            "/api/profile",
+            cookie,
+            json!({"request_id":Uuid::now_v7(),"handle":handle,"name":handle}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    }
+    let catalog = h.server.catalog().unwrap();
+    let admin = RepositoryMember {
+        subject: "alice-id".into(),
+        name: "Alice".into(),
+        access: RepositoryAccess::Admin,
+    };
+    let destination = catalog
+        .set_members(
+            "team",
+            "library",
+            vec![
+                admin.clone(),
+                RepositoryMember {
+                    subject: "bob-id".into(),
+                    name: "Bob".into(),
+                    access: RepositoryAccess::Read,
+                },
+                RepositoryMember {
+                    subject: "outsider-id".into(),
+                    name: "Outside reader".into(),
+                    access: RepositoryAccess::Read,
+                },
+            ],
+            true,
+        )
+        .await
+        .unwrap()
+        .id;
+    h.write(
+        Method::POST,
+        "/api/repos/team/private/issues",
+        &alice,
+        json!({"request_id":Uuid::now_v7(),"title":"Moved discussion","body":"Hello @bob, @outside-reader"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    h.deliver_notifications("team", "private").await;
+    assert_eq!(
+        h.json("/api/notifications?reason=mention", &bob).await["items"][0]["title"],
+        "Moved discussion"
+    );
+    let issue = "/api/repos/team/private/issues/1";
+    let version = h.json(issue, &alice).await["version"].clone();
+    let move_request =
+        json!({"request_id":Uuid::now_v7(),"version":version,"destination":destination});
+    let transfer = format!("{issue}/transfer");
+    assert_eq!(
+        h.write(Method::POST, &transfer, &alice, move_request.clone())
+            .await
+            .status(),
+        StatusCode::ACCEPTED
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            if h.json(issue, &alice).await["transfer"]["state"] == "ready" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+    h.deliver_notifications("team", "library").await;
+    h.write(Method::POST, &transfer, &alice, move_request)
+        .await
+        .error_for_status()
+        .unwrap();
+    h.deliver_notifications("team", "library").await;
+    let inbox = "/api/notifications?reason=issue_transferred";
+    let page = h.json(inbox, &bob).await;
+    let author = original["id"].as_str().unwrap();
+    let author_inbox = format!("{inbox}&author={author}");
+    assert_eq!(h.json(&author_inbox, &bob).await, page);
+    assert_eq!(
+        h.json(&format!("{inbox}&author=me"), &bob).await["items"],
+        json!([])
+    );
+    let [notice] = page["items"].as_array().unwrap().as_slice() else {
+        panic!("expected one issue transfer notice, got {page}");
+    };
+    assert_eq!(notice["title"], "Moved discussion");
+    assert_eq!(
+        notice["href"],
+        format!("/team/library/issues/1?repository_id={destination}")
+    );
+    assert_eq!(
+        notice["subject"],
+        json!({"kind":"issue_transfer","number":1})
+    );
+    assert_eq!(h.json(inbox, &outsider).await["items"], json!([]));
+    assert_eq!(
+        h.json("/api/notifications/unread", &bob).await["unread"],
+        true
+    );
+
+    let mark = format!(
+        "/api/notifications/{}/state",
+        notice["id"].as_str().unwrap()
+    );
+    let save =
+        json!({"repository_id":destination,"expected":notice["updated"],"action":{"save":true}});
+    assert_eq!(
+        h.write(Method::PUT, &mark, &bob, save.clone())
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    for read in [true, false] {
+        h.write(
+            Method::PUT, &mark, &bob,
+            json!({"repository_id":destination,"expected":notice["updated"],"action":{"read":read}}),
+        ).await.error_for_status().unwrap();
+        assert_eq!(
+            h.json("/api/notifications/unread", &bob).await["unread"],
+            !read
+        );
+    }
+    catalog
+        .set_members("team", "private", vec![admin], true)
+        .await
+        .unwrap();
+    assert_eq!(h.json(inbox, &bob).await["items"], json!([]));
+    assert_eq!(
+        h.json("/api/notifications?view=saved", &bob).await["items"],
+        json!([])
+    );
+    assert_eq!(
+        h.json("/api/notifications/unread", &bob).await["unread"],
+        false
+    );
+    assert_eq!(
+        h.write(Method::PUT, &mark, &bob, save).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        h.json("/api/repos/team/library/issues/1", &bob).await["title"],
+        "Moved discussion"
+    );
+}
+
 #[tokio::test]
 async fn inbox_delivers_a_review_request_and_mention_to_the_current_member() {
     let h = Harness::new(false).await;
     let alice = h.login().await;
+    let original: Value = h
+        .write(
+            Method::POST,
+            "/api/profile",
+            &alice,
+            json!({"request_id":Uuid::now_v7(),"handle":"alice","name":"Alice"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     let bob_id = h.assignee_id(&alice, "Bob").await;
     *h.provider.mode.lock().await = "member".into();
     let bob = h.login().await;
@@ -88,6 +275,18 @@ async fn inbox_delivers_a_review_request_and_mention_to_the_current_member() {
     let review = &page["items"][0];
     assert_eq!(review["reason"], "review_requested");
     assert_eq!(review["title"], "Please review");
+    let author = original["id"].as_str().unwrap();
+    let authored = h
+        .json(
+            &format!("/api/notifications?kind=pull&author={author}"),
+            &bob,
+        )
+        .await;
+    assert_eq!(authored["items"], json!([review]));
+    assert_eq!(
+        h.json("/api/notifications?kind=pull&author=me", &bob).await["items"],
+        json!([])
+    );
     assert!(
         review["href"]
             .as_str()

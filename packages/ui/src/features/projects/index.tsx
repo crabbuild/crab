@@ -41,7 +41,8 @@ import {
   type AddProjectGroupItem,
 } from "./grouping";
 import type { IssueType } from "@/lib/contracts";
-import { ProjectBoard, ProjectTable, ProjectRoadmap } from "./views";
+import { ProjectBoard } from "./board";
+import { ProjectTable, ProjectRoadmap } from "./views";
 import { useProjectCommands } from "./commands";
 import { ProjectHistory } from "./history";
 import { DraftRecovery } from "./drafts";
@@ -291,6 +292,8 @@ function ProjectWorkspace({
     if (resource.data) setProject(resource.data.page.project);
   }, [resource.data]);
   const manager = resource.data?.can_manage ?? canManage;
+  const bulkTarget =
+    manager && !repo.archived && !project.archived ? { repo } : undefined;
   const editable =
     manager && !repo.archived && !project.archived && !commands.locked;
   const onIssueTypeChange =
@@ -527,6 +530,7 @@ function ProjectWorkspace({
                       repo={repo}
                       page={page}
                       editable={editable && can_manage}
+                      bulkTarget={bulkTarget}
                       onEdit={setEditing}
                       onAddGroupItem={addGroupItem}
                       onAddGroupIssue={addGroupIssue}
@@ -552,6 +556,7 @@ function ProjectWorkspace({
                       repo={repo}
                       page={page}
                       editable={editable && can_manage}
+                      bulkTarget={bulkTarget}
                       onEdit={setEditing}
                       onAddGroupItem={addGroupItem}
                       onAddGroupIssue={addGroupIssue}

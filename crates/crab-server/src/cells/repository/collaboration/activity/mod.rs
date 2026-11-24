@@ -10,6 +10,21 @@ const ROOT: &str = "collaboration/v1/activity";
 const SEQUENCE: &str = "collaboration/v1/activity/sequence";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExternalCommit {
+    pub repository: uuid::Uuid,
+    pub oid: String,
+}
+
+impl ExternalCommit {
+    pub(super) fn valid(&self) -> bool {
+        !self.repository.is_nil()
+            && self.oid.len() == 40
+            && gix_hash::ObjectId::from_hex(self.oid.as_bytes()).is_ok()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Action {
     ProjectChanged {
@@ -82,6 +97,8 @@ pub(crate) enum Action {
         pull: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         commit: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        external_commit: Option<ExternalCommit>,
     },
     IssueCloseReasonChanged {
         from: Option<crate::cells::repository::issues::lifecycle::Reason>,
@@ -285,13 +302,29 @@ impl Action {
             pull,
             commit: Some(commit),
             reason,
+            external_commit,
         } = self
             && (pull.is_some()
+                || external_commit.is_some()
                 || *reason != super::super::issues::lifecycle::Reason::Completed
                 || commit.len() != 40
                 || gix_hash::ObjectId::from_hex(commit.as_bytes()).is_err())
         {
             return Err(crate::cells::Error::Invalid("invalid closing commit"));
+        }
+        if let Self::IssueClosed {
+            pull,
+            reason,
+            external_commit: Some(commit),
+            ..
+        } = self
+            && (pull.is_some()
+                || *reason != super::super::issues::lifecycle::Reason::Completed
+                || !commit.valid())
+        {
+            return Err(crate::cells::Error::Invalid(
+                "invalid external closing commit",
+            ));
         }
         if !valid {
             return Err(crate::cells::Error::Invalid(
@@ -355,10 +388,35 @@ pub(in crate::cells::repository) fn append(
         action,
         created_at: timestamp(context.now_ms())?,
     };
+    store(context, &event)?;
+    super::watches::participate(context, &event)?;
+    super::mentions::watched(context, &event)?;
+    Ok(event)
+}
+
+pub(in crate::cells::repository) fn import(
+    context: &Transaction<'_>,
+    mut event: Event,
+) -> crate::cells::Result<Event> {
+    validate_author(&event.actor)?;
+    event.action.validate(event.target)?;
+    if !event.target.exists(context)? {
+        return Err(crate::cells::Error::Invalid(
+            "Imported activity target is missing",
+        ));
+    }
+    event.number = super::next_version(latest(context)?)?;
+    store(context, &event)?;
+    Ok(event)
+}
+
+fn store(context: &Transaction<'_>, event: &Event) -> crate::cells::Result<()> {
+    let number = event.number;
+    let subject = event.target.subject();
     // The caller's SQL write, event, indexes, and sequence share the native
     // command transaction. A rejected command cannot leave phantom activity.
     context.put_document(SEQUENCE, &number)?;
-    context.put_document(&format!("{}{number:016x}", events(None)), &event)?;
+    context.put_document(&format!("{}{number:016x}", events(None)), event)?;
     context.put_document(&format!("{}{number:016x}", events(Some(subject))), &true)?;
     if let Some(related) = event.action.related_subject() {
         if related.closed(context)?.is_none() {
@@ -369,10 +427,7 @@ pub(in crate::cells::repository) fn append(
         // A relationship is one repository event visible from both subjects.
         context.put_document(&format!("{}{number:016x}", events(Some(related))), &true)?;
     }
-    super::conversation::project_event(context, &event)?;
-    super::watches::participate(context, &event)?;
-    super::mentions::watched(context, &event)?;
-    Ok(event)
+    super::conversation::project_event(context, event)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

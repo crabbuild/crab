@@ -22,16 +22,17 @@ fn cell(server: &crate::server::Server) -> RepositoryCell {
         .unwrap()
 }
 fn input(draft: bool) -> CreatePullInput {
+    let request = Uuid::now_v7();
     CreatePullInput {
         code_owner_requests: Default::default(),
         metadata: Default::default(),
         draft,
-        submission_id: *Uuid::now_v7().as_bytes(),
+        submission_id: *request.as_bytes(),
         author: actor("Alice"),
         title: "Draft workflow".into(),
         body: "Initial body".into(),
         base_ref: "refs/heads/main".into(),
-        head_ref: "refs/heads/feature".into(),
+        head_ref: format!("refs/heads/feature-{request}"),
         head_repository: None,
         base_oid: "a".repeat(40),
         head_oid: "b".repeat(40),

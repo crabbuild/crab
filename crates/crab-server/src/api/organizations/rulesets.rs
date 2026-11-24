@@ -131,6 +131,9 @@ async fn replace(
         ReplaceOutcome::Saved(settings) => Ok(Json(settings)),
         ReplaceOutcome::Conflict => Err(Error::Conflict),
         ReplaceOutcome::UnavailableTeam => Err(Error::Invalid("Choose an active, non-secret team")),
+        ReplaceOutcome::UnavailableMember => Err(Error::Invalid(
+            "Choose an active organization member for review dismissal",
+        )),
         ReplaceOutcome::UnavailableProperty => Err(Error::Invalid(
             "Choose a defined repository property and an allowed value",
         )),

@@ -509,6 +509,60 @@ fn adjust(
     context.put_document(&key(number), &milestone)
 }
 
+fn replace_assignment(
+    context: &Transaction<'_>,
+    mut assignment: StoredAssignment,
+    selected: Option<u64>,
+    closed: bool,
+) -> crate::cells::Result<StoredAssignment> {
+    if let Some(number) = assignment.milestone {
+        context.delete_document(&item_key(number, assignment.position))?;
+        adjust(context, number, closed, false)?;
+    }
+    if let Some(number) = selected {
+        let sequence_key = format!("{PREFIX}/sequences/milestone-items");
+        let last = context.document::<u64>(&sequence_key)?.unwrap_or(0);
+        assignment.position = next_version(last)?;
+        context.put_document(&sequence_key, &assignment.position)?;
+        context.put_document(&item_key(number, assignment.position), &assignment.subject)?;
+        adjust(context, number, closed, true)?;
+    } else {
+        assignment.position = 0;
+    }
+    assignment.milestone = selected;
+    assignment.version = next_version(assignment.version)?;
+    context.put_document(&assignment_key(assignment.subject), &assignment)?;
+    super::super::search::index::dirty(context, assignment.subject)?;
+    advance_revision(context)?;
+    Ok(assignment)
+}
+
+pub(in crate::cells::repository) fn transfer_assignment(
+    context: &Transaction<'_>,
+    subject: Subject,
+    selected: Option<u64>,
+) -> crate::cells::Result<()> {
+    let current = assignment(context, subject)?;
+    if current.milestone != selected {
+        replace_assignment(context, current, selected, false)?;
+    }
+    Ok(())
+}
+
+pub(in crate::cells::repository) fn find_transfer_match(
+    context: &Transaction<'_>,
+    title: &str,
+    due_on: Option<&str>,
+) -> crate::cells::Result<Option<u64>> {
+    let Some(number) = context.document::<u64>(&name_key(title))? else {
+        return Ok(None);
+    };
+    let value = load(context, number)?.ok_or(crate::cells::Error::Invalid(
+        "milestone name has no milestone",
+    ))?;
+    Ok((value.due_on.as_deref() == due_on).then_some(number))
+}
+
 pub(crate) struct AssignMilestone;
 impl Mutation for AssignMilestone {
     const CLASS: &'static str = crate::cells::repository::CLASS;
@@ -526,8 +580,7 @@ impl Mutation for AssignMilestone {
         let Some(closed) = input.subject.closed(context)? else {
             return Ok(MutationResult::Rejected(Decision::NotFound));
         };
-        let key = assignment_key(input.subject);
-        let mut assignment = assignment(context, input.subject)?;
+        let assignment = assignment(context, input.subject)?;
         if let Some(number) = input.milestone
             && load(context, number)?.is_none()
         {
@@ -542,25 +595,7 @@ impl Mutation for AssignMilestone {
             return Ok(MutationResult::Rejected(Decision::Conflict));
         }
         let previous = assignment.milestone;
-        if let Some(number) = assignment.milestone {
-            context.delete_document(&item_key(number, assignment.position))?;
-            adjust(context, number, closed, false)?;
-        }
-        if let Some(number) = input.milestone {
-            let sequence_key = format!("{PREFIX}/sequences/milestone-items");
-            let last = context.document::<u64>(&sequence_key)?.unwrap_or(0);
-            assignment.position = next_version(last)?;
-            context.put_document(&sequence_key, &assignment.position)?;
-            context.put_document(&item_key(number, assignment.position), &input.subject)?;
-            adjust(context, number, closed, true)?;
-        } else {
-            assignment.position = 0;
-        }
-        assignment.milestone = input.milestone;
-        assignment.version = next_version(assignment.version)?;
-        context.put_document(&key, &assignment)?;
-        super::super::search::index::dirty(context, input.subject)?;
-        advance_revision(context)?;
+        let assignment = replace_assignment(context, assignment, input.milestone, closed)?;
         let target = match input.subject.kind {
             SubjectKind::Issue => Target::Issue {
                 number: input.subject.number,

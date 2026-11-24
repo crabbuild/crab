@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use super::{Address, Error, Result, directory, organization, repository};
 
+mod issue_transfer_recovery;
 mod project_issue_recovery;
 
 pub(crate) use cellar::sdk::storage::SqlValue;
@@ -281,6 +282,52 @@ pub(crate) struct Reply {
     pub output: Value,
 }
 
+async fn command_from_alarm<C: Mutation>(
+    context: &Context,
+    target: Address,
+    input: C::Input,
+) -> Result<C::Output> {
+    if target.class() != C::CLASS {
+        return Err(Error::Invalid("Command belongs to another Cell authority"));
+    }
+    let now_ms = super::unix_now_ms()?;
+    let request = Request {
+        target,
+        operation: C::ID,
+        mutation: Some(MutationIdentity {
+            request_id: Uuid::now_v7(),
+            issued_at_ms: now_ms,
+            expires_at_ms: now_ms.saturating_add(60_000),
+        }),
+        minimum: None,
+        input: serde_json::to_value(input)?,
+    };
+    // The ordinary native output gate proves the other Cell's decision
+    // durable before the caller acknowledges its own queued work.
+    let response = context
+        .namespace(target.namespace())
+        .map_err(Error::sdk)?
+        .get_by_name(&target.name())
+        .fetch(
+            context,
+            cellar::sdk::Request {
+                url: format!("http://crab{}", target.path()),
+                method: "POST".into(),
+                headers: vec![("content-type".into(), "application/json".into())],
+                body: cellar::engine_api::RequestBody::Bytes(serde_json::to_vec(&request)?.into()),
+                entrypoint: None,
+            },
+        )
+        .await
+        .map_err(Error::sdk)?;
+    if response.status != 200 || response.stream.is_some() || response.body.len() > MAX_RESULT_BYTES
+    {
+        return Err(Error::Unavailable);
+    }
+    let reply: Reply = serde_json::from_slice(&response.body)?;
+    Ok(serde_json::from_value(reply.output)?)
+}
+
 async fn request_bytes(
     context: &Context,
     body: cellar::engine_api::RequestBody,
@@ -308,6 +355,10 @@ impl Cell for ApplicationCell {
                 Invocation::Fetch(request) => request,
                 Invocation::Alarm { .. } if self.class == organization::CLASS => {
                     project_issue_recovery::alarm(&context).await?;
+                    return Ok(Output::Done);
+                }
+                Invocation::Alarm { .. } if self.class == repository::CLASS => {
+                    issue_transfer_recovery::alarm(&context).await?;
                     return Ok(Output::Done);
                 }
                 _ => return Ok(Output::Done),

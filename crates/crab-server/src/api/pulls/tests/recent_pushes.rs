@@ -166,6 +166,28 @@ async fn native_browser_opens_a_pull_from_a_stock_git_push() {
     let pull: Value = h.json("/api/repos/team/private/pulls/1", &writer).await;
     assert_eq!(pull["head_oid"], head);
     assert_eq!(h.json(ENDPOINT, &writer).await["items"], json!([]));
+    browser
+        .run(&[
+            "open",
+            &format!("{root}/compare/main...feature?title=Another+review"),
+        ])
+        .await;
+    browser
+        .run(&["wait", "--text", "View pull request #1"])
+        .await;
+    browser.run(&["wait", "--fn", "Array.from(document.querySelectorAll('button')).some(button => button.textContent.trim() === 'Create pull request' && button.disabled)"]).await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "link",
+            "click",
+            "--name",
+            "View pull request #1",
+            "--exact",
+        ])
+        .await;
+    browser.run(&["wait", "--url", "**/pull/1*"]).await;
     drop(browser);
     h.close().await;
 }

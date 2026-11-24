@@ -35,7 +35,10 @@ fn target(subject: Subject) -> Target {
     }
 }
 
-pub(super) fn current(context: &Transaction<'_>, subject: Subject) -> Result<Option<u64>> {
+pub(in crate::cells::repository) fn current(
+    context: &Transaction<'_>,
+    subject: Subject,
+) -> Result<Option<u64>> {
     Ok(context
         .document::<Mark>(&key(subject))?
         .filter(|mark| mark.active)

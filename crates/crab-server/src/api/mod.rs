@@ -28,6 +28,7 @@ mod members;
 mod milestones;
 mod notifications;
 mod organizations;
+mod personal_work;
 mod profiles;
 mod projects;
 mod pulls;
@@ -592,6 +593,14 @@ pub(crate) fn routes(server: Arc<Server>) -> axum::Router<Arc<Server>> {
         .route(
             "/api/code-search",
             axum::routing::get(code_search::workspace::search),
+        )
+        .route(
+            "/api/personal-work",
+            axum::routing::get(personal_work::list),
+        )
+        .route(
+            "/api/discussion-search",
+            axum::routing::get(personal_work::search),
         )
         .route("/api/repos", axum::routing::get(catalog::list))
         .merge(catalog::namespace_routes(Arc::clone(&server)))

@@ -1,5 +1,97 @@
 use super::*;
+use crate::cells::repository::{
+    collaboration::{Subject, SubjectKind},
+    issues::transfer::publication::Destination,
+};
 use planning::grouping::{self, GroupBy};
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BulkSourceQuery {
+    pub actor: Uuid,
+    pub project: Uuid,
+    pub items: Vec<Uuid>,
+}
+
+pub(crate) struct BulkSources;
+impl Read for BulkSources {
+    const CLASS: &'static str = super::super::CLASS;
+    const ID: u32 = 90;
+    type Input = BulkSourceQuery;
+    type Output = Option<Vec<(Uuid, Subject)>>;
+
+    fn execute(context: &mut Transaction<'_>, input: BulkSourceQuery) -> Result<Self::Output> {
+        let Some(project) = load(context, input.project)? else {
+            return Ok(None);
+        };
+        if input.items.len() > ledger::bulk::LIMIT || !can_manage(context, input.actor, &project)? {
+            return Ok(None);
+        }
+        let mut sources = Vec::new();
+        for id in input.items {
+            let Some(entry) = item(context, input.project, id)? else {
+                return Ok(None);
+            };
+            if let Some((repo, subject)) = entry.repository.zip(entry.item.subject) {
+                sources.push((repo, subject));
+            }
+        }
+        Ok(Some(sources))
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AttachmentSources {
+    pub project_version: u64,
+    pub issues: Vec<Destination>,
+    pub pending: Vec<(Uuid, Uuid)>,
+}
+
+pub(crate) struct GetAttachmentSources;
+impl Read for GetAttachmentSources {
+    const CLASS: &'static str = super::super::CLASS;
+    const ID: u32 = 36;
+    type Input = ProjectKey;
+    type Output = Option<AttachmentSources>;
+
+    fn execute(context: &mut Transaction<'_>, input: ProjectKey) -> Result<Self::Output> {
+        let Some(project) = load(context, input.project)? else {
+            return Ok(None);
+        };
+        if !can_manage(context, input.actor, &project)? {
+            return Ok(None);
+        }
+        let rows = context.query(
+            "SELECT repository,number FROM organization_project_items WHERE project=? AND kind=0 LIMIT ?",
+            &[blob(project.id), integer(MAX_ITEMS + 1)?],
+        )?;
+        if rows.rows.len() as u64 > MAX_ITEMS {
+            return Err(Error::Invalid(
+                "Project source lookup exceeds the item limit",
+            ));
+        }
+        let issues = rows
+            .rows
+            .iter()
+            .map(|row| {
+                Ok(Destination {
+                    repository: uuid(&row[0])?,
+                    number: uint(&row[1])?,
+                })
+            })
+            .collect::<Result<_>>()?;
+        let pending = issue_creation::reservations(context, project.id)?
+            .into_values()
+            .map(|reservation| (reservation.repository, reservation.request_id))
+            .collect();
+        Ok(Some(AttachmentSources {
+            project_version: project.version,
+            issues,
+            pending,
+        }))
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -89,7 +181,6 @@ pub(crate) struct ItemsQuery {
     pub after: Option<Uuid>,
     pub version: Option<u64>,
     pub status: Option<String>,
-    pub repository: Option<Uuid>,
     pub item: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matched: Option<MatchedItems>,
@@ -105,64 +196,80 @@ pub(crate) struct MatchedItems {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct TypeSourcesQuery {
+pub(crate) struct SourcesQuery {
     pub actor: Uuid,
     pub project: Uuid,
-    pub repository: Option<Uuid>,
     pub item: Option<Uuid>,
+    pub include_pulls: bool,
 }
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct TypeSource {
+pub(crate) struct WorkSource {
     pub repository: Uuid,
     pub item: Uuid,
-    pub number: u64,
+    pub subject: Subject,
     pub status: String,
 }
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct TypeSourcePage {
+pub(crate) struct SourcePage {
     pub project_version: u64,
-    pub items: Vec<TypeSource>,
+    pub items: Vec<WorkSource>,
 }
 
-pub(crate) struct TypeSources;
-impl Read for TypeSources {
+pub(crate) struct Sources;
+impl Read for Sources {
     const CLASS: &'static str = super::super::CLASS;
     const ID: u32 = 35;
-    type Input = TypeSourcesQuery;
-    type Output = Option<TypeSourcePage>;
+    type Input = SourcesQuery;
+    type Output = Option<SourcePage>;
 
-    fn execute(context: &mut Transaction<'_>, input: TypeSourcesQuery) -> Result<Self::Output> {
+    fn execute(context: &mut Transaction<'_>, input: SourcesQuery) -> Result<Self::Output> {
         let Some(project) = load(context, input.project)? else {
             return Ok(None);
         };
-        // The work cap bounds the cross-Cell join. Read UUIDs and issue
+        // The work cap bounds the cross-Cell join. Read UUIDs and discussion
         // numbers alone so attachment, title and draft data stay on their cells.
-        let repository = input.repository.map(blob).unwrap_or(SqlValue::Null);
         let item = input.item.map(blob).unwrap_or(SqlValue::Null);
         let rows = context.query(
-            "SELECT repository,id,number,status FROM organization_project_items WHERE project=? AND kind=0 AND (? IS NULL OR repository=?) AND (? IS NULL OR id=?) ORDER BY repository,number LIMIT ?",
-            &[blob(input.project), repository.clone(), repository, item.clone(), item, integer(MAX_ITEMS + 1)?],
+            "SELECT repository,id,kind,number,status FROM organization_project_items
+             WHERE project=? AND kind IN (0,?) AND (? IS NULL OR id=?)
+             ORDER BY repository,kind,number LIMIT ?",
+            &[
+                blob(input.project),
+                SqlValue::Integer(i64::from(input.include_pulls)),
+                item.clone(),
+                item,
+                integer(MAX_ITEMS + 1)?,
+            ],
         )?;
         if rows.rows.len() as u64 > MAX_ITEMS {
-            return Err(Error::Invalid("Project issue type source limit exceeded"));
+            return Err(Error::Invalid(
+                "Project source lookup exceeds the item limit",
+            ));
         }
         let items = rows
             .rows
             .iter()
             .map(|row| {
-                Ok(TypeSource {
+                Ok(WorkSource {
                     repository: uuid(&row[0])?,
                     item: uuid(&row[1])?,
-                    number: uint(&row[2])?,
-                    status: text(&row[3])?,
+                    subject: Subject {
+                        kind: match uint(&row[2])? {
+                            0 => SubjectKind::Issue,
+                            1 => SubjectKind::Pull,
+                            _ => return Err(Error::Invalid("Project work kind is invalid")),
+                        },
+                        number: uint(&row[3])?,
+                    },
+                    status: text(&row[4])?,
                 })
             })
             .collect::<Result<_>>()?;
-        Ok(Some(TypeSourcePage {
+        Ok(Some(SourcePage {
             project_version: project.version,
             items,
         }))
@@ -227,21 +334,15 @@ impl Read for Items {
         {
             return Err(Error::Invalid("project status filter is invalid"));
         }
-        let repository = input.repository.map(blob).unwrap_or(SqlValue::Null);
         let status = input
             .status
             .clone()
             .map(SqlValue::Text)
             .unwrap_or(SqlValue::Null);
         let selected = input.item.map(blob).unwrap_or(SqlValue::Null);
-        let mut predicate = "FROM organization_project_items p WHERE project=? AND (? IS NULL OR repository=?) AND (? IS NULL OR id=?)".to_owned();
-        let mut bindings = vec![
-            blob(input.project),
-            repository.clone(),
-            repository,
-            selected.clone(),
-            selected,
-        ];
+        let mut predicate =
+            "FROM organization_project_items p WHERE project=? AND (? IS NULL OR id=?)".to_owned();
+        let mut bindings = vec![blob(input.project), selected.clone(), selected];
         if let Some(items) = input.matched.and_then(|matched| matched.items) {
             let ids = items
                 .iter()

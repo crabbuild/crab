@@ -4,11 +4,13 @@ use crate::{
     cells::{
         organization::issue_types::Schema,
         repository::{
+            collaboration::SubjectKind,
             issues::issue_type::search::{Filter as Selection, Match, MatchInput},
             search::index::{GetSearchIndexStatus, SearchIndexStatus},
         },
     },
 };
+use futures_util::{StreamExt, TryStreamExt, stream};
 
 pub(super) struct FilteredItems {
     pub matched: projects::MatchedItems,
@@ -16,8 +18,11 @@ pub(super) struct FilteredItems {
     pub types: Option<Schema>,
     pub issue_type_counts: Option<BTreeMap<String, u64>>,
     sources: Vec<Source>,
+    locations: placements::Locations,
+    tracks_types: bool,
 }
 
+#[derive(Clone)]
 struct Source {
     repo: Arc<Repository>,
     generation: Uuid,
@@ -33,7 +38,8 @@ pub(super) async fn resolve(
     input: &Filter,
 ) -> Result<Option<FilteredItems>> {
     let group_by_type = input.group_by == Some(source::grouping::GroupBy::IssueType);
-    if input.issue_type.is_none() && !group_by_type {
+    let tracks_types = input.issue_type.is_some() || group_by_type;
+    if !tracks_types && input.repository.is_none() {
         shared::validate_cursor(input.after.is_some(), None, input.type_cursor.as_deref())?;
         return Ok(None);
     }
@@ -43,52 +49,56 @@ pub(super) async fn resolve(
         .map(Selection::parse)
         .transpose()
         .map_err(Error::Invalid)?;
-    let cells = server.cells().ok_or(Error::CellUnavailable)?;
-    let candidates = cells
-        .query::<projects::TypeSources>(
-            Address::Organization(organization),
-            None,
-            projects::TypeSourcesQuery {
-                actor,
-                project,
-                repository: input.repository,
-                item: input.item,
-            },
-        )
-        .await
-        .map_err(read_error)?
-        .output
-        .ok_or(Error::NotFound)?;
-    let mut grouped = BTreeMap::<Uuid, BTreeMap<u64, (Uuid, String)>>::new();
-    for row in candidates.items {
-        grouped
-            .entry(row.repository)
-            .or_default()
-            .insert(row.number, (row.item, row.status));
+    let locations = placements::resolve(
+        server,
+        principal,
+        organization,
+        projects::SourcesQuery {
+            actor,
+            project,
+            item: input.item,
+            include_pulls: input.repository.is_some(),
+        },
+    )
+    .await?;
+    let scoped = locations
+        .rows
+        .iter()
+        .filter(|row| input.repository.is_none_or(|id| row.repository.id == id));
+    let mut items = if input.repository.is_some() && filter.is_none() {
+        scoped.clone().map(|row| row.item).collect()
+    } else {
+        Vec::new()
+    };
+    let mut grouped = BTreeMap::<_, (_, BTreeMap<_, Vec<_>>)>::new();
+    if tracks_types {
+        for row in scoped.filter(|row| {
+            row.subject.kind == SubjectKind::Issue
+                && row.repository.organization == Some(organization)
+        }) {
+            let matches_status = input
+                .status
+                .as_ref()
+                .is_none_or(|status| status == &row.status);
+            grouped
+                .entry(row.repository.id)
+                .or_insert_with(|| (Arc::clone(&row.repository), BTreeMap::new()))
+                .1
+                .entry(row.subject.number)
+                .or_default()
+                .push((row.item, matches_status));
+        }
     }
-    // Project repository links cap this fan-out at 20. Each source work
-    // lookup reads just the issue/type index and its snapshot stamp.
-    let readable =
-        futures_util::future::try_join_all(grouped.into_iter().map(|(id, work)| async move {
-            let repo = accessible(server, principal, id).await?;
-            Ok::<_, Error>(
-                repo.filter(|repo| repo.organization == Some(organization))
-                    .map(|repo| (repo, work)),
-            )
-        }))
-        .await?;
-    let readable = readable.into_iter().flatten().collect::<Vec<_>>();
-    let types = if readable.is_empty() {
+    let types = if grouped.is_empty() {
         None
     } else {
         Some(issue_types::active(server, Some(organization)).await?)
     };
-    let mut items = Vec::new();
     let mut sources = Vec::new();
     let mut issue_type_counts = group_by_type.then(BTreeMap::new);
     if let Some(types) = &types {
-        let matches = futures_util::future::try_join_all(readable.into_iter().map(
-            |(repo, work)| async move {
+        let matches: Vec<_> = stream::iter(grouped.into_values())
+            .map(|(repo, work)| async move {
                 let cell = app::repository_cell(server, &repo)?;
                 let scope = shared::scope(&repo, filter, types)?;
                 let found = app::query_output(
@@ -103,27 +113,21 @@ pub(super) async fn resolve(
                         )
                         .await,
                 )?;
-                let matched = found
-                    .issues
-                    .iter()
-                    .map(|issue| {
-                        let (item, status) = work
-                            .get(&issue.number)
-                            .ok_or(Error::CellContract("Unexpected project issue type match"))?;
-                        let group = (group_by_type
-                            && input
-                                .status
-                                .as_ref()
-                                .is_none_or(|selected| selected == status))
-                        .then(|| {
+                let mut matched = Vec::new();
+                for issue in found.issues {
+                    let rows = work
+                        .get(&issue.number)
+                        .ok_or(Error::CellContract("Unexpected project issue type match"))?;
+                    for &(item, matches_status) in rows {
+                        let group = (group_by_type && matches_status).then(|| {
                             crate::cells::repository::issues::issue_type::group(
                                 true,
                                 issue.issue_type,
                             )
                         });
-                        Ok((*item, group))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
+                        matched.push((item, group));
+                    }
+                }
                 Ok::<_, Error>((
                     Source {
                         repo,
@@ -132,9 +136,10 @@ pub(super) async fn resolve(
                     },
                     matched,
                 ))
-            },
-        ))
-        .await?;
+            })
+            .buffer_unordered(8)
+            .try_collect()
+            .await?;
         for (source, matched) in matches {
             sources.push(source);
             for (item, group) in matched {
@@ -147,6 +152,7 @@ pub(super) async fn resolve(
             }
         }
     }
+    sources.sort_unstable_by_key(|source| source.repo.id);
     let stamps = sources
         .iter()
         .map(|source| {
@@ -159,11 +165,11 @@ pub(super) async fn resolve(
         })
         .collect::<Vec<_>>();
     let cursor = shared::cursor((
-        "organization-project-type/1",
+        "organization-project-source/1",
         organization,
         project,
         actor,
-        candidates.project_version,
+        locations.project_version,
         filter,
         types.as_ref().map(|schema| schema.version),
         input.repository,
@@ -171,6 +177,7 @@ pub(super) async fn resolve(
         &input.status,
         input.group_by,
         stamps,
+        locations.stamp(),
     ))?;
     shared::validate_cursor(
         input.after.is_some(),
@@ -179,21 +186,24 @@ pub(super) async fn resolve(
     )?;
     Ok(Some(FilteredItems {
         matched: projects::MatchedItems {
-            project_version: candidates.project_version,
-            items: filter.is_some().then_some(items),
+            project_version: locations.project_version,
+            items: (filter.is_some() || input.repository.is_some()).then_some(items),
         },
         cursor,
         types,
         issue_type_counts,
         sources,
+        locations,
+        tracks_types,
     }))
 }
 
 impl FilteredItems {
     pub(super) fn contains_source(&self, repo: &Repository) -> bool {
-        self.sources.iter().any(|source| {
-            source.repo.id == repo.id && source.repo.ownership_epoch == repo.ownership_epoch
-        })
+        !self.tracks_types
+            || self.sources.iter().any(|source| {
+                source.repo.id == repo.id && source.repo.ownership_epoch == repo.ownership_epoch
+            })
     }
 
     pub(super) async fn verify(
@@ -202,6 +212,7 @@ impl FilteredItems {
         principal: &Principal,
         organization: Uuid,
     ) -> Result<()> {
+        self.locations.verify(server, principal).await?;
         if let Some(types) = &self.types
             && issue_types::active(server, Some(organization))
                 .await?
@@ -210,27 +221,30 @@ impl FilteredItems {
         {
             return Err(shared::stale());
         }
-        futures_util::future::try_join_all(self.sources.iter().map(|source| async move {
-            let cell = app::repository_cell(server, &source.repo)?;
-            let status = app::query_output(
-                cell.client
-                    .query::<GetSearchIndexStatus>(&cell.target, None, ())
-                    .await,
-            )?;
-            if !matches!(status, SearchIndexStatus::Ready { generation, revision }
+        stream::iter(self.sources.clone())
+            .map(|source| async move {
+                let cell = app::repository_cell(server, &source.repo)?;
+                let status = app::query_output(
+                    cell.client
+                        .query::<GetSearchIndexStatus>(&cell.target, None, ())
+                        .await,
+                )?;
+                if !matches!(status, SearchIndexStatus::Ready { generation, revision }
                 if generation == source.generation && revision == source.revision)
-            {
-                return Err(shared::stale());
-            }
-            // Counts include all matching sources. Check even those absent
-            // from this page after sampling their authoritative snapshot.
-            match app::membership(server, principal, &source.repo).await {
-                Ok(_) => Ok(()),
-                Err(Error::NotFound) => Err(shared::stale()),
-                Err(error) => Err(error),
-            }
-        }))
-        .await?;
+                {
+                    return Err(shared::stale());
+                }
+                // Counts include all matching sources. Check even those absent
+                // from this page after sampling their authoritative snapshot.
+                match app::membership(server, principal, &source.repo).await {
+                    Ok(_) => Ok(()),
+                    Err(Error::NotFound) => Err(shared::stale()),
+                    Err(error) => Err(error),
+                }
+            })
+            .buffer_unordered(8)
+            .try_for_each(|()| async { Ok(()) })
+            .await?;
         Ok(())
     }
 }

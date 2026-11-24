@@ -175,6 +175,58 @@ pub(super) fn qualified_head(reference: &str, fork: Option<uuid::Uuid>) -> Strin
     )
 }
 
+pub(super) fn open_for_comparison(
+    context: &Transaction<'_>,
+    base: &str,
+    head: &str,
+    fork: Option<Uuid>,
+) -> crate::cells::Result<Option<u64>> {
+    let rows = context.query(
+        "SELECT d.number FROM discussion_index d JOIN discussion_index_pull_sources s ON s.document=d.rowid
+            WHERE d.kind=1 AND d.state=? AND s.base_ref=? AND s.head_ref=? ORDER BY d.number LIMIT 1",
+        &[
+            SqlValue::Integer(i64::from(PullState::Open.code())),
+            SqlValue::Text(base.into()),
+            SqlValue::Blob(qualified_head(head, fork).into_bytes()),
+        ],
+    )?;
+    rows.rows
+        .first()
+        .map(|row| result_u64_from_row(row, 0))
+        .transpose()
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Comparison {
+    pub base_ref: String,
+    pub head_ref: String,
+    pub head_repository: Option<Uuid>,
+}
+
+pub(crate) struct FindOpenComparison;
+impl Read for FindOpenComparison {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
+    const ID: u32 = 454;
+    type Input = Comparison;
+    type Output = Option<u64>;
+
+    fn execute(
+        context: &mut Transaction<'_>,
+        input: Comparison,
+    ) -> crate::cells::Result<Self::Output> {
+        search::index::ensure_ready(context)?;
+        super::operations::validate_ref(&input.base_ref)?;
+        super::operations::validate_ref(&input.head_ref)?;
+        open_for_comparison(
+            context,
+            &input.base_ref,
+            &input.head_ref,
+            input.head_repository,
+        )
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 pub(crate) struct PushedHead {
     pub name: String,

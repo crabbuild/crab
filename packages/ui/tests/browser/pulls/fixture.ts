@@ -217,6 +217,8 @@ export async function mockPullRequest(
       return route.fulfill({
         json: { default: null, items: [], truncated: false, source: null },
       });
+    if (path.endsWith("/pulls/open-comparison") && request.method() === "GET")
+      return route.fulfill({ json: { pull_number: null } });
     if (path.endsWith("/issues/pins") && request.method() === "GET")
       return route.fulfill({
         json: { version: 0, items: [], can_manage: true },

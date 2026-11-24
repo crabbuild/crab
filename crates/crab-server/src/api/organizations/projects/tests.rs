@@ -6,6 +6,144 @@ use crate::cells::{
 use crate::test_support::http::Harness;
 use reqwest::Method;
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bulk_project_planning_rechecks_access_to_every_source() {
+    let h = Harness::new(true).await;
+    let (organization, owner, _) = crate::test_support::http::organizations::bootstrap(&h).await;
+    let alice = h.login().await;
+    let repository = h
+        .server
+        .repositories
+        .get(&("team".into(), "private".into()))
+        .unwrap()
+        .id;
+    let path = format!("/api/organizations/{organization}/projects");
+    let commands = format!("{path}/commands");
+    let project = Uuid::now_v7();
+    let (draft, linked) = (Uuid::now_v7(), Uuid::now_v7());
+    h.write(
+        Method::POST,
+        "/api/repos/team/private/issues",
+        &alice,
+        json!({"request_id":Uuid::now_v7(),"title":"Private launch work","body":""}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let submit = |actor: String, command: Value| {
+        let h = &h;
+        let commands = &commands;
+        async move {
+            h.write(
+                Method::POST,
+                commands,
+                &actor,
+                json!({"request_id":Uuid::now_v7(),"command":command}),
+            )
+            .await
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()
+        }
+    };
+    for command in [
+        json!({"kind":"create","id":project,"name":"Release planning","template":"table"}),
+        json!({"kind":"repository","project":project,"version":1,"repository":repository,"linked":true}),
+        json!({"kind":"item","project":project,"version":0,"repository":null,"item":{
+            "id":draft,"subject":null,"title":"Plan","body":"","status":"Todo","priority":0,"start":null,"end":null,"values":{}
+        }}),
+        json!({"kind":"item","project":project,"version":0,"repository":repository,"item":{
+            "id":linked,"subject":{"kind":"issue","number":1},"title":"","body":"","status":"Todo","priority":0,"start":null,"end":null,"values":{}
+        }}),
+    ] {
+        assert_eq!(submit(alice.clone(), command).await["outcome"], "applied");
+    }
+    let cells = h.server.cells().unwrap();
+    let guest = app::command_output(
+        cells
+            .command::<RegisterAccounts>(
+                Address::Directory,
+                app::mutation_identity().unwrap(),
+                vec![IdentityKey {
+                    issuer: h.provider.issuer.clone(),
+                    subject: "outsider-id".into(),
+                }],
+            )
+            .await,
+    )
+    .unwrap()[0];
+    let address = Address::Organization(organization);
+    let ChangeOutcome::Applied(offer) = app::command_output(
+        cells
+            .command::<Invite>(
+                address,
+                app::mutation_identity().unwrap(),
+                InviteInput {
+                    actor: owner,
+                    recipient: guest,
+                    version: 0,
+                    role: Role::Owner,
+                },
+            )
+            .await,
+    )
+    .unwrap() else {
+        panic!("Owner invitation was rejected");
+    };
+    cells
+        .command::<DecideInvitation>(
+            address,
+            app::mutation_identity().unwrap(),
+            Decision {
+                actor: guest,
+                version: offer.version,
+                accept: true,
+            },
+        )
+        .await
+        .unwrap();
+    *h.provider.mode.lock().await = "outsider".into();
+    let guest = h.login().await;
+    let items_path = format!("{path}/{project}/items");
+    let guest_page = h.json(&items_path, &guest).await;
+    assert!(
+        guest_page["page"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["restricted"] == true)
+    );
+    let updates = [draft, linked].map(|item| {
+        json!({
+            "item":item,"version":1,"change":{"field":"priority","value":2}
+        })
+    });
+    let bulk = json!({"kind":"bulk_fields","project":project,"items":updates});
+    assert_eq!(submit(guest, bulk.clone()).await["outcome"], "rejected");
+    let original = h.json(&items_path, &alice).await;
+    assert!(
+        original["page"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["version"] == 1 && row["item"]["priority"] == 0)
+    );
+    assert_eq!(submit(alice.clone(), bulk).await["outcome"], "applied");
+    let updated = h.json(&items_path, &alice).await;
+    assert!(
+        updated["page"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["version"] == 2
+                && row["item"]["priority"] == 2
+                && row["item"]["status"] == "Todo")
+    );
+    h.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Playwright, the built embedded UI and CARGO_TARGET_DIR; isolated real OIDC/native Cells"]
 async fn native_browser_concurrent_project_edits_preserve_account_drafts_and_history() {

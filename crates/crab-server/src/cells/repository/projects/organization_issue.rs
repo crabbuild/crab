@@ -35,6 +35,30 @@ struct Saved {
     outcome: Outcome,
 }
 
+fn key(organization: Uuid, request: Uuid) -> String {
+    format!("projects/v1/organization-issues/{organization}/{request}")
+}
+
+pub(crate) struct GetCreatedIssue;
+
+impl Read for GetCreatedIssue {
+    const CLASS: &'static str = super::super::CLASS;
+    const ID: u32 = 461;
+    type Input = (Uuid, Uuid);
+    type Output = Option<u64>;
+
+    fn execute(
+        context: &mut Transaction<'_>,
+        (organization, request): Self::Input,
+    ) -> Result<Self::Output> {
+        let saved = context.document::<Saved>(&key(organization, request))?;
+        Ok(match saved.map(|receipt| receipt.outcome) {
+            Some(Outcome::Created { number }) => Some(number),
+            _ => None,
+        })
+    }
+}
+
 pub(crate) fn digest(
     project: Uuid,
     actor: Uuid,
@@ -72,10 +96,7 @@ fn decide(
             "Organization Project issue submission ID is invalid",
         ));
     }
-    let key = format!(
-        "projects/v1/organization-issues/{}/{}",
-        input.organization, input.request_id
-    );
+    let key = key(input.organization, input.request_id);
     if let Some(saved) = context.document::<Saved>(&key)? {
         return Ok(MutationResult::Success(if saved.digest == input.digest {
             saved.outcome

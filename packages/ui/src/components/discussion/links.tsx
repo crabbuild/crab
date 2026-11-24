@@ -8,6 +8,11 @@ import { useMutation } from "./mutations";
 import { repoHref } from "@/lib/repository-route";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
+import { DevelopmentBranches, type BranchLinks } from "./development-branches";
+import {
+  CrossRepositoryLinks,
+  type RelatedWork,
+} from "./cross-repository-links";
 
 interface LinkedWork {
   work: {
@@ -18,11 +23,14 @@ interface LinkedWork {
   version?: number;
   closes_on_merge?: boolean;
   from_description?: boolean;
+  from_branch?: boolean;
 }
 interface LinkPage {
   items: LinkedWork[];
   next: number | null;
   can_manage: boolean;
+  branches?: BranchLinks;
+  cross_repository?: RelatedWork[];
 }
 interface LinkState {
   active: boolean;
@@ -46,13 +54,16 @@ export function LinkedWork({
   const [before, setBefore] = useState<string>();
   const [issue, setIssue] = useState("");
   const [closesOnMerge, setClosesOnMerge] = useState(allowIssueClosure);
-  const resource = useRequest<LinkPage>(
-    endpoint(repo, `${path}/links`, { before }),
-  );
-  const mutation = useMutation(csrf, repo);
   const pull = path.startsWith("pulls/")
     ? Number(path.split("/")[1])
     : undefined;
+  const resource = useRequest<LinkPage>(
+    endpoint(repo, `${path}/links`, {
+      before,
+      include_branches: pull ? undefined : "true",
+    }),
+  );
+  const mutation = useMutation(csrf, repo);
   const issueNumber = Number(issue);
   const validIssue = Number.isSafeInteger(issueNumber) && issueNumber > 0;
   const pairUrl =
@@ -96,6 +107,7 @@ export function LinkedWork({
                     version,
                     closes_on_merge: closes,
                     from_description: described,
+                    from_branch,
                   }) => {
                     const isIssue = work.subject.kind === "issue";
                     const number = work.subject.number;
@@ -116,6 +128,9 @@ export function LinkedWork({
                         <span className="muted">{work.state}</span>
                         {described && (
                           <span className="muted">From PR description</span>
+                        )}
+                        {from_branch && (
+                          <span className="muted">From linked branch</span>
                         )}
                         {closes &&
                           (pull
@@ -161,10 +176,21 @@ export function LinkedWork({
                   },
                 )}
               </ul>
-            ) : (
+            ) : !page.cross_repository?.length ? (
               <p className="muted">
                 No linked {pull ? "issues" : "pull requests"}.
               </p>
+            ) : null}
+            {page.cross_repository && (
+              <CrossRepositoryLinks
+                items={page.cross_repository}
+                repo={repo}
+                issue={pull ? undefined : Number(path.split("/")[1])}
+                pull={pull}
+                csrf={csrf}
+                canManage={page.can_manage && !repo.archived}
+                onSaved={resource.retry}
+              />
             )}
             <div className="discussion-actions">
               {before && (
@@ -250,6 +276,15 @@ export function LinkedWork({
                   Link issue
                 </Button>
               </form>
+            )}
+            {page.branches && !pull && (
+              <DevelopmentBranches
+                repo={repo}
+                issue={Number(path.split("/")[1])}
+                csrf={csrf}
+                links={page.branches}
+                onChanged={resource.retry}
+              />
             )}
           </>
         )}

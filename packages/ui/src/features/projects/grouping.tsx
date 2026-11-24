@@ -67,7 +67,7 @@ export function ProjectGrouping({
   );
 }
 
-function rowGroup(row: Row, grouping: GroupBy) {
+export function rowGroup(row: Row, grouping: GroupBy) {
   if (grouping === "status") return row.item.status;
   if (grouping === "issue_type") return row.issue_type_group ?? "other";
   return row.item.values[grouping.slice("field:".length)] ?? "";
@@ -179,8 +179,13 @@ export function useProjectGroupMove(
   repo: Pick<Repository, "id" | "owner" | "name"> | undefined,
   refreshIssueType: (() => void) | undefined,
   editItem?: ChangeProjectItem,
+  selection?: {
+    rows: readonly Row[];
+    stale: boolean;
+    move: (rows: readonly Row[], key: string) => void;
+  },
 ) {
-  const dragged = useRef<Row | null>(null);
+  const dragged = useRef<{ row: Row; selected?: readonly Row[] } | null>(null);
   const [over, setOver] = useState<string>();
   const { csrf } = useProjectCommands();
   const mutation = useMutation(csrf, null);
@@ -229,25 +234,32 @@ export function useProjectGroupMove(
   }
 
   function draggable(row: Row) {
-    if (!movable(row)) return { draggable: false };
+    const selected = selection?.rows.some(
+      (item) => item.item.id === row.item.id,
+    )
+      ? selection.rows
+      : undefined;
+    if (!movable(row) || (selected && selection?.stale))
+      return { draggable: false };
     return {
       draggable: true,
       onDragStart: (event: DragEvent<HTMLElement>) => {
         event.dataTransfer.effectAllowed = "move";
         event.dataTransfer.setData("text/plain", row.item.id);
-        dragged.current = row;
+        dragged.current = { row, selected };
       },
       onDragEnd: endDrag,
     };
   }
 
   function dropTarget(key: string) {
-    function accepts(row: Row) {
+    function accepts({ row, selected }: NonNullable<typeof dragged.current>) {
       return (
         !!grouping &&
         movable(row) &&
         (grouping !== "issue_type" || key !== "other") &&
-        rowGroup(row, grouping) !== key
+        (!selected || (!!selection && !selection.stale)) &&
+        (selected ?? [row]).some((item) => rowGroup(item, grouping) !== key)
       );
     }
     function allow(event: DragEvent<HTMLElement>) {
@@ -270,8 +282,10 @@ export function useProjectGroupMove(
       },
       onDrop: (event: DragEvent<HTMLElement>) => {
         event.preventDefault();
-        if (dragged.current && accepts(dragged.current)) {
-          void move(dragged.current, key);
+        const item = dragged.current;
+        if (item && accepts(item)) {
+          if (item.selected) selection?.move(item.selected, key);
+          else void move(item.row, key);
         }
         endDrag();
       },

@@ -132,7 +132,7 @@ pub(super) async fn exercise(
                 .unwrap();
             assert_eq!(locked, StatusCode::TOO_MANY_REQUESTS);
         }
-        let mut opened: Value = repository_write(h, Method::POST, &pulls, alice, id, input)
+        let mut opened: Value = repository_write(h, Method::POST, &pulls, alice, id, input.clone())
             .await
             .error_for_status()
             .unwrap()
@@ -141,6 +141,23 @@ pub(super) async fn exercise(
             .unwrap();
         let number = opened["number"].as_u64().unwrap();
         if method == "squash" {
+            let comparison = format!(
+                "{pulls}/open-comparison?base_ref=refs%2Fheads%2Fsquash-target&head_ref=refs%2Fheads%2Fproposal"
+            );
+            assert!(h.json(&comparison, alice).await["pull_number"].is_null());
+            assert_eq!(
+                h.json(&format!("{comparison}&head_repository={fork}"), alice)
+                    .await["pull_number"],
+                number
+            );
+            let mut duplicate = input;
+            duplicate["request_id"] = json!(Uuid::now_v7());
+            let duplicate = repository_write(h, Method::POST, &pulls, alice, id, duplicate).await;
+            assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+            assert_eq!(
+                duplicate.json::<Value>().await.unwrap()["error"]["pull_number"],
+                number
+            );
             let recent = h.json(&suggestions, fork_author).await;
             assert!(
                 recent["items"]

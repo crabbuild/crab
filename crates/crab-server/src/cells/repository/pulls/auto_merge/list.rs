@@ -167,7 +167,7 @@ mod tests {
     ) -> Vec<Uuid> {
         let base_oid = "a".repeat(40);
         let head_oid = "b".repeat(40);
-        for _ in 0..count {
+        for pull in 1..=count {
             let opened = cell
                 .client
                 .command::<CreatePull>(
@@ -183,7 +183,7 @@ mod tests {
                         body: String::new(),
                         base_ref: BRANCH.into(),
                         base_oid: base_oid.clone(),
-                        head_ref: "refs/heads/feature".into(),
+                        head_ref: format!("refs/heads/feature-{pull}"),
                         head_repository: None,
                         head_oid: head_oid.clone(),
                     },
@@ -208,7 +208,7 @@ mod tests {
                             id,
                             actor: actor.clone(),
                             base_ref: BRANCH.into(),
-                            head_ref: "refs/heads/feature".into(),
+                            head_ref: format!("refs/heads/feature-{pull}"),
                             head_repository: None,
                             head_oid: head_oid.clone(),
                             initial_base_oid: base_oid.clone(),

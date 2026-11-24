@@ -7,14 +7,15 @@ use crate::{
     cells::repository::{
         CaptureMergeEffects, CaptureMergeEffectsInput, CreatePull, CreatePullComment,
         CreatePullCommentInput, CreatePullCommentOutcome, CreatePullInput, CreatePullOutcome,
-        CreatePullReview, CreatePullReviewInput, CreatePullReviewOutcome, GetPull, GetPullComment,
-        GetPullMergeSubmission, GetPullReviewSubmission, GetPullSubmission, ListPullComments,
-        PullChildKey, PullChildListInput, PullMergeTransition, PullRecord, PullSubmissionKey,
-        RejectStalePullComparison, ReservePullMerge, ReservePullMergeInput,
-        ReservePullMergeOutcome, TransitionPullMerge, TransitionPullMergeInput,
-        TransitionPullMergeOutcome, UpdatePull, UpdatePullComment, UpdatePullCommentInput,
-        UpdatePullCommentOutcome, UpdatePullInput, UpdatePullOutcome, UpdatePullReview,
-        UpdatePullReviewInput, UpdatePullReviewOutcome,
+        CreatePullReview, CreatePullReviewInput, CreatePullReviewOutcome, CreatePullWithLinks,
+        GetPull, GetPullComment, GetPullMergeSubmission, GetPullReviewSubmission,
+        GetPullSubmission, ListPullComments, PullChildKey, PullChildListInput, PullMergeTransition,
+        PullRecord, PullSubmissionKey, RejectStalePullComparison, ReservePullMerge,
+        ReservePullMergeInput, ReservePullMergeOutcome, TransitionPullMerge,
+        TransitionPullMergeInput, TransitionPullMergeOutcome, UpdatePull, UpdatePullComment,
+        UpdatePullCommentInput, UpdatePullCommentOutcome, UpdatePullInput, UpdatePullOutcome,
+        UpdatePullReview, UpdatePullReviewInput, UpdatePullReviewOutcome,
+        collaboration::links::branches::promotion::cross,
     },
     repository::Repository,
     server::Server,
@@ -207,6 +208,7 @@ pub(super) async fn create_pull(
     repo: &Repository,
     input: NewPullRequest,
     stale: bool,
+    links: Option<cross::Batch>,
 ) -> Result<PullRequest> {
     let routed = app::repository_cell(server, repo)?;
     let input = CreatePullInput {
@@ -228,6 +230,11 @@ pub(super) async fn create_pull(
         routed
             .client
             .command::<RejectStalePullComparison>(&routed.target, identity, input)
+            .await
+    } else if let Some(links) = links {
+        routed
+            .client
+            .command::<CreatePullWithLinks>(&routed.target, identity, (input, links))
             .await
     } else {
         routed

@@ -22,7 +22,7 @@ use crate::{
     app::{self, Error, Result},
     auth::{Identity, Principal},
     cells::repository::{MergeMethod, MergeReviewers, collaboration::Target},
-    repository::Repository,
+    repository::{Repository, development_branches::promotion as branch_links, settings},
     server::Server,
 };
 
@@ -41,6 +41,7 @@ mod git;
 pub(super) use git::review_head;
 mod merge;
 mod merge_methods;
+mod open_comparison;
 mod readiness;
 mod recent_pushes;
 pub(in crate::api) mod reopen;
@@ -54,7 +55,7 @@ pub(super) mod rollups;
 pub(super) mod storage;
 mod templates;
 mod viewed;
-use crate::cells::repository::{ListPulls, PullSummary};
+use crate::cells::repository::{ListPulls, PullSummary, collaboration::links::keywords::qualified};
 use required_checks::RequiredCheck;
 use storage::{NewPullRequest, PullRequest, PullState};
 
@@ -113,6 +114,10 @@ fn same_author(left: &Identity, right: &Identity) -> bool {
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .route("/api/repos/{owner}/{name}/pulls", get(list).post(create))
+        .route(
+            "/api/repos/{owner}/{name}/pulls/open-comparison",
+            get(open_comparison::find),
+        )
         .route(
             "/api/repos/{owner}/{name}/pulls/recent-pushes",
             get(recent_pushes::list),
@@ -987,16 +992,40 @@ async fn create(
         head_oid: comparison.head_oid,
     };
     let result = if replay || stale {
-        storage::create_pull(&server, &repo, input, stale).await
+        storage::create_pull(&server, &repo, input, stale, None).await
     } else {
         create_at_comparison(&server, &principal, &repo, input).await
     };
     let pull = match result {
         Err(Error::CreationRejected(reason)) => {
+            if matches!(
+                reason,
+                crate::cells::repository::collaboration::creation::Failure::ExistingPull(_)
+            ) {
+                app::membership(&server, &principal, &repo).await?;
+            }
             return Ok(super::write::rejected(Error::CreationRejected(reason)));
         }
         other => other?,
     };
+    if replay && repo.organization.is_some() {
+        let server = server.as_ref();
+        let repo = repo.as_ref();
+        let number = pull.number;
+        if let Err(error) = settings::with_ownership_lease(server, repo, |cancel| async move {
+            if !cancel.is_cancelled() {
+                branch_links::refresh(server, repo, number).await;
+            }
+            Ok(())
+        })
+        .await
+        {
+            tracing::warn!(repository = %repo.id, pull = number, %error, "development branch promotion will retry");
+        }
+    }
+    if repo.organization.is_some() && !qualified(&pull.body).is_empty() {
+        crate::repository::development_references::refresh(&server, &repo, pull.number).await;
+    }
     let current = repository
         .as_ref()
         .and_then(|repository| repository.tips(&pull.base_ref, &pull.head_ref));
@@ -1023,10 +1052,28 @@ async fn create_at_comparison(
     repo: &Arc<Repository>,
     input: NewPullRequest,
 ) -> Result<PullRequest> {
+    use crate::cells::repository::collaboration::links::branches::promotion::Prepare;
+
     let fork = input
         .head_repository
         .map(|id| git::fork_repository(server, repo, id))
         .transpose()?;
+    let cell = app::repository_cell(server, repo)?;
+    // Prepare preview-era links in bounded commits before borrowing the ref
+    // leases. Concurrent branch edits already maintain the target index.
+    loop {
+        if server.cancellation.is_cancelled() {
+            return Err(Error::MergeBusy);
+        }
+        let ready = app::command_output(
+            cell.client
+                .command::<Prepare>(cell.target, app::mutation_identity()?, ())
+                .await,
+        )?;
+        if ready {
+            break;
+        }
+    }
     let worker = Arc::clone(server);
     let principal = principal.clone();
     let repo = Arc::clone(repo);
@@ -1075,7 +1122,36 @@ async fn create_at_comparison(
                 if cancel.is_cancelled() {
                     return Err(Error::MergeBusy);
                 }
-                storage::create_pull(worker, repo, input, stale).await
+                if stale
+                    || repo.organization.is_none()
+                    || !input.head_ref.starts_with("refs/heads/")
+                {
+                    return storage::create_pull(worker, repo, input, stale, None).await;
+                }
+                settings::with_ownership_lease(worker, repo, |policy| async move {
+                    if cancel.is_cancelled() || policy.is_cancelled() {
+                        return Err(Error::MergeBusy);
+                    }
+                    let grant = app::membership(worker, &principal, repo).await?;
+                    if fork.is_some() && !grant.principal.can_write(repo.id) {
+                        return Err(Error::Forbidden);
+                    }
+                    let branch = crate::cells::repository::collaboration::links::branches::Branch {
+                        repository: input.head_repository.unwrap_or(repo.id),
+                        reference: input.head_ref.clone(),
+                    };
+                    let links =
+                        branch_links::capture(worker, repo, &grant.principal, branch).await?;
+                    if cancel.is_cancelled() || policy.is_cancelled() {
+                        return Err(Error::MergeBusy);
+                    }
+                    let pull = storage::create_pull(worker, repo, input, false, links).await?;
+                    if !policy.is_cancelled() {
+                        branch_links::refresh(worker, repo, pull.number).await;
+                    }
+                    Ok(pull)
+                })
+                .await
             },
         )
         .await;
@@ -1138,6 +1214,11 @@ async fn edit(
     let pull = storage::pull(&server, &repo, number)
         .await?
         .ok_or(Error::NotFound)?;
+    let references_changed = repo.organization.is_some()
+        && input
+            .body
+            .as_ref()
+            .is_some_and(|body| qualified(body) != qualified(&pull.body));
     let label_change = input.label_ids.is_some();
     let needs_label_catalog = input
         .label_ids
@@ -1248,6 +1329,9 @@ async fn edit(
     } else {
         storage::update_pull(&server, &repo, number, change, false).await?
     };
+    if references_changed {
+        crate::repository::development_references::refresh(&server, &repo, number).await;
+    }
     let repository = git::PullGit::open(&server, &repo, pull.head_repository)
         .await
         .ok();

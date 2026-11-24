@@ -14,8 +14,22 @@ test("repository admins manage rulesets and readers see active rules", async ({
     name: string;
     enforcement: string;
     bypass_actors?: unknown;
+    review_dismissal?: unknown;
   }[] = [];
   const releaseTeam = "00000000-0000-4000-8000-0000000000aa";
+  const releaseReviewer = "00000000-0000-4000-8000-0000000000bb";
+  await page.route(
+    (url) => url.pathname === "/api/repos/team/project/assignees",
+    (route) =>
+      route.fulfill({
+        json: {
+          items: [
+            { id: releaseReviewer, name: "Release reviewer", profile: null },
+          ],
+          can_manage: true,
+        },
+      }),
+  );
   await page.route("**/api/session", (route) =>
     route.fulfill({
       json: {
@@ -81,7 +95,11 @@ test("repository admins manage rulesets and readers see active rules", async ({
             ? rulesets
             : rulesets
                 .filter((rule) => rule.enforcement === "active")
-                .map((rule) => ({ ...rule, bypass_actors: undefined })),
+                .map((rule) => ({
+                  ...rule,
+                  bypass_actors: undefined,
+                  review_dismissal: rule.review_dismissal ? [] : undefined,
+                })),
         },
       });
     },
@@ -100,6 +118,15 @@ test("repository admins manage rulesets and readers see active rules", async ({
   await page.getByLabel("Include patterns").fill("release/**/*");
   await page.getByLabel("Exclude patterns").fill("release/sandbox");
   await page.getByLabel("Required approving reviews").fill("2");
+  await page
+    .getByLabel("Restrict who can dismiss pull request reviews")
+    .check();
+  await page
+    .getByLabel("Allow review dismissal for")
+    .selectOption(`user:${releaseReviewer}`);
+  await page
+    .getByLabel("Allow review dismissal for")
+    .selectOption(`team:${releaseTeam}`);
   await page.getByLabel("Restrict updates", { exact: true }).check();
   await page.getByLabel("Require linear history", { exact: true }).check();
   await page.getByLabel("Restrict deletions").check();
@@ -141,6 +168,10 @@ test("repository admins manage rulesets and readers see active rules", async ({
     require_merge_queue: true,
     required_checks: ["ci/release"],
     required_approvals: 2,
+    review_dismissal: [
+      { kind: "user", id: releaseReviewer },
+      { kind: "team", id: releaseTeam },
+    ],
     bypass_actors: [
       { actor: { kind: "team", id: releaseTeam }, mode: "pull_request" },
       { actor: { kind: "repository_admin" }, mode: "always" },
@@ -155,6 +186,9 @@ test("repository admins manage rulesets and readers see active rules", async ({
     page.getByRole("heading", { name: "Release branches" }),
   ).toBeVisible();
   await expect(page.getByText("Require 2 approving reviews")).toBeVisible();
+  await expect(
+    page.getByText("Restrict review dismissal", { exact: true }),
+  ).toBeVisible();
   await expect(
     page.getByText("Require linear history", { exact: true }),
   ).toBeVisible();

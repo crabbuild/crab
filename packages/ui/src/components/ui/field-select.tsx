@@ -19,7 +19,13 @@ type Option = {
 
 type FieldSelectProps = Pick<
   ComponentProps<typeof Select>,
-  "value" | "defaultValue" | "onValueChange" | "disabled" | "name" | "required"
+  | "value"
+  | "defaultValue"
+  | "onValueChange"
+  | "onOpenChange"
+  | "disabled"
+  | "name"
+  | "required"
 > &
   AriaAttributes & {
     options: Readonly<Record<string, string>> | Option[];
@@ -41,6 +47,7 @@ export function FieldSelect({
   value,
   defaultValue,
   onValueChange,
+  onOpenChange,
   ...accessibility
 }: FieldSelectProps) {
   const items: Option[] = Array.isArray(options)
@@ -58,6 +65,7 @@ export function FieldSelect({
       value={value}
       defaultValue={defaultValue}
       onValueChange={onValueChange}
+      onOpenChange={onOpenChange}
       disabled={disabled}
       name={name}
       required={required}

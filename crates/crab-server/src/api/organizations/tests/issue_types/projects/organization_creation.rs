@@ -49,6 +49,7 @@ async fn organization_project_recovers_the_issue_after_the_repository_commits() 
                     request_id: body["request_id"].as_str().unwrap().parse().unwrap(),
                     command: serde_json::from_value(body["command"].clone()).unwrap(),
                     source_allowed: true,
+                    attachment: None,
                     source_epoch: Some(epoch),
                     cancel: false,
                 },
@@ -108,6 +109,17 @@ async fn organization_project_recovers_the_issue_after_the_repository_commits() 
     assert_eq!(committed, source::Outcome::Created { number: 2 });
     let items = format!("{root}/{project}/items");
     assert_eq!(h.json(&items, &alice).await["page"]["total"], 1);
+    let duplicate = send(
+        "commands",
+        json!({"request_id":Uuid::now_v7(),"command":{
+            "kind":"item","project":project,"version":0,"repository":repo,"item":{
+                "id":Uuid::now_v7(),"subject":{"kind":"issue","number":2},"title":"","body":"",
+                "status":"Todo","priority":0,"start":null,"end":null,"values":{},
+            },
+        }}),
+    )
+    .await;
+    assert_eq!(duplicate["outcome"], "issue_already_linked", "{duplicate}");
     let recovered = send("cancel", input.clone()).await;
     assert_eq!(recovered["outcome"], "applied");
     assert_eq!(send("commands", input.clone()).await, recovered);

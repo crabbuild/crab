@@ -37,6 +37,16 @@ pub(in crate::cells::repository) fn load(
     Ok(context.document(&key(number))?.unwrap_or_default())
 }
 
+pub(in crate::cells::repository) fn store(
+    context: &Transaction<'_>,
+    number: u64,
+    assignment: Assignment,
+) -> crate::cells::Result<()> {
+    context.put_document(&key(number), &assignment)?;
+    search::project(context, number, assignment.selection)?;
+    super::super::search::index::invalidate_cursors(context)
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SetInput {
@@ -84,10 +94,8 @@ impl Mutation for Set {
             version: current.version + 1,
             selection: input.selection,
         };
-        context.put_document(&key(input.number), &next)?;
         // Canonical assignments, filter rows, and pagination advance together.
-        search::project(context, input.number, next.selection)?;
-        super::super::search::index::invalidate_cursors(context)?;
+        store(context, input.number, next)?;
         Ok(MutationResult::Success(Outcome::Saved(next)))
     }
 }

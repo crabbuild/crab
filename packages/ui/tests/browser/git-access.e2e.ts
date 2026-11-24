@@ -12,6 +12,7 @@ test("Git tokens require a repository and keep secrets tied to that selection", 
   let issued = 0;
   let revoked = 0;
   let requestedAccess = "read";
+  let closeRelatedIssues = false;
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
@@ -35,6 +36,7 @@ test("Git tokens require a repository and keep secrets tied to that selection", 
             name,
             description: "",
             access: name === "first" ? "write" : "read",
+            organization_id: "00000000-0000-4000-8000-000000000003",
             archive_version: 0,
             archived: false,
             protection_version: 0,
@@ -52,6 +54,7 @@ test("Git tokens require a repository and keep secrets tied to that selection", 
       owner: "team",
       repository: "first",
       access: requestedAccess,
+      ...(closeRelatedIssues ? { close_related_issues: true } : {}),
     });
     if (fail) return route.fulfill({ status: 403 });
     issued++;
@@ -80,7 +83,11 @@ test("Git tokens require a repository and keep secrets tied to that selection", 
   });
   await expect(generate).toBeDisabled();
   const repository = page.getByLabel("Repository", { exact: true });
+  const scope = page.getByRole("checkbox", {
+    name: /Allow commit messages to close issues/,
+  });
   await chooseSelectOption(repository, "team/first");
+  await expect(scope).toHaveCount(0);
   await generate.click();
   await expect(page.getByRole("status")).toContainText(
     "Could not update Git access",
@@ -95,11 +102,16 @@ test("Git tokens require a repository and keep secrets tied to that selection", 
   requestedAccess = "write";
   await chooseSelectOption(page.getByLabel("Access", { exact: true }), "write");
   await expect(token).toHaveCount(0);
+  await expect(scope).not.toBeChecked();
+  await expectNoAccessibilityViolations(page);
+  await scope.check();
+  closeRelatedIssues = true;
   await generate.click();
   await expect(
     page.getByLabel("Write token for team/first", { exact: false }),
   ).toHaveValue("fixture-token");
   await chooseSelectOption(repository, "team/second");
+  await expect(scope).toHaveCount(0);
   await expect(page.getByLabel("Access", { exact: true })).toHaveText(
     "Read (clone and fetch)",
   );

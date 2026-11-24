@@ -20,6 +20,16 @@ impl Browser {
         .await;
     }
 
+    pub(crate) async fn choose_select(&self, trigger: &str, value: &str) {
+        let value = serde_json::to_string(value).unwrap();
+        let ready = serde_json::to_string(&format!("select option[value={value}]")).unwrap();
+        let test = format!("document.querySelector({ready}) !== null");
+        self.run(&["wait", "--fn", &test]).await;
+        self.run(&["click", trigger]).await;
+        self.run(&["click", &format!("[role=option][data-value={value}]")])
+            .await;
+    }
+
     pub(crate) async fn run(&self, arguments: &[&str]) -> String {
         let output = tokio::time::timeout(
             Duration::from_secs(45),

@@ -94,8 +94,8 @@ fn input(review: &PullReviewRecord) -> Input {
         can_write: true,
         can_admin: false,
         configured_protected: false,
-        organization_protected: false,
-        default_ref: "refs/heads/main".into(),
+        base_ref: "refs/heads/main".into(),
+        policy: ReviewDismissalPolicy::Unrestricted,
     }
 }
 async fn events(
@@ -594,5 +594,48 @@ async fn persisted_protections_override_the_configured_seed_in_both_directions()
         write::<DismissReview>(&cell, admin).await,
         Outcome::Dismissed
     );
+    fixtures::close(&server).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dismissal_cannot_use_the_policy_of_a_previous_base() {
+    use crate::cells::repository::pulls::base;
+    let server = fixtures::fixture().await;
+    let cell = cell(&server);
+    seed(&cell).await;
+    let decision = review(&cell, "Bob", ReviewState::ChangesRequested).await;
+    let pull = read::<GetPull>(&cell, decision.pull).await.unwrap();
+    let previous = Input {
+        policy: ReviewDismissalPolicy::Restricted(true),
+        ..input(&decision)
+    };
+    assert!(matches!(
+        write::<base::Retarget>(
+            &cell,
+            base::Input {
+                pull: pull.number,
+                actor: actor("Alice"),
+                can_write: true,
+                comparison_current: true,
+                change: base::Change {
+                    request_id: Uuid::now_v7(),
+                    version: pull.version,
+                    base_ref: "refs/heads/release".into(),
+                    base_oid: "c".repeat(40),
+                    head_oid: decision.commit_oid,
+                },
+                code_owner_requests: Default::default(),
+            }
+        )
+        .await,
+        base::Outcome::Saved
+    ));
+    assert_eq!(
+        write::<DismissReview>(&cell, previous.clone()).await,
+        Outcome::Conflict
+    );
+    let current = read::<GetReviewDetail>(&cell, previous.key).await.unwrap();
+    assert!(current.dismissible);
+    assert_eq!(current.base_ref, "refs/heads/release");
     fixtures::close(&server).await;
 }

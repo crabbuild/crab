@@ -44,6 +44,7 @@ pub(super) fn issue(
         "assignees": assignees.view(&issue.assignees),
         "can_edit": same_author(&issue.author, author) || assignees.principal.can_moderate(repository),
         "can_close": same_author(&issue.author, author) || can_triage,
+        "can_transfer": issue.state == 0 && assignees.principal.can_moderate(repository),
         "can_label": can_triage,
         "can_assign": can_triage,
     }))

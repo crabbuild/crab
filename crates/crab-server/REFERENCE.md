@@ -1217,7 +1217,8 @@ collection with matching `expected_version`. Each entry contains `id` (UUID),
 `include`, `exclude`, `restrict_creations`, `restrict_updates`, `restrict_deletions`,
 `require_pull_request`, `required_approvals`, `required_code_owner_reviews`,
 `require_conversation_resolution`, `require_up_to_date`, `require_merge_queue`, `require_linear_history`,
-`required_checks`, and `required_integrations`. Branch-only settings must have
+`required_checks`, `required_integrations`, and optional `review_dismissal`.
+Branch-only settings must have
 empty or zero values on tag rulesets. A stale replacement returns HTTP 409.
 
 Rulesets govern Crab Server Git HTTP, browser Git changes, releases that create
@@ -1951,6 +1952,12 @@ git config --global 'credential.https://git.example.com.useHttpPath' true
 The response contains the secret, target, permission, and remaining session
 lifetime. Shared storage retains only token hashes.
 
+A write token for an organization repository can opt in to closing related
+issues with Git commit messages. Select the option under **Git access** or
+send `"close_related_issues": true` when generating the token. Crab checks
+the account's current Write access on each issue repository before publishing
+the default branch. The option grants no other access to those repositories.
+
 Token rules:
 
 - Scope binds one owner, repository, and `read` or `write` permission
@@ -2469,10 +2476,41 @@ owner label does not acquire ownership.
 | Edit history | `GET /api/repos/{owner}/{name}/edit-history/{target}` and `DELETE ...?revision={number}` |
 | Activity | `GET /api/repos/{owner}/{name}/activity`, `GET /api/repos/{owner}/{name}/issues/{number}/activity`, `GET /api/repos/{owner}/{name}/pulls/{number}/activity` |
 | Linked work | Issue/pull `GET .../{number}/links`; `GET/PUT /api/repos/{owner}/{name}/pulls/{pull}/linked-issues/{issue}` |
+| Cross-repository linked work | `GET/PUT .../issues/{issue}/linked-pulls/{repository}/{pull}` |
+| Development branches | `GET .../issues/{number}/links?include_branches=true`; `PUT/POST .../issues/{number}/development-branches` |
 | Issue dependencies | `GET .../issues/{number}/dependencies/{blocked_by|blocking}`; `GET/PUT .../issues/{number}/dependencies/{direction}/{other}` |
 | Assign or clear an issue type | `PUT .../issues/{number}/type` |
 
 Every route prefix is `/api/repos/{owner}/{name}`. Browser mutations require the session cookie, canonical `Origin`, and CSRF token.
+
+### Transfer an issue
+
+Open an issue and choose **Transfer issue** in its sidebar. The picker shows
+repositories under the same owner where you have Moderate access or higher.
+You need that access in both repositories. The move preserves the issue,
+comments, assignees, reactions, retained edit history, and discussion
+attachments. Retained revisions keep their authors, timestamps, and
+attachments. Removed revision text stays removed. Labels match by name.
+Milestones match by title and due date. The original URL continues to work.
+
+Current transfer support covers open issues. Crab keeps the source issue in
+place when it detects linked work that the destination cannot preserve.
+
+`GET /api/repos/{owner}/{name}/issues/{number}/transfer` lists up to 30 eligible
+destinations and accepts optional `q` to filter by repository name. POST the
+same route with `request_id`, the observed issue `version`, and the destination
+repository UUID as `destination`. A committed move returns `202 Accepted`.
+Repeat the same submission to recover a lost reply. Read the original issue
+URL for the current transfer status.
+
+### Follow a transferred issue
+
+The original issue detail returns a `transfer` object after a committed move.
+`ready` includes the current destination repository UUID and address and its
+issue number. The browser opens that issue and keeps the comment anchor.
+`pending` means destination publication is still in progress. `unavailable`
+omits the destination when the reader lacks current access. A retry of the
+original creation can return the original `number` with `transferred: true`.
 
 ### Open an issue from a repository template
 
@@ -2512,6 +2550,89 @@ Losing source access hides the inherited choices and invalidates outstanding
 proofs for new writes. The original submission can still recover an issue
 created while the proof was authorized.
 
+### Link a branch to an issue
+
+Open **Linked branches** in the issue sidebar and choose **Link branch**.
+Select a repository and one of its existing branches. Write access to the
+issue repository and Read access to the branch repository are required.
+Each issue supports up to ten links. Readers see branches only while they
+can read both repositories. Issue transfers retain the links and continue
+to check each branch repository's access.
+
+`GET .../issues/{number}/links?include_branches=true` returns a `branches`
+object with `items`, `version`, and `can_manage`. Each item contains the
+target repository address, the full ref, and `exists`. A ref that has since
+been deleted remains removable and appears as unavailable. The link follows
+the named branch as commits change.
+
+Send `{branch: {repository, reference}, active, version}` to
+`PUT .../issues/{number}/development-branches` using the target repository
+UUID and the issue's observed branch-link version. The response includes
+the committed version. A conflicting mutation returns HTTP 409.
+
+Choose **Create a branch** to publish a new branch in the selected repository
+and link it to the issue. The starting branch defaults to the selected
+repository's default branch. The server verifies Write access in both
+repositories and applies the destination's normal Git branch rules.
+POST `{request_id, repository, name, source_oid}` to the same endpoint,
+using the selected repository UUID and the exact starting commit SHA.
+Keep the request ID and payload for retries. On a lost response, reload the
+issue to see the linked branch or the original actor's pending request.
+Recovery links only the exact Git creation, even if the new branch has moved.
+
+When a pull request opens from a linked branch, it replaces the branch on the
+issue. Both conversations show **From linked branch**. This works with fork
+heads and with issues in another repository in the same organization. For a
+cross-repository link, the pull request author needs Read access to the issue
+repository. Merging into the default branch closes the issue when the merger
+has Write access to the issue repository and the link still closes on merge.
+Crab promotes up to ten matching issues per pull request in each link scope.
+After an upgrade, the background worker indexes earlier branch links in batches.
+
+### Link a pull request from another repository
+
+Choose **Link pull request** on an issue and select a repository and pull
+request within the same organization. Creating or removing the link requires
+Write access to the issue repository and Read access to the pull request
+repository. Either sidebar shows the relationship to readers with access
+to both endpoints. The link follows the issue through transfers within the
+organization.
+
+Leave **Close issue on merge** selected to complete the issue when the pull
+request merges into its repository's default branch. The merging account
+needs current Write access in the issue repository. Use **Keep open** on
+either sidebar to keep the relationship without automatic closure.
+
+Use the pull request repository UUID as `{repository}` in the edit route.
+GET returns the link's `active` flag and `version`. PUT accepts the desired
+`active` flag, observed `version`, and optional `closes_on_merge` flag.
+Omitting the flag keeps the selection on existing links and leaves new
+links as related work. Repeating a completed transition returns its current
+state. A stale conflicting write returns HTTP 409.
+Cross-repository links appear under `cross_repository` on the first page of
+each linked-work response and are limited to ten per issue or pull request.
+
+Crab captures the authorized issue state versions before publishing the merge.
+The exact Git publication receipt lets the job recover if the response is
+lost or the default branch moves. An intervening closure or reopen takes
+precedence over a delayed cross-repository update.
+
+### Link an issue from a pull request description
+
+Use `Fixes owner/repository#123`, `Closes owner/repository#123`, or
+`Resolves owner/repository#123` to reference an issue in another repository
+in the same organization. The pull request must target its default branch.
+Crab reads up to ten distinct qualified references in Markdown prose.
+Both sidebars show **From PR description** to readers with access to both
+repositories. Editing the description or retargeting the pull request
+updates active references. A manual link and a description reference to
+the same issue share one row.
+
+Qualified references use the same merge authorization and receipt as
+manual cross-repository closure. After publication, the saved references
+remain visible even if the description changes. Description-only entries
+in `cross_repository` include `from_description: true` and omit `version`.
+
 ### Close a linked issue when its pull request merges
 
 In the pull request’s **Linked issues** section, enter an issue number and leave
@@ -2547,14 +2668,20 @@ edit. The `linked-issues/{issue}` edit route addresses the manual link.
 Default-branch changes and PR retargeting affect the active links.
 Completed merges retain the captured links and the issue's closure event.
 
-The same keywords in a commit message close repository-local issues when that
-commit becomes reachable from the default branch through Crab Server. This
-includes Git pushes, browser commits and the commits actually published by a
-pull request merge. A topic branch push leaves the issue open. The issue
-timeline links to the exact closing commit and identifies the authenticated
-publisher. Crab verifies the committed ref receipt before applying closure
-and recovers pending closures after an interruption. A ref publication can
-contain up to 100 distinct closing issue references across its new commits.
+The same keywords in a commit message close issues when the commit becomes
+reachable from the default branch through Crab Server. Use `Fixes #123` in
+the same repository or `Fixes owner/repository#123` for another repository
+in the same organization where the publisher has Write access. This covers
+Git pushes, browser commits and the commits actually published by a pull
+request merge. Git credentials require the explicit token option for qualified
+references. A topic branch push leaves the issue open.
+
+The issue timeline identifies the authenticated publisher and links to the
+exact closing commit for readers with access to the source repository.
+Commit messages alone create no pull request relationship in either sidebar.
+Crab verifies the committed ref receipt before applying closures and recovers
+pending closures after an interruption. A ref publication can contain up to
+100 distinct commit-message closing references across its new commits.
 
 Before serving existing repositories, deploy all peers and run
 `cells rebuild-search --owner OWNER --name REPO` to prepare discussion index
@@ -2786,6 +2913,27 @@ Reload the latest data after HTTP 409.
 Update all serving peers before using the new settings so every peer can
 read the new audit events and handle issue type requests.
 
+### Edit multiple Project items
+
+In a repository or organization Project table, select rows with their
+checkboxes. The header checkbox selects the editable items on the current
+page. Choose a status, priority, planning date or custom field, then select
+**Apply to selected**. A blank optional value clears that field. Organization
+Project edits require access to every selected item's source work.
+
+**Undo** restores the previous values as one new edit. If another change
+advanced any of the selected item revisions, refresh and make a new selection.
+After an interrupted request, use **Retry submission** to recover its decision.
+
+The existing Project commands endpoints accept
+`{kind:"bulk_fields",project,items:[{item,version,change}]}`. A selection
+contains 1–50 unique item UUIDs with their current revisions. Each change sets
+`status`, `priority`, `start`, `end`, or `custom` using a `field` tag and
+`value`. A custom change also identifies the field by UUID in `id`.
+Planning dates and custom fields use `null` to clear a value. The entire
+command commits or rolls back together and keeps one payload-bound receipt.
+Upgrade the serving peers and embedded UI together before using this command.
+
 ### Show issue types in Projects
 
 In **Settings** → **Views**, turn on **Show issue type** for a saved Project
@@ -2830,6 +2978,14 @@ workflow status and dates.
 Project editors can drag work between status or custom field groups on a
 table or board. Dropping into **No value** clears the custom field. These
 moves use the versioned Project item command and preserve other item fields.
+
+On a board grouped by workflow status or a single-select Project field,
+select cards individually or with the checkbox in a column header. Drag any
+selected card to a destination, or choose a column under **Move selected to**.
+The selection covers editable cards on the current page, including selections
+from different columns. The move uses one bulk Project submission and offers
+**Undo** after saving. Cards already in the destination keep their revisions
+and still participate in the batch's conflict checks.
 
 Choose **Add work to** on a status or custom-field group to start an item
 with that value. The editor keeps the prefilled value when you switch work
@@ -3236,8 +3392,8 @@ issue/pull state preparation. Historical successful counts/digests/keys are
 preserved in bounded frames; old failed decisions cannot be reconstructed.
 No discussion-index rebuild is required. HTTP defers archive policy to the native
 command so a committed submission can recover after archive.
-Catalog-owned grants remain the authority; native grant cutover/cross-Cell fencing,
-bulk Project actions and wider GitHub parity remain delivery work.
+Catalog-owned grants remain the authority. Native grant cutover, broader
+cross-Cell fencing, and wider GitHub parity remain delivery work.
 Coordinate private peer and UI updates before using bulk issue type assignment.
 
 ### Browse activity
@@ -3851,6 +4007,20 @@ base tip and head from that preview when creating the pull request. If either
 tip changes before submission, the API rejects the request before creating a
 pull, and **Review inputs** refreshes the comparison while keeping the draft.
 
+The composer checks for an open or draft PR for the selected source repository,
+head branch, and base branch. **View pull request** opens that review. The
+Repository Cell repeats the same check when creating a PR, so concurrent
+submissions can create only one new review for that comparison. Different base
+branches and forks are independent. A comparison becomes available when it has
+no open PR.
+
+`GET .../pulls/open-comparison` accepts `base_ref`, `head_ref`, and optional
+`head_repository`, and returns a nullable `pull_number`. A duplicate creation
+returns HTTP 409 with error code `open_pull_exists`, the existing
+`error.pull_number`, and the terminal write rejection marker. Repeating that
+submission recovers its original decision, including after the other PR closes.
+The browser preserves the draft and links to the existing review.
+
 The opt-in real-change fixture takes the base, head and common-ancestor trees
 from pinned Next.js and Neovim commits and publishes them as short divergent
 histories. It checks every changed path, mode and object ID against stock Git,
@@ -4143,8 +4313,21 @@ for the changed private search/rollup input contract.
 
 PUT `/api/repos/{owner}/{name}/pulls/{number}/reviews/{review}/dismissals`
 accepts `{request_id, version, body}`. The nonempty reason uses the existing
-64 KiB discussion-body contract. Write permission is required; on a protected
-base branch, Admin permission is required. The native transaction reads current
+64 KiB discussion-body contract. Repository Write permission is required.
+Administrators can configure **Restrict who can dismiss pull request reviews**
+in a branch ruleset with a pull request requirement. The rule's optional
+`review_dismissal` array contains up to 64 `{kind: "user" | "team", id}` entries.
+Each matching explicit rule must allow the actor through a named account or
+current team membership. An empty array prevents manual dismissal. If no
+explicit rule matches, a protected base still requires Admin permission.
+
+Repository rulesets offer collaborators and visible teams with repository
+access. Organization rulesets offer active organization members and visible
+teams. Organization team membership can authorize a writer with a separate
+repository grant. Repository readers see that an active restriction applies,
+and repository ruleset administrators can see its local selections.
+
+The native transaction reads current
 branch protection, archive and pending merge state, verifies the review version,
 records the explanation, advances review/PR versions, removes only the matching
 active decision and appends one conversation event. An older dismissal cannot
@@ -4155,8 +4338,10 @@ The configured version-zero policy applies before the first administrative save,
 as it does for merge and Git publication. Native dismissal receives that initial
 branch classification from HTTP composition; rules saved in the native transaction
 take precedence, including an explicitly empty set. Review create/edit/detail/list
-and conversation capabilities use the same precedence. This retains the existing
-configuration seed contract; native cross-Cell authority fencing remains separate.
+and conversation capabilities use the same ruleset policy. A tracked write worker
+refreshes membership inside the shared ruleset lease, which also serializes
+default-branch changes. The native command verifies the evaluated base ref so a
+concurrent PR retarget cannot use a decision made for its former base.
 
 Public review details, lists and conversation entries expose effective state
 `dismissed`, nullable `dismissal: {author, body, created_at}` and `can_dismiss`.
@@ -4177,8 +4362,8 @@ to the review after success. Reasons appear with the original review; the later
 conversation event links directly to it.
 
 Run private `cells prepare-review-state --owner OWNER --name REPO` on existing
-repositories. Serving never installs missing schemas. Full per-user/team review
-dismissal restrictions and broader review/workspace parity remain open. This
+repositories. Upgrade peers and embedded UI together for the private dismissal
+command contract. This
 workflow follows [GitHub review dismissal](https://docs.github.com/en/pull-requests/how-tos/review-pull-requests/dismissing-a-pull-request-review)
 and its [protected-branch permission contract](https://docs.github.com/en/rest/pulls/reviews#dismiss-a-review-for-a-pull-request), checked 2026-10-22.
 
@@ -4596,8 +4781,8 @@ navigation without changing query parameters, native cursors or data requests.
 Compact rows preserve the displayed metadata. When browser storage is denied,
 the current component's selection still works in memory. The sidebar measures
 available viewport height with diagnostics present, and wraps on narrow screens.
-Detail/create routes keep full-width layouts. These controls do not implement
-saved views or personal author/assignment/review navigation.
+Detail/create routes keep full-width layouts. The repository navigation opens
+personal author, assignment, and review request filters for that repository.
 Count/loading rows and the optional diagnostic header retain their height during
 refresh so a completed request cannot move an open menu under a pressed pointer.
 Before a measurement exists, the diagnostic header shows a dash and explains
@@ -4626,6 +4811,49 @@ triage permission controls changes to label or assignee sets.
 Stored assignments retain stable IDs and name snapshots after grant removal.
 Public profiles provide current presentation without granting access. Label
 renames appear immediately; deleted labels disappear without rewriting discussions.
+
+### Find your work across repositories
+
+Open **My work** in the global navigation. **Pull requests** and **Issues**
+each offer **Created by me** and **Assigned to me**. **Review requests** includes
+open pull requests requested from you or your current teams. Created and
+assigned work can be filtered by Open, Closed, or All states. Closed pull
+requests include both merged and unmerged work. Rows are newest first by
+creation time, with repository-qualified links and a draft or lifecycle label.
+
+`GET /api/personal-work` requires a browser account. It accepts
+`kind=pull|issue`, `relation=authored|assigned|review_requested`,
+`state=open|closed|all`, `limit` from 1 to 50, and `after` from the previous
+result. The default is 30 open authored pull requests. Review requests require
+`kind=pull` and `state=open`. The response contains `items` and nullable `next`.
+
+Upgrade server peers and the embedded UI together to expose **My work**. Each
+readable repository supplies bounded summaries from its existing discussion index.
+The server merges those ordered pages with at most eight repository reads in
+flight. It rechecks the readable repositories and applicable team membership
+before returning results. Continuations bind the account, filters, and this
+access scope. A changed scope returns HTTP 409 and the browser offers **First
+page**. Refresh the first page to see new work created ahead of a continuation.
+
+### Search issues and pull requests across repositories
+
+Open **Search issues and PRs** from My work or the user menu. Use the same
+text, Boolean expressions, and discussion qualifiers as the repository lists.
+For example, `is:open label:"bug" deployment` finds open work that matches
+both the label and text. The repository scope accepts an owner namespace or
+an exact `owner/repository`. Search both types together or choose Issues or
+Pull requests, and sort by creation time or recent activity. The browser URL
+keeps the query and filters and opens each result by its type and repository
+UUID.
+
+`GET /api/discussion-search` requires a browser account, plus `q` or `scope`.
+It accepts optional `kind=issue|pull`, `sort=created|updated`, `limit` from 1
+to 50, and `after` from the previous response. It returns `items` and nullable
+`next`. Crab merges bounded pages from each readable repository's discussion
+index. The account, search parameters, and readable scope bind the cursor.
+Current repository access is checked again before results are returned. A
+changed scope returns HTTP 409. An unavailable repository index returns its
+normal preparation error so an incomplete search can be retried.
 
 ### Understand pagination and storage
 

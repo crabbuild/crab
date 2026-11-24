@@ -265,8 +265,8 @@ async fn review_status_counts_follow_current_decisions_and_preserve_mixed_boolea
             can_write: true,
             can_admin: true,
             configured_protected: true,
-            organization_protected: false,
-            default_ref: "refs/heads/main".into(),
+            base_ref: "refs/heads/main".into(),
+            policy: crate::cells::repository::rulesets::ReviewDismissalPolicy::Unrestricted,
         },
     )
     .await;
@@ -588,6 +588,7 @@ async fn review_filters_apply_rulesets_to_the_default_ref_in_the_search_snapshot
                 required_checks: Vec::new(),
                 required_integrations: Vec::new(),
                 bypass_actors: Vec::new(),
+                review_dismissal: None,
             }],
         },
     )

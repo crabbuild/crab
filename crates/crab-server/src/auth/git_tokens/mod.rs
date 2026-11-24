@@ -26,6 +26,8 @@ pub(crate) struct TokenRequest {
     owner: String,
     repository: String,
     access: GitTokenAccess,
+    #[serde(default)]
+    close_related_issues: bool,
 }
 
 #[derive(Clone, Copy, Deserialize, serde::Serialize)]
@@ -115,6 +117,7 @@ impl Authentication {
             owner: record.owner,
             repository: record.repository,
             access: record.access,
+            close_related_issues: record.close_related_issues,
             revoked: AtomicBool::new(false),
         });
         if !token.active() {
@@ -128,6 +131,7 @@ impl Authentication {
                 && cached.owner == token.owner
                 && cached.repository == token.repository
                 && cached.access == token.access
+                && cached.close_related_issues == token.close_related_issues
             {
                 return Some(Arc::clone(cached));
             }
@@ -152,6 +156,7 @@ impl Authentication {
             owner: token.owner.clone(),
             repository: token.repository.clone(),
             access: token.access,
+            close_related_issues: token.close_related_issues,
             expires_at: token.session.expires_at,
         };
         state
@@ -295,7 +300,11 @@ pub(crate) async fn issue_git_token(
         GitTokenAccess::Read => current.principal.can_read(repository.id),
         GitTokenAccess::Write => current.principal.can_write(repository.id),
     };
-    if !allowed {
+    if !allowed
+        || (request.close_related_issues
+            && (!matches!(request.access, GitTokenAccess::Write)
+                || repository.organization.is_none()))
+    {
         return Err(AuthError::Forbidden);
     }
     let token = format!("crab_git_{}", CsrfToken::new_random_len(32).secret());
@@ -311,6 +320,7 @@ pub(crate) async fn issue_git_token(
                 GitTokenAccess::Read => RepositoryAccess::Read,
                 GitTokenAccess::Write => RepositoryAccess::Write,
             },
+            close_related_issues: request.close_related_issues,
             revoked: AtomicBool::new(false),
         }),
     )

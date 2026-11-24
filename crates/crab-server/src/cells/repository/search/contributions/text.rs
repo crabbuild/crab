@@ -29,7 +29,7 @@ pub(super) fn edit(context: &Transaction<'_>, key: &Key, body: &str) -> Result<(
     Ok(())
 }
 
-pub(in crate::cells::repository::search) fn flush(context: &Transaction<'_>) -> Result<()> {
+pub(in crate::cells::repository) fn flush(context: &Transaction<'_>) -> Result<()> {
     let rows = context.query(
         "SELECT id FROM discussion_index_comment_text_dirty ORDER BY id LIMIT 129",
         &[],

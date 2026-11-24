@@ -1,5 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import { pickDate } from "./date-picker";
+import { chooseSelectOption } from "./select";
 import {
   expectNoAccessibilityViolations,
   selectDarkTheme,
@@ -45,7 +46,7 @@ const views = [
     hide_closed: false,
   },
 ];
-async function fixture(page: Page) {
+async function fixture(page: Page, movedIssue = false) {
   let project: WorkspaceProject = {
     id: projectId,
     definition: {
@@ -76,6 +77,25 @@ async function fixture(page: Page) {
   const decisions = new Map<string, Outcome>();
   const submissions: { request_id: string; command: WorkspaceCommand }[] = [];
   let lose = false;
+  const movedItem = "01900000-0000-7000-8000-000000000030";
+  if (movedIssue) {
+    linked.add(repositories[0].id);
+    revisions.set(movedItem, 1);
+    items.push({
+      repository: repositories[0].id,
+      item: {
+        id: movedItem,
+        subject: { kind: "issue", number: 1 },
+        title: "",
+        body: "",
+        status: "Todo",
+        priority: 0,
+        start: null,
+        end: null,
+        values: {},
+      },
+    });
+  }
   function work(repository: string): Work {
     return {
       subject: { kind: "issue", number: 1 },
@@ -166,6 +186,60 @@ async function fixture(page: Page) {
           throw new Error(
             "Issue publication requires the native Project browser fixture",
           );
+        } else if (command.kind === "bulk_fields") {
+          const stale = command.items.find(
+            ({ item, version }) => revisions.get(item) !== version,
+          );
+          if (stale) {
+            outcome = {
+              outcome: "item_conflict",
+              project: project.id,
+              item: stale.item,
+              version: revisions.get(stale.item) ?? 0,
+            };
+          } else {
+            let changed = 0;
+            for (const edit of command.items) {
+              const row = items.find(({ item }) => item.id === edit.item);
+              if (!row) throw new Error("Unexpected Project bulk fixture edit");
+              if (edit.change.field === "status") {
+                if (row.item.status === edit.change.value) continue;
+                row.item = { ...row.item, status: edit.change.value };
+              } else if (edit.change.field === "custom") {
+                const values = { ...row.item.values };
+                if ((values[edit.change.id] ?? null) === edit.change.value)
+                  continue;
+                if (edit.change.value === null) delete values[edit.change.id];
+                else values[edit.change.id] = edit.change.value;
+                row.item = { ...row.item, values };
+              } else {
+                throw new Error("Unexpected Project bulk fixture field");
+              }
+              revisions.set(edit.item, edit.version + 1);
+              changed++;
+            }
+            project = {
+              ...project,
+              version: project.version + changed,
+            };
+            outcome = {
+              outcome: "applied",
+              project: project.id,
+              version: project.version,
+            };
+          }
+        } else if (
+          movedIssue &&
+          command.kind === "item" &&
+          command.version === 0 &&
+          command.repository === repositories[1].id &&
+          command.item.subject?.number === 9
+        ) {
+          outcome = {
+            outcome: "issue_already_linked",
+            project: project.id,
+            version: project.version,
+          };
         } else if (
           (command.kind === "item" || command.kind === "remove") &&
           command.version !==
@@ -249,42 +323,72 @@ async function fixture(page: Page) {
           lead: { id: actor, name: "Alice", handle: "alice" },
         },
       });
-    if (path === `${root}/${project.id}/candidates`)
+    if (path === `${root}/${project.id}/candidates`) {
+      const repository = url.searchParams.get("repository")!;
+      const candidate =
+        movedIssue && repository === repositories[1].id
+          ? {
+              ...work(repositories[0].id),
+              subject: { kind: "issue", number: 9 },
+            }
+          : work(repository);
       return route.fulfill({
-        json: { items: [work(url.searchParams.get("repository")!)] },
+        json: { items: [candidate] },
+      });
+    }
+    if (path === `${root}/${project.id}/filter-repositories`)
+      return route.fulfill({
+        json: {
+          items: repositories.filter(
+            (repo) =>
+              linked.has(repo.id) ||
+              (movedIssue && repo.id === repositories[1].id),
+          ),
+        },
       });
     if (path === `${root}/${project.id}/items`) {
       const repository = url.searchParams.get("repository");
       const status = url.searchParams.get("status");
+      const repositoryMatches = (row: (typeof items)[number]) =>
+        !repository ||
+        (row.item.id === movedItem ? repositories[1].id : row.repository) ===
+          repository;
       const matching = items.filter(
         (row) =>
-          (!repository || row.repository === repository) &&
+          repositoryMatches(row) &&
           (!url.searchParams.has("item") ||
             row.item.id === url.searchParams.get("item")) &&
           (!status || row.item.status === status),
       );
       const counts: Record<string, number> = {};
-      for (const row of items.filter(
-        (row) => !repository || row.repository === repository,
-      ))
+      for (const row of items.filter(repositoryMatches))
         counts[row.item.status] = (counts[row.item.status] ?? 0) + 1;
       return route.fulfill({
         json: {
           page: {
             project,
-            items: matching.map((row) => ({
-              version: revisions.get(row.item.id),
-              item: row.item,
-              repository:
-                repositories.find((repo) => repo.id === row.repository) ?? null,
-              work: row.repository ? work(row.repository) : null,
-              blocked: row.repository === repositories[0].id,
-              assignees: [],
-              parent: null,
-              progress: null,
-              links: [],
-              more_links: false,
-            })),
+            items: matching.map((row) => {
+              const moved = row.item.id === movedItem;
+              const current = row.repository ? work(row.repository) : null;
+              return {
+                version: revisions.get(row.item.id),
+                item: row.item,
+                repository: moved
+                  ? repositories[1]
+                  : (repositories.find((repo) => repo.id === row.repository) ??
+                    null),
+                source_repository: row.repository,
+                work: moved
+                  ? { ...current, subject: { kind: "issue", number: 9 } }
+                  : current,
+                blocked: row.repository === repositories[0].id,
+                assignees: [],
+                parent: null,
+                progress: null,
+                links: [],
+                more_links: false,
+              };
+            }),
             counts,
             total: matching.length,
             next: null,
@@ -302,6 +406,34 @@ async function fixture(page: Page) {
   return {
     submissions,
     items,
+    addDraft(title: string, status = "Todo", values: Item["values"] = {}) {
+      const id = crypto.randomUUID();
+      items.push({
+        repository: null,
+        item: {
+          id,
+          title,
+          subject: null,
+          body: "",
+          status,
+          priority: 0,
+          start: null,
+          end: null,
+          values,
+        },
+      });
+      revisions.set(id, 1);
+      return id;
+    },
+    addStreamField() {
+      const id = crypto.randomUUID();
+      project.definition.fields.push({
+        id,
+        name: "Workstream",
+        definition: { kind: "select", options: ["Platform", "Application"] },
+      });
+      return id;
+    },
     editFirstItem(title: string) {
       const row = items[0];
       row.item = { ...row.item, title };
@@ -422,6 +554,95 @@ test("one project coordinates matching issue numbers across repositories with pl
   expect(
     await page.evaluate(() => document.documentElement.scrollWidth),
   ).toBeLessThanOrEqual(390);
+});
+
+test("moved work links to its current issue and saves planning edits against its original placement", async ({
+  page,
+}) => {
+  const state = await fixture(page, true);
+  await page.goto(`${home}/${projectId}`);
+  const work = page.getByRole("link", { name: "Ship API", exact: true });
+  await expect(work).toHaveAttribute("href", "/team/client/issues/9");
+  await page
+    .getByRole("button", { name: "Edit Ship API", exact: true })
+    .click();
+  const editor = page.getByRole("dialog", {
+    name: "Project item",
+    exact: true,
+  });
+  await editor
+    .getByRole("combobox", { name: "Item status", exact: true })
+    .click();
+  await page.getByRole("option", { name: "Done", exact: true }).click();
+  await editor.getByRole("button", { name: "Save item", exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  expect(state.submissions.at(-1)?.command).toMatchObject({
+    kind: "item",
+    repository: repositories[0].id,
+    version: 1,
+    item: { status: "Done", subject: { kind: "issue", number: 1 } },
+  });
+  await expect(work).toHaveAttribute("href", "/team/client/issues/9");
+  const filter = page.getByRole("combobox", {
+    name: "Filter by repository",
+    exact: true,
+  });
+  const discovery = page.waitForResponse((response) =>
+    new URL(response.url()).pathname.endsWith("/filter-repositories"),
+  );
+  await filter.click();
+  expect((await discovery).ok()).toBe(true);
+  await page.getByRole("option", { name: "team/client", exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`repository=${repositories[1].id}`));
+  await expect(work).toBeVisible();
+  await filter.click();
+  await page.getByRole("option", { name: "team/server", exact: true }).click();
+  await expect(work).toHaveCount(0);
+});
+
+test("adding moved work again acknowledges the existing Project placement", async ({
+  page,
+}) => {
+  const state = await fixture(page, true);
+  await page.goto(`${home}/${projectId}`);
+  await page.getByRole("button", { name: "Manage", exact: true }).click();
+  const linking = page.getByRole("dialog", {
+    name: "Link repositories",
+    exact: true,
+  });
+  await linking.getByLabel("team/client", { exact: true }).click();
+  await expect(
+    linking.getByLabel("team/client", { exact: true }),
+  ).toBeChecked();
+  await linking.getByRole("button", { name: "Done", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Add work", exact: true })
+    .first()
+    .click();
+  const editor = page.getByRole("dialog", {
+    name: "Add work to project",
+    exact: true,
+  });
+  await editor
+    .getByRole("combobox", { name: "Source repository", exact: true })
+    .click();
+  await page.getByRole("option", { name: "team/client", exact: true }).click();
+  await editor
+    .getByRole("button", { name: "Ship API #9", exact: true })
+    .click();
+  await editor
+    .getByRole("button", { name: "Add to project", exact: true })
+    .click();
+  await expect(editor).toHaveCount(0);
+  await expect(
+    page.getByText(
+      "The issue was already added to this Project. Its current planning fields were kept.",
+    ),
+  ).toBeVisible();
+  expect(state.items).toHaveLength(1);
+  await expect(
+    page.getByRole("link", { name: "Ship API", exact: true }),
+  ).toHaveAttribute("href", "/team/client/issues/9");
 });
 
 test("a same-item conflict shows the saved edit and keeps the local draft for an explicit retry", async ({
@@ -852,6 +1073,161 @@ test("a lost submission survives reload and stays bound to its original account"
   await expect(page.getByLabel("Project name", { exact: true })).toHaveValue(
     "",
   );
+});
+
+test("bulk Project edits recover the original submission and Undo after reload", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  state.addDraft("Roll out API");
+  state.addDraft("Roll out client");
+  await page.goto(`${home}/${projectId}`);
+  await page.getByRole("tab", { name: "Table", exact: true }).click();
+  await page
+    .getByRole("checkbox", { name: /Select all Project items/ })
+    .check();
+  await chooseSelectOption(page.getByLabel("New value", { exact: true }), {
+    label: "Done",
+  });
+  state.loseNext();
+  await page
+    .getByRole("button", { name: "Apply to selected", exact: true })
+    .click();
+  const retry = page.getByRole("button", {
+    name: "Retry submission",
+    exact: true,
+  });
+  await expect(retry).toBeEnabled();
+  const sent = structuredClone(state.submissions[0]);
+  expect(sent.command.kind).toBe("bulk_fields");
+  await page.reload();
+  await retry.click();
+  await expect(
+    page.getByRole("button", { name: "Undo", exact: true }),
+  ).toBeVisible();
+  expect(state.submissions[1]).toEqual(sent);
+  await expect(page.getByLabel("Status for Roll out API")).toHaveText("Done");
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect(page.getByLabel("Status for Roll out API")).toHaveText("Todo");
+  await expect(page.getByLabel("Status for Roll out client")).toHaveText(
+    "Todo",
+  );
+  const inverse = state.submissions[2];
+  expect(inverse.request_id).not.toBe(sent.request_id);
+  expect(inverse.command).toMatchObject({
+    kind: "bulk_fields",
+    items: [
+      { version: 2, change: { field: "status", value: "Todo" } },
+      { version: 2, change: { field: "status", value: "Todo" } },
+    ],
+  });
+});
+
+test("dragging a selected card moves the board selection in one Project command", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  const api = state.addDraft("Roll out API");
+  const client = state.addDraft("Roll out client", "In progress");
+  const shipped = state.addDraft("Already shipped", "Done");
+  state.addDraft("Unselected follow-up");
+  await page.goto(`${home}/${projectId}`);
+  const board = page.getByRole("region", { name: "Project board" });
+  const todo = board.getByRole("region", { name: "Todo", exact: true });
+  const progress = board.getByRole("region", {
+    name: "In progress",
+    exact: true,
+  });
+  const done = board.getByRole("region", { name: "Done", exact: true });
+  for (const name of ["Roll out API", "Roll out client", "Already shipped"])
+    await board
+      .getByRole("checkbox", { name: `Select ${name}`, exact: true })
+      .check();
+  await expect(page.getByText("3 selected", { exact: true })).toBeVisible();
+  await page.screenshot({
+    path: test.info().outputPath("board-selection-light.png"),
+  });
+  await todo
+    .locator("article")
+    .filter({ hasText: "Roll out API" })
+    .dragTo(done, { targetPosition: { x: 110, y: 230 } });
+  await expect(done.locator("article")).toHaveCount(3);
+  await expect(
+    todo.getByText("Unselected follow-up", { exact: true }),
+  ).toBeVisible();
+  expect(state.submissions).toHaveLength(1);
+  expect(state.submissions[0].command).toEqual({
+    kind: "bulk_fields",
+    project: projectId,
+    items: [api, client, shipped].map((item) => ({
+      item,
+      version: 1,
+      change: { field: "status", value: "Done" },
+    })),
+  });
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect(todo.getByText("Roll out API", { exact: true })).toBeVisible();
+  await expect(
+    progress.getByText("Roll out client", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    done.getByText("Already shipped", { exact: true }),
+  ).toBeVisible();
+});
+
+test("the board move menu clears a custom column with the keyboard on mobile", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  const field = state.addStreamField();
+  const api = state.addDraft("Build the API", "Todo", { [field]: "Platform" });
+  const client = state.addDraft("Ship the app", "In progress", {
+    [field]: "Application",
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${home}/${projectId}`);
+  await selectDarkTheme(page);
+  await chooseSelectOption(page.getByLabel("Group board by", { exact: true }), {
+    label: "Workstream",
+  });
+  const board = page.getByRole("region", { name: "Project board" });
+  await board
+    .getByRole("checkbox", { name: "Select all editable cards in Platform" })
+    .press("Space");
+  await board
+    .getByRole("checkbox", { name: "Select Ship the app" })
+    .press("Space");
+  const move = page.getByRole("button", {
+    name: "Move selected to",
+    exact: true,
+  });
+  await expect(move).toBeEnabled();
+  await expectNoAccessibilityViolations(page);
+  await page.screenshot({
+    path: test.info().outputPath("board-selection-mobile-dark.png"),
+  });
+  await move.press("Enter");
+  await page
+    .getByRole("menuitem", { name: "No value", exact: true })
+    .press("Enter");
+  const unassigned = board.getByRole("region", {
+    name: "No value",
+    exact: true,
+  });
+  await expect(unassigned.locator("article")).toHaveCount(2);
+  expect(state.submissions[0].command).toEqual({
+    kind: "bulk_fields",
+    project: projectId,
+    items: [api, client].map((item) => ({
+      item,
+      version: 1,
+      change: { field: "custom", id: field, value: null },
+    })),
+  });
+  expect(state.items.map(({ item }) => item.status)).toEqual([
+    "Todo",
+    "In progress",
+  ]);
 });
 
 test("a failed recovery checkpoint prevents the new native request", async ({

@@ -31,6 +31,10 @@ pub(crate) enum Command {
         repository: Option<Uuid>,
         item: planning::Item,
     },
+    BulkFields {
+        project: Uuid,
+        items: Vec<ledger::bulk::Edit>,
+    },
     CreateIssue {
         project: Uuid,
         repository: Uuid,
@@ -51,13 +55,14 @@ impl Command {
             | Self::Planning { project, .. }
             | Self::Repository { project, .. }
             | Self::Item { project, .. }
+            | Self::BulkFields { project, .. }
             | Self::CreateIssue { project, .. }
             | Self::Remove { project, .. } => Some(*project),
         }
     }
     fn version(&self) -> u64 {
         match self {
-            Self::Create { .. } | Self::CreateIssue { .. } => 0,
+            Self::Create { .. } | Self::CreateIssue { .. } | Self::BulkFields { .. } => 0,
             Self::Edit { version, .. }
             | Self::Planning { version, .. }
             | Self::Repository { version, .. }
@@ -77,7 +82,16 @@ pub(crate) struct Request {
     // It is excluded from the digest so a lost reply can recover after revocation.
     pub source_allowed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment: Option<AttachmentCheck>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_epoch: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AttachmentCheck {
+    pub project_version: u64,
+    pub already_linked: bool,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
@@ -176,7 +190,18 @@ pub(super) fn apply(
     context: &mut Transaction<'_>,
     input: &Request,
 ) -> Result<MutationResult<Outcome>> {
-    if let Command::Create { id, name, template } = &input.command {
+    apply_command(context, input, &input.command)
+}
+
+fn apply_command(
+    context: &mut Transaction<'_>,
+    input: &Request,
+    command: &Command,
+) -> Result<MutationResult<Outcome>> {
+    if let Command::BulkFields { project, items } = command {
+        return apply_bulk(context, input, *project, items);
+    }
+    if let Command::Create { id, name, template } = command {
         let Some(template) = planning::templates()
             .into_iter()
             .find(|candidate| candidate.id == *template)
@@ -238,16 +263,16 @@ pub(super) fn apply(
             version: 1,
         }));
     }
-    let Some(project_id) = input.command.project() else {
+    let Some(project_id) = command.project() else {
         return Err(Error::Invalid("project target is missing"));
     };
     let Some(mut project) = load(context, project_id)? else {
         return Ok(rejected("Project not found"));
     };
     if !matches!(
-        input.command,
+        command,
         Command::Item { .. } | Command::Remove { .. } | Command::CreateIssue { .. }
-    ) && project.version != input.command.version()
+    ) && project.version != command.version()
     {
         return Ok(rejected(
             "The project changed. Review its current version before saving your draft.",
@@ -257,13 +282,13 @@ pub(super) fn apply(
     if project.version.saturating_add(pending.len() as u64) >= MAX_VERSION {
         return Ok(rejected("Project version limit reached"));
     }
-    if project.archived && !matches!(input.command, Command::Edit { .. }) {
+    if project.archived && !matches!(command, Command::Edit { .. }) {
         return Ok(rejected("Archived projects are read-only"));
     }
     let mut event_target = ledger::Target::Project;
     let mut before = Some(history::project_snapshot(&project));
     let mut after = None;
-    match &input.command {
+    match command {
         Command::Edit {
             definition,
             archived,
@@ -386,6 +411,25 @@ pub(super) fn apply(
                     "An existing project item's source cannot be replaced",
                 ));
             }
+            if *version == 0
+                && next.subject.is_some_and(|subject| {
+                    subject.kind == crate::cells::repository::collaboration::SubjectKind::Issue
+                })
+                && let Some(check) = &input.attachment
+            {
+                // A placement could have been added through an older address
+                // after the coordinator sampled the Project. A stale check
+                // must roll back without saving a terminal request outcome.
+                if check.project_version != project.version {
+                    return Err(Error::StaleSearch);
+                }
+                if check.already_linked {
+                    return Ok(MutationResult::Rejected(Outcome::IssueAlreadyLinked {
+                        project: project_id,
+                        version: project.version,
+                    }));
+                }
+            }
             if old.is_none() && !issue_creation::has_room(context, project_id, &pending)? {
                 return Ok(rejected("This project has reached its 5,000-item limit"));
             }
@@ -406,6 +450,16 @@ pub(super) fn apply(
             };
             let repository_value = repository.map(blob).unwrap_or(SqlValue::Null);
             if next.subject.is_some() && !context.query("SELECT 1 FROM organization_project_items WHERE project=? AND repository=? AND kind=? AND number=? AND id!=?",&[blob(project_id),repository_value.clone(),kind.clone(),number.clone(),blob(next.id)])?.rows.is_empty() {return Ok(rejected("This work is already in the project"));}
+            // A no-op selection still participates in every permission and
+            // revision check above. It produces no history or new revision.
+            if matches!(input.command, Command::BulkFields { .. })
+                && old.as_ref().is_some_and(|saved| &saved.item == next)
+            {
+                return Ok(MutationResult::Success(Outcome::Applied {
+                    project: Some(project_id),
+                    version: project.version,
+                }));
+            }
             let data = Item {
                 repository: *repository,
                 item: next.clone(),
@@ -471,7 +525,7 @@ pub(super) fn apply(
             };
             before = Some(history::item_snapshot(&old.item)?);
         }
-        Command::Create { .. } => {
+        Command::Create { .. } | Command::BulkFields { .. } => {
             return Err(Error::Invalid("project create reached item dispatch"));
         }
     }
@@ -494,5 +548,50 @@ pub(super) fn apply(
     Ok(MutationResult::Success(Outcome::Applied {
         project: Some(project_id),
         version: project.version,
+    }))
+}
+
+fn apply_bulk(
+    context: &mut Transaction<'_>,
+    input: &Request,
+    project: Uuid,
+    edits: &[ledger::bulk::Edit],
+) -> Result<MutationResult<Outcome>> {
+    if !ledger::bulk::valid(edits) {
+        return Ok(rejected("Select up to 50 distinct Project items"));
+    }
+    if !input.source_allowed {
+        return Ok(rejected("Select Project items with accessible work"));
+    }
+    let Some(saved) = load(context, project)? else {
+        return Ok(rejected("Project not found"));
+    };
+    let mut version = saved.version;
+    for edit in edits {
+        let Some(entry) = item(context, project, edit.item)? else {
+            return Ok(MutationResult::Rejected(Outcome::ItemConflict {
+                project,
+                item: edit.item,
+                version: ledger::item_version(context, project, edit.item)?,
+            }));
+        };
+        let mut item = entry.item;
+        if !edit.change.update(&mut item, &saved.definition) {
+            return Ok(rejected("The selected Project field is unavailable"));
+        }
+        let command = Command::Item {
+            project,
+            version: edit.version,
+            repository: entry.repository,
+            item,
+        };
+        match apply_command(context, input, &command)? {
+            MutationResult::Success(Outcome::Applied { version: next, .. }) => version = next,
+            outcome => return Ok(outcome),
+        }
+    }
+    Ok(MutationResult::Success(Outcome::Applied {
+        project: Some(project),
+        version,
     }))
 }

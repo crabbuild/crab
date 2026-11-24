@@ -17,6 +17,7 @@ pub(crate) const MAX_VERSION: u64 = 9_007_199_254_740_991;
 
 pub(crate) mod automation;
 mod commands;
+pub(crate) mod development;
 pub(crate) mod discovery;
 mod invitations;
 pub(crate) mod issue_types;
@@ -351,6 +352,24 @@ pub(in crate::cells) fn authorize(
             | automation::Verify::ID,
             false,
         ) => return Ok(()),
+        // Linked work is governed by the two repository grants. The trusted
+        // HTTP caller checks both before using this organization-owned index.
+        (
+            development::List::ID
+            | development::Get::ID
+            | development::descriptions::Pulls::ID
+            | development::branches::Candidates::ID,
+            false,
+        )
+        | (
+            development::Set::ID
+            | development::descriptions::Replace::ID
+            | development::branches::Track::ID
+            | development::branches::Promote::ID,
+            true,
+        ) => {
+            return Ok(());
+        }
         (discovery::GetLanding::ID, false) => return Ok(()),
         (GetOrganization::ID | ListMembers::ID | FindMembers::ID, false) => false,
         (
@@ -446,9 +465,21 @@ pub(in crate::cells) fn dispatch_read(
         projects::GetPreparation::ID => invoke_read::<projects::GetPreparation>(context, input),
         projects::GetHistory::ID => invoke_read::<projects::GetHistory>(context, input),
         projects::List::ID => invoke_read::<projects::List>(context, input),
+        development::List::ID => invoke_read::<development::List>(context, input),
+        development::Get::ID => invoke_read::<development::Get>(context, input),
+        development::descriptions::Pulls::ID => {
+            invoke_read::<development::descriptions::Pulls>(context, input)
+        }
+        development::branches::Candidates::ID => {
+            invoke_read::<development::branches::Candidates>(context, input)
+        }
         projects::Get::ID => invoke_read::<projects::Get>(context, input),
         projects::Items::ID => invoke_read::<projects::Items>(context, input),
-        projects::TypeSources::ID => invoke_read::<projects::TypeSources>(context, input),
+        projects::BulkSources::ID => invoke_read::<projects::BulkSources>(context, input),
+        projects::Sources::ID => invoke_read::<projects::Sources>(context, input),
+        projects::GetAttachmentSources::ID => {
+            invoke_read::<projects::GetAttachmentSources>(context, input)
+        }
         teams::GetPreparation::ID => invoke_read::<teams::GetPreparation>(context, input),
         teams::List::ID => invoke_read::<teams::List>(context, input),
         teams::ResolveReviewTeams::ID => invoke_read::<teams::ResolveReviewTeams>(context, input),
@@ -512,6 +543,16 @@ pub(in crate::cells) fn dispatch_mutation(
         }
         projects::Prepare::ID => invoke_mutation::<projects::Prepare>(context, input),
         projects::Change::ID => invoke_mutation::<projects::Change>(context, input),
+        development::Set::ID => invoke_mutation::<development::Set>(context, input),
+        development::descriptions::Replace::ID => {
+            invoke_mutation::<development::descriptions::Replace>(context, input)
+        }
+        development::branches::Track::ID => {
+            invoke_mutation::<development::branches::Track>(context, input)
+        }
+        development::branches::Promote::ID => {
+            invoke_mutation::<development::branches::Promote>(context, input)
+        }
         projects::ResolveIssue::ID => invoke_mutation::<projects::ResolveIssue>(context, input),
         #[cfg(test)]
         teams::tests::WithoutTeams::ID => {

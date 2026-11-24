@@ -22,6 +22,10 @@ import {
   type BypassGrant,
   type BypassOptions,
 } from "./ruleset-bypass";
+import {
+  ReviewDismissalEditor,
+  type ReviewDismissalActor,
+} from "./ruleset-review-dismissal";
 
 import {
   allRepositories,
@@ -50,6 +54,7 @@ interface Ruleset {
   required_checks: string[];
   required_integrations: string[];
   bypass_actors?: BypassGrant[];
+  review_dismissal?: ReviewDismissalActor[];
   repositories?: RepositoryTarget;
 }
 
@@ -123,6 +128,7 @@ const pullRules = {
   require_merge_queue: false,
   required_checks: [],
   required_integrations: [],
+  review_dismissal: undefined,
 };
 
 function newRuleset(): Ruleset {
@@ -268,6 +274,7 @@ function RulesetsList({
         <RulesetForm
           key={editing.id}
           initial={editing}
+          repo={repo}
           organization={organization}
           definitions={definitions}
           workflows={workflows.data?.items}
@@ -424,6 +431,9 @@ function RulesetSummary({
           <li>Require branches to be up to date before merging</li>
         )}
         {rule.require_merge_queue && <li>Require merge queue</li>}
+        {rule.review_dismissal !== undefined && (
+          <li>Restrict review dismissal</li>
+        )}
         {rule.required_checks.length > 0 && (
           <li>
             Required checks{" "}
@@ -456,6 +466,7 @@ const lineValues = (text: string) =>
 
 function RulesetForm({
   initial,
+  repo,
   organization,
   definitions,
   workflows,
@@ -466,6 +477,7 @@ function RulesetForm({
   onSave,
 }: {
   initial: Ruleset;
+  repo?: Repository;
   organization?: string;
   definitions?: PropertyDefinition[];
   workflows: Connections["items"] | undefined;
@@ -486,6 +498,15 @@ function RulesetForm({
   const requiredChecks = lineValues(checks);
   const hasRequiredChecks =
     requiredChecks.length > 0 || rule.required_integrations.length > 0;
+  const requiresPull =
+    rule.require_pull_request ||
+    rule.require_merge_queue ||
+    Number(approvals) > 0 ||
+    rule.required_code_owner_reviews ||
+    rule.require_conversation_resolution ||
+    hasRequiredChecks;
+  const restrictDismissal = rule.review_dismissal !== undefined;
+  const invalidDismissal = branch && restrictDismissal && !requiresPull;
   const repositories = rule.repositories;
   const invalidRepositories =
     (repositories?.kind === "selected" && !repositories.ids.length) ||
@@ -764,6 +785,33 @@ function RulesetForm({
                 Require {name}
               </label>
             ))}
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={restrictDismissal}
+                disabled={!requiresPull && !restrictDismissal}
+                onChange={(event) =>
+                  change({
+                    review_dismissal: event.target.checked ? [] : undefined,
+                  })
+                }
+              />
+              Restrict who can dismiss pull request reviews
+            </label>
+            {(!requiresPull || invalidDismissal) && (
+              <p className="text-sm text-muted-foreground">
+                Add a pull request requirement to configure review dismissal.
+              </p>
+            )}
+            {rule.review_dismissal !== undefined && (
+              <ReviewDismissalEditor
+                actors={rule.review_dismissal}
+                onChange={(review_dismissal) => change({ review_dismissal })}
+                repo={repo}
+                organization={organization}
+                teams={bypassOptions?.teams}
+              />
+            )}
           </>
         )}
         <RulesetBypassEditor
@@ -784,6 +832,7 @@ function RulesetForm({
             type="submit"
             disabled={
               invalidBypass ||
+              invalidDismissal ||
               invalidRepositories ||
               (branch &&
                 (rule.require_up_to_date || rule.require_merge_queue) &&

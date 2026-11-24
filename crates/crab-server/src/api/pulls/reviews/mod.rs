@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::storage;
-use crate::cells::repository::review_dismissals::Detail;
+use crate::cells::repository::{review_dismissals::Detail, rulesets::ReviewDismissalPolicy};
 use crate::{
     api::{profiles::attribution::Authors, reactions},
     app::{self, Error, Result},
@@ -61,24 +61,29 @@ pub(super) fn state(review: ReviewState, dismissed: bool) -> &'static str {
     }
 }
 
-pub(in crate::api) async fn ruleset_requires_admin(
+pub(in crate::api) async fn dismissal_allowed(
     server: &Server,
     repo: &crate::repository::Repository,
-    principal: &Principal,
+    grant: &app::Membership,
+    actor: &Identity,
     review: Option<&Detail>,
 ) -> Result<bool> {
     let Some(review) = review.filter(|review| review.dismissible) else {
         return Ok(false);
     };
-    if !principal.can_write(repo.id) || principal.can_admin(repo.id) {
+    if !grant.principal.can_write(repo.id) {
         return Ok(false);
     }
     let policy = crate::repository::settings::load_ref_policy(server, repo).await?;
-    let default_ref = policy.default_ref(repo).await?;
-    Ok(policy
-        .active()?
-        .matches(&review.base_ref, &default_ref)
-        .any(|(_, rule)| rule.requires_pull()))
+    let dismissal = policy
+        .review_dismissal(server, repo, grant, actor, &review.base_ref)
+        .await?;
+    Ok(dismissal.allows(
+        grant.principal.can_admin(repo.id),
+        review
+            .admin_required
+            .unwrap_or_else(|| configured_protected(repo, &review.base_ref)),
+    ))
 }
 
 pub(in crate::api) fn review_view(
@@ -87,16 +92,10 @@ pub(in crate::api) fn review_view(
     actor: &Identity,
     current_head: Option<&str>,
     reactions: &reactions::View,
-    principal: &Principal,
-    repo: &crate::repository::Repository,
-    ruleset_protected: bool,
+    can_dismiss: bool,
 ) -> Value {
     let review = &detail.review;
     let state = state(review.state, detail.dismissal.is_some());
-    let admin_required = ruleset_protected
-        || detail
-            .admin_required
-            .unwrap_or_else(|| configured_protected(repo, &detail.base_ref));
     json!({
         "number": review.number,
         "author": authors.view(&review.author),
@@ -110,7 +109,7 @@ pub(in crate::api) fn review_view(
             "body": value.body,
             "created_at": value.created_at_ms,
         })),
-        "can_dismiss": detail.dismissible && principal.can_write(repo.id) && (!admin_required || principal.can_admin(repo.id)),
+        "can_dismiss": detail.dismissible && can_dismiss,
         "commit_oid": review.commit_oid,
         "current": current_head.map(|oid| oid == review.commit_oid),
         "version": review.version,
@@ -191,11 +190,12 @@ async fn list(
         })
         .collect();
     let authors = Authors::load(&server, &principal, actors.into_iter()).await?;
-    let principal = app::membership(&server, &principal, repo).await?.principal;
-    let ruleset_protected = ruleset_requires_admin(
+    let grant = app::membership(&server, &principal, repo).await?;
+    let can_dismiss = dismissal_allowed(
         &server,
         repo,
-        &principal,
+        &grant,
+        &actor,
         reviews.iter().find(|review| review.dismissible),
     )
     .await?;
@@ -209,9 +209,7 @@ async fn list(
                 &actor,
                 head.as_deref(),
                 &reactions,
-                &principal,
-                repo,
-                ruleset_protected,
+                can_dismiss,
             )
         })
         .collect::<Vec<_>>();
@@ -312,9 +310,8 @@ async fn create(
             .chain(review.dismissal.as_ref().map(|value| &value.author)),
     )
     .await?;
-    let principal = app::membership(&server, &principal, repo).await?.principal;
-    let ruleset_protected =
-        ruleset_requires_admin(&server, repo, &principal, Some(&review)).await?;
+    let grant = app::membership(&server, &principal, repo).await?;
+    let can_dismiss = dismissal_allowed(&server, repo, &grant, &actor, Some(&review)).await?;
     Ok((
         StatusCode::CREATED,
         Json(review_view(
@@ -323,9 +320,7 @@ async fn create(
             &actor,
             head.as_deref(),
             &reaction,
-            &principal,
-            repo,
-            ruleset_protected,
+            can_dismiss,
         )),
     ))
 }
@@ -360,18 +355,15 @@ async fn detail(
             .chain(review.dismissal.as_ref().map(|value| &value.author)),
     )
     .await?;
-    let principal = app::membership(&server, &principal, repo).await?.principal;
-    let ruleset_protected =
-        ruleset_requires_admin(&server, repo, &principal, Some(&review)).await?;
+    let grant = app::membership(&server, &principal, repo).await?;
+    let can_dismiss = dismissal_allowed(&server, repo, &grant, &actor, Some(&review)).await?;
     Ok(Json(review_view(
         &authors,
         &review,
         &actor,
         head.as_deref(),
         &reaction,
-        &principal,
-        repo,
-        ruleset_protected,
+        can_dismiss,
     )))
 }
 
@@ -430,18 +422,15 @@ async fn edit(
             .chain(review.dismissal.as_ref().map(|value| &value.author)),
     )
     .await?;
-    let principal = app::membership(&server, &principal, repo).await?.principal;
-    let ruleset_protected =
-        ruleset_requires_admin(&server, repo, &principal, Some(&review)).await?;
+    let grant = app::membership(&server, &principal, repo).await?;
+    let can_dismiss = dismissal_allowed(&server, repo, &grant, &actor, Some(&review)).await?;
     Ok(Json(review_view(
         &authors,
         &review,
         &actor,
         head.as_deref(),
         &reaction,
-        &principal,
-        repo,
-        ruleset_protected,
+        can_dismiss,
     )))
 }
 

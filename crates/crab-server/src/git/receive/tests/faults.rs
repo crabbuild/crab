@@ -85,6 +85,31 @@ pub(crate) fn fault_plan_intent() -> (Store, impl Fn(bool)) {
     })
 }
 
+pub(crate) fn fault_plan_receipt() -> (Store, impl Fn(bool)) {
+    let backing = Arc::new(FaultStore {
+        inner: Arc::new(object_store::memory::InMemory::new()),
+        marker_prefix: String::new(),
+        root_path: String::new(),
+        head_path: String::new(),
+        committed: AtomicBool::new(false),
+        fail_plan_io: AtomicBool::new(false),
+        cancel: CancellationToken::new(),
+        fault: Fault::PlanReceiptRead,
+    });
+    let store = Store::with_retry(
+        backing.clone(),
+        crab_storage::RetryPolicy {
+            max_attempts: 1,
+            base: Duration::ZERO,
+            cap: Duration::ZERO,
+        },
+    );
+    (store, move |active| {
+        backing.committed.store(false, Ordering::SeqCst);
+        backing.fail_plan_io.store(active, Ordering::SeqCst);
+    })
+}
+
 #[async_trait::async_trait]
 impl ObjectStore for FaultStore {
     async fn put_opts(
@@ -100,7 +125,11 @@ impl ObjectStore for FaultStore {
         {
             return Err(disconnected());
         }
-        let marker = location.as_ref().starts_with(&self.marker_prefix);
+        let marker = if self.marker_prefix.is_empty() {
+            location.as_ref().contains("/v2/transactions/committed/")
+        } else {
+            location.as_ref().starts_with(&self.marker_prefix)
+        };
         if marker && matches!(self.fault, Fault::RejectedMarker) {
             return Err(disconnected());
         }

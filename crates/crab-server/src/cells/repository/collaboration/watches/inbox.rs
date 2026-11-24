@@ -2,7 +2,10 @@ use super::{
     CLASS, Error, IdentityKey, Mutation, MutationResult, Read, Result, Subject, ThreadMode,
     Transaction, activity, identity_key, save_thread, thread_subscription,
 };
-use crate::cells::directory::notifications::Position;
+use crate::cells::{
+    directory::notifications::Position,
+    repository::{collaboration::SubjectKind, issues::transfer::publication::moved},
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -57,6 +60,13 @@ impl Read for InboxVisibility {
             .items
             .into_iter()
             .map(|item| {
+                if item.subject.kind == SubjectKind::Issue
+                    && moved(context, item.subject.number)?.is_some()
+                {
+                    // An old inbox event remains in Directory after an issue
+                    // moves. It must not light the source's unread badge.
+                    return Ok(false);
+                }
                 let subscription = thread_subscription(context, item.subject, key)?;
                 Ok(subscription
                     .dismissed

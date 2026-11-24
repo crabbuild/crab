@@ -297,6 +297,11 @@ async fn retention_preserves_original_and_bounds_large_escaped_revisions() {
         .await
         .unwrap();
     for version in 1..=102 {
+        let body = if (90..102).contains(&version) {
+            format!("{} {version}", "\\".repeat(65_520))
+        } else {
+            format!("Edit {version}")
+        };
         cell.client
             .command::<UpdateComment>(
                 &cell.target,
@@ -309,29 +314,72 @@ async fn retention_preserves_original_and_bounds_large_escaped_revisions() {
                     actor: author.clone(),
                     can_moderate: true,
                     version,
-                    body: format!("Edit {version}"),
+                    body,
                 },
             )
             .await
             .unwrap();
     }
+    let revisions = async |path: &str| {
+        let mut numbers = Vec::new();
+        let mut page = h.json(path, &bob).await;
+        loop {
+            numbers.extend(
+                page["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|entry| entry["number"].as_u64().unwrap()),
+            );
+            let Some(next) = page["next"].as_u64() else {
+                break;
+            };
+            assert!(numbers.len() < 100);
+            page = h.json(&format!("{path}?before={next}"), &alice).await;
+        }
+        numbers
+    };
     let path = history("issues/1/comments/1");
-    let mut numbers = Vec::new();
-    let mut page = h.json(&path, &bob).await;
-    loop {
-        numbers.extend(
-            page["items"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|entry| entry["number"].as_u64().unwrap()),
-        );
-        let Some(next) = page["next"].as_u64() else {
-            break;
-        };
-        assert!(numbers.len() < 100);
-        page = h.json(&format!("{path}?before={next}"), &alice).await;
-    }
+    let numbers = revisions(&path).await;
+    assert_eq!(numbers.len(), 100);
+    assert!(numbers.windows(2).all(|pair| pair[0] > pair[1]));
+    let original = numbers.last().unwrap();
+    let detail = h.json(&format!("{path}?revision={original}"), &bob).await;
+    assert_eq!(detail["before"]["body"], initial);
+    assert!(detail["after"].is_null());
+
+    h.add_repository("library").await;
+    let repo = h
+        .server
+        .repositories
+        .get(&("team".into(), "library".into()))
+        .unwrap();
+    let issue = format!("{ROOT}/issues/1");
+    let version = h.json(&issue, &alice).await["version"].as_u64().unwrap();
+    assert_eq!(
+        h.write(
+            Method::POST,
+            &format!("{issue}/transfer"),
+            &alice,
+            json!({"request_id":Uuid::now_v7(),"version":version,"destination":repo.id}),
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+    let moved = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let state = h.json(&issue, &alice).await;
+            if state["transfer"]["state"] == "ready" {
+                break state["transfer"]["number"].as_u64().unwrap();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let path = format!("/api/repos/team/library/edit-history/issues/{moved}/comments/1");
+    let numbers = revisions(&path).await;
     assert_eq!(numbers.len(), 100);
     assert!(numbers.windows(2).all(|pair| pair[0] > pair[1]));
     let original = numbers.last().unwrap();

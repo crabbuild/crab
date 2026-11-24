@@ -246,6 +246,9 @@ pub(in crate::cells) fn dispatch_read(
         CompleteHandles::ID => invoke_read::<CompleteHandles>(context, input),
         MentionCandidates::ID => invoke_read::<MentionCandidates>(context, input),
         notifications::List::ID => invoke_read::<notifications::List>(context, input),
+        notifications::filters::ListFilters::ID => {
+            invoke_read::<notifications::filters::ListFilters>(context, input)
+        }
         notifications::email::ReadEmail::ID => {
             invoke_read::<notifications::email::ReadEmail>(context, input)
         }
@@ -293,6 +296,9 @@ pub(in crate::cells) fn dispatch_mutation(
             invoke_mutation::<review_availability::SetAvailability>(context, input)
         }
         notifications::Deliver::ID => invoke_mutation::<notifications::Deliver>(context, input),
+        notifications::filters::UpdateFilters::ID => {
+            invoke_mutation::<notifications::filters::UpdateFilters>(context, input)
+        }
         notifications::email::BindEmail::ID => {
             invoke_mutation::<notifications::email::BindEmail>(context, input)
         }

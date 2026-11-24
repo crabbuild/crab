@@ -485,6 +485,153 @@ state navigation. Definitions, assignments, counts and cursors continue to use
 the existing native transaction and revision contracts. Prepared format-2
 repositories need no additional rebuild for the label menu.
 
+## Cross-repository issue transfer
+
+An issue transfer spans two Repository Cells. The source capture reads the
+open issue, active label names, milestone title and due date, issue type,
+conversation lock, and bounded pages of original comments and activity. The
+capture binds the source UUID, issue number, issue version, repository
+revision, and issue type version. A change to the captured discussion stops
+the old continuation. The lock retains its stored deadline so a clock change
+alone does not change the captured bytes.
+
+The destination stages frames in private SQL, with the progress document
+updated in the same Cell transaction. The transfer UUID binds the source and
+qualified initiator. Progress carries an ordered digest of the staged frames
+bound to their destination. An identical retry returns the latest progress.
+Conflicting bytes and out-of-order frames cannot advance the transfer. Staging
+allocates no issue number and contributes no rows to the destination's issue
+lists, discussion index, or inbox.
+
+The destination reserves a number after all frames are staged, and the
+reservation leaves issue lists unchanged. The source rechecks the capture
+version and commits its move record with removal of the issue and its search
+projections. It arms a durable recovery alarm in the same transaction. The
+alarm re-arms before contacting the destination and acknowledges the move only
+after the destination's publication crosses the Cell output gate. The
+destination publishes the reserved number from that decision and replays the
+same result after a lost reply. Issue text, author, dates,
+comment numbers, moderation, and the conversation lock are restored in the
+target Cell. Labels match by name, and a milestone matches by title and due
+date. Historical events with source-local references remain in their source
+frames to avoid resolving their numbers in the destination repository.
+
+Reaction frames page through the issue and comment ledgers in key order. They
+retain opaque actor membership keys, derive destination counts, and compare
+those counts with the source snapshot. Publication keeps a viewer's ability to
+remove an existing reaction after the issue moves.
+
+Activity frames include retained issue and comment edits within the frame
+byte budget. The destination remaps revisions to the imported activity
+numbers and preserves redactions and gaps in edit history. Only retained
+text contributes attachment manifests. Publication removes edit text from
+staging and keeps the original frame digest for exact replay.
+
+Issue bodies and comments carry manifests for linked published attachments in
+the source repository. The receiver reserves the transfer-specific attachment
+IDs before the worker writes their bytes. A staged frame advances only with a
+trusted storage receipt matching the size-checked copies' SHA-256 digests.
+Destination records stay private until publication rewrites Markdown link
+destinations and commits them with the issue. Shared attachments reuse the same
+destination ID.
+Code examples, link titles, and external links retain their original text.
+
+Development branch links store the target repository UUID and full ref in the
+issue's Repository Cell. The issue header captures the bounded link list and
+its version. Publication installs both with the destination issue, and source
+retirement removes the old record. Changing links advances the repository
+revision, so an issue transfer cannot retire a stale snapshot of those links.
+HTTP readers check current repository grants before returning target identity
+or ref data. Existing transfer headers and issues require no new preparation.
+
+Creating a development branch reserves one link slot and a payload-bound
+request in the issue's Repository Cell before starting the Git ref update.
+The destination uses an absent-ref precondition, the exact starting commit,
+and a Git plan ID derived from the source repository and request UUID.
+The publication gate rechecks both grants and the reserved request.
+The issue may move once that request settles. A proven Git receipt finishes
+the link in the same Cell mutation that records the result. An existing branch
+at the same commit is insufficient evidence. Recovery checks bounded due
+requests. It releases unattempted expired requests under the Git plan lease
+and retains attempted requests while the outcome is ambiguous.
+Update serving peers and UI together before enabling issue branch creation.
+
+The issue Cell indexes development links by head repository UUID and full ref.
+The pull-creation transaction uses that index to replace eligible branches
+with normal linked-issue records when the pull request lives in the same Cell.
+Earlier links are indexed in bounded, resumable batches before acquiring
+the comparison leases. A pending branch creation can remember the first pull
+request that opens from it. Its exact Git receipt must be proven before the
+branch can promote. Merge publication checks those receipts before capturing
+the default-branch closure set, so an unacknowledged branch creation can
+still close its issue on time.
+
+For cross-repository promotion, the Organization Cell indexes issue origins
+by the exact head repository and ref. Branch writes register candidates before
+they become eligible. A bounded background pass indexes earlier links. Pull
+creation captures readable candidates under the comparison and organization
+leases. The PR write stores those issue origins and observed branch versions
+in its own transaction. Delivery saves the link in both directions, then
+removes the captured branch from the issue. A newer issue branch revision or
+an explicit unlink takes precedence. The background worker and merge
+publication retry pending promotions.
+
+Explicit cross-repository issue and pull request links live in the shared
+Organization Cell. One transaction updates the versioned relationship and
+both bounded indexes. Removing a relationship retains its version so a stale
+request cannot recreate it. The issue points to its stable origin from the
+transfer header. The reverse view follows committed issue moves and checks
+current repository grants before exposing the destination. The owning
+organization's policy lease serializes edits with issue retirement and
+repository ownership changes.
+
+Default-branch publication captures qualified commit references and eligible
+cross-repository PR links with the publishing account's current issue Write
+grants. The commit-closure outbox records stable issue origins and observed
+state versions under the exact Git plan. Commit-driven closures also record
+the source repository and commit. Delivery follows committed issue moves and
+uses a native version check before closing the issue. A late retry therefore
+preserves a newer close or reopen. Recovery verifies the same Git receipt and
+reacquires the owning organization's policy lease before applying the saved
+closure. Activity readers need an independent grant on the source repository
+to receive the commit link.
+
+Qualified description references enqueue their reverse-index update in the
+pull write transaction. The Organization Cell replaces the previous targets
+under the pull version and the Repository Cell acknowledges only that
+observed version. Maintenance backfills older descriptions in bounded
+batches and retries interrupted updates. An issue-side read treats the
+reverse index as candidates and verifies each source pull against its live
+description and default branch or its exact published reference set.
+
+Repository ownership acceptance and the operator's initial organization
+assignment check for incoming issue reservations under the existing policy
+lease. Publication clears the reservation in the same transaction that
+installs the issue. This keeps a reserved issue from crossing an ownership
+change while recovery is pending.
+
+The destination gives staged work a rolling idle deadline. When a prepared
+transfer expires, it asks the source to record a cancellation for that exact
+reservation. A source that already committed instead reports its publication
+decision and retains its recovery obligation. A cancelled transfer releases
+the ownership fence, keeps a compact replay decision, and prunes one private
+frame at a time. The attachment sweeper removes only destination objects sealed
+by that cancellation, after the active-copy grace period.
+
+The issue detail route follows durable move decisions to the current issue.
+Each Repository Cell reads the live issue and its move decision in one snapshot.
+The route rechecks the original and every traversed repository grant before
+disclosing the final published location. The browser retains the comment anchor
+from the original URL.
+
+The browser HTTP workflow checks both repository grants and the shared owner.
+It reserves and verifies attachment copies before preparing. Preparation
+previews publication and its search projections in a rolled-back transaction.
+Approval and retirement run under the policy leases used for repository
+ownership changes. The source refuses captures with repository-local
+relationships that require a different publication format. Organization
+Project placements follow the durable source address across moves.
+
 ## Reviewer search preparation
 
 Discussion index format 6 adds qualified reviewer projections. Each PR/identity
@@ -1358,6 +1505,23 @@ without source UUID/name/number, title or body. Project counts describe planning
 membership, including redacted rows; they make no source-access or merge claims.
 There is no distributed transaction or grant inheritance between Cells.
 
+When a stored issue has moved, the project row reads and displays its current
+published work through the issue redirect chain. It rechecks the original and
+intermediate grants as well as the final repository grant. The row's planning
+item and `source_repository` retain the stored address so edits use the same
+item ID, revision, and history. New placements still require a live source.
+The repository filter and its counts use the published location. The filter
+picker includes readable destinations even when they are outside the Project's
+linked repository list. Filtered pages batch location reads by Repository Cell
+and recheck their revisions and grants before returning counts or a cursor.
+
+When a manager adds an issue, admission resolves the Project's saved placements
+and any still-pending issue publications through their durable receipts. The
+Organization Cell checks the observed Project version before recording the
+result. A stale comparison can retry the same request. Adding an equivalent
+address returns the existing placement outcome without exposing restricted
+source addresses or replacing the item's fields.
+
 For `create_issue`, the Organization Cell reserves a new item under the
 actor and payload digest. The reservation pins the linked repository and
 ownership epoch. The Repository Cell commits the issue, optional issue
@@ -1463,6 +1627,19 @@ Removing a parent keeps its version tombstone, preventing delayed edits from
 replacing a newer relationship. Parent activity appears in both issue timelines.
 Creating a sub-issue from its parent is one native transaction. Child progress
 reads canonical issue states and updates immediately when children close/reopen.
+Triage can manage these relationships in the repository. Project mutations
+require Write access.
+
+The parent retains its explicit sibling priorities in a bounded native document.
+Reads join the live parent edges with issue titles and states in one query.
+Reparenting removes the old priority and appends to the new parent's saved
+order in the same transaction. The hierarchy route accepts `limit=1…100` and
+includes an opaque `order_token` when a limit is supplied. The existing
+`after` cursor continues from the named child in the current order. Reordering
+binds the exact sibling list and the two direct children to a permanent command
+receipt. A stale order is rejected and replay returns the saved decision.
+Existing hierarchy records use issue-number order until the parent is customized.
+This change needs coordinated peers and UI, with no new schema preparation.
 
 This is repository project management. Organization projects have the independent
 authority described above; project-specific ACLs, workflow automation and
@@ -1493,6 +1670,14 @@ previous/new planning values in the same domain transaction. Field paths use
 JSON Pointer escaping; each custom value has its own path. Rejections, cancellation
 and identical replay do not append changes. Preparation seeds revision one for
 existing items without fabricating past actors or history.
+
+Bulk field edits use the same item mutation inside one savepoint. One
+conflict rolls back every item change, revision and history entry. The
+outer Project submission transaction records the terminal result for exact
+replay. Organization Projects resolve the selected placement IDs to their
+stored sources and check current repository access before the write. The
+browser records an inverse edit in the submission journal and uses the next
+item revisions for Undo.
 
 Both project APIs expose `/{project}/history`: newest-first by default,
 `before=REVISION` for older UI entries, or `after=REVISION` for ascending worker

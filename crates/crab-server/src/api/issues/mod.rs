@@ -29,8 +29,10 @@ use crate::{
     server::Server,
 };
 
+mod move_issue;
 mod pins;
 mod templates;
+pub(in crate::api) mod transferred;
 pub(super) mod view;
 
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
@@ -47,6 +49,10 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .route(
             "/api/repos/{owner}/{name}/issues/{number}",
             get(detail).patch(edit),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/issues/{number}/transfer",
+            get(move_issue::destinations).post(move_issue::submit),
         )
         .route(
             "/api/repos/{owner}/{name}/issues/{number}/type",
@@ -249,18 +255,25 @@ async fn create(
         .map_err(Error::Cell)?;
     let minimum = Some(committed.receipt);
     let output = committed.output;
-    let issue = match output {
+    let number = match output {
         CreateIssueOutcome::MetadataRejected(reason) => {
             return Ok(super::write::rejected(Error::CreationRejected(reason)));
         }
         CreateIssueOutcome::Archived => return Err(Error::Archived),
-        CreateIssueOutcome::Created(issue) => issue,
+        CreateIssueOutcome::Created(issue) => issue.number,
+        CreateIssueOutcome::Transferred(source) => {
+            return Ok((
+                StatusCode::OK,
+                Json(json!({"number": source, "transferred": true})),
+            )
+                .into_response());
+        }
         CreateIssueOutcome::RequestConflict => return Err(Error::RequestConflict),
     };
     let enrichment_started = Instant::now();
     let response = (
         StatusCode::CREATED,
-        rendered(&server, &principal, &repo, issue.number, minimum).await?,
+        rendered(&server, &principal, &repo, number, minimum).await?,
     );
     tracing::debug!(
         target: "crab_server::action",
@@ -291,9 +304,13 @@ async fn detail(
     {
         return Err(Error::Invalid("Cellar supports owner-routed issue reads"));
     }
-    Ok(rendered(&server, &principal, &repo, number(id)?, None)
-        .await?
-        .into_response())
+    let number = number(id)?;
+    match rendered(&server, &principal, &repo, number, None).await {
+        Err(Error::NotFound) => Ok(transferred::detail(&server, &principal, &repo, number)
+            .await?
+            .into_response()),
+        result => Ok(result?.into_response()),
+    }
 }
 
 #[derive(Deserialize)]

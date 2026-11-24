@@ -151,6 +151,7 @@ pub(crate) struct GitToken {
     owner: String,
     repository: String,
     access: RepositoryAccess,
+    close_related_issues: bool,
     revoked: AtomicBool,
 }
 
@@ -239,6 +240,8 @@ struct StoredGitToken {
     owner: String,
     repository: String,
     access: RepositoryAccess,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    close_related_issues: bool,
     expires_at: u64,
 }
 

@@ -3,6 +3,10 @@
 React application embedded by `crab-server`. GitHub repository layouts and
 interactions are the reference; Geist colors and typography define the theme.
 
+Use **Manage filters** in Notifications to name a view and save its repository,
+organization, reason, notification type, and original author. Saved filters
+follow your account across sessions and use current repository access.
+
 ## Design system
 
 `src/styles/globals.css` owns the theme for both product CSS and Tailwind/shadcn
@@ -402,6 +406,13 @@ access grants no source repository access. Inaccessible work is redacted, and
 repository UUIDs prevent name reuse from redirecting project references. Source
 permissions are refreshed after enrichment; native organization authority is
 checked again before returning a composed response.
+
+When a linked issue moves, its row opens the current issue while planning edits
+retain the stored project item and its history. A reader needs access to the
+repositories along the transfer path to see the work. Filter by repository
+includes published destinations and counts relocated work there.
+Adding the moved issue again keeps its existing Project placement and shows an
+already-linked message.
 
 Shared projects link existing work and support draft notes. Source creation,
 draft conversion, title/state saved filters and custom project templates remain

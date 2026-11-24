@@ -292,6 +292,45 @@ test("a late pull request template preserves what the author typed", async ({
   expect(fixture.pullSubmissions[0].body).toBe("An author already wrote this.");
 });
 
+test("a concurrent pull creation links to the winner and preserves the draft", async ({
+  page,
+}) => {
+  await mockPullRequest(page);
+  await page.route(/\/api\/repos\/team\/project\/pulls(?:\?|$)/, (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    return route.fulfill({
+      status: 409,
+      headers: { "X-Crab-Write-Outcome": "rejected" },
+      json: {
+        error: {
+          code: "open_pull_exists",
+          message: "A pull request is already open for these branches",
+          pull_number: 1,
+        },
+      },
+    });
+  });
+  await page.goto("/team/project/compare/main...feature%2Fdocs");
+  await page
+    .getByRole("textbox", { name: "Title", exact: true })
+    .fill("My proposed review");
+  const description = page.getByRole("textbox", {
+    name: "Description",
+    exact: true,
+  });
+  await description.fill("Keep this draft.");
+  await page
+    .getByRole("button", { name: "Create pull request", exact: true })
+    .click();
+  await expect(
+    page.getByRole("link", { name: "View pull request #1" }),
+  ).toHaveAttribute("href", /\/team\/project\/pull\/1\?repository_id=/);
+  await expect(description).toHaveValue("Keep this draft.");
+  await expect(
+    page.getByRole("button", { name: "Retry original submission" }),
+  ).toHaveCount(0);
+});
+
 test("a rejected stale comparison reloads before submitting a fresh pull request", async ({
   page,
 }) => {

@@ -7,6 +7,16 @@ async fn pull_only_subscription_delivers_every_committed_head_and_stable_redeliv
     let alice = h.login().await;
     let head = stock_push(&h, &alice).await;
     let checkout = checkout_feature(&h, &alice).await;
+    git::success(
+        checkout.path(),
+        &[
+            "push",
+            "origin",
+            "refs/remotes/origin/main:refs/heads/reopened-base",
+            "refs/remotes/origin/main:refs/heads/late-base",
+        ],
+    )
+    .await;
     let response: Value = h
         .write(Method::POST, PATH, &alice, configure())
         .await
@@ -18,7 +28,7 @@ async fn pull_only_subscription_delivers_every_committed_head_and_stable_redeliv
     let secret = response["secret"].as_str().unwrap();
     let first = json!({"request_id":Uuid::now_v7(),"title":"Track feature","body":"","base_ref":"refs/heads/main","head_ref":"refs/heads/feature"});
     open(&h, &alice, &first).await;
-    let reopened = json!({"request_id":Uuid::now_v7(),"title":"Reopen after the push","body":"","base_ref":"refs/heads/main","head_ref":"refs/heads/feature"});
+    let reopened = json!({"request_id":Uuid::now_v7(),"title":"Reopen after the push","body":"","base_ref":"refs/heads/reopened-base","head_ref":"refs/heads/feature"});
     open(&h, &alice, &reopened).await;
     drain(&h).await;
 
@@ -35,7 +45,7 @@ async fn pull_only_subscription_delivers_every_committed_head_and_stable_redeliv
         .error_for_status()
         .unwrap();
     }
-    let late = json!({"request_id":Uuid::now_v7(),"title":"Track future updates","body":"","base_ref":"refs/heads/main","head_ref":"refs/heads/feature"});
+    let late = json!({"request_id":Uuid::now_v7(),"title":"Track future updates","body":"","base_ref":"refs/heads/late-base","head_ref":"refs/heads/feature"});
     open(&h, &alice, &late).await;
     let repository = &h.server.repositories.values()[0];
     let bogus = crab_git::receive_plan::RefUpdate {

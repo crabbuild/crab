@@ -139,9 +139,12 @@ async fn authors_use_current_public_profiles_without_exposing_private_keys_or_ch
     assert_eq!(edited["author"], renamed);
     use crate::cells::repository::{CreatePull, CreatePullInput};
     let repo = h.server.repositories.values()[0].id;
-    for issuer in [
-        h.provider.issuer.clone(),
-        format!("{}/other", h.provider.issuer),
+    for (issuer, head_ref) in [
+        (h.provider.issuer.clone(), "refs/heads/feature"),
+        (
+            format!("{}/other", h.provider.issuer),
+            "refs/heads/other-feature",
+        ),
     ] {
         h.server
             .cells()
@@ -162,7 +165,7 @@ async fn authors_use_current_public_profiles_without_exposing_private_keys_or_ch
                     title: "Attributed pull".into(),
                     body: String::new(),
                     base_ref: "refs/heads/main".into(),
-                    head_ref: "refs/heads/feature".into(),
+                    head_ref: head_ref.into(),
                     head_repository: None,
                     base_oid: "a".repeat(40),
                     head_oid: "b".repeat(40),

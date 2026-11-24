@@ -146,11 +146,22 @@ async fn page(
         })
         .collect();
     let authors = Authors::load(server, principal, actors.into_iter()).await?;
-    let principal = app::membership(server, principal, &repo).await?.principal;
-    let ruleset_protected = pulls::reviews::ruleset_requires_admin(
+    let sources = activity::CommitSources::load(
+        server,
+        principal,
+        &repo,
+        page.items.iter().filter_map(|entry| match entry {
+            Entry::Activity(event) => Some(event),
+            _ => None,
+        }),
+    )
+    .await?;
+    let grant = app::membership(server, principal, &repo).await?;
+    let can_dismiss = pulls::reviews::dismissal_allowed(
         server,
         &repo,
-        &principal,
+        &grant,
+        &actor,
         page.items.iter().find_map(|entry| match entry {
             Entry::Review(detail) if detail.dismissible => Some(detail),
             _ => None,
@@ -162,7 +173,9 @@ async fn page(
         .into_iter()
         .map(|entry| {
             if let Entry::Activity(event) = entry {
-                return Ok(json!({"kind":"activity","value":activity::view(&authors,&event)}));
+                return Ok(
+                    json!({"kind":"activity","value":activity::view(&authors,&sources,&event)}),
+                );
             }
             let reaction = reactions.next().ok_or(Error::CellContract(
                 "Conversation reaction count is invalid",
@@ -174,7 +187,7 @@ async fn page(
                         &authors,
                         &comment,
                         &actor,
-                        principal.can_moderate(repo.id),
+                        grant.principal.can_moderate(repo.id),
                         &reaction,
                     ),
                 ),
@@ -193,9 +206,7 @@ async fn page(
                         &actor,
                         head.as_deref(),
                         &reaction,
-                        &principal,
-                        &repo,
-                        ruleset_protected,
+                        can_dismiss,
                     ),
                 ),
                 Entry::Activity(_) => {

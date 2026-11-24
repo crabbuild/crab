@@ -182,7 +182,17 @@ async fn ordinary_http_reads_use_verified_edge_bodies_and_keep_native_controls()
             .unwrap(),
         lfs_body
     );
-    assert!(edge.requests().is_empty());
+    let repeat = edge.requests();
+    if cfg!(feature = "provider-cdn") {
+        assert!(repeat.is_empty());
+    } else {
+        assert!(
+            repeat
+                .iter()
+                .any(|request| request.location == lfs_path.as_ref())
+        );
+    }
+    edge.reset();
 
     native.unblock_body_reads_for(&lfs_path);
     let response = read(

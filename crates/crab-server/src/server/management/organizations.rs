@@ -18,6 +18,7 @@ use crate::{
         directory::{IdentityKey, RegisterAccounts},
         organization::{self, Bootstrap, BootstrapInput, Caller, ChangeOutcome, teams},
     },
+    repository::settings,
     server::Server,
 };
 
@@ -76,17 +77,45 @@ async fn set_repository_organization(
         issuer: "urn:crab:local".into(),
         subject: "operator".into(),
     };
-    let record = catalog
-        .set_organization_access(
-            &owner,
-            &name,
-            input.repository_id,
-            input.expected_revision,
-            input.organization,
-            actor,
-        )
-        .await
-        .map_err(app::repository_access_error)?;
+    let repository_id = input.repository_id;
+    let update = || async {
+        catalog
+            .set_organization_access(
+                &owner,
+                &name,
+                repository_id,
+                input.expected_revision,
+                input.organization,
+                actor,
+            )
+            .await
+            .map_err(app::repository_access_error)
+    };
+    let record = if snapshot.organization.is_none() {
+        let repository = server
+            .repositories
+            .by_id(repository_id)
+            .ok_or(Error::NotFound)?;
+        let server = server.as_ref();
+        let repository = repository.as_ref();
+        if repository.organization.is_some()
+            || repository.ownership_epoch != snapshot.ownership_epoch
+        {
+            return Err(Error::PageChanged);
+        }
+        settings::with_ownership_lease(server, repository, |cancel| async move {
+            settings::require_no_issue_reservations(server, repository).await?;
+            if cancel.is_cancelled() {
+                return Err(Error::TransferPublication(
+                    crab_remote::publication::Error::Cancelled,
+                ));
+            }
+            update().await
+        })
+        .await?
+    } else {
+        update().await?
+    };
     let (document, _) = catalog.load().await.map_err(app::repository_access_error)?;
     // Publish the new owner with the repository route before returning. Until
     // another peer refreshes, it must fail closed on a different owner binding.

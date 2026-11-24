@@ -40,6 +40,10 @@ pub(crate) enum Error {
     IdentityAuthority(#[source] Box<crate::auth::AuthError>),
     #[error("Repository transfer publication is unavailable")]
     TransferPublication(#[source] crab_remote::publication::Error),
+    #[error("Incoming issue transfers must finish before repository ownership can change")]
+    RepositoryIssueTransfersPending,
+    #[error("This transfer expired. Reload the issue to start a new transfer.")]
+    IssueTransferExpired,
     #[error("This username is already taken")]
     ProfileHandleTaken,
     #[error("Your profile is already registered; reload to edit it")]
@@ -52,6 +56,8 @@ pub(crate) enum Error {
     CommitNotFound,
     #[error("Only the author can edit this content")]
     Forbidden,
+    #[error("You do not have permission to dismiss reviews for this branch")]
+    ReviewDismissalPermission,
     #[error("You do not have permission to edit this issue or comment")]
     IssueEditPermission,
     #[error("This conversation is locked")]
@@ -164,7 +170,9 @@ pub(crate) enum Error {
     LinkPermission,
     #[error("Triage access is required to manage issue dependencies")]
     DependencyPermission,
-    #[error("Write access is required to manage projects and sub-issues")]
+    #[error("Triage access is required to manage sub-issues")]
+    SubIssuePermission,
+    #[error("Write access is required to manage projects")]
     ProjectPermission,
     #[error("A milestone with this title already exists")]
     MilestoneConflict,
@@ -362,9 +370,24 @@ impl IntoResponse for Error {
                 "page_changed",
                 "This list changed; reload from the first page",
             ),
+            Self::RepositoryIssueTransfersPending => (
+                StatusCode::CONFLICT,
+                "issue_transfers_pending",
+                "Incoming issue transfers must finish before repository ownership can change",
+            ),
+            Self::IssueTransferExpired => (
+                StatusCode::CONFLICT,
+                "issue_transfer_expired",
+                "This transfer expired. Reload the issue to start a new transfer.",
+            ),
             Self::Invalid(message) => (StatusCode::BAD_REQUEST, "invalid_request", *message),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found", "Resource not found"),
             Self::CommitNotFound => (StatusCode::NOT_FOUND, "not_found", "Commit not found"),
+            Self::ReviewDismissalPermission => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "You do not have permission to dismiss reviews for this branch",
+            ),
             Self::Forbidden => (
                 StatusCode::FORBIDDEN,
                 "forbidden",
@@ -582,7 +605,12 @@ impl IntoResponse for Error {
             Self::ProjectPermission => (
                 StatusCode::FORBIDDEN,
                 "project_permission",
-                "Write access is required to manage projects and sub-issues",
+                "Write access is required to manage projects",
+            ),
+            Self::SubIssuePermission => (
+                StatusCode::FORBIDDEN,
+                "sub_issue_permission",
+                "Triage access is required to manage sub-issues",
             ),
             Self::LinkPermission => (
                 StatusCode::FORBIDDEN,
@@ -779,6 +807,11 @@ impl IntoResponse for Error {
                     "comparison_changed",
                     "A branch moved or was deleted. Review the updated comparison before creating the pull request",
                 ),
+                crate::cells::repository::collaboration::creation::Failure::ExistingPull(_) => (
+                    StatusCode::CONFLICT,
+                    "open_pull_exists",
+                    "A pull request is already open for these branches",
+                ),
             },
             Self::ReviewIndexPending => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -856,11 +889,14 @@ impl IntoResponse for Error {
             ),
         };
 
-        (
-            status,
-            Json(json!({"error":{"code":code,"message":message}})),
-        )
-            .into_response()
+        let mut error = json!({"code":code,"message":message});
+        if let Self::CreationRejected(
+            crate::cells::repository::collaboration::creation::Failure::ExistingPull(number),
+        ) = self
+        {
+            error["pull_number"] = json!(number);
+        }
+        (status, Json(json!({"error": error}))).into_response()
     }
 }
 

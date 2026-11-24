@@ -4,6 +4,7 @@ use crate::cells::repository::collaboration::{
     Subject, SubjectKind, Target,
     activity::{self, Action},
     creation,
+    links::branches::promotion::cross,
 };
 
 pub(crate) struct CreatePull;
@@ -18,7 +19,22 @@ impl Mutation for CreatePull {
         context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
-        write_pull(context, input, None)
+        write_pull(context, input, None, None)
+    }
+}
+
+pub(crate) struct CreatePullWithLinks;
+impl Mutation for CreatePullWithLinks {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
+    const ID: u32 = 475;
+    type Input = (CreatePullInput, cross::Batch);
+    type Output = CreatePullOutcome;
+
+    fn execute(
+        context: &mut Transaction<'_>,
+        (input, links): Self::Input,
+    ) -> crate::cells::Result<MutationResult<Self::Output>> {
+        write_pull(context, input, None, Some(links))
     }
 }
 
@@ -34,7 +50,12 @@ impl Mutation for RejectStalePullComparison {
         context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
-        write_pull(context, input, Some(creation::Failure::ComparisonChanged))
+        write_pull(
+            context,
+            input,
+            Some(creation::Failure::ComparisonChanged),
+            None,
+        )
     }
 }
 
@@ -42,6 +63,7 @@ fn write_pull(
     context: &mut Transaction<'_>,
     input: CreatePullInput,
     rejection: Option<creation::Failure>,
+    cross_links: Option<cross::Batch>,
 ) -> crate::cells::Result<MutationResult<CreatePullOutcome>> {
     if settings::archived(context)? {
         return Ok(MutationResult::Rejected(CreatePullOutcome::Archived));
@@ -68,6 +90,18 @@ fn write_pull(
         base_oid: input.base_oid.clone(),
         head_oid: input.head_oid.clone(),
     });
+    // Creation is one Cell transaction. The committed index and the new
+    // pull's projection advance together, so concurrent authors see one winner.
+    let rejection = match rejection {
+        Some(reason) => Some(reason),
+        None => branch::open_for_comparison(
+            context,
+            &input.base_ref,
+            &input.head_ref,
+            input.head_repository,
+        )?
+        .map(creation::Failure::ExistingPull),
+    };
     match input.metadata.resolve(
         context,
         SubjectKind::Pull,
@@ -139,6 +173,9 @@ fn write_pull(
         number: record.number,
     };
     let source = activity::append(context, target, &record.author, Action::Created)?;
+    collaboration::links::branches::promotion::create(context, &record)?;
+    cross::record(context, &record, cross_links)?;
+    collaboration::links::keywords::projection::changed(context, record.number, "", &record.body)?;
     webhooks::pull(context, &record, webhooks::PullAction::Opened)?;
     crate::cells::repository::collaboration::body_written(context, &source, None, &record.body)?;
     collaboration::mentions::assigned(context, &source, &[], &record.assignees)?;
@@ -302,6 +339,12 @@ impl Mutation for UpdatePull {
                 collaboration::mentions::assigned(context, &source, &previous, &pull.assignees)?;
             }
             if let Some(previous) = previous_body.as_deref() {
+                collaboration::links::keywords::projection::changed(
+                    context,
+                    pull.number,
+                    previous,
+                    &pull.body,
+                )?;
                 crate::cells::repository::collaboration::body_written(
                     context,
                     &source,

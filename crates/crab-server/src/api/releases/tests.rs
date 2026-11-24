@@ -714,6 +714,28 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
     };
     assert_eq!(notice["title"], "Crab 3.0 ready");
     assert_eq!(notice["subject"], json!({"kind":"release","number":4}));
+    let author: Value = h
+        .write(
+            reqwest::Method::POST,
+            "/api/profile",
+            &alice,
+            json!({"request_id":uuid::Uuid::now_v7(),"handle":"alice-release","name":"Alice"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let author = author["id"].as_str().unwrap();
+    assert_eq!(
+        h.json(&format!("{inbox}&author={author}"), &bob).await,
+        release_inbox
+    );
+    assert_eq!(
+        h.json(&format!("{inbox}&author=me"), &bob).await["items"],
+        json!([])
+    );
     assert_eq!(
         notice["href"],
         format!(

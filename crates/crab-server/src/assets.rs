@@ -27,7 +27,8 @@ pub(crate) async fn serve(request: Request) -> Response {
     let account_route = match components.as_slice() {
         [
             "-",
-            "profile" | "notifications" | "code-search" | "organizations",
+            "profile" | "notifications" | "code-search" | "discussion-search" | "organizations"
+            | "work",
         ]
         | ["-", "notifications", "watched" | "subscriptions"]
         | ["-", "repositories", "personal"]
@@ -182,6 +183,13 @@ mod tests {
                 StatusCode::OK,
             ),
             ("/-/code-search/unknown", StatusCode::NOT_FOUND),
+            ("/-/work?kind=issue&state=closed", StatusCode::OK),
+            ("/-/work/unknown", StatusCode::NOT_FOUND),
+            (
+                "/-/discussion-search?q=release&scope=team%2Frepo",
+                StatusCode::OK,
+            ),
+            ("/-/discussion-search/unknown", StatusCode::NOT_FOUND),
             ("/-/settings/saved-replies", StatusCode::OK),
             ("/-/settings/review-availability", StatusCode::OK),
             (

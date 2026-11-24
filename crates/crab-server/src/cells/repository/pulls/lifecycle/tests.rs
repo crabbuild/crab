@@ -41,18 +41,19 @@ async fn read<R: Read>(cell: &RepositoryCell, input: R::Input) -> R::Output {
         .output
 }
 async fn create(cell: &RepositoryCell) -> PullRecord {
+    let request = Uuid::now_v7();
     let CreatePullOutcome::Created(pull) = write::<CreatePull>(
         cell,
         CreatePullInput {
             code_owner_requests: Default::default(),
             metadata: Default::default(),
             draft: false,
-            submission_id: *Uuid::now_v7().as_bytes(),
+            submission_id: *request.as_bytes(),
             author: actor(),
             title: "Lifecycle".into(),
             body: "Original".into(),
             base_ref: "refs/heads/main".into(),
-            head_ref: "refs/heads/feature".into(),
+            head_ref: format!("refs/heads/feature-{request}"),
             head_repository: None,
             base_oid: "a".repeat(40),
             head_oid: "b".repeat(40),

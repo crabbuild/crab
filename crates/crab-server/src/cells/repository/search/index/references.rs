@@ -12,12 +12,17 @@ use crate::cells::{
 pub(crate) struct ReferenceInput {
     pub search: String,
     pub exact: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<[u8; 32]>,
 }
 
 impl ReferenceInput {
     pub(crate) fn validate(&self) -> std::result::Result<(), &'static str> {
         if self.search.chars().count() > 80 || self.search.chars().any(char::is_control) {
             return Err("Reference search must contain at most 80 characters without controls");
+        }
+        if self.author.is_some() && !self.exact {
+            return Err("An author requires an exact discussion reference");
         }
         Ok(())
     }
@@ -41,8 +46,10 @@ impl Read for FindReferences {
                 return Ok(Vec::new());
             };
             context.query(
-                "SELECT kind, number FROM discussion_index WHERE rowid >= ? AND rowid < ? ORDER BY rowid DESC",
-                &[integer(number * 2)?, integer((number + 1) * 2)?],
+                "SELECT kind, number FROM discussion_index d WHERE rowid >= ?1 AND rowid < ?2
+                 AND (?3 IS NULL OR EXISTS (SELECT 1 FROM discussion_index_authors a WHERE a.document = d.rowid AND a.identity = ?3))
+                 ORDER BY rowid DESC",
+                &[integer(number * 2)?, integer((number + 1) * 2)?, input.author.map_or(SqlValue::Null, |value| SqlValue::Blob(value.to_vec()))],
             )?
         } else if search.is_empty() {
             // Issue and pull numbers have separate sequences. Read bounded

@@ -43,7 +43,9 @@ export function NewIssue({
     assignees: template?.assignees ?? [],
     milestone: null,
   });
-  const creation = useCreateSubmission<Issue>({
+  const creation = useCreateSubmission<
+    Issue | { number: number; transferred: true }
+  >({
     repo,
     kind: "issues",
     csrf,

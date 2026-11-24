@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 pub(crate) mod email;
 mod filing;
+pub(crate) mod filters;
 mod retention;
 mod triage;
 use filing::Filed;
@@ -35,6 +36,16 @@ pub(crate) enum ReleaseKind {
 pub(crate) enum NoticeTarget {
     Discussion(Target),
     Release { kind: ReleaseKind, number: u64 },
+    IssueTransfer { origin: Uuid, number: u64 },
+}
+
+impl NoticeTarget {
+    pub(crate) fn transfer_origin(self) -> Option<Uuid> {
+        match self {
+            Self::IssueTransfer { origin, .. } => Some(origin),
+            _ => None,
+        }
+    }
 }
 
 impl From<Target> for NoticeTarget {
@@ -67,6 +78,13 @@ impl Notice {
             NoticeTarget::Release { number, .. } => {
                 subject_id(self.repository, &format!("release/{number:016x}"))
             }
+            NoticeTarget::IssueTransfer { origin, number } => {
+                // A transfer and ordinary activity have different grants.
+                subject_id(
+                    self.repository,
+                    &format!("issue-transfer/{origin}/{number:016x}"),
+                )
+            }
         }
     }
 
@@ -87,6 +105,15 @@ impl Notice {
                     Ok(())
                 } else {
                     Err(Error::Invalid("Release notification target is invalid"))
+                };
+            }
+            NoticeTarget::IssueTransfer { origin, number } => {
+                return if valid(number) && !origin.is_nil() && origin != self.repository {
+                    Ok(())
+                } else {
+                    Err(Error::Invalid(
+                        "Issue transfer notification target is invalid",
+                    ))
                 };
             }
             NoticeTarget::Discussion(target) => target,
@@ -133,6 +160,7 @@ pub(crate) enum Reason {
     ReviewRequested,
     TeamMention,
     Mention,
+    IssueTransferred,
 }
 
 impl Reason {
@@ -320,6 +348,13 @@ impl Mutation for Deliver {
             access,
         } in input.recipients
         {
+            if (reason == Reason::IssueTransferred)
+                != input.notice.target.transfer_origin().is_some()
+            {
+                return Err(Error::Invalid(
+                    "Notification reason does not match its target",
+                ));
+            }
             let (current, route) = recipients.entry(actor).or_insert((reason, access));
             *current = (*current).max(reason);
             *route = (*route).max(access);

@@ -1,4 +1,4 @@
-import type { Command, ProjectTarget } from "./model";
+import type { BulkEdit, Command, ProjectTarget } from "./model";
 import type { WorkspaceCommand } from "./workspace/model";
 import type { DraftCheckpoint } from "./draft-storage";
 
@@ -7,6 +7,7 @@ export interface ProjectIntent {
   target: ProjectTarget;
   body: { request_id: string; command: Command | WorkspaceCommand };
   draft?: DraftCheckpoint;
+  undo?: BulkEdit[];
 }
 
 function key(account: string) {
@@ -68,6 +69,20 @@ export function readProjectIntent(account: string): ProjectIntent | null {
     !object(intent.body) ||
     !uuid(intent.body.request_id) ||
     !object(intent.body.command) ||
+    (intent.undo !== undefined &&
+      (intent.body.command.kind !== "bulk_fields" ||
+        !Array.isArray(intent.undo) ||
+        intent.undo.length < 1 ||
+        intent.undo.length > 50 ||
+        !intent.undo.every(
+          (edit) =>
+            object(edit) &&
+            uuid(edit.item) &&
+            typeof edit.version === "number" &&
+            Number.isSafeInteger(edit.version) &&
+            edit.version > 0 &&
+            object(edit.change),
+        ))) ||
     (intent.draft !== undefined &&
       (!object(intent.draft) ||
         typeof intent.draft.key !== "string" ||
@@ -82,9 +97,11 @@ export function readProjectIntent(account: string): ProjectIntent | null {
       "planning",
       "repository",
       "item",
+      "bulk_fields",
       "remove",
       "parent",
       "sub_issue",
+      "reorder_sub_issue",
       "create_issue",
     ].includes(String(intent.body.command.kind))
   )
