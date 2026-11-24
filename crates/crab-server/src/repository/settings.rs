@@ -190,6 +190,53 @@ where
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+enum OwnershipLeaseError {
+    #[error(transparent)]
+    Application(#[from] Error),
+    #[error(transparent)]
+    Lease(#[from] crab_remote::publication::Error),
+}
+
+pub(crate) async fn with_ownership_lease<T, F, Fut>(
+    server: &Server,
+    repository: &Repository,
+    work: F,
+) -> Result<T>
+where
+    F: FnOnce(CancellationToken) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    with_ruleset_lease(
+        server,
+        RulesetScope::Repository(repository),
+        &server.cancellation,
+        |cancel| async move { work(cancel).await.map_err(OwnershipLeaseError::Application) },
+    )
+    .await
+    .map_err(|error| match error {
+        OwnershipLeaseError::Application(error) => error,
+        OwnershipLeaseError::Lease(error) => Error::TransferPublication(error),
+    })
+}
+
+pub(crate) async fn require_no_issue_reservations(
+    server: &Server,
+    repository: &Repository,
+) -> Result<()> {
+    use crate::{app, cells::repository::issues::transfer::publication::HasReservations};
+    let cell = app::repository_cell(server, repository)?;
+    let reserved = app::query_output(
+        cell.client
+            .query::<HasReservations>(cell.target, None, ())
+            .await,
+    )?;
+    if reserved {
+        return Err(Error::RepositoryIssueTransfersPending);
+    }
+    Ok(())
+}
+
 pub(crate) struct RefPolicy {
     pub protections: BranchProtections,
     rulesets: Rulesets,

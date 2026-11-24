@@ -385,14 +385,6 @@ async fn decide(
     Ok(Json(result))
 }
 
-#[derive(Debug, thiserror::Error)]
-enum CommitError {
-    #[error(transparent)]
-    Application(#[from] Error),
-    #[error(transparent)]
-    Lease(#[from] crab_remote::publication::Error),
-}
-
 async fn accept(
     server: &Server,
     principal: &Principal,
@@ -435,47 +427,41 @@ async fn accept(
     }
     // Finish any publication holding the source policy lease before switching
     // namespaces. Later publications must read the new owner and its policies.
-    settings::with_ruleset_lease(
-        server,
-        settings::RulesetScope::Repository(source),
-        &server.cancellation,
-        |cancel| async move {
-            if settings::load_lifecycle(server, source).await?.archived {
-                return Err(Error::Archived.into());
-            }
-            if !can_manage_source(server, record, &offer.requester).await?
-                || !can_receive(server, &offer.recipient, &actor).await?
-            {
-                return Err(Error::PageChanged.into());
-            }
-            if offer.name != record.name {
-                // The source administrator requested the name change. A
-                // destination owner cannot lend them a ruleset bypass.
-                settings::check_rename(server, record, key(&offer.requester)).await?;
-            }
-            if cancel.is_cancelled() {
-                return Err(crab_remote::publication::Error::Cancelled.into());
-            }
-            let signed = app::actor(principal)?;
-            catalog
-                .decide_transfer(
-                    document.version,
-                    offer.id,
-                    Decision::Accept {
-                        actor,
-                        display_name: signed.name,
-                    },
-                    now()?,
-                )
-                .await
-                .map_err(|error| CommitError::Application(catalog_error(error)))
-        },
-    )
-    .await
-    .map_err(|error| match error {
-        CommitError::Application(error) => error,
-        CommitError::Lease(error) => Error::TransferPublication(error),
+    settings::with_ownership_lease(server, source, |cancel| async move {
+        if settings::load_lifecycle(server, source).await?.archived {
+            return Err(Error::Archived);
+        }
+        if !can_manage_source(server, record, &offer.requester).await?
+            || !can_receive(server, &offer.recipient, &actor).await?
+        {
+            return Err(Error::PageChanged);
+        }
+        settings::require_no_issue_reservations(server, source).await?;
+        if offer.name != record.name {
+            // The source administrator requested the name change. A
+            // destination owner cannot lend them a ruleset bypass.
+            settings::check_rename(server, record, key(&offer.requester)).await?;
+        }
+        if cancel.is_cancelled() {
+            return Err(Error::TransferPublication(
+                crab_remote::publication::Error::Cancelled,
+            ));
+        }
+        let signed = app::actor(principal)?;
+        catalog
+            .decide_transfer(
+                document.version,
+                offer.id,
+                Decision::Accept {
+                    actor,
+                    display_name: signed.name,
+                },
+                now()?,
+            )
+            .await
+            .map_err(catalog_error)
     })
+    .await
 }
 
 #[cfg(test)]

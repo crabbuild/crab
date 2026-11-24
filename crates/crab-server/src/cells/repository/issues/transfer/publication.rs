@@ -2,6 +2,11 @@ use super::*;
 use crate::cells::repository::collaboration::milestones;
 
 const MOVED: &str = "collaboration/v1/issue-transfers/moved/";
+const RESERVED: &str = "collaboration/v1/issue-transfers/reserved/";
+const PENDING: &str = "collaboration/v1/issue-transfers/pending/";
+const WAKE: &str = "collaboration/v1/issue-transfers/wake/";
+const PUBLICATION_GRACE_MS: i64 = 5_000;
+const PUBLICATION_RETRY_MS: i64 = 30_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -48,6 +53,18 @@ fn job_key(request: Uuid) -> String {
 
 fn move_key(number: u64) -> String {
     format!("{MOVED}{number:016x}")
+}
+
+fn reservation_key(request: Uuid) -> String {
+    format!("{RESERVED}{request}")
+}
+
+fn pending_key(number: u64) -> String {
+    format!("{PENDING}{number:016x}")
+}
+
+fn wake_key(at: i64, number: u64) -> String {
+    format!("{WAKE}{at:016x}/{number:016x}")
 }
 
 #[derive(Deserialize, Serialize)]
@@ -112,6 +129,9 @@ impl Mutation for Prepare {
                 ownership_epoch: input.ownership_epoch,
             }));
             context.put_document(&key, &job)?;
+            // The ownership route checks this fence under the same policy
+            // lease the ingress coordinator must hold when it prepares.
+            context.put_document(&reservation_key(input.request), &input.request)?;
             number
         };
         let (repository, _) = identity(context)?;
@@ -217,6 +237,11 @@ impl Mutation for Retire {
             source_revision,
         };
         context.put_document(&move_key(issue.number), &decision)?;
+        enqueue(
+            context,
+            issue.number,
+            context.now_ms().saturating_add(PUBLICATION_GRACE_MS),
+        )?;
         Ok(MutationResult::Success(RetireOutcome::Committed {
             decision,
         }))
@@ -242,6 +267,76 @@ impl Read for GetMove {
     fn execute(context: &mut Transaction<'_>, number: u64) -> Result<Self::Output> {
         moved(context, number)
     }
+}
+
+pub(crate) struct HasReservations;
+
+impl Read for HasReservations {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
+    const ID: u32 = 458;
+    type Input = ();
+    type Output = bool;
+
+    fn execute(context: &mut Transaction<'_>, (): ()) -> Result<bool> {
+        Ok(!context.documents::<Uuid>(RESERVED, None, 1)?.is_empty())
+    }
+}
+
+fn next_wake(context: &Transaction<'_>) -> Result<Option<(i64, u64)>> {
+    let rows = context.documents_after(WAKE, None, 1)?;
+    Ok(rows.into_iter().next().map(|(_, wake)| wake))
+}
+
+fn schedule(context: &Transaction<'_>) -> Result<()> {
+    context.set_alarm(next_wake(context)?.map(|(at, _)| at))
+}
+
+fn enqueue(context: &Transaction<'_>, number: u64, at: i64) -> Result<()> {
+    context.put_document(&pending_key(number), &at)?;
+    context.put_document(&wake_key(at, number), &(at, number))?;
+    schedule(context)
+}
+
+pub(in crate::cells) fn due(context: &Transaction<'_>) -> Result<Option<Decision>> {
+    let Some((at, number)) = next_wake(context)? else {
+        context.set_alarm(None)?;
+        return Ok(None);
+    };
+    if at > context.now_ms() {
+        context.set_alarm(Some(at))?;
+        return Ok(None);
+    }
+    if context.document::<i64>(&pending_key(number))? != Some(at) {
+        return Err(Error::Invalid(
+            "Issue transfer wake does not match pending work",
+        ));
+    }
+    let decision = moved(context, number)?
+        .ok_or(Error::Invalid("Issue transfer wake has no source decision"))?;
+    // A retry is durable before the cross-Cell call starts. Moving this job to
+    // its next wake gives other committed moves a chance if its target is down.
+    context.delete_document(&wake_key(at, number))?;
+    enqueue(
+        context,
+        number,
+        context.now_ms().saturating_add(PUBLICATION_RETRY_MS),
+    )?;
+    Ok(Some(decision))
+}
+
+pub(in crate::cells) fn acknowledged(context: &Transaction<'_>, decision: &Decision) -> Result<()> {
+    let number = decision.reservation.source.issue;
+    if moved(context, number)?.as_ref() != Some(decision) {
+        return Err(Error::Invalid(
+            "Issue transfer acknowledgement does not match its decision",
+        ));
+    }
+    if let Some(at) = context.document::<i64>(&pending_key(number))? {
+        context.delete_document(&wake_key(at, number))?;
+        context.delete_document(&pending_key(number))?;
+        schedule(context)?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -292,6 +387,7 @@ impl Mutation for Publish {
                 ownership_epoch: reservation.ownership_epoch,
             }));
             context.put_document(&key, &job)?;
+            context.delete_document(&reservation_key(reservation.request))?;
             advance_revision(context)?;
         }
         Ok(MutationResult::Success(PublishOutcome::Published {

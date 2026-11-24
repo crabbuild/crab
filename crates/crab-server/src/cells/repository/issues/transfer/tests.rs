@@ -670,3 +670,101 @@ async fn publication_replays_a_retired_issue_with_its_comments_and_moderation() 
     assert_eq!(following.number, 132);
     h.close().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn issue_transfer_alarm_publishes_the_reserved_number_after_restart() {
+    use crate::cells::runtime::test_node;
+    use cellar::sdk::{NodeOutcome, ShutdownMode};
+    use publication::*;
+
+    let directory = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let started = test_node(directory.path(), address).await;
+    let origin_id = Uuid::now_v7();
+    let target_id = Uuid::now_v7();
+    for id in [origin_id, target_id] {
+        started.client.initialize(id).await.unwrap();
+    }
+    let origin = started.client.repository(origin_id).unwrap();
+    let target = started.client.repository(target_id).unwrap();
+    let actor = IdentityKey {
+        issuer: "urn:crab:test".into(),
+        subject: "transfer-owner".into(),
+    };
+    let author = RepositoryAuthor {
+        issuer: actor.issuer.clone(),
+        subject: actor.subject.clone(),
+        name: "Owner".into(),
+    };
+    let issue = create(&origin, author.clone()).await;
+    let previous = create(&target, author).await;
+    let request = Uuid::now_v7();
+    let (source, progress) = snapshot(&origin, &target, &issue, request, &actor).await;
+    let outcome = mutate::<Prepare>(
+        &target,
+        PrepareInput {
+            request,
+            source,
+            actor,
+            commitment: progress.commitment,
+            ownership_epoch: 0,
+        },
+    )
+    .await;
+    let PrepareOutcome::Reserved { reservation } = outcome else {
+        panic!("{outcome:?}");
+    };
+    let number = reservation.destination.number;
+    assert_eq!(number, previous.number + 1);
+    assert!(matches!(
+        mutate::<Retire>(&origin, reservation).await,
+        RetireOutcome::Committed { .. }
+    ));
+    assert!(
+        target
+            .client
+            .query::<GetIssue>(target_id, None, number)
+            .await
+            .unwrap()
+            .output
+            .is_none()
+    );
+    let NodeOutcome::Stopped(report) = started.node.shutdown(ShutdownMode::Preserve).await.unwrap()
+    else {
+        panic!("Native node did not drain");
+    };
+    assert!(report.cells_drained && !report.drain_timed_out);
+
+    let restored = test_node(directory.path(), address).await;
+    restored
+        .client
+        .query::<GetMove>(origin_id, None, issue.number)
+        .await
+        .unwrap();
+    let published = tokio::time::timeout(std::time::Duration::from_secs(45), async {
+        loop {
+            let output = restored
+                .client
+                .query::<GetIssue>(target_id, None, number)
+                .await
+                .unwrap();
+            if let Some(published) = output.output {
+                break published;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    })
+    .await
+    .expect("The restored Repository Cell alarm did not publish the reserved issue");
+    assert_eq!(published, IssueRecord { number, ..issue });
+    let NodeOutcome::Stopped(report) = restored
+        .node
+        .shutdown(ShutdownMode::Preserve)
+        .await
+        .unwrap()
+    else {
+        panic!("Restored node did not drain");
+    };
+    assert!(report.cells_drained && !report.drain_timed_out);
+}

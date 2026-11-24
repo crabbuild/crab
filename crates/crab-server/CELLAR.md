@@ -506,8 +506,11 @@ lists, discussion index, or inbox.
 The destination reserves a number after all frames are staged, and the
 reservation leaves issue lists unchanged. The source rechecks the capture
 version and commits its move record with removal of the issue and its search
-projections. The destination publishes the reserved number from that decision
-and replays the same result after a lost reply. Issue text, author, dates,
+projections. It arms a durable recovery alarm in the same transaction. The
+alarm re-arms before contacting the destination and acknowledges the move only
+after the destination's publication crosses the Cell output gate. The
+destination publishes the reserved number from that decision and replays the
+same result after a lost reply. Issue text, author, dates,
 comment numbers, moderation, and the conversation lock are restored in the
 target Cell. Labels match by name, and a milestone matches by title and due
 date. Historical events with source-local references remain in their source
@@ -522,13 +525,20 @@ destinations and commits them with the issue. Shared attachments reuse the same
 destination ID.
 Code examples, link titles, and external links retain their original text.
 
+Repository ownership acceptance and the operator's initial organization
+assignment check for incoming issue reservations under the existing policy
+lease. Publication clears the reservation in the same transaction that
+installs the issue. This keeps a reserved issue from crossing an ownership
+change while recovery is pending.
+
 The issue detail route resolves the move through independent, current grants
 on the original and destination repositories. It exposes the destination only
 after publication, and the browser retains the original comment anchor.
 
-The HTTP write workflow must bind publication to both current Write grants and
-the shared owner. It also owns the verified object copy, remaining discussion
-state and relationship placement, and cleanup of abandoned staging.
+The HTTP write workflow must check both current grants and the shared owner,
+then prepare under the same policy lease used for ownership changes. It also
+owns the verified object copy, remaining discussion state and relationship
+placement, and cleanup of abandoned staging and reservations.
 The native write commands stay private while those paths are under construction.
 
 ## Reviewer search preparation

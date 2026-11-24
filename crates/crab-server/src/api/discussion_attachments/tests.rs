@@ -246,7 +246,7 @@ async fn issue_transfer_publishes_verified_attachments_with_destination_access()
                 issues::transfer::{
                     Capture, CaptureInput, CaptureOutcome, Stage, StageInput, StageOutcome,
                     publication::{
-                        Prepare, PrepareInput, PrepareOutcome, Publish, PublishOutcome, Retire,
+                        HasReservations, Prepare, PrepareInput, PrepareOutcome, Retire,
                         RetireOutcome,
                     },
                 },
@@ -430,6 +430,14 @@ async fn issue_transfer_publishes_verified_attachments_with_destination_access()
     let PrepareOutcome::Reserved { reservation } = reserved else {
         panic!("{reserved:?}");
     };
+    assert!(
+        target_cell
+            .client
+            .query::<HasReservations>(target_cell.target, None, ())
+            .await
+            .unwrap()
+            .output
+    );
     let retired = origin_cell
         .client
         .command::<Retire>(
@@ -444,21 +452,30 @@ async fn issue_transfer_publishes_verified_attachments_with_destination_access()
         panic!("{retired:?}");
     };
     let destination = decision.destination();
-    for _ in 0..2 {
-        assert_eq!(
-            target_cell
-                .client
-                .command::<Publish>(
-                    target_cell.target,
-                    app::mutation_identity().unwrap(),
-                    decision.clone(),
-                )
-                .await
-                .unwrap()
-                .output,
-            PublishOutcome::Published { destination }
-        );
-    }
+    let old_issue = format!("{ROOT}/issues/{issue_number}");
+    // Once the source commits, no caller has to send the destination command.
+    // Wait through the real native alarm and exercise the original HTTP link.
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let moved = h.json(&old_issue, &alice).await;
+            if moved["transfer"]["state"] == "ready" {
+                assert_eq!(moved["transfer"]["number"], destination.number);
+                break;
+            }
+            assert_eq!(moved["transfer"]["state"], "pending");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the native alarm should publish the committed move");
+    assert!(
+        !target_cell
+            .client
+            .query::<HasReservations>(target_cell.target, None, ())
+            .await
+            .unwrap()
+            .output
+    );
     *h.provider.mode.lock().await = "member".into();
     let bob = h.login().await;
     let catalog = h.server.catalog().unwrap();

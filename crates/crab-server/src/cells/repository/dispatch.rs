@@ -467,6 +467,9 @@ pub(in crate::cells) fn dispatch_read(
         issues::transfer::publication::GetMove::ID => {
             invoke_read::<issues::transfer::publication::GetMove>(context, input)
         }
+        issues::transfer::publication::HasReservations::ID => {
+            invoke_read::<issues::transfer::publication::HasReservations>(context, input)
+        }
         <GetComment as Read>::ID => invoke_read::<GetComment>(context, input),
         <ListDiscussions as Read>::ID => invoke_read::<ListDiscussions>(context, input),
         search::index::work::ListWorkspaceWork::ID => {
