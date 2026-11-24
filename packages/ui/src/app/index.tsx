@@ -294,25 +294,27 @@ export function App() {
     return (
       <TooltipProvider>
         <main id="main" className="sign-in-page" tabIndex={-1}>
-          {session.error ? (
-            <div className="notice error" role="alert">
-              <h1>Unable to check your session</h1>
-              <p>{session.error}</p>
-              <Button variant="outline" onClick={session.retry}>
-                Try again
-              </Button>
-            </div>
-          ) : session.loading || !session.data ? (
-            <div className="notice" role="status">
-              <Spinner /> Checking your session…
-            </div>
-          ) : (
-            <SignIn
-              mode={session.data.mode}
-              canSignUp={session.data.can_sign_up}
-              url={url}
-            />
-          )}
+          <div className="sign-in-main">
+            {session.error ? (
+              <div className="notice error" role="alert">
+                <h1>Unable to check your session</h1>
+                <p>{session.error}</p>
+                <Button variant="outline" onClick={session.retry}>
+                  Try again
+                </Button>
+              </div>
+            ) : session.loading || !session.data ? (
+              <div className="notice" role="status">
+                <Spinner /> Checking your session…
+              </div>
+            ) : (
+              <SignIn
+                mode={session.data.mode}
+                canSignUp={session.data.can_sign_up}
+                url={url}
+              />
+            )}
+          </div>
           <div className="sign-in-appearance">
             <AppearanceControl theme={theme} setTheme={setTheme} />
           </div>

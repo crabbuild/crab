@@ -1796,10 +1796,10 @@ be decoded. Logout
 requires the canonical `Origin` and the session's cross-site request forgery
 (CSRF) token. It removes the durable session, invalidating subsequent browser
 and Git-token authentication on every replica, but does not sign the account
-out of the identity provider. Configure an object-store lifecycle rule that
-deletes objects below `.crab/http-server/v1/auth/` after 24 hours. Active state
-expires within eight hours; the rule only collects consumed flows, expired
-sessions, and token records left after session invalidation.
+out of the identity provider. Scope the one-day object-store lifecycle rules
+to the short-lived paths in the [operations runbook](deploy/operations.md#manage-membership-and-sessions).
+The broader `.crab/http-server/v1/auth/` prefix also contains the persistent
+SCIM user and group directory.
 Logout Token replay records under `.crab/http-server/v1/logout-replays/` live
 outside that lifecycle prefix. Retain them through their signed expiry and clean
 them with an expiry-aware operator job. Identity-index markers and stored session
@@ -1843,8 +1843,10 @@ revision stay invalid after reactivation. See [the operations runbook](deploy/op
 ### Provision users with SCIM
 
 Crab can require SCIM provisioning for the configured OIDC issuer. Upgrade
-all serving replicas before enabling it. Mount the same operator-owned bearer
-token file on each replica and configure it under `[auth]`.
+all serving replicas and verify that lifecycle rules preserve the SCIM directory
+before enabling it. Mount the same operator-owned bearer token file on each
+replica and configure it under `[auth]`. Kubernetes deployments can set
+`secrets.scimTokenKey` in the [Helm chart](deploy/helm/crab-server/README.md#enable-scim-provisioning).
 
 ```toml
 scim_token_file = "/run/secrets/crab-scim-token"

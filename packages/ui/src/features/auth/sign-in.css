@@ -1,16 +1,23 @@
-.sign-in-page,
+.sign-in-page {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 1fr auto 1fr;
+  justify-items: center;
+  min-height: 100dvh;
+  row-gap: 0.5rem;
+  padding: 1rem;
+  outline: none;
+}
+
+.sign-in-main {
+  grid-row: 2;
+  width: min(100%, var(--sign-in-form-width));
+}
+
 .sign-in {
   display: grid;
   min-width: 0;
   gap: var(--sign-in-section-gap);
-}
-
-.sign-in-page {
-  align-content: start;
-  width: min(var(--sign-in-form-width), calc(100% - 2rem));
-  margin-inline: auto;
-  padding-block: var(--sign-in-top-gap) 2rem;
-  outline: none;
 }
 
 .sign-in-logo {
@@ -43,7 +50,9 @@
 }
 
 .sign-in-appearance {
-  justify-self: center;
+  grid-row: 1;
+  align-self: start;
+  justify-self: end;
 }
 
 .sign-in-actions {

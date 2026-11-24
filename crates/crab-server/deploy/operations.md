@@ -108,10 +108,20 @@ The identity-session index is mandatory. Sessions without a matching marker are
 rejected; the server neither repairs old records nor scans the entire session
 namespace during revocation.
 
-The 24-hour auth lifecycle applies below `.crab/http-server/v1/auth/`.
-Keep suspension records under `.crab/http-server/v1/accounts/` outside that
-lifecycle. After restoring an older root, reconcile account state with the IdP
-and verify revoked credentials fail before reopening public ingress.
+Scope one-day expiration to `flows/`, `git-tokens/`, `identity-sessions/`,
+`preflight/`, and `sessions/` beneath `.crab/http-server/v1/auth/`. Users
+and groups under `auth/scim/` and suspension records under
+`.crab/http-server/v1/accounts/` are persistent.
+
+If the bucket has a one-day rule for the whole `auth/` prefix, replace it
+with the scoped rules before enabling or resuming SCIM. The previous policy
+can still run for up to 24 hours on
+[Google Cloud Storage](https://cloud.google.com/storage/docs/lifecycle).
+For an existing SCIM deployment, verify that both user and group records are
+present. If a directory was expired, verify a version-selected recovery in an
+isolated root. After restoring an older root, reconcile account state and
+group membership with the IdP and verify revoked credentials fail before
+reopening public ingress.
 Logout replay records live separately under `.crab/http-server/v1/logout-replays/`;
 retain them through their signed expiry and collect them with an expiry-aware job.
 Keep the state key stable across replicas and process replacement. Rotate peer

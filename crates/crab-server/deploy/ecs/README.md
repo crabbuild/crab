@@ -47,9 +47,9 @@ execution role needs ECR pull, CloudWatch log write, and read access to the
 six named Secrets Manager values. Do not place AWS access keys in those
 secrets; the server uses the Fargate task role credential chain.
 
-Add an S3 lifecycle rule that expires objects below
-`repositories/.crab/http-server/v1/auth/` after 24 hours. Do not apply that
-rule to the catalog or repository prefixes.
+Configure one-day expiration for the short-lived auth prefixes listed in the
+[operations runbook](../operations.md#manage-membership-and-sessions). Scope
+the rules to the corresponding paths under the configured S3 root.
 
 Replace both the container image suffix and
 `CRAB_SERVER_RELEASE_IMAGE` with the same qualified manifest digest. The

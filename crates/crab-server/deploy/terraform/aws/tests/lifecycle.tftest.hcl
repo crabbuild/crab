@@ -84,6 +84,31 @@ run "bounds_recovery_versions_and_multipart_uploads" {
   }
 }
 
+run "preserves_the_scim_directory_during_auth_cleanup" {
+  command = plan
+
+  assert {
+    condition = toset([
+      for rule in aws_s3_bucket_lifecycle_configuration.repositories.rule : one(rule.filter).prefix
+      if length(rule.expiration) != 0
+      ]) == toset([
+      for path in ["flows", "git-tokens", "identity-sessions", "preflight", "sessions"] :
+      "${var.root_prefix}/.crab/http-server/v1/auth/${path}/"
+    ])
+    error_message = "Current objects may expire only in the five short-lived auth namespaces."
+  }
+
+  assert {
+    condition = alltrue([
+      for rule in aws_s3_bucket_lifecycle_configuration.repositories.rule :
+      rule.status == "Enabled" && one(rule.expiration).days == 1 &&
+      one(rule.noncurrent_version_expiration).noncurrent_days == 1
+      if length(rule.expiration) != 0
+    ])
+    error_message = "Short-lived auth objects and their previous versions must expire after one day."
+  }
+}
+
 run "grants_only_runtime_storage_actions" {
   command = plan
 

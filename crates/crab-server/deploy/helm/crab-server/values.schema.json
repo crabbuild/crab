@@ -98,6 +98,7 @@
       "properties": {
         "existingSecret": { "type": "string", "minLength": 1 },
         "oidcClientSecretKey": { "type": "string" },
+        "scimTokenKey": { "type": "string", "maxLength": 253, "pattern": "^[A-Za-z0-9._-]*$" },
         "stateKeyKey": { "type": "string", "minLength": 1 }
       }
     },

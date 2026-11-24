@@ -88,6 +88,29 @@ run "bounds_recovery_versions_and_multipart_uploads" {
   }
 }
 
+run "preserves_the_scim_directory_during_auth_cleanup" {
+  command = plan
+
+  assert {
+    condition = toset(one([
+      for rule in google_storage_bucket.repositories.lifecycle_rule : one(rule.condition).matches_prefix
+      if one(rule.action).type == "Delete" && one(rule.condition).days_since_noncurrent_time == null
+      ])) == toset([
+      for path in ["flows", "git-tokens", "identity-sessions", "preflight", "sessions"] :
+      "${var.root_prefix}/.crab/http-server/v1/auth/${path}/"
+    ])
+    error_message = "Current objects may expire only in the five short-lived auth namespaces."
+  }
+
+  assert {
+    condition = one([
+      for rule in google_storage_bucket.repositories.lifecycle_rule : one(rule.condition)
+      if one(rule.action).type == "Delete" && one(rule.condition).days_since_noncurrent_time == null
+    ]).age == 1
+    error_message = "Short-lived auth objects must expire after one day."
+  }
+}
+
 run "grants_object_use_without_object_administration" {
   command = plan
 

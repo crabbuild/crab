@@ -10,6 +10,11 @@
 {{- end }}
 {{- include "crab-server.validateAvailability" . }}
 {{- include "crab-server.validateExtraEnv" . }}
+{{- with .Values.secrets.scimTokenKey }}
+  {{- if or (eq . $.Values.secrets.oidcClientSecretKey) (eq . $.Values.secrets.stateKeyKey) }}
+    {{- fail "secrets.scimTokenKey must name a dedicated Secret key" }}
+  {{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -187,6 +192,10 @@ spec:
                     {{- with .Values.secrets.oidcClientSecretKey }}
                     - key: {{ . }}
                       path: oidc-client-secret
+                    {{- end }}
+                    {{- with .Values.secrets.scimTokenKey }}
+                    - key: {{ . | quote }}
+                      path: scim-token
                     {{- end }}
                     - key: {{ .Values.secrets.stateKeyKey }}
                       path: state-key

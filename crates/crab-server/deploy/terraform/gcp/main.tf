@@ -1,6 +1,8 @@
 locals {
   auth_prefix = "${var.root_prefix}/.crab/http-server/v1/auth/"
-  ksa_member  = "serviceAccount:${var.project_id}.svc.id.goog[${var.namespace}/${var.service_account_name}]"
+  # SCIM directories share auth/ but must survive credential expiry.
+  expiring_auth_paths = ["flows", "git-tokens", "identity-sessions", "preflight", "sessions"]
+  ksa_member          = "serviceAccount:${var.project_id}.svc.id.goog[${var.namespace}/${var.service_account_name}]"
   gke_node_selector = var.gke_cluster_mode == "standard" ? {
     "iam.gke.io/gke-metadata-server-enabled" = "true"
   } : {}
@@ -26,7 +28,7 @@ resource "google_storage_bucket" "repositories" {
 
     condition {
       age            = 1
-      matches_prefix = [local.auth_prefix]
+      matches_prefix = [for path in local.expiring_auth_paths : "${local.auth_prefix}${path}/"]
       with_state     = "ANY"
     }
   }

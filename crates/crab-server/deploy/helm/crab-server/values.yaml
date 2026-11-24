@@ -28,6 +28,7 @@ config:
 secrets:
   existingSecret: ""
   oidcClientSecretKey: oidc-client-secret
+  scimTokenKey: ""
   stateKeyKey: state-key
 
 cells:
