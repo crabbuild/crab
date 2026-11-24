@@ -285,7 +285,9 @@ groups inbox entries by typed discussion. Issue transfer receipts capture
 mentions from the source description. Destination publication enqueues them
 in the same transaction that installs the issue. Transfer inbox entries
 carry their source repository and require current grants to both repositories
-for delivery, viewing, and triage. `notifications/triage.rs` binds all
+for delivery, viewing, and triage. An opted-in email uses the same notice ID.
+The sender rechecks both grants and the destination issue before sending an
+authenticated inbox link. `notifications/triage.rs` binds all
 selected rows to observed activity in one transaction. `notifications/filing.rs`
 retains saved and completed conversations with private activity-order indexes.
 `notifications/retention.rs` sweeps expired completions and fences replay.

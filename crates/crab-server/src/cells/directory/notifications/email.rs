@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{
-    CLASS, Error, IdentityKey, Mutation, MutationResult, Notice, Read, Result, Transaction,
-    active_account,
+    CLASS, Error, IdentityKey, Mutation, MutationResult, Notice, NoticeTarget, Read, Result,
+    Transaction, active_account,
 };
 use crate::cells::directory::RegisterAccounts;
 
@@ -204,6 +204,13 @@ pub(crate) struct InvitationSource {
     pub created_at_ms: u64,
 }
 
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct IssueTransferSource {
+    pub origin: Uuid,
+    pub number: u64,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Job {
@@ -213,6 +220,8 @@ pub(crate) struct Job {
     pub transfer: Option<TransferSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invitation: Option<InvitationSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_transfer: Option<IssueTransferSource>,
     pub preference_version: u64,
     pub expires: u64,
     due: u64,
@@ -244,9 +253,14 @@ pub(super) fn enqueue(context: &Transaction<'_>, actor: Uuid, notice: &Notice) -
         },
         notice.repository,
         notice.created_at_ms,
-        None,
-        None,
+        Source::Notice(notice.target),
     )
+}
+
+enum Source {
+    Notice(NoticeTarget),
+    RepositoryOffer(TransferSource),
+    Invitation(InvitationSource),
 }
 
 fn queue(
@@ -254,11 +268,10 @@ fn queue(
     id: JobId,
     repository: Uuid,
     created_at_ms: u64,
-    transfer: Option<TransferSource>,
-    invitation: Option<InvitationSource>,
+    source: Source,
 ) -> Result<()> {
     let preference = preference(context, id.actor)?;
-    if !preference.enabled && transfer.is_none() && invitation.is_none() {
+    if !preference.enabled && matches!(source, Source::Notice(_)) {
         return Ok(());
     }
     let now = now(context)?;
@@ -275,6 +288,14 @@ fn queue(
         // Reconciliation must preserve the first delivery decision after opt-in changes.
         return context.put_document(&id.receipt(expires), &true);
     }
+    let (transfer, invitation, issue_transfer) = match source {
+        Source::Notice(NoticeTarget::IssueTransfer { origin, number }) => {
+            (None, None, Some(IssueTransferSource { origin, number }))
+        }
+        Source::Notice(_) => (None, None, None),
+        Source::RepositoryOffer(transfer) => (Some(transfer), None, None),
+        Source::Invitation(invitation) => (None, Some(invitation), None),
+    };
     store_job(
         context,
         &Job {
@@ -282,6 +303,7 @@ fn queue(
             repository,
             transfer,
             invitation,
+            issue_transfer,
             preference_version: preference.version,
             expires,
             due: now,
@@ -336,8 +358,7 @@ impl Mutation for QueueTransferMail {
                 id,
                 item.repository,
                 item.source.created_at_ms,
-                Some(item.source),
-                None,
+                Source::RepositoryOffer(item.source),
             )?;
         }
         Ok(MutationResult::Success(()))
@@ -380,8 +401,7 @@ impl Mutation for QueueInvitationMail {
                 },
                 source.organization,
                 source.created_at_ms,
-                None,
-                Some(source),
+                Source::Invitation(source),
             )?;
         }
         Ok(MutationResult::Success(()))

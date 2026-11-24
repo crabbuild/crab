@@ -419,13 +419,7 @@ impl Mutation for Deliver {
                 stored_filed = filing::store(context, actor, Some(&previous), &filed)?;
                 changed |= stored_filed;
             }
-            // Transfer notices need the origin grant at send time too. The
-            // repository-only email queue has no proof of that grant.
-            if input.email
-                && input.notice.target.transfer_origin().is_none()
-                && new_activity
-                && (store_recent || stored_filed)
-            {
+            if input.email && new_activity && (store_recent || stored_filed) {
                 email::enqueue(context, actor, &input.notice)?;
             }
             if store_recent {

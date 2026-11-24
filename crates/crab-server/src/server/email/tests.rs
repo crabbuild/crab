@@ -6,6 +6,8 @@ use serde_json::{Value, json};
 use tokio::{sync::Mutex, task::JoinHandle};
 use uuid::Uuid;
 
+mod issue_transfers;
+
 const SETTINGS: &str = "/api/notifications/email";
 const REPOSITORY: &str = "/api/repos/team/private";
 

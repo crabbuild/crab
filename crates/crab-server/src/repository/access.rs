@@ -12,7 +12,7 @@ use crate::{
     auth::Principal,
     catalog::{RepositoryApplicationState, TeamGrant},
     cells::{
-        Address,
+        Address, CellClient,
         directory::{
             IdentityKey, LookupAccounts, LookupIdentities, LookupRoutingIdentities, RoutingLookup,
         },
@@ -111,25 +111,10 @@ pub(crate) async fn organization_grants_for_identity(
         organizations
             .into_iter()
             .map(|(organization, include_teams)| {
-                let cells = cells.clone();
+                let cells = &cells;
                 async move {
-                    let result = cells
-                        .query::<RepositoryTeamsForActor>(
-                            Address::Organization(organization),
-                            None,
-                            RepositoryActor {
-                                actor,
-                                include_teams,
-                            },
-                        )
-                        .await;
-                    let grant = match result {
-                        Ok(result) => result.output,
-                        Err(
-                            crate::cells::Error::NotInitialized | crate::cells::Error::AccessDenied,
-                        ) => ActorTeams::default(),
-                        Err(error) => return Err(Error::Cell(error)),
-                    };
+                    let grant =
+                        organization_grant(cells, organization, actor, include_teams).await?;
                     Ok((organization, grant))
                 }
             }),
@@ -137,6 +122,31 @@ pub(crate) async fn organization_grants_for_identity(
     .buffer_unordered(8)
     .try_collect()
     .await
+}
+
+pub(crate) async fn organization_grant(
+    cells: &CellClient,
+    organization: Uuid,
+    actor: Uuid,
+    include_teams: bool,
+) -> Result<ActorTeams> {
+    match cells
+        .query::<RepositoryTeamsForActor>(
+            Address::Organization(organization),
+            None,
+            RepositoryActor {
+                actor,
+                include_teams,
+            },
+        )
+        .await
+    {
+        Ok(result) => Ok(result.output),
+        Err(crate::cells::Error::NotInitialized | crate::cells::Error::AccessDenied) => {
+            Ok(ActorTeams::default())
+        }
+        Err(error) => Err(Error::Cell(error)),
+    }
 }
 
 pub(crate) async fn visible_team_names(

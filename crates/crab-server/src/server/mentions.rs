@@ -30,7 +30,7 @@ use crate::{
             watches,
         },
     },
-    repository::Repository,
+    repository::{Repository, access},
 };
 
 const SWEEP_INTERVAL: Duration = Duration::from_secs(2);
@@ -74,11 +74,16 @@ pub(super) async fn recipient_has_grant(
         return Ok(true);
     }
     if let Some(organization) = &grants.organization {
-        match app::repository_team_access(server, organization, Some(actor), false).await {
-            Ok(access) if access.owner || !access.teams.is_empty() => return Ok(true),
-            Ok(_) | Err(Error::Cell(cells::Error::NotInitialized | cells::Error::AccessDenied)) => {
-            }
-            Err(error) => return Err(error),
+        let cells = server.cells().ok_or(Error::CellUnavailable)?;
+        let grant = access::organization_grant(
+            &cells,
+            organization.id,
+            actor,
+            !organization.teams.is_empty(),
+        )
+        .await?;
+        if access::organization_access(&grant, &organization.teams).is_some() {
+            return Ok(true);
         }
     }
     Ok(auth.is_oidc()
