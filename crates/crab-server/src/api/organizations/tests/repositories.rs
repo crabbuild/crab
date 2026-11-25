@@ -8,6 +8,7 @@ use crate::{
 mod external_forks;
 mod fork_merges;
 mod personal_forks;
+mod public_forks;
 mod sync;
 
 #[tokio::test(flavor = "multi_thread")]

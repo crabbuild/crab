@@ -110,7 +110,8 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
     let public_read = public_read_route(request.method(), request.uri())
         && !machine_request
         && (!git_request || !request.headers().contains_key("authorization"));
-    if public_read {
+    if public_read || (principal.is_user() && public_fork_creation(request.method(), request.uri()))
+    {
         principal.allow_public_reads();
     }
     // Membership's handler hides absent and non-admin repositories uniformly.
@@ -390,6 +391,15 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
     ).into_response()
 }
 
+fn public_fork_creation(method: &axum::http::Method, uri: &axum::http::Uri) -> bool {
+    *method == axum::http::Method::POST
+        && uri
+            .path()
+            .strip_prefix("/api/repos/")
+            .and_then(|path| path.splitn(3, '/').nth(2))
+            == Some("forks")
+}
+
 fn public_read_route(method: &axum::http::Method, uri: &axum::http::Uri) -> bool {
     use axum::http::Method;
     let path = uri.path();
@@ -432,6 +442,7 @@ fn public_read_route(method: &axum::http::Method, uri: &axum::http::Uri) -> bool
                             | "lfs-content"
                             | "crab-content"
                             | "code-search"
+                            | "forks"
                             | "properties"
                     )
             })

@@ -91,6 +91,7 @@ impl CatalogDocument {
                 || record.ownership_epoch != record.name_version()
                 || !record.property_seed_valid()
                 || !record.fork_baseline_valid()
+                || !record.fork_creator_valid()
                 || record.application != RepositoryApplicationState::CellReady
                 || record.transfer.is_some()
                 || (entry.retired_for_removal
@@ -263,6 +264,9 @@ impl CatalogStore {
             return Err(CatalogError::Conflict);
         }
         let previous = root.membership_digest()?;
+        if root.visibility.value.is_public() {
+            document.separate_public_forks(input.repository, input.now);
+        }
         let (removed, retained): (Vec<_>, _) =
             document.repositories.into_iter().partition(|record| {
                 record.id == input.repository || record.forked_from == Some(input.repository)

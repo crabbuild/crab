@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { expectNoAccessibilityViolations } from "./accessibility";
 
 test("organization repository creation recovers its owner-scoped request after reload", async ({
@@ -226,7 +226,7 @@ test("organization repository creation recovers its owner-scoped request after r
   ).toHaveCount(0);
 });
 
-test("a current organization owner can resume a shared import", async ({
+test("an eligible member imports with the allowed visibility and an owner can resume", async ({
   page,
 }) => {
   const organization = "01900000-0000-7000-8000-000000000020";
@@ -255,7 +255,7 @@ test("a current organization owner can resume a shared import", async ({
   let jobId: string | undefined;
   let complete = false;
   let actor = alice;
-  let role = "owner";
+  let role = "member";
   await page.route("**/api/**", (route) => {
     const req = route.request();
     const { pathname } = new URL(req.url());
@@ -283,11 +283,13 @@ test("a current organization owner can resume a shared import", async ({
           },
           actor,
           role,
+          can_create: actor === alice || role === "owner",
         },
       });
     if (pathname === `${orgApi}/repositories/creation`)
       return route.fulfill({
         json: {
+          visibilities: role === "owner" ? ["private", "public"] : ["public"],
           properties: [
             {
               id: property,
@@ -346,7 +348,12 @@ test("a current organization owner can resume a shared import", async ({
       });
     }
     if (pathname === `${imports}/${jobId}`)
-      return route.fulfill({ json: interrupted });
+      return actor === alice || role === "owner"
+        ? route.fulfill({ json: interrupted })
+        : route.fulfill({
+            status: 404,
+            json: { error: { message: "Import job not found" } },
+          });
     if (pathname === `${imports}/${jobId}/resume`) {
       expect(actor).toBe(bob);
       expect(req.headers()["x-csrf-token"]).toBe("fixture-csrf");
@@ -395,8 +402,12 @@ test("a current organization owner can resume a shared import", async ({
   const visibility = page
     .getByRole("region", { name: "Bring a repository from Git" })
     .getByRole("combobox", { name: "Visibility" });
+  await expect(visibility).toHaveText("Public");
   await visibility.click();
-  await page.getByRole("option", { name: "Public", exact: true }).click();
+  await expect(
+    page.getByRole("option", { name: "Private", exact: true }),
+  ).toHaveCount(0);
+  await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Start import" }).click();
   const statusLink = page.getByRole("link", { name: "Import status link" });
   await expect(statusLink).toBeVisible();
@@ -415,6 +426,7 @@ test("a current organization owner can resume a shared import", async ({
   await expect(page.getByRole("button", { name: "Resume import" })).toHaveCount(
     0,
   );
+  await expect(page.getByRole("alert")).toContainText("Import job not found");
 
   role = "owner";
   await page.reload();
@@ -682,9 +694,10 @@ test("a personal fork keeps its job scope across reload and resume", async ({
   ).toHaveCount(0);
 });
 
-test("a fork can choose another organization and resume in that destination", async ({
-  page,
-}) => {
+async function chooseOrganizationFork(
+  page: Page,
+  visibility: "private" | "public",
+) {
   const sourceId = "01900000-0000-7000-8000-000000000040";
   const targetId = "01900000-0000-7000-8000-000000000041";
   const sourceOrg = { id: sourceId, name: "Source engineering" };
@@ -696,7 +709,8 @@ test("a fork can choose another organization and resume in that destination", as
     name: "library",
     organization_id: sourceId,
     access: "read",
-    visibility: "private",
+    visibility,
+    public_read_only: visibility === "public",
     can_fork: true,
     can_fork_to_other_organizations: true,
   };
@@ -709,6 +723,7 @@ test("a fork can choose another organization and resume in that destination", as
     fork: true,
     forked_from: source,
     access: "write",
+    public_read_only: false,
   };
   const jobRoot = `/api/organizations/${targetId}/repositories/imports/git`;
   let requestId: string | undefined;
@@ -718,6 +733,7 @@ test("a fork can choose another organization and resume in that destination", as
     name: fork.name,
     source: `${owner}/library`,
     fork_source: source.id,
+    visibility,
     default_branch_only: true,
     state: "interrupted",
     message: "Fork interrupted",
@@ -752,9 +768,11 @@ test("a fork can choose another organization and resume in that destination", as
             {
               kind: "member",
               organization: target,
-              role: "owner",
+              role: "member",
               actor: source.id,
               can_create: true,
+              can_create_private: true,
+              can_create_public: true,
             },
             {
               kind: "member",
@@ -762,6 +780,8 @@ test("a fork can choose another organization and resume in that destination", as
               role: "member",
               actor: source.id,
               can_create: true,
+              can_create_private: false,
+              can_create_public: false,
             },
           ],
           next: null,
@@ -774,8 +794,9 @@ test("a fork can choose another organization and resume in that destination", as
       return route.fulfill({
         json: {
           organization: pathname.endsWith(targetId) ? target : sourceOrg,
-          role: "owner",
+          role: "member",
           actor: source.id,
+          can_create: pathname.endsWith(targetId),
         },
       });
     if (pathname === `/api/organizations/${targetId}/repositories/creation`)
@@ -814,6 +835,13 @@ test("a fork can choose another organization and resume in that destination", as
   await page
     .getByRole("button", { name: "Fork repository", exact: true })
     .click();
+  await expect(
+    page.getByText(
+      visibility === "public"
+        ? "The fork is public and links to the source repository."
+        : "The fork stays private and keeps a link to the source repository.",
+    ),
+  ).toBeVisible();
   await page
     .getByRole("button", { name: "Choose another organization" })
     .click();
@@ -839,4 +867,10 @@ test("a fork can choose another organization and resume in that destination", as
   await statusLink.click();
   await page.getByRole("button", { name: "Resume fork", exact: true }).click();
   await expect(page).toHaveURL(`/${fork.owner}/library`);
-});
+}
+
+for (const visibility of ["private", "public"] as const) {
+  test(`a ${visibility} fork can choose another organization and resume there`, ({
+    page,
+  }) => chooseOrganizationFork(page, visibility));
+}

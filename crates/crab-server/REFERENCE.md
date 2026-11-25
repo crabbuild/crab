@@ -838,6 +838,12 @@ and captured base permission. A fork in another organization keeps its
 destination owner and loses inherited upstream grants. A detached personal
 fork belongs to its individual owner. All detached forks stay private.
 Pending fork jobs must settle before the repository can become public.
+Making a public upstream private separates its existing public forks. The
+oldest ready fork becomes the upstream of their public network. The same
+promotion happens when an organization deletes the public upstream. The
+surviving repositories keep their UUIDs, addresses, and access.
+Unpublished public fork reservations are released when the upstream leaves
+the public network.
 
 `GET /api/repositories/{id}/visibility` returns the current setting and
 eligibility. Send `version`, `value` (`public` or `private`), and the exact
@@ -1024,14 +1030,16 @@ copied as well.
 | `GET /api/imports/git/{id}` | Reads the caller's job from object storage on any serving replica. States are `queued`, `running`, `succeeded`, `failed`, and `interrupted`. The response includes the saved `visibility`, `resumable`, and the destination link after success. |
 | `POST /api/imports/git/{id}/resume` | Resumes a failed or interrupted job as the original account. Send the session CSRF token and a JSON body of `{}` or `{"token":"…"}` for a private HTTPS source. An active or completed job returns its existing status. |
 
-Organization owners use **Import from Git** in the organization's
-**Repositories** tab. The scoped endpoint
+People with repository creation permission use **Import from Git** in the
+organization's **Repositories** tab or from the repository owner picker.
+Import visibility follows the organization's repository creation policy. The scoped endpoint
 `/api/organizations/{organization}/repositories/imports/git` takes the same
 fields except `owner`, which is derived from the organization UUID. Its
-`/{id}` and `/{id}/resume` endpoints are available to current organization
-owners. One owner can share the import status link with another owner, who can
-resume the same job and repository. The imported repository grants Admin
-access through current organization ownership.
+`/{id}` and `/{id}/resume` endpoints are available to the current member who
+started the job and the current organization owners. An owner can resume the
+same job even after the member's creation permission ends. A member who
+creates a repository by importing receives Admin access to it, like other
+repository creators. Organization owners administer it through membership.
 
 Public imports require a managed personal namespace or an organization
 destination. An import request ID fixes visibility alongside the source and
@@ -1040,7 +1048,7 @@ token. Public visibility takes effect in the catalog when the verified Git
 snapshot and Repository Cell are ready.
 
 Organization imports also accept `properties` keyed by property definition
-UUID. The job stores and returns the chosen values to organization owners.
+UUID. Every authorized job viewer can see the saved property values.
 Resuming reuses the saved values. Crab applies them before receiving Git refs
 so property-targeted rulesets see the destination's values throughout import.
 
@@ -1090,7 +1098,14 @@ Cell local-disk budget while cloning and shrinks the reservation to the measured
 mirror plus a command margin. `TMPDIR` needs space for Git process scratch
 files. The server needs outbound access to the configured Git host or proxy.
 
-### Private organization forks
+### Public and private forks
+
+A signed-in reader can fork a public upstream repository into their personal
+account or an organization where they can create public repositories. The
+destination's repository grants and organization rulesets govern the copy.
+Public forks support anonymous browse and clone, and their upstream's
+**Forks** page lists them to signed-out readers. A public fork writer can copy
+additional branches from the public upstream.
 
 Private forks are disabled by default. An organization owner can enable them
 in **Settings → Member privileges**. When the organization allows forks, a
@@ -1101,7 +1116,8 @@ governs future forks. Existing forks retain their current access.
 
 When both policies allow forking, a signed-in reader can choose **Fork
 repository** in the source's Code view and select **Personal**. Organization
-owners can also choose the source organization as the destination. Enter an
+members who can create private repositories can also select an eligible
+organization. Enter an
 optional description and choose whether to copy only the default branch. The
 browser selects **Copy only the default branch** initially. Clearing it copies
 all advertised refs. A fork writer can bring in additional branches later on
@@ -1144,15 +1160,22 @@ personal forks as private repositories owned by their individual accounts.
 
 An organization owner can enable **Allow private forks in other organizations**
 in **Settings → Member privileges**. The upstream repository must also permit
-private forks, and the creator must have current upstream read access and own
-the destination organization. The destination owns the fork, can administer
-it, and applies its branch and tag rulesets. Upstream organization owners have
+private forks, and the creator needs upstream read access and permission to
+create private repositories in the destination. The destination administers
+the fork and applies its branch and tag rulesets. Upstream organization owners have
 Read access. Other upstream members retain their applicable team and captured
 base permissions. Individual upstream grants and OIDC group grants do not
 carry over, and the destination's base permission does not grant read access
-to an attached fork. Removing upstream access from the creator leaves the
-destination-owned fork available. Publishing the source detaches the fork as
-a private repository in its destination and ends inherited upstream grants.
+to an attached fork. A member who creates an organization fork receives Write
+access while they are a destination member and can read the source. The
+access inspector shows this grant when it can verify the source access from
+durable repository and organization grants. Mentions, assignments, review
+requests, and watch notifications use the same creator grant. Group-based
+creator access requires current signed evidence to show notifications in the
+inbox or send email. Destination owners retain Admin
+access when an individual creator loses upstream access. Publishing the
+source detaches the fork as a private repository in its destination and
+ends inherited upstream grants.
 
 `POST /api/repos/{owner}/{name}/forks` accepts `{request_id, name, destination,
 organization?, description?, default_branch_only?, properties?}` and requires
@@ -1163,11 +1186,13 @@ selection.
 `destination` is `personal` or `organization` and defaults to `organization`.
 With an organization destination, `organization` may specify the destination
 UUID. Omitting it uses the upstream organization. When the upstream policy
-allows this choice, the fork form lists organizations you own.
+allows this choice, the fork form lists organizations where you can create
+private repositories.
 Personal forks use the caller's `/api/imports/git/{id}` status and resume routes.
 Organization forks use the destination organization import routes and require
-a current destination owner. Viewing or resuming an external fork job also
-requires current upstream read access. Jobs verify the pinned refs, source
+a current destination owner or the member who started the job. Viewing or
+resuming an organization fork job also requires current upstream read access.
+Jobs verify the pinned refs, source
 access, and policies before making the fork visible.
 **View forks** on the upstream repository or a fork opens the upstream
 repository's **Forks** page. It lists readable direct forks, newest first, with

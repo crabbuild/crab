@@ -63,6 +63,7 @@ pub(in crate::api) struct AccessRepository {
     name: String,
     access: Option<RepositoryAccess>,
     direct: Option<RepositoryAccess>,
+    fork_creator: Option<RepositoryAccess>,
     teams: Vec<MemberAccessTeam>,
     organization_owner: bool,
     baseline: Option<RepositoryAccess>,
@@ -199,11 +200,15 @@ async fn list(
                     .and_then(|id| source_records.get(&id).copied()),
             )
             .map_err(app::repository_access_error)?;
+        let is_creator = known_provider
+            && repo.fork_creator.as_ref().is_some_and(|creator| {
+                creator.issuer == identity.issuer && creator.subject == identity.subject
+            });
         if repo.external_fork_destination(source).is_some() {
             let organization = source.organization.as_ref().ok_or(Error::NotFound)?;
             let organization_owner = known_provider && roles.owner;
-            let (access, baseline) = if organization_owner {
-                (Some(RepositoryAccess::Admin), None)
+            let (access, baseline, fork_creator) = if organization_owner {
+                (Some(RepositoryAccess::Admin), None, None)
             } else if known_provider {
                 let grant = match source_grants.entry(organization.id) {
                     std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
@@ -226,9 +231,19 @@ async fn list(
                     repo.baseline(),
                     RepositoryAccess::Read,
                 );
-                (access, baseline)
+                let fork_creator = (is_creator
+                    && (RepositoryMember::access_for(&source.members, &identity.subject)
+                        .is_some()
+                        || crate::repository::access::organization_access(
+                            grant,
+                            &organization.teams,
+                            source.baseline(),
+                        )
+                        .is_some()))
+                .then_some(RepositoryAccess::Write);
+                (access.max(fork_creator), baseline, fork_creator)
             } else {
-                (None, None)
+                (None, None, None)
             };
             // A destination administrator can inspect the fork's effective
             // role. The upstream name and team roster need source access.
@@ -238,6 +253,7 @@ async fn list(
                 name: repo.name.clone(),
                 access,
                 direct: None,
+                fork_creator,
                 teams: Vec::new(),
                 organization_owner,
                 baseline,
@@ -266,11 +282,18 @@ async fn list(
                 })
             })
             .collect();
+        let fork_creator = (is_creator
+            && (direct.is_some()
+                || organization_owner
+                || !teams.is_empty()
+                || source.baseline().resolve(roles.baseline).is_some()))
+        .then_some(RepositoryAccess::Write);
         let access = direct
             .into_iter()
             .chain(teams.iter().map(|team| team.access))
             .chain(organization_owner.then_some(RepositoryAccess::Admin))
             .chain(baseline)
+            .chain(fork_creator)
             .max();
         let sso_group_ceiling = source
             .groups
@@ -284,6 +307,7 @@ async fn list(
             name: repo.name.clone(),
             access,
             direct,
+            fork_creator,
             teams,
             organization_owner,
             baseline,

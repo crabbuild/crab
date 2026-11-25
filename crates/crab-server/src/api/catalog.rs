@@ -112,7 +112,7 @@ pub(super) async fn list(
     for VisibleRepository {
         repository,
         principal: current,
-        organization_owner,
+        can_create_at_visibility,
         forking,
         visibility,
         topics,
@@ -129,6 +129,10 @@ pub(super) async fn list(
             crate::repository::settings::load(&server, &repository).await?
         };
         let lifecycle = crate::repository::settings::load_lifecycle(&server, &repository).await?;
+        let public_source = visibility.is_public() && repository.forked_from.is_none();
+        let private_source = forking.is_some_and(|(enabled, _, policy)| enabled && policy.allowed);
+        let can_fork =
+            (principal.is_user() || principal.is_local()) && (public_source || private_source);
         let mut view = json!({
             "id": repository.id,
             "owner": repository.config.owner, "name": repository.config.name,
@@ -141,9 +145,9 @@ pub(super) async fn list(
             "public_read_only": public_reader,
             "can_maintain": current.can_maintain(repository.id),
             "fork": repository.forked_from.is_some(),
-            "can_fork": (principal.is_user() || principal.is_local()) && forking.is_some_and(|(enabled, _, policy)| enabled && policy.allowed),
-            "can_fork_to_organization": organization_owner && forking.is_some_and(|(enabled, _, policy)| enabled && policy.allowed),
-            "can_fork_to_other_organizations": forking.is_some_and(|(enabled, external, policy)| enabled && external && policy.allowed),
+            "can_fork": can_fork,
+            "can_fork_to_organization": can_fork && can_create_at_visibility,
+            "can_fork_to_other_organizations": can_fork && (public_source || forking.is_some_and(|(_, external, _)| external)),
             "protection_version": protections.version,
             "protected_branches": protections.rules,
             "archive_version": lifecycle.version,
@@ -229,6 +233,7 @@ pub(super) struct VisibleRepository {
     pub(super) team_access_inherited: bool,
     pub(super) principal: Principal,
     pub(super) organization_owner: bool,
+    can_create_at_visibility: bool,
     forking: Option<(bool, bool, crate::catalog::forking::Forking)>,
     pub(super) visibility: crate::catalog::visibility::Visibility,
 }
@@ -349,6 +354,9 @@ pub(super) async fn visible_matching(
             let inherited = crate::repository::access::snapshot_organization_access(
                 &snapshot,
                 &organization_grants,
+                principal,
+                &repository.config,
+                issuer,
             );
             let mut config = repository.config.clone();
             config.members = snapshot.members;
@@ -372,7 +380,11 @@ pub(super) async fn visible_matching(
         let organization = repository
             .organization
             .and_then(|id| organization_grants.get(&id));
-        let organization_owner = organization.is_some_and(|grant| grant.owner);
+        let visibility = record.map_or(crate::catalog::visibility::Visibility::Private, |record| {
+            record.visibility.value
+        });
+        let can_create_at_visibility =
+            organization.is_some_and(|grant| grant.creation_visibilities.contains(&visibility));
         let forking = record
             .filter(|record| {
                 record.organization_id().is_some()
@@ -394,11 +406,10 @@ pub(super) async fn visible_matching(
             metadata_updated_at_ms: record.and_then(|record| record.metadata_updated_at_ms),
             repository,
             principal: current,
-            organization_owner,
+            organization_owner: organization.is_some_and(|grant| grant.owner),
+            can_create_at_visibility,
             forking,
-            visibility: record.map_or(crate::catalog::visibility::Visibility::Private, |record| {
-                record.visibility.value
-            }),
+            visibility,
             team_access,
             team_access_inherited,
         });
@@ -433,10 +444,17 @@ async fn forks(
 ) -> app::Result<Json<Value>> {
     let repository = app::repository(&server, &principal, &key)?;
     let current = app::membership(&server, &principal, &repository).await?;
-    let viewer = current
-        .principal
-        .related_catalog(repository.id)
-        .ok_or(app::Error::NotFound)?;
+    let mut viewer = if current.principal.is_anonymous() {
+        // The named upstream grant is UUID-bound. The network search has to
+        // evaluate public visibility independently for each fork.
+        Principal::anonymous()
+    } else {
+        current
+            .principal
+            .related_catalog(repository.id)
+            .ok_or(app::Error::NotFound)?
+    };
+    viewer.allow_public_reads();
     let result =
         catalog_browse::list(&server, &viewer, Scope::Forks(repository.id), search).await?;
     // Listing a fork network needs both source access and an independent grant

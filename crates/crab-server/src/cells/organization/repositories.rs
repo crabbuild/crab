@@ -183,6 +183,7 @@ pub(crate) struct ImportPublication {
     pub repository: Uuid,
     pub snapshot: [u8; 32],
     pub expected_policy: u64,
+    pub visibility: Visibility,
 }
 
 pub(crate) struct AuthorizeImportPublication;
@@ -204,8 +205,8 @@ impl Mutation for AuthorizeImportPublication {
                 "organization rules changed during import publication",
             ));
         }
-        // Another current owner can recover this decision for the exact same
-        // repository and verified refs after the original owner leaves.
+        // The ticket identifies the repository and refs so a current owner
+        // can complete the original creator's verified publication.
         let key = format!("organization/v1/import-publications/{}", input.repository);
         authorize_ticket(context, &key, input.snapshot)
     }
@@ -223,10 +224,22 @@ fn authorize_ticket(
             MutationResult::Rejected(Authorized::Conflict)
         });
     }
-    // The dispatcher checks current owner authority in this transaction,
-    // before the durable decision or a replay can authorize publication.
     context.put_document(key, &digest)?;
     Ok(MutationResult::Success(Authorized::Accepted))
+}
+
+pub(super) fn require_import(
+    context: &Transaction<'_>,
+    actor: Uuid,
+    visibility: Visibility,
+) -> Result<()> {
+    let current = member(context, actor)?
+        .filter(|member| member.active)
+        .ok_or(Error::AccessDenied)?;
+    if !repository_policy::load(context)?.permits_creation(current.role, visibility) {
+        return Err(Error::AccessDenied);
+    }
+    Ok(())
 }
 
 pub(crate) fn valid_creation(name: &str, description: &str) -> bool {

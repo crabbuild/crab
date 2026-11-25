@@ -87,6 +87,10 @@ impl Policy {
             CreationVisibility::Any => &[Private, Public],
         }
     }
+
+    pub(super) fn permits_creation(&self, role: Role, visibility: Visibility) -> bool {
+        self.can_create(role) && self.creation_visibilities(role).contains(&visibility)
+    }
 }
 
 pub(super) fn load(context: &Transaction<'_>) -> Result<Policy> {

@@ -159,6 +159,7 @@ export function RepositoryPage({
       "branches",
       "tags",
       "code-search",
+      "forks",
       "labels",
       "milestones",
     ].includes(view) ||
@@ -169,12 +170,12 @@ export function RepositoryPage({
   const canWrite = repo.access === "write" && !repo.archived;
   const organizationId = repo.organization_id;
   const forkSource = repo.forked_from;
-  const forkNetwork =
-    !publicReader &&
-    repo.visibility !== "public" &&
-    (repo.fork ? forkSource : organizationId ? repo : undefined);
-  const canCreateFork =
-    repo.can_fork && organizationId && identity && !repo.archived;
+  const forkNetwork = repo.fork
+    ? forkSource
+    : organizationId || repo.visibility === "public"
+      ? repo
+      : undefined;
+  const canCreateFork = repo.can_fork && identity && !repo.archived;
   const refs = useRequest<Refs>(
     view === "projects" ||
       view === "issues" ||
@@ -540,10 +541,14 @@ export function RepositoryPage({
             <GitImport
               key={`${identity.issuer}:${identity.subject}:${repo.id}`}
               account={JSON.stringify([identity.issuer, identity.subject])}
-              organization={{
-                id: organizationId,
-                name: ownership?.organization.name ?? repo.owner,
-              }}
+              organization={
+                organizationId
+                  ? {
+                      id: organizationId,
+                      name: ownership?.organization.name ?? repo.owner,
+                    }
+                  : undefined
+              }
               fork={repo}
               csrf={csrf}
               onImported={(repository) => {

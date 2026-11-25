@@ -95,6 +95,19 @@ pub(super) async fn recipient_has_grant(
             return Ok(true);
         }
     }
+    if let Some(creator) = &grants.fork_creator
+        && creator.actor.issuer == identity.issuer
+        && creator.actor.subject == identity.subject
+        && let Some(grant) = fork_creator_delivery(server, grants).await?
+        && grant.actor == actor
+        && (grant.access == Access::Direct
+            || auth
+                .mention_group(&identity.subject, &grant.groups)
+                .await?
+                .is_some())
+    {
+        return Ok(true);
+    }
     Ok(auth.is_oidc()
         && !grants.groups.is_empty()
         && auth
@@ -168,6 +181,50 @@ struct DeliveryScope {
     direct: BTreeSet<Uuid>,
     revision: u64,
     groups: Vec<RepositoryGroup>,
+    creator: Option<ForkCreatorDelivery>,
+}
+
+#[derive(PartialEq, Eq)]
+struct ForkCreatorDelivery {
+    identity: IdentityKey,
+    actor: Uuid,
+    access: Access,
+    groups: Vec<RepositoryGroup>,
+}
+
+async fn fork_creator_delivery(
+    server: &Server,
+    snapshot: &MembershipSnapshot,
+) -> Result<Option<ForkCreatorDelivery>> {
+    use access::ForkCreatorGrant;
+
+    let (Some(source), Some(creator)) = (&snapshot.organization, &snapshot.fork_creator) else {
+        return Ok(None);
+    };
+    let Some((actor, grant)) = access::fork_creator_grant(
+        server,
+        creator,
+        source.id,
+        &source.teams,
+        snapshot.fork_destination,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let (access, groups) = match grant {
+        ForkCreatorGrant::Durable => (Access::Direct, Vec::new()),
+        ForkCreatorGrant::Group => (Access::Group, creator.source_groups.clone()),
+    };
+    Ok(Some(ForkCreatorDelivery {
+        identity: IdentityKey {
+            issuer: creator.actor.issuer.clone(),
+            subject: creator.actor.subject.clone(),
+        },
+        actor,
+        access,
+        groups,
+    }))
 }
 
 async fn team_members(
@@ -272,8 +329,22 @@ impl DeliveryScope {
             None
         } else if self.subjects.contains(&actor.subject) {
             Some(Access::Direct)
+        } else if let Some(creator) = &self.creator
+            && &creator.identity == actor
+        {
+            Some(creator.access)
         } else {
             (!self.groups.is_empty()).then_some(Access::Group)
+        }
+    }
+
+    fn group_grants(&self, identity: &IdentityKey) -> &[RepositoryGroup] {
+        // An upstream group can qualify only the recorded fork creator here.
+        match &self.creator {
+            Some(creator) if &creator.identity == identity && creator.access == Access::Group => {
+                &creator.groups
+            }
+            _ => &self.groups,
         }
     }
 
@@ -284,6 +355,12 @@ impl DeliveryScope {
         if fresh.revision != self.revision {
             // A roster change can move an account between inbox retention
             // classes. Resolve the delivery again against the new grant.
+            return Err(Error::PageChanged);
+        }
+        // Organization policy and team changes can occur without a catalog write.
+        if fresh.fork_creator.is_some()
+            && fork_creator_delivery(server, &fresh).await? != self.creator
+        {
             return Err(Error::PageChanged);
         }
         Ok(true)
@@ -386,7 +463,7 @@ async fn enroll(
         .map(|(candidate, identity)| async move {
             if candidate.access == Access::Direct
                 || auth
-                    .mention_group(&identity.subject, &scope.groups)
+                    .mention_group(&identity.subject, scope.group_grants(&identity))
                     .await?
                     .is_some()
             {
@@ -638,6 +715,14 @@ async fn deliver(
                 return Err(Error::PageChanged);
             }
         }
+        if scope.creator.as_ref().is_some_and(|creator| {
+            recipients
+                .iter()
+                .any(|(recipient, _)| recipient.actor == creator.actor)
+        }) && !scope.current(server, repo).await?
+        {
+            return Ok(Progress::Ready(None));
+        }
         publish(
             server,
             client,
@@ -754,19 +839,28 @@ pub(crate) async fn drain_repository(server: &Server, repo: &Repository) -> Resu
                     subject: member.subject,
                 })
                 .collect();
-            let ids = account_ids(&cell.client, &identities).await?;
+            let mut ids: BTreeSet<_> = account_ids(&cell.client, &identities)
+                .await?
+                .into_iter()
+                .flatten()
+                .collect();
+            let creator = fork_creator_delivery(server, snapshot).await?;
+            if let Some(creator) = &creator {
+                ids.insert(creator.actor);
+            }
             // Group candidates are only visible when the inbox principal has a
             // current verified repository grant. No background session is used.
             Some(DeliveryScope {
                 issuer: auth.issuer().to_owned(),
                 subjects: identities.into_iter().map(|actor| actor.subject).collect(),
-                direct: ids.into_iter().flatten().collect(),
+                direct: ids,
                 revision: snapshot.revision,
                 groups: if auth.is_oidc() {
                     snapshot.groups.clone()
                 } else {
                     Vec::new()
                 },
+                creator,
             })
         }
         _ => None,
@@ -789,7 +883,9 @@ pub(crate) async fn drain_repository(server: &Server, repo: &Repository) -> Resu
         )?;
         for event in events.discussions {
             let progress = if let Some(scope) = &roster
-                && (!scope.subjects.is_empty() || !scope.groups.is_empty())
+                && (!scope.subjects.is_empty()
+                    || !scope.groups.is_empty()
+                    || scope.creator.is_some())
             {
                 deliver(server, repo, &cell.client, scope, &settings, &event).await?
             } else {

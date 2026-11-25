@@ -142,6 +142,9 @@ function AccessList({
                       {repo.direct && (
                         <li>Direct grant · {roleLabels[repo.direct]}</li>
                       )}
+                      {repo.fork_creator && (
+                        <li>Fork creator · {roleLabels[repo.fork_creator]}</li>
+                      )}
                       {repo.teams.map((team) => (
                         <li className="wrap-anywhere" key={team.id}>
                           <Link

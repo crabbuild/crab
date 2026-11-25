@@ -1,7 +1,7 @@
 use super::{ImportError, ValidatedImport, source};
 use crate::{
-    catalog::visibility::Visibility, cells::organization::properties::PropertyValue,
-    storage_root::StorageRoot,
+    auth::Identity, catalog::visibility::Visibility,
+    cells::organization::properties::PropertyValue, storage_root::StorageRoot,
 };
 use bytes::Bytes;
 use crab_storage::{ETag, StorageError};
@@ -155,6 +155,14 @@ struct Document {
     description: Option<String>,
     #[serde(default)]
     snapshot: Option<Snapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    creator: Option<Creator>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub(super) struct Creator {
+    pub(super) actor: Uuid,
+    pub(super) member_identity: Option<Identity>,
 }
 
 impl Document {
@@ -179,6 +187,7 @@ impl Document {
 pub(super) struct Jobs {
     root: StorageRoot,
     scope: Scope,
+    viewer: Option<(Uuid, bool)>,
 }
 
 enum Scope {
@@ -195,6 +204,7 @@ impl Jobs {
         Self {
             root: root.clone(),
             scope: Scope::Account(hash.finalize()),
+            viewer: None,
         }
     }
 
@@ -202,7 +212,13 @@ impl Jobs {
         Self {
             root: root.clone(),
             scope: Scope::Organization(organization),
+            viewer: None,
         }
+    }
+
+    pub(super) fn for_viewer(mut self, actor: Uuid, owner: bool) -> Self {
+        self.viewer = Some((actor, owner));
+        self
     }
 
     fn path(&self, id: Uuid) -> object_store::path::Path {
@@ -234,7 +250,18 @@ impl Jobs {
             .get_with_etag_bounded(&self.path(id), MAX_JOB_BYTES)
             .await
         {
-            Ok((body, etag)) => Ok(Some((serde_json::from_slice(&body)?, etag))),
+            Ok((body, etag)) => {
+                let document: Document = serde_json::from_slice(&body)?;
+                if let Some((actor, false)) = self.viewer
+                    && !document
+                        .creator
+                        .as_ref()
+                        .is_some_and(|creator| creator.actor == actor)
+                {
+                    return Err(ImportError::NotFound);
+                }
+                Ok(Some((document, etag)))
+            }
             Err(StorageError::NotFound { .. }) => Ok(None),
             Err(error) => Err(error.into()),
         }
@@ -300,7 +327,7 @@ impl Jobs {
                 owner: status.owner.clone(),
                 name: status.name.clone(),
                 description,
-                visibility: Visibility::Private,
+                visibility: status.visibility,
                 properties: BTreeMap::new(),
                 fork_source: Some(fork_source),
                 default_branch_only: status.default_branch_only,
@@ -362,6 +389,7 @@ impl Jobs {
         &self,
         id: Uuid,
         request: &ValidatedImport,
+        member_identity: Option<Identity>,
     ) -> Result<Option<Writer>, ImportError> {
         let status = Status {
             id,
@@ -384,6 +412,10 @@ impl Jobs {
             lease: Uuid::now_v7(),
             description: Some(request.description.clone()),
             snapshot: None,
+            creator: self.viewer.map(|(actor, _)| Creator {
+                actor,
+                member_identity,
+            }),
         };
         let path = self.path(id);
         let store = self.root.store.clone();
@@ -431,6 +463,10 @@ impl Writer {
 
     pub(super) async fn snapshot(&self) -> Option<Snapshot> {
         self.document.lock().await.0.snapshot.clone()
+    }
+
+    pub(super) async fn creator(&self) -> Option<Creator> {
+        self.document.lock().await.0.creator.clone()
     }
 
     pub(super) async fn pin(&self, snapshot: &Snapshot) -> Result<(), ImportError> {
@@ -580,8 +616,8 @@ mod tests {
             token: Some("fixture-secret".into()),
         };
         let id = Uuid::now_v7();
-        let writer = jobs.create(id, &import).await.unwrap().unwrap();
-        assert!(second.create(id, &import).await.unwrap().is_none());
+        let writer = jobs.create(id, &import, None).await.unwrap().unwrap();
+        assert!(second.create(id, &import, None).await.unwrap().is_none());
         assert!(matches!(other.status(id).await, Err(ImportError::NotFound)));
         assert_eq!(
             serde_json::to_value(second.status(id).await.unwrap()).unwrap()["state"],
@@ -614,7 +650,7 @@ mod tests {
         let resumed = resumed.unwrap();
         assert_eq!(resumed.visibility, Visibility::Public);
         assert_eq!(resumed.properties, import.properties);
-        assert!(second.create(id, &import).await.unwrap().is_none());
+        assert!(second.create(id, &import, None).await.unwrap().is_none());
 
         let (left, right) = tokio::join!(jobs.claim(id, &import), second.claim(id, &import));
         let left = left.unwrap();

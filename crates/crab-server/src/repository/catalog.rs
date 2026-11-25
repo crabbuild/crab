@@ -203,6 +203,7 @@ pub(crate) async fn materialize_record(
     repository.ownership_epoch = record.ownership_epoch;
     repository.property_seed = record.property_seed;
     repository.forked_from = record.forked_from;
+    repository.public_fork = record.is_public_fork();
     repository.topics.clone_from(&record.topics.names);
     Ok(repository)
 }

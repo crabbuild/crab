@@ -1,6 +1,6 @@
 use super::*;
 use crate::RepositoryAccess;
-use crate::catalog::{MAX_TEAM_GRANTS, RepositoryBaseline};
+use crate::catalog::{MAX_TEAM_GRANTS, RepositoryBaseline, visibility::Visibility};
 use std::collections::BTreeMap;
 
 pub(crate) const MAX_TEAM_ACCESS_ROWS: usize = 4096;
@@ -17,6 +17,8 @@ pub(crate) struct RepositoryActor {
 pub(crate) struct ActorTeams {
     pub owner: bool,
     pub member: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub creation_visibilities: Vec<Visibility>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub member_transfer: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -58,6 +60,11 @@ impl Read for RepositoryTeamsForActor {
         let mut grant = ActorTeams {
             owner,
             member: true,
+            creation_visibilities: if policy.can_create(organization.role) {
+                policy.creation_visibilities(organization.role).to_vec()
+            } else {
+                Vec::new()
+            },
             member_transfer: policy.member_transfer,
             member_deletion: policy.member_deletion,
             private_forks: policy.private_forks,

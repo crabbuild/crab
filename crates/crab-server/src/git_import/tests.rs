@@ -12,6 +12,7 @@ use crate::{
 use std::sync::atomic::Ordering;
 use tokio_util::sync::CancellationToken;
 
+mod members;
 mod xet;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -52,7 +53,7 @@ async fn resumes_published_git_snapshot_after_worker_loss() {
         properties: Default::default(),
         token: None,
     };
-    let job = Arc::new(jobs.create(id, &request).await.unwrap().unwrap());
+    let job = Arc::new(jobs.create(id, &request, None).await.unwrap().unwrap());
     job.update(jobs::State::Running, "Publishing")
         .await
         .unwrap();
@@ -863,7 +864,7 @@ async fn private_fork_resumes_after_missing_historical_lfs_payload_is_restored()
     h.close().await;
 }
 
-async fn import_owner(h: &Harness, cookie: &str, organization: Uuid) -> OrganizationOwner {
+async fn import_owner(h: &Harness, cookie: &str, organization: Uuid) -> OrganizationDestination {
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(axum::http::header::COOKIE, cookie.parse().unwrap());
     let principal = h.server.auth.as_ref().unwrap().principal(&headers).await;

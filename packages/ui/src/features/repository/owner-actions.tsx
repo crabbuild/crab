@@ -90,7 +90,7 @@ export function RepositoryOwnerActions({
           onCreated={onCreated}
         />
       )}
-      {(!selected || selected.role === "owner") && (
+      {(!selected || selected.can_create) && (
         <GitImport
           key={`import-${organization?.id ?? "personal"}`}
           account={selected?.actor ?? account}

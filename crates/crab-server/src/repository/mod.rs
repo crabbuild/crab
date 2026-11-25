@@ -32,6 +32,7 @@ pub(crate) struct Repository {
     pub(crate) ownership_epoch: u32,
     pub(crate) property_seed: Option<Uuid>,
     pub(crate) forked_from: Option<Uuid>,
+    pub(crate) public_fork: bool,
     pub(crate) topics: Vec<String>,
     pub(crate) config: RepositoryConfig,
     pub(crate) store: Store,
@@ -94,6 +95,12 @@ impl Repository {
     }
 
     pub(crate) fn fork_source(&self, server: &Server) -> Option<Arc<Self>> {
+        if self.public_fork {
+            return server
+                .repositories
+                .by_id(self.forked_from?)
+                .filter(|source| source.forked_from.is_none());
+        }
         let organization = self.organization?;
         server
             .repositories
@@ -119,6 +126,7 @@ impl Repository {
             ownership_epoch: 0,
             property_seed: None,
             forked_from: None,
+            public_fork: false,
             topics: Vec::new(),
             config,
             store: layout.store().clone(),

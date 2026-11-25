@@ -16,7 +16,7 @@ use crate::{
     app::{self, Error, Result},
     auth::Principal,
     catalog::{
-        CatalogRecord, MembershipActor,
+        CatalogRecord, MembershipActor, RepositoryApplicationState,
         visibility::{Setting, Visibility},
     },
     repository::settings,
@@ -46,6 +46,7 @@ struct Status {
     setting: Setting,
     can_change: bool,
     private_forks: usize,
+    public_forks: usize,
 }
 
 async fn access(
@@ -88,14 +89,25 @@ async fn read(
         .repository_by_id(repository)
         .ok_or(Error::NotFound)?;
     let allowed = access(&server, record, &actor).await?;
+    let forks = document
+        .repositories
+        .iter()
+        .filter(|fork| {
+            fork.forked_from == Some(repository)
+                && (!record.visibility.value.is_public()
+                    || fork.application == RepositoryApplicationState::CellReady)
+        })
+        .count();
+    let (private_forks, public_forks) = if record.visibility.value.is_public() {
+        (0, forks)
+    } else {
+        (forks, 0)
+    };
     Ok(Json(Status {
         setting: record.visibility,
         can_change: allowed == SourceAccess::Allowed,
-        private_forks: document
-            .repositories
-            .iter()
-            .filter(|fork| fork.forked_from == Some(repository))
-            .count(),
+        private_forks,
+        public_forks,
     }))
 }
 

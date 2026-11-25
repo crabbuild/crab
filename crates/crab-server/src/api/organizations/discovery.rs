@@ -19,6 +19,8 @@ enum Entry {
         actor: Uuid,
         role: Role,
         can_create: bool,
+        can_create_private: bool,
+        can_create_public: bool,
     },
     Invitation {
         organization: organization::Organization,
@@ -71,12 +73,17 @@ pub(super) async fn list(
                 };
                 Ok(landing.map(|entry| match entry {
                     Landing::Member {
-                        view, can_create, ..
+                        view,
+                        can_create,
+                        can_create_private,
+                        can_create_public,
                     } => Entry::Member {
                         organization: view.organization,
                         actor,
                         role: view.role,
                         can_create,
+                        can_create_private,
+                        can_create_public,
                     },
                     Landing::Invitation {
                         organization,

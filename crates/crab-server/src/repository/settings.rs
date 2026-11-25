@@ -142,6 +142,7 @@ where
     if let RulesetScope::Repository(repo) = &scope
         && let Some(destination) = repo.owning_organization()
         && repo.forked_from.is_some()
+        && !repo.public_fork
     {
         let upstream = repo
             .fork_source(server)

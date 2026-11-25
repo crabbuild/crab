@@ -15,7 +15,12 @@ import { Input } from "@/components/ui/input";
 import { useRequest, type Repository } from "@/lib/api";
 
 type Setting = { version: number; value: "private" | "public" };
-type Status = { setting: Setting; can_change: boolean; private_forks: number };
+type Status = {
+  setting: Setting;
+  can_change: boolean;
+  private_forks: number;
+  public_forks: number;
+};
 
 export function VisibilitySettings({
   repo,
@@ -117,6 +122,8 @@ function VisibilityForm({
         <p className="text-sm">
           Only people with repository access will be able to view and clone it.
           Previously downloaded copies can still be used.
+          {status.public_forks > 0 &&
+            " Existing forks will stay public in a separate network."}
         </p>
       )}
       <Field>

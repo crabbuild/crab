@@ -20,6 +20,8 @@ export type OrganizationEntry =
       actor: string;
       role: OrganizationRole;
       can_create: boolean;
+      can_create_private: boolean;
+      can_create_public: boolean;
     }
   | { kind: "invitation"; organization: Organization; invitation: Invitation };
 

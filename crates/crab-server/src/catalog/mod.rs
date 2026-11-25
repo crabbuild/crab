@@ -75,6 +75,8 @@ pub struct CatalogRecord {
     fork_baseline: RepositoryBaseline,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) fork_owner: Option<MembershipActor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) fork_creator: Option<MembershipActor>,
     pub name: String,
     pub prefix: String,
     pub placement_generation: u64,
@@ -209,12 +211,22 @@ pub struct MembershipSnapshot {
     #[serde(skip)]
     pub(crate) fork_destination: Option<Uuid>,
     #[serde(skip)]
+    pub(crate) fork_creator: Option<ForkCreatorAccess>,
+    #[serde(skip)]
     pub(crate) baseline: RepositoryBaseline,
     pub members: Vec<RepositoryMember>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<RepositoryGroup>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) organization: Option<OrganizationAccess>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ForkCreatorAccess {
+    pub(crate) actor: MembershipActor,
+    pub(crate) source_baseline: RepositoryBaseline,
+    pub(crate) source_member: Option<RepositoryMember>,
+    pub(crate) source_groups: Vec<RepositoryGroup>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -367,6 +379,7 @@ impl CatalogDocument {
                 || record.ownership_epoch > record.name_version()
                 || !record.property_seed_valid()
                 || !record.fork_baseline_valid()
+                || !record.fork_creator_valid()
                 || (record.visibility.value.is_public()
                     && record.application != RepositoryApplicationState::CellReady)
                 || !names.insert((record.owner.to_lowercase(), record.name.to_lowercase()))
@@ -395,7 +408,18 @@ impl CatalogDocument {
             }
             if let Some(upstream) = record.forked_from {
                 record.access_record(records.get(&upstream).copied())?;
-                if record.visibility.value.is_public()
+                if record.is_public_fork() {
+                    if record.fork_owner.is_some()
+                        || record.fork_creator.is_some()
+                        || !record.fork_baseline.inherits_organization()
+                        || (record.application == RepositoryApplicationState::CellReady
+                            && !record.visibility.value.is_public())
+                    {
+                        return Err(CatalogError::Invalid(
+                            "Public forks must retain their own access",
+                        ));
+                    }
+                } else if record.visibility.value.is_public()
                     || !record.members.is_empty()
                     || !record.groups.is_empty()
                     || record
@@ -489,6 +513,26 @@ pub(crate) enum BrowserNamespace {
 }
 
 impl BrowserNamespace {
+    fn reservation_owner(
+        self,
+        actor: &MembershipActor,
+        members: &[RepositoryMember],
+    ) -> Result<(String, Option<OrganizationAccess>), CatalogError> {
+        if matches!(&self, Self::Organization(_)) {
+            if !members.is_empty()
+                && (members.len() != 1
+                    || members[0].subject != actor.subject
+                    || members[0].access != RepositoryAccess::Admin)
+            {
+                return Err(CatalogError::Invalid(
+                    "Organization creation can grant Admin only to its creator",
+                ));
+            }
+            return self.catalog_owner(&[]);
+        }
+        self.catalog_owner(members)
+    }
+
     fn catalog_owner(
         self,
         members: &[RepositoryMember],
@@ -560,6 +604,17 @@ fn membership_digest(
 }
 
 impl CatalogRecord {
+    fn fork_creator_valid(&self) -> bool {
+        self.fork_creator.as_ref().is_none_or(|creator| {
+            self.forked_from.is_some()
+                && self.fork_owner.is_none()
+                && self
+                    .organization_id()
+                    .is_some_and(|id| self.owner == organization_namespace(id))
+                && valid_actor(creator)
+        })
+    }
+
     fn fork_baseline_valid(&self) -> bool {
         self.fork_baseline.inherits_organization()
             || (self.organization.is_some()
@@ -568,7 +623,9 @@ impl CatalogRecord {
 
     pub(crate) fn baseline(&self) -> RepositoryBaseline {
         match self.fork_baseline {
-            RepositoryBaseline::Organization if self.forked_from.is_some() => {
+            RepositoryBaseline::Organization
+                if self.forked_from.is_some() && !self.is_public_fork() =>
+            {
                 RepositoryBaseline::None
             }
             baseline => baseline,
@@ -598,6 +655,10 @@ impl CatalogRecord {
         self.organization.as_ref().map(|access| access.id)
     }
 
+    pub(crate) fn is_public_fork(&self) -> bool {
+        self.forked_from.is_some() && self.creation_visibility.is_public()
+    }
+
     pub(crate) fn external_fork_destination(&self, source: &Self) -> Option<Uuid> {
         self.organization_id().filter(|id| {
             self.forked_from == Some(source.id) && Some(*id) != source.organization_id()
@@ -611,6 +672,17 @@ impl CatalogRecord {
         let Some(upstream) = self.forked_from else {
             return Ok(self);
         };
+        if self.is_public_fork() {
+            return source
+                .filter(|source| {
+                    source.id == upstream
+                        && source.forked_from.is_none()
+                        && source.visibility.value.is_public()
+                        && source.application == RepositoryApplicationState::CellReady
+                })
+                .map(|_| self)
+                .ok_or(CatalogError::Invalid("Public fork source is unavailable"));
+        }
         // The catalog binds lineage to an upstream UUID. Personal forks use
         // that organization's authority. A separate organization owns its fork.
         source
@@ -643,6 +715,16 @@ impl CatalogRecord {
             forked_from: self.forked_from,
             fork_owner: self.fork_owner.clone(),
             fork_destination,
+            fork_creator: self.fork_creator.clone().map(|actor| ForkCreatorAccess {
+                source_baseline: source.baseline(),
+                source_member: source
+                    .members
+                    .iter()
+                    .find(|member| member.subject == actor.subject)
+                    .cloned(),
+                source_groups: source.groups.clone(),
+                actor,
+            }),
             baseline: self.baseline(),
             organization: source.organization.clone(),
             members: if fork_destination.is_some() {
@@ -781,6 +863,7 @@ impl CatalogStore {
             forked_from: None,
             fork_baseline: RepositoryBaseline::Organization,
             fork_owner: None,
+            fork_creator: None,
             name,
             prefix,
             placement_generation: 1,
@@ -811,17 +894,7 @@ impl CatalogStore {
         actor: MembershipActor,
         members: Vec<RepositoryMember>,
     ) -> Result<CatalogRecord, CatalogError> {
-        if matches!(&namespace, BrowserNamespace::Organization(_))
-            && !members.is_empty()
-            && (members.len() != 1
-                || members[0].subject != actor.subject
-                || members[0].access != RepositoryAccess::Admin)
-        {
-            return Err(CatalogError::Invalid(
-                "Organization creation can grant Admin only to its creator",
-            ));
-        }
-        let (owner, organization) = namespace.catalog_owner(&[])?;
+        let (owner, organization) = namespace.reservation_owner(&actor, &members)?;
         let id = browser_repository_id(&owner, input.request_id);
         self.insert_with_mode(
             CatalogRecord {
@@ -833,6 +906,7 @@ impl CatalogStore {
                 forked_from: None,
                 fork_baseline: RepositoryBaseline::Organization,
                 fork_owner: None,
+                fork_creator: None,
                 name: input.name,
                 prefix: format!("browser-repositories/{id}"),
                 placement_generation: 1,
@@ -870,9 +944,6 @@ impl CatalogStore {
             visibility,
             forked_from,
         } = input;
-        if visibility.is_public() && forked_from.is_some() {
-            return Err(CatalogError::Invalid("Managed forks must start private"));
-        }
         let fork_owner = match &namespace {
             BrowserNamespace::PersonalFork { owner, .. }
                 if forked_from.is_some() && owner == &actor =>
@@ -884,7 +955,18 @@ impl CatalogStore {
             }
             _ => None,
         };
-        let (owner, organization) = namespace.catalog_owner(&members)?;
+        let (owner, organization) = namespace.reservation_owner(&actor, &members)?;
+        // The creator's write grant is conditional on destination membership
+        // and access to the source. Never install it as a direct Admin grant.
+        let (fork_creator, members) = if forked_from.is_some()
+            && !visibility.is_public()
+            && organization.is_some()
+            && !members.is_empty()
+        {
+            (Some(actor.clone()), Vec::new())
+        } else {
+            (None, members)
+        };
         self.insert_with_mode(
             CatalogRecord {
                 id,
@@ -895,6 +977,7 @@ impl CatalogStore {
                 forked_from,
                 fork_baseline: RepositoryBaseline::Organization,
                 fork_owner,
+                fork_creator,
                 name,
                 prefix: format!("git-imports/{id}"),
                 placement_generation: 1,
@@ -960,6 +1043,7 @@ impl CatalogStore {
             forked_from: None,
             fork_baseline: RepositoryBaseline::Organization,
             fork_owner: None,
+            fork_creator: None,
             name,
             prefix,
             placement_generation: 1,
@@ -1183,7 +1267,7 @@ impl CatalogStore {
         {
             return Err(CatalogError::Conflict);
         }
-        if record.forked_from.is_some() {
+        if record.forked_from.is_some() && !record.is_public_fork() {
             return Err(CatalogError::Invalid(
                 "manage fork access on the source repository",
             ));
@@ -1326,13 +1410,14 @@ impl CatalogStore {
             if record.application == RepositoryApplicationState::CellReady {
                 return Ok(record.clone());
             }
-            if record.forked_from.is_some() == baseline.inherits_organization() {
+            let private_fork = record.forked_from.is_some() && !record.is_public_fork();
+            if private_fork == baseline.inherits_organization() {
                 return Err(CatalogError::Invalid(
                     "repository publication must match its fork lineage",
                 ));
             }
             record.fork_baseline = baseline;
-            if record.fork_owner.is_some()
+            if (record.fork_owner.is_some() || record.fork_creator.is_some())
                 && record
                     .organization_id()
                     .is_some_and(|id| document.pending_membership_changes.contains_key(&id))
@@ -1378,6 +1463,7 @@ impl CatalogStore {
                 let same = existing.organization_id() == record.organization_id()
                     && existing.forked_from == record.forked_from
                     && existing.fork_owner == record.fork_owner
+                    && existing.fork_creator == record.fork_creator
                     && match &mode {
                         InsertMode::ExistingPrefix => existing.prefix == record.prefix,
                         InsertMode::Reserved(_) => {
@@ -1417,6 +1503,13 @@ impl CatalogStore {
                 || document.deleted_repositories.iter().any(|deleted| {
                     deleted.repository.id == record.id || deleted.repository.prefix == record.prefix
                 })
+            {
+                return Err(CatalogError::Conflict);
+            }
+            if record.fork_creator.is_some()
+                && record
+                    .organization_id()
+                    .is_some_and(|id| document.pending_membership_changes.contains_key(&id))
             {
                 return Err(CatalogError::Conflict);
             }

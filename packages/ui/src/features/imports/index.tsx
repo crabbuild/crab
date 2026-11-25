@@ -61,18 +61,25 @@ export function GitImport({
   csrf: string;
   defaultOwner?: string;
   personal?: boolean;
-  organization?: { id: string; name: string; requestedJob?: string };
+  organization?: {
+    id: string;
+    name: string;
+    requestedJob?: string;
+    canStart?: boolean;
+  };
   fork?: Pick<
     Repository,
     | "id"
     | "owner"
     | "name"
+    | "visibility"
     | "can_fork_to_organization"
     | "can_fork_to_other_organizations"
   >;
   onImported: (repository: ImportedRepository) => void;
 }) {
   const organizationId = organization?.id;
+  const canStart = organization?.canStart !== false;
   const storageKey = fork
     ? `crab:fork:${account}:${fork.id}`
     : organizationId
@@ -137,6 +144,7 @@ export function GitImport({
   }>(personal && open ? "/api/repos/creation" : null);
   const organizationDestination = useRequest<{
     properties: PropertyDefinition[];
+    visibilities: RepositoryVisibility[];
   }>(
     jobOrganization && open
       ? `/api/organizations/${encodeURIComponent(jobOrganization)}/repositories/creation`
@@ -164,8 +172,11 @@ export function GitImport({
   const visibilities: RepositoryVisibility[] = job
     ? [job.visibility]
     : organization
-      ? ["private", "public"]
+      ? (organizationDestination.data?.visibilities ?? [])
       : (personalDestination.data?.visibilities ?? ["private"]);
+  const selectedVisibility = visibilities.includes(visibility)
+    ? visibility
+    : visibilities[0];
   const [error, setError] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
   const [statusCheck, setStatusCheck] = useState(0);
@@ -283,9 +294,10 @@ export function GitImport({
       }
       return;
     }
-    if (job) return;
+    if (job || !canStart) return;
     if (jobOrganization && (!organizationDestination.data || incomplete))
       return;
+    if (!fork && !selectedVisibility) return;
     const sourceValue = source.trim();
     const parsedName = parseGitRepository(sourceValue);
     const repositoryName = name.trim() || parsedName;
@@ -308,7 +320,7 @@ export function GitImport({
       owner: organizationId ? undefined : destination,
       name: repositoryName.trim(),
       description: description.trim() || undefined,
-      visibility,
+      visibility: selectedVisibility ?? "private",
       ...(jobOrganization && Object.keys(properties).length
         ? { properties }
         : {}),
@@ -361,7 +373,7 @@ export function GitImport({
   }
 
   if (!open)
-    return (
+    return canStart ? (
       <Button variant="outline" onClick={() => setOpen(true)}>
         {fork ? (
           <RepoForkedIcon data-icon="inline-start" />
@@ -370,7 +382,7 @@ export function GitImport({
         )}
         {fork ? "Fork repository" : "Import from Git"}
       </Button>
-    );
+    ) : null;
 
   const running =
     job?.state === "queued" ||
@@ -394,7 +406,11 @@ export function GitImport({
           </h2>
           <p className="muted">
             {forkJob ? (
-              "The fork stays private and keeps a link to the source repository."
+              fork?.visibility === "public" || job?.visibility === "public" ? (
+                "The fork is public and links to the source repository."
+              ) : (
+                "The fork stays private and keeps a link to the source repository."
+              )
             ) : (
               <>
                 Crab copies Git history and refs from an allowed Git host into
@@ -469,7 +485,9 @@ export function GitImport({
               {choosingOrganization && !fixedDestination && !jobId && (
                 <OrganizationChoices
                   eligible={(entry) =>
-                    entry.role === "owner" &&
+                    (fork.visibility === "public"
+                      ? entry.can_create_public
+                      : entry.can_create_private) &&
                     entry.organization.id !== organizationId
                   }
                   select={({ organization: selected }) => {
@@ -564,8 +582,8 @@ export function GitImport({
                 id="git-import-visibility"
                 label="Visibility"
                 aria-describedby="git-import-visibility-help"
-                value={job?.visibility ?? visibility}
-                disabled={fixedDestination || !!jobId}
+                value={selectedVisibility}
+                disabled={fixedDestination || !!jobId || !selectedVisibility}
                 options={visibilities.map((value) => ({
                   value,
                   label: visibilityLabels[value],
@@ -575,7 +593,7 @@ export function GitImport({
                 }}
               />
               <FieldDescription id="git-import-visibility-help">
-                {(job?.visibility ?? visibility) === "public"
+                {selectedVisibility === "public"
                   ? "Anyone can view the imported code and commit history once setup finishes."
                   : "Only people with access can view the imported repository."}
               </FieldDescription>
@@ -658,7 +676,7 @@ export function GitImport({
               size="sm"
               onClick={organizationDestination.retry}
             >
-              Reload repository properties
+              Reload destination settings
             </Button>
           </div>
         )}
@@ -720,7 +738,7 @@ export function GitImport({
               Check {operation} status
             </Button>
           )}
-          {(!job || running || job.resumable) && (
+          {((!job && canStart) || running || job?.resumable) && (
             <Button
               type="submit"
               disabled={
@@ -729,7 +747,8 @@ export function GitImport({
                 (!!jobOrganization &&
                   !job &&
                   (!organizationDestination.data || incomplete)) ||
-                (personal && !job && !personalDestination.data)
+                (personal && !job && !personalDestination.data) ||
+                (!forkJob && !selectedVisibility)
               }
             >
               {submitting || running
@@ -752,7 +771,11 @@ export function GitImport({
               onClick={reset}
               disabled={submitting}
             >
-              {fork ? "Start another fork" : "Start another import"}
+              {!canStart
+                ? "Back to repositories"
+                : fork
+                  ? "Start another fork"
+                  : "Start another import"}
             </Button>
           )}
         </div>
