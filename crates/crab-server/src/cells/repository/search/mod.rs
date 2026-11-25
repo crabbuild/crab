@@ -68,6 +68,7 @@ enum Term {
     Reason(super::issues::lifecycle::Reason),
     Kind(SubjectKind),
     Unmerged,
+    Queued,
     Draft(bool),
     Locked(bool),
     Missing(Metadata),
@@ -85,6 +86,11 @@ enum Metadata {
 impl Query {
     pub(crate) fn needs_pull_heads(&self) -> bool {
         self.needs_review_source() || self.uses_check_status()
+    }
+
+    pub(crate) fn uses_merge_queue(&self) -> bool {
+        self.expression
+            .has_term(|term| matches!(term, Term::Queued))
     }
 
     pub(crate) fn uses_check_status(&self) -> bool {
@@ -413,6 +419,7 @@ fn atom_expression(atom: &str) -> Result<Expression, &'static str> {
                     Term::State(SubjectState::Merged)
                 }
                 "unmerged" if qualifier.eq_ignore_ascii_case("is") => Term::Unmerged,
+                "queued" if qualifier.eq_ignore_ascii_case("is") => Term::Queued,
                 "locked" if qualifier.eq_ignore_ascii_case("is") => Term::Locked(true),
                 "unlocked" if qualifier.eq_ignore_ascii_case("is") => Term::Locked(false),
                 "issue" if qualifier.eq_ignore_ascii_case("is") => Term::Kind(SubjectKind::Issue),

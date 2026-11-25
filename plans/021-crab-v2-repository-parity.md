@@ -215,6 +215,8 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
   On required branches, writers can request **Merge when ready**. A durable
   request waits for the exact head to pass current reviews and checks before
   receiving a queue position and undergoing candidate CI.
+  Repository and workspace pull request searches support `is:queued` across
+  target branches. Results follow active queue admission and removal.
   Required workflows can start automatically within the configured build limit.
   Candidate checks show the bound run and its GitHub Actions link. Repository
   settings choose merge commit, squash, or rebase for queued changes while

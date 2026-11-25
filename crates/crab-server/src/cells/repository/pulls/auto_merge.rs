@@ -328,9 +328,46 @@ fn enter_queue(context: &Transaction<'_>, job: &mut Job) -> crate::cells::Result
         priority: false,
         testing: None,
     };
+    // The queue order and search membership commit with the active job.
     context.put_document(&queue_key(&job.base_ref, &entry), &job.pull)?;
+    index_queue_entry(context, job.pull)?;
+    super::super::search::index::invalidate_cursors(context)?;
     job.queue = Some(entry);
     Ok(())
+}
+
+pub(in crate::cells::repository) fn install_queue_index(
+    context: &Transaction<'_>,
+) -> crate::cells::Result<()> {
+    context.install_schema(
+        "CREATE TABLE IF NOT EXISTS discussion_index_merge_queue (
+             pull INTEGER PRIMARY KEY REFERENCES repository_pulls(number) ON DELETE CASCADE
+         ) STRICT;",
+    )
+}
+
+fn index_queue_entry(context: &Transaction<'_>, pull: u64) -> crate::cells::Result<()> {
+    context.query(
+        "INSERT INTO discussion_index_merge_queue(pull) VALUES (?) ON CONFLICT DO NOTHING",
+        &[integer(pull)?],
+    )?;
+    Ok(())
+}
+
+pub(in crate::cells::repository) fn backfill_queue_index(
+    context: &Transaction<'_>,
+    after: &mut u64,
+    batch: usize,
+) -> crate::cells::Result<bool> {
+    let cursor = (*after != 0).then(|| key(ACTIVE, *after));
+    let page = context.documents_after::<Job>(ACTIVE, cursor.as_deref(), batch)?;
+    for (_, job) in &page {
+        if job.queue.is_some() {
+            index_queue_entry(context, job.pull)?;
+        }
+        *after = job.pull;
+    }
+    Ok(page.len() < batch)
 }
 
 fn front(context: &Transaction<'_>, branch: &str) -> crate::cells::Result<Option<u64>> {
@@ -712,6 +749,11 @@ impl Mutation for Edit {
                 }
                 if let Some(queue) = &job.queue {
                     context.delete_document(&queue_key(&job.base_ref, queue))?;
+                    context.query(
+                        "DELETE FROM discussion_index_merge_queue WHERE pull=?",
+                        &[integer(pull)?],
+                    )?;
+                    super::super::search::index::invalidate_cursors(context)?;
                 }
                 context.delete_document(&active)?;
                 context.put_document(

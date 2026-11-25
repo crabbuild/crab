@@ -170,7 +170,12 @@ async fn complete(
     issue_types::complete(&server, &repo, &input, &mut result).await?;
     // Recheck the durable grant after the awaited read: the materialized
     // repository may still contain a member whose access has been revoked.
-    app::membership(&server, &principal, &repo).await?;
+    let access = app::membership(&server, &principal, &repo).await?;
+    if access.principal.is_public_reader(repo.id) {
+        result
+            .items
+            .retain(|item| item.value.trim_start_matches('-') != "is:queued");
+    }
     Ok(Json(result))
 }
 

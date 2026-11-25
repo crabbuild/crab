@@ -41,7 +41,7 @@ is buffered before owner dispatch so Cellar can safely retry stale routes; it is
 not forwarded as a non-replayable upload stream. Successful HTTP output
 uses the SDK output gate, including its ownership and durability checks.
 
-Repository assignment format 2 and discussion index format 17 require the explicit
+Repository assignment format 2 and discussion index format 18 require the explicit
 preparation described below. Issue lifecycle metadata also requires explicit
 `cells prepare-issue-state` on existing repositories. Pull lifecycle metadata
 requires `cells prepare-pull-state`. Other canonical records
@@ -759,6 +759,16 @@ commit while the backfill runs. Fresh reports and their summary commit together,
 including reports whose commit sorts before the backfill cursor.
 The summary revision advances when totals change and binds check-status search
 continuations to their CI results.
+
+### Merge queue search preparation
+
+Discussion index format 18 adds search membership for active merge queue
+entries. Update serving peers together and run `cells rebuild-search --owner
+OWNER --name REPO` on existing repositories. A ready format-17 repository keeps
+its existing projections and backfills live queue admissions in bounded
+batches. Queue membership and the discussion search revision change in the
+same Repository Cell transaction as entry or removal. The new index generation
+invalidates continuations issued before preparation.
 
 ## Team review search preparation
 

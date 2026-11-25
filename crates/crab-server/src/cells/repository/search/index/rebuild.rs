@@ -1,6 +1,7 @@
 use super::*;
 use crate::cells::repository::checks::summary;
 use crate::cells::repository::issues::issue_type::search as issue_types;
+use crate::cells::repository::pull_auto_merge;
 
 /// Start or advance preparation using its expected generation and version.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -56,6 +57,17 @@ impl Mutation for RebuildIndex {
                     return Err(crate::cells::Error::Invalid(
                         "discussion index generation is invalid",
                     ));
+                }
+                pull_auto_merge::install_queue_index(context)?;
+                if current
+                    .as_ref()
+                    .is_some_and(|state| state.format == 17 && state.progress.is_none())
+                {
+                    context.put_document(
+                        STATE_KEY,
+                        &building(generation, SearchIndexPhase::MergeQueue),
+                    )?;
+                    return progress(context);
                 }
                 summary::begin(context)?;
                 if current
@@ -165,6 +177,9 @@ impl Mutation for RebuildIndex {
                     }
                     SearchIndexPhase::CheckRollups => {
                         summary::backfill(context, &mut build.processed)?
+                    }
+                    SearchIndexPhase::MergeQueue => {
+                        pull_auto_merge::backfill_queue_index(context, &mut build.after, BATCH)?
                     }
                     SearchIndexPhase::Reviews => super::super::reviews::reviews(context)?,
                     SearchIndexPhase::ReviewRequests => super::super::reviews::requests(context)?,
@@ -314,7 +329,12 @@ impl Mutation for RebuildIndex {
                                 current.progress = None;
                             }
                         }
-                        SearchIndexPhase::CheckRollups => current.progress = None,
+                        SearchIndexPhase::CheckRollups => {
+                            if begin_queue(context, build)? {
+                                current.progress = None;
+                            }
+                        }
+                        SearchIndexPhase::MergeQueue => current.progress = None,
                     }
                 }
                 current
@@ -330,7 +350,16 @@ fn begin_checks(
 ) -> crate::cells::Result<bool> {
     build.phase = SearchIndexPhase::CheckRollups;
     build.after = 0;
-    summary::backfill(context, &mut build.processed)
+    Ok(summary::backfill(context, &mut build.processed)? && begin_queue(context, build)?)
+}
+
+fn begin_queue(
+    context: &Transaction<'_>,
+    build: &mut SearchIndexProgress,
+) -> crate::cells::Result<bool> {
+    build.phase = SearchIndexPhase::MergeQueue;
+    build.after = 0;
+    pull_auto_merge::backfill_queue_index(context, &mut build.after, BATCH)
 }
 
 fn building(generation: Uuid, phase: SearchIndexPhase) -> State {

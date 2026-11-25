@@ -192,7 +192,7 @@ async fn scope(
 ) -> Result<Scope> {
     let query = crate::cells::repository::search::Query::parse(request.search.query.as_deref())
         .map_err(Error::Invalid)?;
-    let needs_member = query.needs_pull_heads();
+    let needs_member = query.needs_pull_heads() || query.uses_merge_queue();
     let mut repositories: Vec<_> = catalog::visible_matching(server, principal, None, |repo| {
         request.selection.includes(repo)
     })

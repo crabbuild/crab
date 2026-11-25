@@ -3511,6 +3511,12 @@ the cursor. Restart the search to use the current matches. An absent `q` default
 `is:issue is:open` for the issue workspace and `is:open` for the PR workspace.
 An explicit query has no additional hidden state filter. The issue endpoint
 searches both discussion kinds; the PR endpoint retains its PR scope.
+Use `is:queued` to find open pull requests admitted to a merge queue in
+repository or workspace search. Combine it with `base:main` to narrow to a
+target branch, or use `-is:queued` to exclude queued work. An auto-merge request
+waiting for eligibility starts matching when it takes a queue position.
+The qualifier uses member access, including read-only members. Queue membership
+changes invalidate continuations for queued searches.
 Use `is:issue` or `is:pr` to include all states of that kind. The former separate
 `state` parameter is rejected; milestone and release state parameters keep their
 own contracts. Text terms search titles, bodies, conversation comments, submitted reviews, inline threads and replies. Spaces and `AND` require both terms; `OR` matches either; parentheses
@@ -5435,7 +5441,7 @@ It accepts optional `kind=issue|pull`, `sort=created|updated|comments|reactions`
 Crab merges bounded pages from each readable repository's discussion index.
 The account, search parameters, and readable scope bind the cursor. Current
 repository access is checked again before results are returned. A changed
-scope returns HTTP 409. For date filters and comment or reaction sorts, an
+scope returns HTTP 409. For date and queue filters and comment or reaction sorts, an
 index revision change also returns HTTP 409. Open **First page** to refresh
 the results.
 An unavailable repository index returns its normal preparation error so an
