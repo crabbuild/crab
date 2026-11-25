@@ -106,6 +106,7 @@ test("owners target repositories and repository admins see inherited rules as re
           name: "regulated",
           kind: "boolean",
           default: true,
+          required: true,
           options: [],
           values_editable_by: "repository",
         });
@@ -246,6 +247,14 @@ test("owners target repositories and repository admins see inherited rules as re
   await page.getByRole("button", { name: "New property" }).click();
   await page.getByLabel("Property name").fill("regulated");
   await chooseSelectOption(page.getByLabel("Property type"), "boolean");
+  await page
+    .getByRole("checkbox", {
+      name: "Require this property for all repositories",
+    })
+    .check();
+  await expect(
+    page.getByRole("button", { name: "Save property" }),
+  ).toBeDisabled();
   await chooseSelectOption(page.getByLabel("Default value"), "true");
   await page
     .getByRole("checkbox", { name: /Allow repository administrators/ })

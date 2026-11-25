@@ -7,7 +7,7 @@ use crate::test_support::{git::git, http::Harness};
 use crate::{
     RepositoryAccess, RepositoryMember,
     auth::Identity,
-    catalog::{BrowserNamespace, MembershipActor},
+    catalog::{BrowserNamespace, GitImportReservation, MembershipActor},
 };
 use std::sync::atomic::Ordering;
 use tokio_util::sync::CancellationToken;
@@ -47,6 +47,7 @@ async fn resumes_published_git_snapshot_after_worker_loss() {
         owner: "team".into(),
         name: "imported".into(),
         description: "Imported repository".into(),
+        visibility: Visibility::Private,
         token: None,
     };
     let job = Arc::new(jobs.create(id, &request).await.unwrap().unwrap());
@@ -65,10 +66,14 @@ async fn resumes_published_git_snapshot_after_worker_loss() {
     job.pin(&snapshot).await.unwrap();
     let record = catalog
         .reserve_git_import(
-            repository_id,
             BrowserNamespace::Personal(request.owner),
-            request.name,
-            request.description,
+            GitImportReservation {
+                id: repository_id,
+                name: request.name,
+                description: request.description,
+                visibility: request.visibility,
+                forked_from: None,
+            },
             MembershipActor {
                 issuer: actor.issuer,
                 subject: actor.subject.clone(),
@@ -78,7 +83,6 @@ async fn resumes_published_git_snapshot_after_worker_loss() {
                 name: actor.name,
                 access: RepositoryAccess::Admin,
             }],
-            None,
         )
         .await
         .unwrap();
@@ -238,7 +242,7 @@ async fn organization_import_requires_current_ownership_and_resumes_under_anothe
     let path = format!("{endpoint}/{id}");
     let resume_path = format!("{path}/resume");
     let destination = crate::catalog::organization_namespace(organization);
-    let body = json!({"request_id": id, "source": "https://127.0.0.1:1/offline-source.git", "name": "imported"});
+    let body = json!({"request_id": id, "source": "https://127.0.0.1:1/offline-source.git", "name": "imported", "visibility":"public"});
     let forbidden = h
         .write(reqwest::Method::POST, &endpoint, &bob, body.clone())
         .await;
@@ -249,13 +253,30 @@ async fn organization_import_requires_current_ownership_and_resumes_under_anothe
         .write(reqwest::Method::POST, "/api/imports/git", &alice, spoofed)
         .await;
     assert_eq!(forbidden.status(), StatusCode::BAD_REQUEST);
+    let mut unmanaged = body.clone();
+    unmanaged["owner"] = json!("team");
+    assert_eq!(
+        h.write(reqwest::Method::POST, "/api/imports/git", &alice, unmanaged)
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
     let start = h
-        .write(reqwest::Method::POST, &endpoint, &alice, body)
+        .write(reqwest::Method::POST, &endpoint, &alice, body.clone())
         .await;
     assert_eq!(start.status(), StatusCode::ACCEPTED);
     let queued: serde_json::Value = start.json().await.unwrap();
     assert_eq!(queued["id"], json!(id));
     assert_eq!(queued["owner"], json!(destination));
+    assert_eq!(queued["visibility"], "public");
+    let mut changed = body;
+    changed["visibility"] = json!("private");
+    assert_eq!(
+        h.write(reqwest::Method::POST, &endpoint, &alice, changed)
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
     wait_for_state(&h, &alice, &path, "failed").await;
 
     use reqwest::Method;
@@ -284,6 +305,7 @@ async fn organization_import_requires_current_ownership_and_resumes_under_anothe
         .await
         .unwrap();
     let request = request.unwrap();
+    assert_eq!(request.visibility, Visibility::Public);
     let writer = Arc::new(scope.claim(id, &request).await.unwrap().unwrap());
     let alice_owner = import_owner(&h, &alice, organization).await;
     let source = fixture_mirror().await;
@@ -298,16 +320,19 @@ async fn organization_import_requires_current_ownership_and_resumes_under_anothe
     let repository_id = scope.repository_id(id);
     let record = catalog
         .reserve_git_import(
-            repository_id,
             BrowserNamespace::Organization(organization),
-            request.name,
-            request.description,
+            GitImportReservation {
+                id: repository_id,
+                name: request.name,
+                description: request.description,
+                visibility: request.visibility,
+                forked_from: None,
+            },
             MembershipActor {
                 issuer: h.provider.issuer.clone(),
                 subject: "alice-id".into(),
             },
             Vec::new(),
-            None,
         )
         .await
         .unwrap();
@@ -351,6 +376,20 @@ async fn organization_import_requires_current_ownership_and_resumes_under_anothe
         Err(ImportError::NotFound)
     ));
     assert!(h.server.repositories.by_id(repository_id).is_none());
+    let public = async || {
+        h.http
+            .get(format!("{}/api/repos?public=true&q=imported", h.origin))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap()["repositories"]
+            .clone()
+    };
+    assert_eq!(public().await, json!([]));
     assert_eq!(
         h.json(&format!("/api/repos?organization={organization}"), &bob)
             .await["repositories"],
@@ -455,6 +494,7 @@ async fn organization_import_requires_current_ownership_and_resumes_under_anothe
         json!(organization)
     );
     assert_eq!(listed["repositories"][0]["can_admin"], json!(true));
+    assert_eq!(public().await[0]["id"], json!(repository_id));
     let imported = h.server.repositories.by_id(repository_id).unwrap();
     assert!(imported.config.members.is_empty());
     let view = imported.open_ref_view().await.unwrap();

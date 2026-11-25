@@ -117,6 +117,9 @@ disclosure and email eligibility. Discovery starts with fresh organization
 state. `cells/organization/repository_policy.rs` owns repository creation and
 baseline access policy. Git publication and policy writes share the existing
 organization ruleset lease.
+`cells/organization/properties.rs` owns required defaults and repository
+overrides. `api/organizations/properties.rs` rechecks the repository grant and
+projects only effective values for public-only readers.
 `api/organizations/collaborators.rs` groups direct catalog grants for owners
 and checks them against current Organization Cell membership. It rechecks both
 snapshots before returning a page. Repository access edits still use the
@@ -270,6 +273,8 @@ and the membership audit together. `catalog/rename.rs` owns historical addresses
 `repository/access.rs` resolves current owner grants, and `app::membership`
 applies them alongside repository members and groups across browser and Git.
 `git_import/jobs.rs` owns actor-scoped durable import status and worker heartbeats.
+The job binds initial visibility to the import intent. `git_import/workflow.rs`
+publishes the selected visibility at catalog readiness after snapshot verification.
 `api/write.rs` owns the shared proven-rejection response marker.
 `api/discussion_state/` owns current membership and state HTTP composition.
 `server/http/boundary.rs` binds browser mutation headers to the stable repository
@@ -387,6 +392,9 @@ to `server/management/organizations.rs` and `cells bootstrap-organization`.
 Membership checks run inside the shared native transaction before receipt replay;
 repository grants stay catalog-owned. Public sessions cannot bootstrap authority.
 `catalog/` binds repository and organization UUIDs and audits grant replacements.
+`api/catalog.rs` reserves browser-created organization repositories under the
+organization policy lease. `catalog/mod.rs` applies the reserved visibility at
+the same catalog write that makes the repository ready.
 `auth/principal/` caps effective roles by credential scope.
 `app.rs` composes current native team and catalog grants for every request.
 `api/members/team_access.rs` authorizes team grant management for current
@@ -430,8 +438,9 @@ and session migration paths are supported.
   existing pull request deletion action with its confirmed impact. Git pushes
   lease the combined ref set and commit all dependent comparisons together.
 - `api/catalog_browse/` filters, sorts and pages catalog matches. Reuse `api/catalog.rs`
-  for current direct, group, organization, and fork grants and topic metadata. Browse reads
-  lifecycle settings only for the result page and rechecks access before
+  for current direct, group, organization, and fork grants, topic metadata, and
+  the catalog's committed metadata update time. Browse reads lifecycle settings
+  only for the result page and rechecks access before
   returning results and continuations.
 - `api/code_search/` searches authorized Git snapshots under bulk read
   admission. Repository searches bind the UUID, commit, and query filters.

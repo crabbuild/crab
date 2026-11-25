@@ -31,6 +31,7 @@ async function fixture(page: Page) {
     policy: {
       version: number;
       member_creation: boolean;
+      member_creation_visibility: "private" | "public" | "any";
       member_transfer: boolean;
       member_deletion: boolean;
       private_forks: boolean;
@@ -63,6 +64,7 @@ async function fixture(page: Page) {
     policy: {
       version: 0,
       member_creation: false,
+      member_creation_visibility: "private",
       member_transfer: false,
       member_deletion: false,
       private_forks: false,
@@ -280,6 +282,10 @@ test("organization owners save repository policy from settings", async ({
     .click();
   await page.getByRole("option", { name: "All organization members" }).click();
   await page
+    .getByRole("combobox", { name: "Visibilities members can create" })
+    .click();
+  await page.getByRole("option", { name: "Public and private" }).click();
+  await page
     .getByRole("combobox", { name: "Who can transfer repositories" })
     .click();
   await page
@@ -302,6 +308,7 @@ test("organization owners save repository policy from settings", async ({
   expect(state.policy).toEqual({
     version: 1,
     member_creation: true,
+    member_creation_visibility: "any",
     member_transfer: true,
     member_deletion: true,
     private_forks: false,

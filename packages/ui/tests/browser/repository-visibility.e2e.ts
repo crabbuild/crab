@@ -111,6 +111,13 @@ test("an owner confirms publication and a signed-out visitor can find the code",
         return route.fulfill({
           json: { head: null, default_branch: "main", refs: [] },
         });
+      if (pathname === "/api/repos/org-crab/library/properties") {
+        expect(request.method()).toBe("GET");
+        expect(admin).toBe(false);
+        return route.fulfill({
+          json: { properties: [{ name: "service_tier", value: "standard" }] },
+        });
+      }
       if (pathname.endsWith("/issues/pins"))
         return route.fulfill({ json: { items: [], can_manage: false } });
       if (pathname.endsWith("/issues") || pathname.endsWith("/pulls"))
@@ -178,6 +185,14 @@ test("an owner confirms publication and a signed-out visitor can find the code",
       name: "Repository",
       exact: true,
     });
+    await tabs.getByRole("link", { name: "Properties", exact: true }).click();
+    await expect(
+      guest.getByRole("heading", { name: "Repository properties" }),
+    ).toBeVisible();
+    await expect(guest.getByText("standard", { exact: true })).toBeVisible();
+    await expect(
+      guest.getByRole("button", { name: "Edit properties" }),
+    ).toHaveCount(0);
     await tabs.getByRole("link", { name: "Issues", exact: true }).click();
     await expect(guest.getByRole("button", { name: "New issue" })).toHaveCount(
       0,

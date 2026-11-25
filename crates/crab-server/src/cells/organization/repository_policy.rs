@@ -1,16 +1,28 @@
 use super::*;
 use crate::{
     RepositoryAccess,
+    catalog::visibility::Visibility,
     config::{default_repository_branch, valid_repository_branch},
 };
 
 const KEY: &str = "organization/v1/repository-policy";
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CreationVisibility {
+    #[default]
+    Private,
+    Public,
+    Any,
+}
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Policy {
     pub version: u64,
     pub member_creation: bool,
+    #[serde(default)]
+    pub member_creation_visibility: CreationVisibility,
     #[serde(default)]
     pub member_transfer: bool,
     #[serde(default)]
@@ -29,6 +41,7 @@ impl Default for Policy {
         Self {
             version: 0,
             member_creation: false,
+            member_creation_visibility: CreationVisibility::Private,
             member_transfer: false,
             member_deletion: false,
             private_forks: false,
@@ -42,6 +55,18 @@ impl Default for Policy {
 impl Policy {
     pub(crate) fn can_create(&self, role: Role) -> bool {
         role == Role::Owner || self.member_creation
+    }
+
+    pub(super) fn creation_visibilities(&self, role: Role) -> &'static [Visibility] {
+        use Visibility::{Private, Public};
+        if role == Role::Owner {
+            return &[Private, Public];
+        }
+        match self.member_creation_visibility {
+            CreationVisibility::Private => &[Private],
+            CreationVisibility::Public => &[Public],
+            CreationVisibility::Any => &[Private, Public],
+        }
     }
 }
 

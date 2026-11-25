@@ -82,6 +82,7 @@ impl CatalogStore {
         if !edit(record)? {
             return Ok(document);
         }
+        record.record_metadata_update(super::catalog_time_ms()?);
         document.version = document
             .version
             .checked_add(1)

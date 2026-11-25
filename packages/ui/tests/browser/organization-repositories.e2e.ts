@@ -68,7 +68,13 @@ test("organization repository creation recovers its owner-scoped request after r
     if (pathname === `${orgApi}/repositories/creation`) {
       expect(role).toBe("owner");
       if (request.method() === "GET")
-        return route.fulfill({ json: { owner, default_branch: "trunk" } });
+        return route.fulfill({
+          json: {
+            owner,
+            default_branch: "trunk",
+            visibilities: ["private", "public"],
+          },
+        });
       expect(actor).toBe(alice);
       expect(request.headers()["x-csrf-token"]).toBe("fixture-csrf");
       if (!created) {
@@ -76,6 +82,7 @@ test("organization repository creation recovers its owner-scoped request after r
         expect(intent).toMatchObject({
           name: repository.name,
           description: repository.description,
+          visibility: "public",
         });
         created = true;
         return route.abort("failed");
@@ -119,8 +126,21 @@ test("organization repository creation recovers its owner-scoped request after r
     "owned by Crab Engineering",
   );
   await expect(page.getByRole("dialog")).toContainText("Default branch trunk");
+  await expect
+    .poll(() =>
+      page.getByRole("dialog").evaluate((dialog) => {
+        const bounds = dialog.getBoundingClientRect();
+        return (
+          dialog.scrollWidth <= dialog.clientWidth &&
+          bounds.top >= 0 &&
+          bounds.bottom <= window.innerHeight
+        );
+      }),
+    )
+    .toBe(true);
   await page.getByLabel("Repository name").fill("widgets");
   await page.getByLabel("Description (optional)").fill("Team repository");
+  await page.getByRole("radio", { name: "Public" }).click();
   await page
     .getByRole("button", { name: "Create repository", exact: true })
     .click();
@@ -139,6 +159,7 @@ test("organization repository creation recovers its owner-scoped request after r
   await expect(page.getByLabel("Description (optional)")).toHaveValue(
     "Team repository",
   );
+  await expect(page.getByRole("radio", { name: "Public" })).toBeChecked();
   await page
     .getByRole("button", { name: "Create repository", exact: true })
     .click();
@@ -248,7 +269,13 @@ test("a current organization owner can resume a shared import", async ({
         json: { head: null, default_branch: "trunk", refs: [] },
       });
     }
-    const job = { id: jobId, source, owner, name: repository.name };
+    const job = {
+      id: jobId,
+      source,
+      owner,
+      name: repository.name,
+      visibility: "public",
+    };
     const interrupted = {
       ...job,
       state: "interrupted",
@@ -263,6 +290,7 @@ test("a current organization owner can resume a shared import", async ({
         request_id: expect.any(String),
         source,
         name: "widgets",
+        visibility: "public",
         token: "initial-token",
       });
       jobId = input.request_id;
@@ -314,6 +342,11 @@ test("a current organization owner can resume a shared import", async ({
   ).toBe(true);
   await page.getByLabel("Git source").fill(source);
   await page.getByLabel("Source token").fill("initial-token");
+  const visibility = page
+    .getByRole("region", { name: "Bring a repository from Git" })
+    .getByRole("combobox", { name: "Visibility" });
+  await visibility.click();
+  await page.getByRole("option", { name: "Public", exact: true }).click();
   await page.getByRole("button", { name: "Start import" }).click();
   const statusLink = page.getByRole("link", { name: "Import status link" });
   await expect(statusLink).toBeVisible();
@@ -339,6 +372,8 @@ test("a current organization owner can resume a shared import", async ({
     page.getByText("The import worker stopped reporting progress."),
   ).toBeVisible();
   await expect(page.getByLabel("Source token")).toHaveValue("");
+  await expect(visibility).toBeDisabled();
+  await expect(visibility).toHaveText("Public");
   await page.getByLabel("Source token").fill("replacement-token");
   await page.getByRole("button", { name: "Resume import" }).click();
   await expect(page).toHaveURL(`/${owner}/widgets`);

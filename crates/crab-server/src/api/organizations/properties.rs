@@ -125,14 +125,28 @@ fn binding(repo: &Repository) -> Result<(Uuid, Binding)> {
     ))
 }
 
+#[derive(Serialize)]
+struct PublicProperty {
+    name: String,
+    value: PropertyValue,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum PropertyRead {
+    Repository(View),
+    Public { properties: Vec<PublicProperty> },
+}
+
 async fn read_values(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path(path): Path<(String, String)>,
-) -> Result<Json<View>> {
+) -> Result<Json<PropertyRead>> {
     let repo = app::repository(&server, &principal, &path)?;
     let (organization, binding) = binding(&repo)?;
     let editor = match app::account(&principal) {
+        Ok(_) if principal.is_public_reader(repo.id) => None,
         Ok(identity) => crate::repository::access::actor_id(&server, identity)
             .await?
             .map(|actor| Editor {
@@ -142,7 +156,7 @@ async fn read_values(
         Err(_) => None,
     };
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
-    let mut result = cells
+    let mut view = cells
         .query::<GetValues>(
             target(organization)?,
             None,
@@ -152,15 +166,32 @@ async fn read_values(
             },
         )
         .await
-        .map_err(read_error)?;
+        .map_err(read_error)?
+        .output;
     let current = app::membership(&server, &principal, &repo).await?;
+    if current.principal.is_public_reader(repo.id) {
+        let properties = view
+            .schema
+            .definitions
+            .iter()
+            .filter_map(|definition| {
+                view.values
+                    .effective(definition)
+                    .map(|value| PublicProperty {
+                        name: definition.name.clone(),
+                        value: value.clone(),
+                    })
+            })
+            .collect();
+        return Ok(Json(PropertyRead::Public { properties }));
+    }
     // A stale render hint cannot keep delegated controls after loss of Admin.
     // The write path always checks the live grant, independently of the hint.
     if !current.principal.can_admin(repo.id) && editor.is_some_and(|editor| editor.repository_admin)
     {
-        result.output.editable.clear();
+        view.editable.clear();
     }
-    Ok(Json(result.output))
+    Ok(Json(PropertyRead::Repository(view)))
 }
 
 #[derive(Deserialize)]
@@ -426,6 +457,9 @@ fn saved<T>(outcome: Outcome<T>) -> Result<Json<T>> {
         Outcome::Denied => Err(Error::NotFound),
         Outcome::Invalid => Err(Error::Invalid(
             "Choose valid property names, types, and values",
+        )),
+        Outcome::MissingRequiredDefault => Err(Error::Invalid(
+            "Set a default value for each required property",
         )),
         Outcome::UsedByRuleset => Err(Error::Invalid("A ruleset uses this property or value")),
         Outcome::IncompatibleDefinition => Err(Error::Invalid(

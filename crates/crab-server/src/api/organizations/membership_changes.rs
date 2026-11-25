@@ -89,7 +89,7 @@ pub(super) async fn depart(
     let address = target(organization)?;
     require_owner(&cells, address, owner).await?;
     let worker = Arc::clone(server);
-    membership_change(server, organization, move |cancel| async move {
+    with_org_policy(server, organization, move |cancel| async move {
         applied(
             cells
                 .query::<CheckDeparture>(address, None, decision.clone())

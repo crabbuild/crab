@@ -3,6 +3,8 @@ import { useState } from "react";
 
 const sorting = [
   ["", "Best match"],
+  ["updated-desc", "Recently updated"],
+  ["updated-asc", "Least recently updated"],
   ["name-asc", "Name (A to Z)"],
   ["name-desc", "Name (Z to A)"],
   ["created-desc", "Newest created"],

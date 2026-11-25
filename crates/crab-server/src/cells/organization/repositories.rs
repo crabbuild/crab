@@ -1,5 +1,8 @@
 use super::*;
-use crate::config::{DEFAULT_REPOSITORY_BRANCH, default_repository_branch};
+use crate::{
+    catalog::visibility::Visibility,
+    config::{DEFAULT_REPOSITORY_BRANCH, default_repository_branch},
+};
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -8,6 +11,7 @@ pub(crate) struct Creation {
     pub request_id: Uuid,
     pub name: String,
     pub description: String,
+    pub visibility: Visibility,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -30,13 +34,29 @@ impl Mutation for AuthorizeCreation {
         if input.request_id.is_nil() || !valid_creation(&input.name, &input.description) {
             return Err(Error::Invalid("invalid repository creation request"));
         }
+        let current = member(context, input.actor)?.ok_or(Error::AccessDenied)?;
+        let policy = repository_policy::load(context)?;
+        if !policy
+            .creation_visibilities(current.role)
+            .contains(&input.visibility)
+        {
+            return Ok(MutationResult::Rejected(
+                CreationOutcome::VisibilityRestricted,
+            ));
+        }
         let key = format!("organization/v1/repository-creations/{}", input.request_id);
-        let digest = *blake3::hash(&serde_json::to_vec(&(
+        let mut digest = blake3::Hasher::new();
+        digest.update(&serde_json::to_vec(&(
             input.actor,
             input.name,
             input.description,
-        ))?)
-        .as_bytes();
+        ))?);
+        // Private is the original request domain. A public reservation must
+        // have a different digest even if all other fields match.
+        if input.visibility.is_public() {
+            digest.update(b"\0public");
+        }
+        let digest = *digest.finalize().as_bytes();
         // Keep the original ticket digest. A later promotion must not change
         // which direct grant an already authorized reservation carries.
         let creator = format!("{key}/member-creator");
@@ -53,14 +73,13 @@ impl Mutation for AuthorizeCreation {
                         .unwrap_or_else(default_repository_branch),
                 )
             } else {
-                let member_creating =
-                    member(context, input.actor)?.is_some_and(|member| member.role == Role::Member);
+                let member_creating = current.role == Role::Member;
                 context.put_document(&key, &digest)?;
                 if member_creating {
                     context.put_document(&creator, &true)?;
                 }
                 // The authorized branch must survive retries across policy changes.
-                let default_branch = repository_policy::load(context)?.default_branch;
+                let default_branch = policy.default_branch;
                 if default_branch != DEFAULT_REPOSITORY_BRANCH {
                     context.put_document(&branch, &default_branch)?;
                 }
@@ -80,6 +99,7 @@ pub(crate) enum CreationOutcome {
         default_branch: String,
     },
     Conflict,
+    VisibilityRestricted,
 }
 
 #[derive(Deserialize, Serialize)]
