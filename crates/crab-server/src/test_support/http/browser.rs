@@ -22,12 +22,11 @@ impl Browser {
 
     pub(crate) async fn choose_select(&self, trigger: &str, value: &str) {
         let value = serde_json::to_string(value).unwrap();
-        let ready = serde_json::to_string(&format!("select option[value={value}]")).unwrap();
-        let test = format!("document.querySelector({ready}) !== null");
-        self.run(&["wait", "--fn", &test]).await;
+        let option = format!("[role=option][data-value={value}]");
+        self.run(&["wait", trigger]).await;
         self.run(&["click", trigger]).await;
-        self.run(&["click", &format!("[role=option][data-value={value}]")])
-            .await;
+        self.run(&["wait", &option]).await;
+        self.run(&["click", &option]).await;
     }
 
     pub(crate) async fn run(&self, arguments: &[&str]) -> String {

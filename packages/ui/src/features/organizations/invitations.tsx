@@ -160,29 +160,35 @@ export function InviteDialog({
   endpoint,
   csrf,
   onInvited,
+  recipient,
 }: {
   endpoint: string;
   csrf: string;
   onInvited: () => void;
+  recipient?: ActorSummary;
 }) {
   const [open, setOpen] = useState(false);
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button>Invite member</Button>
+        <Button variant={recipient ? "ghost" : "default"}>
+          {recipient ? "Invite to organization" : "Invite member"}
+        </Button>
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Invite a member</DialogTitle>
           <DialogDescription>
-            Choose a registered username and the role they should have in this
-            organization.
+            {recipient
+              ? "Choose an organization role for this collaborator."
+              : "Choose a registered username and the role they should have in this organization."}
           </DialogDescription>
         </DialogHeader>
         {open && (
           <InviteForm
             endpoint={endpoint}
             csrf={csrf}
+            recipient={recipient}
             onInvited={() => {
               setOpen(false);
               onInvited();
@@ -197,14 +203,16 @@ function InviteForm({
   endpoint,
   csrf,
   onInvited,
+  recipient,
 }: {
   endpoint: string;
   csrf: string;
   onInvited: () => void;
+  recipient?: ActorSummary;
 }) {
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState(recipient?.handle ?? "");
   const query = useDeferredValue(search.trim());
-  const [selected, setSelected] = useState<ActorSummary>();
+  const [selected, setSelected] = useState(recipient);
   const candidates = useRequest<{ items: ActorSummary[]; truncated: boolean }>(
     query && !selected
       ? `${endpoint}/invitations/candidates?${new URLSearchParams({ q: query })}`
@@ -237,7 +245,7 @@ function InviteForm({
             id="invite-username"
             value={search}
             maxLength={40}
-            disabled={mutation.pending}
+            disabled={mutation.pending || Boolean(recipient)}
             placeholder="Search by username"
             autoComplete="off"
             onChange={(event) => {

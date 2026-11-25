@@ -104,6 +104,9 @@ pub(super) async fn run_import(
                 ImportError::Ruleset => {
                     "Organization rules restrict the imported refs. Review the organization's rulesets before resuming."
                 }
+                ImportError::ForkingDisabled => {
+                    "The organization or source repository disabled private forks. Restore permission before resuming."
+                }
                 ImportError::Organization(_) => {
                     "Organization permissions are unavailable. Resume this job to try again."
                 }
@@ -202,6 +205,7 @@ async fn import_repository(
         None => None,
         Some(id) => {
             let organization = organization.ok_or(ImportError::NotFound)?;
+            organization.require_fork(server, &document, id).await?;
             let source = server
                 .repositories
                 .by_id(id)
@@ -443,6 +447,11 @@ async fn validate_destination_policy(
         .iter()
         .find(|row| row.id == id && row.organization_id() == Some(owner.id))
         .ok_or(ImportError::DestinationChanged)?;
+    if let Some(source) = record.forked_from {
+        // This read shares the organization's policy lease with both settings
+        // writers. A disabled fork stays quarantined even after its refs commit.
+        owner.require_fork(server, &document, source).await?;
+    }
     let repository = crate::repository::catalog::materialize_record(catalog, record)
         .await
         .map_err(ImportError::Setup)?;

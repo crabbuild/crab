@@ -116,13 +116,13 @@ export function DiscussionRow({
             </>
           )}
           {item.kind === "pull" && item.draft && " · Draft"}
-          {item.kind === "pull" && (
+          {item.kind === "pull" && item.rollup && (
             <span className="ml-2 inline-flex flex-wrap items-center gap-2">
               <PullRollups repo={repo} rollup={item.rollup} />
             </span>
           )}
         </p>
-        {item.kind === "pull" && (
+        {item.kind === "pull" && item.head_ref && (
           <p className="pull-branches muted">
             <code>{branch(item.head_ref)}</code>
             <span>into</span>

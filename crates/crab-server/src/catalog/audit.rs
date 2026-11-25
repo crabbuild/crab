@@ -34,6 +34,18 @@ pub(crate) enum Action {
     TransferredOut,
     Deleted,
     Restored,
+    VisibilityChanged,
+    OutsideCollaboratorsRemoved,
+    CollaboratorGrantsRetained,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub(crate) struct OutsideGrantChange {
+    pub(crate) collaborators: usize,
+    pub(crate) repositories: usize,
+    pub(crate) grants: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -41,7 +53,8 @@ pub(crate) enum Action {
 pub(super) struct Scope {
     pub(super) organization: Uuid,
     action: Action,
-    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
     previous: Option<Position>,
 }
 
@@ -50,9 +63,25 @@ impl Scope {
         Some(Self {
             organization: record.organization_id()?,
             action,
-            name: record.name.clone(),
+            name: Some(record.name.clone()),
             previous: None,
         })
+    }
+
+    pub(super) fn outside_removal(organization: Uuid) -> Self {
+        Self {
+            organization,
+            action: Action::OutsideCollaboratorsRemoved,
+            name: None,
+            previous: None,
+        }
+    }
+
+    pub(super) fn conversion(organization: Uuid) -> Self {
+        Self {
+            action: Action::CollaboratorGrantsRetained,
+            ..Self::outside_removal(organization)
+        }
     }
 }
 
@@ -65,8 +94,49 @@ impl MembershipAuditEvent {
     }
 
     pub(super) fn valid(&self) -> bool {
+        let target_valid = match (self.repository_id, self.outside_grants) {
+            (Some(repository), None) => {
+                !repository.is_nil()
+                    && self.organizations.iter().all(|scope| {
+                        !matches!(
+                            scope.action,
+                            Action::OutsideCollaboratorsRemoved
+                                | Action::CollaboratorGrantsRetained
+                        ) && scope
+                            .name
+                            .as_deref()
+                            .is_some_and(crate::config::valid_repository_component)
+                    })
+            }
+            (None, Some(change)) => match self.organizations.as_slice() {
+                [
+                    Scope {
+                        action: Action::OutsideCollaboratorsRemoved,
+                        name: None,
+                        ..
+                    },
+                ] => {
+                    (1..=50).contains(&change.collaborators)
+                        && change.repositories > 0
+                        && change.grants >= change.collaborators.max(change.repositories)
+                }
+                [
+                    Scope {
+                        action: Action::CollaboratorGrantsRetained,
+                        name: None,
+                        ..
+                    },
+                ] => {
+                    (1..=crate::cells::organization::MAX_CONVERSION_MEMBERS)
+                        .contains(&change.collaborators)
+                        && change.grants >= change.repositories
+                }
+                _ => false,
+            },
+            _ => false,
+        };
         self.position().valid(u64::MAX)
-            && !self.repository_id.is_nil()
+            && target_valid
             && self.occurred_at > 0
             && self.occurred_at <= 9_007_199_254_740
             && valid_actor(&self.actor)
@@ -75,7 +145,6 @@ impl MembershipAuditEvent {
             && self.organizations.len() <= 2
             && self.organizations.iter().enumerate().all(|(index, scope)| {
                 !scope.organization.is_nil()
-                    && crate::config::valid_repository_component(&scope.name)
                     && self.organizations[..index]
                         .iter()
                         .all(|other| other.organization != scope.organization)
@@ -83,6 +152,26 @@ impl MembershipAuditEvent {
                         .previous
                         .is_none_or(|position| position.valid(self.repository_version - 1))
             })
+    }
+
+    pub(super) fn digest(&self, document: &CatalogDocument) -> Result<String, CatalogError> {
+        if let Some(id) = self.repository_id {
+            return document
+                .repositories
+                .iter()
+                .find(|record| record.id == id)
+                .or_else(|| {
+                    document
+                        .deleted_repository(id)
+                        .map(|entry| &entry.repository)
+                })
+                .ok_or(CatalogError::Invalid("audit repository is missing"))?
+                .membership_digest();
+        }
+        let [scope] = self.organizations.as_slice() else {
+            return Err(CatalogError::Invalid("audit organization is missing"));
+        };
+        document.organization_membership_digest(scope.organization)
     }
 }
 
@@ -127,8 +216,8 @@ pub(crate) struct Entry {
     pub(crate) position: Position,
     pub(crate) previous: Option<Position>,
     pub(crate) action: Action,
-    pub(crate) name: String,
-    pub(crate) repository: Uuid,
+    pub(crate) repository: Option<(Uuid, String)>,
+    pub(crate) outside_grants: Option<OutsideGrantChange>,
     pub(crate) actor: MembershipActor,
     pub(crate) occurred_at_ms: u64,
 }
@@ -173,8 +262,8 @@ impl CatalogStore {
             position,
             previous: scope.previous,
             action: scope.action,
-            name: scope.name,
-            repository: event.repository_id,
+            repository: event.repository_id.zip(scope.name),
+            outside_grants: event.outside_grants,
             actor: event.actor,
             occurred_at_ms: event.occurred_at * 1000,
         })

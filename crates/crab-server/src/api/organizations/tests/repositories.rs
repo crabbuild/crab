@@ -230,6 +230,85 @@ async fn private_fork_recovers_git_publication_and_uses_live_source_permissions(
     let request = Uuid::now_v7();
     let body = json!({"request_id":request,"name":"library-fork"});
     let route = format!("{source}/forks");
+    let settings = format!("/api/repositories/{id}/forking");
+    let detail = format!("/api/repos?owner={owner}&name=library");
+    assert_eq!(
+        h.json(&detail, &alice).await["repositories"][0]["can_fork"],
+        false
+    );
+    assert_eq!(
+        repository_write(&h, Method::POST, &route, &alice, id, body.clone())
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        h.write(
+            Method::PUT,
+            &settings,
+            &alice,
+            json!({"version":0,"allowed":false})
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    crate::test_support::http::organizations::set_private_forks(&h, organization, &alice, true)
+        .await;
+    assert_eq!(
+        h.json(&detail, &alice).await["repositories"][0]["can_fork"],
+        true
+    );
+    assert_eq!(
+        h.write(
+            Method::PUT,
+            &settings,
+            &bob,
+            json!({"version":0,"allowed":false})
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    h.write(
+        Method::PUT,
+        &settings,
+        &alice,
+        json!({"version":0,"allowed":false}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert_eq!(
+        h.json(&detail, &alice).await["repositories"][0]["can_fork"],
+        false
+    );
+    assert_eq!(
+        repository_write(&h, Method::POST, &route, &alice, id, body.clone())
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        h.write(
+            Method::PUT,
+            &settings,
+            &alice,
+            json!({"version":0,"allowed":true})
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
+    h.write(
+        Method::PUT,
+        &settings,
+        &alice,
+        json!({"version":1,"allowed":true}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
     assert_eq!(
         repository_write(&h, Method::POST, &route, &bob, id, body.clone())
             .await
@@ -271,6 +350,19 @@ async fn private_fork_recovers_git_publication_and_uses_live_source_permissions(
         .await
         .unwrap();
     assert_eq!(replay["state"], "succeeded");
+    crate::test_support::http::organizations::set_private_forks(&h, organization, &alice, false)
+        .await;
+    assert_eq!(
+        h.json(&detail, &alice).await["repositories"][0]["can_fork"],
+        false
+    );
+    assert!(
+        h.json(&format!("{fork}/refs"), &alice).await["refs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["name"] == "refs/heads/feature")
+    );
     let grants = h
         .json(
             &format!("{org}/members/{owner_actor}/repository-access"),
@@ -531,6 +623,43 @@ async fn private_fork_recovers_git_publication_and_uses_live_source_permissions(
             .iter()
             .any(|entry| entry["name"] == "refs/heads/fork-only")
     );
+    catalog
+        .set_members(
+            owner,
+            "library",
+            vec![crate::RepositoryMember {
+                subject: "bob-id".into(),
+                name: "Bob".into(),
+                access: crate::RepositoryAccess::Read,
+            }],
+            true,
+        )
+        .await
+        .unwrap();
+    let visibility = format!("/api/repositories/{id}/visibility");
+    assert_eq!(h.json(&visibility, &alice).await["private_forks"], 1);
+    h.write(
+        Method::PUT,
+        &visibility,
+        &alice,
+        json!({"version":0,"value":"public","confirmation":format!("{owner}/library")}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let detached = h
+        .json(&format!("/api/repos?owner={owner}&name=library-fork"), &bob)
+        .await;
+    assert_eq!(detached["repositories"][0]["visibility"], "private");
+    assert_eq!(detached["repositories"][0]["id"], json!(fork_id));
+    assert!(detached["repositories"][0].get("forked_from").is_none());
+    let denied = h
+        .http
+        .get(format!("{}{fork}/refs", h.origin))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
     h.close().await;
 }
 

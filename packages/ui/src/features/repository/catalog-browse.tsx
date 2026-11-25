@@ -16,7 +16,7 @@ import { TopicLinks } from "./topic-links";
 
 type Entry = Pick<
   Repository,
-  "id" | "owner" | "name" | "description" | "archived" | "topics"
+  "id" | "owner" | "name" | "description" | "archived" | "topics" | "visibility"
 >;
 type Page = {
   repositories: (Entry & {
@@ -30,6 +30,7 @@ type Page = {
 
 type Scope =
   | { kind: "all"; subject?: string }
+  | { kind: "public" }
   | { kind: "personal" }
   | { kind: "profile"; actor: string }
   | { kind: "organization"; organization: string; owner: boolean }
@@ -49,6 +50,7 @@ function catalogPath(scope: Scope) {
 }
 
 const emptyText = {
+  public: "There are no public repositories yet.",
   personal: "You don’t have any personal repositories yet.",
   profile: "No repositories owned by this user are visible to you.",
   organization: "No repositories are visible to you in this organization.",
@@ -61,6 +63,7 @@ export function BrowseRepositories({ url, scope }: { url: URL; scope: Scope }) {
   const params = new URLSearchParams({ limit: "32" });
   if (query) params.set("q", query);
   if (after) params.set("after", after);
+  if (scope.kind === "public") params.set("public", "true");
   const organization =
     scope.kind === "organization" || scope.kind === "team"
       ? scope.organization
@@ -185,6 +188,9 @@ export function BrowseRepositories({ url, scope }: { url: URL; scope: Scope }) {
                         <Badge variant="outline">Archived</Badge>
                       )}
                       {repo.fork && <Badge variant="outline">Fork</Badge>}
+                      {repo.visibility === "public" && (
+                        <Badge variant="outline">Public</Badge>
+                      )}
                       {repo.team_access && (
                         <Badge variant="secondary">
                           {repositoryRoleLabels[repo.team_access]}

@@ -168,6 +168,7 @@ async fn source_access(
 pub(super) enum Management {
     Transfer,
     Delete,
+    Visibility,
 }
 
 pub(super) async fn management_access(
@@ -200,6 +201,7 @@ pub(super) async fn management_access(
         let members_allowed = match operation {
             Management::Transfer => grant.member_transfer,
             Management::Delete => grant.member_deletion,
+            Management::Visibility => grant.member_visibility,
         };
         (admin, grant.owner || members_allowed)
     } else {

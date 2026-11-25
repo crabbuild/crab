@@ -223,7 +223,7 @@ export function IssueDetail({
               />
             </article>
           )}
-          <SubIssues repo={repo} number={number} />
+          {!repo.public_read_only && <SubIssues repo={repo} number={number} />}
           <Comments
             repo={repo}
             issue={current}
@@ -262,25 +262,29 @@ export function IssueDetail({
               refresh={resource.retry}
             />
           ) : null}
-          <IssueDependencies
-            repo={repo}
-            csrf={csrf}
-            issue={number}
-            onChanged={() => {
-              setMetadataEpoch((value) => value + 1);
-              resource.retry();
-            }}
-          />
-          <PinIssue
-            repo={repo}
-            csrf={csrf}
-            number={number}
-            onChanged={() => {
-              // Pinning changes the conversation, not the issue record. A source
-              // refresh would activate unrelated close/reopen focus recovery.
-              setMetadataEpoch((value) => value + 1);
-            }}
-          />
+          {!repo.public_read_only && (
+            <IssueDependencies
+              repo={repo}
+              csrf={csrf}
+              issue={number}
+              onChanged={() => {
+                setMetadataEpoch((value) => value + 1);
+                resource.retry();
+              }}
+            />
+          )}
+          {!repo.public_read_only && (
+            <PinIssue
+              repo={repo}
+              csrf={csrf}
+              number={number}
+              onChanged={() => {
+                // Pinning changes the conversation, not the issue record. A source
+                // refresh would activate unrelated close/reopen focus recovery.
+                setMetadataEpoch((value) => value + 1);
+              }}
+            />
+          )}
           {current.can_transfer && !repo.archived && (
             <IssueMove
               repo={repo}

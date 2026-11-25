@@ -768,7 +768,7 @@ organization creation path.
 
 Organization owners can read and update `/api/organizations/{id}/repository-policy`
 and configure it in **Settings → Member privileges**. Updates carry the saved
-`version`, `member_creation`, `member_transfer`, `member_deletion`, `baseline`
+`version`, `member_creation`, `member_transfer`, `member_deletion`, `private_forks`, `baseline`
 (`null`, `read`, or `write`), and `default_branch` (a short Git branch name).
 By default only owners can create, transfer, or delete repositories, and
 members have no base access.
@@ -783,6 +783,33 @@ repository's default branch.
 
 Upgrade serving replicas together before starting organization-owned
 creation. Existing catalog entries keep their previous ownership and grants.
+
+### Repository visibility
+
+Managed repositories start private. In **Settings → General → Danger Zone**,
+an organization owner can make a repository public or private. Organization
+owners can let repository admins change visibility in **Member privileges**.
+Administrators can change visibility in a managed personal repository.
+
+Public repositories appear in **Public repositories** and support signed-out
+code browsing, source archives, and HTTP Git clone and fetch. Visitors can
+also browse published issues, pull requests, conversations, attachments, and
+available same-repository pull request comparisons. Repository access is still
+required for writes, draft reviews, settings, checks, and Git LFS transport.
+Large files linked from published code can be downloaded through the browser.
+Changing back to private removes public access on subsequent requests. Copies
+already downloaded remain available to their recipients.
+
+Publishing a repository detaches its existing private forks in the same
+catalog update. They keep their private visibility and current repository
+grants. Pending fork jobs must settle before the repository can become public.
+
+`GET /api/repositories/{id}/visibility` returns the current setting and
+eligibility. Send `version`, `value` (`public` or `private`), and the exact
+`owner/name` as `confirmation` to `PUT` on the same route. Update
+`member_visibility` in the organization repository policy to delegate the
+change to repository admins. Upgrade serving replicas together before using
+visibility changes.
 
 ### Find a repository
 
@@ -1019,8 +1046,16 @@ files. The server needs outbound access to the configured Git host or proxy.
 
 ### Private organization forks
 
-An organization owner can choose **Fork repository** in a source repository's
-Code view. Choose a new repository name in the same organization. Crab copies
+Private forks are disabled by default. An organization owner can enable them
+in **Settings → Member privileges**. When the organization allows forks, a
+repository admin can disable them for an individual source in
+**Settings → General → Forking**. Repositories allow forks whenever their
+organization allows them, unless an admin opts out. Changing either setting
+governs future forks. Existing forks retain their current access.
+
+An organization owner can choose **Fork repository** in the source repository's
+Code view when both policies allow it. Choose a new repository name in the
+same organization. Crab copies
 the advertised Git refs and history through the native Git service and keeps
 the source repository UUID as the fork's lineage. Before publishing refs, Crab
 copies and verifies reachable Git LFS payloads. For native Crab Xet files, it
@@ -1039,9 +1074,12 @@ rulesets still apply to the fork, including its initial Git publication.
 the source repository ID header and browser CSRF token. It returns an
 organization job with `fork_source`. Use the organization Git import status and
 resume routes with the same job ID. Resume with `{}` and a current organization
-owner session. The job exposes the fork after verifying the pinned refs and
-preparing its repository Cell. Deploy the updated server on all replicas before
-creating forks.
+owner session. A job verifies the pinned refs and checks both policies again
+before the fork becomes visible. Enable both policies to resume a blocked job.
+Repository admins can update the source policy with `PUT /api/repositories/{id}/forking`
+and `{version, allowed}`. The exact repository lookup returns the current
+setting and the organization policy to repository admins. Deploy the updated
+server on all replicas before using these policies.
 
 On the fork's **Code** view, select a branch and choose **Sync fork**. Crab
 compares it with the upstream branch of the same name. Writers can choose
@@ -1788,6 +1826,57 @@ owner, inspected member, catalog revision, current teams and account
 suspension version. Reload from the first page after a change. The response
 omits private provider identities and group names. Upgrade Organization Cell
 peers together so every owner supports the new read.
+
+### Find outside collaborators
+
+Organization owners can open **People → Outside collaborators** to find
+people who have direct repository grants and lack an active membership in
+the organization. Search by name or public username. Expand a person's
+repository list to see the role granted on each repository. **Manage access**
+opens that repository's access settings to change or remove the grant.
+For collaborators with a public profile, **Invite to organization** opens
+the standard invitation with the person selected.
+
+Select one or more people and choose **Remove from all repositories** to
+revoke their direct grants in one change. This covers grants inherited by
+private forks and grants stored in deleted repository records. Independent
+grants from the identity provider can still apply. The organization audit log
+records the removal and the number of people, repositories, and grants affected.
+
+`GET /api/organizations/{id}/outside-collaborators` returns a paginated
+list of people, with an opaque key and direct repository count for each.
+`GET /api/organizations/{id}/outside-collaborators/{key}/repositories`
+lists that person's direct grants. The listings combine the catalog and
+current Organization Cell membership and expose public profiles and directly
+held roles on source repositories.
+An `after` token is tied to the owner, organization, search, and current
+catalog and organization revisions. Restart from the first page after a
+grant or membership changes. Upgrade Organization Cell peers together to
+enable the member checks for this view.
+
+`POST /api/organizations/{id}/outside-collaborators/remove` accepts the
+listing's `revision` and up to 50 distinct collaborator `keys`. It returns
+`{collaborators, repositories, grants}` after a successful catalog commit.
+The owner and targets are checked under the organization policy lease shared
+by membership changes and invitation acceptance. Reload after a conflict to
+review the current membership and grants before submitting again.
+Upgrade serving replicas together before using bulk removal so every replica
+can read its audit event.
+
+From **People → Members**, organization owners can select members and choose
+**Convert to outside collaborators**. Existing direct roles and the highest current team grant
+on each source repository become direct access. Organization ownership, team
+membership, and baseline access end. The organization must retain an owner.
+Private forks follow their source repository grants.
+
+`POST /api/organizations/{id}/members/conversion` accepts a `members` array
+of up to 50 distinct `{actor, version}` entries and returns the count in
+`converted` after completion. Crab validates the whole selection before
+committing the retained grants and durable conversion record in one catalog
+write. The Organization Cell removes the selected memberships in one
+transaction. The catalog refresh worker can resume an interrupted batch.
+Membership and team changes serialize with the grant snapshot.
+Upgrade serving peers together before using conversion.
 
 ### Configure protected branches
 

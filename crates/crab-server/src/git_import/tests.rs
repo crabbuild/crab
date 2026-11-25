@@ -486,6 +486,8 @@ async fn private_fork_resumes_after_missing_historical_lfs_payload_is_restored()
         .unwrap();
     let (organization, _, _) = crate::test_support::http::organizations::bootstrap(&h).await;
     let alice = h.login().await;
+    crate::test_support::http::organizations::set_private_forks(&h, organization, &alice, true)
+        .await;
     let org = format!("/api/organizations/{organization}");
     let upstream: serde_json::Value = h
         .write(
@@ -587,6 +589,17 @@ async fn private_fork_resumes_after_missing_historical_lfs_payload_is_restored()
     assert_eq!(token("fork", "read").await.status(), StatusCode::FORBIDDEN);
 
     upload().await.unwrap().error_for_status().unwrap();
+    crate::test_support::http::organizations::set_private_forks(&h, organization, &alice, false)
+        .await;
+    assert_eq!(
+        h.write(Method::POST, &format!("{status}/resume"), &alice, json!({}))
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(token("fork", "read").await.status(), StatusCode::FORBIDDEN);
+    crate::test_support::http::organizations::set_private_forks(&h, organization, &alice, true)
+        .await;
     h.write(Method::POST, &format!("{status}/resume"), &alice, json!({}))
         .await
         .error_for_status()

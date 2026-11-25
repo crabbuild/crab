@@ -32,10 +32,10 @@ pub(super) fn routes() -> Router<Arc<Server>> {
         )
 }
 
-pub(in crate::api) fn comment_view(
+pub(in crate::api) fn comment_view<'a>(
     authors: &Authors,
     comment: &PullComment,
-    actor: &Identity,
+    actor: impl Into<Option<&'a Identity>>,
     reactions: &reactions::View,
 ) -> Value {
     json!({
@@ -48,7 +48,7 @@ pub(in crate::api) fn comment_view(
         "version": comment.version,
         "created_at": comment.created_at,
         "updated_at": comment.updated_at,
-        "can_edit": same_author(&comment.author, actor),
+        "can_edit": actor.into().is_some_and(|actor| same_author(&comment.author, actor)),
     })
 }
 
@@ -64,7 +64,7 @@ async fn comments(
     if params.state.is_some() || params.q.is_some() {
         return Err(Error::Invalid("Comments do not support list filters"));
     }
-    let actor = app::actor(&principal)?;
+    let actor = principal.member_identity(repo.id);
     let limit =
         u8::try_from(params.limit()?).map_err(|_| Error::Invalid("Invalid pull request page"))?;
     let (comments, next) = storage::comments(&server, repo, id, params.before, limit)
@@ -77,7 +77,7 @@ async fn comments(
             number: comment.number,
         })
         .collect();
-    let reactions = reactions::read(&server, repo, &actor, targets).await?;
+    let reactions = reactions::read(&server, repo, actor.as_ref(), targets).await?;
     let authors = Authors::load(
         &server,
         &principal,
@@ -88,7 +88,7 @@ async fn comments(
     let items = comments
         .iter()
         .zip(reactions)
-        .map(|(comment, reactions)| comment_view(&authors, comment, &actor, &reactions))
+        .map(|(comment, reactions)| comment_view(&authors, comment, actor.as_ref(), &reactions))
         .collect::<Vec<_>>();
     Ok(Json(json!({"items":items,"next":next})))
 }
@@ -147,14 +147,14 @@ async fn comment_detail(
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let repo = repo.as_ref();
-    let actor = app::actor(&principal)?;
+    let actor = principal.member_identity(repo.id);
     let comment = storage::comment(&server, repo, app::number(id)?, app::number(comment)?)
         .await?
         .ok_or(Error::NotFound)?;
     let reaction = reactions::one(
         &server,
         repo,
-        &actor,
+        actor.as_ref(),
         Target::PullComment {
             pull: id,
             number: comment.number,
@@ -163,7 +163,12 @@ async fn comment_detail(
     .await?;
     let authors = Authors::load(&server, &principal, std::iter::once(&comment.author)).await?;
     app::membership(&server, &principal, repo).await?;
-    Ok(Json(comment_view(&authors, &comment, &actor, &reaction)))
+    Ok(Json(comment_view(
+        &authors,
+        &comment,
+        actor.as_ref(),
+        &reaction,
+    )))
 }
 
 #[derive(Deserialize)]

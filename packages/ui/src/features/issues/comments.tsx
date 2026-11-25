@@ -38,6 +38,7 @@ export function Comments({
         active
       >
         {(busy, posted) =>
+          !repo.public_read_only &&
           (!repo.archived || comment.body || comment.intent) && (
             <CommentComposer
               href={href}

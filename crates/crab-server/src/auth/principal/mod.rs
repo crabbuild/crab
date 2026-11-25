@@ -46,6 +46,8 @@ pub(crate) struct Principal {
     credential: Credential,
     grant: Option<Grant>,
     repository_scope: RepositoryScope,
+    allow_public_reads: bool,
+    public_read: Option<Uuid>,
 }
 
 impl Principal {
@@ -54,6 +56,8 @@ impl Principal {
             credential: Credential::Anonymous,
             grant: None,
             repository_scope: RepositoryScope::Unrestricted,
+            allow_public_reads: false,
+            public_read: None,
         }
     }
     pub(crate) fn local() -> Self {
@@ -61,6 +65,8 @@ impl Principal {
             credential: Credential::Local,
             grant: None,
             repository_scope: RepositoryScope::Unrestricted,
+            allow_public_reads: false,
+            public_read: None,
         }
     }
     pub(super) fn user(session: Arc<Session>) -> Self {
@@ -68,6 +74,8 @@ impl Principal {
             credential: Credential::User(session),
             grant: None,
             repository_scope: RepositoryScope::Unrestricted,
+            allow_public_reads: false,
+            public_read: None,
         }
     }
     pub(super) fn git(token: Arc<GitToken>) -> Self {
@@ -75,6 +83,8 @@ impl Principal {
             credential: Credential::Git(token),
             grant: None,
             repository_scope: RepositoryScope::Unrestricted,
+            allow_public_reads: false,
+            public_read: None,
         }
     }
     pub(super) fn automation(credential: super::automation::Credential) -> Self {
@@ -82,6 +92,8 @@ impl Principal {
             credential: Credential::Automation(Arc::new(credential)),
             grant: None,
             repository_scope: RepositoryScope::Unrestricted,
+            allow_public_reads: false,
+            public_read: None,
         }
     }
 
@@ -104,7 +116,7 @@ impl Principal {
                 access,
                 role: access,
             }),
-            repository_scope: self.repository_scope,
+            ..self.clone()
         }
     }
 
@@ -117,6 +129,8 @@ impl Principal {
                 role: RepositoryAccess::Read,
             }),
             repository_scope: RepositoryScope::Target(repository),
+            allow_public_reads: false,
+            public_read: None,
         }
     }
     pub(crate) fn is_deploy(&self) -> bool {
@@ -132,6 +146,8 @@ impl Principal {
                 role: RepositoryAccess::Write,
             }),
             repository_scope: RepositoryScope::Target(repository),
+            allow_public_reads: false,
+            public_read: None,
         }
     }
     pub(crate) fn import_grant(&self) -> Option<&crate::git_import::ReceiveGrant> {
@@ -145,6 +161,8 @@ impl Principal {
             credential: Credential::AutoMerge(actor),
             grant: None,
             repository_scope: RepositoryScope::Target(repository),
+            allow_public_reads: false,
+            public_read: None,
         }
     }
     pub(crate) fn is_auto_merge(&self) -> bool {
@@ -152,6 +170,35 @@ impl Principal {
     }
     pub(crate) fn is_local(&self) -> bool {
         matches!(self.credential, Credential::Local)
+    }
+
+    pub(crate) fn allow_public_reads(&mut self) {
+        self.allow_public_reads = self.is_anonymous() || self.is_user();
+    }
+
+    pub(crate) fn permits_public_reads(&self) -> bool {
+        self.allow_public_reads
+    }
+
+    pub(crate) fn without_public_reads(mut self) -> Self {
+        self.allow_public_reads = false;
+        self.public_read = None;
+        self
+    }
+
+    pub(crate) fn with_public_visibility(mut self, repository: Uuid, public: bool) -> Self {
+        self.public_read = (self.allow_public_reads && public).then_some(repository);
+        self
+    }
+
+    pub(crate) fn is_public_reader(&self, repository: Uuid) -> bool {
+        self.public_read == Some(repository) && self.grant.is_none()
+    }
+
+    pub(crate) fn member_identity(&self, repository: Uuid) -> Option<Identity> {
+        (!self.is_public_reader(repository))
+            .then(|| self.identity())
+            .flatten()
     }
     /// Restrict repository access; an absent identity denies all repository access.
     #[must_use]
@@ -322,9 +369,9 @@ impl Principal {
                 })
         });
         Self {
-            credential: self.credential.clone(),
             grant,
-            repository_scope: self.repository_scope,
+            public_read: None,
+            ..self.clone()
         }
     }
 
@@ -342,6 +389,10 @@ impl Principal {
         self.grant
             .filter(|grant| grant.repository == repository && self.authenticated())
             .map(|grant| grant.access)
+            .or_else(|| {
+                (self.public_read == Some(repository) && (self.is_anonymous() || self.is_user()))
+                    .then_some(RepositoryAccess::Read)
+            })
     }
     pub(crate) fn write_role(&self, repository: Uuid) -> Option<RepositoryAccess> {
         // A write-scoped Git token preserves the account role for rulesets

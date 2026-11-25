@@ -49,13 +49,17 @@ pub(in crate::api) async fn resolve(
     }
     let mut by_handle: std::collections::BTreeMap<_, _> =
         handles.into_iter().zip(resolved).collect();
-    let actor = app::actor(principal)?;
+    let actor = principal.identity();
     // All people predicates bind against one parsed union and Directory snapshot.
     input.people = names
         .into_iter()
         .map(|name| {
             let identity = if name == "@me" {
-                Some(people::identity(&actor.issuer, &actor.subject).map_err(app::Error::Cell)?)
+                actor
+                    .as_ref()
+                    .map(|actor| people::identity(&actor.issuer, &actor.subject))
+                    .transpose()
+                    .map_err(app::Error::Cell)?
             } else {
                 by_handle
                     .remove(&name)

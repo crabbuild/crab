@@ -46,6 +46,12 @@ pub(crate) enum Error {
         "The organization’s policy does not allow this repository to be deleted by this account"
     )]
     RepositoryDeletionRestricted,
+    #[error("The organization’s policy does not allow private forks")]
+    RepositoryForkingRestricted,
+    #[error("The organization’s policy restricts repository visibility changes")]
+    RepositoryVisibilityRestricted,
+    #[error("Remove organization members from the Members page")]
+    OutsideCollaboratorExpected,
     #[error(
         "The requester must have permission to create repositories in the destination organization"
     )]
@@ -397,6 +403,16 @@ impl IntoResponse for Error {
                 "repository_deletion_restricted",
                 "The organization’s policy does not allow this repository to be deleted by this account",
             ),
+            Self::RepositoryForkingRestricted => (
+                StatusCode::FORBIDDEN,
+                "repository_forking_restricted",
+                "The organization’s policy does not allow private forks",
+            ),
+            Self::RepositoryVisibilityRestricted => (
+                StatusCode::FORBIDDEN,
+                "repository_visibility_restricted",
+                "The organization’s policy restricts repository visibility changes",
+            ),
             Self::RepositoryTransferDestinationCreationRequired => (
                 StatusCode::FORBIDDEN,
                 "transfer_destination_creation_required",
@@ -413,6 +429,11 @@ impl IntoResponse for Error {
                 "This transfer expired. Reload the issue to start a new transfer.",
             ),
             Self::Invalid(message) => (StatusCode::BAD_REQUEST, "invalid_request", *message),
+            Self::OutsideCollaboratorExpected => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "outside_collaborator_expected",
+                "Remove organization members from the Members page",
+            ),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found", "Resource not found"),
             Self::CommitNotFound => (StatusCode::NOT_FOUND, "not_found", "Commit not found"),
             Self::ReviewDismissalPermission => (
@@ -1149,6 +1170,7 @@ pub(crate) async fn membership(
             if snapshot.repository_id != repo.id
                 || snapshot.name != repo.config.name
                 || snapshot.ownership_epoch != repo.ownership_epoch
+                || snapshot.forked_from != repo.forked_from
             {
                 return Err(Error::NotFound);
             }
@@ -1191,6 +1213,13 @@ pub(crate) async fn membership(
     if !current.principal.can_read(repo.id) {
         return Err(Error::NotFound);
     }
+    // A request that already entered with a grant can have fetched data that
+    // matches that grant. Restart the read if it crosses the public boundary.
+    if principal.can_read(repo.id)
+        && principal.is_public_reader(repo.id) != current.principal.is_public_reader(repo.id)
+    {
+        return Err(Error::NotFound);
+    }
     Ok(current)
 }
 
@@ -1204,6 +1233,7 @@ pub(crate) async fn membership_snapshot(
     if snapshot.repository_id != repo.id
         || organization != repo.organization
         || snapshot.ownership_epoch != repo.ownership_epoch
+        || snapshot.forked_from != repo.forked_from
     {
         return Err(Error::NotFound);
     }
@@ -1235,6 +1265,7 @@ pub(crate) async fn membership_for_config(
         .organization
         .map_or_else(Vec::new, |access| access.teams);
     let grant = if let Some(organization) = organization
+        && !principal.is_anonymous()
         && !principal.is_deploy()
         && principal.automation_credential().is_none()
     {
@@ -1265,13 +1296,15 @@ pub(crate) async fn membership_for_config(
             )
             .await?
     } else {
-        principal.with_catalog_membership(
-            snapshot.repository_id,
-            &config,
-            issuer,
-            inherited,
-            snapshot.renamed,
-        )
+        principal
+            .with_catalog_membership(
+                snapshot.repository_id,
+                &config,
+                issuer,
+                inherited,
+                snapshot.renamed,
+            )
+            .with_public_visibility(snapshot.repository_id, snapshot.visibility.is_public())
     };
     let grant = grant.unwrap_or_default();
     let mut review_teams = grant.teams;

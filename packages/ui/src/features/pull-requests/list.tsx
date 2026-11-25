@@ -23,18 +23,20 @@ export function PullList({
       <div className="section-heading flex-wrap">
         <h2>Pull requests</h2>
         <div className="flex flex-wrap items-center gap-2">
-          <Button variant="outline" asChild>
-            <Link href={repoHref(repo, { view: "pulls", action: "queue" })}>
-              Merge queue
-            </Link>
-          </Button>
+          {!repo.public_read_only && (
+            <Button variant="outline" asChild>
+              <Link href={repoHref(repo, { view: "pulls", action: "queue" })}>
+                Merge queue
+              </Link>
+            </Button>
+          )}
           <Button variant="outline" asChild>
             <Link href={repoHref(repo, { view: "labels" })}>
               <TagIcon data-icon="inline-start" />
               Labels
             </Link>
           </Button>
-          {!repo.archived && (
+          {!repo.archived && !repo.public_read_only && (
             <Button
               variant="default"
               onClick={() =>

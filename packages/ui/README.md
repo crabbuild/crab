@@ -313,7 +313,14 @@ with no repositories. Invitation recipients can open their offers from
 email delivery uses the recipient's verified address and opt-in.
 
 Organization owners can invite a member directly from **People** and review
-pending or past invitations under **People → Invitations**. **Settings** has
+pending or past invitations under **People → Invitations**. **Outside
+collaborators** lists people outside the organization with direct repository
+grants. Expand a person to see their roles and open the repository
+access editor, or invite a collaborator with a public profile. Select people
+and choose **Remove from all repositories** to revoke their direct grants
+across the organization. From **Members**, select people to convert and keep their
+direct and team-derived repository grants while ending organization and team
+membership. **Settings** has
 dedicated pages for the organization profile, member privileges, and repository
 governance. The **Repositories** list links people with repository Admin access
 directly to that repository's settings.
@@ -322,6 +329,11 @@ back to the repository list when the current viewer can open the organization.
 Repository administrators can check whether they can delete a repository in
 **Settings → General → Danger Zone**. Organization owners can restore eligible
 repositories from **Settings → Deleted repositories** for 90 days.
+Organization owners can allow private forks in **Settings → Member privileges**.
+Repository admins can then control new forks from **Settings → General → Forking**.
+Owners can change repository visibility from **Settings → General → Danger Zone**.
+Signed-out visitors can find public repositories through **Browse public
+repositories** and open their code, issues, and pull requests.
 
 The **Personal** catalog at
 `/-/repositories/personal` lists repositories in the signed-in account's

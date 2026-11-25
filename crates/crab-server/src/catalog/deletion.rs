@@ -85,6 +85,8 @@ impl CatalogDocument {
                 || record.ownership_epoch != record.name_version()
                 || record.application != RepositoryApplicationState::CellReady
                 || record.transfer.is_some()
+                || !record.forking.valid_saved()
+                || !record.visibility.valid_saved()
                 || record.organization.as_ref().is_none_or(|organization| {
                     !organization.teams.is_empty() || organization.validate().is_err()
                 })
@@ -115,7 +117,8 @@ impl CatalogDocument {
         self.version = self.version.checked_add(1).ok_or(CatalogError::Conflict)?;
         self.queue_membership_audit(MembershipAuditEvent {
             id: Uuid::now_v7(),
-            repository_id: record.id,
+            outside_grants: None,
+            repository_id: Some(record.id),
             actor,
             previous_members_digest: previous,
             new_members_digest: record.membership_digest()?,

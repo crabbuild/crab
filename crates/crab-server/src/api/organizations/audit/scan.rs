@@ -76,6 +76,9 @@ pub(super) async fn search(
                     | AuditAction::RepositoryTransferredOut
                     | AuditAction::RepositoryDeleted
                     | AuditAction::RepositoryRestored
+                    | AuditAction::RepositoryVisibilityChanged
+                    | AuditAction::OutsideCollaboratorsRemoved
+                    | AuditAction::CollaboratorGrantsRetained
             )
         });
         let organization = repository_action != Some(true) && filters.repository.is_none();

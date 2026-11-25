@@ -4,7 +4,7 @@ use axum::{
     Extension, Json, Router,
     extract::{DefaultBodyLimit, Path, State},
     middleware,
-    routing::get,
+    routing::{get, put},
 };
 use uuid::Uuid;
 
@@ -12,7 +12,8 @@ use crate::{
     app::{self, Error, Result},
     auth::Principal,
     catalog::{
-        CatalogDocument, CatalogError, CatalogStore, description::Description, topics::Topics,
+        CatalogDocument, CatalogError, CatalogStore, description::Description, forking::Forking,
+        topics::Topics,
     },
     repository::{Repository, settings},
     server::Server,
@@ -28,6 +29,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
             "/api/repositories/{repository}/topics",
             get(read_topics).put(write_topics),
         )
+        .route("/api/repositories/{repository}/forking", put(write_forking))
         .layer(DefaultBodyLimit::max(4096))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
@@ -36,7 +38,7 @@ async fn authorized(
     server: &Server,
     principal: &Principal,
     repository: Uuid,
-    maintain: bool,
+    allowed: fn(&Principal, Uuid) -> bool,
 ) -> Result<(CatalogStore, CatalogDocument, Arc<Repository>)> {
     app::account(principal)?;
     let catalog = server.catalog().ok_or(Error::NotFound)?;
@@ -52,9 +54,7 @@ async fn authorized(
         .membership_snapshot(record)
         .map_err(app::repository_access_error)?;
     let grant = app::membership_snapshot(server, principal, &active, snapshot).await?;
-    if !grant.principal.can_read(repository)
-        || (maintain && !grant.principal.can_maintain(repository))
-    {
+    if !allowed(&grant.principal, repository) {
         return Err(Error::NotFound);
     }
     Ok((catalog, document, active))
@@ -65,7 +65,8 @@ async fn read(
     Extension(principal): Extension<Principal>,
     Path(repository): Path<Uuid>,
 ) -> Result<Json<Description>> {
-    let (_, document, _) = authorized(&server, &principal, repository, true).await?;
+    let (_, document, _) =
+        authorized(&server, &principal, repository, Principal::can_maintain).await?;
     let record = document
         .repository_by_id(repository)
         .ok_or(Error::NotFound)?;
@@ -78,7 +79,8 @@ async fn write(
     Path(repository): Path<Uuid>,
     Json(input): Json<Description>,
 ) -> Result<Json<Description>> {
-    let (catalog, document, active) = authorized(&server, &principal, repository, true).await?;
+    let (catalog, document, active) =
+        authorized(&server, &principal, repository, Principal::can_maintain).await?;
     let record = document
         .repository_by_id(repository)
         .ok_or(Error::NotFound)?;
@@ -110,7 +112,7 @@ async fn read_topics(
     Extension(principal): Extension<Principal>,
     Path(repository): Path<Uuid>,
 ) -> Result<Json<Topics>> {
-    let (_, document, _) = authorized(&server, &principal, repository, false).await?;
+    let (_, document, _) = authorized(&server, &principal, repository, Principal::can_read).await?;
     let record = document
         .repository_by_id(repository)
         .ok_or(Error::NotFound)?;
@@ -123,7 +125,8 @@ async fn write_topics(
     Path(repository): Path<Uuid>,
     Json(mut input): Json<Topics>,
 ) -> Result<Json<Topics>> {
-    let (catalog, document, active) = authorized(&server, &principal, repository, true).await?;
+    let (catalog, document, active) =
+        authorized(&server, &principal, repository, Principal::can_maintain).await?;
     input.normalize().map_err(app::repository_access_error)?;
     let record = document
         .repository_by_id(repository)
@@ -145,6 +148,61 @@ async fn write_topics(
         .ok_or(Error::NotFound)?
         .topics
         .clone();
+    server
+        .install_catalog(published)
+        .await
+        .map_err(|error| Error::RepositorySetup(Box::new(error)))?;
+    Ok(Json(result))
+}
+
+async fn write_forking(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path(repository): Path<Uuid>,
+    Json(input): Json<Forking>,
+) -> Result<Json<Forking>> {
+    let (_, _, repo) = authorized(&server, &principal, repository, Principal::can_admin).await?;
+    let organization = repo
+        .organization
+        .filter(|_| repo.forked_from.is_none())
+        .ok_or(Error::NotFound)?;
+    let actor = super::organizations::actor(&server, &principal).await?;
+    let service = server.as_ref();
+    let published = settings::with_ownership_lease(service, &repo, |cancel| async move {
+        let (catalog, document, active) =
+            authorized(service, &principal, repository, Principal::can_admin).await?;
+        // The lease must cover the repository's current organization even
+        // if a transfer committed after the first authorization.
+        if active.organization != Some(organization) {
+            return Err(Error::Conflict);
+        }
+        let cells = service.cells().ok_or(Error::CellUnavailable)?;
+        let grant =
+            crate::repository::access::organization_grant(&cells, organization, actor, false)
+                .await?;
+        if !grant.private_forks {
+            return Err(Error::RepositoryForkingRestricted);
+        }
+        if settings::load_lifecycle(service, &active).await?.archived {
+            return Err(Error::Archived);
+        }
+        if cancel.is_cancelled() {
+            return Err(Error::MergeBusy);
+        }
+        app::account(&principal)?;
+        catalog
+            .change_forking(document.version, repository, input)
+            .await
+            .map_err(|error| match error {
+                CatalogError::Conflict => Error::Conflict,
+                error => app::repository_access_error(error),
+            })
+    })
+    .await?;
+    let result = published
+        .repository_by_id(repository)
+        .ok_or(Error::NotFound)?
+        .forking;
     server
         .install_catalog(published)
         .await

@@ -291,7 +291,7 @@ export function DiscussionMetadata({
 }) {
   return (
     <aside className="discussion-metadata" aria-label="Metadata">
-      {path.startsWith("pulls/") && (
+      {!repo.public_read_only && path.startsWith("pulls/") && (
         <Reviewers
           key={`${path}:${reviewerRefresh}`}
           repo={repo}
@@ -349,23 +349,27 @@ export function DiscussionMetadata({
           <p className="muted">None yet</p>
         )}
       </section>
-      <LinkedWork
-        key={`links:${version}`}
-        repo={repo}
-        path={path}
-        csrf={csrf}
-        onSaved={onSaved}
-        allowIssueClosure={allowIssueClosure}
-      />
-      <DiscussionProjects repo={repo} path={path} />
-      <MilestonePicker
-        version={version}
-        repo={repo}
-        path={path}
-        csrf={csrf}
-        onSaved={onSaved}
-      />
-      {csrf && <DiscussionWatch repo={repo} csrf={csrf} subject={path} />}
+      {!repo.public_read_only && (
+        <>
+          <LinkedWork
+            key={`links:${version}`}
+            repo={repo}
+            path={path}
+            csrf={csrf}
+            onSaved={onSaved}
+            allowIssueClosure={allowIssueClosure}
+          />
+          <DiscussionProjects repo={repo} path={path} />
+          <MilestonePicker
+            version={version}
+            repo={repo}
+            path={path}
+            csrf={csrf}
+            onSaved={onSaved}
+          />
+          {csrf && <DiscussionWatch repo={repo} csrf={csrf} subject={path} />}
+        </>
+      )}
       {children}
     </aside>
   );

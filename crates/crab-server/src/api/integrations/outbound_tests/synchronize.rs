@@ -151,6 +151,8 @@ async fn private_fork_push_synchronizes_only_the_matching_upstream_pull() {
         .unwrap();
     let (organization, _, _) = crate::test_support::http::organizations::bootstrap(&h).await;
     let alice = h.login().await;
+    crate::test_support::http::organizations::set_private_forks(&h, organization, &alice, true)
+        .await;
     let upstream = catalog
         .reserve_git_import(
             upstream_id,

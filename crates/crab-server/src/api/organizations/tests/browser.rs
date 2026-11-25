@@ -184,6 +184,8 @@ async fn native_browser_squashes_a_protected_private_fork_pull_request() {
         .unwrap();
     let (organization, _, _) = crate::test_support::http::organizations::bootstrap(&h).await;
     let alice = h.login().await;
+    crate::test_support::http::organizations::set_private_forks(&h, organization, &alice, true)
+        .await;
     let repo: Value = h
         .write(
             Method::POST,
@@ -276,7 +278,7 @@ async fn native_browser_squashes_a_protected_private_fork_pull_request() {
         .run(&["wait", "--text", "This comparison has no changed files."])
         .await;
     browser
-        .run(&["select", "#fork-compare-head", "refs/heads/feature"])
+        .choose_select("#fork-compare-head", "refs/heads/feature")
         .await;
     browser.run(&["wait", "--text", "1 changed file"]).await;
     browser
