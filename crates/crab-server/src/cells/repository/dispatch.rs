@@ -27,12 +27,23 @@ pub(in crate::cells) fn dispatch_mutation(
         || id == PreparePullLifecycle::ID
         || id == review_dismissals::PrepareReviewState::ID
         || id == collaboration::submissions::preparation::Prepare::ID;
+    // Check reports update their own commit summary. They do not affect any
+    // discussion document and can commit while its index is being prepared.
+    let maintenance = maintenance
+        || matches!(
+            id,
+            CreateCommitStatus::ID
+                | CreateCheckRun::ID
+                | UpdateCheckRun::ID
+                | integrations::Record::ID
+        );
     #[cfg(test)]
     let maintenance = maintenance
         || id == projects::tests::Historical::ID
         || id == assignments::migration::tests::SeedSubjects::ID
         || id == reviewers::tests::PreviousIndex::ID
         || id == rollups::tests::PreviousFormat::ID
+        || id == rollups::tests::BeforeCommitSummaries::ID
         || id == search::reviews::status::tests::PreviousFormat::ID
         || id == collaboration::conversation::tests::Inspect::ID
         || id == collaboration::submissions::preparation::tests::Historical::ID
@@ -163,6 +174,10 @@ pub(in crate::cells) fn dispatch_mutation(
         #[cfg(test)]
         rollups::tests::PreviousFormat::ID => {
             invoke_mutation::<rollups::tests::PreviousFormat>(context, input)
+        }
+        #[cfg(test)]
+        rollups::tests::BeforeCommitSummaries::ID => {
+            invoke_mutation::<rollups::tests::BeforeCommitSummaries>(context, input)
         }
         #[cfg(test)]
         issues::lifecycle::tests::Historical::ID => {

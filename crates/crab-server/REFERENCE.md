@@ -4454,6 +4454,10 @@ Pull list rows, including PR rows returned by issue search, include `rollup` wit
 success, neutral, skipped, pending and failed outcomes. Latest commit statuses
 and latest check runs remain separate sources. The newest run wins within
 each case-insensitive name and provider connection.
+Each accepted CI report updates its commit's counts in the same Repository Cell
+transaction. PR lists read the saved counts for the selected commit without
+scanning report history. Existing repositories prepare these counts through
+[`cells rebuild-search`](CELLAR.md#commit-check-summary-preparation).
 Review counts include selected-head approvals, unresolved requests for changes,
 outstanding review requests and decisions anchored on earlier commits. Requested
 changes remain active after a new push until the same reviewer replaces the

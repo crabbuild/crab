@@ -29,6 +29,9 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
   Conversation refreshes merge readiness after CI passes, updates the reviewer
   sidebar for approval or head changes, and disables outdated merge
   confirmations while preserving the author's draft.
+- PR lists read transactionally maintained check summaries for their selected
+  commits. Historical reports backfill in bounded batches, and new reports
+  stay current during preparation.
 - Writers can restore a missing head branch from a completed pull request.
   The panel shows the saved commit. Publication checks the current source
   repository, write grant and ref rules, and requires the branch name to be

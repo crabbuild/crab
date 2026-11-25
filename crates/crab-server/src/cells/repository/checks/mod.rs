@@ -1,5 +1,6 @@
 mod codec;
 pub(crate) mod required;
+pub(in crate::cells::repository) mod summary;
 
 use super::*;
 
@@ -224,6 +225,7 @@ impl Mutation for CreateCheckRun {
             )],
         })?;
         insert_check_version(context, &run, &input.report.output)?;
+        summary::refresh(context, &run.oid)?;
         advance_revision(context)?;
         Ok(MutationResult::Success(CreateCheckRunOutcome::Created(
             Box::new(CheckRunDetail {
@@ -328,6 +330,7 @@ impl Mutation for UpdateCheckRun {
                 ],
             )],
         })?;
+        summary::refresh(context, &run.oid)?;
         advance_revision(context)?;
         Ok(MutationResult::Success(UpdateCheckRunOutcome::Updated(
             Box::new(CheckRunDetail {
