@@ -10,10 +10,13 @@ const UP_TO_DATE_RULES_FORMAT: usize = 104;
 const QUEUE_RULES_FORMAT: usize = 105;
 const LINEAR_HISTORY_RULES_FORMAT: usize = 106;
 const LAST_PUSH_APPROVAL_RULES_FORMAT: usize = 107;
+const ALLOW_DELETIONS_RULES_FORMAT: usize = 108;
 
 pub(super) fn encode(rules: &[BranchProtectionRecord]) -> Result<Vec<u8>, RecordError> {
     let mut encoder = RecordEncoder::new(MAX_PROTECTION_BYTES)?;
-    let format = if rules.iter().any(|rule| rule.require_last_push_approval) {
+    let format = if rules.iter().any(|rule| rule.allow_deletions) {
+        ALLOW_DELETIONS_RULES_FORMAT
+    } else if rules.iter().any(|rule| rule.require_last_push_approval) {
         LAST_PUSH_APPROVAL_RULES_FORMAT
     } else if rules.iter().any(|rule| rule.require_linear_history) {
         LINEAR_HISTORY_RULES_FORMAT
@@ -66,13 +69,16 @@ pub(super) fn encode(rules: &[BranchProtectionRecord]) -> Result<Vec<u8>, Record
         if format >= LAST_PUSH_APPROVAL_RULES_FORMAT {
             encoder.write_u8(u8::from(rule.require_last_push_approval))?;
         }
+        if format >= ALLOW_DELETIONS_RULES_FORMAT {
+            encoder.write_u8(u8::from(rule.allow_deletions))?;
+        }
     }
     Ok(encoder.finish())
 }
 
 pub(super) fn decode(bytes: &[u8]) -> Result<Vec<BranchProtectionRecord>, RecordError> {
     let mut decoder = RecordDecoder::new(bytes, MAX_PROTECTION_BYTES)?;
-    let format = bounded_count(&mut decoder, LAST_PUSH_APPROVAL_RULES_FORMAT)?;
+    let format = bounded_count(&mut decoder, ALLOW_DELETIONS_RULES_FORMAT)?;
     let count = if format >= PROVIDER_RULES_FORMAT {
         bounded_count(&mut decoder, 100)?
     } else {
@@ -108,6 +114,9 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Vec<BranchProtectionRecord>, Record
         if format >= LAST_PUSH_APPROVAL_RULES_FORMAT {
             rule.require_last_push_approval = flag(&mut decoder)?;
         }
+        if format >= ALLOW_DELETIONS_RULES_FORMAT {
+            rule.allow_deletions = flag(&mut decoder)?;
+        }
         rules.push(rule);
     }
     decoder.finish()?;
@@ -142,6 +151,7 @@ impl StoredRecord for BranchProtectionRecord {
             require_up_to_date: false,
             require_merge_queue: false,
             require_linear_history: false,
+            allow_deletions: false,
             required_checks,
             required_integrations: Vec::new(),
         })

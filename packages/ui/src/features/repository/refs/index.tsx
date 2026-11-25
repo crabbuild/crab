@@ -253,8 +253,11 @@ export function RefsPage({
   const remaining = defaultRef
     ? matching.filter((ref) => ref.name !== defaultRef.name)
     : matching;
-  const protectedNames = new Set(
-    repo.protected_branches.map((rule) => `refs/heads/${rule.branch}`),
+  const protectedBranches = new Map(
+    repo.protected_branches.map((rule) => [
+      `refs/heads/${rule.branch}`,
+      Boolean(rule.allow_deletions),
+    ]),
   );
   return (
     <section className="refs-page">
@@ -316,7 +319,7 @@ export function RefsPage({
           refs={[defaultRef]}
           kind="branch"
           defaultName={refs.head?.name}
-          protectedNames={protectedNames}
+          protectedBranches={protectedBranches}
           onDeleteBranch={onDeleteBranch}
         />
       )}
@@ -327,7 +330,7 @@ export function RefsPage({
         refs={remaining}
         kind={type === "branches" ? "branch" : "tag"}
         defaultName={refs.head?.name}
-        protectedNames={protectedNames}
+        protectedBranches={protectedBranches}
         onDeleteBranch={onDeleteBranch}
         empty={
           normalizedQuery
@@ -348,7 +351,7 @@ function RefGroup({
   refs,
   kind,
   defaultName,
-  protectedNames,
+  protectedBranches,
   onDeleteBranch,
   empty,
 }: {
@@ -358,7 +361,7 @@ function RefGroup({
   refs: Ref[];
   kind: "branch" | "tag";
   defaultName?: string;
-  protectedNames: Set<string>;
+  protectedBranches: ReadonlyMap<string, boolean>;
   onDeleteBranch?: DeleteBranch;
   empty?: string;
 }) {
@@ -386,7 +389,7 @@ function RefGroup({
                 repo={repo}
                 ref={ref}
                 defaultBranch={ref.name === defaultName}
-                protectedBranch={protectedNames.has(ref.name)}
+                protectedBranch={protectedBranches.has(ref.name)}
                 canCompare={
                   repo.access === "write" &&
                   !repo.archived &&
@@ -398,7 +401,7 @@ function RefGroup({
                 onDelete={
                   kind === "branch" &&
                   ref.name !== defaultName &&
-                  !protectedNames.has(ref.name) &&
+                  protectedBranches.get(ref.name) !== false &&
                   onDeleteBranch
                     ? onDeleteBranch
                     : undefined

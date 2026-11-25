@@ -8,6 +8,7 @@ pub(crate) mod check_status;
 pub(crate) mod completion;
 pub(crate) mod contributions;
 mod counts;
+mod dates;
 pub(crate) mod heads;
 pub(crate) mod index;
 pub(crate) mod issue_types;
@@ -58,6 +59,7 @@ enum Term {
     BaseBranch(String),
     HeadBranch(String),
     Count(counts::Filter),
+    Date(dates::Filter),
     Text(String),
     Label(Vec<String>),
     Milestone(String),
@@ -125,6 +127,14 @@ impl Query {
     pub(super) fn needs_lifecycle(&self) -> bool {
         self.expression
             .has_term(|term| matches!(term, Term::Reason(_) | Term::Missing(Metadata::Reason)))
+    }
+    pub(super) fn has_dates(&self) -> bool {
+        self.expression
+            .has_term(|term| matches!(term, Term::Date(_)))
+    }
+    pub(super) fn needs_pull_lifecycle(&self) -> bool {
+        self.expression
+            .has_term(|term| matches!(term, Term::Date(filter) if filter.needs_pull_lifecycle()))
     }
     fn needs_lock_state(&self) -> bool {
         self.expression
@@ -363,6 +373,10 @@ fn atom_expression(atom: &str) -> Result<Expression, &'static str> {
             "commenter" => Term::Commenter(people::name(&unquote(value)?)?),
             "assignee" => Term::Assignee(assignees::name(&unquote(value)?)?),
             "comments" | "reactions" | "interactions" => Term::Count(counts::Filter::parse(
+                &qualifier.to_ascii_lowercase(),
+                &unquote(value)?,
+            )?),
+            "created" | "updated" | "closed" | "merged" => Term::Date(dates::Filter::parse(
                 &qualifier.to_ascii_lowercase(),
                 &unquote(value)?,
             )?),

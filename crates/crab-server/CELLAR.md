@@ -462,6 +462,11 @@ again at publication. Team ownership reads check the live team's visibility
 and approval membership epochs in one Organization Cell snapshot. The new rule
 requires no SQL preparation.
 
+Enabling **Allow deletions** on an exact branch protection rule writes record
+format 108. Upgrade serving peers before enabling it. Earlier records keep
+deletion blocked for protected branches. The settings mutation leases affected
+refs when effective deletion permission changes. No SQL preparation is required.
+
 Fresh ready PR creation and transitions out of draft share the base-comparison
 owner resolver. The application passes qualified accounts and stable team UUIDs
 to the native command. Requests, activity and deduplicated inbox deliveries

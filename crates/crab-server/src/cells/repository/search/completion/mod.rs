@@ -353,6 +353,13 @@ fn suggestions(
                 "interactions:1..10",
                 "One to ten comments and reactions combined",
             ),
+            ("created:", "Filter by creation date using YYYY-MM-DD"),
+            ("updated:", "Filter by last update using YYYY-MM-DD"),
+            ("closed:", "Filter by closure date using YYYY-MM-DD"),
+            (
+                "merged:",
+                "Filter by pull request merge date using YYYY-MM-DD",
+            ),
         ];
         for (value, description) in qualifiers.into_iter().chain(values) {
             if negative && (value.starts_with("no:") || value.starts_with("in:"))

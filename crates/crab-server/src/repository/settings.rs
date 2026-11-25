@@ -51,6 +51,11 @@ impl BranchProtections {
         let branch = reference.strip_prefix("refs/heads/")?;
         self.rules.iter().find(|rule| rule.branch == branch)
     }
+
+    pub(crate) fn blocks_deletion(&self, reference: &str) -> bool {
+        self.protection(reference)
+            .is_some_and(|rule| !rule.allow_deletions)
+    }
 }
 
 pub(crate) async fn load(server: &Server, repo: &Repository) -> Result<BranchProtections> {
@@ -647,6 +652,7 @@ impl RefPolicy {
                 require_up_to_date: false,
                 require_merge_queue: false,
                 require_linear_history: false,
+                allow_deletions: false,
                 required_checks: Vec::new(),
                 required_integrations: Vec::new(),
             });
@@ -701,17 +707,24 @@ pub(crate) async fn replace(
     if current.version != expected_version {
         return Err(Error::Conflict);
     }
-    let required = |rules: &[BranchProtection]| -> HashSet<String> {
+    // Adding or removing an exact rule can also change deletion permission.
+    let fenced = |rules: &[BranchProtection]| -> HashSet<_> {
         rules
             .iter()
-            .filter(|rule| rule.require_merge_queue)
-            .map(|rule| format!("refs/heads/{}", rule.branch))
+            .filter(|rule| rule.require_merge_queue || !rule.allow_deletions)
+            .map(|rule| {
+                (
+                    format!("refs/heads/{}", rule.branch),
+                    rule.require_merge_queue,
+                    rule.allow_deletions,
+                )
+            })
             .collect()
     };
-    let names = required(&current.rules)
-        .symmetric_difference(&required(&rules))
-        .cloned()
-        .collect::<Vec<_>>();
+    let names = fenced(&current.rules)
+        .symmetric_difference(&fenced(&rules))
+        .map(|(name, _, _)| name.clone())
+        .collect::<HashSet<_>>();
     if names.is_empty() {
         return replace_rules(server, repo, expected_version, rules).await;
     }
@@ -723,7 +736,7 @@ pub(crate) async fn replace(
     tracker.spawn(async move {
         let server = server.as_ref();
         let repo = repo.as_ref();
-        // The policy transition and protected ref publication share a lease.
+        // Queue and deletion policy changes share a lease with ref publication.
         // Drain the Cell mutation and release it even if the HTTP caller leaves.
         let result = crab_remote::publication::with_leases(
             &repo.store,
@@ -827,6 +840,7 @@ pub(crate) fn protection_record(rule: BranchProtection) -> BranchProtectionRecor
         require_up_to_date: rule.require_up_to_date,
         require_merge_queue: rule.require_merge_queue,
         require_linear_history: rule.require_linear_history,
+        allow_deletions: rule.allow_deletions,
         required_checks: rule.required_checks,
         required_integrations: rule.required_integrations,
     }
@@ -847,6 +861,7 @@ fn branch_protections(settings: BranchProtectionSettings) -> Result<BranchProtec
                 require_up_to_date: rule.require_up_to_date,
                 require_merge_queue: rule.require_merge_queue,
                 require_linear_history: rule.require_linear_history,
+                allow_deletions: rule.allow_deletions,
                 required_checks: rule.required_checks,
                 required_integrations: rule.required_integrations,
             })

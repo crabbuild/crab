@@ -854,6 +854,9 @@ impl RefMutation<'_> {
                 ));
             }
             if !pull && let Some(protection) = policy.protections.protection(&update.name) {
+                if update.new.is_none() && protection.allow_deletions {
+                    continue;
+                }
                 if update.old.is_some() || self.has_branch {
                     return Err(if protection.require_merge_queue {
                         ReceiveError::RefRule("protected branch requires the merge queue")

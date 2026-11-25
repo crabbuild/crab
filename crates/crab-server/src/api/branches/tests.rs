@@ -292,6 +292,7 @@ async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
         require_up_to_date: false,
         require_merge_queue: false,
         require_linear_history: false,
+        allow_deletions: false,
         required_checks: vec![],
         required_integrations: vec![],
     });

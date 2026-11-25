@@ -276,14 +276,17 @@ async fn native_browser_enables_automatic_cleanup_and_restores_the_merged_branch
         Method::PUT,
         "/api/repos/team/private/settings/branch-protections",
         &writer,
-        json!({"expected_version":0,"rules":[]}),
+        json!({"expected_version":0,"rules":[{"branch":"feature","required_checks":[]}]}),
     )
     .await
     .error_for_status()
     .unwrap();
     let browser = Browser::new("auto-cleanup");
     browser
-        .run(&["open", &format!("{}/team/private/settings", h.origin)])
+        .run(&[
+            "open",
+            &format!("{}/team/private/settings/branches", h.origin),
+        ])
         .await;
     browser.sign_in().await;
     let click = async |role, name| {
@@ -291,6 +294,21 @@ async fn native_browser_enables_automatic_cleanup_and_restores_the_merged_branch
             .run(&["find", "role", role, "click", "--name", name, "--exact"])
             .await;
     };
+    browser
+        .run(&["wait", "--text", "Branch protection rules"])
+        .await;
+    click("button", "Edit feature").await;
+    click("checkbox", "Allow deletions").await;
+    click("button", "Save changes").await;
+    browser.run(&["wait", "--text", "Deletions allowed"]).await;
+    assert_eq!(
+        h.json("/api/repos?owner=team&name=private", &writer).await["repositories"][0]["protected_branches"]
+            [0]["allow_deletions"],
+        true
+    );
+    browser
+        .run(&["open", &format!("{}/team/private/settings", h.origin)])
+        .await;
     browser
         .run(&["wait", "--text", "Automatically delete head branches"])
         .await;
@@ -326,6 +344,15 @@ async fn native_browser_enables_automatic_cleanup_and_restores_the_merged_branch
             .await
             .is_empty()
     );
+    h.write(
+        Method::PUT,
+        "/api/repos/team/private/settings/branch-protections",
+        &writer,
+        json!({"expected_version":2,"rules":[]}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
     click("button", "Restore branch").await;
     browser.run(&["wait", "--text", "Restored feature"]).await;
     assert_eq!(

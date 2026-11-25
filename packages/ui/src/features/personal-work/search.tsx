@@ -1,6 +1,6 @@
 import { SearchIcon } from "@primer/octicons-react";
 import { Button } from "@/components/ui/button";
-import { Field, FieldLabel } from "@/components/ui/field";
+import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { FieldSelect } from "@/components/ui/field-select";
 import { Input } from "@/components/ui/input";
 import { navigate, useRequest } from "@/lib/api";
@@ -92,7 +92,12 @@ export default function WorkSearch({ url }: { url: URL }) {
             defaultValue={q}
             maxLength={256}
             placeholder='is:open label:"bug" deployment'
+            aria-describedby="discussion-search-date-format"
           />
+          <FieldDescription id="discussion-search-date-format">
+            Use date filters such as <code>updated:&gt;=2025-01-01</code> or{" "}
+            <code>merged:2025-01-01..2025-01-31</code>.
+          </FieldDescription>
         </Field>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-[minmax(0,1fr)_auto_auto_auto] sm:items-end">
           <Field className="col-span-2 sm:col-span-1">

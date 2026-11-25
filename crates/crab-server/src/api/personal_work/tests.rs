@@ -346,6 +346,65 @@ async fn workspace_discussion_search_combines_types_and_rechecks_repository_scop
         StatusCode::CONFLICT
     );
 
+    let dated = format!("{SEARCH}?q=release+created:1970-01-01..*+updated:%3E=1970-01-01");
+    assert_eq!(
+        h.json(&dated, &bob).await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    let older = format!("{SEARCH}?q=release+created:%3C1970-01-01");
+    assert_eq!(h.json(&older, &bob).await["items"], json!([]));
+    for name in ["private", "library"] {
+        let item = h
+            .json(&format!("/api/repos/team/{name}/issues/1"), &alice)
+            .await;
+        write(
+            &h,
+            name,
+            &alice,
+            Method::PATCH,
+            "issues/1",
+            json!({"version":item["version"],"state":"closed"}),
+        )
+        .await;
+    }
+    let closed = "q=release+closed:1970-01-01..*";
+    let repo_search = h
+        .json(&format!("/api/repos/team/private/issues?{closed}"), &bob)
+        .await;
+    assert_eq!(repo_search["matching"], 1);
+    let route = format!("{SEARCH}?{closed}&limit=1");
+    let page = h.json(&route, &bob).await;
+    assert_eq!(page["items"][0]["kind"], "issue");
+    let after = page["next"].as_str().unwrap();
+    let item = h.json("/api/repos/team/private/issues/1", &alice).await;
+    write(
+        &h,
+        "private",
+        &alice,
+        Method::PATCH,
+        "issues/1",
+        json!({"version":item["version"],"state":"open"}),
+    )
+    .await;
+    assert_eq!(
+        get(&h, &format!("{route}&after={after}"), &bob)
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        h.json(&route, &bob).await["items"][0]["title"],
+        "Release checklist"
+    );
+    assert_eq!(
+        h.json(&format!("/api/repos/team/private/issues?{closed}"), &bob)
+            .await["matching"],
+        0
+    );
+
     revoke(&h, "library").await;
     assert_eq!(
         get(&h, &continuation.unwrap(), &bob).await.status(),
@@ -410,7 +469,11 @@ async fn browser_opens_personal_work_from_multiple_repositories() {
         .await;
     browser.run(&["wait", "#discussion-search-terms"]).await;
     browser
-        .run(&["fill", "#discussion-search-terms", "is:open"])
+        .run(&[
+            "fill",
+            "#discussion-search-terms",
+            "is:open created:>=1970-01-01",
+        ])
         .await;
     browser
         .choose_select("#discussion-search-sort", "comments")

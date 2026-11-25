@@ -3946,6 +3946,12 @@ test("branch and tag pages follow the GitHub refs hierarchy", async ({
                   required_approvals: 1,
                   required_checks: [],
                 },
+                {
+                  branch: "alpha",
+                  required_approvals: 1,
+                  required_checks: [],
+                  allow_deletions: true,
+                },
               ],
             },
           ],
@@ -4285,15 +4291,20 @@ test("repository settings create, edit, and delete branch protection rules", asy
   await page.getByLabel("Branch name").fill("main");
   await chooseSelectOption(page.getByLabel("Required approving reviews"), "2");
   const queue = page.getByRole("checkbox", { name: "Require merge queue" });
+  const allowDeletions = page.getByRole("checkbox", {
+    name: "Allow deletions",
+  });
   await expect(queue).toBeDisabled();
   await page.getByLabel("Required status checks").fill("ci/test\nsecurity");
   await queue.click();
+  await allowDeletions.click();
   await expect(queue).toBeChecked();
   await page.getByRole("button", { name: "Save changes" }).click();
   const rule = page.locator(".protection-list > li");
   await expect(rule).toContainText("main");
   await expect(rule).toContainText("2 approving reviews required");
   await expect(rule).toContainText("Merge queue required");
+  await expect(rule).toContainText("Deletions allowed");
   await expect(rule.locator(".protection-checks")).toContainText("ci/test");
   await expect(rule.locator(".protection-checks")).toContainText("security");
   expect(updates[0]).toEqual({
@@ -4303,6 +4314,7 @@ test("repository settings create, edit, and delete branch protection rules", asy
         branch: "main",
         required_approvals: 2,
         require_merge_queue: true,
+        allow_deletions: true,
         required_checks: ["ci/test", "security"],
       },
     ],
@@ -4310,6 +4322,8 @@ test("repository settings create, edit, and delete branch protection rules", asy
 
   await page.getByRole("button", { name: "Edit main" }).click();
   await expect(queue).toBeChecked();
+  await expect(allowDeletions).toBeChecked();
+  await allowDeletions.click();
   await chooseSelectOption(page.getByLabel("Required approving reviews"), "1");
   await page.getByLabel("Required status checks").fill("build");
   await page.getByRole("button", { name: "Save changes" }).click();
