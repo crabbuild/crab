@@ -673,8 +673,10 @@ The indexer parses each page in parallel under the shared Git CPU limit
 and assembles the filters in Git path order.
 Larger files get larger text filters to reduce false positives. An
 index answers only for its exact Git tree. Crab verifies returned paths, text,
-and definition locations against Git. It reuses unchanged blobs' filters when
-their parsing language is unchanged. Short literals and other terms that the
+and definition locations against Git. During a cold build it makes filters
+once per Git blob and parsing language, even when the file appears at several
+paths. It also reuses filters from the previous tree for incremental builds.
+Short literals and other terms that the
 filter cannot rule out remain candidates. The page reports `indexed_repositories`,
 `scanning_repositories`, and `limited_repositories`. Crab scans Git while a
 matching index is unavailable or exceeds the artifact or memory limit.

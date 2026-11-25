@@ -365,6 +365,11 @@ Prove one private repository from an author’s browser and stock Git through a 
   build from 154 to 127 seconds in the next paired run. All 81 warm pages
   returned the expected results, and eight concurrent pages during indexing
   completed at 56 ms p95.
+  Cold index builds reuse filters for an identical blob and parsing language
+  across paths and pages. Two local RustFS runs of the same five snapshots
+  returned the expected results, with build and concurrent search reads falling
+  from 51,483 to 50,988. Cold build times varied by repository. The largest
+  index took 64.9 seconds in the first run and 67.4 seconds with filter reuse.
 
 - Embedded Chromium previewed and downloaded a native Crab file through the
   same server API. Native HTTP tests exercised authorized full reads, ranges,

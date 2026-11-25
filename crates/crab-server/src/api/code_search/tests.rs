@@ -870,6 +870,51 @@ async fn native_browser_finds_symbols_across_repositories_and_opens_the_definiti
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn index_reuses_repeated_blobs_without_merging_paths_or_languages() {
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    let (_, _, head) = searchable_repository(
+        &h,
+        &alice,
+        "team",
+        "private",
+        (0..100)
+            .map(|i| (format!("padding/part-{i:03}.txt"), "padding\n".into()))
+            .chain(
+                ["a.py", "a.rs", "b.rs", "note.txt", "z.rs"]
+                    .map(|path| (path.into(), "fn shared_definition() {}\n".into())),
+            ),
+    )
+    .await;
+    let repo = h.server.repositories.values()[0].clone();
+    code_index::reconcile(&h.server, &repo, &h.server.cancellation)
+        .await
+        .unwrap();
+    for (qualifier, expected) in [
+        ("symbol", &["a.rs", "b.rs", "z.rs"][..]),
+        ("content", &["a.py", "a.rs", "b.rs", "note.txt", "z.rs"][..]),
+    ] {
+        let result = h
+            .json(
+                &format!("/api/code-search?q={qualifier}:shared_definition"),
+                &alice,
+            )
+            .await;
+        assert_eq!(result["indexed_repositories"], 1);
+        assert_eq!(result["groups"][0]["commit"], head);
+        let files = result["groups"][0]["files"].as_array().unwrap();
+        let paths: Vec<_> = files
+            .iter()
+            .map(|file| file["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths, expected);
+        assert!(files.iter().all(|file| file["lines"][0]["line"] == 1));
+        assert_eq!(result["next"], Value::Null);
+    }
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn persistent_code_index_prunes_a_sparse_search_and_refreshes_after_publication() {
     let h = Harness::new(false).await;
     let alice = h.login().await;
