@@ -545,7 +545,7 @@ async fn requirements(
                 }
             },
             async {
-                if !rule.required_code_owner_reviews {
+                if !rule.required_code_owner_reviews || pull.merge.is_some() {
                     return Ok(None);
                 }
                 let Some(base_oid) = base_oid else {

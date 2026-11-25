@@ -22,6 +22,8 @@ use uuid::Uuid;
 const ROOT: &str = "/api/repos/team/private";
 const PULL: &str = "/api/repos/team/private/pulls/1";
 const SAVED: &str = "/api/repos/team/private/pulls/1/merged-comparison";
+const OWNERS: &str = "/api/repos/team/private/pulls/1/codeowners";
+const POLICY: &str = "/README.md @merge-reviewer\n/BASE.txt @base-owner\n";
 const MAINTENANCE_BYTES: u64 = 16 * 1024 * 1024;
 const MAINTENANCE_LIMITS: CapsuleReadLimits = CapsuleReadLimits {
     max_capsule_bytes: MAINTENANCE_BYTES,
@@ -66,6 +68,12 @@ async fn squash_and_delete(h: &Harness, alice: &str) -> (Vec<String>, Value) {
         retrieve(h, alice, SAVED).await.status(),
         StatusCode::NOT_FOUND
     );
+    assert_eq!(
+        retrieve(h, alice, &format!("{OWNERS}/source"))
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
     for (setting, input) in [
         (
             "branch-protections",
@@ -92,7 +100,9 @@ async fn squash_and_delete(h: &Harness, alice: &str) -> (Vec<String>, Value) {
     git::success(path, &["push", remote.as_str(), "feature"]).await;
     git::success(path, &["checkout", "main"]).await;
     std::fs::write(path.join("BASE.txt"), "base branch only\n").unwrap();
-    git::success(path, &["add", "BASE.txt"]).await;
+    std::fs::create_dir(path.join(".github")).unwrap();
+    std::fs::write(path.join(".github/CODEOWNERS"), POLICY).unwrap();
+    git::success(path, &["add", "BASE.txt", ".github/CODEOWNERS"]).await;
     git::success(path, &["commit", "-m", "Add a base-only file"]).await;
     git::success(path, &["push", remote.as_str(), "main"]).await;
     let commits: Vec<_> = git::success(path, &["rev-list", "main..feature"])
@@ -133,6 +143,14 @@ async fn squash_and_delete(h: &Harness, alice: &str) -> (Vec<String>, Value) {
     .unwrap();
     git::success(path, &["push", remote.as_str(), "--delete", "feature"]).await;
     repack_and_prune(h, layout, head).await;
+    git::success(path, &["fetch", remote.as_str(), "main"]).await;
+    git::success(path, &["merge", "--ff-only", "FETCH_HEAD"]).await;
+    std::fs::write(path.join(".github/CODEOWNERS"), "* @later-owner\n").unwrap();
+    git::success(path, &["commit", "-am", "Change the current base policy"]).await;
+    git::success(path, &["push", remote.as_str(), "main"]).await;
+    h.write(Method::PUT, &format!("{ROOT}/settings/branch-protections"), alice,
+        json!({"expected_version":1,"rules":[{"branch":"main","required_code_owner_reviews":true}]}))
+        .await.error_for_status().unwrap();
     let general = format!(
         "{ROOT}/changes?rev={head}&base={}&merge_base=true",
         compare["base_tip"].as_str().unwrap()
@@ -250,6 +268,34 @@ async fn saved_merge_comparison_survives_git_repack_and_history_prune() {
     let alice = h.login().await;
     let (commits, compare) = squash_and_delete(&h, &alice).await;
     let head = commits[0].as_str();
+    let detail = h.json(PULL, &alice).await;
+    assert!(detail["merge_requirements"]["code_owners"].is_null());
+    let owners = h.json(OWNERS, &alice).await;
+    assert_eq!(owners["base_oid"], compare["base_tip"]);
+    assert_eq!(owners["head_oid"], head);
+    assert_eq!(owners["affected_paths"], 1);
+    assert!(owners.get("missing_paths").is_none());
+    assert_eq!(
+        owners["groups"],
+        json!([{
+            "line":1,"owners":["@merge-reviewer"],"paths":["README.md"],"affected":1,
+        }])
+    );
+    let policy = retrieve(&h, &alice, &format!("{OWNERS}/source")).await;
+    assert_eq!(
+        policy.headers()[reqwest::header::CONTENT_TYPE],
+        "text/plain; charset=utf-8"
+    );
+    assert_eq!(
+        policy.error_for_status().unwrap().text().await.unwrap(),
+        POLICY
+    );
+    assert_eq!(
+        retrieve(&h, &alice, &format!("{OWNERS}/source?path=README.md"))
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
     let saved = h.json(SAVED, &alice).await;
     for field in ["base", "base_tip", "commit", "changes"] {
         assert_eq!(saved[field], compare[field], "{field}");
@@ -345,6 +391,38 @@ async fn native_browser_reads_the_merged_history_after_source_deletion() {
             "--text",
             "Keep this inline review after branch cleanup",
         ])
+        .await;
+    browser
+        .run(&["wait", "--text", "Code owners cover 1 path"])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Code owner rules at merge",
+            "--exact",
+        ])
+        .await;
+    browser.run(&["wait", "--text", "@merge-reviewer"]).await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "link",
+            "click",
+            "--name",
+            "View CODEOWNERS at merge",
+            "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", "--url", "**/pulls/1/codeowners/source*"])
+        .await;
+    browser
+        .run(&["wait", "--text", "/README.md @merge-reviewer"])
         .await;
     browser
         .run(&["open", &format!("{}/team/private/pull/1/commits", h.origin)])

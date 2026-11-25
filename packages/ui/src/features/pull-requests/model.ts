@@ -130,15 +130,15 @@ export interface CodeOwnersReport {
   head_oid: string | null;
   invalid_lines: number;
   affected_paths: number;
-  missing_paths: number;
+  missing_paths?: number;
   problem: string | null;
   groups: {
     line: number;
     owners: string[];
     paths: string[];
     affected: number;
-    approved: boolean;
-    has_eligible_owner: boolean;
+    approved?: boolean;
+    has_eligible_owner?: boolean;
   }[];
 }
 

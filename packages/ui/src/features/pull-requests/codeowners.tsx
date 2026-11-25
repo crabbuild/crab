@@ -1,6 +1,7 @@
 import { Disclosure } from "@/components/ui/collapsible";
 import { ShieldLockIcon } from "@primer/octicons-react";
 import { Link } from "@/components/navigation/link";
+import { Result } from "@/components/request/result";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 import type { CodeOwnersReport, PullRequest } from "./model";
@@ -12,37 +13,65 @@ export function PullCodeOwners({
   repo: Repository;
   pull: PullRequest;
 }) {
+  const resource = `pulls/${pull.number}/codeowners`;
+  const gate = pull.merge ? null : pull.merge_requirements.code_owners;
   const state = useRequest<CodeOwnersReport>(
-    pull.merge_requirements.code_owners
+    gate
       ? null
-      : endpoint(repo, `pulls/${pull.number}/codeowners`, {
-          base: pull.base_oid,
-          head: pull.head_oid,
-          version: String(pull.version),
-        }),
+      : endpoint(
+          repo,
+          resource,
+          pull.merge
+            ? undefined
+            : {
+                base: pull.base_oid,
+                head: pull.head_oid,
+                version: String(pull.version),
+              },
+        ),
+    pull.merge ? repo.id : undefined,
   );
-  const report = pull.merge_requirements.code_owners ?? state.data;
-  if (
-    !report ||
-    (!report.path && !report.problem) ||
-    (report.base_oid && report.base_oid !== pull.base_oid) ||
-    (report.head_oid && report.head_oid !== pull.head_oid)
-  )
-    return null;
-  return <CodeOwnersSummary repo={repo} report={report} />;
+  const savedSource = pull.merge
+    ? endpoint(repo, `${resource}/source`)
+    : undefined;
+  function summary(report: CodeOwnersReport) {
+    if (
+      (!report.path && !report.problem) ||
+      (report.base_oid && report.base_oid !== pull.base_oid) ||
+      (report.head_oid && report.head_oid !== pull.head_oid)
+    )
+      return null;
+    return (
+      <CodeOwnersSummary
+        repo={repo}
+        report={report}
+        savedSource={savedSource}
+      />
+    );
+  }
+  if (pull.merge)
+    return (
+      <Result state={state} timingLabel="Code owners">
+        {summary}
+      </Result>
+    );
+  const report = gate ?? state.data;
+  return report ? summary(report) : null;
 }
 
 export function CodeOwnersSummary({
   repo,
   report,
   required = false,
+  savedSource,
 }: {
   repo: Repository;
   report: CodeOwnersReport;
   required?: boolean;
+  savedSource?: string;
 }) {
   const source =
-    report.path && report.base_oid
+    !savedSource && report.path && report.base_oid
       ? repoHref(repo, {
           rev: report.base_oid,
           kind: "Blob",
@@ -53,12 +82,14 @@ export function CodeOwnersSummary({
       : null;
   const pending = report.missing_paths;
   const title = report.problem
-    ? "Code owner review status unavailable"
+    ? savedSource
+      ? "Saved code owner coverage unavailable"
+      : "Code owner review status unavailable"
     : !report.affected_paths
       ? "No changed paths have code owners"
       : pending === 0
         ? "Code owner approvals complete"
-        : required
+        : required && pending !== undefined
           ? `Code owner approval required for ${pending} ${pending === 1 ? "path" : "paths"}`
           : `Code owners cover ${report.affected_paths} ${report.affected_paths === 1 ? "path" : "paths"}`;
   return (
@@ -75,6 +106,11 @@ export function CodeOwnersSummary({
           View base branch CODEOWNERS
         </Link>
       )}
+      {savedSource && report.path && !report.problem && (
+        <a className="w-fit underline" href={savedSource}>
+          View CODEOWNERS at merge
+        </a>
+      )}
       {report.invalid_lines > 0 && (
         <p className="m-0 text-muted-foreground">
           Skipped {report.invalid_lines}{" "}
@@ -83,9 +119,13 @@ export function CodeOwnersSummary({
       )}
       {report.groups.length > 0 && (
         <Disclosure
-          expanded={required && pending > 0}
+          expanded={required && pending !== undefined && pending > 0}
           summaryClassName="w-fit cursor-pointer"
-          summary={<>Code owner requirements</>}
+          summary={
+            savedSource
+              ? "Code owner rules at merge"
+              : "Code owner requirements"
+          }
         >
           <ul className="mt-2 grid list-none gap-2 p-0">
             {report.groups.map((group) => (
@@ -95,12 +135,9 @@ export function CodeOwnersSummary({
               >
                 <strong>{group.owners.join(", ")}</strong>
                 <span className="text-muted-foreground">
-                  {group.approved
-                    ? "Approved"
-                    : group.has_eligible_owner
-                      ? "Awaiting approval"
-                      : "No eligible owner"}
-                  {` · Line ${group.line}`}
+                  {group.approved === undefined
+                    ? `Line ${group.line}`
+                    : `${group.approved ? "Approved" : group.has_eligible_owner ? "Awaiting approval" : "No eligible owner"} · Line ${group.line}`}
                 </span>
                 <span className="font-mono text-xs">
                   {group.paths.join(", ")}

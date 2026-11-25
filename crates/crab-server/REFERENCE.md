@@ -3782,6 +3782,14 @@ required gate. Invalid pattern lines are skipped. Policy files must be regular
 UTF-8 Git blobs under 3 MiB, with up to 4,096 rules and 1,024 distinct owner
 references per comparison.
 
+On a merged PR, **Files changed** shows the rules from the recorded base
+commit and the paths they matched in the recorded comparison. The saved
+report omits approval counts and eligibility fields. **View CODEOWNERS at
+merge** opens the exact policy as text at
+`GET .../pulls/{number}/codeowners/source`. Both reads require current access
+to the PR repository and any source fork, including after source-branch
+deletion.
+
 Opening a ready PR or marking a draft ready requests its eligible code owners
 even on branches without a required-owner protection rule. Draft creation
 sends no requests. Requests appear in **Reviewers**, and the inbox notification

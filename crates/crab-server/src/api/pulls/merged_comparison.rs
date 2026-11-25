@@ -249,7 +249,7 @@ async fn read(
     read_admission::retain(result.unwrap_or_else(|response| response), admission)
 }
 
-fn remote_response(error: crab_remote_git::Error) -> Response {
+pub(super) fn remote_response(error: crab_remote_git::Error) -> Response {
     if matches!(
         crate::api::revalidation::shared_cause(&error),
         crab_remote_git::Error::SnapshotUnavailable | crab_remote_git::Error::ObjectNotFound { .. }
@@ -262,24 +262,27 @@ fn remote_response(error: crab_remote_git::Error) -> Response {
     ApiError::Remote(error).into_response()
 }
 
-struct Capture {
+pub(super) struct Capture {
     git: PullGit,
     fork: Option<(Arc<Repository>, Principal)>,
     base: ObjectId,
     head: ObjectId,
 }
 
-struct Operations {
-    head: OperationContext,
+pub(super) struct Operations {
+    pub(super) head: OperationContext,
     fork_base: Option<OperationContext>,
 }
 
 impl Operations {
-    fn base(&self) -> &OperationContext {
+    pub(super) fn base(&self) -> &OperationContext {
         self.fork_base.as_ref().unwrap_or(&self.head)
     }
 
-    async fn finish<T>(self, result: crab_remote_git::Result<T>) -> crab_remote_git::Result<T> {
+    pub(super) async fn finish<T>(
+        self,
+        result: crab_remote_git::Result<T>,
+    ) -> crab_remote_git::Result<T> {
         let result = match self.fork_base {
             Some(base) => base.finish(result).await,
             None => result,
@@ -289,7 +292,7 @@ impl Operations {
 }
 
 impl Capture {
-    async fn open(
+    pub(super) async fn open(
         server: &Server,
         principal: &Principal,
         repo: &Repository,
@@ -336,7 +339,7 @@ impl Capture {
         })
     }
 
-    async fn recheck(
+    pub(super) async fn recheck(
         &self,
         server: &Server,
         principal: &Principal,
@@ -355,7 +358,7 @@ impl Capture {
         Ok(())
     }
 
-    async fn operations(
+    pub(super) async fn operations(
         &self,
         kind: OperationKind,
         cancel: &CancellationToken,
@@ -372,15 +375,18 @@ impl Capture {
         Ok(Operations { head, fork_base })
     }
 
-    async fn tips(
+    pub(super) async fn base_snapshot(
+        &self,
+        ops: &Operations,
+    ) -> crab_remote_git::Result<RemoteGitSnapshot> {
+        self.git.base.snapshot_retained(self.base, ops.base()).await
+    }
+
+    pub(super) async fn tips(
         &self,
         ops: &Operations,
     ) -> crab_remote_git::Result<(RemoteGitSnapshot, RemoteGitSnapshot)> {
-        let base = self
-            .git
-            .base
-            .snapshot_retained(self.base, ops.base())
-            .await?;
+        let base = self.base_snapshot(ops).await?;
         let head = self
             .git
             .head()
@@ -389,7 +395,7 @@ impl Capture {
         Ok((base, head))
     }
 
-    async fn ancestor(
+    pub(super) async fn ancestor(
         &self,
         base: RemoteGitSnapshot,
         head: &RemoteGitSnapshot,

@@ -208,7 +208,9 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
   approvals before merge publication. Ready PR creation and transitions out
   of draft request owners and deliver deduplicated inbox notifications.
   The repository file browser links ownership to the rule at the displayed
-  commit. Verified email owner lookup remains open.
+  commit. Merged PRs show ownership from the saved comparison and open the
+  exact policy text after branch cleanup. Verified email owner lookup remains
+  open.
 
 - Team maintainers can distribute review requests by repository-scoped
   rotation or fewest open requests and exclude selected members from both

@@ -19,6 +19,12 @@ pub(super) async fn exercise(
     let repo = h.server.repositories.by_id(id).unwrap();
     let root = format!("/api/repos/{}/{}", repo.config.owner, repo.config.name);
     let pulls = format!("{root}/pulls");
+    let policy = "/proposal/ @upstream-owner\n";
+    git(upstream_work, &["checkout", "main"]).await;
+    std::fs::write(upstream_work.join("CODEOWNERS"), policy).unwrap();
+    git(upstream_work, &["add", "CODEOWNERS"]).await;
+    git(upstream_work, &["commit", "-m", "Own fork proposal paths"]).await;
+    git(upstream_work, &["push", upstream_remote, "main"]).await;
     let base = git(upstream_work, &["rev-parse", "main"]).await;
     let targets = [
         ("squash", "squash-target"),
@@ -331,6 +337,25 @@ pub(super) async fn exercise(
                     .await;
                 assert!(file["old"].is_null());
                 assert_eq!(file["new"]["text"], "second fork change");
+                let ownership = format!("{pulls}/{number}/codeowners");
+                let report = h.json(&ownership, fork_author).await;
+                assert_eq!(report["base_oid"], base);
+                assert_eq!(report["head_oid"], head);
+                assert_eq!(report["groups"][0]["owners"], json!(["@upstream-owner"]));
+                assert_eq!(report["affected_paths"], 3);
+                let saved_policy = h
+                    .http
+                    .get(format!("{}{ownership}/source", h.origin))
+                    .header(reqwest::header::COOKIE, fork_author)
+                    .send()
+                    .await
+                    .unwrap()
+                    .error_for_status()
+                    .unwrap()
+                    .text()
+                    .await
+                    .unwrap();
+                assert_eq!(saved_policy, policy);
                 let mut restoration = h.json(&branch_path, alice).await["branch"].clone();
                 assert_eq!(restoration["action"], "restore");
                 restoration["request_id"] = json!(Uuid::now_v7());
