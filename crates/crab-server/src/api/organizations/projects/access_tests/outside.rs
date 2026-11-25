@@ -284,6 +284,16 @@ async fn outside_project_grants_require_current_repository_access_and_redact_pri
     let version = access["version"].as_u64().unwrap();
     assert_eq!(
         project_command(&f.h, &f.root, &f.alice, role(f.guest, version, "write")).await["outcome"],
+        "rejected"
+    );
+    f.repository_grants(json!([{"subject":"bob-id","name":"Bob Outside","access":"read"}]))
+        .await;
+    assert_eq!(
+        guest_get(path.clone()).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        project_command(&f.h, &f.root, &f.alice, role(f.guest, version, "write")).await["outcome"],
         "applied"
     );
     assert_eq!(f.h.json(&path, &f.bob).await["can_manage"], true);
