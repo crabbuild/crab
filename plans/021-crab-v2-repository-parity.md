@@ -186,6 +186,9 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
   classic protections and matching repository or organization branch rulesets.
   The effective policy applies when preparing candidates and at Git publication,
   including retries of unpublished direct merges.
+  On required branches, writers can request **Merge when ready**. A durable
+  request waits for the exact head to pass current reviews and checks before
+  receiving a queue position and undergoing candidate CI.
   Required workflows can start automatically within the configured build limit.
   Candidate checks show the bound run and its GitHub Actions link. Repository
   settings choose merge commit, squash, or rebase for queued changes while

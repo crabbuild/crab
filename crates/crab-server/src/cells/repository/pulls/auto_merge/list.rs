@@ -218,6 +218,7 @@ mod tests {
                             comparison_revision: None,
                             method: MergeMethod::MergeCommit,
                             message: String::new(),
+                            when_ready: false,
                             queue: None,
                         },
                         queue: true,

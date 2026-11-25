@@ -219,10 +219,15 @@ async fn pull_view(
     )?;
     let auto_merge_configured =
         merge_methods.auto_merge_generation > 0 || merge_methods.merge_queue_generation > 0;
-    let merge_queued = pull.state == PullState::Open
-        && auto_merge::active_queue(server, repo, pull.number)
-            .await?
-            .is_some();
+    let automatic = if pull.state == PullState::Open {
+        auto_merge::current(server, repo, pull.number).await?
+    } else {
+        None
+    };
+    let merge_queued = automatic
+        .as_ref()
+        .is_some_and(|state| state.stopped.is_none() && state.job.queue.is_some());
+    let merge_queue_requested = automatic.is_some_and(|state| state.job.when_ready);
     let configured_methods = merge_methods.enabled;
     let merge_methods: Vec<_> = configured_methods
         .iter()
@@ -355,6 +360,7 @@ async fn pull_view(
         "bypass_merge_methods": bypass_merge_methods,
         "auto_merge_configured": auto_merge_configured,
         "merge_queued": merge_queued,
+        "merge_queue_requested": merge_queue_requested,
         "merge_queue_required": requirements.queue_required,
         "merge_requirements": {
             "bypass_options": if bypass_merge_methods.is_empty() { &[] } else { requirements.bypass_options.as_slice() },

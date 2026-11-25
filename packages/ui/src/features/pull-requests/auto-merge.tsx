@@ -45,6 +45,7 @@ const stoppedReasons = {
 interface Status {
   can_enable: boolean;
   can_enqueue?: boolean;
+  can_wait_for_queue?: boolean;
   queue_method?: MergeMethod;
   can_disable: boolean;
   request: {
@@ -54,10 +55,13 @@ interface Status {
     scheduled_by: string;
     stopped: keyof typeof stoppedReasons | null;
     queue?: boolean;
+    waiting_for_queue?: boolean;
     first?: boolean;
     testing?: boolean;
   } | null;
 }
+
+type Mode = "auto" | "queue" | "when_ready";
 
 export function AutoMerge({
   repo,
@@ -77,7 +81,7 @@ export function AutoMerge({
     version: number;
     base_oid: string;
     head_oid: string;
-    queue: boolean;
+    mode: Mode;
     queueMethod: MergeMethod;
     intent: string;
   }>();
@@ -97,7 +101,7 @@ export function AutoMerge({
     (confirmation.version !== pull.version ||
       confirmation.base_oid !== pull.base_oid ||
       confirmation.head_oid !== pull.head_oid ||
-      (confirmation.queue
+      (confirmation.mode !== "auto"
         ? confirmation.queueMethod !== queueMethod
         : !pull.merge_methods.includes(method)));
 
@@ -124,23 +128,28 @@ export function AutoMerge({
     };
   }, [active, save.pending, url]);
 
+  const refreshState =
+    scheduled &&
+    (scheduled.stopped === "merged" ||
+      ((scheduled.queue || scheduled.waiting_for_queue) && scheduled.stopped) ||
+      (scheduled.queue && !pull.merge_queued) ||
+      (scheduled.waiting_for_queue && !pull.merge_queue_requested))
+      ? scheduled.request_id +
+        ":" +
+        (scheduled.stopped ?? (scheduled.queue ? "queued" : "waiting"))
+      : undefined;
   useEffect(() => {
-    if (
-      (scheduled?.stopped === "merged" ||
-        (scheduled?.queue && scheduled.stopped)) &&
-      refreshed.current !== scheduled.request_id
-    ) {
-      refreshed.current = scheduled.request_id;
+    if (refreshState && refreshed.current !== refreshState) {
+      refreshed.current = refreshState;
       refresh();
     }
-  }, [refresh, scheduled]);
+  }, [refresh, refreshState]);
 
   async function change(action: "PUT" | "DELETE", input: object) {
     setMissing(false);
     const result = await save.run<Status | null>(url, action, input);
     setMissing(result === null);
     if (result) {
-      if (result.request?.queue) refresh();
       setStatus(result);
       setConfirmation(undefined);
     }
@@ -152,9 +161,14 @@ export function AutoMerge({
     !!value?.can_enqueue &&
     pull.branches_available &&
     !pull.merge_requirements.updates_restricted;
-  if (!value || (!scheduled && !canSchedule && !canEnqueue)) return null;
+  const canWait =
+    !!value?.can_wait_for_queue &&
+    pull.branches_available &&
+    !pull.merge_requirements.updates_restricted;
+  if (!value || (!scheduled && !canSchedule && !canEnqueue && !canWait))
+    return null;
 
-  function confirm(queue: boolean, button: HTMLButtonElement) {
+  function confirm(mode: Mode, button: HTMLButtonElement) {
     trigger.current = button;
     save.reset();
     setMissing(false);
@@ -164,39 +178,46 @@ export function AutoMerge({
       version: pull.version,
       base_oid: pull.base_oid,
       head_oid: pull.head_oid,
-      queue,
+      mode,
       queueMethod,
       intent: crypto.randomUUID(),
     });
   }
-  const enqueue = confirmation?.queue;
+  const whenReady = confirmation?.mode === "when_ready";
+  const enqueue = confirmation && confirmation.mode !== "auto";
   const recovering =
     missing ||
     (!!save.error && (save.status === undefined || save.status >= 500));
 
   return (
     <section
-      aria-label={scheduled?.queue ? "Merge queue" : "Auto-merge"}
+      aria-label={
+        scheduled?.queue || scheduled?.waiting_for_queue
+          ? "Merge queue"
+          : "Auto-merge"
+      }
       className="merge-footer grid gap-2"
     >
       {scheduled &&
         (active ? (
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <p>
+            <p aria-live="polite">
               <ClockIcon className="mr-1.5 inline" />{" "}
               <strong>
-                {scheduled.queue
-                  ? scheduled.first
-                    ? scheduled.testing
-                      ? "Testing merge candidate"
-                      : "Preparing merge candidate"
-                    : scheduled.testing
-                      ? "Testing with earlier queue entries"
-                      : "Waiting in the merge queue"
-                  : "Auto-merge enabled"}
+                {scheduled.waiting_for_queue
+                  ? "Waiting for merge requirements"
+                  : scheduled.queue
+                    ? scheduled.first
+                      ? scheduled.testing
+                        ? "Testing merge candidate"
+                        : "Preparing merge candidate"
+                      : scheduled.testing
+                        ? "Testing with earlier queue entries"
+                        : "Waiting in the merge queue"
+                    : "Auto-merge enabled"}
               </strong>{" "}
               ·{" "}
-              {scheduled.queue
+              {scheduled.queue || scheduled.waiting_for_queue
                 ? "Head"
                 : mergeMethod(scheduled.method).label + " at"}{" "}
               <code>{short(scheduled.head_oid)}</code> ·{" "}
@@ -243,22 +264,26 @@ export function AutoMerge({
                   void change("DELETE", { request_id: scheduled.request_id })
                 }
               >
-                {scheduled.queue
-                  ? "Remove from merge queue"
-                  : "Disable auto-merge"}
+                {scheduled.waiting_for_queue
+                  ? "Cancel merge when ready"
+                  : scheduled.queue
+                    ? "Remove from merge queue"
+                    : "Disable auto-merge"}
               </Button>
             )}
           </div>
         ) : (
           scheduled.stopped && (
             <p role="status">
-              {scheduled.queue && scheduled.stopped === "canceled"
-                ? "Removed from the merge queue."
-                : scheduled.queue && scheduled.stopped === "disabled"
-                  ? "The merge queue was disabled in repository settings."
-                  : scheduled.queue && scheduled.stopped === "method_disabled"
-                    ? "The queue merge method changed. Add the pull request again to test it."
-                    : stoppedReasons[scheduled.stopped]}
+              {scheduled.waiting_for_queue && scheduled.stopped === "canceled"
+                ? "Merge when ready canceled."
+                : scheduled.queue && scheduled.stopped === "canceled"
+                  ? "Removed from the merge queue."
+                  : scheduled.queue && scheduled.stopped === "disabled"
+                    ? "The merge queue was disabled in repository settings."
+                    : scheduled.queue && scheduled.stopped === "method_disabled"
+                      ? "The queue merge method changed. Add the pull request again to test it."
+                      : stoppedReasons[scheduled.stopped]}
             </p>
           )
         ))}
@@ -272,13 +297,13 @@ export function AutoMerge({
           }
         />
       )}
-      {(canSchedule || canEnqueue) && (
+      {(canSchedule || canEnqueue || canWait) && (
         <div className="flex flex-wrap gap-2">
           {canSchedule && (
             <Button
               variant="outline"
               size="sm"
-              onClick={(event) => confirm(false, event.currentTarget)}
+              onClick={(event) => confirm("auto", event.currentTarget)}
             >
               Enable auto-merge
             </Button>
@@ -287,9 +312,18 @@ export function AutoMerge({
             <Button
               variant="outline"
               size="sm"
-              onClick={(event) => confirm(true, event.currentTarget)}
+              onClick={(event) => confirm("queue", event.currentTarget)}
             >
               Add to merge queue
+            </Button>
+          )}
+          {canWait && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={(event) => confirm("when_ready", event.currentTarget)}
+            >
+              Merge when ready
             </Button>
           )}
         </div>
@@ -310,10 +344,20 @@ export function AutoMerge({
         >
           <DialogHeader>
             <DialogTitle>
-              {enqueue ? "Add to merge queue" : "Enable auto-merge"}
+              {whenReady
+                ? "Merge when ready"
+                : enqueue
+                  ? "Add to merge queue"
+                  : "Enable auto-merge"}
             </DialogTitle>
             <DialogDescription>
-              {enqueue ? (
+              {whenReady ? (
+                <>
+                  Once the current reviews and checks pass, Crab will add head{" "}
+                  <code>{short(confirmation.head_oid)}</code> to the merge queue
+                  and test it against the latest base.
+                </>
+              ) : enqueue ? (
                 <>
                   Crab will test head{" "}
                   <code>{short(confirmation?.head_oid ?? pull.head_oid)}</code>{" "}
@@ -404,11 +448,17 @@ export function AutoMerge({
               disabled={save.pending || stale}
               onClick={() => {
                 if (!confirmation) return;
-                const { intent, queue, queueMethod, ...comparison } =
+                const { intent, mode, queueMethod, ...comparison } =
                   confirmation;
-                const input = queue
-                  ? { ...comparison, queue, method: queueMethod }
-                  : { ...comparison, method, message };
+                const input =
+                  mode !== "auto"
+                    ? {
+                        ...comparison,
+                        queue: true,
+                        method: queueMethod,
+                        ...(whenReady ? { when_ready: true } : {}),
+                      }
+                    : { ...comparison, method, message };
                 void change("PUT", {
                   ...input,
                   request_id: submission({ intent, ...input }),
@@ -417,10 +467,14 @@ export function AutoMerge({
             >
               {save.pending
                 ? enqueue
-                  ? "Adding…"
+                  ? whenReady
+                    ? "Scheduling…"
+                    : "Adding…"
                   : "Enabling…"
                 : enqueue
-                  ? "Confirm merge queue entry"
+                  ? whenReady
+                    ? "Confirm merge when ready"
+                    : "Confirm merge queue entry"
                   : "Confirm auto-merge"}
             </Button>
           </DialogFooter>

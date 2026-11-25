@@ -81,6 +81,9 @@ merge admission and publication under the per-PR merge lease. FIFO queue
 entries share this worker. The Cell assigns order per target branch, admits
 tests within the configured build window, and guards merge reservation for
 the first entry. `auto_merge/queue.rs` reconciles candidate checks and retries.
+A merge-when-ready request waits outside the queue index. The worker rechecks
+its exact head and current eligibility under the ref and ruleset leases.
+The Cell allocates its position and transitions the active request together.
 An administrator's priority change advances the branch queue's order
 revision in the same Cell transaction as the move. Candidate sources, CI
 admission, and begin-merge compare that revision so a stale worker cannot

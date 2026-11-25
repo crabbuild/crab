@@ -4838,6 +4838,14 @@ To offer the queue on other branches, enable **Allow merge queue** under
 head checks and reviews, select **Add to merge queue**. The target branch must
 require at least one check.
 
+When the branch requires the queue and the pull request is still blocked by
+reviews or checks, a writer can select **Merge when ready**. The request
+survives reload and worker restart. Crab gives it a queue position once the
+exact head satisfies current requirements, then builds and checks a candidate
+against the live base and earlier queue entries. A new head needs fresh
+confirmation. Writers can cancel from the pull request before it enters the
+queue.
+
 In the same settings section, **Queue merge method** chooses the repository
 default of merge commit, squash, or rebase. It is independent of the enabled
 direct merge methods and defaults to merge commit. **Branch queue overrides**
@@ -4917,6 +4925,9 @@ timeout for the target branch. It identifies the first entry and shows
 whether candidate preparation has started. Disabling
 optional queues invalidates optional entries, including across off/on changes.
 Branches that require the queue keep their entries.
+On a required branch, add `when_ready: true` to record consent and wait for the
+head requirements. The request reports `waiting_for_queue: true` until it joins
+the queue with the same ID. A waiting request takes no position or build slot.
 
 ### Manage labels and assignees
 

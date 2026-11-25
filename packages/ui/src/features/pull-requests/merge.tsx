@@ -537,7 +537,10 @@ export function MergePanel({
           )}
         </div>
       )}
-      {(pull.auto_merge_configured || queueRequired || queued) && (
+      {(pull.auto_merge_configured ||
+        pull.merge_queue_requested ||
+        queueRequired ||
+        queued) && (
         <AutoMerge
           key={`${repo.id}:${pull.number}`}
           repo={repo}

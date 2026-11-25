@@ -74,6 +74,7 @@ export interface PullRequest extends PullSummary {
   can_merge: boolean;
   auto_merge_configured?: boolean;
   merge_queued?: boolean;
+  merge_queue_requested?: boolean;
   merge_queue_required?: boolean;
   branches_available: boolean;
   merge: {
