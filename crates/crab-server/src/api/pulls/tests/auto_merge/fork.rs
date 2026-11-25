@@ -9,7 +9,7 @@ async fn fork_auto_merge_requires_every_push_to_be_attributed_to_an_upstream_wri
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Chromium and the built embedded UI"]
-async fn native_browser_read_only_contributor_opens_a_pull_from_their_fork() {
+async fn native_browser_selects_a_writable_fork_from_the_upstream_comparison() {
     exercise(Some(Browser::new("fork-contribution"))).await;
 }
 
@@ -187,22 +187,27 @@ async fn exercise(browser: Option<Browser>) {
     };
     if let Some(browser) = &browser {
         browser
-            .run(&["open", &format!("{}/{fork_owner}/upstream", h.origin)])
+            .run(&["open", &format!("{}/{owner}/upstream/pulls", h.origin)])
             .await;
         browser.sign_in().await;
-        browser
-            .run(&["wait", "--text", "You recently pushed"])
-            .await;
+        let click = async |name: &str| {
+            browser.run(&["wait", "--text", name]).await;
+            browser
+                .run(&["find", "role", "button", "click", "--name", name, "--exact"])
+                .await;
+        };
+        click("New pull request").await;
+        click("Compare across forks").await;
+        click("upstream (your fork)").await;
         browser
             .run(&[
-                "find",
-                "role",
-                "link",
-                "click",
-                "--name",
-                "Compare & pull request for feature",
-                "--exact",
+                "wait",
+                "--fn",
+                "!document.querySelector('[role=dialog]') && !!document.querySelector('#fork-compare-head:enabled')",
             ])
+            .await;
+        browser
+            .choose_select("#fork-compare-head", "refs/heads/feature")
             .await;
         browser.run(&["wait", "#discussion-title"]).await;
         browser
@@ -243,6 +248,16 @@ async fn exercise(browser: Option<Browser>) {
             .repositories
             .get(&(other_owner, "upstream".into()))
             .unwrap();
+        let forks = h
+            .json(&format!("{root}/pulls/head-forks?q=UPSTREAM"), &bob)
+            .await;
+        assert_eq!(
+            forks,
+            json!({
+                "items":[{"id":fork_id,"owner":fork_owner,"name":"upstream","owned":true}],
+                "truncated":false,
+            })
+        );
         let mut unowned = request(&initial_head);
         unowned["head_repository"] = json!(other_fork.id);
         assert!(matches!(

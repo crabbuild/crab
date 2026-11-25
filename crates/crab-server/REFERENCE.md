@@ -1137,6 +1137,12 @@ fork branch with an upstream branch. The file list and diffs show changes
 from the common Git ancestor to the fork tip. Changes made only upstream
 are excluded. Branch selection does not write refs or copy Git objects.
 
+From the upstream repository, choose **New pull request** and then
+**Compare across forks**. Search by owner or repository name and select a
+fork you can write to. Your base branch, draft, and previous branch choice
+stay in the form when switching between head repositories. The
+`GET .../pulls/head-forks?q=...` endpoint serves the searchable choices.
+
 For the comparison API, send `GET /api/repos/{owner}/{name}/changes` with
 `rev=refs/heads/{fork-branch}`, `base=refs/heads/{upstream-branch}`,
 `merge_base=true`, and `upstream={source-repository-uuid}`. Crab verifies

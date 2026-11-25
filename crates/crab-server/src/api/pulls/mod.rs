@@ -38,6 +38,7 @@ mod codeowners;
 pub(crate) use branch_update::authorize_branch_update;
 pub(super) mod comments;
 pub(super) mod git;
+mod head_forks;
 mod merged_comparison;
 pub(super) use git::review_head;
 mod merge;
@@ -133,6 +134,10 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .route(
             "/api/repos/{owner}/{name}/pulls/open-comparison",
             get(open_comparison::find),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/pulls/head-forks",
+            get(head_forks::list),
         )
         .route(
             "/api/repos/{owner}/{name}/pulls/recent-pushes",

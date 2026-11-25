@@ -5,7 +5,7 @@ import type { DiffReviewState } from "./model";
 import { ChangeWorkspace } from "./workspace";
 
 export function usePullComparison(
-  repo: Pick<Repository, "owner" | "name">,
+  repo: Pick<Repository, "id" | "owner" | "name">,
   base: string,
   head: string,
   upstream?: string,
@@ -22,6 +22,7 @@ export function usePullComparison(
             upstream,
           })
         : null,
+    repo.id,
   );
 }
 

@@ -88,7 +88,9 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
 - Fork readers can compare a selected branch against an upstream branch in the
   browser. Changed files use the common Git ancestor and identify both captured
   tips. Contributors with Write access to the fork and Read access upstream can
-  open a pull request from that comparison or a recent push to the fork. Teams
+  open a pull request from that comparison or a recent push to the fork. The
+  upstream compare form also offers searchable writable forks and preserves the
+  draft when the contributor switches head repositories. Teams
   can review the exact fork commit, report scoped Crab checks upstream, and publish
   merge commits, squash, rebase, or fast-forward through the upstream's merge
   policy. Writers can apply review suggestions to the fork branch, with one
