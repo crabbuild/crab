@@ -157,17 +157,19 @@ export function Settings({
           </div>
         )
       ) : section === "members" ? (
-        repo.forked_from ? (
+        repo.fork ? (
           <div className="notice">
             This fork inherits access from the source repository.{" "}
-            <Link
-              href={repoHref(repo.forked_from, {
-                view: "settings",
-                section: "members",
-              })}
-            >
-              Manage source access
-            </Link>
+            {repo.forked_from && (
+              <Link
+                href={repoHref(repo.forked_from, {
+                  view: "settings",
+                  section: "members",
+                })}
+              >
+                Manage source access
+              </Link>
+            )}
           </div>
         ) : (
           <MemberSettings repo={repo} csrf={csrf} identity={identity} />

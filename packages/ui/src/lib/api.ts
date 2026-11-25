@@ -37,6 +37,7 @@ export interface GitImportJob {
 }
 
 export interface Repository {
+  fork?: boolean;
   forked_from?: { id: string; owner: string; name: string };
   can_fork?: boolean;
   can_fork_to_organization?: boolean;

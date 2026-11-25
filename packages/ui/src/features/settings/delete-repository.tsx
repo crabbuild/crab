@@ -112,7 +112,7 @@ function DeleteForm({
         }
       }}
     >
-      {repo.forked_from ? (
+      {repo.fork ? (
         <p className="text-sm">
           The upstream repository stays available. This fork can’t be restored
           separately.

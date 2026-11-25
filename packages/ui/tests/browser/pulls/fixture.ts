@@ -285,6 +285,7 @@ export async function mockPullRequest(
             {
               id: lifecycle.repositoryId,
               organization_id: lifecycle.organizationId,
+              fork: !!lifecycle.forkedFrom,
               forked_from: lifecycle.forkedFrom,
               owner: "team",
               name: "project",

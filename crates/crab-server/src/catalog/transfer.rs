@@ -299,6 +299,7 @@ impl CatalogStore {
             // Direct collaborators remain. Namespace-owned grants are replaced
             // at the same commit as the address, including former SSO groups.
             new.groups.clear();
+            new.fork_baseline = super::RepositoryBaseline::Organization;
             // A later return to the same organization cannot revive an old
             // automation grant. Ordinary renames retain their ownership epoch.
             new.ownership_epoch = new.name_version();

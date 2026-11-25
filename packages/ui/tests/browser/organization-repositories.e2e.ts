@@ -453,6 +453,7 @@ test("a personal fork keeps its job scope across reload and resume", async ({
     owner: "user-personal",
     name: "library",
     visibility: "private",
+    fork: true,
     forked_from: { id, owner, name: "library" },
     protected_branches: [],
     access: "write",
@@ -460,6 +461,7 @@ test("a personal fork keeps its job scope across reload and resume", async ({
   const main = { name: "refs/heads/main", oid: "a".repeat(40) };
   const feature = { name: "refs/heads/feature", oid: "b".repeat(40) };
   const forkRefs = [main];
+  let upstreamAccess = true;
   let copyRequestId: string | undefined;
   let jobId: string | undefined;
   let reads = 0;
@@ -502,7 +504,12 @@ test("a personal fork keeps its job scope across reload and resume", async ({
       return route.fulfill({
         json: {
           repositories: [
-            searchParams.get("owner") === fork.owner ? fork : source,
+            searchParams.get("owner") === fork.owner
+              ? {
+                  ...fork,
+                  forked_from: upstreamAccess ? fork.forked_from : undefined,
+                }
+              : source,
           ],
         },
       });
@@ -538,6 +545,15 @@ test("a personal fork keeps its job scope across reload and resume", async ({
     }
     if (pathname === `/api/repos/${owner}/library/forks`) {
       expect(req.headers()["x-crab-repository-id"]).toBe(id);
+      if (req.method() === "GET") {
+        const query = searchParams.get("q");
+        return route.fulfill({
+          json: {
+            repositories: query === "missing" ? [] : [{ ...fork, fork: true }],
+            next: null,
+          },
+        });
+      }
       const input = req.postDataJSON();
       expect(input).toEqual({
         request_id: expect.any(String),
@@ -603,6 +619,28 @@ test("a personal fork keeps its job scope across reload and resume", async ({
   await page.getByRole("button", { name: "Resume fork", exact: true }).click();
   await expect(page).toHaveURL(/\/user-personal\/library$/);
   expect(reads).toBeGreaterThan(0);
+  await page.getByRole("link", { name: "View forks" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Forks", exact: true }),
+  ).toBeVisible();
+  const results = page.getByRole("list", { name: "Repository results" });
+  const forkResult = results.getByRole("link", {
+    name: "user-personal / library",
+  });
+  await expect(forkResult).toBeVisible();
+  const directorySearch = page.getByRole("searchbox", {
+    name: "Search repositories",
+  });
+  await directorySearch.fill("missing");
+  await directorySearch.press("Enter");
+  await expect(
+    page.getByText("No repositories match this search."),
+  ).toBeVisible();
+  await page.getByRole("link", { name: "Clear search" }).click();
+  await expect(forkResult).toBeVisible();
+  await expectNoAccessibilityViolations(page);
+  await forkResult.click();
+  await expect(page).toHaveURL(/\/user-personal\/library$/);
   await page.goto(`/${fork.owner}/library/branches`);
   await page.getByRole("button", { name: "Copy from upstream" }).click();
   const copyDialog = page.getByRole("dialog", {
@@ -630,4 +668,16 @@ test("a personal fork keeps its job scope across reload and resume", async ({
   await expect(
     page.getByRole("link", { name: "feature", exact: true }),
   ).toBeVisible();
+  upstreamAccess = false;
+  await page.goto(`/${fork.owner}/library`);
+  await expect(page.getByText("Private fork", { exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "View forks" })).toHaveCount(0);
+  await expect(page.getByText("Forked from")).toHaveCount(0);
+  await page.goto(`/${fork.owner}/library/branches`);
+  await expect(
+    page.getByRole("link", { name: "feature", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Copy from upstream" }),
+  ).toHaveCount(0);
 });

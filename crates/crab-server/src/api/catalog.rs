@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use axum::{
     Extension, Json, Router,
@@ -105,6 +108,7 @@ pub(super) async fn list(
         matches = visible(&server, &principal, address, selection.organization).await?;
     }
     let mut repositories = Vec::new();
+    let mut recheck = HashSet::new();
     for VisibleRepository {
         repository,
         principal: current,
@@ -136,6 +140,7 @@ pub(super) async fn list(
                 && (repository.organization.is_some() || crate::catalog::is_personal_namespace(&repository.config.owner)),
             "public_read_only": public_reader,
             "can_maintain": current.can_maintain(repository.id),
+            "fork": repository.forked_from.is_some(),
             "can_fork": (principal.is_user() || principal.is_local()) && forking.is_some_and(|(enabled, policy)| enabled && policy.allowed),
             "can_fork_to_organization": organization_owner && forking.is_some_and(|(enabled, policy)| enabled && policy.allowed),
             "protection_version": protections.version,
@@ -158,53 +163,60 @@ pub(super) async fn list(
         if !topics.is_empty() {
             view["topics"] = json!(topics);
         }
-        if let Some(source) = repository
-            .forked_from
-            .and_then(|id| server.repositories.by_id(id))
+        if repository.forked_from.is_some()
+            || (!principal.is_local()
+                && (repository.owning_organization().is_some()
+                    || !topics.is_empty()
+                    || visibility.is_public()))
         {
-            view["forked_from"] = json!({
-                "id": source.id, "owner": source.config.owner, "name": source.config.name,
-            });
+            recheck.insert(repository.id);
+            recheck.extend(repository.forked_from);
         }
-        repositories.push(view);
+        repositories.push((repository, view));
     }
-    let needs_recheck = |repo: &Value| {
-        repo.get("organization_id").is_some()
-            || repo.get("forked_from").is_some()
-            || repo.get("topics").is_some()
-            || repo["visibility"] == "public"
-    };
-    if !principal.is_local() && repositories.iter().any(needs_recheck) {
-        // Recheck access and topics after potentially slow settings reads.
-        let current: std::collections::HashMap<_, _> =
-            visible(&server, &principal, address, selection.organization)
+    if !recheck.is_empty() {
+        // Fork access and source access can differ. Read both grants from the
+        // same fresh catalog snapshot before exposing any upstream address.
+        let current: HashMap<_, _> =
+            visible_matching(&server, &principal, None, |repo| recheck.contains(&repo.id))
                 .await?
                 .into_iter()
-                .map(|visible| (visible.repository.id.to_string(), visible))
+                .map(|visible| (visible.repository.id, visible))
                 .collect();
-        repositories.retain_mut(|repo| {
-            if !needs_recheck(repo) {
+        repositories.retain_mut(|(original, view)| {
+            if !recheck.contains(&original.id) {
                 return true;
             }
-            let Some(visible) = repo["id"].as_str().and_then(|id| current.get(id)) else {
+            let Some(visible) = current.get(&original.id) else {
                 return false;
             };
-            if repo["public_read_only"] != visible.principal.is_public_reader(visible.repository.id)
-                || repo.get("forked_from").is_some() != visible.repository.forked_from.is_some()
+            let fresh = &visible.repository;
+            if view["public_read_only"] != visible.principal.is_public_reader(fresh.id)
+                || fresh.config.owner != original.config.owner
+                || fresh.config.name != original.config.name
+                || fresh.ownership_epoch != original.ownership_epoch
+                || fresh.forked_from != original.forked_from
             {
                 return false;
             }
-            if let Some(fields) = repo.as_object_mut() {
+            if let Some(fields) = view.as_object_mut() {
                 fields.insert("visibility".into(), json!(visible.visibility));
                 if visible.topics.is_empty() {
                     fields.remove("topics");
                 } else {
                     fields.insert("topics".into(), json!(visible.topics));
                 }
+                if let Some(source) = fresh.forked_from.and_then(|id| current.get(&id)) {
+                    let source = &source.repository;
+                    fields.insert("forked_from".into(), json!({
+                        "id": source.id, "owner": source.config.owner, "name": source.config.name,
+                    }));
+                }
             }
             true
         });
     }
+    let repositories: Vec<_> = repositories.into_iter().map(|(_, view)| view).collect();
     Ok(Json(json!({"repositories":repositories})))
 }
 
@@ -400,6 +412,7 @@ pub(super) async fn visible_matching(
 
 pub(super) fn namespace_routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
+        .route("/api/repos/{owner}/{name}/forks", get(forks))
         .route(
             "/api/repos/creation",
             get(creation)
@@ -414,6 +427,26 @@ pub(super) fn namespace_routes(server: Arc<Server>) -> Router<Arc<Server>> {
                 .layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
         )
         .route_layer(middleware::from_fn_with_state(server, app::admit))
+}
+
+async fn forks(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path(key): Path<(String, String)>,
+    Query(search): Query<Search>,
+) -> app::Result<Json<Value>> {
+    let repository = app::repository(&server, &principal, &key)?;
+    let current = app::membership(&server, &principal, &repository).await?;
+    let viewer = current
+        .principal
+        .related_catalog(repository.id)
+        .ok_or(app::Error::NotFound)?;
+    let result =
+        catalog_browse::list(&server, &viewer, Scope::Forks(repository.id), search).await?;
+    // Listing a fork network needs both source access and an independent grant
+    // for every result. A concurrent source revocation invalidates the page.
+    app::membership(&server, &principal, &repository).await?;
+    Ok(result)
 }
 
 fn namespace(principal: &Principal) -> app::Result<String> {

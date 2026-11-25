@@ -232,26 +232,48 @@ where
     F: FnOnce(CancellationToken) -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
 {
-    let Some(destination) = destination.filter(|id| repository.organization != Some(*id)) else {
-        return with_ownership_lease(server, repository, work).await;
+    with_destination_ruleset_leases(
+        server,
+        RulesetScope::Repository(repository),
+        destination,
+        &server.cancellation,
+        |cancel| async move { work(cancel).await.map_err(OwnershipLeaseError::Application) },
+    )
+    .await
+    .map_err(OwnershipLeaseError::into_application)
+}
+
+pub(crate) async fn with_destination_ruleset_leases<T, E, F, Fut>(
+    server: &Server,
+    source: RulesetScope<'_>,
+    destination: Option<uuid::Uuid>,
+    cancel: &CancellationToken,
+    work: F,
+) -> std::result::Result<T, E>
+where
+    E: From<Error> + From<crab_remote::publication::Error>,
+    F: FnOnce(CancellationToken) -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<T, E>>,
+{
+    let source_organization = match &source {
+        RulesetScope::Organization(id) => Some(*id),
+        RulesetScope::Repository(repo) => repo.organization,
     };
-    let source = RulesetScope::Repository(repository);
+    let Some(destination) = destination.filter(|id| source_organization != Some(*id)) else {
+        return with_ruleset_lease(server, source, cancel, work).await;
+    };
     let target = RulesetScope::Organization(destination);
     // Distinct organization scopes are acquired in UUID order even for
-    // opposing transfers. A personal repository scope always comes last.
-    let (first, second) = if repository.organization.is_some_and(|id| id < destination) {
+    // opposing operations. A personal repository scope always comes last.
+    let (first, second) = if source_organization.is_some_and(|id| id < destination) {
         (source, target)
     } else {
         (target, source)
     };
-    with_ruleset_lease(server, first, &server.cancellation, |cancel| async move {
-        with_ruleset_lease(server, second, &cancel, |nested| async move {
-            work(nested).await.map_err(OwnershipLeaseError::Application)
-        })
-        .await
+    with_ruleset_lease(server, first, cancel, |cancel| async move {
+        with_ruleset_lease(server, second, &cancel, work).await
     })
     .await
-    .map_err(OwnershipLeaseError::into_application)
 }
 
 pub(crate) async fn require_no_issue_reservations(

@@ -196,16 +196,10 @@ impl InternalGit {
     pub(crate) async fn principal(self, server: &Server) -> Principal {
         match self {
             Self::Receive(grant) => Principal::import(grant),
-            Self::Fetch(grant) => {
-                if grant.writer.verify().await.is_ok()
-                    && let Ok((source, principal)) = grant.fork.current(server).await
-                    && repository_route(&source) == grant.route
-                {
-                    principal.scoped_to_repository(Some(source.id))
-                } else {
-                    Principal::anonymous()
-                }
-            }
+            Self::Fetch(grant) => grant
+                .principal(server)
+                .await
+                .unwrap_or_else(|_| Principal::anonymous()),
         }
     }
 }
@@ -214,6 +208,21 @@ pub(crate) struct FetchGrant {
     route: String,
     writer: Arc<jobs::Writer>,
     fork: Arc<ForkSource>,
+    destination: Option<OrganizationOwner>,
+}
+
+impl FetchGrant {
+    async fn principal(&self, server: &Server) -> Result<Principal, ImportError> {
+        self.writer.verify().await?;
+        if let Some(owner) = self.destination {
+            owner.check(server).await?;
+        }
+        let (source, principal) = self.fork.current(server).await?;
+        if repository_route(&source) != self.route {
+            return Err(ImportError::NotFound);
+        }
+        Ok(principal.scoped_to_repository(Some(source.id)))
+    }
 }
 
 fn repository_route(repository: &Repository) -> String {
@@ -250,10 +259,11 @@ impl ReceiveGrant {
     pub(crate) async fn active(&self, server: &Server) -> bool {
         let result = async {
             self.writer.verify().await?;
+            if let Some(owner) = self.organization {
+                owner.check(server).await?;
+            }
             if let Some(fork) = &self.fork {
                 fork.current(server).await?;
-            } else if let Some(owner) = self.organization {
-                owner.check(server).await?;
             }
             Ok::<_, ImportError>(())
         }

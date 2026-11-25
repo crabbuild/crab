@@ -784,10 +784,11 @@ and configure it in **Settings → Member privileges**. Updates carry the saved
 By default only owners can create, transfer, or delete repositories, and
 members have no base access. Owners review changes to base repository permissions
 before saving them in the browser. Current organization members receive those
-permissions in existing and new repositories. Existing private forks retain
-the base permission captured when they were published. Outside collaborators
-keep their repository grants. The highest applicable organization, repository,
-and group role applies subject to credential limits. The People repository
+permissions in existing and new repositories. Private forks and detached
+organization forks retain the base permission captured when they were
+published. Outside collaborators keep their repository grants. The highest
+applicable organization, repository, and group role applies subject to
+credential limits. The People repository
 access inspector shows the baseline separately.
 
 New organization repositories start with the branch name configured in Member
@@ -832,7 +833,9 @@ already downloaded remain available to their recipients.
 
 Publishing a repository detaches its existing private forks in the same
 catalog update. They keep their private visibility and current repository
-grants. Pending fork jobs must settle before the repository can become public.
+grants. A detached organization fork keeps its captured base permission until
+it changes ownership. A detached personal fork belongs to its individual
+owner. Pending fork jobs must settle before the repository can become public.
 
 `GET /api/repositories/{id}/visibility` returns the current setting and
 eligibility. Send `version`, `value` (`public` or `private`), and the exact
@@ -1107,7 +1110,9 @@ publishing refs, Crab copies and verifies reachable Git LFS payloads. For native
 Crab Xet files, it verifies the shared shard and xorb data and writes the
 selected file bindings into the fork's own catalog. If content is missing or
 corrupt, repair it in the source and resume the fork job. The ready fork's
-Code view links back to the source. You can clone the fork and push independent
+Code view links back to the source when you can read it. The repository detail
+sets `fork: true` for an attached fork and includes `forked_from` only when the
+viewer can read the source. You can clone the fork and push independent
 changes with its own repository-scoped Git token.
 
 Organization forks inherit current source members, OIDC groups, and organization
@@ -1117,7 +1122,7 @@ Write access while they have a qualifying fork grant. Direct grants to other
 individual collaborators apply to the source repository. The upstream
 organization's rulesets govern private forks, including initial Git publication.
 
-Both private fork destinations capture the organization's base repository
+Both private fork destinations capture the source repository's effective base
 permission when the fork becomes available. The captured permission applies to
 current organization members. Forks published before this field existed have
 no captured base permission. Current team and individually applicable grants
@@ -1143,6 +1148,13 @@ Personal forks use the caller's `/api/imports/git/{id}` status and resume routes
 Organization forks use the organization import routes and require a current
 owner. Jobs verify the pinned refs and current source access and policies
 before making the fork visible.
+**View forks** on the upstream repository or a fork opens the upstream
+repository's **Forks** page. It lists readable direct forks, newest first, with
+search, archive filters, and sorting. `GET /api/repos/{owner}/{name}/forks`
+uses repository catalog search parameters `q`, `limit`, and `after` and returns
+`{repositories, next}`. The viewer needs current access to both the upstream
+repository and each result. Retired forks stay out of the list.
+
 Repository admins can update the source policy with `PUT /api/repositories/{id}/forking`
 and `{version, allowed}`. The exact repository lookup returns the current
 setting and the organization policy to repository admins. Deploy the updated

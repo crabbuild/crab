@@ -136,7 +136,6 @@ impl ImportAccount {
         let access = Arc::new(ForkSource {
             source,
             organization,
-            owner: self.organization,
             principal: self.principal.clone(),
         });
         access.current(server).await?;
@@ -170,7 +169,6 @@ impl ImportAccount {
 pub(super) struct ForkSource {
     pub(super) source: Uuid,
     pub(super) organization: Uuid,
-    owner: Option<OrganizationOwner>,
     principal: Principal,
 }
 
@@ -180,9 +178,6 @@ impl ForkSource {
         server: &Server,
     ) -> Result<(Arc<Repository>, Principal), ImportError> {
         app::account(&self.principal).map_err(|_| ImportError::NotFound)?;
-        if let Some(owner) = self.owner {
-            owner.check(server).await?;
-        }
         let catalog = server.catalog().ok_or(ImportError::Unavailable)?;
         let (document, _) = catalog
             .load_snapshot()
@@ -198,8 +193,8 @@ impl ForkSource {
             .repositories
             .by_id(record.id)
             .ok_or(ImportError::NotFound)?;
-        // The fork grant rechecks the source account against the catalog.
-        // The import credential being verified only authorizes the destination.
+        // Recheck the signed-in account independently of its destination
+        // grant. An import credential never confers upstream read access.
         let membership = app::catalog_membership(server, &self.principal, &repository)
             .await
             .map_err(ImportError::organization)?;

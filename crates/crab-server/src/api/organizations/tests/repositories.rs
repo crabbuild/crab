@@ -893,7 +893,10 @@ async fn private_fork_recovers_git_publication_and_uses_live_source_permissions(
         .await;
     assert_eq!(detached["repositories"][0]["visibility"], "private");
     assert_eq!(detached["repositories"][0]["id"], json!(fork_id));
+    assert_eq!(detached["repositories"][0]["fork"], false);
     assert!(detached["repositories"][0].get("forked_from").is_none());
+    assert_eq!(detached["repositories"][0]["access"], "read");
+    assert_eq!(detached["repositories"][0]["can_admin"], false);
     let denied = h
         .http
         .get(format!("{}{fork}/refs", h.origin))

@@ -37,6 +37,7 @@ import {
   SidebarCollapseIcon,
   TagIcon,
   ProjectIcon,
+  RepoForkedIcon,
   SearchIcon,
 } from "@primer/octicons-react";
 import {
@@ -111,6 +112,11 @@ const Settings = lazy(() =>
 );
 const RepositoryCodeSearch = lazy(() => import("./code-search"));
 const ForkComparison = lazy(() => import("./fork-compare"));
+const BrowseRepositories = lazy(() =>
+  import("./catalog-browse").then((module) => ({
+    default: module.BrowseRepositories,
+  })),
+);
 const DEFAULT_TREE_PANE_WIDTH = 320;
 const MIN_TREE_PANE_WIDTH = 240;
 const MAX_TREE_PANE_WIDTH = 640;
@@ -161,14 +167,22 @@ export function RepositoryPage({
     (view === "pulls" && route?.pull !== "new" && !route?.action);
   const historyBase = route?.since;
   const canWrite = repo.access === "write" && !repo.archived;
+  const organizationId = repo.organization_id;
   const forkSource = repo.forked_from;
+  const forkNetwork =
+    !publicReader &&
+    repo.visibility !== "public" &&
+    (repo.fork ? forkSource : organizationId ? repo : undefined);
+  const canCreateFork =
+    repo.can_fork && organizationId && identity && !repo.archived;
   const refs = useRequest<Refs>(
     view === "projects" ||
       view === "issues" ||
       view === "labels" ||
       view === "milestones" ||
       view === "properties" ||
-      view === "activity"
+      view === "activity" ||
+      view === "forks"
       ? null
       : endpoint(repo, "refs"),
   );
@@ -513,17 +527,21 @@ export function RepositoryPage({
           </Button>
         )}
       </div>
-      {overview &&
-        repo.can_fork &&
-        repo.organization_id &&
-        identity &&
-        !repo.archived && (
-          <div className="flex justify-end px-4 py-2">
+      {overview && (forkNetwork || canCreateFork) && (
+        <div className="flex flex-wrap items-start justify-end gap-2 px-4 py-2">
+          {forkNetwork && (
+            <Button asChild variant="outline">
+              <Link href={repoHref(forkNetwork, { view: "forks" })}>
+                <RepoForkedIcon data-icon="inline-start" /> View forks
+              </Link>
+            </Button>
+          )}
+          {canCreateFork && (
             <GitImport
               key={`${identity.issuer}:${identity.subject}:${repo.id}`}
               account={JSON.stringify([identity.issuer, identity.subject])}
               organization={{
-                id: repo.organization_id,
+                id: organizationId,
                 name: ownership?.organization.name ?? repo.owner,
               }}
               fork={repo}
@@ -533,20 +551,25 @@ export function RepositoryPage({
                 navigate(repoHref(repository));
               }}
             />
-          </div>
-        )}
-      {forkSource && (
+          )}
+        </div>
+      )}
+      {repo.fork && (
         <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 text-sm text-muted-foreground">
-          <span>
-            Forked from{" "}
-            <Link
-              href={repoHref(forkSource)}
-              className="underline underline-offset-4"
-            >
-              {forkSource.name}
-            </Link>
-          </span>
-          {overview && (
+          {forkSource ? (
+            <span>
+              Forked from{" "}
+              <Link
+                href={repoHref(forkSource)}
+                className="underline underline-offset-4"
+              >
+                {forkSource.name}
+              </Link>
+            </span>
+          ) : (
+            <span>Private fork</span>
+          )}
+          {overview && forkSource && (
             <div className="flex flex-wrap items-center gap-2">
               <Button asChild variant="outline" size="sm">
                 <Link
@@ -590,7 +613,7 @@ export function RepositoryPage({
       )}
       {!publicReader &&
         !repo.archived &&
-        (!forkSource || canWrite) &&
+        (!repo.fork || (forkSource && canWrite)) &&
         (overview || (view === "pulls" && !route?.pull && !route?.action)) && (
           <RecentPushes
             key={JSON.stringify([
@@ -610,6 +633,32 @@ export function RepositoryPage({
             <h2>Repository access required</h2>
             <Link href={repoHref(repo)}>Browse the public code</Link>
           </div>
+        ) : view === "forks" ? (
+          <section
+            aria-labelledby="repository-forks"
+            className="mx-auto grid w-full max-w-5xl gap-4"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 id="repository-forks" className="text-xl font-semibold">
+                Forks
+              </h2>
+              <Button asChild variant="outline" size="sm">
+                <Link href={repoHref(repo)}>Back to code</Link>
+              </Button>
+            </div>
+            <Suspense
+              fallback={
+                <p role="status" className="notice">
+                  Loading forks…
+                </p>
+              }
+            >
+              <BrowseRepositories
+                url={url}
+                scope={{ kind: "forks", repository: repo }}
+              />
+            </Suspense>
+          </section>
         ) : view === "fork-compare" ? (
           forkSource ? (
             <Result state={visibleRefState} timingLabel="Fork references">
@@ -637,7 +686,9 @@ export function RepositoryPage({
             </Result>
           ) : (
             <div className="notice error" role="alert">
-              This repository has no upstream fork source.
+              {repo.fork
+                ? "Upstream repository access is required to compare forks."
+                : "This repository has no upstream fork source."}
             </div>
           )
         ) : view === "projects" ? (

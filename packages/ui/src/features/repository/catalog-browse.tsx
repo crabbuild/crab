@@ -6,7 +6,7 @@ import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { navigate, useRequest, type Repository } from "@/lib/api";
+import { endpoint, navigate, useRequest, type Repository } from "@/lib/api";
 import type { RepositoryAccess } from "@/lib/contracts";
 import { repositoryRoleLabels } from "@/lib/repository-roles";
 import { repoHref } from "@/lib/repository-route";
@@ -37,10 +37,11 @@ type Scope =
   | { kind: "public" }
   | { kind: "personal" }
   | { kind: "profile"; actor: string }
+  | { kind: "forks"; repository: Pick<Repository, "id" | "owner" | "name"> }
   | { kind: "organization"; organization: string; owner: boolean }
   | { kind: "team"; organization: string; team: string };
 
-function catalogPath(scope: Scope) {
+function catalogPath(scope: Exclude<Scope, { kind: "forks" }>) {
   switch (scope.kind) {
     case "personal":
       return "/api/repos/personal";
@@ -57,6 +58,7 @@ const emptyText = {
   public: "There are no public repositories yet.",
   personal: "You don’t have any personal repositories yet.",
   profile: "No repositories owned by this user are visible to you.",
+  forks: "No forks of this repository are visible to you.",
   organization: "No repositories are visible to you in this organization.",
   team: "No repositories with team access are visible to you.",
 };
@@ -74,10 +76,20 @@ export function BrowseRepositories({ url, scope }: { url: URL; scope: Scope }) {
       : undefined;
   if (scope.kind === "organization")
     params.set("organization", scope.organization);
-  const page = useRequest<Page>(`${catalogPath(scope)}?${params}`);
+  const forks = scope.kind === "forks";
+  const page = useRequest<Page>(
+    forks
+      ? endpoint(scope.repository, "forks", Object.fromEntries(params))
+      : `${catalogPath(scope)}?${params}`,
+    forks ? scope.repository.id : undefined,
+  );
   const scoped = scope.kind !== "all";
   const RepositoryHeading =
-    scope.kind === "team" ? "h4" : scope.kind === "organization" ? "h3" : "h2";
+    scope.kind === "team"
+      ? "h4"
+      : scope.kind === "organization" || forks
+        ? "h3"
+        : "h2";
   const searchInput = useRef<HTMLInputElement>(null);
 
   function href(search: string, next?: string) {
@@ -130,7 +142,8 @@ export function BrowseRepositories({ url, scope }: { url: URL; scope: Scope }) {
       <RepositoryStateFilters
         key={query}
         query={query}
-        showVisibility={scope.kind !== "public"}
+        showVisibility={scope.kind !== "public" && !forks}
+        showFork={!forks}
         draft={draft}
         apply={apply}
       />
@@ -176,14 +189,16 @@ export function BrowseRepositories({ url, scope }: { url: URL; scope: Scope }) {
                         }
                       >
                         <Link href={repoHref(repo)}>
-                          {!scoped && <>{repo.owner} / </>}
+                          {(!scoped || forks) && <>{repo.owner} / </>}
                           <strong>{repo.name}</strong>
                         </Link>
                       </RepositoryHeading>
                       {repo.archived && (
                         <Badge variant="outline">Archived</Badge>
                       )}
-                      {repo.fork && <Badge variant="outline">Fork</Badge>}
+                      {repo.fork && !forks && (
+                        <Badge variant="outline">Fork</Badge>
+                      )}
                       {repo.visibility && (
                         <Badge variant="outline">
                           {repo.visibility === "public" ? "Public" : "Private"}
