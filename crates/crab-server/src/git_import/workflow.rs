@@ -143,7 +143,7 @@ async fn import_repository(
     let fork = account
         .fork_source(server, &catalog, request.fork_source)
         .await?;
-    let namespace = account.destination(&request.owner, fork.as_deref())?;
+    let namespace = account.destination(&request.owner, request.visibility, fork.as_deref())?;
     let authority = organization
         .map(|owner| owner.id)
         .or(fork.as_ref().map(|source| source.organization));
@@ -157,6 +157,7 @@ async fn import_repository(
             || record.name != request.name
             || record.organization_id() != authority
             || record.forked_from != request.fork_source
+            || record.creation_visibility != request.visibility
         {
             return Err(ImportError::Catalog(crate::catalog::CatalogError::Conflict));
         }
@@ -287,16 +288,19 @@ async fn import_repository(
     };
     let record = catalog
         .reserve_git_import(
-            id,
             namespace,
-            request.name.clone(),
-            request.description.clone(),
+            crate::catalog::GitImportReservation {
+                id,
+                name: request.name.clone(),
+                description: request.description.clone(),
+                visibility: request.visibility,
+                forked_from: request.fork_source,
+            },
             MembershipActor {
                 issuer: actor.issuer.clone(),
                 subject: actor.subject.clone(),
             },
             members,
-            request.fork_source,
         )
         .await
         .map_err(ImportError::Catalog)?;

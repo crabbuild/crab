@@ -108,6 +108,8 @@ function VisibilityForm({
       {value === "public" ? (
         <p className="text-sm">
           Anyone will be able to view and download the code and its Git history.
+          {repo.organization_id &&
+            " Repository property values will also be public."}
           {status.private_forks > 0 &&
             " Existing private forks will become separate private repositories."}
         </p>

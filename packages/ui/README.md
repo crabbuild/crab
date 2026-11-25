@@ -357,8 +357,14 @@ private forks use the source's access and rules. Member removal retires their
 personal private forks, and an accepted restoration invitation can bring back
 eligible forks.
 Owners can change repository visibility from **Settings → General → Danger Zone**.
+The **New repository** dialog shows the visibility choices for its selected
+owner. Under **Settings → Member privileges**, organization owners can limit
+what visibility members can choose when they create repositories.
+**Import from Git** saves the destination visibility with the job and shows it
+when another organization owner opens a shared import link.
 Signed-out visitors can find public repositories through **Browse public
-repositories** and open their code, issues, and pull requests.
+repositories** and open their code, issues, and pull requests. Public
+organization repositories also show their effective values in **Properties**.
 
 The **Personal** catalog at
 `/-/repositories/personal` lists repositories in the signed-in account's

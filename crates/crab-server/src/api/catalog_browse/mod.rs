@@ -77,6 +77,8 @@ struct Entry<'a> {
     id: Uuid,
     #[serde(skip_serializing_if = "Option::is_none")]
     created_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata_updated_at_ms: Option<u64>,
     owner: &'a str,
     name: &'a str,
     description: &'a str,
@@ -165,6 +167,7 @@ pub(super) async fn list(
     .await?;
     let property_organization = organization.filter(|_| property_filter && !scoped.is_empty());
     let mut topics = HashMap::new();
+    let mut updates = HashMap::new();
     let mut visibility = HashMap::new();
     let mut team_grants = HashMap::new();
     let mut ranked: Vec<_> = scoped
@@ -184,6 +187,9 @@ pub(super) async fn list(
                 return None;
             }
             topics.insert(row.repository.id, row.topics);
+            if let Some(time) = row.metadata_updated_at_ms {
+                updates.insert(row.repository.id, time);
+            }
             visibility.insert(row.repository.id, row.visibility);
             if let Some(access) = row.team_access {
                 team_grants.insert(
@@ -200,6 +206,7 @@ pub(super) async fn list(
             repo.config.name.to_ascii_lowercase(),
         )
     };
+    let updated = |repo: &Repository| updates.get(&repo.id).copied().or(repo.created_at_ms);
     match query.order {
         Order::Relevance => ranked.sort_by(|(rank_a, a), (rank_b, b)| {
             (rank_a, &a.config.owner, &a.config.name).cmp(&(
@@ -215,6 +222,13 @@ pub(super) async fn list(
         }),
         Order::CreatedDesc => {
             ranked.sort_by_cached_key(|(_, repo)| (Reverse(repo.created_at_ms), name(repo)))
+        }
+        Order::UpdatedAsc => ranked.sort_by_cached_key(|(_, repo)| {
+            let date = updated(repo);
+            (date.is_none(), date, name(repo))
+        }),
+        Order::UpdatedDesc => {
+            ranked.sort_by_cached_key(|(_, repo)| (Reverse(updated(repo)), name(repo)))
         }
     }
     let visible: Vec<_> = ranked.into_iter().map(|(_, repo)| repo).collect();
@@ -266,7 +280,14 @@ pub(super) async fn list(
     {
         return Err(Error::PageChanged);
     }
-    let snapshot_scope = filtered.then(|| scan::scope(server, &visible, window.property_revision));
+    let snapshot_scope = filtered.then(|| {
+        scan::scope(
+            server,
+            &visible,
+            window.property_revision,
+            query.order.by_update().then_some(&updates),
+        )
+    });
     let cursor_state = |id| -> Result<Option<blake3::Hash>> {
         let Some(mut scope) = snapshot_scope.clone() else {
             return Ok(None);
@@ -309,6 +330,7 @@ pub(super) async fn list(
                     && fresh.config.name == repo.config.name
                     && fresh.config.description == repo.config.description
                     && fresh.created_at_ms == repo.created_at_ms
+                    && updates.get(&repo.id).copied() == row.metadata_updated_at_ms
                     && topics.get(&repo.id) == Some(&row.topics)
                     && visibility.get(&repo.id) == Some(&row.visibility)
                     && team_grants.get(&repo.id).copied()
@@ -347,6 +369,7 @@ pub(super) async fn list(
         .map(|(repo, lifecycle)| Entry {
             id: repo.id,
             created_at_ms: repo.created_at_ms,
+            metadata_updated_at_ms: updates.get(&repo.id).copied(),
             owner: &repo.config.owner,
             name: &repo.config.name,
             description: &repo.config.description,

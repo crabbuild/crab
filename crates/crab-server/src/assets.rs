@@ -24,11 +24,11 @@ pub(crate) async fn serve(request: Request) -> Response {
         };
         valid_id(id)
     };
-    let account_route = match components.as_slice() {
+    let global_route = match components.as_slice() {
         [
             "-",
             "profile" | "notifications" | "code-search" | "discussion-search" | "organizations"
-            | "work",
+            | "public" | "work",
         ]
         | ["-", "notifications", "watched" | "subscriptions"]
         | ["-", "repositories", "personal"]
@@ -45,7 +45,7 @@ pub(crate) async fn serve(request: Request) -> Response {
         _ => false,
     };
     let application_route = path.is_empty()
-        || account_route
+        || global_route
         || (components.len() >= 2
             && components[0] != "-"
             && components[0] != "api"
@@ -204,6 +204,8 @@ mod tests {
                 StatusCode::OK,
             ),
             ("/-/repositories/personal", StatusCode::OK),
+            ("/-/public?q=open-library", StatusCode::OK),
+            ("/-/public/unknown", StatusCode::NOT_FOUND),
             ("/-/organizations", StatusCode::OK),
             (
                 "/-/users/01900000-0000-7000-8000-000000000001/repositories",

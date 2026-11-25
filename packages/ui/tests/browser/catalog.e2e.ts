@@ -46,6 +46,7 @@ test("the owner picker scopes creation and import to the selected organization",
         json: {
           owner: `org-${id.replaceAll("-", "")}`,
           default_branch: "main",
+          visibilities: ["public"],
         },
       }),
   );
@@ -59,6 +60,8 @@ test("the owner picker scopes creation and import to the selected organization",
   await expect(page.getByRole("dialog")).toContainText(
     "owned by Crab engineering",
   );
+  await expect(page.getByRole("radio", { name: "Public" })).toBeChecked();
+  await expect(page.getByRole("radio", { name: "Private" })).toHaveCount(0);
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Import from Git" }).click();
   await expect(page.getByLabel("Organization", { exact: true })).toHaveValue(
@@ -77,7 +80,13 @@ test("personal import retries namespace resolution before submitting", async ({
   );
   await page.route("**/api/repos/creation", (route) =>
     namespaceAvailable
-      ? route.fulfill({ json: { owner, default_branch: "main" } })
+      ? route.fulfill({
+          json: {
+            owner,
+            default_branch: "main",
+            visibilities: ["private", "public"],
+          },
+        })
       : route.fulfill({
           status: 503,
           json: { error: { message: "Namespace lookup is unavailable" } },
@@ -89,6 +98,7 @@ test("personal import retries namespace resolution before submitting", async ({
       source: "https://github.com/example/notes.git",
       owner,
       name: "notes",
+      visibility: "private",
     });
     submitted = true;
     return route.fulfill({
@@ -146,7 +156,13 @@ test("new repository recovers one submission after a reload", async ({
   await page.route("**/api/repos/creation", (route) => {
     const request = route.request();
     if (request.method() === "GET") {
-      return route.fulfill({ json: { owner, default_branch: "main" } });
+      return route.fulfill({
+        json: {
+          owner,
+          default_branch: "main",
+          visibilities: ["private", "public"],
+        },
+      });
     }
     expect(request.headers()["x-csrf-token"]).toBe("fixture-csrf");
     const body = request.postDataJSON();
@@ -154,6 +170,7 @@ test("new repository recovers one submission after a reload", async ({
       expect(body).toMatchObject({
         name: "my-library",
         description: "First repository",
+        visibility: "private",
       });
       submission = body;
       ready = true;
@@ -196,11 +213,17 @@ test("new repository recovers one submission after a reload", async ({
   );
 });
 
-test("a reloaded import resumes the same job with a fresh source token", async ({
+test("a reloaded public import keeps its visibility and takes a fresh source token", async ({
   page,
 }) => {
   await session(page);
-  let saved: { id: string; source: string; owner: string; name: string };
+  let saved: {
+    id: string;
+    source: string;
+    owner: string;
+    name: string;
+    visibility: "public";
+  };
   let state = "running";
   await page.route(
     (url) => url.pathname === "/api/repos",
@@ -228,7 +251,13 @@ test("a reloaded import resumes the same job with a fresh source token", async (
       }),
   );
   await page.route("**/api/repos/creation", (route) =>
-    route.fulfill({ json: { owner, default_branch: "main" } }),
+    route.fulfill({
+      json: {
+        owner,
+        default_branch: "main",
+        visibilities: ["private", "public"],
+      },
+    }),
   );
   await page.route(`**/api/repos/${owner}/repo/refs`, (route) =>
     route.fulfill({ json: { head: null, default_branch: "main", refs: [] } }),
@@ -237,11 +266,13 @@ test("a reloaded import resumes the same job with a fresh source token", async (
     const input = route.request().postDataJSON();
     expect(input.token).toBe("fixture-token");
     expect(input.owner).toBe(owner);
+    expect(input.visibility).toBe("public");
     saved = {
       id: input.request_id,
       source: input.source,
       owner: input.owner,
       name: input.name,
+      visibility: input.visibility,
     };
     return route.fulfill({
       status: 202,
@@ -297,6 +328,12 @@ test("a reloaded import resumes the same job with a fresh source token", async (
     .fill("https://github.com/example/repo.git");
   await expect(page.getByLabel("Personal namespace")).toHaveValue(owner);
   await page.getByLabel("Source token").fill("fixture-token");
+  const visibility = page
+    .getByRole("region", { name: "Bring a repository from Git" })
+    .getByRole("combobox", { name: "Visibility" });
+  await expect(visibility).toHaveText("Private");
+  await visibility.click();
+  await page.getByRole("option", { name: "Public", exact: true }).click();
   await page.getByRole("button", { name: "Start import", exact: true }).click();
   await expect(page.getByText("Queued for import")).toBeVisible();
   state = "interrupted";
@@ -313,6 +350,8 @@ test("a reloaded import resumes the same job with a fresh source token", async (
   );
   expect(savedImport).toBe(saved!.id);
   await expect(page.getByLabel("Git source")).toBeDisabled();
+  await expect(visibility).toBeDisabled();
+  await expect(visibility).toHaveText("Public");
   await expect(page.getByLabel("Repository name")).toHaveValue("repo");
   await page.getByLabel("Source token").fill("new-source-token");
   await page

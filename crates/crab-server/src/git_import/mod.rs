@@ -25,7 +25,10 @@ use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::{Config, app, auth::Principal, repository::Repository, server::Server};
+use crate::{
+    Config, app, auth::Principal, catalog::visibility::Visibility, repository::Repository,
+    server::Server,
+};
 
 #[derive(Clone)]
 pub(crate) struct ImportContext {
@@ -563,6 +566,7 @@ async fn start_fork(
         },
         name,
         description: String::new(),
+        visibility: Visibility::Private,
         token: None,
     };
     submit(&server, context, account, input.request_id, request).await
@@ -579,7 +583,7 @@ async fn submit(
         return Err(ImportError::Invalid("the import request ID is invalid"));
     }
     let catalog = server.catalog().ok_or(ImportError::Unavailable)?;
-    account.namespace(&request.owner)?;
+    account.namespace(&request.owner, request.visibility)?;
     let jobs = account.jobs(catalog.root());
     if let Some(status) = jobs.replay(id, &request).await? {
         account.check(server).await?;
@@ -639,7 +643,7 @@ async fn resume(
         account.check(&server).await?;
         return Ok((StatusCode::ACCEPTED, Json(status)));
     };
-    account.namespace(&request.owner)?;
+    account.namespace(&request.owner, request.visibility)?;
     account
         .fork_source(&server, &catalog, request.fork_source)
         .await?;

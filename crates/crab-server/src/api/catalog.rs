@@ -7,7 +7,7 @@ use axum::{
     middleware,
     routing::get,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -16,8 +16,8 @@ use crate::{
     RepositoryAccess, RepositoryMember, app,
     auth::Principal,
     catalog::{
-        BrowserNamespace, CatalogError, MembershipActor, RepositoryApplicationState,
-        organization_namespace,
+        BrowserCreation, BrowserNamespace, CatalogError, CatalogRecord, MembershipActor,
+        RepositoryApplicationState, organization_namespace, visibility::Visibility,
     },
     cells::{
         Address,
@@ -207,6 +207,7 @@ pub(super) async fn list(
 pub(super) struct VisibleRepository {
     pub(super) repository: Arc<crate::repository::Repository>,
     pub(super) topics: Vec<String>,
+    pub(super) metadata_updated_at_ms: Option<u64>,
     pub(super) team_access: Option<RepositoryAccess>,
     pub(super) team_access_inherited: bool,
     pub(super) principal: Principal,
@@ -374,6 +375,7 @@ pub(super) async fn visible_matching(
                 || repository.topics.clone(),
                 |record| record.topics.names.clone(),
             ),
+            metadata_updated_at_ms: record.and_then(|record| record.metadata_updated_at_ms),
             repository,
             principal: current,
             organization_owner,
@@ -427,17 +429,19 @@ async fn personal(
 async fn creation(
     Extension(principal): Extension<Principal>,
 ) -> app::Result<Json<serde_json::Value>> {
+    let owner = namespace(&principal)?;
     Ok(Json(
-        json!({"owner":namespace(&principal)?,"default_branch":crate::config::DEFAULT_REPOSITORY_BRANCH}),
+        json!({"owner":owner,"default_branch":crate::config::DEFAULT_REPOSITORY_BRANCH,
+            "visibilities":personal_visibilities(&principal)}),
     ))
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CreateRepository {
-    request_id: Uuid,
-    name: String,
-    description: String,
+fn personal_visibilities(principal: &Principal) -> &'static [Visibility] {
+    if principal.is_local() {
+        &[Visibility::Private]
+    } else {
+        &[Visibility::Private, Visibility::Public]
+    }
 }
 
 #[derive(Serialize)]
@@ -453,20 +457,26 @@ async fn organization_creation(
     Path(organization): Path<Uuid>,
 ) -> app::Result<Json<serde_json::Value>> {
     let actor = super::organizations::actor(&server, &principal).await?;
-    let default_branch = creation_allowed(&server, organization, actor).await?;
+    let (default_branch, visibilities) = creation_options(&server, organization, actor).await?;
     app::account(&principal)?;
     Ok(Json(
-        json!({"owner":organization_namespace(organization),"default_branch":default_branch}),
+        json!({"owner":organization_namespace(organization),"default_branch":default_branch,
+            "visibilities":visibilities}),
     ))
 }
 
-async fn creation_allowed(server: &Server, organization: Uuid, actor: Uuid) -> app::Result<String> {
+async fn creation_options(
+    server: &Server,
+    organization: Uuid,
+    actor: Uuid,
+) -> app::Result<(String, Vec<Visibility>)> {
     match crate::repository::access::organization_landing(server, organization, actor).await? {
         Some(Landing::Member {
             can_create: true,
+            creation_visibilities,
             default_branch,
             ..
-        }) => Ok(default_branch),
+        }) => Ok((default_branch, creation_visibilities)),
         _ => Err(app::Error::NotFound),
     }
 }
@@ -475,49 +485,65 @@ async fn create_organization(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path(organization): Path<Uuid>,
-    Json(input): Json<CreateRepository>,
+    Json(input): Json<BrowserCreation>,
 ) -> app::Result<(StatusCode, Json<CreatedRepository>)> {
     let actor = super::organizations::actor(&server, &principal).await?;
     input.validate()?;
-    let cells = server.cells().ok_or(app::Error::CellUnavailable)?;
     app::account(&principal)?;
-    let authorized = cells
-        .command::<AuthorizeCreation>(
-            Address::Organization(organization),
-            app::mutation_identity()?,
-            Creation {
-                actor,
-                request_id: input.request_id,
-                name: input.name.clone(),
-                description: input.description.clone(),
-            },
-        )
-        .await
-        .map_err(super::organizations::read_error)?
-        .output;
-    match authorized {
-        CreationOutcome::Accepted {
-            grant_creator,
-            default_branch,
-        } => {
-            let response = publish(
-                &server,
-                &principal,
-                BrowserNamespace::Organization(organization),
-                grant_creator,
-                default_branch,
-                input,
-            )
-            .await?;
-            creation_allowed(&server, organization, actor).await?;
-            app::account(&principal)?;
-            Ok(response)
-        }
-        CreationOutcome::Conflict => Err(app::Error::RepositoryNameUnavailable),
-    }
+    let worker = Arc::clone(&server);
+    let account = principal.clone();
+    let (record, default_branch) = super::organizations::with_org_policy(
+        &server,
+        organization,
+        move |cancel| async move {
+                    let cells = worker.cells().ok_or(app::Error::CellUnavailable)?;
+                    let authorized = cells
+                        .command::<AuthorizeCreation>(
+                            Address::Organization(organization),
+                            app::mutation_identity()?,
+                            Creation {
+                                actor,
+                                request_id: input.request_id,
+                                name: input.name.clone(),
+                                description: input.description.clone(),
+                                visibility: input.visibility,
+                            },
+                        )
+                        .await
+                        .map_err(super::organizations::read_error)?
+                        .output;
+                    let (grant_creator, default_branch) = match authorized {
+                        CreationOutcome::Accepted { grant_creator, default_branch } => (grant_creator, default_branch),
+                        CreationOutcome::Conflict => return Err(app::Error::RepositoryNameUnavailable),
+                        CreationOutcome::VisibilityRestricted => return Err(app::Error::Invalid(
+                            "This organization does not allow you to create repositories with that visibility",
+                        )),
+                    };
+                    // Policy and membership writes share this lease. Bind the
+                    // decision to the durable reservation before allowing a change.
+                    app::account(&account)?;
+                    if cancel.is_cancelled() {
+                        return Err(app::Error::MergeBusy);
+                    }
+                    let record = reserve(
+                        &worker,
+                        &account,
+                        BrowserNamespace::Organization(organization),
+                        grant_creator,
+                        input,
+                    )
+                    .await?;
+                    Ok((record, default_branch))
+        },
+    )
+    .await?;
+    let response = publish(&server, &principal, record, default_branch).await?;
+    creation_options(&server, organization, actor).await?;
+    app::account(&principal)?;
+    Ok(response)
 }
 
-impl CreateRepository {
+impl BrowserCreation {
     fn validate(&self) -> app::Result<()> {
         if self.request_id.is_nil() {
             return Err(app::Error::Invalid("Repository submission ID is invalid"));
@@ -539,29 +565,39 @@ impl CreateRepository {
 async fn create(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
-    Json(input): Json<CreateRepository>,
+    Json(input): Json<BrowserCreation>,
 ) -> app::Result<(StatusCode, Json<CreatedRepository>)> {
     let owner = namespace(&principal)?;
     input.validate()?;
-    publish(
+    if !personal_visibilities(&principal).contains(&input.visibility) {
+        return Err(app::Error::Invalid(
+            "Choose a visibility available for this account",
+        ));
+    }
+    let record = reserve(
         &server,
         &principal,
         BrowserNamespace::Personal(owner),
         true,
-        crate::config::default_repository_branch(),
         input,
+    )
+    .await?;
+    publish(
+        &server,
+        &principal,
+        record,
+        crate::config::default_repository_branch(),
     )
     .await
 }
 
-async fn publish(
-    server: &Arc<Server>,
+async fn reserve(
+    server: &Server,
     principal: &Principal,
     namespace: BrowserNamespace,
     grant_creator: bool,
-    default_branch: String,
-    input: CreateRepository,
-) -> app::Result<(StatusCode, Json<CreatedRepository>)> {
+    input: BrowserCreation,
+) -> app::Result<CatalogRecord> {
     let actor = app::actor(principal)?;
     let catalog = server.catalog().ok_or(app::Error::CellUnavailable)?;
     let members = if principal.is_local() || !grant_creator {
@@ -573,12 +609,10 @@ async fn publish(
             access: RepositoryAccess::Admin,
         }]
     };
-    let record = catalog
+    catalog
         .reserve_browser_repository(
             namespace,
-            input.name,
-            input.description,
-            input.request_id,
+            input,
             MembershipActor {
                 issuer: actor.issuer,
                 subject: actor.subject,
@@ -589,7 +623,16 @@ async fn publish(
         .map_err(|error| match error {
             CatalogError::Conflict => app::Error::RepositoryNameUnavailable,
             source => app::Error::RepositorySetup(Box::new(source.into())),
-        })?;
+        })
+}
+
+async fn publish(
+    server: &Arc<Server>,
+    principal: &Principal,
+    record: CatalogRecord,
+    default_branch: String,
+) -> app::Result<(StatusCode, Json<CreatedRepository>)> {
+    let catalog = server.catalog().ok_or(app::Error::CellUnavailable)?;
     let worker = Arc::clone(server);
     let result = server
         .receives
@@ -666,9 +709,12 @@ mod tests {
         let pending = catalog
             .reserve_browser_repository(
                 BrowserNamespace::Personal(owner.into()),
-                "first-repo".into(),
-                "Start here".into(),
-                request_id,
+                BrowserCreation {
+                    request_id,
+                    name: "first-repo".into(),
+                    description: "Start here".into(),
+                    visibility: Visibility::Private,
+                },
                 MembershipActor {
                     issuer: h.server.auth.as_ref().unwrap().issuer().into(),
                     subject: "alice-id".into(),

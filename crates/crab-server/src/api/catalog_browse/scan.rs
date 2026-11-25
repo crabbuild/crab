@@ -96,6 +96,7 @@ pub(super) fn scope(
     server: &Server,
     candidates: &[Arc<Repository>],
     property_revision: Option<u64>,
+    updates: Option<&HashMap<Uuid, u64>>,
 ) -> blake3::Hasher {
     let mut proof = blake3::Hasher::new_keyed(&server.cursor_key);
     proof.update(b"crab-server.repository-property-search.v1");
@@ -103,6 +104,10 @@ pub(super) fn scope(
     for repo in candidates {
         proof.update(repo.id.as_bytes());
         proof.update(&repo.ownership_epoch.to_le_bytes());
+        if let Some(updates) = updates {
+            let time = updates.get(&repo.id).copied().or(repo.created_at_ms);
+            proof.update(&time.unwrap_or_default().to_le_bytes());
+        }
     }
     proof
 }

@@ -131,6 +131,7 @@ impl CatalogDocument {
             request,
             aliases,
         });
+        record.record_metadata_update(super::catalog_time_ms()?);
         Ok(record)
     }
 

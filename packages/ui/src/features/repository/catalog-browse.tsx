@@ -23,6 +23,7 @@ type Page = {
   repositories: (Entry & {
     fork: boolean;
     created_at_ms?: number;
+    metadata_updated_at_ms?: number;
     can_admin?: boolean;
     team_access?: RepositoryAccess;
     team_access_inherited?: boolean;
@@ -254,9 +255,20 @@ export function BrowseRepositories({ url, scope }: { url: URL; scope: Scope }) {
                       names={repo.topics}
                       href={(topic) => href(`topic:${topic}`)}
                     />
-                    {repo.created_at_ms !== undefined && (
-                      <p className="mt-2 text-xs text-muted-foreground">
-                        Created <RelativeTime value={repo.created_at_ms} />
+                    {(repo.created_at_ms !== undefined ||
+                      repo.metadata_updated_at_ms !== undefined) && (
+                      <p className="mt-2 flex flex-wrap gap-x-3 text-xs text-muted-foreground">
+                        {repo.created_at_ms !== undefined && (
+                          <span>
+                            Created <RelativeTime value={repo.created_at_ms} />
+                          </span>
+                        )}
+                        {repo.metadata_updated_at_ms !== undefined && (
+                          <span>
+                            Details updated{" "}
+                            <RelativeTime value={repo.metadata_updated_at_ms} />
+                          </span>
+                        )}
                       </p>
                     )}
                   </li>

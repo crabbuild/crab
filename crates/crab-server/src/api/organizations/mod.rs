@@ -289,7 +289,7 @@ async fn change_member(
     let actor = actor(server, &principal).await?;
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     let address = target(id)?;
-    let value = membership_change(server, id, move |_| async move {
+    let value = with_org_policy(server, id, move |_| async move {
         app::account(&principal)?;
         app::command_output(
             cells
@@ -310,14 +310,14 @@ async fn change_member(
     Ok(Json(serde_json::to_value(applied(value)?)?))
 }
 
-async fn membership_change<T, F, Fut>(server: &Arc<Server>, id: Uuid, work: F) -> Result<T>
+pub(super) async fn with_org_policy<T, F, Fut>(server: &Arc<Server>, id: Uuid, work: F) -> Result<T>
 where
     T: Send + 'static,
     F: FnOnce(CancellationToken) -> Fut + Send + 'static,
     Fut: Future<Output = Result<T>> + Send,
 {
-    // Membership and team writers share the gate with catalog-backed grants.
-    // Settle a durable access change before changing the member incarnation.
+    // Settle pending membership changes before reusing this organization's
+    // authority for another membership change, team command, or reservation.
     let worker = Arc::clone(server);
     server
         .receives

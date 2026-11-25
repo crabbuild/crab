@@ -170,7 +170,7 @@ pub(super) async fn remove(
     let position = plan.position(confirmation)?;
     owner_version(&server, organization, caller).await?;
     let worker = Arc::clone(&server);
-    let result = membership_change(&server, organization, move |cancel| async move {
+    let result = with_org_policy(&server, organization, move |cancel| async move {
         let snapshot = Snapshot::load(&worker, &principal, organization).await?;
         let catalog = worker.catalog().ok_or(Error::NotFound)?;
         if let Some(receipt) = catalog

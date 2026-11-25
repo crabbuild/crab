@@ -52,6 +52,8 @@ pub(crate) struct Definition {
     pub options: Vec<String>,
     pub default: Option<PropertyValue>,
     #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
     pub values_editable_by: EditAuthority,
 }
 
@@ -68,6 +70,16 @@ impl Definition {
     fn valid(&self) -> bool {
         let choices = matches!(self.kind, Kind::SingleSelect | Kind::MultiSelect);
         let mut unique = HashSet::new();
+        let valid_options = if choices {
+            !self.options.is_empty()
+                && self.options.len() <= 50
+                && self
+                    .options
+                    .iter()
+                    .all(|value| valid_text(value) && unique.insert(value))
+        } else {
+            self.options.is_empty()
+        };
         !self.id.is_nil()
             && !self.name.is_empty()
             && self.name.len() <= 75
@@ -77,16 +89,7 @@ impl Definition {
                 .all(|byte| byte.is_ascii_alphanumeric() || b"_-#$".contains(&byte))
             && self.description.len() <= 256
             && !self.description.chars().any(char::is_control)
-            && if choices {
-                !self.options.is_empty()
-                    && self.options.len() <= 50
-                    && self
-                        .options
-                        .iter()
-                        .all(|value| valid_text(value) && unique.insert(value))
-            } else {
-                self.options.is_empty()
-            }
+            && valid_options
             && self
                 .default
                 .as_ref()
@@ -161,6 +164,14 @@ pub(crate) struct Values {
     pub overrides: BTreeMap<Uuid, PropertyValue>,
 }
 
+impl Values {
+    pub(crate) fn effective<'a>(&'a self, definition: &'a Definition) -> Option<&'a PropertyValue> {
+        self.overrides
+            .get(&definition.id)
+            .or(definition.default.as_ref())
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 pub(crate) struct View {
     pub schema: Schema,
@@ -216,16 +227,14 @@ pub(super) fn effective(
     repository: Repository,
 ) -> Result<BTreeMap<Uuid, PropertyValue>> {
     let schema = schema(context)?;
-    let mut values = values(context, &schema, &repository.key()?)?;
+    let values = values(context, &schema, &repository.key()?)?;
     Ok(schema
         .definitions
-        .into_iter()
+        .iter()
         .filter_map(|definition| {
             values
-                .overrides
-                .remove(&definition.id)
-                .or(definition.default)
-                .map(|value| (definition.id, value))
+                .effective(definition)
+                .map(|value| (definition.id, value.clone()))
         })
         .collect())
 }
@@ -235,6 +244,7 @@ pub(crate) enum Outcome<T> {
     Saved(T),
     Conflict,
     Invalid,
+    MissingRequiredDefault,
     Denied,
     UsedByRuleset,
     IncompatibleDefinition,
@@ -306,6 +316,13 @@ impl Mutation for SetSchema {
             })
         {
             return Ok(MutationResult::Rejected(Outcome::Invalid));
+        }
+        if input
+            .definitions
+            .iter()
+            .any(|definition| definition.required && definition.default.is_none())
+        {
+            return Ok(MutationResult::Rejected(Outcome::MissingRequiredDefault));
         }
         let next = Schema {
             version: current.version + 1,
@@ -510,10 +527,7 @@ impl Read for GetSelection {
                 version: current.version,
             });
             for definition in &schema.definitions {
-                let value = current
-                    .overrides
-                    .get(&definition.id)
-                    .or(definition.default.as_ref());
+                let value = current.effective(definition);
                 match effective.entry(definition.id) {
                     std::collections::btree_map::Entry::Vacant(entry) => {
                         entry.insert(SelectionValue::Shared {

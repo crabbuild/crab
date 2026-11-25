@@ -16,6 +16,7 @@ export interface PropertyDefinition {
   kind: PropertyKind;
   options: string[];
   default: PropertyValue | null;
+  required: boolean;
   values_editable_by: "organization" | "repository";
 }
 

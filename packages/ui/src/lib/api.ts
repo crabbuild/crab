@@ -1,12 +1,15 @@
 import type { BranchProtection } from "@/lib/contracts";
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 
+export type RepositoryVisibility = "private" | "public";
+
 export interface GitImportInput {
   request_id: string;
   source: string;
   owner?: string;
   name: string;
   description?: string;
+  visibility: RepositoryVisibility;
   token?: string;
 }
 
@@ -16,6 +19,7 @@ export interface GitImportJob {
   fork_source?: string;
   owner: string;
   name: string;
+  visibility: RepositoryVisibility;
   state: "queued" | "running" | "succeeded" | "failed" | "interrupted";
   message: string;
   resumable: boolean;
@@ -26,7 +30,7 @@ export interface Repository {
   forked_from?: { id: string; owner: string; name: string };
   can_fork?: boolean;
   can_fork_to_organization?: boolean;
-  visibility?: "private" | "public";
+  visibility?: RepositoryVisibility;
   public_read_only?: boolean;
   can_configure_visibility?: boolean;
   forking?: { organization_allows: boolean; version: number; allowed: boolean };

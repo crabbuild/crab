@@ -19,6 +19,10 @@ impl Visibility {
     pub(crate) fn is_public(self) -> bool {
         self == Self::Public
     }
+
+    pub(super) fn is_private(&self) -> bool {
+        *self == Self::Private
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -66,6 +70,7 @@ impl CatalogStore {
             return Err(CatalogError::Conflict);
         }
         let root = root.clone();
+        let now_ms = super::catalog_time_ms()?;
         if expected.value.is_public() {
             // Forks must stay private with their existing grants. In-flight jobs
             // still depend on lineage and must settle before an atomic detach.
@@ -80,6 +85,7 @@ impl CatalogStore {
                     ));
                 }
                 fork.forked_from = None;
+                fork.record_metadata_update(now_ms);
                 if let Some(owner) = fork.fork_owner.take() {
                     fork.members = vec![crate::RepositoryMember {
                         subject: owner.subject,
@@ -104,6 +110,7 @@ impl CatalogStore {
             version: expected.version + 1,
             value: expected.value,
         };
+        record.record_metadata_update(now_ms);
         document.version = document
             .version
             .checked_add(1)

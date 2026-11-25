@@ -548,7 +548,7 @@ async fn save(
     let outcome = match submission {
         Submission::Apply => {
             let principal = principal.clone();
-            super::membership_change(server, id, move |_| async move {
+            super::with_org_policy(server, id, move |_| async move {
                 app::account(&principal)?;
                 app::command_output(
                     cells

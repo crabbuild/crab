@@ -114,16 +114,20 @@ test("repository search pages on the server and restores a stale continuation", 
           },
         });
       }
-      if (q === `${publicQuery} sort:created-desc`) {
+      const updated = q === `${publicQuery} sort:updated-desc`;
+      if (updated || q === `${publicQuery} sort:created-desc`) {
         expect(after).toBeNull();
         return route.fulfill({
           json: {
             repositories: [
               {
-                ...repo("archive-newest", true),
+                ...repo(updated ? "archive-updated" : "archive-newest", true),
                 fork: true,
                 visibility: "public",
                 created_at_ms: Date.UTC(2026, 0, 15),
+                metadata_updated_at_ms: updated
+                  ? Date.UTC(2026, 0, 21)
+                  : undefined,
               },
             ],
             next: null,
@@ -278,5 +282,20 @@ test("repository search pages on the server and restores a stale continuation", 
     "datetime",
     "2026-01-15T00:00:00.000Z",
   );
+  await chooseSelectOption(
+    page.getByRole("combobox", { name: "Sort repositories" }),
+    "updated-desc",
+  );
+  await expect(
+    page.getByRole("link", { name: "archive-updated" }),
+  ).toBeVisible();
+  await expect(search).toHaveValue(
+    'project props.region:"US East" archived:true fork:only is:public sort:updated-desc',
+  );
+  await expect(
+    page
+      .getByText("Details updated", { exact: false })
+      .locator("relative-time"),
+  ).toHaveAttribute("datetime", "2026-01-21T00:00:00.000Z");
   await expectNoAccessibilityViolations(page);
 });

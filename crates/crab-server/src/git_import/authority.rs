@@ -3,7 +3,7 @@ use uuid::Uuid;
 use crate::{
     app,
     auth::{Identity, Principal},
-    catalog::{BrowserNamespace, CatalogStore, MembershipActor},
+    catalog::{BrowserNamespace, CatalogStore, MembershipActor, visibility::Visibility},
     cells::{
         Address,
         organization::{
@@ -66,7 +66,11 @@ impl ImportAccount {
         }
     }
 
-    pub(super) fn namespace(&self, owner: &str) -> Result<BrowserNamespace, ImportError> {
+    pub(super) fn namespace(
+        &self,
+        owner: &str,
+        visibility: Visibility,
+    ) -> Result<BrowserNamespace, ImportError> {
         if let Some(organization) = self.organization {
             if owner != crate::catalog::organization_namespace(organization.id) {
                 return Err(ImportError::DestinationChanged);
@@ -78,11 +82,14 @@ impl ImportAccount {
                 "Start the import from the organization's Repositories tab",
             ));
         }
-        if !self.local
-            && crate::catalog::is_personal_namespace(owner)
-            && owner
-                != crate::catalog::personal_namespace(&self.identity.issuer, &self.identity.subject)
-        {
+        let personal =
+            crate::catalog::personal_namespace(&self.identity.issuer, &self.identity.subject);
+        if visibility.is_public() && (self.local || owner != personal) {
+            return Err(ImportError::Invalid(
+                "Public imports require an organization or your managed personal namespace",
+            ));
+        }
+        if !self.local && crate::catalog::is_personal_namespace(owner) && owner != personal {
             return Err(ImportError::Invalid(
                 "Imports into personal namespaces must use your own namespace",
             ));
@@ -133,9 +140,10 @@ impl ImportAccount {
     pub(super) fn destination(
         &self,
         owner: &str,
+        visibility: Visibility,
         source: Option<&ForkSource>,
     ) -> Result<BrowserNamespace, ImportError> {
-        let namespace = self.namespace(owner)?;
+        let namespace = self.namespace(owner, visibility)?;
         let Some(source) = source.filter(|_| self.organization.is_none()) else {
             return Ok(namespace);
         };

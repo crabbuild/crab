@@ -156,6 +156,7 @@ export function RepositoryPage({
       "labels",
       "milestones",
     ].includes(view) ||
+    (view === "properties" && !!repo.organization_id) ||
     (view === "issues" && route?.issue !== "new") ||
     (view === "pulls" && route?.pull !== "new" && !route?.action);
   const historyBase = route?.since;
@@ -166,6 +167,7 @@ export function RepositoryPage({
       view === "issues" ||
       view === "labels" ||
       view === "milestones" ||
+      view === "properties" ||
       view === "activity"
       ? null
       : endpoint(repo, "refs"),
@@ -432,6 +434,7 @@ export function RepositoryPage({
                 view !== "pulls" &&
                 view !== "settings" &&
                 view !== "activity" &&
+                view !== "properties" &&
                 view !== "projects",
             },
             {
@@ -446,6 +449,16 @@ export function RepositoryPage({
               icon: GitPullRequestIcon,
               active: view === "pulls",
             },
+            ...(repo.organization_id
+              ? [
+                  {
+                    view: "properties",
+                    label: "Properties",
+                    icon: TagIcon,
+                    active: view === "properties",
+                  },
+                ]
+              : []),
             {
               view: "projects",
               label: "Projects",
@@ -471,7 +484,8 @@ export function RepositoryPage({
           ]
             .filter(
               (tab) =>
-                !publicReader || ["code", "issues", "pulls"].includes(tab.view),
+                !publicReader ||
+                ["code", "issues", "pulls", "properties"].includes(tab.view),
             )
             .map(({ view: tab, label, icon: Icon, active }) => (
               <Link

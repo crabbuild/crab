@@ -13,16 +13,35 @@ import {
 } from "@/components/ui/dialog";
 import {
   Field,
+  FieldContent,
+  FieldDescription,
   FieldError,
   FieldGroup,
   FieldLabel,
+  FieldLegend,
+  FieldSet,
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import { useRequest } from "@/lib/api";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { useRequest, type RepositoryVisibility } from "@/lib/api";
 
-type Destination = { owner: string; default_branch: string };
+type Destination = {
+  owner: string;
+  default_branch: string;
+  visibilities: [RepositoryVisibility, ...RepositoryVisibility[]];
+};
 type RepositoryAddress = { id: string; owner: string; name: string };
-type Submission = { request_id: string; name: string; description: string };
+type Submission = {
+  request_id: string;
+  name: string;
+  description: string;
+  visibility: RepositoryVisibility;
+};
+
+const visibilityOptions = {
+  private: ["Private", "Only people with access can view this repository."],
+  public: ["Public", "Anyone can view and clone this repository."],
+} as const;
 
 function recover(key: string): Submission | undefined {
   try {
@@ -38,6 +57,7 @@ function recover(key: string): Submission | undefined {
         request_id: data.request_id,
         name: data.name,
         description: data.description,
+        visibility: data.visibility === "public" ? "public" : "private",
       };
   } catch {
     // Browsers can disable session storage.
@@ -61,16 +81,25 @@ function RepositoryForm({
   const [attempt, setAttempt] = useState(() => recover(key));
   const [name, setName] = useState(attempt?.name ?? "");
   const [description, setDescription] = useState(attempt?.description ?? "");
+  const [visibility, setVisibility] = useState(
+    attempt?.visibility ?? destination.visibilities[0],
+  );
+  const available = destination.visibilities.includes(visibility);
   const mutation = useMutation(csrf, null);
   return (
     <form
       onSubmit={async (event) => {
         event.preventDefault();
-        if (!name.trim() || mutation.pending) return;
-        const fields = { name: name.trim(), description: description.trim() };
+        if (!name.trim() || !available || mutation.pending) return;
+        const fields = {
+          name: name.trim(),
+          description: description.trim(),
+          visibility,
+        };
         const next =
           attempt?.name === fields.name &&
-          attempt.description === fields.description
+          attempt.description === fields.description &&
+          attempt.visibility === visibility
             ? attempt
             : { ...fields, request_id: crypto.randomUUID() };
         setAttempt(next);
@@ -120,7 +149,46 @@ function RepositoryForm({
             onChange={(event) => setDescription(event.target.value)}
           />
         </Field>
-        <p className="text-sm text-muted-foreground">
+        <FieldSet>
+          <FieldLegend id="new-repository-visibility" variant="label">
+            Visibility
+          </FieldLegend>
+          <RadioGroup
+            aria-labelledby="new-repository-visibility"
+            value={visibility}
+            disabled={mutation.pending}
+            onValueChange={(value) => {
+              setVisibility(value === "public" ? "public" : "private");
+            }}
+          >
+            {destination.visibilities.map((value) => {
+              const id = `new-repository-${value}`;
+              const [label, description] = visibilityOptions[value];
+              return (
+                <Field key={value} orientation="horizontal">
+                  <RadioGroupItem
+                    id={id}
+                    value={value}
+                    aria-describedby={`${id}-help`}
+                  />
+                  <FieldContent>
+                    <FieldLabel htmlFor={id}>{label}</FieldLabel>
+                    <FieldDescription id={`${id}-help`}>
+                      {description}
+                    </FieldDescription>
+                  </FieldContent>
+                </Field>
+              );
+            })}
+          </RadioGroup>
+          {!available && (
+            <FieldError>
+              Your saved visibility is no longer available. Choose an allowed
+              visibility to continue.
+            </FieldError>
+          )}
+        </FieldSet>
+        <p className="text-sm wrap-anywhere text-muted-foreground">
           <code>
             {destination.owner}/{name || "repository"}
           </code>{" "}
@@ -128,7 +196,10 @@ function RepositoryForm({
         </p>
         {mutation.error && <FieldError>{mutation.error}</FieldError>}
         <div className="flex justify-end">
-          <Button type="submit" disabled={!name.trim() || mutation.pending}>
+          <Button
+            type="submit"
+            disabled={!name.trim() || !available || mutation.pending}
+          >
             {mutation.pending ? "Creating…" : "Create repository"}
           </Button>
         </div>
@@ -159,13 +230,13 @@ export function CreateRepository({
           New repository
         </Button>
       </DialogTrigger>
-      <DialogContent>
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Create a repository</DialogTitle>
           <DialogDescription>
             {organization
-              ? `Create an empty private Git repository owned by ${organization.name}.`
-              : "Create an empty private Git repository in your personal namespace."}
+              ? `Create an empty Git repository owned by ${organization.name}.`
+              : "Create an empty Git repository in your personal namespace."}
           </DialogDescription>
         </DialogHeader>
         <Result state={destination}>

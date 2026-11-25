@@ -1,5 +1,5 @@
 use super::{ImportError, ValidatedImport, source};
-use crate::storage_root::StorageRoot;
+use crate::{catalog::visibility::Visibility, storage_root::StorageRoot};
 use bytes::Bytes;
 use crab_storage::{ETag, StorageError};
 use serde::{Deserialize, Serialize};
@@ -76,6 +76,8 @@ pub(super) struct Status {
     pub(super) source: String,
     pub(super) owner: String,
     pub(super) name: String,
+    #[serde(default)]
+    pub(super) visibility: Visibility,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fork_source: Option<Uuid>,
     state: State,
@@ -291,6 +293,7 @@ impl Jobs {
                 owner: status.owner.clone(),
                 name: status.name.clone(),
                 description,
+                visibility: Visibility::Private,
                 fork_source: Some(fork_source),
                 token: None,
             }
@@ -300,6 +303,7 @@ impl Jobs {
                 status.owner.clone(),
                 status.name.clone(),
                 description,
+                status.visibility,
                 token,
                 allowed_hosts,
             )?
@@ -354,6 +358,7 @@ impl Jobs {
             source: request.source.clone(),
             owner: request.owner.clone(),
             name: request.name.clone(),
+            visibility: request.visibility,
             fork_source: request.fork_source,
             state: State::Queued,
             message: "Queued for import".into(),
@@ -515,7 +520,14 @@ fn digest(request: &ValidatedImport) -> Result<String, ImportError> {
         Some(source) => serde_json::to_vec(&(source, intent))?,
         None => serde_json::to_vec(&intent)?,
     };
-    Ok(blake3::hash(&encoded).to_hex().to_string())
+    let mut hash = blake3::Hasher::new();
+    hash.update(&encoded);
+    // Existing private jobs keep their identity. Publication intent is bound
+    // separately from replaceable source credentials.
+    if request.visibility.is_public() {
+        hash.update(b"\0public");
+    }
+    Ok(hash.finalize().to_hex().to_string())
 }
 
 #[cfg(test)]
@@ -545,6 +557,7 @@ mod tests {
             owner: "example".into(),
             name: "repo".into(),
             description: "description".into(),
+            visibility: Visibility::Public,
             token: Some("fixture-secret".into()),
         };
         let id = Uuid::now_v7();
@@ -570,11 +583,16 @@ mod tests {
             "interrupted"
         );
         let mut changed = import.clone();
-        changed.name = "another".into();
+        changed.visibility = Visibility::Private;
         assert!(matches!(
             second.replay(id, &changed).await,
             Err(ImportError::SubmissionConflict)
         ));
+        let (_, resumed) = second
+            .resume_request(id, Some("fresh-token".into()), &["example.com".into()])
+            .await
+            .unwrap();
+        assert_eq!(resumed.unwrap().visibility, Visibility::Public);
         assert!(second.create(id, &import).await.unwrap().is_none());
 
         let (left, right) = tokio::join!(jobs.claim(id, &import), second.claim(id, &import));

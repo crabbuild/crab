@@ -1,4 +1,5 @@
 use super::ImportError;
+use crate::catalog::visibility::Visibility;
 use serde::Deserialize;
 use url::{Host, Url};
 const MAX_TOKEN_BYTES: usize = 512;
@@ -14,6 +15,8 @@ pub(super) struct GitImportRequest {
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
+    visibility: Visibility,
+    #[serde(default)]
     token: Option<String>,
 }
 
@@ -24,6 +27,7 @@ pub(super) struct ValidatedImport {
     pub(super) owner: String,
     pub(super) name: String,
     pub(super) description: String,
+    pub(super) visibility: Visibility,
     pub(super) token: Option<String>,
 }
 
@@ -72,6 +76,7 @@ pub(super) fn validate_request(
         owner,
         name,
         description,
+        visibility: request.visibility,
         token,
     })
 }
@@ -81,6 +86,7 @@ pub(super) fn stored_request(
     owner: String,
     name: String,
     description: String,
+    visibility: Visibility,
     token: Option<String>,
     allowed_hosts: &[String],
 ) -> Result<ValidatedImport, ImportError> {
@@ -91,6 +97,7 @@ pub(super) fn stored_request(
             owner: Some(owner),
             name,
             description: Some(description),
+            visibility,
             token,
         },
         None,

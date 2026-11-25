@@ -22,6 +22,8 @@ pub(super) enum Order {
     NameDesc,
     CreatedAsc,
     CreatedDesc,
+    UpdatedAsc,
+    UpdatedDesc,
 }
 
 impl Order {
@@ -32,6 +34,8 @@ impl Order {
             "name-desc" => Self::NameDesc,
             "created-asc" => Self::CreatedAsc,
             "created-desc" => Self::CreatedDesc,
+            "updated-asc" => Self::UpdatedAsc,
+            "updated-desc" => Self::UpdatedDesc,
             _ => return None,
         })
     }
@@ -43,7 +47,13 @@ impl Order {
             Self::NameDesc => b"name-desc",
             Self::CreatedAsc => b"created-asc",
             Self::CreatedDesc => b"created-desc",
+            Self::UpdatedAsc => b"updated-asc",
+            Self::UpdatedDesc => b"updated-desc",
         }
+    }
+
+    pub(super) fn by_update(self) -> bool {
+        matches!(self, Self::UpdatedAsc | Self::UpdatedDesc)
     }
 }
 
@@ -86,7 +96,7 @@ impl Query {
                 }
                 if name.eq_ignore_ascii_case("sort") {
                     let selected = Order::parse(value).filter(|_| !exclude).ok_or(Error::Invalid(
-                        "Use sort:relevance, sort:name-asc, sort:name-desc, sort:created-asc, or sort:created-desc",
+                        "Use sort:relevance or sort by name, created, or updated with -asc or -desc",
                     ))?;
                     require_value(&mut order, selected)?;
                     source = end;
