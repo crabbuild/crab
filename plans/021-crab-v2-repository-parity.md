@@ -217,6 +217,10 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
   finds outstanding requests by visible team or by the viewer's current team
   memberships. Automatic assignment, organization creation policy and base
   permissions remain open.
+- Search by a person's open team review requests in repository and workspace
+  search. Named review-request searches include direct requests and visible
+  team requests. The direct-only and team-only qualifiers work independently,
+  and pagination rechecks current team visibility and membership.
 - Repository and workspace discussion search support exact target branch and
   source branch prefix filters. Repository search suggests both qualifiers.
 - Repository and workspace discussion search filter pending, successful, and

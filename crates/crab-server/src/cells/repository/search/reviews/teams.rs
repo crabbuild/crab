@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{Kind, Query, Term};
+use super::{Query, Term};
 use crate::cells::{
     Result,
     application::{SqlStatement, SqlValue, Transaction},
@@ -36,15 +36,19 @@ impl Query {
         })
     }
 
-    pub(crate) fn includes_my_team_requests(&self) -> bool {
+    pub(crate) fn review_team_users(&self) -> BTreeSet<String> {
         self.names(|term| match term {
-            Term::Reviewer {
-                kind: Kind::ReviewRequested,
-                name,
-            } if name == "@me" => Some(name),
+            Term::Reviewer { kind, name } if kind.includes_teams() => Some(name),
             _ => None,
         })
-        .contains("@me")
+    }
+
+    pub(in crate::cells::repository::search) fn uses_review_teams(&self) -> bool {
+        self.expression.has_term(|term| match term {
+            Term::Reviewer { kind, .. } => kind.includes_teams(),
+            Term::TeamReviewRequested(_) => true,
+            _ => false,
+        })
     }
 }
 
@@ -53,6 +57,8 @@ impl Query {
 pub(crate) struct Bindings {
     pub named: Vec<(String, Option<Uuid>)>,
     pub mine: Vec<Uuid>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub users: Vec<(String, Vec<Uuid>)>,
 }
 
 impl Bindings {
@@ -60,6 +66,10 @@ impl Bindings {
         &self,
         query: &Query,
     ) -> std::result::Result<(), &'static str> {
+        let users = query.review_team_users();
+        let ordered_ids = |ids: &[Uuid]| {
+            ids.windows(2).all(|pair| pair[0] < pair[1]) && !ids.iter().any(Uuid::is_nil)
+        };
         if !self
             .named
             .iter()
@@ -69,11 +79,18 @@ impl Bindings {
                 .named
                 .iter()
                 .any(|(_, id)| id.is_some_and(|id| id.is_nil()))
-            || (!self.mine.is_empty() && !query.includes_my_team_requests())
+            || !self
+                .users
+                .iter()
+                .map(|(name, _)| name)
+                .eq(users.iter().filter(|name| name.as_str() != "@me"))
+            || (!self.mine.is_empty() && !users.contains("@me"))
+            || !ordered_ids(&self.mine)
+            || self.users.iter().any(|(_, ids)| !ordered_ids(ids))
             || self.mine.len()
                 > crate::cells::organization::teams::repository_access::MAX_TEAM_ACCESS_ROWS
-            || self.mine.windows(2).any(|pair| pair[0] >= pair[1])
-            || self.mine.iter().any(Uuid::is_nil)
+            || self.users.iter().map(|(_, ids)| ids.len()).sum::<usize>()
+                > crate::cells::organization::teams::repository_access::MAX_TEAM_ACCESS_ROWS
         {
             return Err("Team review filters require ordered, resolved organization bindings");
         }
@@ -82,6 +99,16 @@ impl Bindings {
 
     pub(in crate::cells::repository::search) fn named(&self, name: &str) -> Option<Uuid> {
         self.named.iter().find(|(key, _)| key == name)?.1
+    }
+
+    pub(in crate::cells::repository::search) fn for_user(&self, name: &str) -> &[Uuid] {
+        if name == "@me" {
+            return &self.mine;
+        }
+        self.users
+            .iter()
+            .find(|(key, _)| key == name)
+            .map_or(&[], |(_, ids)| ids.as_slice())
     }
 }
 

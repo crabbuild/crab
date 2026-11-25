@@ -366,12 +366,14 @@ fn atom_expression(atom: &str) -> Result<Expression, &'static str> {
                 &qualifier.to_ascii_lowercase(),
                 &unquote(value)?,
             )?),
-            "review-requested" | "reviewed-by" | "review-involves" | "user-review-requested" => {
-                Term::Reviewer {
-                    kind: reviews::Kind::parse(&qualifier.to_ascii_lowercase())?,
-                    name: people::name(&unquote(value)?)?,
-                }
-            }
+            "review-requested"
+            | "reviewed-by"
+            | "review-involves"
+            | "user-review-requested"
+            | "team-review-requested-user" => Term::Reviewer {
+                kind: reviews::Kind::parse(&qualifier.to_ascii_lowercase())?,
+                name: people::name(&unquote(value)?)?,
+            },
             "team-review-requested" => {
                 Term::TeamReviewRequested(reviews::teams::name(&unquote(value)?)?)
             }

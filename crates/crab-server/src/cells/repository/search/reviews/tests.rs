@@ -31,12 +31,22 @@ async fn search(
     reviewer: &RepositoryAuthor,
 ) -> index::Page<DiscussionSummary> {
     let parsed = Query::parse(Some(query)).unwrap();
+    let review_teams = teams::Bindings {
+        users: parsed
+            .review_team_users()
+            .into_iter()
+            .filter(|name| name != "@me")
+            .map(|name| (name, Vec::new()))
+            .collect(),
+        ..Default::default()
+    };
     let people = parsed
         .people()
         .into_iter()
         .map(|name| Binding {
             name,
             identity: Some(people::identity(&reviewer.issuer, &reviewer.subject).unwrap()),
+            account: None,
         })
         .collect();
     cell.client
@@ -46,6 +56,7 @@ async fn search(
             SearchInput {
                 query: Some(query.into()),
                 people,
+                review_teams,
                 ..Default::default()
             },
         )
@@ -134,7 +145,8 @@ fn reviewer_navigation_preserves_conditional_groups_and_native_personal_selectio
         query
             .validate_people(&[Binding {
                 name: "@me".into(),
-                identity: None
+                identity: None,
+                account: None,
             }])
             .is_err()
     );
@@ -358,7 +370,7 @@ async fn rebuild_pages_review_history_and_sparse_requests_without_changing_versi
                 query: Some("is:open team-review-requested:team/engineering".into()),
                 review_teams: teams::Bindings {
                     named: vec![("team/engineering".into(), Some(team))],
-                    mine: Vec::new(),
+                    ..Default::default()
                 },
                 ..Default::default()
             },

@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 pub(crate) struct Binding {
     pub name: String,
     pub identity: Option<[u8; 32]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<uuid::Uuid>,
 }
 
 pub(crate) fn identity(issuer: &str, subject: &str) -> crate::cells::Result<[u8; 32]> {
@@ -34,14 +36,21 @@ impl super::Query {
 
     pub(super) fn validate_people(&self, bindings: &[Binding]) -> Result<(), &'static str> {
         let names = self.people();
+        let team_users = self.review_team_users();
         if bindings.len() != names.len()
             || !bindings
                 .iter()
                 .map(|binding| &binding.name)
                 .eq(names.iter())
-            || bindings
-                .iter()
-                .any(|binding| binding.name == "@me" && binding.identity.is_none())
+            || bindings.iter().any(|binding| {
+                (binding.name == "@me" && binding.identity.is_none())
+                    || binding.account.is_some_and(|account| {
+                        account.is_nil()
+                            || binding.identity.is_none()
+                            || binding.name == "@me"
+                            || !team_users.contains(&binding.name)
+                    })
+            })
         {
             return Err("People filters require ordered, resolved qualified identity bindings");
         }

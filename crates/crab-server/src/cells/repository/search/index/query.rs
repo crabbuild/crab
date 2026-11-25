@@ -707,13 +707,12 @@ fn scoped_expression(
                 format!("d.kind = 1 AND EXISTS (SELECT 1 FROM repository_pulls p WHERE p.number = d.number AND instr(p.head_ref, {reference}) = 1)")
             }
             Term::Reviewer { kind, name } => {
-                use super::super::reviews::Kind;
-                let direct = bindings.person(name).map_or_else(|| "0".into(), |value| {
-                    let predicate = kind.predicate();
+                let direct = kind.direct_predicate().and_then(|predicate| bindings.person(name).map(|value| {
                     format!("d.kind = 1 AND d.number IN (SELECT r.pull FROM discussion_index_reviewers r WHERE r.identity = {value} AND ({predicate}))")
-                });
-                if *kind == Kind::ReviewRequested && name == "@me" && !bindings.review_teams.mine.is_empty() {
-                    let teams = bindings.text(&serde_json::to_string(&bindings.review_teams.mine)?);
+                })).unwrap_or_else(|| "0".into());
+                let teams = bindings.review_teams.for_user(name);
+                if kind.includes_teams() && !teams.is_empty() {
+                    let teams = bindings.text(&serde_json::to_string(teams)?);
                     let team = format!("EXISTS (SELECT 1 FROM discussion_index_team_requests t WHERE t.document=d.rowid AND t.team IN (SELECT value FROM json_each({teams})))");
                     format!("(({direct}) OR (d.kind=1 AND {team}))")
                 } else {

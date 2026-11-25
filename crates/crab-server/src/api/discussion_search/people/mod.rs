@@ -3,7 +3,9 @@ use crate::{
     auth::Principal,
     cells::{
         Address,
-        directory::{ActorSummary, CompleteHandles, ResolveHandles, validate_handle_prefix},
+        directory::{
+            ActorSummary, CompleteHandles, LookupAccounts, ResolveHandles, validate_handle_prefix,
+        },
         repository::{
             SearchInput,
             search::{
@@ -49,6 +51,27 @@ pub(in crate::api) async fn resolve(
     }
     let mut by_handle: std::collections::BTreeMap<_, _> =
         handles.into_iter().zip(resolved).collect();
+    let team_users = query.review_team_users();
+    let (handles, identities): (Vec<_>, Vec<_>) = team_users
+        .iter()
+        .filter_map(|name| Some((name.clone(), by_handle.get(name)?.as_ref()?.clone())))
+        .unzip();
+    let accounts = if identities.is_empty() {
+        Vec::new()
+    } else {
+        let cells = server.cells().ok_or(app::Error::CellUnavailable)?;
+        app::query_output(
+            cells
+                .query::<LookupAccounts>(Address::Directory, None, identities)
+                .await,
+        )?
+    };
+    if accounts.len() != handles.len() {
+        return Err(app::Error::CellContract(
+            "Review team account lookup returned an invalid result count",
+        ));
+    }
+    let accounts: std::collections::BTreeMap<_, _> = handles.into_iter().zip(accounts).collect();
     let actor = principal.identity();
     // All people predicates bind against one parsed union and Directory snapshot.
     input.people = names
@@ -68,7 +91,12 @@ pub(in crate::api) async fn resolve(
                     .transpose()
                     .map_err(app::Error::Cell)?
             };
-            Ok(Binding { name, identity })
+            let account = accounts.get(&name).copied().flatten();
+            Ok(Binding {
+                name,
+                identity,
+                account,
+            })
         })
         .collect::<Result<_>>()?;
     Ok(())

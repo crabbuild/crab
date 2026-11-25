@@ -16,6 +16,7 @@ pub(crate) enum Kind {
     ReviewedBy,
     ReviewInvolves,
     UserReviewRequested,
+    TeamReviewRequestedUser,
 }
 impl Kind {
     pub(super) fn parse(value: &str) -> Result<Self, &'static str> {
@@ -24,6 +25,7 @@ impl Kind {
             "reviewed-by" => Ok(Self::ReviewedBy),
             "review-involves" => Ok(Self::ReviewInvolves),
             "user-review-requested" => Ok(Self::UserReviewRequested),
+            "team-review-requested-user" => Ok(Self::TeamReviewRequestedUser),
             _ => Err("Unsupported reviewer qualifier"),
         }
     }
@@ -33,14 +35,20 @@ impl Kind {
             Self::ReviewedBy => "reviewed-by",
             Self::ReviewInvolves => "review-involves",
             Self::UserReviewRequested => "user-review-requested",
+            Self::TeamReviewRequestedUser => "team-review-requested-user",
         }
     }
-    pub(super) const fn predicate(self) -> &'static str {
+    pub(super) const fn direct_predicate(self) -> Option<&'static str> {
         match self {
-            Self::ReviewRequested | Self::UserReviewRequested => "r.requested = 1",
-            Self::ReviewedBy => "r.reviewed = 1",
-            Self::ReviewInvolves => "r.requested = 1 OR r.reviewed = 1",
+            Self::ReviewRequested | Self::UserReviewRequested => Some("r.requested = 1"),
+            Self::ReviewedBy => Some("r.reviewed = 1"),
+            Self::ReviewInvolves => Some("r.requested = 1 OR r.reviewed = 1"),
+            Self::TeamReviewRequestedUser => None,
         }
+    }
+
+    pub(super) const fn includes_teams(self) -> bool {
+        matches!(self, Self::ReviewRequested | Self::TeamReviewRequestedUser)
     }
 }
 
@@ -51,7 +59,10 @@ impl Query {
                 Expression::Term {
                     value:
                         Term::Reviewer {
-                            kind: Kind::ReviewRequested | Kind::UserReviewRequested,
+                            kind:
+                                Kind::ReviewRequested
+                                | Kind::UserReviewRequested
+                                | Kind::TeamReviewRequestedUser,
                             name,
                         },
                     ..

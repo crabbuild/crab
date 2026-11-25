@@ -38,7 +38,7 @@ pub(crate) struct Item {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Page {
     pub items: Vec<Item>,
-    pub head_snapshot: Option<[u8; 32]>,
+    pub filter_snapshot: Option<[u8; 32]>,
 }
 
 impl Item {
@@ -73,7 +73,7 @@ impl Read for ListWorkspaceWork {
         if input.search.before.is_some() || input.search.direction != Direction::Desc {
             return Err(crate::cells::Error::Invalid("Invalid workspace page"));
         }
-        ensure_ready(context)?;
+        let generation = ensure_ready(context)?;
         let criteria = criteria(context, &input.search, input.kind)?;
         let mut items = Vec::new();
         // Each kind uses its existing time index before joining the canonical title.
@@ -135,18 +135,25 @@ impl Read for ListWorkspaceWork {
         }
         items.sort_unstable_by_key(|item| Reverse(item.key(input.search.sort)));
         items.truncate(usize::from(input.search.limit) + 1);
-        let head_snapshot = input
-            .search
-            .pull_heads
-            .as_ref()
-            .map(|heads| {
-                serde_json::to_vec(&(heads, &criteria.review, criteria.check_revision))
-                    .map(|data| *blake3::hash(&data).as_bytes())
-            })
-            .transpose()?;
+        let filter_snapshot =
+            if criteria.query.needs_pull_heads() || criteria.query.uses_review_teams() {
+                // Workspace continuations merge repository pages. A team roster
+                // or a fulfilled request can change membership without moving a Git ref.
+                let data = serde_json::to_vec(&(
+                    generation,
+                    revision(context)?,
+                    &input.search.pull_heads,
+                    &criteria.review,
+                    criteria.check_revision,
+                    &input.search.review_teams,
+                ))?;
+                Some(*blake3::hash(&data).as_bytes())
+            } else {
+                None
+            };
         Ok(Page {
             items,
-            head_snapshot,
+            filter_snapshot,
         })
     }
 }

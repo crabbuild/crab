@@ -3,6 +3,7 @@ use axum::http::{StatusCode, header};
 use serde_json::{Value, json};
 
 mod fork_heads;
+mod team_requests;
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Chromium and the built embedded UI"]

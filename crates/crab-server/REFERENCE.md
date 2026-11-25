@@ -3564,9 +3564,13 @@ Both list outputs include `assigned_to_me` for global positive self predicates;
 conditional/excluded predicates retain arbitrary-search navigation.
 
 Reviewer predicates accept public usernames or `@me`: `review-requested`,
-`reviewed-by`, `review-involves`, and `user-review-requested`.
-`review-requested:@me` includes outstanding requests for the teams you currently
-belong to. `user-review-requested:@me` shows direct requests. A submitted review
+`reviewed-by`, `review-involves`, `user-review-requested`, and
+`team-review-requested-user`.
+`review-requested:USERNAME` includes direct requests and outstanding requests
+to the user's current teams that the reader can see. Use
+`user-review-requested:USERNAME` for direct requests and
+`team-review-requested-user:USERNAME` for team requests. Use `@me` to apply
+any of these filters to your own account. A submitted review
 fulfills its pending direct request and remains a participant. Cancellation
 without a review removes participation. Qualified issuer/subject bindings
 prevent cross-provider subject collisions.
@@ -3576,7 +3580,7 @@ review from a visible team in the repository's organization. Quote values
 containing spaces. Type `team-review-requested:` in the search box to choose
 a visible team with the qualified value filled in. A fulfilled or cancelled
 request drops out. Team visibility and roster changes invalidate affected
-continuations. Existing repositories require `cells rebuild-search` for
+continuations in repository and workspace search. Existing repositories require `cells rebuild-search` for
 discussion index format 14.
 
 Exclusion, boolean groups, exact full counts and query-bound cursors use the

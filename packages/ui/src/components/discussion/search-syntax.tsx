@@ -30,6 +30,7 @@ const icons = new Map<string, LucideIcon>([
   ["review", GitPullRequestIcon],
   ["review-requested", GitPullRequestIcon],
   ["team-review-requested", GitPullRequestIcon],
+  ["team-review-requested-user", GitPullRequestIcon],
   ["reviewed-by", GitPullRequestIcon],
   ["review-involves", GitPullRequestIcon],
   ["user-review-requested", GitPullRequestIcon],

@@ -82,6 +82,8 @@ pub(crate) struct ReviewTeamQuery {
     pub actor: Uuid,
     pub names: Vec<String>,
     pub include_mine: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub users: Vec<Uuid>,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -89,6 +91,8 @@ pub(crate) struct ReviewTeamQuery {
 pub(crate) struct ReviewTeams {
     pub named: Vec<Option<Uuid>>,
     pub mine: Vec<Uuid>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub users: BTreeMap<Uuid, Vec<Uuid>>,
 }
 
 pub(crate) struct ResolveReviewTeams;
@@ -132,8 +136,60 @@ impl Read for ResolveReviewTeams {
                 mine.push(uuid(team)?);
             }
         }
-        Ok(ReviewTeams { named, mine })
+        let users = if input.users.is_empty() {
+            BTreeMap::new()
+        } else {
+            visible_memberships(context, input.actor, input.users)?
+        };
+        Ok(ReviewTeams { named, mine, users })
     }
+}
+
+fn visible_memberships(
+    context: &Transaction<'_>,
+    viewer: Uuid,
+    users: Vec<Uuid>,
+) -> Result<BTreeMap<Uuid, Vec<Uuid>>> {
+    if users.len() > 64
+        || users.windows(2).any(|pair| pair[0] >= pair[1])
+        || users.iter().any(Uuid::is_nil)
+    {
+        return Err(Error::Invalid("Invalid review team accounts"));
+    }
+    let organization = member(context, viewer)?
+        .filter(|member| member.active)
+        .ok_or(Error::AccessDenied)?;
+    let owner = organization.role == OrganizationRole::Owner;
+    let ids = vec!["?"; users.len()].join(",");
+    let mut params = vec![blob(viewer), SqlValue::Integer(i64::from(owner))];
+    params.extend(users.into_iter().map(blob));
+    params.push(SqlValue::Integer((MAX_TEAM_ACCESS_ROWS + 1) as i64));
+    // A viewer can learn another member's team assignment only through the
+    // same visibility and current membership epoch as the team roster.
+    let rows = context.query(
+        &format!(
+            "SELECT m.actor,m.team FROM organization_team_members m
+             JOIN organization_teams t ON t.id=m.team
+             JOIN organization_members o ON o.actor=m.actor
+             JOIN organization_membership_epochs e ON e.actor=o.actor
+             LEFT JOIN organization_team_members v ON v.team=t.id AND v.actor=?1
+             LEFT JOIN organization_membership_epochs ve ON ve.actor=v.actor
+             WHERE t.deleted_at_ms IS NULL AND {ACTIVE_MEMBERSHIP}
+               AND (?2 OR t.visibility='closed' OR (v.role IS NOT NULL AND v.membership_epoch=ve.epoch))
+               AND m.actor IN ({ids})
+             ORDER BY m.actor,m.team LIMIT ?"
+        ),
+        &params,
+    )?;
+    enforce_row_budget(rows.rows.len())?;
+    let mut visible = BTreeMap::<_, Vec<_>>::new();
+    for row in &rows.rows {
+        let [person, team] = row.as_slice() else {
+            return Err(Error::Invalid("Invalid visible review team membership"));
+        };
+        visible.entry(uuid(person)?).or_default().push(uuid(team)?);
+    }
+    Ok(visible)
 }
 
 pub(super) fn active_team_rows(

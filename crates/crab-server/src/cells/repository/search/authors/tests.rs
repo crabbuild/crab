@@ -127,6 +127,7 @@ async fn qualified_author_projection_filters_both_kinds_and_binds_cursors_to_res
     let binding = |name: &str, index| Binding {
         name: name.into(),
         identity: key(index),
+        account: None,
     };
     let first = page(
         &cell,
@@ -191,7 +192,8 @@ async fn qualified_author_projection_filters_both_kinds_and_binds_cursors_to_res
             "author:unknown",
             vec![Binding {
                 name: "unknown".into(),
-                identity: None
+                identity: None,
+                account: None,
             }],
             None,
             50
@@ -214,7 +216,8 @@ async fn qualified_author_projection_filters_both_kinds_and_binds_cursors_to_res
             "author:@me",
             vec![Binding {
                 name: "@me".into(),
-                identity: None
+                identity: None,
+                account: None,
             }],
             None,
             50

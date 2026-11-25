@@ -42,6 +42,7 @@ async fn search(
         .map(|name| Binding {
             name,
             identity: Some(super::super::people::identity(&actor.issuer, &actor.subject).unwrap()),
+            account: None,
         })
         .collect();
     cell.client
@@ -85,14 +86,17 @@ fn people_bindings_deduplicate_all_relationships_and_preserve_boolean_identity()
         Binding {
             name: "@me".into(),
             identity: Some([1; 32]),
+            account: None,
         },
         Binding {
             name: "alice".into(),
             identity: Some([2; 32]),
+            account: None,
         },
         Binding {
             name: "bob".into(),
             identity: None,
+            account: None,
         },
     ];
     assert!(query.validate_people(&bindings).is_ok());

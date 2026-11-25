@@ -43,6 +43,7 @@ const PEOPLE_QUALIFIERS: &[&str] = &[
     "reviewed-by",
     "review-involves",
     "user-review-requested",
+    "team-review-requested-user",
 ];
 
 pub(crate) struct CompleteSearch;
@@ -262,6 +263,10 @@ fn suggestions(
             ("reviewed-by:@me", "Reviewed by you"),
             ("review-involves:@me", "Your review involvement"),
             ("user-review-requested:@me", "Directly awaiting your review"),
+            (
+                "team-review-requested-user:@me",
+                "Awaiting a review from your teams",
+            ),
         ] {
             if value.starts_with(&prefix) {
                 items.push(Suggestion {
@@ -318,6 +323,10 @@ fn suggestions(
             ("assignee:@me", "Work assigned to you"),
             ("assignee:*", "Work with any assignee"),
             ("team-review-requested:", "Filter by requested team"),
+            (
+                "team-review-requested-user:",
+                "Filter requests to a person's teams",
+            ),
             ("reviewed-by:", "Filter submitted reviewers"),
             (
                 "review-involves:",

@@ -32,6 +32,7 @@ fn input(source: &str) -> SearchInput {
         .map(|name| people::Binding {
             name,
             identity: Some(people::identity(&actor.issuer, &actor.subject).unwrap()),
+            account: None,
         })
         .collect();
     SearchInput {
