@@ -13,7 +13,7 @@ async fn required_properties_keep_a_default_and_public_reads_expose_only_effecti
     let property = Uuid::now_v7().to_string();
     let mut definition = json!({
         "id":property,"name":"regulated","description":"Organization definition",
-        "kind":"boolean","options":[],"required":true,"default":null,
+        "kind":"boolean","options":[],"required":true,"require_explicit_values":true,"default":null,
     });
     assert_eq!(
         h.write(
@@ -73,13 +73,26 @@ async fn required_properties_keep_a_default_and_public_reads_expose_only_effecti
         public(false)
     );
     assert_eq!(get(&schema).await.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        repository_write(
+            &h,
+            Method::PUT,
+            &properties,
+            &alice,
+            id,
+            json!({"expected_version":0,"schema_version":1,"overrides":{}}),
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
     repository_write(
         &h,
         Method::PUT,
         &properties,
         &alice,
         id,
-        json!({"expected_version":0,"schema_version":1,"overrides":{(property):true}}),
+        json!({"expected_version":0,"schema_version":1,"overrides":{(&property):true}}),
     )
     .await
     .error_for_status()
@@ -93,6 +106,22 @@ async fn required_properties_keep_a_default_and_public_reads_expose_only_effecti
             .await
             .unwrap(),
         public(true)
+    );
+    let selection = format!("{schema}/values");
+    let selected = h
+        .json(&format!("{selection}?repositories={id}"), &alice)
+        .await;
+    assert_eq!(
+        h.write(
+            Method::PUT, &selection, &alice,
+            json!({"request_id":Uuid::now_v7(),"issued_at_ms":crate::cells::unix_now_ms().unwrap(),
+                "schema_version":1,"repositories":selected["repositories"],"changes":{(&property):null}}),
+        ).await.status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        h.json(&properties, &alice).await["values"]["overrides"][&property],
+        true
     );
     change(1, "private").await;
     assert_eq!(get(&properties).await.status(), StatusCode::UNAUTHORIZED);

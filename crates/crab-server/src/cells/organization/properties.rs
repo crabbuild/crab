@@ -54,6 +54,8 @@ pub(crate) struct Definition {
     #[serde(default)]
     pub required: bool,
     #[serde(default)]
+    pub require_explicit_values: bool,
+    #[serde(default)]
     pub values_editable_by: EditAuthority,
 }
 
@@ -135,21 +137,72 @@ impl Schema {
     }
 }
 
+pub(super) fn creation_fields(context: &Transaction<'_>, role: Role) -> Result<Vec<Definition>> {
+    Ok(schema(context)?
+        .definitions
+        .into_iter()
+        .filter(|field| {
+            role == Role::Owner || field.values_editable_by == EditAuthority::Repository
+        })
+        .collect())
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+pub(crate) enum ValueError {
+    Invalid,
+    MissingExplicit,
+}
+
+impl ValueError {
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::Invalid => "Choose valid values for the repository properties you can set",
+            Self::MissingExplicit => "Choose an explicit value for each property that requires one",
+        }
+    }
+}
+
+pub(crate) fn validate_initial_values(
+    fields: &[Definition],
+    values: &BTreeMap<Uuid, PropertyValue>,
+) -> std::result::Result<(), ValueError> {
+    if !values.iter().all(|(id, value)| {
+        fields
+            .iter()
+            .find(|field| field.id == *id)
+            .is_some_and(|field| field.accepts(value))
+    }) {
+        return Err(ValueError::Invalid);
+    }
+    if fields
+        .iter()
+        .any(|field| field.require_explicit_values && !values.contains_key(&field.id))
+    {
+        return Err(ValueError::MissingExplicit);
+    }
+    Ok(())
+}
+
 pub(super) fn schema(context: &Transaction<'_>) -> Result<Schema> {
     Ok(context.document(KEY)?.unwrap_or_default())
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Repository {
     pub id: Uuid,
     pub ownership_epoch: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub property_seed: Option<Uuid>,
 }
 
 impl Repository {
     fn key(self) -> Result<String> {
         if self.id.is_nil() {
             return Err(Error::Invalid("invalid property repository"));
+        }
+        if let Some(seed) = self.property_seed {
+            return Ok(format!("{KEY}/repository/{}/transfer/{seed}", self.id));
         }
         Ok(format!(
             "{KEY}/repository/{}/{:08x}",
@@ -245,6 +298,7 @@ pub(crate) enum Outcome<T> {
     Conflict,
     Invalid,
     MissingRequiredDefault,
+    MissingExplicitValue,
     Denied,
     UsedByRuleset,
     IncompatibleDefinition,
@@ -311,6 +365,7 @@ impl Mutation for SetSchema {
             || serde_json::to_vec(&input.definitions)?.len() > 96 * 1024
             || !input.definitions.iter().all(|definition| {
                 definition.valid()
+                    && (!definition.require_explicit_values || definition.required)
                     && ids.insert(definition.id)
                     && names.insert(definition.name.to_ascii_lowercase())
             })
@@ -439,6 +494,13 @@ impl Mutation for SetValues {
         {
             return Ok(MutationResult::Rejected(Outcome::Denied));
         }
+        if current.schema.definitions.iter().any(|field| {
+            field.require_explicit_values
+                && current.editable.contains(&field.id)
+                && !input.overrides.contains_key(&field.id)
+        }) {
+            return Ok(MutationResult::Rejected(Outcome::MissingExplicitValue));
+        }
         if current.values.overrides == input.overrides {
             return Ok(MutationResult::Success(Outcome::Saved(current)));
         }
@@ -470,6 +532,122 @@ fn save_values(
             version: values.version,
         },
     )
+}
+
+pub(super) fn initialize_values(
+    context: &Transaction<'_>,
+    actor: Uuid,
+    repository: Repository,
+    overrides: BTreeMap<Uuid, PropertyValue>,
+) -> Result<()> {
+    let key = repository.key()?;
+    // A retry can cross a schema edit. Retired IDs stay retired, and an
+    // already applied initialization must never overwrite later edits.
+    if context.document::<Values>(&key)?.is_some() {
+        return Ok(());
+    }
+    let schema = schema(context)?;
+    let mut values = Values {
+        version: 0,
+        overrides,
+    };
+    values
+        .overrides
+        .retain(|id, _| schema.definition(*id).is_some());
+    if !values.overrides.is_empty() {
+        save_values(context, actor, repository, &mut values)?;
+        search::advance_revision(context)?;
+    }
+    Ok(())
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ImportValues {
+    pub actor: Uuid,
+    pub repository: Uuid,
+    pub overrides: BTreeMap<Uuid, PropertyValue>,
+}
+
+pub(crate) struct InitializeImportValues;
+impl Mutation for InitializeImportValues {
+    const CLASS: &'static str = CLASS;
+    const ID: u32 = 99;
+    type Input = ImportValues;
+    type Output = ();
+
+    fn execute(context: &mut Transaction<'_>, input: ImportValues) -> Result<MutationResult<()>> {
+        let repository = Repository {
+            id: input.repository,
+            ownership_epoch: 0,
+            property_seed: None,
+        };
+        initialize_values(context, input.actor, repository, input.overrides)?;
+        Ok(MutationResult::Success(()))
+    }
+}
+
+pub(crate) fn transfer_seed(
+    offer: Uuid,
+    overrides: &BTreeMap<Uuid, PropertyValue>,
+) -> std::result::Result<Option<Uuid>, serde_json::Error> {
+    if overrides.is_empty() {
+        return Ok(None);
+    }
+    let mut digest = blake3::Hasher::new_derive_key("crab repository transfer properties v1");
+    digest.update(offer.as_bytes());
+    digest.update(&serde_json::to_vec(overrides)?);
+    let mut seed = [0; 16];
+    seed.copy_from_slice(&digest.finalize().as_bytes()[..16]);
+    Ok(Some(Uuid::from_bytes(seed)))
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TransferValues {
+    pub actor: Uuid,
+    pub offer: Uuid,
+    pub repository: Repository,
+    pub overrides: BTreeMap<Uuid, PropertyValue>,
+}
+
+pub(crate) struct PrepareTransferValues;
+impl Mutation for PrepareTransferValues {
+    const CLASS: &'static str = CLASS;
+    const ID: u32 = 100;
+    type Input = TransferValues;
+    type Output = std::result::Result<(), ValueError>;
+
+    fn execute(
+        context: &mut Transaction<'_>,
+        input: TransferValues,
+    ) -> Result<MutationResult<Self::Output>> {
+        if input.offer.is_nil()
+            || input.repository.property_seed != transfer_seed(input.offer, &input.overrides)?
+        {
+            return Ok(MutationResult::Rejected(Err(ValueError::Invalid)));
+        }
+        let fields = creation_fields(context, Role::Owner)?;
+        if let Err(error) = validate_initial_values(&fields, &input.overrides) {
+            return Ok(MutationResult::Rejected(Err(error)));
+        }
+        if input.overrides.is_empty() {
+            return Ok(MutationResult::Success(Ok(())));
+        }
+        let key = input.repository.key()?;
+        // Only the catalog's accepted transfer makes this key addressable.
+        // A retry of a prepared write must preserve edits made after acceptance.
+        if context.document::<Values>(&key)?.is_none() {
+            context.put_document(
+                &key,
+                &Values {
+                    version: 1,
+                    overrides: input.overrides,
+                },
+            )?;
+        }
+        Ok(MutationResult::Success(Ok(())))
+    }
 }
 
 fn valid_selection(ids: impl ExactSizeIterator<Item = Uuid>) -> bool {
@@ -592,6 +770,14 @@ impl Mutation for SetSelection {
         }
         // Collect every valid edit before writing. A changed schema or a stale
         // repository leaves all selected values and audit events untouched.
+        if input.changes.iter().any(|(id, value)| {
+            value.is_none()
+                && schema
+                    .definition(*id)
+                    .is_some_and(|field| field.require_explicit_values)
+        }) {
+            return Ok(MutationResult::Rejected(Outcome::MissingExplicitValue));
+        }
         let mut pending = Vec::new();
         for row in input.repositories {
             let mut current = values(context, &schema, &row.repository.key()?)?;

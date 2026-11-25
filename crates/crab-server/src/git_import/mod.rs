@@ -26,8 +26,8 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
-    Config, app, auth::Principal, catalog::visibility::Visibility, repository::Repository,
-    server::Server,
+    Config, app, auth::Principal, catalog::visibility::Visibility,
+    cells::organization::properties::PropertyValue, repository::Repository, server::Server,
 };
 
 #[derive(Clone)]
@@ -481,12 +481,15 @@ impl IntoResponse for ImportError {
 pub(crate) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .route("/api/imports/git", post(start))
-        .route("/api/repos/{owner}/{name}/forks", post(start_fork))
+        .route(
+            "/api/repos/{owner}/{name}/forks",
+            post(start_fork).layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
+        )
         .route("/api/imports/git/{id}", get(status))
         .route("/api/imports/git/{id}/resume", post(resume))
         .route(
             "/api/organizations/{organization}/repositories/imports/git",
-            post(start),
+            post(start).layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
         )
         .route(
             "/api/organizations/{organization}/repositories/imports/git/{id}",
@@ -527,6 +530,8 @@ struct ForkRequest {
     name: String,
     #[serde(default)]
     destination: ForkDestination,
+    #[serde(default)]
+    properties: BTreeMap<Uuid, PropertyValue>,
 }
 
 #[derive(Default, Deserialize, PartialEq, Eq)]
@@ -550,6 +555,11 @@ async fn start_fork(
         .filter(|_| source.forked_from.is_none())
         .ok_or(ImportError::NotFound)?;
     let personal = input.destination == ForkDestination::Personal;
+    if personal && !input.properties.is_empty() {
+        return Err(ImportError::Invalid(
+            "Repository properties require an organization destination",
+        ));
+    }
     let account =
         ImportAccount::resolve(&server, &principal, (!personal).then_some(organization)).await?;
     let name = source::identifier(input.name, "name")?;
@@ -567,6 +577,7 @@ async fn start_fork(
         name,
         description: String::new(),
         visibility: Visibility::Private,
+        properties: input.properties,
         token: None,
     };
     submit(&server, context, account, input.request_id, request).await
@@ -588,6 +599,11 @@ async fn submit(
     if let Some(status) = jobs.replay(id, &request).await? {
         account.check(server).await?;
         return Ok((StatusCode::ACCEPTED, Json(status)));
+    }
+    if let Some(owner) = account.organization {
+        owner
+            .validate_properties(server, &request.properties)
+            .await?;
     }
     account
         .fork_source(server, &catalog, request.fork_source)

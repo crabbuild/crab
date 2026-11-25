@@ -789,6 +789,7 @@ async fn organization_audit_retains_each_side_of_a_transfer_and_survives_root_re
             transfer::Decision::Accept {
                 actor: actor(),
                 display_name: "Alice".into(),
+                property_seed: None,
             },
             now + 2000,
         )

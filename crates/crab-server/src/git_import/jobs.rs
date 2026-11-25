@@ -1,5 +1,8 @@
 use super::{ImportError, ValidatedImport, source};
-use crate::{catalog::visibility::Visibility, storage_root::StorageRoot};
+use crate::{
+    catalog::visibility::Visibility, cells::organization::properties::PropertyValue,
+    storage_root::StorageRoot,
+};
 use bytes::Bytes;
 use crab_storage::{ETag, StorageError};
 use serde::{Deserialize, Serialize};
@@ -11,7 +14,7 @@ use std::{
 use uuid::Uuid;
 
 const MAX_ACTIVE_JOBS: usize = 4;
-const MAX_JOB_BYTES: u64 = 16 * 1024;
+const MAX_JOB_BYTES: u64 = 144 * 1024;
 const LEASE: Duration = Duration::from_secs(60);
 pub(super) const HEARTBEAT: Duration = Duration::from_secs(15);
 
@@ -78,6 +81,8 @@ pub(super) struct Status {
     pub(super) name: String,
     #[serde(default)]
     pub(super) visibility: Visibility,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(super) properties: BTreeMap<Uuid, PropertyValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fork_source: Option<Uuid>,
     state: State,
@@ -282,7 +287,7 @@ impl Jobs {
             return Ok((status, None));
         }
         let description = document.description.ok_or(ImportError::Unavailable)?;
-        let request = if let Some(fork_source) = status.fork_source {
+        let mut request = if let Some(fork_source) = status.fork_source {
             if token.is_some() {
                 return Err(ImportError::Invalid(
                     "A Crab fork uses your signed-in account",
@@ -294,6 +299,7 @@ impl Jobs {
                 name: status.name.clone(),
                 description,
                 visibility: Visibility::Private,
+                properties: BTreeMap::new(),
                 fork_source: Some(fork_source),
                 token: None,
             }
@@ -308,6 +314,7 @@ impl Jobs {
                 allowed_hosts,
             )?
         };
+        request.properties.clone_from(&status.properties);
         if document.digest != digest(&request)? {
             return Err(ImportError::SubmissionConflict);
         }
@@ -359,6 +366,7 @@ impl Jobs {
             owner: request.owner.clone(),
             name: request.name.clone(),
             visibility: request.visibility,
+            properties: request.properties.clone(),
             fork_source: request.fork_source,
             state: State::Queued,
             message: "Queued for import".into(),
@@ -378,9 +386,7 @@ impl Jobs {
         let body = serde_json::to_vec(&document)?;
         // Leave space for the terminal message and projected repository address.
         if body.len() as u64 > MAX_JOB_BYTES - 1024 {
-            return Err(ImportError::Invalid(
-                "The Git import description or source URL is too long",
-            ));
+            return Err(ImportError::Invalid("The Git import request is too large"));
         }
         match store
             .create_strict_with_etag(&path, Bytes::from(body))
@@ -527,6 +533,10 @@ fn digest(request: &ValidatedImport) -> Result<String, ImportError> {
     if request.visibility.is_public() {
         hash.update(b"\0public");
     }
+    if !request.properties.is_empty() {
+        hash.update(b"\0properties");
+        hash.update(&serde_json::to_vec(&request.properties)?);
+    }
     Ok(hash.finalize().to_hex().to_string())
 }
 
@@ -558,6 +568,7 @@ mod tests {
             name: "repo".into(),
             description: "description".into(),
             visibility: Visibility::Public,
+            properties: [(Uuid::now_v7(), PropertyValue::Boolean(false))].into(),
             token: Some("fixture-secret".into()),
         };
         let id = Uuid::now_v7();
@@ -592,7 +603,9 @@ mod tests {
             .resume_request(id, Some("fresh-token".into()), &["example.com".into()])
             .await
             .unwrap();
-        assert_eq!(resumed.unwrap().visibility, Visibility::Public);
+        let resumed = resumed.unwrap();
+        assert_eq!(resumed.visibility, Visibility::Public);
+        assert_eq!(resumed.properties, import.properties);
         assert!(second.create(id, &import).await.unwrap().is_none());
 
         let (left, right) = tokio::join!(jobs.claim(id, &import), second.claim(id, &import));

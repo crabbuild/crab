@@ -75,6 +75,8 @@ pub struct CatalogRecord {
     pub placement_generation: u64,
     #[serde(default, skip_serializing_if = "ownership_epoch_is_initial")]
     pub(crate) ownership_epoch: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) property_seed: Option<Uuid>,
     pub application: RepositoryApplicationState,
     // The creation request matches the original description on replay.
     pub description: String,
@@ -314,6 +316,7 @@ impl CatalogDocument {
             if record.placement_generation == 0
                 || !record.timestamps_valid()
                 || record.ownership_epoch > record.name_version()
+                || !record.property_seed_valid()
                 || (record.visibility.value.is_public()
                     && record.application != RepositoryApplicationState::CellReady)
                 || !names.insert((record.owner.to_lowercase(), record.name.to_lowercase()))
@@ -507,6 +510,12 @@ fn membership_digest(
 }
 
 impl CatalogRecord {
+    fn property_seed_valid(&self) -> bool {
+        self.property_seed.is_none_or(|seed| {
+            !seed.is_nil() && self.ownership_epoch != 0 && self.organization_id().is_some()
+        })
+    }
+
     fn timestamps_valid(&self) -> bool {
         self.created_at_ms
             .is_none_or(|time| time <= crate::app::MAX_NUMBER)
@@ -622,6 +631,17 @@ pub(crate) struct BrowserCreation {
     pub(crate) description: String,
     #[serde(default)]
     pub(crate) visibility: visibility::Visibility,
+    #[serde(default)]
+    pub(crate) properties: BTreeMap<Uuid, crate::cells::organization::properties::PropertyValue>,
+}
+
+pub(crate) fn browser_repository_id(owner: &str, request_id: Uuid) -> Uuid {
+    let mut hash = blake3::Hasher::new_derive_key("crab browser repository creation v1");
+    hash.update(owner.as_bytes());
+    hash.update(request_id.as_bytes());
+    let mut id = [0; 16];
+    id.copy_from_slice(&hash.finalize().as_bytes()[..16]);
+    uuid::Builder::from_custom_bytes(id).into_uuid()
 }
 
 pub(crate) struct GitImportReservation {
@@ -678,6 +698,7 @@ impl CatalogStore {
             prefix,
             placement_generation: 1,
             ownership_epoch: 0,
+            property_seed: None,
             application: RepositoryApplicationState::EmptyCellPending,
             description,
             description_edit: None,
@@ -714,12 +735,7 @@ impl CatalogStore {
             ));
         }
         let (owner, organization) = namespace.catalog_owner(&[])?;
-        let mut hash = blake3::Hasher::new_derive_key("crab browser repository creation v1");
-        hash.update(owner.as_bytes());
-        hash.update(input.request_id.as_bytes());
-        let mut id = [0; 16];
-        id.copy_from_slice(&hash.finalize().as_bytes()[..16]);
-        let id = uuid::Builder::from_custom_bytes(id).into_uuid();
+        let id = browser_repository_id(&owner, input.request_id);
         self.insert_with_mode(
             CatalogRecord {
                 id,
@@ -733,6 +749,7 @@ impl CatalogStore {
                 prefix: format!("browser-repositories/{id}"),
                 placement_generation: 1,
                 ownership_epoch: 0,
+                property_seed: None,
                 application: RepositoryApplicationState::EmptyCellPending,
                 description: input.description,
                 description_edit: None,
@@ -793,6 +810,7 @@ impl CatalogStore {
                 prefix: format!("git-imports/{id}"),
                 placement_generation: 1,
                 ownership_epoch: 0,
+                property_seed: None,
                 application: RepositoryApplicationState::GitImportPending,
                 description,
                 description_edit: None,
@@ -856,6 +874,7 @@ impl CatalogStore {
             prefix,
             placement_generation: 1,
             ownership_epoch: 0,
+            property_seed: None,
             application: RepositoryApplicationState::EmptyCellPending,
             description,
             description_edit: None,

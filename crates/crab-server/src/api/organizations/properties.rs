@@ -9,7 +9,7 @@ use crate::{
             Definition, Editor, GetSchema, GetSelection, GetValues, MAX_BATCH, Outcome,
             PropertyValue, ReadValues, Repository as Binding, Schema, Selection, SelectionReceipt,
             SelectionView, SetSchema, SetSchemaInput, SetSelection, SetValues, SetValuesInput,
-            UpdateSelection, VersionedRepository, View, search::Fields,
+            UpdateSelection, ValueError, VersionedRepository, View, search::Fields,
         },
     },
     repository::{
@@ -121,6 +121,7 @@ fn binding(repo: &Repository) -> Result<(Uuid, Binding)> {
         Binding {
             id: repo.id,
             ownership_epoch: repo.ownership_epoch,
+            property_seed: repo.property_seed,
         },
     ))
 }
@@ -311,17 +312,18 @@ async fn catalog_selection(
             (record.organization_id() == Some(organization)
                 && record.application == crate::catalog::RepositoryApplicationState::CellReady
                 && unique.contains(&record.id))
-            .then_some((record.id, record.ownership_epoch))
+            .then_some((
+                record.id,
+                Binding {
+                    id: record.id,
+                    ownership_epoch: record.ownership_epoch,
+                    property_seed: record.property_seed,
+                },
+            ))
         })
         .collect();
     ids.into_iter()
-        .map(|id| {
-            let ownership_epoch = present.get(&id).copied().ok_or(Error::NotFound)?;
-            Ok(Binding {
-                id,
-                ownership_epoch,
-            })
-        })
+        .map(|id| present.get(&id).copied().ok_or(Error::NotFound))
         .collect()
 }
 
@@ -373,7 +375,7 @@ async fn update_selection(
                 .repositories
                 .iter()
                 .zip(current)
-                .any(|(row, current)| row.repository.ownership_epoch != current.ownership_epoch)
+                .any(|(row, current)| row.repository != current)
             {
                 return Err(Error::Conflict);
             }
@@ -461,6 +463,7 @@ fn saved<T>(outcome: Outcome<T>) -> Result<Json<T>> {
         Outcome::MissingRequiredDefault => Err(Error::Invalid(
             "Set a default value for each required property",
         )),
+        Outcome::MissingExplicitValue => Err(Error::Invalid(ValueError::MissingExplicit.message())),
         Outcome::UsedByRuleset => Err(Error::Invalid("A ruleset uses this property or value")),
         Outcome::IncompatibleDefinition => Err(Error::Invalid(
             "Existing properties keep their type and allowed values",

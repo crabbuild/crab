@@ -7,6 +7,7 @@ test("organization repository creation recovers its owner-scoped request after r
   const organization = "01900000-0000-7000-8000-000000000010";
   const alice = "01900000-0000-7000-8000-000000000011";
   const bob = "01900000-0000-7000-8000-000000000012";
+  const property = "01900000-0000-7000-8000-000000000013";
   const owner = `org-${organization.replaceAll("-", "")}`;
   const repository = {
     id: "01900000-0000-7000-8000-000000000014",
@@ -73,6 +74,19 @@ test("organization repository creation recovers its owner-scoped request after r
             owner,
             default_branch: "trunk",
             visibilities: ["private", "public"],
+            properties: [
+              {
+                id: property,
+                name: "service_area",
+                description: "The team responsible for this repository.",
+                kind: "text",
+                options: [],
+                default: "Shared",
+                required: true,
+                require_explicit_values: true,
+                values_editable_by: "organization",
+              },
+            ],
           },
         });
       expect(actor).toBe(alice);
@@ -83,6 +97,7 @@ test("organization repository creation recovers its owner-scoped request after r
           name: repository.name,
           description: repository.description,
           visibility: "public",
+          properties: { [property]: "Tools" },
         });
         created = true;
         return route.abort("failed");
@@ -141,6 +156,14 @@ test("organization repository creation recovers its owner-scoped request after r
   await page.getByLabel("Repository name").fill("widgets");
   await page.getByLabel("Description (optional)").fill("Team repository");
   await page.getByRole("radio", { name: "Public" }).click();
+  await expect(page.getByLabel("service_area")).toHaveAttribute(
+    "placeholder",
+    "Choose a value",
+  );
+  await expect(
+    page.getByRole("button", { name: "Create repository", exact: true }),
+  ).toBeDisabled();
+  await page.getByLabel("service_area").fill("Tools");
   await page
     .getByRole("button", { name: "Create repository", exact: true })
     .click();
@@ -160,6 +183,7 @@ test("organization repository creation recovers its owner-scoped request after r
     "Team repository",
   );
   await expect(page.getByRole("radio", { name: "Public" })).toBeChecked();
+  await expect(page.getByLabel("service_area")).toHaveValue("Tools");
   await page
     .getByRole("button", { name: "Create repository", exact: true })
     .click();
@@ -208,6 +232,8 @@ test("a current organization owner can resume a shared import", async ({
   const organization = "01900000-0000-7000-8000-000000000020";
   const alice = "01900000-0000-7000-8000-000000000021";
   const bob = "01900000-0000-7000-8000-000000000022";
+  const property = "01900000-0000-7000-8000-000000000023";
+  const properties = { [property]: "Tools" };
   const owner = `org-${organization.replaceAll("-", "")}`;
   const orgPage = `/-/organizations/${organization}?tab=repositories`;
   const orgApi = `/api/organizations/${organization}`;
@@ -259,6 +285,24 @@ test("a current organization owner can resume a shared import", async ({
           role,
         },
       });
+    if (pathname === `${orgApi}/repositories/creation`)
+      return route.fulfill({
+        json: {
+          properties: [
+            {
+              id: property,
+              name: "service_area",
+              description: "Responsible group",
+              kind: "text",
+              options: [],
+              default: "Shared",
+              required: true,
+              require_explicit_values: true,
+              values_editable_by: "organization",
+            },
+          ],
+        },
+      });
     if (pathname === "/api/repos") {
       return route.fulfill({
         json: { repositories: complete ? [repository] : [] },
@@ -275,6 +319,7 @@ test("a current organization owner can resume a shared import", async ({
       owner,
       name: repository.name,
       visibility: "public",
+      properties,
     };
     const interrupted = {
       ...job,
@@ -291,6 +336,7 @@ test("a current organization owner can resume a shared import", async ({
         source,
         name: "widgets",
         visibility: "public",
+        properties,
         token: "initial-token",
       });
       jobId = input.request_id;
@@ -342,6 +388,10 @@ test("a current organization owner can resume a shared import", async ({
   ).toBe(true);
   await page.getByLabel("Git source").fill(source);
   await page.getByLabel("Source token").fill("initial-token");
+  await expect(
+    page.getByRole("button", { name: "Start import" }),
+  ).toBeDisabled();
+  await page.getByLabel("service_area").fill("Tools");
   const visibility = page
     .getByRole("region", { name: "Bring a repository from Git" })
     .getByRole("combobox", { name: "Visibility" });
@@ -374,6 +424,8 @@ test("a current organization owner can resume a shared import", async ({
   await expect(page.getByLabel("Source token")).toHaveValue("");
   await expect(visibility).toBeDisabled();
   await expect(visibility).toHaveText("Public");
+  await expect(page.locator("dl")).toContainText("Tools");
+  await expect(page.getByLabel("service_area")).toHaveCount(0);
   await page.getByLabel("Source token").fill("replacement-token");
   await page.getByRole("button", { name: "Resume import" }).click();
   await expect(page).toHaveURL(`/${owner}/widgets`);

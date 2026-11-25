@@ -52,10 +52,18 @@ async fn repository_creation_visibility_restricts_members_and_binds_the_reservat
     };
     set_policy(0, "public").await;
     let creation = format!("{root}/repositories/creation");
-    assert_eq!(
-        h.json(&creation, &bob).await["visibilities"],
-        json!(["public"])
-    );
+    let locked = Uuid::now_v7();
+    let delegated = Uuid::now_v7();
+    h.write(Method::PUT, &format!("{root}/repository-properties"), &alice, json!({
+        "expected_version":0,"definitions":[
+            {"id":locked,"name":"locked","description":"","kind":"boolean","options":[],"default":true,"required":true,"require_explicit_values":true},
+            {"id":delegated,"name":"delegated","description":"","kind":"boolean","options":[],"default":true,"required":true,"require_explicit_values":true,"values_editable_by":"repository"},
+        ],
+    })).await.error_for_status().unwrap();
+    let member_options = h.json(&creation, &bob).await;
+    assert_eq!(member_options["properties"].as_array().unwrap().len(), 1);
+    assert_eq!(member_options["properties"][0]["id"], json!(delegated));
+    assert_eq!(member_options["visibilities"], json!(["public"]));
     assert_eq!(
         h.json(&creation, &alice).await["visibilities"],
         json!(["private", "public"])
@@ -65,8 +73,21 @@ async fn repository_creation_visibility_restricts_members_and_binds_the_reservat
     let member_input = |visibility| {
         json!({
             "request_id":request_id,"name":"open-library","description":"","visibility":visibility,
+            "properties":{(delegated.to_string()):false},
         })
     };
+    for properties in [
+        json!({}),
+        json!({(locked.to_string()):false}),
+        json!({(delegated.to_string()):"false"}),
+    ] {
+        let mut input = member_input("public");
+        input["properties"] = properties;
+        assert_eq!(
+            h.write(Method::POST, &creation, &bob, input).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
     assert_eq!(
         h.write(Method::POST, &creation, &bob, member_input("private"))
             .await
@@ -85,7 +106,8 @@ async fn repository_creation_visibility_restricts_members_and_binds_the_reservat
         Method::POST,
         &creation,
         &alice,
-        json!({"request_id":Uuid::now_v7(),"name":"closed-library","description":"","visibility":"private"}),
+        json!({"request_id":Uuid::now_v7(),"name":"closed-library","description":"","visibility":"private",
+            "properties":{(locked.to_string()):true,(delegated.to_string()):true}}),
     )
     .await
     .error_for_status()
@@ -105,6 +127,12 @@ async fn repository_creation_visibility_restricts_members_and_binds_the_reservat
     let repositories = list["repositories"].as_array().unwrap();
     assert_eq!(repositories.len(), 1);
     assert_eq!(repositories[0]["id"], public["id"]);
+    let owner = public["owner"].as_str().unwrap();
+    assert_eq!(
+        h.json(&format!("/api/repos/{owner}/open-library/properties"), &bob)
+            .await["values"]["overrides"],
+        json!({(delegated.to_string()):false})
+    );
 
     set_policy(1, "any").await;
     assert_eq!(
@@ -825,6 +853,7 @@ async fn organization_creation_retries_keep_the_branch_authorized_for_that_reque
                 name: "old-branch".into(),
                 description: String::new(),
                 visibility: crate::catalog::visibility::Visibility::Private,
+                properties: Default::default(),
             },
         )
         .await
@@ -882,7 +911,23 @@ async fn organization_repository_ownership_survives_creator_revocation_without_a
     let creation = format!("{root}/repositories/creation");
     let listed = format!("/api/repos?organization={id}");
     let request_id = Uuid::now_v7();
-    let body = json!({"request_id":request_id,"name":"widget","description":"Organization owned"});
+    let property = Uuid::now_v7();
+    let body = json!({
+        "request_id":request_id,"name":"widget","description":"Organization owned",
+        "properties":{(property.to_string()):false},
+    });
+    h.write(
+        Method::PUT,
+        &format!("{root}/repository-properties"),
+        &alice,
+        json!({
+            "expected_version":0,"definitions":[{"id":property,"name":"regulated","description":"",
+            "kind":"boolean","options":[],"default":true}],
+        }),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
     h.write(
         Method::PUT,
         &format!("{root}/invitations/{bob_id}"),
@@ -937,6 +982,11 @@ async fn organization_repository_ownership_survives_creator_revocation_without_a
                 name: "widget".into(),
                 description: "Organization owned".into(),
                 visibility: crate::catalog::visibility::Visibility::Private,
+                properties: [(
+                    property,
+                    crate::cells::organization::properties::PropertyValue::Boolean(false),
+                )]
+                .into(),
             },
         )
         .await
@@ -956,6 +1006,7 @@ async fn organization_repository_ownership_survives_creator_revocation_without_a
                 name: "widget".into(),
                 description: "Organization owned".into(),
                 visibility: crate::catalog::visibility::Visibility::Private,
+                properties: Default::default(),
             },
             qualified,
             vec![],
@@ -972,8 +1023,9 @@ async fn organization_repository_ownership_survives_creator_revocation_without_a
         .to_owned();
     let repo = format!("/api/repos/{owner}/widget");
     let members = format!("{repo}/members");
+    let properties = format!("{repo}/properties");
     let expected = json!({"id":pending.id,"owner":owner,"name":"widget"});
-    for _ in 0..2 {
+    for value in [false, true] {
         let response: Value = h
             .write(Method::POST, &creation, &alice, body.clone())
             .await
@@ -983,7 +1035,24 @@ async fn organization_repository_ownership_survives_creator_revocation_without_a
             .await
             .unwrap();
         assert_eq!(response, expected);
+        assert_eq!(
+            h.json(&properties, &alice).await["values"]["overrides"][property.to_string()],
+            value
+        );
+        if !value {
+            repository_write(&h, Method::PUT, &properties, &alice, pending.id, json!({
+                "expected_version":1,"schema_version":1,"overrides":{(property.to_string()):true},
+            })).await.error_for_status().unwrap();
+        }
     }
+    let mut changed = body.clone();
+    changed["properties"][property.to_string()] = json!(true);
+    assert_eq!(
+        h.write(Method::POST, &creation, &alice, changed)
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
     assert_eq!(h.json(&listed, &bob).await["repositories"], json!([]));
     let owners = h.json(&listed, &alice).await;
     assert_eq!(owners["repositories"][0]["organization_id"], json!(id));

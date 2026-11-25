@@ -23,12 +23,19 @@ import {
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import {
+  RepositoryPropertyFields,
+  needsExplicitPropertyValues,
+  type PropertyDefinition,
+  type PropertyOverrides,
+} from "@/features/organizations/property-fields";
 import { useRequest, type RepositoryVisibility } from "@/lib/api";
 
 type Destination = {
   owner: string;
   default_branch: string;
   visibilities: [RepositoryVisibility, ...RepositoryVisibility[]];
+  properties?: PropertyDefinition[];
 };
 type RepositoryAddress = { id: string; owner: string; name: string };
 type Submission = {
@@ -36,6 +43,7 @@ type Submission = {
   name: string;
   description: string;
   visibility: RepositoryVisibility;
+  properties?: PropertyOverrides;
 };
 
 const visibilityOptions = {
@@ -58,6 +66,7 @@ function recover(key: string): Submission | undefined {
         name: data.name,
         description: data.description,
         visibility: data.visibility === "public" ? "public" : "private",
+        properties: data.properties,
       };
   } catch {
     // Browsers can disable session storage.
@@ -84,25 +93,52 @@ function RepositoryForm({
   const [visibility, setVisibility] = useState(
     attempt?.visibility ?? destination.visibilities[0],
   );
+  const [properties, setProperties] = useState(attempt?.properties ?? {});
+  const definitions = destination.properties ?? [];
+  const propertyIds = Object.keys(properties);
+  const availableProperties = Object.fromEntries(
+    Object.entries(properties).filter(([id]) =>
+      definitions.some((definition) => definition.id === id),
+    ),
+  );
+  const hasUnavailable =
+    propertyIds.length > Object.keys(availableProperties).length;
   const available = destination.visibilities.includes(visibility);
+  const fields = {
+    name: name.trim(),
+    description: description.trim(),
+    visibility,
+  };
+  const savedProperties = attempt?.properties ?? {};
+  const retry =
+    attempt?.name === fields.name &&
+    attempt.description === fields.description &&
+    attempt.visibility === visibility &&
+    propertyIds.length === Object.keys(savedProperties).length &&
+    propertyIds.every(
+      (id) =>
+        JSON.stringify(properties[id]) === JSON.stringify(savedProperties[id]),
+    );
+  const incomplete =
+    !retry && needsExplicitPropertyValues(definitions, availableProperties);
   const mutation = useMutation(csrf, null);
   return (
     <form
       onSubmit={async (event) => {
         event.preventDefault();
-        if (!name.trim() || !available || mutation.pending) return;
-        const fields = {
-          name: name.trim(),
-          description: description.trim(),
-          visibility,
-        };
-        const next =
-          attempt?.name === fields.name &&
-          attempt.description === fields.description &&
-          attempt.visibility === visibility
-            ? attempt
-            : { ...fields, request_id: crypto.randomUUID() };
+        if (!fields.name || !available || incomplete || mutation.pending)
+          return;
+        const next = retry
+          ? attempt
+          : {
+              ...fields,
+              request_id: crypto.randomUUID(),
+              ...(Object.keys(availableProperties).length
+                ? { properties: availableProperties }
+                : {}),
+            };
         setAttempt(next);
+        setProperties(next.properties ?? {});
         try {
           sessionStorage.setItem(key, JSON.stringify(next));
         } catch {
@@ -188,6 +224,23 @@ function RepositoryForm({
             </FieldError>
           )}
         </FieldSet>
+        <RepositoryPropertyFields
+          definitions={definitions}
+          values={properties}
+          onChange={setProperties}
+          disabled={mutation.pending}
+        />
+        {hasUnavailable && (
+          <Button
+            type="button"
+            variant="outline"
+            className="self-start"
+            disabled={mutation.pending}
+            onClick={() => setProperties(availableProperties)}
+          >
+            Clear unavailable property values
+          </Button>
+        )}
         <p className="text-sm wrap-anywhere text-muted-foreground">
           <code>
             {destination.owner}/{name || "repository"}
@@ -198,7 +251,9 @@ function RepositoryForm({
         <div className="flex justify-end">
           <Button
             type="submit"
-            disabled={!name.trim() || !available || mutation.pending}
+            disabled={
+              !fields.name || !available || incomplete || mutation.pending
+            }
           >
             {mutation.pending ? "Creating…" : "Create repository"}
           </Button>

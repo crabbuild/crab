@@ -29,6 +29,7 @@ pub(super) async fn matches(
                         .map(|repo| Binding {
                             id: repo.id,
                             ownership_epoch: repo.ownership_epoch,
+                            property_seed: repo.property_seed,
                         })
                         .collect(),
                     terms: terms.to_vec(),

@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Result } from "@/components/request/result";
 import { useRequest } from "@/lib/api";
+import { propertyTerm } from "./catalog-search";
 import {
   PropertyInput,
   propertySchemaPath,
@@ -55,10 +56,9 @@ export function RepositoryPropertyFilters({
                   if (!definition || value === null) return;
                   const raw = String(value).trim();
                   if (!raw) return;
-                  const term = /\s/.test(raw) ? `"${raw}"` : raw;
                   if (
                     !apply(
-                      `${exclude ? "-" : ""}props.${definition.name}:${term}`,
+                      `${exclude ? "-" : ""}props.${definition.name}:${propertyTerm(raw)}`,
                     )
                   ) {
                     setTooLong(true);

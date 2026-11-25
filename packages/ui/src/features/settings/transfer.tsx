@@ -19,6 +19,12 @@ import { useRequest, type Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 import { refreshNotificationBadge } from "@/features/notifications/actions";
 import { OrganizationChoices } from "@/features/organizations/choices";
+import {
+  RepositoryPropertyFields,
+  needsExplicitPropertyValues,
+  type PropertyDefinition,
+  type PropertyOverrides,
+} from "@/features/organizations/property-fields";
 import { organizationDestination } from "@/lib/organization-route";
 import type { Organization, OrganizationRole } from "@/lib/contracts";
 
@@ -33,6 +39,7 @@ type Offer = {
   expires_at_ms: number;
   can_accept: boolean;
   can_cancel: boolean;
+  properties?: PropertyDefinition[];
 };
 
 type Target =
@@ -384,6 +391,7 @@ export function TransferPage({ id, csrf }: { id: string; csrf: string }) {
   const mutation = useMutation(csrf, null);
   const [confirmed, setConfirmed] = useState<Offer>();
   const [confirmation, setConfirmation] = useState("");
+  const [properties, setProperties] = useState<PropertyOverrides>({});
   return (
     <section
       className="mx-auto grid max-w-xl gap-4 px-4 py-8"
@@ -395,8 +403,23 @@ export function TransferPage({ id, csrf }: { id: string; csrf: string }) {
       <Result state={request} timingLabel="Repository transfer">
         {(loaded) => {
           const offer = confirmed ?? loaded;
+          const definitions = offer.properties ?? [];
+          const incomplete = needsExplicitPropertyValues(
+            definitions,
+            properties,
+          );
           async function decide(decision: "accept" | "decline" | "cancel") {
-            const result = await mutation.run<Offer>(path, "PUT", { decision });
+            const selected = Object.fromEntries(
+              definitions.flatMap(({ id }) =>
+                Object.hasOwn(properties, id) ? [[id, properties[id]]] : [],
+              ),
+            );
+            const result = await mutation.run<Offer>(path, "PUT", {
+              decision,
+              ...(decision === "accept" && Object.keys(selected).length
+                ? { properties: selected }
+                : {}),
+            });
             if (result) {
               setConfirmed(result);
               refreshNotificationBadge();
@@ -428,7 +451,8 @@ export function TransferPage({ id, csrf }: { id: string; csrf: string }) {
                   className="grid gap-3"
                   onSubmit={(event) => {
                     event.preventDefault();
-                    if (confirmation === offer.to.name) void decide("accept");
+                    if (confirmation === offer.to.name && !incomplete)
+                      void decide("accept");
                   }}
                 >
                   <p className="text-sm">
@@ -436,6 +460,12 @@ export function TransferPage({ id, csrf }: { id: string; csrf: string }) {
                     review and revoke them in Settings after accepting
                     ownership.
                   </p>
+                  <RepositoryPropertyFields
+                    definitions={definitions}
+                    values={properties}
+                    onChange={setProperties}
+                    disabled={mutation.pending}
+                  />
                   <label className="grid gap-1 text-sm">
                     Type <strong>{offer.to.name}</strong> to accept ownership.
                     <Input
@@ -448,7 +478,9 @@ export function TransferPage({ id, csrf }: { id: string; csrf: string }) {
                     <Button
                       type="submit"
                       disabled={
-                        confirmation !== offer.to.name || mutation.pending
+                        confirmation !== offer.to.name ||
+                        incomplete ||
+                        mutation.pending
                       }
                     >
                       Accept transfer
