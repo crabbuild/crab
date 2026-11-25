@@ -1,61 +1,83 @@
 # Cloudflare CDN for private R2 repositories
 
-The direct CLI qualification build supports Cloudflare for a Crab v2 repository
-that owns its R2 bucket. Bucket-global Xet objects are shared within a bucket,
-so provision one private bucket per Worker and repository. Keep public access
-and the R2 development URL disabled. Use independently scoped R2 API
-credentials for normal Crab operations.
+Use one dedicated private R2 bucket, one Worker on a custom hostname, and one
+Crab binding per repository. Xet objects are shared across a bucket, so anyone
+with this Worker's viewer token can read the bucket's immutable Xet objects.
+Keep bucket public access and its R2 development URL disabled. Crab uses
+separate R2 API credentials for writes and mutable metadata. The CDN binding
+is available in the direct CLI qualification build.
 
-## Deploy the viewer
+## Generate the deployment
 
-Deploy `worker.mjs` as a module Worker on a dedicated custom hostname in a
-Cloudflare zone. Configure these Worker bindings.
+Start with an existing private bucket and an unused hostname in a Cloudflare
+zone you manage. Run from the Crab checkout with Node.js and npm available.
 
-| Binding | Value |
-| --- | --- |
-| `CRAB_BUCKET` | The dedicated R2 bucket, as an R2 binding |
-| `CRAB_REPO_PREFIX` | The exact physical Crab repository prefix, such as `org/repo` |
-| `CRAB_VIEWER_HOST` | The Worker hostname without scheme or path |
-| `CRAB_CACHE_NAMESPACE` | A unique identifier using letters, digits, hyphens, or underscores. Change it when rebinding the hostname to another repository or bucket |
-| `CRAB_VIEWER_TOKEN` | A Worker secret containing 32 random bytes encoded as unpadded base64url |
-
-Use the custom hostname for the Cache API and disable the Worker's development
-URL and previews. If the zone's Browser Integrity Check prevents CLI clients
-from reaching the Worker, use a Configuration Rule scoped to the exact Worker
-hostname. Keep viewer authorization in the Worker. [Custom domains](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/) · [R2 Cache API](https://developers.cloudflare.com/r2/examples/cache-api/) · [Configuration Rules](https://developers.cloudflare.com/rules/configuration-rules/settings/)
-
-The viewer allows exact immutable Git, capsule, LFS, Xet xorb, shard, and chunk
-page keys. It authenticates every request before cache lookup. On a range miss,
-it fetches exactly that interval from R2 and stores those bytes at the edge.
-The same range can then hit the cache without an R2 read. Whole-object fetches
-and ranges each have an 8 MiB transfer limit. Public-facing responses use
-`private, no-store` so a second cache cannot serve the bearer-protected response.
-
-## Configure Crab
-
-Use the S3-compatible R2 API endpoint and region `auto` for Crab's object store.
-Add the binding to the per-user configuration at `~/.config/crab/config.toml`.
-Save the Worker token in a regular file readable only by the current user.
-
-```toml
-[[cdn]]
-origin = "https://<account-id>.r2.cloudflarestorage.com/<bucket>"
-repo_prefix = "org/repo"
-base_url = "https://cdn.example.com"
-access = "private"
-viewer_token_file = "/absolute/private/path/viewer-token"
+```sh
+deployment_dir="$HOME/.config/crab/r2-cdn-models"
+mkdir -p "$(dirname "$deployment_dir")"
+node crab/deploy/cdn/cloudflare/setup.mjs \
+  --r2-endpoint "https://<account-id>.r2.cloudflarestorage.com" \
+  --bucket models-private \
+  --repository org/models \
+  --hostname cdn-models.example.com \
+  --output "$deployment_dir"
 ```
 
-The binding matches the exact R2 account endpoint, bucket, and repository.
-Rotating the Worker secret and atomically replacing the token file changes the
-viewer credential independently of the R2 credentials. Ref reads, writes,
-locks, and retention operations continue through R2's native API. CDN reads
-pass through Crab's existing range, length, and content checks.
+The setup generates a Wrangler configuration and a matching
+`[[cdn]]` snippet from the same R2 endpoint, bucket, repository prefix, and
+hostname. The Worker name and cache namespace are stable for those inputs.
+The generated deployment disables the Worker's development and preview URLs
+and keeps the viewer token in a private, Git-ignored file. Reuse the generated
+directory for redeployments. For jurisdictional R2 buckets, use the
+jurisdiction-specific endpoint and apply your required data residency policy
+to the Worker and cache. [R2 data location](https://developers.cloudflare.com/r2/reference/data-location/) · [Wrangler configuration](https://developers.cloudflare.com/workers/wrangler/configuration/)
 
-Run `crab doctor --cdn-probe` against the configured repository. For a live
-qualification, use a fresh client cache for each clone and hydration, compare
-the output bytes to the publication, and inspect
-`crab_storage::cdn::transfer` for verified `cloudflare` reads and cache hits.
-Confirm that missing and incorrect tokens get HTTP 403 even after warming
-the range. The additional release evidence gates are documented in
-`crab/docs/guides/provider-qualification.md`.
+## Deploy the Worker
+
+Set `CLOUDFLARE_API_TOKEN` to a token authorized to deploy the Worker and
+attach its custom domain. Upload the viewer token as a Worker secret
+alongside the code, then attach the generated hostname. Repeating the
+attachment is safe when the hostname already points to this Worker.
+
+```sh
+(
+  set -eu
+  umask 077
+  secrets_file="$(mktemp)"
+  trap 'rm -f "$secrets_file"' EXIT
+  node -e 'const token = require("node:fs").readFileSync(process.argv[1], "utf8").trim(); process.stdout.write(JSON.stringify({CRAB_VIEWER_TOKEN: token}))' \
+    "$deployment_dir/viewer-token" > "$secrets_file"
+  cd -P "$deployment_dir"
+  npx --yes wrangler@4.168.0 deploy --config wrangler.json \
+    --secrets-file "$secrets_file"
+) && node crab/deploy/cdn/cloudflare/attach-domain.mjs "$deployment_dir"
+```
+
+If Browser Integrity Check blocks CLI requests, add a Configuration Rule
+scoped to the exact Worker hostname and set Browser Integrity Check to Off
+for that hostname. The Worker checks the viewer token before every cache
+lookup. On a range miss it fetches the exact interval from R2 and caches it at
+the serving data center. Whole-object reads and individual ranges each have
+an 8 MiB transfer limit. [Worker Domains API](https://developers.cloudflare.com/api/resources/workers/subresources/domains/methods/update/) · [Worker secrets](https://developers.cloudflare.com/workers/configuration/secrets/#upload-secrets-alongside-code) · [Configuration Rules](https://developers.cloudflare.com/rules/configuration-rules/settings/) · [Workers Cache API](https://developers.cloudflare.com/workers/reference/how-the-cache-works/#cache-api)
+
+## Configure and verify a client
+
+Use the S3-compatible R2 API endpoint and region `auto` for Crab's object
+store. Add the generated `crab-cdn.toml` block to
+`~/.config/crab/config.toml`. On other clients, distribute the viewer token
+through your secret delivery process and update `viewer_token_file` to
+point to that machine's private copy. Its parent directory can differ across
+machines.
+
+For rotation, coordinate client updates with the Worker deploy. Replace
+`viewer-token` with a new private file containing 32 random bytes encoded
+as unpadded base64url, then repeat the deploy command.
+
+Use a published Crab v2 repository with a root-authenticated sample and run
+`crab doctor --cdn-probe`. Check that the whole or ranged edge bytes match
+native R2 and that requests for mutable data are denied. Use fresh client
+caches to verify a cache fill and a repeat hit. An invalid viewer token must
+receive HTTP 403 after warmup. [R2 credentials](https://crab.build/docs/cli/authentication/static-credentials#cloudflare-r2-example)
+
+To roll back a client to direct R2, remove its generated `[[cdn]]` block.
+For release evidence, use the [provider qualification guide](../../../docs/guides/provider-qualification.md).
