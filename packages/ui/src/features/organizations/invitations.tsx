@@ -26,7 +26,8 @@ import type {
   OrganizationRole,
 } from "@/lib/contracts";
 import { MutationError } from "./feedback";
-import { organizationHref, organizationInvitationsHref } from "./directory";
+import { organizationHref } from "@/lib/organization-route";
+import { organizationInvitationsHref } from "./directory";
 
 export function Invitations({
   endpoint,
@@ -37,15 +38,14 @@ export function Invitations({
   endpoint: string;
   id: string;
   csrf: string;
-  filters?: { q: string; role: string; status: InvitationState };
+  filters: { q: string; role: string; status: InvitationState };
 }) {
   const [after, setAfter] = useState<string>();
   const params = new URLSearchParams(after ? { after } : {});
-  if (filters) {
-    params.set("status", filters.status);
-    if (filters.q) params.set("q", filters.q);
-    if (filters.role !== "all") params.set("role", filters.role);
-  }
+  params.set("status", filters.status);
+  if (filters.q) params.set("q", filters.q);
+  if (filters.role !== "all") params.set("role", filters.role);
+  const pending = filters.status === "pending";
   const offers = useRequest<OrganizationPage<InvitationOffer>>(
     `${endpoint}/invitations?${params}`,
   );
@@ -58,7 +58,7 @@ export function Invitations({
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-lg font-semibold">
-          {filters ? "Organization invitations" : "Pending invitations"}
+          {pending ? "Pending invitations" : "Organization invitations"}
         </h2>
         <div className="flex gap-2">
           <Button variant="outline" onClick={refresh}>
@@ -88,9 +88,9 @@ export function Invitations({
           <>
             {data.items.length === 0 ? (
               <p className="py-8 text-center text-sm text-muted-foreground">
-                {filters
-                  ? "No invitations match these filters."
-                  : "No pending invitations."}
+                {pending && !filters.q && filters.role === "all"
+                  ? "No pending invitations."
+                  : "No invitations match these filters."}
               </p>
             ) : (
               <ul className="divide-y rounded-lg border">
@@ -156,33 +156,39 @@ export function Invitations({
     </div>
   );
 }
-function InviteDialog({
+export function InviteDialog({
   endpoint,
   csrf,
   onInvited,
+  recipient,
 }: {
   endpoint: string;
   csrf: string;
   onInvited: () => void;
+  recipient?: ActorSummary;
 }) {
   const [open, setOpen] = useState(false);
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button>Invite member</Button>
+        <Button variant={recipient ? "ghost" : "default"}>
+          {recipient ? "Invite to organization" : "Invite member"}
+        </Button>
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Invite a member</DialogTitle>
           <DialogDescription>
-            Choose a registered username and the role they should have in this
-            organization.
+            {recipient
+              ? "Choose an organization role for this collaborator."
+              : "Choose a registered username and the role they should have in this organization."}
           </DialogDescription>
         </DialogHeader>
         {open && (
           <InviteForm
             endpoint={endpoint}
             csrf={csrf}
+            recipient={recipient}
             onInvited={() => {
               setOpen(false);
               onInvited();
@@ -197,14 +203,16 @@ function InviteForm({
   endpoint,
   csrf,
   onInvited,
+  recipient,
 }: {
   endpoint: string;
   csrf: string;
   onInvited: () => void;
+  recipient?: ActorSummary;
 }) {
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState(recipient?.handle ?? "");
   const query = useDeferredValue(search.trim());
-  const [selected, setSelected] = useState<ActorSummary>();
+  const [selected, setSelected] = useState(recipient);
   const candidates = useRequest<{ items: ActorSummary[]; truncated: boolean }>(
     query && !selected
       ? `${endpoint}/invitations/candidates?${new URLSearchParams({ q: query })}`
@@ -237,7 +245,7 @@ function InviteForm({
             id="invite-username"
             value={search}
             maxLength={40}
-            disabled={mutation.pending}
+            disabled={mutation.pending || Boolean(recipient)}
             placeholder="Search by username"
             autoComplete="off"
             onChange={(event) => {

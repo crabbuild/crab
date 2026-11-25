@@ -117,6 +117,19 @@ disclosure and email eligibility. Discovery starts with fresh organization
 state. `cells/organization/repository_policy.rs` owns repository creation and
 baseline access policy. Git publication and policy writes share the existing
 organization ruleset lease.
+`api/organizations/collaborators.rs` groups direct catalog grants for owners
+and checks them against current Organization Cell membership. It rechecks both
+snapshots before returning a page. Repository access edits still use the
+revision-guarded repository membership route.
+`api/organizations/collaborators/removal.rs` signs the reviewed selection
+against both revisions. `catalog/outside_removal.rs` commits revocations across
+live and deleted repositories and their audit receipt in one CAS. Membership
+changes, invitation decisions, and ref publication share the organization
+policy lease with this write.
+`catalog/conversion.rs` commits retained team grants and the recovery record
+together. `api/organizations/conversions.rs` finalizes the matching member
+incarnation under the same lease. Team commands and identity provider group
+projection use that lease so the conversion captures current team roles.
 `cells/repository/integrations.rs` owns GitHub Actions connections, delivery
 receipts, bounded accepted-delivery history, and workflow attempt ordering. It
 reads active providers and their exact-commit results from one snapshot for merge
@@ -229,12 +242,6 @@ not grant native Organization or team authority. Tests stay with these owners.
 grant inspection from a catalog revision and the Organization Cell's current
 team memberships. Its native read shares the same team-epoch predicate as
 repository authorization. The public view omits provider identity and claims.
-`api/organizations/outside_collaborators.rs` checks direct catalog grants
-against current Organization membership, with both revisions bound to the
-continuation. `catalog/outside_removal.rs` commits confirmed organization-wide
-revocations and their audit receipt in one catalog CAS. Membership changes,
-invitation decisions, and ref publication share the organization policy lease
-with this write. Repository settings own changes to individual grants.
 `api/organizations/audit/` pages and exports owner-only audit history from
 immutable Organization events and catalog membership events. `catalog/audit.rs`
 records event-time scope and chain links in the catalog CAS outbox. Never

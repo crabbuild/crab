@@ -25,6 +25,10 @@ export interface GitImportJob {
 export interface Repository {
   forked_from?: { id: string; owner: string; name: string };
   can_fork?: boolean;
+  visibility?: "private" | "public";
+  public_read_only?: boolean;
+  can_configure_visibility?: boolean;
+  forking?: { organization_allows: boolean; version: number; allowed: boolean };
   id: string;
   owner: string;
   name: string;

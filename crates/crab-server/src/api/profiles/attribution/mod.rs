@@ -50,9 +50,9 @@ impl Authors {
         principal: &Principal,
         authors: impl Iterator<Item = &'a A>,
     ) -> Result<Self> {
-        // The HTTP boundary admits browser sessions and the local operator.
-        // Keep account lookup closed if another credential reaches this owner.
-        if !(principal.is_user() || principal.is_local()) {
+        // Public repository readers only resolve profiles of authors
+        // already selected by an authorized repository read.
+        if !(principal.is_user() || principal.is_local() || principal.permits_public_reads()) {
             return Err(app::Error::SessionRequired);
         }
         let keys: std::collections::BTreeSet<_> = authors

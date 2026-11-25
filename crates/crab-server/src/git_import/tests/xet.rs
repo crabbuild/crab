@@ -55,6 +55,8 @@ async fn private_fork_publishes_only_verified_xet_dependencies_of_its_history() 
         .unwrap();
     let (organization, _, _) = crate::test_support::http::organizations::bootstrap(&h).await;
     let alice = h.login().await;
+    crate::test_support::http::organizations::set_private_forks(&h, organization, &alice, true)
+        .await;
     let org = format!("/api/organizations/{organization}");
     let upstream: Value = h
         .write(

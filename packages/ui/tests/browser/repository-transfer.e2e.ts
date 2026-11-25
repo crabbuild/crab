@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { expectNoAccessibilityViolations } from "./accessibility";
+import { mockPullRequest } from "./pulls/fixture";
+import { chooseSelectOption } from "./select";
 
 test("an administrator creates an offer that the recipient can find and confirm", async ({
   page,
@@ -11,6 +13,7 @@ test("an administrator creates an offer that the recipient can find and confirm"
   const to = { owner: "account-bob", name: "moved" };
   let recipient = false;
   let accepted = false;
+  let canTransfer = false;
   let proposal: unknown;
   const offer = () => ({
     id,
@@ -67,7 +70,10 @@ test("an administrator creates an offer that the recipient can find and confirm"
       });
     if (pathname === `/api/repositories/${repository}/transfer`) {
       if (request.method() === "GET")
-        return route.fulfill({ json: { version: 0, offer: null } });
+        return route.fulfill({
+          json: { version: 0, can_transfer: canTransfer, offer: null },
+        });
+      expect(canTransfer).toBe(true);
       expect(request.headers()["x-csrf-token"]).toBe("fixture-csrf");
       if (!proposal) {
         proposal = request.postDataJSON();
@@ -109,9 +115,20 @@ test("an administrator creates an offer that the recipient can find and confirm"
 
   await page.goto("/team/before/settings");
   await page.getByRole("button", { name: "Transfer repository" }).click();
+  await expect(page.getByRole("dialog")).toContainText(
+    "Your organization’s transfer policy does not let your account transfer this repository.",
+  );
+  await expect(
+    page.getByRole("button", { name: "Create transfer offer" }),
+  ).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  canTransfer = true;
+  await page.getByRole("button", { name: "Transfer repository" }).click();
   await page.getByLabel("Recipient profile handle").fill("bob");
   await page.getByLabel("Repository name at destination").fill("moved");
   const create = page.getByRole("button", { name: "Create transfer offer" });
+  await expect(create).toBeDisabled();
+  await page.getByLabel("Type before to confirm transfer.").fill("before");
   await create.click();
   await expect(page.getByRole("dialog")).toContainText(
     "The response was lost.",
@@ -151,3 +168,154 @@ test("an administrator creates an offer that the recipient can find and confirm"
     page.getByText("No pending repository transfers."),
   ).toBeVisible();
 });
+
+for (const method of ["directory", "link"] as const) {
+  test(`an organization transfer uses the stable destination ID from the ${method}`, async ({
+    page,
+  }) => {
+    const { lifecycle } = await mockPullRequest(page);
+    const source = "01900000-0000-7000-8000-000000000010";
+    const destination = "01900000-0000-7000-8000-000000000020";
+    const inaccessible = "01900000-0000-7000-8000-000000000030";
+    await page.route("**/api/session", (route) =>
+      route.fulfill({
+        json: {
+          authenticated: true,
+          mode: "oidc",
+          csrf: "fixture-csrf",
+          user: { issuer: "fixture", subject: "alice", name: "Alice" },
+        },
+      }),
+    );
+    await page.route("**/api/repos?*", (route) =>
+      route.fulfill({
+        json: {
+          repositories: [
+            {
+              id: lifecycle.repositoryId,
+              organization_id: source,
+              owner: "team",
+              name: "project",
+              can_admin: true,
+              archived: false,
+              protected_branches: [],
+            },
+          ],
+        },
+      }),
+    );
+    await page.route("**/api/organizations*", (route) => {
+      const after = new URL(route.request().url()).searchParams.get("after");
+      return route.fulfill({
+        json: after
+          ? {
+              items: [
+                {
+                  kind: "member",
+                  role: "member",
+                  can_create: true,
+                  organization: { id: destination, name: "Crab Data" },
+                },
+              ],
+              next: null,
+            }
+          : {
+              items: [
+                {
+                  kind: "member",
+                  role: "owner",
+                  can_create: true,
+                  organization: { id: source, name: "Source" },
+                },
+                {
+                  kind: "member",
+                  role: "member",
+                  can_create: false,
+                  organization: { id: inaccessible, name: "Read only" },
+                },
+              ],
+              next: "next-page",
+            },
+      });
+    });
+    await page.route(
+      `**/api/repositories/${lifecycle.repositoryId}/transfer`,
+      (route) => {
+        if (route.request().method() === "GET")
+          return route.fulfill({
+            json: { version: 0, can_transfer: true, offer: null },
+          });
+        expect(route.request().postDataJSON()).toMatchObject({
+          recipient: { kind: "organization", id: destination },
+          name: "project",
+          version: 0,
+        });
+        return route.fulfill({
+          json: {
+            id: "01900000-0000-7000-8000-000000000040",
+            recipient: "Crab Data",
+            state: "pending",
+          },
+        });
+      },
+    );
+
+    await page.setViewportSize({ width: 320, height: 640 });
+    await page.goto("/team/project/settings");
+    await page.getByRole("button", { name: "Transfer repository" }).click();
+    const dialog = page.getByRole("dialog", {
+      name: "Transfer repository",
+      exact: true,
+    });
+    const type = dialog.getByRole("combobox", { name: "Recipient type" });
+    const create = dialog.getByRole("button", {
+      name: "Create transfer offer",
+    });
+    const confirm = dialog.getByLabel("Type project to confirm transfer.");
+    if (method === "directory") {
+      await chooseSelectOption(type, "directory");
+      await dialog.getByRole("button", { name: "Choose organization" }).click();
+      const picker = page.getByRole("dialog", { name: "Choose organization" });
+      await expect(
+        picker.getByText("No eligible organizations on this page."),
+      ).toBeVisible();
+      await picker.getByRole("button", { name: "Next page" }).click();
+      await picker.getByRole("button", { name: "Crab Data" }).click();
+      await expect(
+        dialog.getByRole("button", { name: "Crab Data" }),
+      ).toBeFocused();
+      await expect(
+        dialog.getByLabel("Repository name at destination"),
+      ).toHaveJSProperty("readOnly", true);
+      await expect(
+        dialog.getByLabel("Repository name at destination"),
+      ).toHaveValue("project");
+    } else {
+      await chooseSelectOption(type, "organization");
+      const link = dialog.getByRole("textbox", {
+        name: "Organization link or ID",
+      });
+      await confirm.fill("project");
+      await link.fill(
+        `https://another.example/-/organizations/crab-data--${destination}`,
+      );
+      await expect(create).toBeDisabled();
+      await link.fill(`/-/organizations/crab-data--${source}`);
+      await expect(create).toBeDisabled();
+      await confirm.clear();
+      await link.fill(
+        new URL(
+          `/-/organizations/crab-data--${destination}?tab=repositories`,
+          page.url(),
+        ).href,
+      );
+    }
+    await expect(create).toBeDisabled();
+    await expectNoAccessibilityViolations(page);
+    await confirm.fill("project");
+    await create.click();
+    await expect(
+      dialog.getByText("Awaiting acceptance from Crab Data."),
+    ).toBeVisible();
+  });
+}

@@ -24,7 +24,7 @@ export function IssueList({
     <section className="issues-page">
       <div className="issues-heading">
         <h2>All issues</h2>
-        {!repo.archived && (
+        {!repo.archived && !repo.public_read_only && (
           <Button
             variant="default"
             onClick={() =>

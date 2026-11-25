@@ -150,7 +150,9 @@ async fn list(
     Query(params): Query<ListParameters>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &key)?;
-    app::actor(&principal)?;
+    if !principal.is_public_reader(repo.id) {
+        app::actor(&principal)?;
+    }
     let state = match params.state.as_deref().unwrap_or("open") {
         "open" => Some(MilestoneState::Open),
         "closed" => Some(MilestoneState::Closed),
@@ -188,7 +190,9 @@ async fn detail(
     Path((owner, name, number)): Path<(String, String, u64)>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
-    app::actor(&principal)?;
+    if !principal.is_public_reader(repo.id) {
+        app::actor(&principal)?;
+    }
     let routed = app::repository_cell(&server, &repo)?;
     let value = app::query_output(
         routed
@@ -347,7 +351,9 @@ async fn items(
     Query(params): Query<ListParameters>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
-    app::actor(&principal)?;
+    if !principal.is_public_reader(repo.id) {
+        app::actor(&principal)?;
+    }
     let routed = app::repository_cell(&server, &repo)?;
     let input = ListMilestoneItemsInput {
         number: app::number(number)?,
@@ -361,6 +367,7 @@ async fn items(
             .await,
     )?
     .ok_or(Error::NotFound)?;
+    app::membership(&server, &principal, &repo).await?;
     Ok(Json(json!(page)))
 }
 

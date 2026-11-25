@@ -40,6 +40,22 @@ pub(crate) enum Error {
     IdentityAuthority(#[source] Box<crate::auth::AuthError>),
     #[error("Repository transfer publication is unavailable")]
     TransferPublication(#[source] crab_remote::publication::Error),
+    #[error("The organization’s transfer policy does not allow this repository to be transferred")]
+    RepositoryTransferRestricted,
+    #[error(
+        "The organization’s policy does not allow this repository to be deleted by this account"
+    )]
+    RepositoryDeletionRestricted,
+    #[error("The organization’s policy does not allow private forks")]
+    RepositoryForkingRestricted,
+    #[error("The organization’s policy restricts repository visibility changes")]
+    RepositoryVisibilityRestricted,
+    #[error(
+        "The requester must have permission to create repositories in the destination organization"
+    )]
+    RepositoryTransferDestinationCreationRequired,
+    #[error("Only a destination organization owner can change the repository name during transfer")]
+    RepositoryTransferDestinationOwnerRequired,
     #[error("Incoming issue transfers must finish before repository ownership can change")]
     RepositoryIssueTransfersPending,
     #[error("This transfer expired. Reload the issue to start a new transfer.")]
@@ -374,6 +390,36 @@ impl IntoResponse for Error {
                 StatusCode::CONFLICT,
                 "issue_transfers_pending",
                 "Incoming issue transfers must finish before repository ownership can change",
+            ),
+            Self::RepositoryTransferRestricted => (
+                StatusCode::FORBIDDEN,
+                "repository_transfer_restricted",
+                "The organization’s transfer policy does not allow this repository to be transferred",
+            ),
+            Self::RepositoryDeletionRestricted => (
+                StatusCode::FORBIDDEN,
+                "repository_deletion_restricted",
+                "The organization’s policy does not allow this repository to be deleted by this account",
+            ),
+            Self::RepositoryForkingRestricted => (
+                StatusCode::FORBIDDEN,
+                "repository_forking_restricted",
+                "The organization’s policy does not allow private forks",
+            ),
+            Self::RepositoryVisibilityRestricted => (
+                StatusCode::FORBIDDEN,
+                "repository_visibility_restricted",
+                "The organization’s policy restricts repository visibility changes",
+            ),
+            Self::RepositoryTransferDestinationCreationRequired => (
+                StatusCode::FORBIDDEN,
+                "transfer_destination_creation_required",
+                "The requester must have permission to create repositories in the destination organization",
+            ),
+            Self::RepositoryTransferDestinationOwnerRequired => (
+                StatusCode::FORBIDDEN,
+                "transfer_destination_owner_required",
+                "Only a destination organization owner can change the repository name during transfer",
             ),
             Self::IssueTransferExpired => (
                 StatusCode::CONFLICT,
@@ -1106,6 +1152,22 @@ pub(crate) async fn membership(
         if !principal.can_read(repo.id) {
             return Err(Error::NotFound);
         }
+        if principal.is_local() && repo.organization.is_some() {
+            let snapshot = server
+                .catalog()
+                .ok_or(Error::NotFound)?
+                .membership(&repo.config.owner, &repo.config.name)
+                .await
+                .map_err(repository_access_error)?;
+            // A local credential must not bypass catalog removal on a stale peer.
+            if snapshot.repository_id != repo.id
+                || snapshot.name != repo.config.name
+                || snapshot.ownership_epoch != repo.ownership_epoch
+                || snapshot.forked_from != repo.forked_from
+            {
+                return Err(Error::NotFound);
+            }
+        }
         let organization_owner = if let Some(grant) = principal.import_grant() {
             if !grant.active(server).await {
                 return Err(Error::NotFound);
@@ -1144,6 +1206,13 @@ pub(crate) async fn membership(
     if !current.principal.can_read(repo.id) {
         return Err(Error::NotFound);
     }
+    // A request that already entered with a grant can have fetched data that
+    // matches that grant. Restart the read if it crosses the public boundary.
+    if principal.can_read(repo.id)
+        && principal.is_public_reader(repo.id) != current.principal.is_public_reader(repo.id)
+    {
+        return Err(Error::NotFound);
+    }
     Ok(current)
 }
 
@@ -1157,6 +1226,7 @@ pub(crate) async fn membership_snapshot(
     if snapshot.repository_id != repo.id
         || organization != repo.organization
         || snapshot.ownership_epoch != repo.ownership_epoch
+        || snapshot.forked_from != repo.forked_from
     {
         return Err(Error::NotFound);
     }
@@ -1188,6 +1258,7 @@ pub(crate) async fn membership_for_config(
         .organization
         .map_or_else(Vec::new, |access| access.teams);
     let grant = if let Some(organization) = organization
+        && !principal.is_anonymous()
         && !principal.is_deploy()
         && principal.automation_credential().is_none()
     {
@@ -1218,13 +1289,15 @@ pub(crate) async fn membership_for_config(
             )
             .await?
     } else {
-        principal.with_catalog_membership(
-            snapshot.repository_id,
-            &config,
-            issuer,
-            inherited,
-            snapshot.renamed,
-        )
+        principal
+            .with_catalog_membership(
+                snapshot.repository_id,
+                &config,
+                issuer,
+                inherited,
+                snapshot.renamed,
+            )
+            .with_public_visibility(snapshot.repository_id, snapshot.visibility.is_public())
     };
     let grant = grant.unwrap_or_default();
     let mut review_teams = grant.teams;

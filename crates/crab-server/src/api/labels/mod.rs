@@ -160,7 +160,9 @@ async fn list(
     Path(key): Path<(String, String)>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &key)?;
-    app::actor(&principal)?;
+    if !principal.is_public_reader(repo.id) {
+        app::actor(&principal)?;
+    }
     let labels = catalog(&server, &repo).await?;
     let current = app::membership(&server, &principal, &repo).await?.principal;
     Ok(Json(json!({

@@ -512,12 +512,8 @@ async fn native_browser_searches_and_opens_an_authorized_repository() {
     let browser = Browser::new("repository-search");
     browser.run(&["open", &h.origin]).await;
     browser.sign_in().await;
-    browser.run(&["wait", "--text", "Your repositories"]).await;
     browser
-        .run(&["wait", "select[aria-label='Archive status']"])
-        .await;
-    browser
-        .run(&["select", "select[aria-label='Archive status']", "true"])
+        .choose_select("button[aria-label='Archive status']", "true")
         .await;
     browser
         .run(&["wait", "--url", "**/?q=archived%3Atrue"])

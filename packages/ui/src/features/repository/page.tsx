@@ -6,7 +6,7 @@ import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { DiscussionWorkspace } from "@/components/discussion/workspace";
-import type { Session } from "@/lib/contracts";
+import type { OrganizationView, Session } from "@/lib/contracts";
 import { GitImport } from "@/features/imports";
 import {
   displayHex,
@@ -122,6 +122,7 @@ function clampTreePaneWidth(width: number, max = MAX_TREE_PANE_WIDTH) {
 
 export function RepositoryPage({
   repo,
+  ownership,
   url,
   theme,
   codeThemes,
@@ -131,6 +132,7 @@ export function RepositoryPage({
   onRepositoryChanged,
 }: {
   repo: Repository;
+  ownership?: OrganizationView;
   url: URL;
   theme: "light" | "dark";
   codeThemes: CodeThemes;
@@ -141,6 +143,21 @@ export function RepositoryPage({
 }) {
   const route = repositoryRoute(url);
   const view = route?.view ?? "code";
+  const publicReader = repo.public_read_only === true;
+  const publicView =
+    [
+      "code",
+      "blame",
+      "commit",
+      "commits",
+      "branches",
+      "tags",
+      "code-search",
+      "labels",
+      "milestones",
+    ].includes(view) ||
+    (view === "issues" && route?.issue !== "new") ||
+    (view === "pulls" && route?.pull !== "new" && !route?.action);
   const historyBase = route?.since;
   const canWrite = repo.access === "write" && !repo.archived;
   const forkSource = repo.forked_from;
@@ -451,18 +468,25 @@ export function RepositoryPage({
                   },
                 ]
               : []),
-          ].map(({ view: tab, label, icon: Icon, active }) => (
-            <Link
-              key={tab}
-              className={active ? "active" : ""}
-              aria-current={active ? "page" : undefined}
-              href={repoHref(repo, { view: tab })}
-            >
-              <Icon /> {label}
-            </Link>
-          ))}
+          ]
+            .filter(
+              (tab) =>
+                !publicReader || ["code", "issues", "pulls"].includes(tab.view),
+            )
+            .map(({ view: tab, label, icon: Icon, active }) => (
+              <Link
+                key={tab}
+                className={active ? "active" : ""}
+                aria-current={active ? "page" : undefined}
+                href={repoHref(repo, { view: tab })}
+              >
+                <Icon /> {label}
+              </Link>
+            ))}
         </nav>
-        {identity && <RepositoryWatch key={repo.id} repo={repo} csrf={csrf} />}
+        {identity && !publicReader && (
+          <RepositoryWatch key={repo.id} repo={repo} csrf={csrf} />
+        )}
         {view !== "code-search" && (
           <Button asChild variant="outline" size="sm" className="shrink-0">
             <Link
@@ -484,7 +508,10 @@ export function RepositoryPage({
             <GitImport
               key={`${identity.issuer}:${identity.subject}:${repo.id}`}
               account={JSON.stringify([identity.issuer, identity.subject])}
-              organization={{ id: repo.organization_id, name: repo.owner }}
+              organization={{
+                id: repo.organization_id,
+                name: ownership?.organization.name ?? repo.owner,
+              }}
               fork={repo}
               csrf={csrf}
               onImported={(repository) => {
@@ -547,7 +574,8 @@ export function RepositoryPage({
           <span>This repository was archived and is read-only.</span>
         </div>
       )}
-      {!repo.archived &&
+      {!publicReader &&
+        !repo.archived &&
         (!forkSource || canWrite) &&
         (overview || (view === "pulls" && !route?.pull && !route?.action)) && (
           <RecentPushes
@@ -563,7 +591,12 @@ export function RepositoryPage({
       <div
         className={`repo-body${view === "projects" ? " repo-project-workspace" : ""}${overview ? " repo-overview" : ""}${fileWorkspace ? " repo-file-workspace" : ""}${discussionNavigation ? " repo-discussion-workspace" : ""}${view === "settings" ? " repo-settings-workspace" : ""}`}
       >
-        {view === "fork-compare" ? (
+        {publicReader && !publicView ? (
+          <div className="notice">
+            <h2>Repository access required</h2>
+            <Link href={repoHref(repo)}>Browse the public code</Link>
+          </div>
+        ) : view === "fork-compare" ? (
           forkSource ? (
             <Result state={visibleRefState} timingLabel="Fork references">
               {(data) => (
@@ -650,6 +683,7 @@ export function RepositoryPage({
                 >
                   <Settings
                     repo={repo}
+                    ownership={ownership}
                     refs={data}
                     csrf={csrf}
                     section={
@@ -1093,23 +1127,27 @@ export function RepositoryPage({
                                 {repo.description || "No description provided."}
                               </p>
                               <TopicLinks names={repo.topics} />
-                              <div className="about-links">
-                                <Link
-                                  href={repoHref(repo, {
-                                    view: "activity",
-                                  })}
-                                >
-                                  <HistoryIcon /> Activity
-                                </Link>
-                                <Link href={repoHref(repo, { view: "issues" })}>
-                                  <IssueOpenedIcon /> Issues
-                                </Link>
-                                <Link
-                                  href={repoHref(repo, { view: "releases" })}
-                                >
-                                  <TagIcon /> Releases
-                                </Link>
-                              </div>
+                              {!publicReader && (
+                                <div className="about-links">
+                                  <Link
+                                    href={repoHref(repo, {
+                                      view: "activity",
+                                    })}
+                                  >
+                                    <HistoryIcon /> Activity
+                                  </Link>
+                                  <Link
+                                    href={repoHref(repo, { view: "issues" })}
+                                  >
+                                    <IssueOpenedIcon /> Issues
+                                  </Link>
+                                  <Link
+                                    href={repoHref(repo, { view: "releases" })}
+                                  >
+                                    <TagIcon /> Releases
+                                  </Link>
+                                </div>
+                              )}
                               {data.refs.some((ref) =>
                                 ref.name.startsWith("refs/heads/"),
                               ) && (

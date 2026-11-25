@@ -7,10 +7,13 @@ import { AlertIcon, GitBranchIcon, PencilIcon } from "@primer/octicons-react";
 import { useMemo, useState } from "react";
 import { ArchiveSettings } from "./archive";
 import { DescriptionSettings } from "./description";
+import { DeleteRepositorySettings } from "./delete-repository";
+import { ForkingSettings } from "./forking";
 import { MergeMethodSettings } from "./merge-methods";
 import { RenameSettings } from "./rename";
 import { TopicSettings } from "./topics";
 import { TransferSettings } from "./transfer";
+import { VisibilitySettings } from "./visibility";
 
 const names = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
 
@@ -58,14 +61,43 @@ export function GeneralSettings({
         />
       )}
       <MergeMethodSettings repo={repo} csrf={csrf} />
+      {repo.forking && csrf && (
+        <ForkingSettings
+          key={`${repo.id}:${repo.forking.version}:${repo.forking.organization_allows}`}
+          repo={repo}
+          policy={repo.forking}
+          csrf={csrf}
+          onChanged={onRepositoryChanged}
+        />
+      )}
       {repo.can_admin && (
         <>
           <TransferSettings repo={repo} csrf={csrf} />
-          <ArchiveSettings
-            repo={repo}
-            csrf={csrf}
-            onChanged={onRepositoryChanged}
-          />
+          <section
+            className="danger-zone"
+            aria-labelledby="danger-zone-heading"
+          >
+            <h2 id="danger-zone-heading">Danger Zone</h2>
+            {repo.can_configure_visibility && csrf && (
+              <VisibilitySettings
+                repo={repo}
+                csrf={csrf}
+                onChanged={onRepositoryChanged}
+              />
+            )}
+            <ArchiveSettings
+              repo={repo}
+              csrf={csrf}
+              onChanged={onRepositoryChanged}
+            />
+            {repo.organization_id && csrf && (
+              <DeleteRepositorySettings
+                repo={repo}
+                csrf={csrf}
+                onChanged={onRepositoryChanged}
+              />
+            )}
+          </section>
         </>
       )}
     </section>

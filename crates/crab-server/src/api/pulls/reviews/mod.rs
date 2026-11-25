@@ -86,10 +86,10 @@ pub(in crate::api) async fn dismissal_allowed(
     ))
 }
 
-pub(in crate::api) fn review_view(
+pub(in crate::api) fn review_view<'a>(
     authors: &Authors,
     detail: &Detail,
-    actor: &Identity,
+    actor: impl Into<Option<&'a Identity>>,
     current_head: Option<&str>,
     reactions: &reactions::View,
     can_dismiss: bool,
@@ -115,7 +115,7 @@ pub(in crate::api) fn review_view(
         "version": review.version,
         "created_at": review.created_at_ms,
         "updated_at": review.updated_at_ms,
-        "can_edit": review.author.issuer==actor.issuer && review.author.subject==actor.subject,
+        "can_edit": actor.into().is_some_and(|actor| review.author.issuer==actor.issuer && review.author.subject==actor.subject),
     })
 }
 

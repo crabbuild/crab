@@ -41,6 +41,9 @@ async fn save(
             "Choose None, Read, or Write baseline access",
         ));
     }
+    if !crate::config::valid_repository_branch(&policy.default_branch) {
+        return Err(Error::Invalid("Enter a valid short Git branch name"));
+    }
     let actor = actor(&server, &principal).await?;
     let address = target(id)?;
     let worker = Arc::clone(&server);

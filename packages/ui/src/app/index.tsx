@@ -21,7 +21,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Spinner } from "@/components/ui/spinner";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { SignIn } from "@/features/auth/sign-in";
+import { SignIn, signInHref } from "@/features/auth/sign-in";
 import { GitAccess } from "@/features/git-access";
 import { RepositoryOwnerActions } from "@/features/repository/owner-actions";
 import { PersonalWork } from "@/features/personal-work";
@@ -33,6 +33,11 @@ import {
   OrganizationInvitation,
 } from "@/features/organizations";
 import { OrganizationDirectory } from "@/features/organizations/directory";
+import {
+  matchOrganizationRoute,
+  organizationHref,
+} from "@/lib/organization-route";
+import type { OrganizationView } from "@/lib/contracts";
 import {
   TeamFeedback,
   useTeamCommands,
@@ -153,19 +158,19 @@ export function App() {
       url.pathname,
     );
   const personalRepositories = url.pathname === "/-/repositories/personal";
+  const publicRepositories = url.pathname === "/-/public";
   const organizations = url.pathname === "/-/organizations";
-  const repositoryCatalogPage = url.pathname === "/" || personalRepositories;
+  const repositoryCatalogPage =
+    url.pathname === "/" || personalRepositories || publicRepositories;
   const transferId = /^\/-\/repository-transfers\/([0-9a-f-]{36})$/i.exec(
     url.pathname,
   )?.[1];
-  const organizationRoute =
-    /^\/-\/organizations\/(?:[^/]+--)?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(\/invitation|\/projects(?:\/([0-9a-f-]{36}))?)?$/i.exec(
-      url.pathname,
-    );
+  const organizationRoute = matchOrganizationRoute(url.pathname);
   const route =
     profileSettings ||
     actorRoute ||
     personalRepositories ||
+    publicRepositories ||
     transferId ||
     organizationRoute ||
     organizations ||
@@ -216,7 +221,7 @@ export function App() {
     repositories: Repository[];
     redirect?: Pick<Repository, "id" | "owner" | "name">;
   }>(
-    session.data?.authenticated && requestedRepository
+    session.data && requestedRepository
       ? `/api/repos?${new URLSearchParams({ owner: requestedRepository.owner, name: requestedRepository.name })}`
       : null,
   );
@@ -258,13 +263,23 @@ export function App() {
       repo.name === route.name &&
       (expectedRepository === null || expectedRepository === repo.id),
   );
+  const repositoryOwnership = useRequest<OrganizationView>(
+    authenticated && repo?.organization_id
+      ? `/api/organizations/${encodeURIComponent(repo.organization_id)}`
+      : null,
+  ).data;
+  const repositoryOrganization = repositoryOwnership?.organization;
+  const publicView =
+    publicRepositories ||
+    repo?.visibility === "public" ||
+    Boolean(route && (repositoryCatalog.loading || renamed));
   useEffect(() => {
-    if (authenticated === false) {
+    if (authenticated === false && !publicView) {
       document.title = "Sign in to Crab";
       return;
     }
     document.title = repo
-      ? `${repo.owner}/${repo.name} · Crab`
+      ? `${repositoryOrganization?.name ?? repo.owner}/${repo.name} · Crab`
       : subscriptions
         ? "Subscriptions · Crab"
         : watched
@@ -284,7 +299,9 @@ export function App() {
                       : "Repositories · Crab";
   }, [
     authenticated,
+    publicView,
     repo,
+    repositoryOrganization,
     watched,
     inbox,
     subscriptions,
@@ -307,7 +324,12 @@ export function App() {
       setImportedRepository(undefined);
     }
   }, [importedRepository, repositoryCatalog.data, url.pathname]);
-  if (session.error || session.loading || !session.data?.authenticated) {
+  if (
+    session.error ||
+    session.loading ||
+    !session.data ||
+    (!authenticated && !publicView)
+  ) {
     return (
       <TooltipProvider>
         <main id="main" className="sign-in-page" tabIndex={-1}>
@@ -357,13 +379,33 @@ export function App() {
             {repo ? (
               <div className="global-repository">
                 <RepoIcon size={16} />
-                <h1>
-                  <Link href={repoHref(repo)}>
-                    {repo.owner} <span aria-hidden="true">/</span>{" "}
-                    <strong>{repo.name}</strong>
-                  </Link>
+                <h1 className="wrap-anywhere">
+                  {repositoryOrganization ? (
+                    <>
+                      <Link
+                        href={organizationHref(
+                          repositoryOrganization,
+                          "?tab=repositories",
+                        )}
+                      >
+                        <bdi>{repositoryOrganization.name}</bdi>
+                      </Link>{" "}
+                      <span aria-hidden="true">/</span>{" "}
+                      <Link href={repoHref(repo)}>
+                        <strong>{repo.name}</strong>
+                      </Link>
+                    </>
+                  ) : (
+                    <Link href={repoHref(repo)}>
+                      {repo.owner} <span aria-hidden="true">/</span>{" "}
+                      <strong>{repo.name}</strong>
+                    </Link>
+                  )}
                 </h1>
                 {repo.archived && <Badge variant="outline">Archived</Badge>}
+                {repo.visibility === "public" && (
+                  <Badge variant="outline">Public</Badge>
+                )}
               </div>
             ) : (
               <Link
@@ -415,6 +457,11 @@ export function App() {
                 codeTheme={codeTheme}
                 setCodeTheme={selectCodeTheme}
               />
+              {!authenticated && (
+                <Button asChild variant="outline" size="sm">
+                  <a href={signInHref(url)}>Sign in</a>
+                </Button>
+              )}
               {session.data?.user && (
                 <NotificationLink current={notifications} />
               )}
@@ -620,50 +667,77 @@ export function App() {
               <div className="catalog">
                 <div className="section-heading">
                   <h1>
-                    {personalRepositories
-                      ? "Personal repositories"
-                      : "Repositories"}
+                    {publicRepositories
+                      ? "Public repositories"
+                      : personalRepositories
+                        ? "Personal repositories"
+                        : "Repositories"}
                   </h1>
-                  <RepositoryOwnerActions
-                    key={importAccount}
-                    account={importAccount}
-                    csrf={session.data.csrf ?? ""}
-                    personal={personalRepositories}
-                  />
+                  {authenticated && !publicRepositories && (
+                    <RepositoryOwnerActions
+                      key={importAccount}
+                      account={importAccount}
+                      csrf={session.data.csrf ?? ""}
+                      personal={personalRepositories}
+                    />
+                  )}
                 </div>
-                <nav
-                  aria-label="Repository ownership"
-                  className="mb-5 flex flex-wrap gap-2 border-b pb-3"
-                >
-                  <Button
-                    asChild
-                    variant={personalRepositories ? "ghost" : "secondary"}
+                {authenticated && (
+                  <nav
+                    aria-label="Repository ownership"
+                    className="mb-5 flex flex-wrap gap-2 border-b pb-3"
                   >
-                    <Link
-                      href="/"
-                      aria-current={personalRepositories ? undefined : "page"}
+                    <Button
+                      asChild
+                      variant={
+                        personalRepositories || publicRepositories
+                          ? "ghost"
+                          : "secondary"
+                      }
                     >
-                      All accessible
-                    </Link>
-                  </Button>
-                  <Button
-                    asChild
-                    variant={personalRepositories ? "secondary" : "ghost"}
-                  >
-                    <Link
-                      href="/-/repositories/personal"
-                      aria-current={personalRepositories ? "page" : undefined}
+                      <Link
+                        href="/"
+                        aria-current={
+                          personalRepositories || publicRepositories
+                            ? undefined
+                            : "page"
+                        }
+                      >
+                        All accessible
+                      </Link>
+                    </Button>
+                    <Button
+                      asChild
+                      variant={personalRepositories ? "secondary" : "ghost"}
                     >
-                      Personal
-                    </Link>
-                  </Button>
-                </nav>
+                      <Link
+                        href="/-/repositories/personal"
+                        aria-current={personalRepositories ? "page" : undefined}
+                      >
+                        Personal
+                      </Link>
+                    </Button>
+                    <Button
+                      asChild
+                      variant={publicRepositories ? "secondary" : "ghost"}
+                    >
+                      <Link
+                        href="/-/public"
+                        aria-current={publicRepositories ? "page" : undefined}
+                      >
+                        Public
+                      </Link>
+                    </Button>
+                  </nav>
+                )}
                 <BrowseRepositories
                   url={url}
                   scope={
-                    personalRepositories
-                      ? { kind: "personal" }
-                      : { kind: "all", subject: session.data.user?.subject }
+                    publicRepositories
+                      ? { kind: "public" }
+                      : personalRepositories
+                        ? { kind: "personal" }
+                        : { kind: "all", subject: session.data.user?.subject }
                   }
                 />
               </div>
@@ -685,6 +759,7 @@ export function App() {
                           <RepositoryPage
                             key={repo.id}
                             repo={repo}
+                            ownership={repositoryOwnership}
                             url={url}
                             theme={resolved}
                             codeThemes={codeThemeChoices[codeTheme].themes}

@@ -13,15 +13,15 @@ import { useMutation } from "@/components/discussion/mutations";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
+import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import { FieldSelect } from "@/components/ui/field-select";
-import { useRequest } from "@/lib/api";
+import { navigate, useRequest } from "@/lib/api";
 import { MutationError } from "./feedback";
 import type {
   OrganizationMembership,
-  Organization,
   OrganizationMembers,
   OrganizationRole,
   OrganizationView,
@@ -30,30 +30,15 @@ import type {
 } from "@/lib/contracts";
 import { Teams } from "./teams";
 import type { Commands } from "./teams/commands";
-import { Invitations } from "./invitations";
+import { Invitations, InviteDialog } from "./invitations";
+import { OrganizationSettings, isOrganizationSettings } from "./settings";
 import { OrganizationRepositories } from "./repositories";
 import { MemberAccess } from "./repository-access";
-import { OrganizationAuditLog } from "./audit-log";
-import { OrganizationAutomation } from "./automation";
-import { OrganizationRulesets } from "@/features/settings/rulesets";
-import { OrganizationRepositoryProperties } from "./repository-properties";
-import { OrganizationIssueTypes } from "./issue-types";
-import { organizationHref } from "./directory";
-import { TeamPicker } from "@/features/settings/team-picker";
-import { RepositoryPolicySettings } from "./repository-policy";
-import { ProjectPolicySettings } from "./project-policy";
+import { ConvertMembers } from "./convert-members";
 import { OutsideCollaborators } from "./outside-collaborators";
+import { organizationHref } from "@/lib/organization-route";
+import { TeamPicker } from "@/features/settings/team-picker";
 export { OrganizationInvitation } from "./invitations";
-
-const adminTabs = [
-  { key: "settings", label: "Settings" },
-  { key: "invitations", label: "Invitations" },
-  { key: "rulesets", label: "Rulesets" },
-  { key: "properties", label: "Properties" },
-  { key: "issue-types", label: "Issue types" },
-  { key: "automation", label: "Automation" },
-  { key: "audit", label: "Audit log" },
-];
 
 export function OrganizationPage({
   id,
@@ -69,257 +54,252 @@ export function OrganizationPage({
   const endpoint = `/api/organizations/${id}`;
   const own = useRequest<OrganizationView>(endpoint);
   const tab = url.searchParams.get("tab") ?? "people";
-  const outside = url.searchParams.get("people") === "outside";
   const [notice, setNotice] = useState("");
   return (
     <section className="mx-auto w-full max-w-6xl p-4 sm:p-8">
       <Result state={own} timingLabel="Organization">
-        {({ organization, role, actor, can_create }) => (
-          <>
-            <header className="mb-6 flex min-w-0 flex-wrap items-start gap-4">
-              <Building2Icon
-                className="size-12 shrink-0 rounded-lg border p-2 text-muted-foreground"
-                aria-hidden="true"
-              />
-              <div className="min-w-0 flex-1 basis-48">
-                <div className="flex flex-wrap items-center gap-2">
-                  <h1
-                    dir="auto"
-                    className="min-w-0 wrap-anywhere text-2xl font-semibold tracking-tight"
-                  >
-                    {organization.name}
-                  </h1>
-                  <Badge variant="outline">
-                    {role === "owner"
-                      ? "Organization owner"
-                      : "Organization member"}
-                  </Badge>
+        {({ organization, role, actor, can_create }) => {
+          const settings = isOrganizationSettings(tab);
+          const owner = role === "owner";
+          const people =
+            tab === "people" ||
+            (owner &&
+              (tab === "invitations" || tab === "outside-collaborators"));
+          return (
+            <>
+              <header className="mb-6 flex min-w-0 flex-wrap items-start gap-4">
+                <Building2Icon
+                  className="size-12 shrink-0 rounded-lg border p-2 text-muted-foreground"
+                  aria-hidden="true"
+                />
+                <div className="min-w-0 flex-1 basis-48">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h1
+                      dir="auto"
+                      className="min-w-0 wrap-anywhere text-2xl font-semibold tracking-tight"
+                    >
+                      {organization.name}
+                    </h1>
+                    <Badge variant="outline">
+                      {role === "owner"
+                        ? "Organization owner"
+                        : "Organization member"}
+                    </Badge>
+                  </div>
+                  {organization.description && (
+                    <p
+                      dir="auto"
+                      className="mt-1 whitespace-pre-wrap wrap-anywhere text-sm text-muted-foreground"
+                    >
+                      {organization.description}
+                    </p>
+                  )}
                 </div>
-                {organization.description && (
-                  <p
-                    dir="auto"
-                    className="mt-1 whitespace-pre-wrap wrap-anywhere text-sm text-muted-foreground"
-                  >
-                    {organization.description}
-                  </p>
-                )}
-              </div>
-              <Button variant="outline" size="sm" onClick={own.retry}>
-                Refresh organization
-              </Button>
-            </header>
-            <nav
-              aria-label="Organization"
-              className="flex flex-wrap gap-2 border-b pb-3"
-            >
-              {[
-                {
-                  key: "repositories",
-                  label: "Repositories",
-                  icon: BookMarkedIcon,
-                },
-                { key: "people", label: "People", icon: UsersIcon },
-                { key: "teams", label: "Teams", icon: NetworkIcon },
-              ].map(({ key, label, icon: Icon }) => (
-                <Button
-                  key={key}
-                  asChild
-                  variant={tab === key ? "secondary" : "ghost"}
-                >
-                  <Link
-                    href={organizationHref(organization, `?tab=${key}`)}
-                    aria-current={tab === key ? "page" : undefined}
-                  >
-                    <Icon data-icon="inline-start" />
-                    {label}
+                <Button variant="outline" size="sm" onClick={own.retry}>
+                  Refresh organization
+                </Button>
+              </header>
+              <nav
+                aria-label="Organization"
+                className="flex flex-wrap gap-2 border-b pb-3"
+              >
+                {[
+                  {
+                    key: "repositories",
+                    label: "Repositories",
+                    icon: BookMarkedIcon,
+                  },
+                  { key: "people", label: "People", icon: UsersIcon },
+                  { key: "teams", label: "Teams", icon: NetworkIcon },
+                ].map(({ key, label, icon: Icon }) => {
+                  const selected = key === "people" ? people : tab === key;
+                  return (
+                    <Button
+                      key={key}
+                      asChild
+                      variant={selected ? "secondary" : "ghost"}
+                    >
+                      <Link
+                        href={organizationHref(organization, `?tab=${key}`)}
+                        aria-current={selected ? "page" : undefined}
+                      >
+                        <Icon data-icon="inline-start" />
+                        {label}
+                      </Link>
+                    </Button>
+                  );
+                })}
+                <Button asChild variant="ghost">
+                  <Link href={organizationHref(organization, "/projects")}>
+                    <FolderKanbanIcon data-icon="inline-start" />
+                    Projects
                   </Link>
                 </Button>
-              ))}
-              <Button asChild variant="ghost">
-                <Link href={organizationHref(organization, "/projects")}>
-                  <FolderKanbanIcon data-icon="inline-start" />
-                  Projects
-                </Link>
-              </Button>
-            </nav>
-            {role === "owner" && (
-              <nav
-                aria-label="Organization administration"
-                className="flex flex-wrap items-center gap-1 border-b py-2"
-              >
-                <SettingsIcon
-                  aria-hidden="true"
-                  className="mx-2 size-4 text-muted-foreground"
-                />
-                {adminTabs.map(({ key, label }) => (
-                  <Button
-                    asChild
-                    key={key}
-                    size="sm"
-                    variant={tab === key ? "secondary" : "ghost"}
-                  >
+                {owner && (
+                  <Button asChild variant={settings ? "secondary" : "ghost"}>
                     <Link
-                      href={organizationHref(organization, `?tab=${key}`)}
-                      aria-current={tab === key ? "page" : undefined}
+                      href={organizationHref(organization, "?tab=settings")}
+                      aria-current={settings ? "page" : undefined}
                     >
-                      {label}
+                      <SettingsIcon data-icon="inline-start" />
+                      Settings
                     </Link>
                   </Button>
-                ))}
+                )}
               </nav>
-            )}
-            <div className="mt-6">
-              {notice && (
-                <p role="status" className="mb-4 text-sm">
-                  {notice}
-                </p>
-              )}
-              {tab === "repositories" ? (
-                <OrganizationRepositories
-                  id={id}
-                  name={organization.name}
-                  actor={actor}
-                  canCreate={role === "owner" || can_create}
-                  owner={role === "owner"}
-                  url={url}
-                  csrf={csrf}
-                />
-              ) : tab === "teams" ? (
-                <Teams
-                  id={id}
-                  actor={actor}
-                  owner={role === "owner"}
-                  url={url}
-                  csrf={csrf}
-                  commands={commands}
-                />
-              ) : tab === "people" ? (
-                <>
-                  {role === "owner" && (
-                    <nav
-                      aria-label="People"
-                      className="mb-4 flex flex-wrap gap-2"
-                    >
-                      <Button
-                        asChild
-                        size="sm"
-                        variant={outside ? "ghost" : "secondary"}
-                      >
-                        <Link
-                          href={organizationHref(organization, "?tab=people")}
-                          aria-current={outside ? undefined : "page"}
-                        >
-                          Members
-                        </Link>
-                      </Button>
-                      <Button
-                        asChild
-                        size="sm"
-                        variant={outside ? "secondary" : "ghost"}
-                      >
-                        <Link
-                          href={organizationHref(
-                            organization,
-                            "?tab=people&people=outside",
-                          )}
-                          aria-current={outside ? "page" : undefined}
-                        >
-                          Outside collaborators
-                        </Link>
-                      </Button>
-                    </nav>
-                  )}
-                  {role === "owner" && outside ? (
-                    <OutsideCollaborators
-                      key={`${id}:${actor}`}
-                      endpoint={endpoint}
-                      url={url}
-                      csrf={csrf}
-                      actor={actor}
-                    />
-                  ) : (
-                    <People
-                      id={id}
-                      endpoint={endpoint}
-                      csrf={csrf}
-                      owner={role === "owner"}
-                      onChanged={(message) => {
-                        setNotice(message);
-                        own.retry();
-                      }}
-                    />
-                  )}
-                </>
-              ) : role === "owner" && tab === "invitations" ? (
-                <Invitations endpoint={endpoint} id={id} csrf={csrf} />
-              ) : role === "owner" && tab === "rulesets" ? (
-                <OrganizationRulesets key={id} organization={id} csrf={csrf} />
-              ) : role === "owner" && tab === "properties" ? (
-                <OrganizationRepositoryProperties
-                  key={id}
-                  organization={id}
-                  csrf={csrf}
-                />
-              ) : role === "owner" && tab === "issue-types" ? (
-                <OrganizationIssueTypes
-                  key={id}
-                  organization={id}
-                  csrf={csrf}
-                />
-              ) : role === "owner" && tab === "automation" ? (
-                <OrganizationAutomation organization={id} csrf={csrf} />
-              ) : role === "owner" && tab === "audit" ? (
-                <OrganizationAuditLog id={id} url={url} />
-              ) : role === "owner" && tab === "settings" ? (
-                <div className="grid gap-8">
-                  <Settings
-                    key={organization.version}
-                    organization={organization}
+              <div className="mt-6">
+                {notice && (
+                  <p role="status" className="mb-4 text-sm">
+                    {notice}
+                  </p>
+                )}
+                {tab === "repositories" ? (
+                  <OrganizationRepositories
+                    id={id}
+                    name={organization.name}
+                    actor={actor}
+                    canCreate={owner || can_create}
+                    owner={owner}
+                    url={url}
                     csrf={csrf}
+                  />
+                ) : tab === "teams" ? (
+                  <Teams
+                    id={id}
+                    actor={actor}
+                    owner={owner}
+                    url={url}
+                    csrf={csrf}
+                    commands={commands}
+                  />
+                ) : people ? (
+                  <div className="grid gap-4">
+                    {owner && (
+                      <nav
+                        aria-label="Organization people"
+                        className="flex flex-wrap gap-2"
+                      >
+                        {[
+                          ["people", "Members"],
+                          ["outside-collaborators", "Outside collaborators"],
+                          ["invitations", "Invitations"],
+                        ].map(([view, label]) => (
+                          <Button
+                            key={view}
+                            asChild
+                            variant={tab === view ? "secondary" : "ghost"}
+                            size="sm"
+                          >
+                            <Link
+                              href={organizationHref(
+                                organization,
+                                `?tab=${view}`,
+                              )}
+                              aria-current={tab === view ? "page" : undefined}
+                            >
+                              {label}
+                            </Link>
+                          </Button>
+                        ))}
+                      </nav>
+                    )}
+                    {tab === "outside-collaborators" ? (
+                      <OutsideCollaborators
+                        endpoint={endpoint}
+                        actor={actor}
+                        url={url}
+                        csrf={csrf}
+                        onInvited={() =>
+                          setNotice("Invitation sent to the collaborator.")
+                        }
+                      />
+                    ) : (
+                      <People
+                        key={tab}
+                        id={id}
+                        actor={actor}
+                        endpoint={endpoint}
+                        csrf={csrf}
+                        owner={owner}
+                        invites={tab === "invitations"}
+                        onInvited={() =>
+                          setNotice(
+                            "Invitation created. It appears in the invitee’s notifications.",
+                          )
+                        }
+                        onChanged={(message) => {
+                          setNotice(message);
+                          own.retry();
+                        }}
+                      />
+                    )}
+                  </div>
+                ) : owner && settings ? (
+                  <OrganizationSettings
+                    tab={tab}
+                    organization={organization}
                     endpoint={endpoint}
-                    onSaved={() => {
+                    csrf={csrf}
+                    url={url}
+                    onProfileSaved={() => {
                       setNotice("Organization updated.");
                       own.retry();
                     }}
                   />
-                  <RepositoryPolicySettings organization={id} csrf={csrf} />
-                  <ProjectPolicySettings organization={id} />
-                </div>
-              ) : (
-                <div className="notice error" role="alert">
-                  <p>This organization page is unavailable.</p>
-                  <Link href={`/-/organizations/${id}`}>
-                    Back to organization
-                  </Link>
-                </div>
-              )}
-            </div>
-          </>
-        )}
+                ) : (
+                  <div className="notice error" role="alert">
+                    <p>This organization page is unavailable.</p>
+                    <Link href={`/-/organizations/${id}`}>
+                      Back to organization
+                    </Link>
+                  </div>
+                )}
+              </div>
+            </>
+          );
+        }}
       </Result>
     </section>
   );
 }
 function People({
   id,
+  actor,
   endpoint,
   csrf,
   owner,
+  invites,
+  onInvited,
   onChanged,
 }: {
   id: string;
+  actor: string;
   endpoint: string;
   csrf: string;
   owner: boolean;
+  invites: boolean;
+  onInvited: () => void;
   onChanged: (message: string) => void;
 }) {
   const [after, setAfter] = useState<string>();
+  const [checks, setChecks] = useState<Record<string, number>>({});
+  const changePage = (cursor?: string) => {
+    setChecks({});
+    setAfter(cursor);
+  };
+  const select = (member: OrganizationMembership, checked: boolean) => {
+    setChecks((previous) => {
+      const next = { ...previous };
+      if (checked) next[member.actor] = member.version;
+      else delete next[member.actor];
+      return next;
+    });
+  };
   const [query, setQuery] = useState("");
   const [q, setQ] = useState("");
   const [role, setRole] = useState("all");
   const [team, setTeam] = useState<Team>();
-  const [status, setStatus] = useState<"active" | InvitationState>("active");
-  const invites = owner && status !== "active";
+  const [status, setStatus] = useState<InvitationState>("pending");
   const params = new URLSearchParams(after ? { after } : {});
   if (q) params.set("q", q);
   if (role !== "all") params.set("role", role);
@@ -328,7 +308,7 @@ function People({
     invites ? null : `${endpoint}/members?${params}`,
   );
   const refresh = () => {
-    setAfter(undefined);
+    changePage();
     members.retry();
   };
   return (
@@ -340,7 +320,7 @@ function People({
           className="flex items-end gap-2"
           onSubmit={(event) => {
             event.preventDefault();
-            setAfter(undefined);
+            changePage();
             setQ(query.trim());
           }}
         >
@@ -367,20 +347,19 @@ function People({
             value={role}
             options={{ all: "All roles", member: "Member", owner: "Owner" }}
             onValueChange={(value) => {
-              setAfter(undefined);
+              changePage();
               setRole(value);
             }}
           />
         </Field>
-        {owner && (
+        {invites && (
           <Field className="w-auto">
-            <FieldLabel htmlFor="people-status">Membership status</FieldLabel>
+            <FieldLabel htmlFor="people-status">Invitation status</FieldLabel>
             <FieldSelect
               id="people-status"
-              label="Membership status"
+              label="Invitation status"
               value={status}
               options={{
-                active: "Active members",
                 pending: "Pending invitations",
                 expired: "Expired invitations",
                 accepted: "Accepted invitations",
@@ -388,7 +367,7 @@ function People({
                 cancelled: "Cancelled invitations",
               }}
               onValueChange={(value) => {
-                setAfter(undefined);
+                changePage();
                 setStatus(value as typeof status);
               }}
             />
@@ -399,7 +378,7 @@ function People({
             <Button
               variant="outline"
               onClick={() => {
-                setAfter(undefined);
+                changePage();
                 setTeam(undefined);
               }}
             >
@@ -412,7 +391,7 @@ function People({
               selected={new Set()}
               disabled={false}
               onSelect={(value) => {
-                setAfter(undefined);
+                changePage();
                 setTeam(value);
               }}
             />
@@ -435,60 +414,125 @@ function People({
                 Refresh members
               </Button>
               {owner && (
-                <Button asChild>
-                  <Link href={`/-/organizations/${id}?tab=invitations`}>
-                    Invite people
-                  </Link>
-                </Button>
+                <InviteDialog
+                  endpoint={endpoint}
+                  csrf={csrf}
+                  onInvited={onInvited}
+                />
               )}
             </div>
           </div>
           <Result state={members} timingLabel="Organization members">
-            {(data) => (
-              <>
-                {data.items.length ? (
-                  <ul className="divide-y rounded-lg border">
-                    {data.items.map((member) => (
-                      <MemberRow
-                        key={`${member.actor}:${member.version}`}
-                        member={member}
-                        organization={id}
-                        canManage={data.can_manage}
-                        endpoint={endpoint}
-                        csrf={csrf}
-                        onChanged={(message) => {
-                          onChanged(message);
-                          refresh();
-                        }}
-                      />
-                    ))}
-                  </ul>
-                ) : (
-                  <p
-                    role="status"
-                    className="rounded-lg border p-6 text-center text-sm text-muted-foreground"
-                  >
-                    No members on this page.
-                  </p>
-                )}
-                <div className="flex gap-2">
-                  <Button
-                    variant="outline"
-                    disabled={!after}
-                    onClick={() => setAfter(undefined)}
-                  >
-                    First page
-                  </Button>
-                  <Button
-                    variant="outline"
-                    disabled={!data.next}
-                    onClick={() => setAfter(data.next ?? undefined)}
-                  >
-                    Next page
-                  </Button>
-                </div>
-              </>
-            )}
+            {(data) => {
+              const selected = data.items.filter(
+                (member) => checks[member.actor] === member.version,
+              );
+              return (
+                <>
+                  {data.can_manage && data.items.length > 0 && (
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <Label
+                        className="flex items-center gap-2"
+                        htmlFor="select-members-page"
+                      >
+                        <Checkbox
+                          id="select-members-page"
+                          checked={
+                            selected.length === data.items.length ||
+                            (selected.length > 0 && "indeterminate")
+                          }
+                          onCheckedChange={(checked) =>
+                            setChecks(
+                              checked
+                                ? Object.fromEntries(
+                                    data.items.map(({ actor, version }) => [
+                                      actor,
+                                      version,
+                                    ]),
+                                  )
+                                : {},
+                            )
+                          }
+                        />
+                        Select page
+                      </Label>
+                      {selected.length > 0 && (
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-sm text-muted-foreground">
+                            {selected.length} selected
+                          </span>
+                          <ConvertMembers
+                            endpoint={`${endpoint}/members/conversion`}
+                            csrf={csrf}
+                            members={selected}
+                            onReload={refresh}
+                            onConverted={() => {
+                              if (
+                                selected.some(
+                                  (member) => member.actor === actor,
+                                )
+                              ) {
+                                navigate("/");
+                              } else {
+                                onChanged(
+                                  selected.length === 1
+                                    ? "Converted 1 member to an outside collaborator."
+                                    : `Converted ${selected.length} members to outside collaborators.`,
+                                );
+                                refresh();
+                              }
+                            }}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {data.items.length ? (
+                    <ul className="divide-y rounded-lg border">
+                      {data.items.map((member) => (
+                        <MemberRow
+                          key={`${member.actor}:${member.version}`}
+                          member={member}
+                          checked={checks[member.actor] === member.version}
+                          onSelect={(checked) => select(member, checked)}
+                          organization={id}
+                          canManage={data.can_manage}
+                          endpoint={endpoint}
+                          csrf={csrf}
+                          onChanged={(message) => {
+                            onChanged(message);
+                            refresh();
+                          }}
+                        />
+                      ))}
+                    </ul>
+                  ) : (
+                    <p
+                      role="status"
+                      className="rounded-lg border p-6 text-center text-sm text-muted-foreground"
+                    >
+                      No members on this page.
+                    </p>
+                  )}
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      disabled={!after}
+                      onClick={() => changePage()}
+                    >
+                      First page
+                    </Button>
+                    <Button
+                      variant="outline"
+                      disabled={!data.next}
+                      onClick={() => changePage(data.next ?? undefined)}
+                    >
+                      Next page
+                    </Button>
+                  </div>
+                </>
+              );
+            }}
           </Result>
         </>
       )}
@@ -497,6 +541,8 @@ function People({
 }
 function MemberRow({
   member,
+  checked,
+  onSelect,
   organization,
   canManage,
   endpoint,
@@ -504,6 +550,8 @@ function MemberRow({
   onChanged,
 }: {
   member: OrganizationMembership;
+  checked: boolean;
+  onSelect: (checked: boolean) => void;
   organization: string;
   canManage: boolean;
   endpoint: string;
@@ -525,17 +573,27 @@ function MemberRow({
   return (
     <li className="flex flex-col gap-3 p-4">
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-4">
-        <div className="min-w-0 break-words">
-          {member.profile ? (
-            <Link href={`/-/users/${member.actor}`} className="font-medium">
-              {name}
-            </Link>
-          ) : (
-            <strong className="font-medium">{name}</strong>
+        <div className="flex min-w-0 items-center gap-3">
+          {canManage && (
+            <Checkbox
+              aria-label={`Select ${member.profile?.name ?? member.actor}`}
+              checked={checked}
+              disabled={mutation.pending || removing}
+              onCheckedChange={(checked) => onSelect(checked === true)}
+            />
           )}
-          <p className="mt-1 break-all text-sm text-muted-foreground">
-            {member.profile ? `@${member.profile.handle}` : member.actor}
-          </p>
+          <div className="min-w-0 break-words">
+            {member.profile ? (
+              <Link href={`/-/users/${member.actor}`} className="font-medium">
+                {name}
+              </Link>
+            ) : (
+              <strong className="font-medium">{name}</strong>
+            )}
+            <p className="mt-1 break-all text-sm text-muted-foreground">
+              {member.profile ? `@${member.profile.handle}` : member.actor}
+            </p>
+          </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {canManage ? (
@@ -597,118 +655,5 @@ function MemberRow({
       )}
       <MutationError error={mutation.error} />
     </li>
-  );
-}
-function Settings({
-  organization,
-  endpoint,
-  csrf,
-  onSaved,
-}: {
-  organization: Organization;
-  endpoint: string;
-  csrf: string;
-  onSaved: () => void;
-}) {
-  const [name, setName] = useState(organization.name);
-  const [description, setDescription] = useState(organization.description);
-  const mutation = useMutation(csrf, null);
-  const [version, setVersion] = useState(organization.version);
-  const latest = useRequest<OrganizationView>(
-    mutation.conflict ? endpoint : null,
-  );
-  return (
-    <form
-      className="max-w-2xl"
-      onSubmit={(event) => {
-        event.preventDefault();
-        void mutation
-          .run(endpoint, "PATCH", {
-            version,
-            name,
-            description,
-          })
-          .then((value) => {
-            if (value) onSaved();
-          });
-      }}
-    >
-      <h2 className="mb-6 text-lg font-semibold">Organization profile</h2>
-      <FieldGroup>
-        <Field>
-          <FieldLabel htmlFor="organization-name">Display name</FieldLabel>
-          <Input
-            id="organization-name"
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            required
-            maxLength={100}
-            disabled={mutation.pending}
-          />
-        </Field>
-        <Field>
-          <FieldLabel htmlFor="organization-description">
-            Description
-          </FieldLabel>
-          <Textarea
-            id="organization-description"
-            value={description}
-            onChange={(event) => setDescription(event.target.value)}
-            maxLength={4000}
-            disabled={mutation.pending}
-          />
-        </Field>
-        <MutationError error={mutation.error} />
-        {mutation.conflict && (
-          <Result state={latest} timingLabel="Current organization profile">
-            {(saved) => (
-              <Alert>
-                <AlertDescription>
-                  <p>
-                    Saved profile: <strong>{saved.organization.name}</strong>
-                  </p>
-                  <p className="whitespace-pre-wrap">
-                    {saved.organization.description || "No description"}
-                  </p>
-                  {saved.role === "owner" ? (
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      <Button
-                        type="button"
-                        variant="outline"
-                        onClick={() => {
-                          setVersion(saved.organization.version);
-                          mutation.reset();
-                        }}
-                      >
-                        Keep draft with current version
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        onClick={() => {
-                          setName(saved.organization.name);
-                          setDescription(saved.organization.description);
-                          setVersion(saved.organization.version);
-                          mutation.reset();
-                        }}
-                      >
-                        Use saved profile
-                      </Button>
-                    </div>
-                  ) : (
-                    <p>
-                      You no longer have permission to edit this organization.
-                    </p>
-                  )}
-                </AlertDescription>
-              </Alert>
-            )}
-          </Result>
-        )}
-        <Button type="submit" className="w-fit" disabled={mutation.pending}>
-          {mutation.pending ? "Saving…" : "Save changes"}
-        </Button>
-      </FieldGroup>
-    </form>
   );
 }

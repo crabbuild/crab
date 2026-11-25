@@ -767,44 +767,49 @@ caller can access. Managed namespaces accept new repositories through the
 organization creation path.
 
 Organization owners can read and update `/api/organizations/{id}/repository-policy`
-and configure it in **Settings → Repository policy**. Updates carry the saved
-`version`, `member_creation`, and `baseline` (`null`, `read`, or `write`).
-The default is owners-only creation with no baseline. The highest applicable
+and configure it in **Settings → Member privileges**. Updates carry the saved
+`version`, `member_creation`, `member_transfer`, `member_deletion`, `private_forks`, `baseline`
+(`null`, `read`, or `write`), and `default_branch` (a short Git branch name).
+By default only owners can create, transfer, or delete repositories, and
+members have no base access.
+The highest applicable
 organization, repository, and group role applies subject to credential limits.
 The People repository access inspector shows the baseline separately.
 
-Organization owners can open **People → Outside collaborators** to inspect
-direct repository grants for people without current organization membership.
-Search by the name on the grant or by repository name. **Manage access** opens
-the repository access editor to change or remove the grant. The search and
-current page stay in the address when you return from the editor. Inherited fork
-access is managed on its source. People with direct grants may still be listed
-before their first sign-in.
-
-`GET /api/organizations/{id}/outside-collaborators` returns the grant name,
-public profile when available, repository identity, and direct role. It omits
-private provider subjects and group claims. Pass `q` to search and `limit`
-from 1 to 50. Continue with `after` and the same search. Each page scans a
-bounded batch and may return a continuation with fewer rows. Changes to the
-organization or catalog invalidate the continuation. Repository role edits
-use the existing revision-bound access editor and audit trail.
-
-Select up to 50 people and choose **Remove from all repositories**. The preview
-counts every direct grant and affected repository across the organization, even
-when a search or page shows only some of them. The confirmation removes the
-selected people’s direct grants in one catalog update and records the removal
-in the organization audit log. Signed group grants retain their own lifecycle.
-
-Post the list’s opaque `collaborator` identifiers as `{collaborators}` to
-`/api/organizations/{id}/outside-collaborators/removal-preview`. Review the
-returned `impact` and `repository_names` and submit the returned `plan` to
-`POST /api/organizations/{id}/outside-collaborators/removals`. A membership
-or catalog change requires a fresh preview. Resubmit the same plan after a
-lost reply to recover its committed result, including after server restart.
-Upgrade all serving peers before using bulk removal.
+New organization repositories start with the branch name configured in Member
+privileges, initially `main`. Once repository creation is authorized, retries
+use the branch name captured for that request. Git imports use the source
+repository's default branch.
 
 Upgrade serving replicas together before starting organization-owned
 creation. Existing catalog entries keep their previous ownership and grants.
+
+### Repository visibility
+
+Managed repositories start private. In **Settings → General → Danger Zone**,
+an organization owner can make a repository public or private. Organization
+owners can let repository admins change visibility in **Member privileges**.
+Administrators can change visibility in a managed personal repository.
+
+Public repositories appear in **Public repositories** and support signed-out
+code browsing, source archives, and HTTP Git clone and fetch. Visitors can
+also browse published issues, pull requests, conversations, attachments, and
+available same-repository pull request comparisons. Repository access is still
+required for writes, draft reviews, settings, checks, and Git LFS transport.
+Large files linked from published code can be downloaded through the browser.
+Changing back to private removes public access on subsequent requests. Copies
+already downloaded remain available to their recipients.
+
+Publishing a repository detaches its existing private forks in the same
+catalog update. They keep their private visibility and current repository
+grants. Pending fork jobs must settle before the repository can become public.
+
+`GET /api/repositories/{id}/visibility` returns the current setting and
+eligibility. Send `version`, `value` (`public` or `private`), and the exact
+`owner/name` as `confirmation` to `PUT` on the same route. Update
+`member_visibility` in the organization repository policy to delegate the
+change to repository admins. Upgrade serving replicas together before using
+visibility changes.
 
 ### Find a repository
 
@@ -817,8 +822,9 @@ before description matches. The organization tab keeps the search scoped to
 that organization. Search terms and the current page are in the URL.
 
 `GET /api/repos?limit=32` returns `{repositories, next}`. Each result has
-`id`, `owner`, `name`, `description`, and `archived`. Provide optional
-`q` (up to 200 characters) and `organization` (UUID). Pages accept a
+`id`, `owner`, `name`, `description`, and `archived`. A result includes
+`can_admin: true` when the caller has current repository Admin access. Provide
+optional `q` (up to 200 characters) and `organization` (UUID). Pages accept a
 `limit` from 1 to 50 and return `next: null` on the last page. Send the
 returned continuation as `after` with the same search and organization.
 Crab binds it to the signed-in account and rechecks current repository
@@ -902,15 +908,22 @@ Continuations bind the query and the matching readable catalog scope.
 ### Transfer repository ownership
 
 In **Settings → General**, a repository administrator can create an offer for a
-personal account by profile handle or for an organization by link or ID. Share
-the private offer link with the recipient. The named account or a current owner
+personal account by profile handle. For an organization, choose an eligible one
+by name or enter its link or ID. The requester must have creation permission
+in the destination. A transfer that changes the repository name requires an
+owner of the destination organization to make the request. Confirm the current
+repository name before creating the offer. Share the private offer link with
+the recipient. The named account or a current owner
 of the destination organization sees eligible offers in **Notifications →
 Repository transfers** and must sign in and accept within 24 hours. The bell
 also signals a pending offer. A current source administrator can cancel a
 pending offer. The recipient can
-also decline it. Crab rechecks the requester's authority and destination access
-at acceptance. Archived repositories and repositories in a private fork network
-are ineligible for transfer.
+also decline it. Organization owners can allow current members with direct,
+team, or group Admin access to transfer organization repositories. Crab checks
+source and destination permissions when the offer is created and again at
+acceptance. Tightening either policy blocks outstanding offers from members
+who lose permission. Archived repositories and repositories in a private fork
+network are ineligible for transfer.
 If the offer changes a protected repository name, acceptance also checks
 the source requester's current ruleset bypass grants.
 
@@ -922,8 +935,10 @@ access. Existing URLs redirect after checking current access until the former
 address is reclaimed. Issue a fresh Git token for the destination owner after
 acceptance. That token can follow the authorized redirect from the old remote.
 
-`GET /api/repositories/{repository}/transfer` returns the current name version
-and offer to a repository administrator. A `POST` to that route submits `version`,
+`GET /api/repositories/{repository}/transfer` returns the current name version,
+`can_transfer`, and offer to a repository administrator. Organization offers
+show the confirmed destination's name.
+A `POST` to that route submits `version`,
 `request_id`, destination `name`, and `recipient` (`{kind:"account",handle}` or
 `{kind:"organization",id}`). `GET /api/repository-transfers/{id}` reads the
 private offer. `PUT` on that path takes `decision` (`accept`, `decline`, or
@@ -934,6 +949,30 @@ reports `pending_transfers: true` when there is a pending offer and no unread
 discussion notification is taking priority. The browser endpoints use the session and the usual CSRF protection.
 Retry a lost response with the same request ID or decision. A changed source
 address, a competing catalog update, or a claimed destination blocks acceptance.
+
+### Delete and restore an organization repository
+
+In **Settings → General → Danger Zone**, type the full repository name to
+confirm deletion. Organization policy controls whether members with
+repository Admin access can delete a repository. Deleting a repository also
+removes its private forks from the active catalog. Deleting a fork leaves the
+upstream repository available.
+
+Organization owners can restore an eligible repository and its private forks
+for 90 days under **Settings → Deleted repositories**. Restoration keeps the
+repository UUID, refs, and collaboration history. Team grants need to be
+assigned again. The original repository and fork names must be available.
+An individually deleted fork cannot be restored on its own. The catalog
+retains a storage reservation after expiry. This workflow does not purge data
+from the configured object store.
+
+`GET /api/repositories/{repository}/deletion` returns eligibility, name
+version, and the number of affected forks. Send `request_id`, `version`, and
+`confirmation` to `DELETE` on the same path. Organization owners can list
+recent deletions at `GET /api/organizations/{organization}/deleted-repositories`
+and restore at `PUT /api/organizations/{organization}/deleted-repositories/{repository}`
+with `deletion_id`. Pass the returned `next` as `before` to page through
+recent deletions. Reuse the same request ID after a lost deletion response.
 
 ### Git imports
 
@@ -1007,8 +1046,16 @@ files. The server needs outbound access to the configured Git host or proxy.
 
 ### Private organization forks
 
-An organization owner can choose **Fork repository** in a source repository's
-Code view. Choose a new repository name in the same organization. Crab copies
+Private forks are disabled by default. An organization owner can enable them
+in **Settings → Member privileges**. When the organization allows forks, a
+repository admin can disable them for an individual source in
+**Settings → General → Forking**. Repositories allow forks whenever their
+organization allows them, unless an admin opts out. Changing either setting
+governs future forks. Existing forks retain their current access.
+
+An organization owner can choose **Fork repository** in the source repository's
+Code view when both policies allow it. Choose a new repository name in the
+same organization. Crab copies
 the advertised Git refs and history through the native Git service and keeps
 the source repository UUID as the fork's lineage. Before publishing refs, Crab
 copies and verifies reachable Git LFS payloads. For native Crab Xet files, it
@@ -1027,9 +1074,12 @@ rulesets still apply to the fork, including its initial Git publication.
 the source repository ID header and browser CSRF token. It returns an
 organization job with `fork_source`. Use the organization Git import status and
 resume routes with the same job ID. Resume with `{}` and a current organization
-owner session. The job exposes the fork after verifying the pinned refs and
-preparing its repository Cell. Deploy the updated server on all replicas before
-creating forks.
+owner session. A job verifies the pinned refs and checks both policies again
+before the fork becomes visible. Enable both policies to resume a blocked job.
+Repository admins can update the source policy with `PUT /api/repositories/{id}/forking`
+and `{version, allowed}`. The exact repository lookup returns the current
+setting and the organization policy to repository admins. Deploy the updated
+server on all replicas before using these policies.
 
 On the fork's **Code** view, select a branch and choose **Sync fork**. Crab
 compares it with the upstream branch of the same name. Writers can choose
@@ -1776,6 +1826,58 @@ owner, inspected member, catalog revision, current teams and account
 suspension version. Reload from the first page after a change. The response
 omits private provider identities and group names. Upgrade Organization Cell
 peers together so every owner supports the new read.
+
+### Find outside collaborators
+
+Organization owners can open **People → Outside collaborators** to find
+people who have direct repository grants and lack an active membership in
+the organization. Search by name, public username, or repository name. Expand a person's
+repository list to see the role granted on each repository. **Manage access**
+opens that repository's access settings to change or remove the grant.
+For collaborators with a public profile, **Invite to organization** opens
+the standard invitation with the person selected.
+
+Select one or more people and choose **Remove from all repositories** to
+revoke their direct grants in one change. This covers grants inherited by
+private forks and grants stored in deleted repository records. Independent
+grants from the identity provider can still apply. The organization audit log
+records the removal and the number of people, repositories, and grants affected.
+
+`GET /api/organizations/{id}/outside-collaborators` returns a paginated
+list of people, with an opaque key and direct repository count for each.
+`GET /api/organizations/{id}/outside-collaborators/{key}/repositories`
+lists that person's direct grants. The listings combine the catalog and
+current Organization Cell membership and expose public profiles and directly
+held roles on source repositories.
+An `after` token is tied to the owner, organization, search, and current
+catalog and organization revisions. Restart from the first page after a
+grant or membership changes. Upgrade Organization Cell peers together to
+enable the member checks for this view.
+
+`POST /api/organizations/{id}/outside-collaborators/removal-preview` accepts
+up to 50 opaque `collaborators` keys from the listing. Review the returned
+impact and submit its signed `plan` to
+`POST /api/organizations/{id}/outside-collaborators/removals`. The owner and
+targets are checked under the organization policy lease shared by membership
+changes and invitation acceptance. Request a fresh preview if membership or
+the catalog changes. Resubmit the same plan after a lost reply to recover
+the committed result. Upgrade serving replicas together before using bulk
+removal so every replica can read its audit event.
+
+From **People → Members**, organization owners can select members and choose
+**Convert to outside collaborators**. Existing direct roles and the highest current team grant
+on each source repository become direct access. Organization ownership, team
+membership, and baseline access end. The organization must retain an owner.
+Private forks follow their source repository grants.
+
+`POST /api/organizations/{id}/members/conversion` accepts a `members` array
+of up to 50 distinct `{actor, version}` entries and returns the count in
+`converted` after completion. Crab validates the whole selection before
+committing the retained grants and durable conversion record in one catalog
+write. The Organization Cell removes the selected memberships in one
+transaction. The catalog refresh worker can resume an interrupted batch.
+Membership and team changes serialize with the grant snapshot.
+Upgrade serving peers together before using conversion.
 
 ### Configure protected branches
 

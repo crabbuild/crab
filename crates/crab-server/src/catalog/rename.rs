@@ -41,6 +41,21 @@ impl CatalogRecord {
     pub(crate) fn name_version(&self) -> u32 {
         self.naming.as_ref().map_or(0, |state| state.version)
     }
+
+    pub(super) fn retire_address(&mut self, request: Uuid) -> Result<(), CatalogError> {
+        let version = self
+            .name_version()
+            .checked_add(1)
+            .ok_or(CatalogError::Conflict)?;
+        self.ownership_epoch = version;
+        self.naming = Some(Naming {
+            version,
+            request,
+            aliases: Vec::new(),
+        });
+        self.transfer = None;
+        Ok(())
+    }
 }
 
 impl CatalogDocument {

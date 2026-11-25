@@ -332,6 +332,8 @@ enum ImportError {
     NotFound,
     #[error("organization ruleset restricts an imported ref")]
     Ruleset,
+    #[error("the organization or repository does not allow private forks")]
+    ForkingDisabled,
     #[error("the organization import authority is unavailable")]
     Organization(#[source] Box<app::Error>),
     #[error("the import queue is busy")]
@@ -390,6 +392,11 @@ impl IntoResponse for ImportError {
                 "repository_ruleset",
                 "Organization rules restrict the imported refs",
             ),
+            Self::ForkingDisabled => (
+                StatusCode::FORBIDDEN,
+                "repository_forking_restricted",
+                "The organization or source repository does not allow private forks",
+            ),
             Self::Busy | Self::Staging(crate::local_disk::Error::Busy(_)) => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "import_busy",
@@ -440,7 +447,12 @@ impl IntoResponse for ImportError {
         };
         if !matches!(
             self,
-            Self::Invalid(_) | Self::NotFound | Self::Busy | Self::Conflict | Self::Ruleset
+            Self::Invalid(_)
+                | Self::NotFound
+                | Self::Busy
+                | Self::Conflict
+                | Self::Ruleset
+                | Self::ForkingDisabled
         ) {
             tracing::error!(error = ?self, "Git import request failed");
         }
@@ -546,6 +558,9 @@ async fn submit(
         account.check(server).await?;
         return Ok((StatusCode::ACCEPTED, Json(status)));
     }
+    account
+        .check_fork(server, &catalog, request.fork_source)
+        .await?;
     let slot = context.admission.admit(&request)?;
     let Some(writer) = jobs.create(id, &request).await? else {
         let status = jobs
@@ -598,6 +613,9 @@ async fn resume(
         return Ok((StatusCode::ACCEPTED, Json(status)));
     };
     account.namespace(&request.owner)?;
+    account
+        .check_fork(&server, &catalog, request.fork_source)
+        .await?;
     let slot = context.admission.admit(&request)?;
     let status = match jobs.claim(id, &request).await? {
         Some(writer) => {

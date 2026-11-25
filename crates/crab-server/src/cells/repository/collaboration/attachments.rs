@@ -231,7 +231,8 @@ impl Mutation for Finish {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReadInput {
     pub id: Uuid,
-    pub actor: RepositoryAuthor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<RepositoryAuthor>,
 }
 
 pub(crate) struct Get;
@@ -242,7 +243,9 @@ impl Read for Get {
     type Output = Option<Upload>;
 
     fn execute(context: &mut Transaction<'_>, input: ReadInput) -> Result<Option<Upload>> {
-        validate_author(&input.actor)?;
+        if let Some(actor) = &input.actor {
+            validate_author(actor)?;
+        }
         let Some(Record::Live {
             upload,
             expires,
@@ -253,7 +256,13 @@ impl Read for Get {
         };
         let visible = match state {
             State::Pending | State::Transferring { .. } => false,
-            State::Ready => expires > context.now_ms() && same_author(&upload.owner, &input.actor),
+            State::Ready => {
+                expires > context.now_ms()
+                    && input
+                        .actor
+                        .as_ref()
+                        .is_some_and(|actor| same_author(&upload.owner, actor))
+            }
             State::Published { .. } => true,
         };
         Ok(visible.then_some(upload))

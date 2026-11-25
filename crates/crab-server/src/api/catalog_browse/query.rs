@@ -165,20 +165,23 @@ impl Query {
     pub(super) fn cursor_key(
         &self,
         server: &Server,
-        actor: &Identity,
+        actor: Option<&Identity>,
         scope: &Scope,
     ) -> blake3::Hasher {
         let mut digest = blake3::Hasher::new_keyed(&server.cursor_key);
         digest.update(b"crab-server.repository-browse.v1");
         for value in [
-            actor.issuer.as_bytes(),
-            actor.subject.as_bytes(),
+            actor.map_or(b"".as_slice(), |actor| actor.issuer.as_bytes()),
+            actor.map_or(b"".as_slice(), |actor| actor.subject.as_bytes()),
             self.text.as_bytes(),
         ] {
             hash_field(&mut digest, value);
         }
         digest.update(scope.organization().unwrap_or_default().as_bytes());
         match scope {
+            Scope::Public => {
+                digest.update(b"public\0");
+            }
             Scope::Personal(owner) => {
                 digest.update(b"personal\0");
                 hash_field(&mut digest, owner.as_bytes());

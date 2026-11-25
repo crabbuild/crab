@@ -1,6 +1,7 @@
 import { CircleAlertIcon, LogInIcon, UserRoundPlusIcon } from "lucide-react";
 import { MarkGithubIcon } from "@primer/octicons-react";
 import { Button } from "@/components/ui/button";
+import { Link } from "@/components/navigation/link";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import type { Session } from "@/lib/contracts";
 import crabMark from "../../../../web/crab.optimized.svg";
@@ -16,12 +17,8 @@ export function SignIn({
   url: URL;
 }) {
   const github = mode === "github";
-  const query = new URLSearchParams(url.search);
-  const failed = query.has("auth_error");
-  query.delete("auth_error");
-  const search = query.toString();
-  const returnTo = `${url.pathname}${search ? `?${search}` : ""}${url.hash}`;
-  const login = `/auth/login?${new URLSearchParams({ return_to: returnTo })}`;
+  const failed = url.searchParams.has("auth_error");
+  const login = signInHref(url);
   const signUp = `${login}&sign_up=true`;
 
   return (
@@ -62,6 +59,9 @@ export function SignIn({
                 </a>
               </Button>
             ) : null}
+            <Button asChild variant="ghost" className="sign-in-action">
+              <Link href="/-/public">Browse public repositories</Link>
+            </Button>
           </div>
           {!github && !canSignUp && (
             <p className="sign-in-help">
@@ -73,4 +73,12 @@ export function SignIn({
       </Card>
     </section>
   );
+}
+
+export function signInHref(url: URL) {
+  const query = new URLSearchParams(url.search);
+  query.delete("auth_error");
+  const search = query.toString();
+  const returnTo = `${url.pathname}${search ? `?${search}` : ""}${url.hash}`;
+  return `/auth/login?${new URLSearchParams({ return_to: returnTo })}`;
 }

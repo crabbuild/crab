@@ -166,20 +166,25 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
 
-async fn pull_view(
+async fn pull_view<'a>(
     number: u64,
-    actor: &Identity,
+    actor: impl Into<Option<&'a Identity>>,
     server: &Server,
     repo: &Repository,
     principal: &Principal,
     current: Option<&(String, String)>,
 ) -> Result<Value> {
+    let actor = actor.into();
     let details = storage::detail(server, repo, number)
         .await?
         .ok_or(Error::NotFound)?;
     let pull = &details.pull;
+    let grant = app::membership(server, principal, repo).await?;
+    let public_reader = grant.principal.is_public_reader(repo.id);
+    let private_head = public_reader && pull.head_repository.is_some();
     let head_repository = pull
         .head_repository
+        .filter(|_| !public_reader)
         .and_then(|id| git::fork_repository(server, repo, id).ok());
     let base_oid = pull.merge.as_ref().map_or_else(
         || current.map_or(pull.comparison_snapshot().0, |value| value.0.as_str()),
@@ -189,37 +194,49 @@ async fn pull_view(
         || current.map_or(pull.comparison_snapshot().1, |value| value.1.as_str()),
         |merge| merge.head_oid.as_str(),
     );
-    let branches_available = pull.merge.is_some() || current.is_some();
-    let grant = app::membership(server, principal, repo).await?;
-    let reviewers = grant.merge_reviewers(server).await?;
+    let branches_available = !private_head && (pull.merge.is_some() || current.is_some());
+    let reviewers = if public_reader {
+        MergeReviewers {
+            issuer: String::new(),
+            subjects: Vec::new(),
+        }
+    } else {
+        grant.merge_reviewers(server).await?
+    };
     let labels = if pull.label_ids.is_empty() {
         vec![]
     } else {
         labels::catalog(server, repo).await?
     };
-    let (requirements, merge_methods, github_actions_ref) = tokio::try_join!(
-        requirements(
-            server,
-            repo,
-            pull,
-            branches_available.then_some(base_oid),
-            head_oid,
-            &grant,
-            &reviewers,
-            MergeCheckTarget::default(),
-        ),
-        merge_methods::load(server, repo),
-        async {
-            if head_repository.is_some() && pull.state == PullState::Open && current.is_some() {
-                super::integrations::fork_mirror_ref(server, repo, pull.number).await
-            } else {
-                Ok(None)
-            }
-        },
-    )?;
-    let auto_merge_configured =
-        merge_methods.auto_merge_generation > 0 || merge_methods.merge_queue_generation > 0;
-    let automatic = if pull.state == PullState::Open {
+    let (requirements, merge_methods, github_actions_ref) = if public_reader {
+        (MergeRequirements::default(), None, None)
+    } else {
+        let (requirements, merge_methods, mirror) = tokio::try_join!(
+            requirements(
+                server,
+                repo,
+                pull,
+                branches_available.then_some(base_oid),
+                head_oid,
+                &grant,
+                &reviewers,
+                MergeCheckTarget::default(),
+            ),
+            merge_methods::load(server, repo),
+            async {
+                if head_repository.is_some() && pull.state == PullState::Open && current.is_some() {
+                    super::integrations::fork_mirror_ref(server, repo, pull.number).await
+                } else {
+                    Ok(None)
+                }
+            },
+        )?;
+        (requirements, Some(merge_methods), mirror)
+    };
+    let auto_merge_configured = merge_methods.as_ref().is_some_and(|methods| {
+        methods.auto_merge_generation > 0 || methods.merge_queue_generation > 0
+    });
+    let automatic = if !public_reader && pull.state == PullState::Open {
         auto_merge::current(server, repo, pull.number).await?
     } else {
         None
@@ -228,7 +245,9 @@ async fn pull_view(
         .as_ref()
         .is_some_and(|state| state.stopped.is_none() && state.job.queue.is_some());
     let merge_queue_requested = automatic.is_some_and(|state| state.job.when_ready);
-    let configured_methods = merge_methods.enabled;
+    let configured_methods = merge_methods
+        .map(|methods| methods.enabled)
+        .unwrap_or_default();
     let merge_methods: Vec<_> = configured_methods
         .iter()
         .copied()
@@ -286,12 +305,18 @@ async fn pull_view(
         principal,
         std::iter::once(&pull.author)
             .chain(pull.merge.as_ref().map(|merge| &merge.author))
-            .chain(pull.merge_pending.as_ref().map(|merge| &merge.author)),
+            .chain(
+                pull.merge_pending
+                    .as_ref()
+                    .filter(|_| !public_reader)
+                    .map(|merge| &merge.author),
+            ),
     )
     .await?;
     let assignees = Selection::load(server, principal, repo, pull.assignees.iter()).await?;
     let can_write = assignees.principal.can_write(repo.id);
     let can_triage = assignees.principal.can_triage(repo.id);
+    let same_author = actor.is_some_and(|actor| same_author(&pull.author, actor));
     let can_write_head = if can_write
         && pull.state == PullState::Open
         && pull.merge_pending.is_none()
@@ -321,12 +346,12 @@ async fn pull_view(
         "base_ref": pull.base_ref,
         "base_oid": base_oid,
         "base_revision": pull.retargeted_base.as_ref().map(|base| base.revision),
-        "head_ref": pull.head_ref,
+        "head_ref": if private_head { "" } else { pull.head_ref.as_str() },
         "head_repository": head_repository.as_ref().map(|fork| json!({"id":fork.id,"owner":fork.config.owner,"name":fork.config.name})),
-        "head_oid": head_oid,
+        "head_oid": if private_head { "" } else { head_oid },
         "github_actions_ref": github_actions_ref,
         "original_base_oid": pull.base_oid,
-        "original_head_oid": pull.head_oid,
+        "original_head_oid": if private_head { "" } else { pull.head_oid.as_str() },
         "version": pull.version,
         "created_at": pull.created_at,
         "closed_at":details.lifecycle.closed_at_ms,
@@ -339,15 +364,15 @@ async fn pull_view(
         "can_apply_suggestions": can_write_head,
         "can_update_branch": can_write_head,
         "can_change_base": pull.state == PullState::Open && pull.merge_pending.is_none()
-            && (can_write || same_author(&pull.author, actor)),
-        "can_edit": same_author(&pull.author, actor),
+            && (can_write || same_author),
+        "can_edit": same_author,
         "can_manage": pull.state != PullState::Merged
             && pull.merge_pending.is_none()
-            && (can_triage || same_author(&pull.author, actor)),
-        "can_decide": pull.state == PullState::Open
+            && (can_triage || same_author),
+        "can_decide": !public_reader && pull.state == PullState::Open
             && current.is_some()
-            && !same_author(&pull.author, actor),
-        "review_counts_for_merge": reviewers.contains(&actor.issuer, &actor.subject),
+            && !same_author,
+        "review_counts_for_merge": actor.is_some_and(|actor| reviewers.contains(&actor.issuer, &actor.subject)),
         "can_merge": pull.state == PullState::Open
             && !merge_queued
             && !pull.draft
@@ -384,10 +409,10 @@ async fn pull_view(
             "commit_oid": merge.commit_oid,
             "message": merge.message,
             "created_at": merge.created_at,
-            "bypass_rulesets": merge.bypass_rulesets,
+            "bypass_rulesets": if public_reader { &[] } else { merge.bypass_rulesets.as_slice() },
             "tested_candidate_oid": merge.tested_candidate.then_some(&merge.commit_oid),
         })),
-        "merge_pending": pull.merge_pending.as_ref().map(|merge| json!({
+        "merge_pending": pull.merge_pending.as_ref().filter(|_| !public_reader).map(|merge| json!({
             "request_id": merge.request_id,
             "author": authors.view(&merge.author),
             "method": merge.method,
@@ -402,6 +427,7 @@ async fn pull_view(
     }))
 }
 
+#[derive(Default)]
 struct MergeRequirements {
     queue_required: bool,
     protected: bool,
@@ -779,10 +805,17 @@ pub(super) fn pull_list_view(
     labels: &[crate::cells::repository::search::index::LabelSummary],
     assignees: &Selection,
     rollups: &std::collections::BTreeMap<u64, crate::cells::repository::rollups::Rollup>,
+    public_reader: bool,
 ) -> Result<Value> {
-    let rollup = rollups
-        .get(&pull.number)
-        .ok_or(Error::CellContract("Pull rollup is missing"))?;
+    let rollup = if public_reader {
+        None
+    } else {
+        Some(
+            rollups
+                .get(&pull.number)
+                .ok_or(Error::CellContract("Pull rollup is missing"))?,
+        )
+    };
     Ok(json!({
         "kind": "pull",
         "rollup": rollup,
@@ -795,7 +828,7 @@ pub(super) fn pull_list_view(
         "state": pull.state,
         "author": authors.view(&pull.author),
         "base_ref": pull.base_ref,
-        "head_ref": pull.head_ref,
+        "head_ref": if public_reader && pull.head_repository.is_some() { "" } else { pull.head_ref.as_str() },
         "created_at": pull.created_at_ms,
         "closed_at":pull.closed_at_ms,
         "merged_at":pull.merged_at_ms,
@@ -828,7 +861,11 @@ async fn list(
             .query::<ListPulls>(&routed.target, None, input)
             .await,
     )?;
-    let rollups = rollups::load(&server, repo, review_source.as_deref(), page.items.iter()).await?;
+    let rollups = if principal.is_public_reader(repo.id) {
+        Default::default()
+    } else {
+        rollups::load(&server, repo, review_source.as_deref(), page.items.iter()).await?
+    };
     let authors = super::profiles::attribution::Authors::load(
         &server,
         &principal,
@@ -846,7 +883,16 @@ async fn list(
     let pulls = &page.items;
     let items = pulls
         .iter()
-        .map(|pull| pull_list_view(&authors, pull, &page.labels, &assignees, &rollups))
+        .map(|pull| {
+            pull_list_view(
+                &authors,
+                pull,
+                &page.labels,
+                &assignees,
+                &rollups,
+                assignees.principal.is_public_reader(repo.id),
+            )
+        })
         .collect::<Result<Vec<_>>>()?;
     if let Some(bound) = review_teams {
         bound.verify(&server, &principal, repo).await?;
@@ -1190,20 +1236,24 @@ async fn detail(
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let repo = repo.as_ref();
-    let actor = app::actor(&principal)?;
+    let actor = principal.member_identity(repo.id);
     let pull = storage::pull(&server, repo, app::number(id)?)
         .await?
         .ok_or(Error::NotFound)?;
-    let repository = git::PullGit::open(&server, repo, pull.head_repository)
-        .await
-        .ok();
+    let repository = if principal.is_public_reader(repo.id) && pull.head_repository.is_some() {
+        None
+    } else {
+        git::PullGit::open(&server, repo, pull.head_repository)
+            .await
+            .ok()
+    };
     let current = repository
         .as_ref()
         .and_then(|repository| current_branches(repository, &pull));
     Ok(Json(
         pull_view(
             pull.number,
-            &actor,
+            actor.as_ref(),
             &server,
             repo,
             &principal,

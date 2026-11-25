@@ -59,6 +59,10 @@ async fn repository_policy_controls_creation_and_current_baseline_access() {
         .unwrap();
     let owner = repo["owner"].as_str().unwrap();
     let listing = format!("/api/repos?organization={organization}&limit=30");
+    assert_eq!(
+        h.json(&listing, &alice).await["repositories"][0]["can_admin"],
+        true
+    );
     assert_eq!(h.json(&listing, &bob).await["repositories"], json!([]));
     let member_create =
         json!({"request_id":Uuid::now_v7(),"name":"member-created","description":""});
@@ -92,6 +96,11 @@ async fn repository_policy_controls_creation_and_current_baseline_access() {
         h.json(&format!("/api/repos?owner={owner}&name=shared"), &bob)
             .await["repositories"][0]["access"],
         "write"
+    );
+    assert!(
+        h.json(&listing, &bob).await["repositories"][0]
+            .get("can_admin")
+            .is_none()
     );
     let access = h
         .json(
@@ -134,6 +143,7 @@ async fn repository_policy_controls_creation_and_current_baseline_access() {
     let visible = h.json(&listing, &bob).await;
     assert_eq!(visible["repositories"].as_array().unwrap().len(), 1);
     assert_eq!(visible["repositories"][0]["name"], "member-created");
+    assert_eq!(visible["repositories"][0]["can_admin"], true);
     h.close().await;
 }
 
@@ -220,6 +230,85 @@ async fn private_fork_recovers_git_publication_and_uses_live_source_permissions(
     let request = Uuid::now_v7();
     let body = json!({"request_id":request,"name":"library-fork"});
     let route = format!("{source}/forks");
+    let settings = format!("/api/repositories/{id}/forking");
+    let detail = format!("/api/repos?owner={owner}&name=library");
+    assert_eq!(
+        h.json(&detail, &alice).await["repositories"][0]["can_fork"],
+        false
+    );
+    assert_eq!(
+        repository_write(&h, Method::POST, &route, &alice, id, body.clone())
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        h.write(
+            Method::PUT,
+            &settings,
+            &alice,
+            json!({"version":0,"allowed":false})
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    crate::test_support::http::organizations::set_private_forks(&h, organization, &alice, true)
+        .await;
+    assert_eq!(
+        h.json(&detail, &alice).await["repositories"][0]["can_fork"],
+        true
+    );
+    assert_eq!(
+        h.write(
+            Method::PUT,
+            &settings,
+            &bob,
+            json!({"version":0,"allowed":false})
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    h.write(
+        Method::PUT,
+        &settings,
+        &alice,
+        json!({"version":0,"allowed":false}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert_eq!(
+        h.json(&detail, &alice).await["repositories"][0]["can_fork"],
+        false
+    );
+    assert_eq!(
+        repository_write(&h, Method::POST, &route, &alice, id, body.clone())
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        h.write(
+            Method::PUT,
+            &settings,
+            &alice,
+            json!({"version":0,"allowed":true})
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
+    h.write(
+        Method::PUT,
+        &settings,
+        &alice,
+        json!({"version":1,"allowed":true}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
     assert_eq!(
         repository_write(&h, Method::POST, &route, &bob, id, body.clone())
             .await
@@ -261,6 +350,19 @@ async fn private_fork_recovers_git_publication_and_uses_live_source_permissions(
         .await
         .unwrap();
     assert_eq!(replay["state"], "succeeded");
+    crate::test_support::http::organizations::set_private_forks(&h, organization, &alice, false)
+        .await;
+    assert_eq!(
+        h.json(&detail, &alice).await["repositories"][0]["can_fork"],
+        false
+    );
+    assert!(
+        h.json(&format!("{fork}/refs"), &alice).await["refs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["name"] == "refs/heads/feature")
+    );
     let grants = h
         .json(
             &format!("{org}/members/{owner_actor}/repository-access"),
@@ -487,6 +589,158 @@ async fn private_fork_recovers_git_publication_and_uses_live_source_permissions(
         .await
         .unwrap();
     assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+    let deletion = format!("/api/repositories/{id}/deletion");
+    let deleted = format!("{org}/deleted-repositories");
+    let request = Uuid::now_v7();
+    assert_eq!(h.json(&deletion, &alice).await["forks"], 1);
+    h.write(
+        Method::DELETE,
+        &deletion,
+        &alice,
+        json!({"request_id":request,"version":0,"confirmation":format!("{owner}/library")}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert_eq!(h.json(&listed, &alice).await["repositories"], json!([]));
+    assert_eq!(h.json(&deleted, &alice).await["items"][0]["forks"], 1);
+    h.write(
+        Method::PUT,
+        &format!("{deleted}/{id}"),
+        &alice,
+        json!({"deletion_id":request}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let restored = h.json(&listed, &alice).await;
+    assert_eq!(restored["repositories"][0]["id"], json!(id));
+    assert_eq!(restored["repositories"][1]["id"], json!(fork_id));
+    assert!(
+        h.json(&format!("{fork}/refs"), &alice).await["refs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["name"] == "refs/heads/fork-only")
+    );
+    catalog
+        .set_members(
+            owner,
+            "library",
+            vec![crate::RepositoryMember {
+                subject: "bob-id".into(),
+                name: "Bob".into(),
+                access: crate::RepositoryAccess::Read,
+            }],
+            true,
+        )
+        .await
+        .unwrap();
+    let visibility = format!("/api/repositories/{id}/visibility");
+    assert_eq!(h.json(&visibility, &alice).await["private_forks"], 1);
+    h.write(
+        Method::PUT,
+        &visibility,
+        &alice,
+        json!({"version":0,"value":"public","confirmation":format!("{owner}/library")}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let detached = h
+        .json(&format!("/api/repos?owner={owner}&name=library-fork"), &bob)
+        .await;
+    assert_eq!(detached["repositories"][0]["visibility"], "private");
+    assert_eq!(detached["repositories"][0]["id"], json!(fork_id));
+    assert!(detached["repositories"][0].get("forked_from").is_none());
+    let denied = h
+        .http
+        .get(format!("{}{fork}/refs", h.origin))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    h.close().await;
+}
+
+#[tokio::test]
+async fn organization_creation_retries_keep_the_branch_authorized_for_that_request() {
+    let h = Harness::new(false).await;
+    h.server
+        .catalog()
+        .unwrap()
+        .mark_cell_ready(h.server.repositories.values()[0].id)
+        .await
+        .unwrap();
+    let (organization, actor, _) = crate::test_support::http::organizations::bootstrap(&h).await;
+    let alice = h.login().await;
+    let root = format!("/api/organizations/{organization}");
+    let policy = format!("{root}/repository-policy");
+    let creation = format!("{root}/repositories/creation");
+    let input = |version, branch| {
+        json!({
+            "version":version,"member_creation":false,"member_transfer":false,
+            "baseline":null,"default_branch":branch
+        })
+    };
+    assert_eq!(
+        h.write(Method::PUT, &policy, &alice, input(0, "refs/heads/trunk"))
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    h.write(Method::PUT, &policy, &alice, input(0, "trunk"))
+        .await
+        .error_for_status()
+        .unwrap();
+    assert_eq!(h.json(&creation, &alice).await["default_branch"], "trunk");
+    let request_id = Uuid::now_v7();
+    h.server
+        .cells()
+        .unwrap()
+        .command::<AuthorizeCreation>(
+            Address::Organization(organization),
+            app::mutation_identity().unwrap(),
+            Creation {
+                actor,
+                request_id,
+                name: "old-branch".into(),
+                description: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+    h.write(Method::PUT, &policy, &alice, input(1, "develop"))
+        .await
+        .error_for_status()
+        .unwrap();
+    assert_eq!(h.json(&creation, &alice).await["default_branch"], "develop");
+    for (request, name, branch) in [
+        (request_id, "old-branch", "trunk"),
+        (Uuid::now_v7(), "new-branch", "develop"),
+    ] {
+        let created: Value = h
+            .write(
+                Method::POST,
+                &creation,
+                &alice,
+                json!({"request_id":request,"name":name,"description":""}),
+            )
+            .await
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let refs = format!(
+            "/api/repos/{}/{name}/refs",
+            created["owner"].as_str().unwrap()
+        );
+        assert_eq!(
+            h.json(&refs, &alice).await["unborn_head"],
+            format!("refs/heads/{branch}")
+        );
+    }
     h.close().await;
 }
 
@@ -570,7 +824,8 @@ async fn organization_repository_ownership_survives_creator_revocation_without_a
     assert!(matches!(
         ticket.output,
         CreationOutcome::Accepted {
-            grant_creator: false
+            grant_creator: false,
+            ..
         }
     ));
     let pending = catalog

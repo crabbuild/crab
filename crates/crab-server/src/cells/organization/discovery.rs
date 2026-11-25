@@ -6,6 +6,7 @@ pub(crate) enum Landing {
     Member {
         view: View,
         can_create: bool,
+        default_branch: String,
     },
     Invitation {
         organization: Organization,
@@ -26,10 +27,12 @@ impl Read for GetLanding {
             .filter(|member| member.active)
             .map(|member| member.role)
         {
-            let can_create = repository_policy::load(context)?.can_create(role);
+            let policy = repository_policy::load(context)?;
+            let can_create = policy.can_create(role);
             return Ok(record(context)?.map(|organization| Landing::Member {
                 view: View { organization, role },
                 can_create,
+                default_branch: policy.default_branch,
             }));
         }
         let view = GetInvitation::execute(

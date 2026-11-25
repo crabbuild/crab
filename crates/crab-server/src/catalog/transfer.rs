@@ -101,7 +101,7 @@ impl Offer {
             && valid_actor(&self.requester)
             && self.recipient.valid()
             && !self.recipient_label.is_empty()
-            && self.recipient_label.len() <= 100
+            && self.recipient_label.chars().count() <= 100
             && !self.recipient_label.chars().any(char::is_control)
             && valid_repository_component(&self.from_owner)
             && valid_repository_component(&self.from_name)
@@ -310,7 +310,8 @@ impl CatalogStore {
             document.advance_transfer()?;
             document.queue_membership_audit(MembershipAuditEvent {
                 id: Uuid::now_v7(),
-                repository_id: repository,
+                outside_grants: None,
+                repository_id: Some(repository),
                 actor,
                 previous_members_digest: previous,
                 new_members_digest: digest,

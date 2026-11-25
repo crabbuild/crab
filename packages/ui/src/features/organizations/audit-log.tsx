@@ -39,9 +39,13 @@ const actions: Record<AuditAction, string> = {
   project_policy_changed: "Project default access changed",
   repository_registered: "Repository registered",
   repository_access_changed: "Repository access changed",
-  outside_collaborators_removed: "Outside collaborators removed",
   repository_transferred_in: "Repository transferred in",
   repository_transferred_out: "Repository transferred out",
+  repository_deleted: "Repository deleted",
+  repository_restored: "Repository restored",
+  repository_visibility_changed: "Repository visibility changed",
+  outside_collaborators_removed: "Outside collaborators removed",
+  collaborator_grants_retained: "Collaborator repository grants retained",
 };
 
 const textFilters = [

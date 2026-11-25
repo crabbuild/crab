@@ -288,9 +288,10 @@ export function CloneMenu({
           {copied ? "Copied" : "Copy URL"}
         </Button>
         <p>
-          Run <code>git clone</code> with this URL. For team deployments,
-          generate a token under Git access and use it when Git prompts for a
-          password.
+          Run <code>git clone</code> with this URL.{" "}
+          {repo.visibility === "public"
+            ? "Public Git history can be cloned without signing in. Git LFS transfers require repository access."
+            : "For team deployments, generate a token under Git access and use it when Git prompts for a password."}
         </p>
         <p className="muted">
           Push requires write access. Non-fast-forward updates are rejected.

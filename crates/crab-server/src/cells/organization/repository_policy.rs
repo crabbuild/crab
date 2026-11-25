@@ -1,18 +1,46 @@
 use super::*;
-use crate::RepositoryAccess;
+use crate::{
+    RepositoryAccess,
+    config::{default_repository_branch, valid_repository_branch},
+};
 
 const KEY: &str = "organization/v1/repository-policy";
 
-#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Policy {
     pub version: u64,
     pub member_creation: bool,
+    #[serde(default)]
+    pub member_transfer: bool,
+    #[serde(default)]
+    pub member_deletion: bool,
+    #[serde(default)]
+    pub private_forks: bool,
+    #[serde(default)]
+    pub member_visibility: bool,
     pub baseline: Option<RepositoryAccess>,
+    #[serde(default = "default_repository_branch")]
+    pub default_branch: String,
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Self {
+            version: 0,
+            member_creation: false,
+            member_transfer: false,
+            member_deletion: false,
+            private_forks: false,
+            member_visibility: false,
+            baseline: None,
+            default_branch: default_repository_branch(),
+        }
+    }
 }
 
 impl Policy {
-    pub(crate) fn can_create(self, role: Role) -> bool {
+    pub(crate) fn can_create(&self, role: Role) -> bool {
         role == Role::Owner || self.member_creation
     }
 }
@@ -58,6 +86,9 @@ impl Mutation for Set {
             return Err(Error::Invalid(
                 "Choose None, Read, or Write baseline access",
             ));
+        }
+        if !valid_repository_branch(&policy.default_branch) {
+            return Err(Error::Invalid("Enter a valid short Git branch name"));
         }
         let current = load(context)?;
         if current.version != policy.version {

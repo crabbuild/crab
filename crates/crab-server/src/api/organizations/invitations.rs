@@ -148,10 +148,10 @@ async fn decide(
     Json(input): Json<Answer>,
 ) -> Result<Json<organization::Invitation>> {
     let actor = actor(&server, &principal).await?;
-    // Invitation acceptance can make a selected collaborator a member. Keep
-    // that decision ordered with organization-wide collaborator revocations.
-    let result = properties::policy_write(server, id, move |server, address, _| async move {
-        let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    let address = target(id)?;
+    let result = super::membership_change(&server, id, move |_| async move {
+        app::account(&principal)?;
         app::command_output(
             cells
                 .command::<DecideInvitation>(

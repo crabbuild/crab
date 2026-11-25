@@ -79,7 +79,8 @@ pub(crate) struct Selection {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Query {
     pub targets: Vec<Target>,
-    pub actor: RepositoryAuthor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<RepositoryAuthor>,
 }
 
 type Counts = BTreeMap<Kind, u64>;
@@ -140,13 +141,16 @@ fn membership(context: &Transaction<'_>, key: &str) -> crate::cells::Result<bool
 fn summary(
     context: &Transaction<'_>,
     target: Target,
-    actor: &RepositoryAuthor,
+    actor: Option<&RepositoryAuthor>,
 ) -> crate::cells::Result<Summary> {
     let counts = counts(context, target)?;
     let groups = Kind::ALL
         .into_iter()
         .map(|kind| {
-            let reacted = membership(context, &member_key(target, kind, actor)?)?;
+            let reacted = match actor {
+                Some(actor) => membership(context, &member_key(target, kind, actor)?)?,
+                None => false,
+            };
             let count = counts.get(&kind).copied().unwrap_or(0);
             if reacted && count == 0 {
                 return Err(crate::cells::Error::Invalid(
@@ -195,7 +199,7 @@ impl Mutation for SetReaction {
             return Ok(MutationResult::Success(Outcome::Applied(summary(
                 context,
                 input.target,
-                &input.actor,
+                Some(&input.actor),
             )?)));
         }
         if super::locks::blocked(context, input.target, false)? {
@@ -235,7 +239,7 @@ impl Mutation for SetReaction {
         Ok(MutationResult::Success(Outcome::Applied(summary(
             context,
             input.target,
-            &input.actor,
+            Some(&input.actor),
         )?)))
     }
 }
@@ -251,7 +255,9 @@ impl Read for GetReactions {
         context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
-        validate_author(&input.actor)?;
+        if let Some(actor) = &input.actor {
+            validate_author(actor)?;
+        }
         if input.targets.is_empty() || input.targets.len() > 50 {
             return Err(crate::cells::Error::Invalid(
                 "reaction queries require 1–50 targets",
@@ -266,7 +272,7 @@ impl Read for GetReactions {
                 if !target.exists(context)? {
                     return Ok(None);
                 }
-                let mut card = summary(context, target, &input.actor)?;
+                let mut card = summary(context, target, input.actor.as_ref())?;
                 card.minimization = super::minimization::load(context, target)?;
                 card.has_edit_history = super::edit_history::exists(context, target)?;
                 Ok(Some(card))

@@ -136,7 +136,10 @@ async fn authority(
     principal: &Principal,
     repo: &Repository,
 ) -> Result<Option<(Uuid, Uuid)>> {
-    let Some(organization) = repo.organization else {
+    let Some(organization) = repo
+        .organization
+        .filter(|_| !principal.is_public_reader(repo.id))
+    else {
         return Ok(None);
     };
     match organizations::actor(server, principal).await {

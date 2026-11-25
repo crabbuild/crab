@@ -19,13 +19,13 @@ async fn native_browser_confirms_outside_collaborator_removal() {
         .run(&[
             "open",
             &format!(
-                "{}/-/organizations/{}?tab=people&people=outside",
+                "{}/-/organizations/{}?tab=outside-collaborators",
                 f.h.origin, f.organization
             ),
         ])
         .await;
     browser.sign_in().await;
-    let checkbox = "[role=checkbox][aria-label='Select Bob from library']";
+    let checkbox = "[role=checkbox][aria-label='Select Bob']";
     browser.run(&["wait", checkbox]).await;
     browser.run(&["click", checkbox]).await;
     browser
@@ -66,13 +66,18 @@ async fn native_browser_confirms_outside_collaborator_removal() {
         .run(&[
             "wait",
             "--text",
-            "Removed 1 direct grant across 1 repository.",
+            "Removed 1 direct repository grant for 1 collaborator.",
         ])
         .await;
     browser
-        .run(&["wait", "--text", "No matching outside collaborator grants."])
+        .run(&["wait", "--text", "No outside collaborators"])
         .await;
     assert_eq!(f.h.json(&member_path, &f.alice).await["members"], json!([]));
+    browser
+        .run(&[
+            "find", "role", "link", "click", "--name", "Settings", "--exact",
+        ])
+        .await;
     browser
         .run(&[
             "find",
@@ -158,20 +163,13 @@ async fn bulk_outside_removal_is_current_atomic_and_recoverable() {
     .unwrap();
     let outside = f.h.json(&listing, &f.alice).await;
     let entries = outside["items"].as_array().unwrap();
-    let keys = entries
-        .iter()
-        .filter(|row| row["name"].as_str().unwrap().starts_with("Bob"))
-        .map(|row| row["collaborator"].as_str().unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(keys.len(), 2);
-    assert_eq!(keys[0], keys[1]);
+    let bob = entries.iter().find(|row| row["name"] == "Bob").unwrap();
+    assert_eq!(bob["repository_count"], 2);
     let visitor = entries
         .iter()
         .find(|row| row["name"] == "Visiting engineer")
-        .unwrap()["collaborator"]
-        .as_str()
         .unwrap();
-    let selection = json!({"collaborators":[keys[0],visitor]});
+    let selection = json!({"collaborators":[bob["key"],visitor["key"]]});
     let post = |path: String, body: Value| {
         let (h, alice) = (&f.h, &f.alice);
         async move { h.write(Method::POST, &path, alice, body).await }

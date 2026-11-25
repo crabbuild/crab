@@ -194,6 +194,15 @@ enum OwnershipLeaseError {
     Lease(#[from] crab_remote::publication::Error),
 }
 
+impl OwnershipLeaseError {
+    fn into_application(self) -> Error {
+        match self {
+            Self::Application(error) => error,
+            Self::Lease(error) => Error::TransferPublication(error),
+        }
+    }
+}
+
 pub(crate) async fn with_ownership_lease<T, F, Fut>(
     server: &Server,
     repository: &Repository,
@@ -210,10 +219,39 @@ where
         |cancel| async move { work(cancel).await.map_err(OwnershipLeaseError::Application) },
     )
     .await
-    .map_err(|error| match error {
-        OwnershipLeaseError::Application(error) => error,
-        OwnershipLeaseError::Lease(error) => Error::TransferPublication(error),
+    .map_err(OwnershipLeaseError::into_application)
+}
+
+pub(crate) async fn with_transfer_ownership_leases<T, F, Fut>(
+    server: &Server,
+    repository: &Repository,
+    destination: Option<uuid::Uuid>,
+    work: F,
+) -> Result<T>
+where
+    F: FnOnce(CancellationToken) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let Some(destination) = destination.filter(|id| repository.organization != Some(*id)) else {
+        return with_ownership_lease(server, repository, work).await;
+    };
+    let source = RulesetScope::Repository(repository);
+    let target = RulesetScope::Organization(destination);
+    // Distinct organization scopes are acquired in UUID order even for
+    // opposing transfers. A personal repository scope always comes last.
+    let (first, second) = if repository.organization.is_some_and(|id| id < destination) {
+        (source, target)
+    } else {
+        (target, source)
+    };
+    with_ruleset_lease(server, first, &server.cancellation, |cancel| async move {
+        with_ruleset_lease(server, second, &cancel, |nested| async move {
+            work(nested).await.map_err(OwnershipLeaseError::Application)
+        })
+        .await
     })
+    .await
+    .map_err(OwnershipLeaseError::into_application)
 }
 
 pub(crate) async fn require_no_issue_reservations(

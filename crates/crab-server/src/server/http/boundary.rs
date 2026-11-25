@@ -107,6 +107,12 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
     );
     let protected =
         request.uri().path().starts_with("/api/") && request.uri().path() != "/api/session";
+    let public_read = public_read_route(request.method(), request.uri())
+        && !machine_request
+        && (!git_request || !request.headers().contains_key("authorization"));
+    if public_read {
+        principal.allow_public_reads();
+    }
     // Membership's handler hides absent and non-admin repositories uniformly.
     // Only anonymous callers bypass generic login/CSRF responses; signed-in
     // mutations retain the normal Origin and session-CSRF requirements.
@@ -127,7 +133,10 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
                         if !owner.is_empty() && !name.is_empty()
                 )
             });
-    let denied = (protected || git_request) && !principal.authenticated() && !anonymous_membership;
+    let mut denied = (protected || git_request)
+        && !principal.authenticated()
+        && !anonymous_membership
+        && !public_read;
     let unsafe_method = !matches!(
         *request.method(),
         axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
@@ -171,7 +180,8 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
     } else {
         None
     };
-    if !denied && !rejected_mutation && principal.authenticated() {
+    let mut admitted_public_repository = false;
+    if !denied && !rejected_mutation && (principal.authenticated() || public_read) {
         let address = params.as_ref().and_then(|params| {
             let owner = params.get("owner")?.as_str();
             let name = params.get("name")?.as_str();
@@ -222,6 +232,7 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
                     }
                 };
                 if current {
+                    admitted_public_repository = principal.is_public_reader(repository.id);
                     principal = principal.scoped_to_repository(Some(repository.id));
                 } else if !needs_lookup
                     && authorization_error.is_none()
@@ -282,6 +293,18 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
                 Err(error) => authorization_error = Some(error.into_response()),
             }
         }
+    }
+    if public_read
+        && principal.is_anonymous()
+        && request.uri().path() != "/api/repos"
+        && !public_attachment(request.uri().path())
+        && !admitted_public_repository
+        && redirect.is_none()
+        && authorization_error.is_none()
+    {
+        // Keep the private Git credential challenge and hide absent routes
+        // the same way. Catalog listing has its own visibility filter.
+        denied = true;
     }
     if browser_repository && unsafe_method {
         // Membership can resolve a case-insensitive catalog name independently
@@ -365,6 +388,97 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
             ("content-security-policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' https://extensions.duckdb.org; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"),
         ], response,
     ).into_response()
+}
+
+fn public_read_route(method: &axum::http::Method, uri: &axum::http::Uri) -> bool {
+    use axum::http::Method;
+    let path = uri.path();
+    if let Some(path) = path.strip_prefix("/git/") {
+        return path.splitn(3, '/').nth(2).is_some_and(|tail| {
+            (*method == Method::POST && tail == "git-upload-pack")
+                || (*method == Method::GET
+                    && tail == "info/refs"
+                    && uri.query() == Some("service=git-upload-pack"))
+        });
+    }
+    if !matches!(*method, Method::GET | Method::HEAD) {
+        return false;
+    }
+    // Named reads use the repository boundary. Attachments resolve the UUID
+    // and verify publication and repository access in their download handler.
+    path == "/api/repos"
+        || public_attachment(path)
+        || path
+            .strip_prefix("/api/repos/")
+            .and_then(|path| path.splitn(3, '/').nth(2))
+            .is_some_and(|tail| {
+                public_discussion(tail)
+                    || matches!(
+                        tail,
+                        "refs"
+                            | "commit"
+                            | "commits"
+                            | "tree"
+                            | "tree-attribution"
+                            | "search"
+                            | "blob"
+                            | "asset"
+                            | "file"
+                            | "file-preview"
+                            | "changes"
+                            | "diff"
+                            | "blame"
+                            | "archive"
+                            | "lfs-content"
+                            | "crab-content"
+                            | "code-search"
+                    )
+            })
+}
+
+fn public_attachment(path: &str) -> bool {
+    path.strip_prefix("/api/discussion-attachments/")
+        .and_then(|tail| tail.split_once('/'))
+        .is_some_and(|(repo, attachment)| {
+            Uuid::parse_str(repo).is_ok() && Uuid::parse_str(attachment).is_ok()
+        })
+}
+
+fn public_discussion(tail: &str) -> bool {
+    let mut parts = tail.split('/');
+    let numeric = |id: &str| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit());
+    match (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) {
+        (
+            Some("issues" | "pulls" | "labels" | "milestones" | "discussion-search"),
+            None,
+            None,
+            None,
+            None,
+        )
+        | (Some("issues"), Some("pins"), None, None, None)
+        | (
+            Some("discussion-search"),
+            Some("labels" | "milestones" | "issue-types" | "authors" | "assignees"),
+            None,
+            None,
+            None,
+        ) => true,
+        (Some("issues" | "pulls" | "milestones"), Some(number), None, None, None)
+        | (Some("milestones"), Some(number), Some("items"), None, None)
+        | (Some("issues" | "pulls"), Some(number), Some("conversation" | "comments"), None, None) => {
+            numeric(number)
+        }
+        (Some("issues" | "pulls"), Some(number), Some("comments"), Some(comment), None) => {
+            numeric(number) && numeric(comment)
+        }
+        _ => false,
+    }
 }
 
 fn repository_identity(headers: &axum::http::HeaderMap) -> Option<Uuid> {
@@ -479,6 +593,67 @@ fn integration_api_path(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn public_transport_admits_code_and_fetch_without_write_or_private_controls() {
+        use axum::http::Method;
+        for (method, path, expected) in [
+            (Method::GET, "/api/repos", true),
+            (Method::HEAD, "/api/repos/org/library/file", true),
+            (Method::GET, "/api/repos/org/library/code-search", true),
+            (Method::GET, "/api/repos/org/library/issues", true),
+            (
+                Method::GET,
+                "/api/repos/org/library/pulls/1/conversation",
+                true,
+            ),
+            (
+                Method::GET,
+                "/api/repos/org/library/milestones/1/items",
+                true,
+            ),
+            (
+                Method::GET,
+                "/api/repos/org/library/pulls/1/pending-review",
+                false,
+            ),
+            (
+                Method::POST,
+                "/api/repos/org/library/issues/1/comments",
+                false,
+            ),
+            (
+                Method::GET,
+                "/api/repos/org/library/settings/integrations",
+                false,
+            ),
+            (Method::GET, "/api/repos/org/library/members", false),
+            (Method::POST, "/api/repos/org/library/file", false),
+            (
+                Method::GET,
+                "/git/org/library.git/info/refs?service=git-upload-pack",
+                true,
+            ),
+            (
+                Method::GET,
+                "/git/org/library.git/info/refs?service=git-receive-pack",
+                false,
+            ),
+            (Method::POST, "/git/org/library.git/git-upload-pack", true),
+            (Method::POST, "/git/org/library.git/git-receive-pack", false),
+            (
+                Method::POST,
+                "/git/org/library.git/info/lfs/objects/batch",
+                false,
+            ),
+        ] {
+            assert_eq!(
+                public_read_route(&method, &path.parse().unwrap()),
+                expected,
+                "{method} {path}"
+            );
+        }
+    }
+
     #[test]
     fn repository_tokens_are_only_considered_on_exact_integration_routes() {
         assert!(integration_api_path(

@@ -71,7 +71,14 @@ export function PullConversation({
       >
         {(busy, posted) => (
           <>
-            <MergePanel repo={repo} pull={pull} csrf={csrf} refresh={refresh} />
+            {!repo.public_read_only && (
+              <MergePanel
+                repo={repo}
+                pull={pull}
+                csrf={csrf}
+                refresh={refresh}
+              />
+            )}
             {pull.can_update_branch && (
               <BranchUpdate
                 key={`${pull.version}:${pull.base_oid}:${pull.head_oid}`}
@@ -82,51 +89,52 @@ export function PullConversation({
                 refresh={refresh}
               />
             )}
-            {(!repo.archived || comment.body || comment.intent) && (
-              <CommentComposer
-                href={href}
-                onCreated={posted}
-                id="pull-comment"
-                className="pull-comment-form"
-                comment={comment}
-                busy={busy || refreshing}
-                readOnly={repo.archived}
-                onStateChanged={refresh}
-                actions={(change, withComment) =>
-                  pull.can_manage &&
-                  !repo.archived && (
-                    <Button
-                      ref={comment.conflict ? undefined : stateTrigger}
-                      variant={
-                        pull.state === "open" ? "destructive" : "outline"
-                      }
-                      disabled={
-                        busy ||
-                        refreshing ||
-                        missingBranch ||
-                        comment.pending ||
-                        Boolean(comment.intent) ||
-                        comment.conflict
-                      }
-                      onClick={() =>
-                        change({
-                          version: pull.version,
-                          state: pull.state === "open" ? "closed" : "open",
-                        })
-                      }
-                    >
-                      {withComment
-                        ? pull.state === "open"
-                          ? "Close with comment"
-                          : "Reopen with comment"
-                        : pull.state === "open"
-                          ? "Close pull request"
-                          : "Reopen pull request"}
-                    </Button>
-                  )
-                }
-              />
-            )}
+            {!repo.public_read_only &&
+              (!repo.archived || comment.body || comment.intent) && (
+                <CommentComposer
+                  href={href}
+                  onCreated={posted}
+                  id="pull-comment"
+                  className="pull-comment-form"
+                  comment={comment}
+                  busy={busy || refreshing}
+                  readOnly={repo.archived}
+                  onStateChanged={refresh}
+                  actions={(change, withComment) =>
+                    pull.can_manage &&
+                    !repo.archived && (
+                      <Button
+                        ref={comment.conflict ? undefined : stateTrigger}
+                        variant={
+                          pull.state === "open" ? "destructive" : "outline"
+                        }
+                        disabled={
+                          busy ||
+                          refreshing ||
+                          missingBranch ||
+                          comment.pending ||
+                          Boolean(comment.intent) ||
+                          comment.conflict
+                        }
+                        onClick={() =>
+                          change({
+                            version: pull.version,
+                            state: pull.state === "open" ? "closed" : "open",
+                          })
+                        }
+                      >
+                        {withComment
+                          ? pull.state === "open"
+                            ? "Close with comment"
+                            : "Reopen with comment"
+                          : pull.state === "open"
+                            ? "Close pull request"
+                            : "Reopen pull request"}
+                      </Button>
+                    )
+                  }
+                />
+              )}
             {comment.conflict && (
               <Button
                 ref={stateTrigger}

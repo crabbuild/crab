@@ -82,15 +82,16 @@ async fn select(
     }))
 }
 
-pub(super) async fn read(
+pub(super) async fn read<'a>(
     server: &Server,
     repo: &Repository,
-    actor: &Identity,
+    actor: impl Into<Option<&'a Identity>>,
     targets: Vec<Target>,
 ) -> Result<Vec<View>> {
     if targets.is_empty() {
         return Ok(Vec::new());
     }
+    let actor = actor.into();
     let count = targets.len();
     let cell = app::repository_cell(server, repo)?;
     let observed = cell
@@ -100,7 +101,7 @@ pub(super) async fn read(
             None,
             Query {
                 targets,
-                actor: actor.into(),
+                actor: actor.map(Into::into),
             },
         )
         .await
@@ -121,16 +122,16 @@ pub(super) async fn read(
                 revision: observed.receipt.revision,
                 groups: value.groups,
                 minimization: value.minimization,
-                has_edit_history: value.has_edit_history,
+                has_edit_history: actor.is_some() && value.has_edit_history,
             })
         })
         .collect()
 }
 
-pub(super) async fn one(
+pub(super) async fn one<'a>(
     server: &Server,
     repo: &Repository,
-    actor: &Identity,
+    actor: impl Into<Option<&'a Identity>>,
     target: Target,
 ) -> Result<View> {
     read(server, repo, actor, vec![target])

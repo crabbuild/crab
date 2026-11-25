@@ -20,12 +20,14 @@ use crate::{
     RepositoryAccess,
     app::{Error, Result},
     auth::Principal,
+    catalog::visibility::Visibility,
     repository::{Repository, settings},
     server::Server,
 };
 
 pub(super) enum Scope {
     All,
+    Public,
     Personal(String),
     Organization(Uuid),
     Team { organization: Uuid, team: Uuid },
@@ -44,7 +46,7 @@ impl Scope {
 
     fn includes(&self, repo: &Repository) -> bool {
         match self {
-            Self::All => true,
+            Self::All | Self::Public => true,
             Self::Personal(owner) => repo.organization.is_none() && repo.config.owner == *owner,
             Self::Organization(id)
             | Self::Team {
@@ -72,7 +74,10 @@ struct Entry<'a> {
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     topics: &'a [String],
     archived: bool,
+    visibility: Visibility,
     fork: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    can_admin: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     team_access: Option<RepositoryAccess>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -100,7 +105,10 @@ pub(super) async fn list(
             "Repository search accepts at most 200 characters and pages of 1–50",
         ));
     }
-    let actor = crate::app::actor(principal)?;
+    let actor = principal.identity();
+    if actor.is_none() && !principal.permits_public_reads() {
+        return Err(Error::SessionRequired);
+    }
     let organization = scope.organization();
     let team = match &scope {
         Scope::Team { team, .. } => Some(*team),
@@ -109,7 +117,17 @@ pub(super) async fn list(
     let query = Query::parse(&search.query, organization)?;
     let filtered = query.filtered();
     let property_filter = !query.terms.is_empty();
-    let key = query.cursor_key(server, &actor, &scope);
+    if property_filter && actor.is_none() {
+        return Err(Error::SessionRequired);
+    }
+    let member_principal;
+    let principal = if property_filter {
+        member_principal = principal.clone().without_public_reads();
+        &member_principal
+    } else {
+        principal
+    };
+    let key = query.cursor_key(server, actor.as_ref(), &scope);
     let after = search
         .after
         .as_deref()
@@ -134,15 +152,20 @@ pub(super) async fn list(
     .await?;
     let property_organization = organization.filter(|_| property_filter && !scoped.is_empty());
     let mut topics = HashMap::new();
+    let mut visibility = HashMap::new();
     let mut team_grants = HashMap::new();
     let mut ranked: Vec<_> = scoped
         .into_iter()
         .filter_map(|row| {
+            if matches!(scope, Scope::Public) && !row.visibility.is_public() {
+                return None;
+            }
             let priority = ranks.remove(&row.repository.id)?;
             if !query.matches_topics(&row.topics) {
                 return None;
             }
             topics.insert(row.repository.id, row.topics);
+            visibility.insert(row.repository.id, row.visibility);
             if let Some(access) = row.team_access {
                 team_grants.insert(row.repository.id, (access, row.organization_owner));
             }
@@ -244,6 +267,7 @@ pub(super) async fn list(
                     && fresh.config.name == repo.config.name
                     && fresh.config.description == repo.config.description
                     && topics.get(&repo.id) == Some(&row.topics)
+                    && visibility.get(&repo.id) == Some(&row.visibility)
                     && team_grants.get(&repo.id).copied()
                         == row
                             .team_access
@@ -256,6 +280,11 @@ pub(super) async fn list(
     {
         return Err(Error::PageChanged);
     }
+    let admins: HashSet<_> = current
+        .iter()
+        .filter(|row| row.principal.can_admin(row.repository.id))
+        .map(|row| row.repository.id)
+        .collect();
     let next = page
         .last()
         .copied()
@@ -279,7 +308,9 @@ pub(super) async fn list(
             description: &repo.config.description,
             topics: topics.get(&repo.id).map_or(&[], Vec::as_slice),
             archived: lifecycle.archived,
+            visibility: visibility.get(&repo.id).copied().unwrap_or_default(),
             fork: repo.forked_from.is_some(),
+            can_admin: admins.contains(&repo.id),
             team_access: team_grants.get(&repo.id).map(|&(access, _)| access),
             can_manage_team_access: team_grants.get(&repo.id).is_some_and(|&(_, owner)| owner)
                 && repo.forked_from.is_none(),

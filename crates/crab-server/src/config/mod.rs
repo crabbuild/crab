@@ -576,10 +576,7 @@ pub(crate) fn validate_repository(repository: &RepositoryConfig) -> Result<()> {
     if repository.bucket.is_empty() || repository.prefix.is_empty() {
         return Err(Error::Config("repository bucket and prefix are required"));
     }
-    let default_ref = format!("refs/heads/{}", repository.default_branch);
-    if repository.default_branch.starts_with("refs/")
-        || crab_git::validate_push_refname(&default_ref).is_err()
-    {
+    if !valid_repository_branch(&repository.default_branch) {
         return Err(Error::Config(
             "repository default_branch must be a valid short branch name",
         ));
@@ -651,8 +648,15 @@ pub(crate) fn valid_protection_requirements(
             .all(|id| !id.is_nil() && integrations.insert(id))
 }
 
-fn default_repository_branch() -> String {
-    "main".to_owned()
+pub(crate) const DEFAULT_REPOSITORY_BRANCH: &str = "main";
+
+pub(crate) fn default_repository_branch() -> String {
+    DEFAULT_REPOSITORY_BRANCH.to_owned()
+}
+
+pub(crate) fn valid_repository_branch(branch: &str) -> bool {
+    !branch.starts_with("refs/")
+        && crab_git::validate_push_refname(&format!("refs/heads/{branch}")).is_ok()
 }
 
 /// Browser identity provider and the application's canonical external origin.

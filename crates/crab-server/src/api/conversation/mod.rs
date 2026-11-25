@@ -4,6 +4,7 @@ use crate::{
     auth::Principal,
     cells::repository::collaboration::{
         Subject, SubjectKind,
+        activity::Action,
         conversation::{Cursor, Entry, Key, ListConversation, Position, Query as Input, Source},
     },
     server::Server,
@@ -105,7 +106,8 @@ async fn page(
         limit: params.limit.unwrap_or(30),
     };
     input.validate().map_err(Error::Invalid)?;
-    let actor = app::actor(principal)?;
+    let actor = principal.member_identity(repo.id);
+    let public_reader = principal.is_public_reader(repo.id);
     let cell = app::repository_cell(server, &repo)?;
     let page = app::query_output(
         cell.client
@@ -113,8 +115,13 @@ async fn page(
             .await,
     )?
     .ok_or(Error::NotFound)?;
+    let private_head = public_reader
+        && page
+            .source
+            .as_ref()
+            .is_some_and(|source| source.head_repository.is_some());
     let head = match page.source {
-        Some(source) => {
+        Some(source) if !public_reader || source.head_repository.is_none() => {
             pulls::review_head(
                 server,
                 &repo,
@@ -124,7 +131,7 @@ async fn page(
             )
             .await?
         }
-        None => None,
+        _ => None,
     };
     let targets = page
         .items
@@ -132,7 +139,7 @@ async fn page(
         .filter(|entry| !matches!(entry, Entry::Activity(_)))
         .map(Entry::target)
         .collect();
-    let mut reactions = reactions::read(server, &repo, &actor, targets)
+    let mut reactions = reactions::read(server, &repo, actor.as_ref(), targets)
         .await?
         .into_iter();
     let actors: Vec<_> = page
@@ -157,20 +164,49 @@ async fn page(
     )
     .await?;
     let grant = app::membership(server, principal, &repo).await?;
-    let can_dismiss = pulls::reviews::dismissal_allowed(
-        server,
-        &repo,
-        &grant,
-        &actor,
-        page.items.iter().find_map(|entry| match entry {
-            Entry::Review(detail) if detail.dismissible => Some(detail),
-            _ => None,
-        }),
-    )
-    .await?;
+    let can_dismiss = match actor.as_ref() {
+        Some(actor) => {
+            pulls::reviews::dismissal_allowed(
+                server,
+                &repo,
+                &grant,
+                actor,
+                page.items.iter().find_map(|entry| match entry {
+                    Entry::Review(detail) if detail.dismissible => Some(detail),
+                    _ => None,
+                }),
+            )
+            .await?
+        }
+        None => false,
+    };
     let items = page
         .items
         .into_iter()
+        .filter_map(|entry| match entry {
+            Entry::Activity(ref event)
+                if public_reader
+                    && matches!(
+                        event.action,
+                        Action::ProjectChanged { .. }
+                            | Action::ProjectRemoved { .. }
+                            | Action::ReviewRequested { .. }
+                            | Action::ReviewRequestCancelled { .. }
+                            | Action::TeamReviewRequested
+                            | Action::TeamReviewRequestCancelled
+                            | Action::CodeOwnerReviewsRequested
+                            | Action::MergeQueuePrioritized
+                    ) =>
+            {
+                None
+            }
+            Entry::Activity(ref event)
+                if private_head && matches!(event.action, Action::HeadChanged { .. }) =>
+            {
+                None
+            }
+            entry => Some(entry),
+        })
         .map(|entry| {
             if let Entry::Activity(event) = entry {
                 return Ok(
@@ -186,7 +222,7 @@ async fn page(
                     issues::view::comment(
                         &authors,
                         &comment,
-                        &actor,
+                        actor.as_ref(),
                         grant.principal.can_moderate(repo.id),
                         &reaction,
                     ),
@@ -195,20 +231,28 @@ async fn page(
                     let comment = pulls::storage::from_comment(comment);
                     (
                         "comment",
-                        pulls::comments::comment_view(&authors, &comment, &actor, &reaction),
+                        pulls::comments::comment_view(
+                            &authors,
+                            &comment,
+                            actor.as_ref(),
+                            &reaction,
+                        ),
                     )
                 }
-                Entry::Review(review) => (
-                    "review",
-                    pulls::reviews::review_view(
+                Entry::Review(review) => {
+                    let mut value = pulls::reviews::review_view(
                         &authors,
                         &review,
-                        &actor,
+                        actor.as_ref(),
                         head.as_deref(),
                         &reaction,
                         can_dismiss,
-                    ),
-                ),
+                    );
+                    if private_head {
+                        value["commit_oid"] = json!("");
+                    }
+                    ("review", value)
+                }
                 Entry::Activity(_) => {
                     return Err(Error::CellContract("Conversation activity was not handled"));
                 }

@@ -32,9 +32,13 @@ pub(in crate::api) enum AuditAction {
     ProjectPolicyChanged,
     RepositoryRegistered,
     RepositoryAccessChanged,
-    OutsideCollaboratorsRemoved,
     RepositoryTransferredIn,
     RepositoryTransferredOut,
+    RepositoryDeleted,
+    RepositoryRestored,
+    RepositoryVisibilityChanged,
+    OutsideCollaboratorsRemoved,
+    CollaboratorGrantsRetained,
 }
 
 #[derive(Serialize)]
@@ -122,6 +126,11 @@ impl From<organization::Event> for RawEvent {
             Action::Membership { member, role, .. } => {
                 event.account = Some(member);
                 event.detail = Some(role.map_or("Removed", member_role).into());
+                AuditAction::OrganizationMembership
+            }
+            Action::MemberConverted { member, .. } => {
+                event.account = Some(member);
+                event.detail = Some("Converted to outside collaborator".into());
                 AuditAction::OrganizationMembership
             }
             Action::Invitation {
@@ -241,9 +250,13 @@ impl From<audit::Entry> for RawEvent {
         let action = match entry.action {
             audit::Action::Registered => AuditAction::RepositoryRegistered,
             audit::Action::AccessChanged => AuditAction::RepositoryAccessChanged,
-            audit::Action::OutsideCollaboratorsRemoved => AuditAction::OutsideCollaboratorsRemoved,
             audit::Action::TransferredIn => AuditAction::RepositoryTransferredIn,
             audit::Action::TransferredOut => AuditAction::RepositoryTransferredOut,
+            audit::Action::Deleted => AuditAction::RepositoryDeleted,
+            audit::Action::Restored => AuditAction::RepositoryRestored,
+            audit::Action::VisibilityChanged => AuditAction::RepositoryVisibilityChanged,
+            audit::Action::OutsideCollaboratorsRemoved => AuditAction::OutsideCollaboratorsRemoved,
+            audit::Action::CollaboratorGrantsRetained => AuditAction::CollaboratorGrantsRetained,
         };
         let operator = entry.actor.issuer == "urn:crab:local";
         Self {
@@ -264,7 +277,7 @@ impl From<audit::Entry> for RawEvent {
                 repository: entry
                     .repository
                     .map(|(id, name)| AuditRepository { id, name }),
-                detail: entry.removal.map(|(collaborators, grants, repositories)| {
+                detail: entry.outside_grants.map(|audit::OutsideGrantChange { collaborators, grants, repositories }| {
                     let people = if collaborators == 1 {
                         "collaborator"
                     } else {

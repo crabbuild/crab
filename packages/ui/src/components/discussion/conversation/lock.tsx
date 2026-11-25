@@ -63,7 +63,10 @@ export function ConversationLockProvider({
   target: string;
   children: ReactNode;
 }) {
-  const resource = useRequest<Lock>(endpoint(repo, `${target}/lock`), repo.id);
+  const resource = useRequest<Lock>(
+    repo.public_read_only ? null : endpoint(repo, `${target}/lock`),
+    repo.id,
+  );
   const [current, setCurrent] = useState<Lock>();
   useEffect(() => {
     const next = resource.data;

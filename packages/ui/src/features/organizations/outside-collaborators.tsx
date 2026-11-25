@@ -1,7 +1,14 @@
 import { useState } from "react";
+import {
+  BookMarkedIcon,
+  SearchIcon,
+  UserRoundIcon,
+  UserRoundMinusIcon,
+} from "lucide-react";
 import { useMutation } from "@/components/discussion/mutations";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -13,113 +20,314 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from "@/components/ui/dialog";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { navigate, useRequest } from "@/lib/api";
 import type {
   OrganizationPage,
-  OutsideCollaboratorGrant,
+  OutsideCollaborator,
+  OutsideCollaboratorRepository,
   OutsideRemovalImpact,
   OutsideRemovalPlan,
   OutsideRemovalPreview,
 } from "@/lib/contracts";
 import { repositoryRoleLabels } from "@/lib/repository-roles";
 import { repoHref } from "@/lib/repository-route";
+import { InviteDialog } from "./invitations";
+import { MutationError } from "./feedback";
 
 export function OutsideCollaborators({
   endpoint,
-  url,
   csrf,
   actor,
+  url,
+  onInvited,
 }: {
   endpoint: string;
-  url: URL;
   csrf: string;
   actor: string;
+  url: URL;
+  onInvited: () => void;
 }) {
-  const removalPath = `${endpoint}/outside-collaborators`;
-  const storageKey = `crab:outside-removal:${endpoint}:${actor}`;
-  const [selected, setSelected] = useState(new Map<string, string>());
-  const [review, setReview] = useState<OutsideRemovalPreview>();
-  const [submitted, setSubmitted] = useState(() => readPending(storageKey));
-  const [storageError, setStorageError] = useState<string>();
-  const [success, setSuccess] = useState<string>();
-  const previewMutation = useMutation(csrf, null);
-  const removal = useMutation(csrf, null);
-  const locked = !!submitted || !!review || previewMutation.pending;
-  const stale = removal.code === "page_changed" || removal.conflict;
-  const search = url.searchParams.get("q") ?? "";
+  const q = url.searchParams.get("q") ?? "";
   const after = url.searchParams.get("after");
-  const params = new URLSearchParams();
-  if (search) params.set("q", search);
-  if (after) params.set("after", after);
-  const state = useRequest<OrganizationPage<OutsideCollaboratorGrant>>(
-    `${removalPath}?${params}`,
+  const [expanded, setExpanded] = useState<string>();
+  const [checked, setChecked] = useState<string[]>([]);
+  const [notice, setNotice] = useState("");
+  const parameters = new URLSearchParams(q ? { q } : {});
+  if (after) parameters.set("after", after);
+  const root = endpoint + "/outside-collaborators";
+  const list = useRequest<OrganizationPage<OutsideCollaborator>>(
+    `${root}?${parameters}`,
   );
-  function showPage(query: string, cursor?: string | null) {
-    const params = new URLSearchParams(url.searchParams);
-    if (query) params.set("q", query);
-    else params.delete("q");
-    if (cursor) params.set("after", cursor);
-    else params.delete("after");
-    navigate(`${url.pathname}?${params}`);
+  function showPage(query: string, cursor?: string) {
+    const next = new URLSearchParams(url.searchParams);
+    if (query) next.set("q", query);
+    else next.delete("q");
+    if (cursor) next.set("after", cursor);
+    else next.delete("after");
+    setExpanded(undefined);
+    setChecked([]);
+    if (next.toString() === url.searchParams.toString()) list.retry();
+    else navigate(`${url.pathname}?${next}`);
   }
-  function resetList() {
-    setSelected(new Map());
-    if (after) showPage(search);
-    else state.retry();
-  }
-  function select(item: OutsideCollaboratorGrant, checked: boolean) {
-    setSelected((current) => {
-      const next = new Map(current);
-      if (checked && next.size < 50) next.set(item.collaborator, item.name);
-      else if (!checked) next.delete(item.collaborator);
-      return next;
-    });
-    previewMutation.reset();
-    setSuccess(undefined);
-  }
-  async function reviewRemoval() {
-    setStorageError(undefined);
-    const value = await previewMutation.run<OutsideRemovalPreview>(
-      `${removalPath}/removal-preview`,
-      "POST",
-      { collaborators: [...selected.keys()] },
-    );
-    if (value) setReview(value);
-  }
-  function clearSubmission() {
+  const firstPage = () => showPage(q);
+  return (
+    <section aria-labelledby="outside-collaborators" className="grid gap-4">
+      <h2 id="outside-collaborators" className="text-lg font-semibold">
+        Outside collaborators
+      </h2>
+      <form
+        role="search"
+        aria-label="Outside collaborator search"
+        className="flex flex-wrap items-end gap-2"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const search = new FormData(event.currentTarget).get("q");
+          if (typeof search === "string") showPage(search.trim());
+        }}
+      >
+        <Field className="min-w-0 flex-1 sm:max-w-xs">
+          <FieldLabel htmlFor="collaborator-search">
+            Find collaborators
+          </FieldLabel>
+          <Input
+            key={q}
+            id="collaborator-search"
+            name="q"
+            type="search"
+            placeholder="Name, username, or repository"
+            autoComplete="off"
+            maxLength={100}
+            defaultValue={q}
+          />
+        </Field>
+        <Button type="submit" variant="outline">
+          <SearchIcon data-icon="inline-start" />
+          Search
+        </Button>
+        <Button type="button" variant="ghost" onClick={firstPage}>
+          {after ? "First page" : "Refresh"}
+        </Button>
+      </form>
+      {notice && (
+        <p role="status" className="text-sm">
+          {notice}
+        </p>
+      )}
+      <RemoveCollaborators
+        key={`${root}:${actor}`}
+        root={root}
+        csrf={csrf}
+        storageKey={`crab:outside-removal:${endpoint}:${actor}`}
+        people={
+          list.data?.items.filter((person) => checked.includes(person.key)) ??
+          []
+        }
+        onRefresh={firstPage}
+        onRemoved={({ collaborators, grants }) => {
+          setNotice(
+            `Removed ${grants} direct repository ${grants === 1 ? "grant" : "grants"} for ${collaborators} ${collaborators === 1 ? "collaborator" : "collaborators"}.`,
+          );
+          firstPage();
+        }}
+      />
+      <Result state={list} timingLabel="Outside collaborators">
+        {({ items, next }) => (
+          <>
+            {items.length ? (
+              <ul className="divide-y rounded-lg border">
+                {items.map((person) => (
+                  <li key={person.key} className="p-3 sm:p-4">
+                    <Collapsible
+                      open={expanded === person.key}
+                      onOpenChange={(open) =>
+                        setExpanded(open ? person.key : undefined)
+                      }
+                    >
+                      <div className="flex min-w-0 flex-wrap items-center gap-3">
+                        <Checkbox
+                          aria-label={`Select ${person.name}`}
+                          checked={checked.includes(person.key)}
+                          onCheckedChange={(selected) =>
+                            setChecked((prior) =>
+                              selected
+                                ? [...prior, person.key]
+                                : prior.filter((key) => key !== person.key),
+                            )
+                          }
+                        />
+                        <Avatar aria-hidden="true">
+                          <AvatarFallback>
+                            <UserRoundIcon className="size-4" />
+                          </AvatarFallback>
+                        </Avatar>
+                        <div className="min-w-0 flex-1 basis-32">
+                          {person.profile ? (
+                            <>
+                              <Link
+                                href={`/-/users/${person.profile.id}`}
+                                className="wrap-anywhere font-medium hover:underline"
+                              >
+                                {person.name}
+                              </Link>
+                              <p className="wrap-anywhere text-sm text-muted-foreground">
+                                @{person.profile.handle}
+                              </p>
+                            </>
+                          ) : (
+                            <strong className="wrap-anywhere font-medium">
+                              {person.name}
+                            </strong>
+                          )}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          {person.profile && (
+                            <InviteDialog
+                              endpoint={endpoint}
+                              csrf={csrf}
+                              recipient={person.profile}
+                              onInvited={onInvited}
+                            />
+                          )}
+                          <CollapsibleTrigger asChild>
+                            <Button
+                              variant="outline"
+                              aria-label={`View repository access for ${person.name}`}
+                            >
+                              <BookMarkedIcon data-icon="inline-start" />
+                              {person.repository_count}{" "}
+                              {person.repository_count === 1
+                                ? "repository"
+                                : "repositories"}
+                            </Button>
+                          </CollapsibleTrigger>
+                        </div>
+                      </div>
+                      <CollapsibleContent>
+                        {expanded === person.key && (
+                          <CollaboratorRepositories
+                            path={`${root}/${person.key}/repositories`}
+                          />
+                        )}
+                      </CollapsibleContent>
+                    </Collapsible>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <Empty className="border">
+                <EmptyHeader>
+                  <EmptyMedia variant="icon">
+                    <UserRoundIcon />
+                  </EmptyMedia>
+                  <EmptyTitle>
+                    {next
+                      ? "No matches on this page"
+                      : q
+                        ? "No matching collaborators"
+                        : "No outside collaborators"}
+                  </EmptyTitle>
+                  <EmptyDescription>
+                    {next
+                      ? "Continue to look through the remaining grants."
+                      : q
+                        ? "Try a different name, username, or repository."
+                        : "People with direct repository access who aren’t organization members appear here."}
+                  </EmptyDescription>
+                </EmptyHeader>
+              </Empty>
+            )}
+            {next && (
+              <Button
+                className="justify-self-start"
+                variant="outline"
+                onClick={() => showPage(q, next)}
+              >
+                Next page
+              </Button>
+            )}
+          </>
+        )}
+      </Result>
+    </section>
+  );
+}
+
+function RemoveCollaborators({
+  root,
+  csrf,
+  people,
+  storageKey,
+  onRefresh,
+  onRemoved,
+}: {
+  root: string;
+  csrf: string;
+  people: OutsideCollaborator[];
+  storageKey: string;
+  onRefresh: () => void;
+  onRemoved: (removal: OutsideRemovalImpact) => void;
+}) {
+  const [plan, setPlan] = useState(() => readPending(storageKey));
+  const [open, setOpen] = useState(Boolean(plan));
+  const [review, setReview] = useState<OutsideRemovalPreview>();
+  const [storageError, setStorageError] = useState<string>();
+  const preview = useMutation(csrf, null);
+  const mutation = useMutation(csrf, null);
+  const pending = preview.pending || mutation.pending;
+  const stale = preview.status === 409 || mutation.status === 409;
+  function clearPlan() {
     try {
       sessionStorage.removeItem(storageKey);
     } catch {
-      // A retained checkpoint replays the same confirmed result on reload.
+      // A saved plan can only replay its original result.
     }
-    setSubmitted(undefined);
-    setStorageError(undefined);
-    removal.reset();
+    setPlan(undefined);
   }
-  async function remove(plan: OutsideRemovalPlan) {
+  async function loadPreview() {
+    setReview(
+      (await preview.run<OutsideRemovalPreview>(
+        `${root}/removal-preview`,
+        "POST",
+        { collaborators: people.map((person) => person.key) },
+      )) ?? undefined,
+    );
+  }
+  async function remove(confirmation: OutsideRemovalPlan) {
     try {
-      sessionStorage.setItem(storageKey, JSON.stringify(plan));
+      sessionStorage.setItem(storageKey, JSON.stringify(confirmation));
     } catch {
       setStorageError("Unable to save this removal for recovery. Try again.");
       return;
     }
     setStorageError(undefined);
-    setReview(undefined);
-    setSubmitted(plan);
-    const result = await removal.run<OutsideRemovalImpact>(
-      `${removalPath}/removals`,
+    setPlan(confirmation);
+    const result = await mutation.run<OutsideRemovalImpact>(
+      `${root}/removals`,
       "POST",
-      plan,
+      confirmation,
     );
     if (!result) return;
     if (
-      result.collaborators !== plan.collaborators.length ||
+      result.collaborators !== confirmation.collaborators.length ||
       !Number.isSafeInteger(result.repositories) ||
       !Number.isSafeInteger(result.grants) ||
-      result.repositories <= 0 ||
+      result.repositories < 1 ||
       result.grants < Math.max(result.repositories, result.collaborators)
     ) {
       setStorageError(
@@ -127,221 +335,163 @@ export function OutsideCollaborators({
       );
       return;
     }
-    clearSubmission();
-    setSuccess(
-      `Removed ${result.grants} direct ${result.grants === 1 ? "grant" : "grants"} across ${result.repositories} ${result.repositories === 1 ? "repository" : "repositories"}.`,
-    );
-    resetList();
+    clearPlan();
+    setOpen(false);
+    onRemoved(result);
   }
+  if (!people.length && !plan) return null;
   return (
-    <section aria-labelledby="outside-collaborators" className="grid gap-4">
-      <div>
-        <h2 id="outside-collaborators" className="text-lg font-semibold">
-          Outside collaborators
-        </h2>
-        <p className="text-sm text-muted-foreground">
-          Direct repository grants for people outside the organization.
-        </p>
-      </div>
-      <form
-        role="search"
-        aria-label="Outside collaborator search"
-        className="flex flex-wrap items-end gap-2"
-        onSubmit={(event) => {
-          event.preventDefault();
-          const query = new FormData(event.currentTarget).get("q");
-          if (typeof query === "string") showPage(query.trim());
-        }}
-      >
-        <Field className="min-w-0 sm:max-w-xs">
-          <FieldLabel htmlFor="outside-collaborator-search">
-            Find outside collaborators
-          </FieldLabel>
-          <Input
-            key={search}
-            id="outside-collaborator-search"
-            name="q"
-            type="search"
-            defaultValue={search}
-            maxLength={100}
-            placeholder="Grant name or repository"
-          />
-        </Field>
-        <Button type="submit" variant="outline">
-          Search
-        </Button>
-      </form>
+    <Dialog
+      open={open}
+      onOpenChange={(value) => {
+        if (pending || (plan && !stale)) return;
+        mutation.reset();
+        preview.reset();
+        setReview(undefined);
+        setStorageError(undefined);
+        setOpen(value);
+        if (value) void loadPreview();
+        else if (plan) clearPlan();
+      }}
+    >
       <div className="flex flex-wrap items-center gap-3">
-        <Button
-          variant="outline"
-          disabled={locked || selected.size === 0}
-          onClick={() => void reviewRemoval()}
-        >
-          Remove from all repositories
-        </Button>
-        {selected.size > 0 && (
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={locked}
-            onClick={() => {
-              previewMutation.reset();
-              resetList();
-            }}
-          >
-            Clear selection ({selected.size})
+        <span className="text-sm text-muted-foreground">
+          {people.length} selected
+        </span>
+        <DialogTrigger asChild>
+          <Button variant="outline" disabled={!people.length}>
+            <UserRoundMinusIcon data-icon="inline-start" />
+            Remove from all repositories
           </Button>
-        )}
-        {selected.size === 50 && (
-          <span className="text-sm text-muted-foreground">
-            Select up to 50 collaborators per removal.
-          </span>
-        )}
+        </DialogTrigger>
       </div>
-      {success && <p role="status">{success}</p>}
-      {previewMutation.error && <p role="alert">{previewMutation.error}</p>}
-      {!!submitted && (
-        <div className="flex flex-wrap items-center gap-3 rounded-lg border p-3">
-          <p
-            role={removal.error || storageError ? "alert" : "status"}
-            className="min-w-0 flex-1 basis-52 text-sm"
-          >
-            {stale
-              ? "The grants or membership changed. Review the current list before removing access."
-              : (storageError ??
-                removal.error ??
-                (removal.pending
-                  ? "Removing direct grants…"
-                  : "Recover the result of your last removal."))}
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Remove outside collaborators</DialogTitle>
+          <DialogDescription>
+            Remove direct access for these collaborators across this
+            organization. Access through signed identity-provider groups can
+            still apply.
+          </DialogDescription>
+        </DialogHeader>
+        <ul className="max-h-48 divide-y overflow-y-auto rounded-md border">
+          {people.map((person) => (
+            <li
+              key={person.key}
+              className="flex flex-wrap items-center justify-between gap-2 px-3 py-2"
+            >
+              <span className="min-w-0 wrap-anywhere font-medium">
+                {person.name}
+                {person.profile && (
+                  <span className="ml-2 text-sm font-normal text-muted-foreground">
+                    @{person.profile.handle}
+                  </span>
+                )}
+              </span>
+              <Badge variant="secondary">
+                {person.repository_count}{" "}
+                {person.repository_count === 1 ? "repository" : "repositories"}
+              </Badge>
+            </li>
+          ))}
+        </ul>
+        {review && (
+          <p>
+            Remove {review.impact.grants} direct{" "}
+            {review.impact.grants === 1 ? "grant" : "grants"} for{" "}
+            {review.impact.collaborators}{" "}
+            {review.impact.collaborators === 1
+              ? "collaborator"
+              : "collaborators"}{" "}
+            across {review.impact.repositories}{" "}
+            {review.impact.repositories === 1 ? "repository" : "repositories"}.
           </p>
-          <Button
-            variant="outline"
-            disabled={removal.pending}
-            onClick={() => {
-              if (stale) {
-                clearSubmission();
-                resetList();
-              } else void remove(submitted);
-            }}
-          >
-            {stale ? "Reload grants" : "Retry removal"}
-          </Button>
-        </div>
-      )}
-      {review && (
-        <Dialog
-          open
-          onOpenChange={(open) => {
-            if (!open) setReview(undefined);
-          }}
-        >
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>Remove outside collaborators?</DialogTitle>
-              <DialogDescription>
-                Remove {review.impact.grants} direct{" "}
-                {review.impact.grants === 1 ? "grant" : "grants"} for{" "}
-                {review.impact.collaborators}{" "}
-                {review.impact.collaborators === 1
-                  ? "collaborator"
-                  : "collaborators"}{" "}
-                across {review.impact.repositories}{" "}
-                {review.impact.repositories === 1
-                  ? "repository"
-                  : "repositories"}
-                . Group access follows the identity provider.
-              </DialogDescription>
-            </DialogHeader>
-            <p className="wrap-anywhere text-sm">
-              {[...selected.values()].join(", ")}
-            </p>
-            <ul
-              aria-label="Affected repositories"
-              className="max-h-40 list-disc overflow-y-auto ps-5 text-sm"
+        )}
+        {review && review.repository_names.length > 0 && (
+          <p className="text-sm text-muted-foreground">
+            {review.repository_names.join(", ")}
+          </p>
+        )}
+        {plan && !review && (
+          <p>Retry the submitted removal to recover its result.</p>
+        )}
+        <MutationError
+          error={storageError || preview.error || mutation.error}
+        />
+        <DialogFooter>
+          <DialogClose asChild>
+            <Button variant="outline" disabled={pending || (!!plan && !stale)}>
+              Cancel
+            </Button>
+          </DialogClose>
+          {stale ? (
+            <Button
+              onClick={() => {
+                clearPlan();
+                setOpen(false);
+                onRefresh();
+              }}
             >
-              {review.repository_names.map((name) => (
-                <li key={name} className="wrap-anywhere">
-                  {name}
-                </li>
-              ))}
-            </ul>
-            {review.impact.repositories > review.repository_names.length && (
-              <p className="text-sm text-muted-foreground">
-                And{" "}
-                {review.impact.repositories - review.repository_names.length}{" "}
-                more.
-              </p>
-            )}
-            {storageError && <p role="alert">{storageError}</p>}
-            <DialogFooter>
-              <DialogClose asChild>
-                <Button variant="outline">Cancel</Button>
-              </DialogClose>
-              <Button
-                variant="destructive"
-                disabled={removal.pending}
-                onClick={() => void remove(review.plan)}
-              >
-                Remove outside collaborators
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
-      )}
-      <Result state={state} timingLabel="Outside collaborators">
-        {({ items, next }) =>
-          items.length ? (
-            <ul
-              className="divide-y rounded-lg border"
-              aria-label="Outside collaborator grants"
+              Reload collaborators
+            </Button>
+          ) : (
+            <Button
+              variant="destructive"
+              disabled={pending || (!review && !plan)}
+              onClick={() => {
+                const confirmation = plan ?? review?.plan;
+                if (confirmation) void remove(confirmation);
+              }}
             >
-              {items.map((item) => (
+              {mutation.pending
+                ? "Removing…"
+                : plan
+                  ? "Retry removal"
+                  : preview.pending
+                    ? "Loading preview…"
+                    : "Remove outside collaborators"}
+            </Button>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function CollaboratorRepositories({ path }: { path: string }) {
+  const [after, setAfter] = useState<string>();
+  const parameters = new URLSearchParams(after ? { after } : {});
+  const list = useRequest<OrganizationPage<OutsideCollaboratorRepository>>(
+    `${path}?${parameters}`,
+  );
+  return (
+    <div className="mt-3 grid gap-2 border-t pt-3">
+      <Result state={list} timingLabel="Collaborator repository access">
+        {({ items, next }) => (
+          <>
+            <ul aria-label="Collaborator repositories" className="grid gap-2">
+              {items.map((repo) => (
                 <li
-                  key={`${item.repository_id}:${item.name}`}
-                  className="flex flex-wrap items-center gap-3 p-4"
+                  key={repo.id}
+                  className="flex flex-wrap items-center gap-2 pl-1"
                 >
-                  <Checkbox
-                    aria-label={`Select ${item.name} from ${item.repository}`}
-                    checked={selected.has(item.collaborator)}
-                    disabled={
-                      locked ||
-                      (selected.size === 50 && !selected.has(item.collaborator))
-                    }
-                    onCheckedChange={(checked) =>
-                      select(item, checked === true)
-                    }
-                  />
-                  <div className="min-w-0 flex-1 basis-40">
-                    {item.profile ? (
-                      <Link
-                        href={`/-/users/${item.profile.id}`}
-                        className="font-semibold wrap-anywhere hover:underline"
-                        dir="auto"
-                      >
-                        {item.name}{" "}
-                        <span className="font-normal text-muted-foreground">
-                          @{item.profile.handle}
-                        </span>
-                      </Link>
-                    ) : (
-                      <p className="font-semibold wrap-anywhere" dir="auto">
-                        {item.name}
-                      </p>
-                    )}
-                    <p className="text-sm wrap-anywhere text-muted-foreground">
-                      {item.repository}
-                    </p>
-                  </div>
-                  <Badge variant="outline">
-                    {repositoryRoleLabels[item.access]}
+                  <Link
+                    className="min-w-0 flex-1 basis-24 wrap-anywhere font-medium hover:underline"
+                    href={repoHref(repo)}
+                  >
+                    {repo.name}
+                  </Link>
+                  <Badge variant="secondary">
+                    {repositoryRoleLabels[repo.access]}
                   </Badge>
-                  <Button asChild size="sm" variant="outline">
+                  <Button asChild size="sm" variant="ghost">
                     <Link
-                      href={repoHref(
-                        { owner: item.owner, name: item.repository },
-                        { view: "settings", section: "members" },
-                      )}
-                      aria-label={`Manage ${item.repository} access for ${item.name}`}
+                      href={repoHref(repo, {
+                        view: "settings",
+                        section: "members",
+                        repository_id: repo.id,
+                      })}
+                      aria-label={`Manage access to ${repo.name}`}
                     >
                       Manage access
                     </Link>
@@ -349,39 +499,28 @@ export function OutsideCollaborators({
                 </li>
               ))}
             </ul>
-          ) : (
-            <p
-              role="status"
-              className="rounded-lg border p-6 text-sm text-muted-foreground"
-            >
-              {next || after
-                ? "No outside collaborator grants on this page."
-                : "No matching outside collaborator grants."}
-            </p>
-          )
-        }
+            {next && (
+              <Button
+                variant="outline"
+                className="justify-self-start"
+                onClick={() => setAfter(next)}
+              >
+                More repositories
+              </Button>
+            )}
+          </>
+        )}
       </Result>
-      {(after || state.data?.next) && (
-        <div className="flex flex-wrap gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            disabled={!after}
-            onClick={() => showPage(search)}
-          >
-            First page
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            disabled={!state.data?.next}
-            onClick={() => showPage(search, state.data?.next)}
-          >
-            Next page
-          </Button>
-        </div>
+      {after && (
+        <Button
+          variant="ghost"
+          className="justify-self-start"
+          onClick={() => setAfter(undefined)}
+        >
+          First repository page
+        </Button>
       )}
-    </section>
+    </div>
   );
 }
 

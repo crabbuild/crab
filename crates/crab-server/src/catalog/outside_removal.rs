@@ -74,7 +74,13 @@ impl CatalogStore {
         for repo in document
             .repositories
             .iter_mut()
-            .filter(|repo| repo.owns_direct_grants(input.organization))
+            .chain(
+                document
+                    .deleted_repositories
+                    .iter_mut()
+                    .map(|entry| &mut entry.repository),
+            )
+            .filter(|repo| repo.holds_organization_grants(input.organization))
         {
             if repo
                 .members
@@ -133,11 +139,8 @@ pub(super) fn audit_digest(
     repositories: &[Uuid],
 ) -> Result<String, CatalogError> {
     let records: BTreeMap<_, _> = document
-        .repositories
-        .iter()
-        .filter(|repo| {
-            repo.owns_direct_grants(organization) && repositories.binary_search(&repo.id).is_ok()
-        })
+        .organization_grant_records(organization)
+        .filter(|repo| repositories.binary_search(&repo.id).is_ok())
         .map(|repo| Ok((repo.id, repo.membership_digest()?)))
         .collect::<Result<_, CatalogError>>()?;
     if records.len() != repositories.len() {
