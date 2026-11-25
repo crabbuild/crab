@@ -38,6 +38,7 @@ import type { PullRequest } from "./model";
 import { branch, pullIcons, pullStatus } from "./presentation";
 import { ReviewChanges, type ReviewDraft } from "./reviews/form";
 import { PendingComments, usePendingReview } from "./reviews/pending";
+import { Reviewers } from "./reviews/reviewers";
 import { PullReviewThreads } from "./reviews/threads";
 import { LinkedReviewThread } from "./reviews/thread-card";
 import { SuggestionCommit, useSuggestionBatch } from "./reviews/suggestion";
@@ -125,7 +126,7 @@ export function PullDetail({
                 ? 5_000
                 : tab === "checks"
                   ? 10_000
-                  : null,
+                  : 15_000,
         }
       : undefined,
   );
@@ -183,6 +184,9 @@ export function PullDetail({
         <Result state={pull}>{() => null}</Result>
       </section>
     );
+  const reviewRevision = `${data.version}:${data.head_oid}`;
+  const { approvals, changes_requested: changesRequested } =
+    data.merge_requirements;
   return (
     <section className="pulls-page pull-detail">
       <RequestWidget timing={pull.timing} label="Pull request">
@@ -433,7 +437,8 @@ export function PullDetail({
                     comment={comment}
                     active={tab === "conversation"}
                     refreshing={pull.loading || Boolean(pull.error)}
-                    revision={`${data.version}:${epoch}`}
+                    revision={String(epoch)}
+                    reviewRevision={reviewRevision}
                     repo={repo}
                     pull={data}
                     csrf={csrf}
@@ -450,7 +455,17 @@ export function PullDetail({
                     csrf={csrf}
                     onSaved={refresh}
                     allowIssueClosure={data.state !== "merged"}
-                    reviewerRefresh={epoch}
+                    reviewers={
+                      !publicReader && (
+                        <Reviewers
+                          repo={repo}
+                          pull={number}
+                          csrf={csrf}
+                          onSaved={refresh}
+                          revision={`${reviewRevision}:${approvals}:${changesRequested}:${data.can_manage}:${epoch}`}
+                        />
+                      )
+                    }
                   />
                 </div>
               </div>

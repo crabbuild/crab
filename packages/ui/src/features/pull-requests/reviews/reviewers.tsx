@@ -74,11 +74,13 @@ export function Reviewers({
   pull,
   csrf,
   onSaved,
+  revision,
 }: {
   repo: Repository;
   pull: number;
   csrf: string;
   onSaved: () => void;
+  revision: string;
 }) {
   const [after, setAfter] = useState<string>();
   const [open, setOpen] = useState(false);
@@ -88,6 +90,9 @@ export function Reviewers({
   const search = useRef<HTMLInputElement>(null);
   const resource = useRequest<Page>(
     endpoint(repo, `pulls/${pull}/reviewers`, { after }),
+    repo.id,
+    undefined,
+    { revision },
   );
   const mutation = useMutation(csrf, repo);
   async function save(version: number, change: Change) {

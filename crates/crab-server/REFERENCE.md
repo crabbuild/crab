@@ -5002,6 +5002,13 @@ Submit `POST .../pulls/{number}/merge` with the candidate's `method`,
 `tested_candidate_oid`, `request_id`, `version`, `base_oid`, and `head_oid`
 to publish the candidate. Retry an interrupted response with the same request.
 
+**Conversation** refreshes merge readiness while an open pull request is
+visible. New reviews, head changes, and changes to approval counts trigger
+fresh reviewer details. The latest conversation refreshes with the decision,
+while earlier activity stays in view during pagination.
+An open merge confirmation becomes unavailable when its requirements or
+captured tips change. The author can keep editing their comment draft.
+
 The **Checks** tab refreshes the open pull request’s head and queued candidate
 while the tab is visible. Head reports and candidate reports identify their
 tested commit separately. The newest check-run page refreshes more often while

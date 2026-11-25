@@ -26,6 +26,9 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
 - Open pull requests refresh required head checks and candidate progress while
   their browser view is visible. Checks stay attached to the exact head or
   candidate, and the selected run log refreshes with its recorded version.
+  Conversation refreshes merge readiness after CI passes, updates the reviewer
+  sidebar for approval or head changes, and disables outdated merge
+  confirmations while preserving the author's draft.
 - Writers can restore a missing head branch from a completed pull request.
   The panel shows the saved commit. Publication checks the current source
   repository, write grant and ref rules, and requires the branch name to be

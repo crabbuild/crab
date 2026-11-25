@@ -72,9 +72,10 @@ export function MergePanel({
   const bypassing = Boolean(confirmation?.bypass_rulesets?.length);
   const staleConfirmation =
     confirmation &&
-    (!(bypassing ? bypassMethods : pull.merge_methods).includes(
-      confirmation.method,
-    ) ||
+    ((!bypassing && !pull.can_merge) ||
+      !(bypassing ? bypassMethods : pull.merge_methods).includes(
+        confirmation.method,
+      ) ||
       confirmation.version !== pull.version ||
       confirmation.base_oid !== pull.base_oid ||
       confirmation.head_oid !== pull.head_oid ||
@@ -248,7 +249,7 @@ export function MergePanel({
       <div className="merge-summary">
         <StatusIcon size={24} />
         <div className="merge-action">
-          <strong>
+          <strong aria-live="polite">
             {pending ? (
               <>
                 <Author author={pending.author} /> started a merge using{" "}
@@ -368,7 +369,8 @@ export function MergePanel({
       </div>
       {!unavailable && (
         <div className="merge-footer">
-          {pull.can_merge || (!pending && bypassIds.length > 0) ? (
+          {pull.can_merge ||
+          (!pending && (confirmation || bypassIds.length)) ? (
             <div className="merge-controls">
               {!pending && !confirmation && (
                 <div className="merge-method-row">
@@ -484,8 +486,9 @@ export function MergePanel({
                   )}
                   {staleConfirmation && !pending && (
                     <p role="status">
-                      The merge options or branch tips changed. Cancel and
-                      review them again.
+                      {!bypassing && !pull.can_merge
+                        ? "Merge requirements are no longer met. Cancel and review the current requirements."
+                        : "The merge options or branch tips changed. Cancel and review them again."}
                     </p>
                   )}
                   <div className="merge-method-row">

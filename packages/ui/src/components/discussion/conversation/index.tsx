@@ -62,6 +62,7 @@ export function Conversation({
   href,
   csrf,
   revision,
+  liveRevision,
   active,
   children,
   onChanged,
@@ -71,6 +72,7 @@ export function Conversation({
   href: string;
   csrf: string;
   revision: string;
+  liveRevision?: string;
   active: boolean;
   onChanged?: () => void;
   children: (busy: boolean, posted: (comment: Comment) => void) => ReactNode;
@@ -92,13 +94,15 @@ export function Conversation({
         history.window.has(entryKey(entry)) && entryId(entry) === focus?.id,
     );
   useContributionFocus(focus?.id, ready);
-  const observed = useRef(revision);
+  const observed = useRef({ revision, liveRevision });
+  const { refresh, refreshLatest } = history;
   useEffect(() => {
-    if (observed.current !== revision) {
-      observed.current = revision;
-      if (active) history.refresh();
-    }
-  }, [revision, active, history.refresh]);
+    const previous = observed.current;
+    observed.current = { revision, liveRevision };
+    if (!active) return;
+    if (previous.revision !== revision) refresh();
+    else if (previous.liveRevision !== liveRevision) refreshLatest?.();
+  }, [revision, liveRevision, active, refresh, refreshLatest]);
   return (
     <RequestWidget timing={history.timing} label="Conversation">
       <section
