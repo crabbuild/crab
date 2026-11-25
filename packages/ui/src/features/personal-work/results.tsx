@@ -14,6 +14,7 @@ import type { Repository, useRequest } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 
 export type Kind = "issue" | "pull";
+export type WorkSort = "created" | "updated" | "comments" | "reactions";
 type Item = {
   repository: Pick<Repository, "id" | "owner" | "name">;
   kind: Kind;
@@ -23,10 +24,11 @@ type Item = {
   draft: boolean;
   created_at: number;
   updated_at: number;
+  sort_value: number;
 };
 export type WorkPage = { items: Item[]; next: string | null };
 
-function WorkRow({ item, showUpdated }: { item: Item; showUpdated: boolean }) {
+function WorkRow({ item, sort }: { item: Item; sort: WorkSort }) {
   const { kind } = item;
   const label =
     item.draft && item.state === "open"
@@ -54,6 +56,8 @@ function WorkRow({ item, showUpdated }: { item: Item; showUpdated: boolean }) {
       ? { view: "issues", issue: String(item.number) }
       : { view: "pulls", pull: String(item.number) };
   const { repository } = item;
+  const metric =
+    sort === "comments" ? "comment" : sort === "reactions" ? "reaction" : null;
   return (
     <li className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-x-3 px-4 py-3 sm:grid-cols-[auto_minmax(0,1fr)_auto]">
       <Icon aria-hidden="true" className="mt-1 text-muted-foreground" />
@@ -82,8 +86,17 @@ function WorkRow({ item, showUpdated }: { item: Item; showUpdated: boolean }) {
         </p>
       </div>
       <p className="col-start-2 m-0 mt-1 text-sm text-muted-foreground sm:col-start-3">
-        {label} · {showUpdated ? "Updated" : "Opened"}{" "}
-        <RelativeTime value={showUpdated ? item.updated_at : item.created_at} />
+        {label} ·{" "}
+        {metric ? (
+          `${item.sort_value} ${metric}${item.sort_value === 1 ? "" : "s"}`
+        ) : (
+          <>
+            {sort === "updated" ? "Updated" : "Opened"}{" "}
+            <RelativeTime
+              value={sort === "updated" ? item.updated_at : item.created_at}
+            />
+          </>
+        )}
       </p>
     </li>
   );
@@ -94,13 +107,13 @@ export function WorkResults({
   after,
   href,
   emptyMessage,
-  showUpdated = false,
+  sort = "created",
 }: {
   result: ReturnType<typeof useRequest<WorkPage>>;
   after?: string;
   href: (after?: string) => string;
   emptyMessage: string;
-  showUpdated?: boolean;
+  sort?: WorkSort;
 }) {
   return (
     <>
@@ -115,7 +128,7 @@ export function WorkResults({
                 {items.map((item) => (
                   <WorkRow
                     key={`${item.repository.id}:${item.kind}:${item.number}`}
-                    showUpdated={showUpdated}
+                    sort={sort}
                     item={item}
                   />
                 ))}

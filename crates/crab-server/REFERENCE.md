@@ -5350,18 +5350,23 @@ text, Boolean expressions, and discussion qualifiers as the repository lists.
 For example, `is:open label:"bug" deployment` finds open work that matches
 both the label and text. The repository scope accepts an owner namespace or
 an exact `owner/repository`. Search both types together or choose Issues or
-Pull requests, and sort by creation time or recent activity. The browser URL
-keeps the query and filters and opens each result by its type and repository
-UUID.
+Pull requests. Sort in either direction by creation time, last update, comment
+count, or reaction count. The selected count is displayed beside each match.
+The browser URL keeps the query and filters and opens each result by its type
+and repository UUID.
 
 `GET /api/discussion-search` requires a browser account, plus `q` or `scope`.
-It accepts optional `kind=issue|pull`, `sort=created|updated`, `limit` from 1
-to 50, and `after` from the previous response. It returns `items` and nullable
-`next`. Crab merges bounded pages from each readable repository's discussion
-index. The account, search parameters, and readable scope bind the cursor.
-Current repository access is checked again before results are returned. A
-changed scope returns HTTP 409. An unavailable repository index returns its
-normal preparation error so an incomplete search can be retried.
+It accepts optional `kind=issue|pull`, `sort=created|updated|comments|reactions`
+(default `created`), `direction=asc|desc` (default `desc`), `limit` from 1 to
+50, and `after` from the previous response. It returns `items` and nullable
+`next`. Each item includes `sort_value`, the selected timestamp or count.
+Crab merges bounded pages from each readable repository's discussion index.
+The account, search parameters, and readable scope bind the cursor. Current
+repository access is checked again before results are returned. A changed
+scope returns HTTP 409. For comment and reaction sorts, an index revision
+change also returns HTTP 409. Open **First page** to refresh the results.
+An unavailable repository index returns its normal preparation error so an
+incomplete search can be retried.
 
 ### Understand pagination and storage
 

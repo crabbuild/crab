@@ -113,6 +113,7 @@ test("workspace search shares its query, sort, and scope across pages", async ({
         state: "open",
         created_at: 1_700_000_000_000,
         updated_at: 1_710_000_000_000,
+        sort_value: query.has("after") ? 3 : 1,
       };
       const later = query.has("after");
       return route.fulfill({
@@ -135,16 +136,16 @@ test("workspace search shares its query, sort, and scope across pages", async ({
   await page.goto("/-/discussion-search");
   await page.getByRole("searchbox").fill("release is:open");
   await page.getByLabel("Repository scope").fill("team/service");
-  await chooseSelectOption(page.getByLabel("Sort"), "updated");
+  await chooseSelectOption(page.getByLabel("Sort"), "comments-asc");
   await page.getByRole("button", { name: "Search", exact: true }).click();
   await expect(page).toHaveURL(
-    /q=release\+is%3Aopen&scope=team%2Fservice&sort=updated/,
+    /q=release\+is%3Aopen&scope=team%2Fservice&sort=comments&direction=asc/,
   );
   await expect(
     page.getByRole("link", { name: "Release checklist" }),
   ).toHaveAttribute("href", `/team/service/issues/1?repository_id=${id}`);
   await expect(
-    page.getByText("Open · Updated", { exact: false }),
+    page.getByText("Open · 1 comment", { exact: true }),
   ).toBeVisible();
   await page.getByRole("link", { name: "Next page" }).click();
   await expect(
@@ -153,6 +154,10 @@ test("workspace search shares its query, sort, and scope across pages", async ({
   await page.reload();
   await expect(page.getByRole("searchbox")).toHaveValue("release is:open");
   await expect(page.getByLabel("Repository scope")).toHaveValue("team/service");
+  await expect(page.getByLabel("Sort")).toHaveText("Fewest comments");
+  await expect(
+    page.getByText("Draft · 3 comments", { exact: true }),
+  ).toBeVisible();
   await expect(
     page.getByRole("link", { name: "Release script" }),
   ).toBeVisible();

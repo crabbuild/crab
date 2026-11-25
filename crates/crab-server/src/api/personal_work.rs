@@ -1,4 +1,4 @@
-use std::{cmp::Reverse, collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use axum::{
     Extension, Json,
@@ -20,7 +20,7 @@ use crate::{
             SearchInput,
             collaboration::SubjectKind,
             search::index::{
-                Sort,
+                Direction, Sort,
                 work::{self, ListWorkspaceWork},
             },
         },
@@ -71,6 +71,7 @@ pub(super) struct SearchParameters {
     scope: Option<String>,
     kind: Option<SubjectKind>,
     sort: Option<Sort>,
+    direction: Option<Direction>,
     limit: Option<u8>,
     after: Option<String>,
 }
@@ -143,7 +144,7 @@ struct Row {
 #[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Position {
-    time: u64,
+    value: u64,
     number: u64,
     kind: SubjectKind,
     repository: Uuid,
@@ -218,7 +219,7 @@ async fn scope(
         BTreeMap::new()
     };
     let mut digest = blake3::Hasher::new_keyed(&server.cursor_key);
-    digest.update(b"workspace-work/v1");
+    digest.update(b"workspace-work/v2");
     digest.update(&serde_json::to_vec(&(
         account,
         request.personal_review,
@@ -303,6 +304,7 @@ pub(super) async fn search(
             search: SearchInput {
                 query,
                 sort: params.sort.unwrap_or_default(),
+                direction: params.direction.unwrap_or_default(),
                 limit: params.limit.unwrap_or(30),
                 ..Default::default()
             },
@@ -319,9 +321,7 @@ async fn respond(
     mut request: Request<'_>,
 ) -> std::result::Result<Response, Response> {
     let account = app::account(principal).map_err(IntoResponse::into_response)?;
-    if !(1..=50).contains(&request.search.limit)
-        || !matches!(request.search.sort, Sort::Created | Sort::Updated)
-    {
+    if !(1..=50).contains(&request.search.limit) || !request.search.sort.is_workspace_sort() {
         return Err(Error::Invalid("Invalid work sort or page size").into_response());
     }
     let admission = read_admission::acquire_bulk(server).map_err(|_| read_admission::busy())?;
@@ -369,11 +369,15 @@ async fn read(
                     kind: request.kind,
                     search,
                     after: position.map(|key| work::After {
-                        time: key.time,
+                        value: key.value,
                         number: key.number,
                         kind: key.kind,
-                        // A repository UUID breaks same-time, same-subject ties.
-                        inclusive: repo.id < key.repository,
+                        // The repository UUID breaks ties for the same subject key.
+                        inclusive: request
+                            .search
+                            .direction
+                            .compare(repo.id, key.repository)
+                            .is_gt(),
                     }),
                 },
             )
@@ -406,7 +410,7 @@ async fn page(
         .buffer_unordered(CONCURRENT_REPOSITORIES);
     let mut items = Vec::new();
     let limit = usize::from(request.search.limit);
-    let sort = request.search.sort;
+    let direction = request.search.direction;
     let mut filter_snapshots = BTreeMap::new();
     while let Some((repo, page)) = pages.try_next().await? {
         if let Some(snapshot) = page.filter_snapshot {
@@ -420,7 +424,12 @@ async fn page(
             },
             item,
         }));
-        items.sort_unstable_by_key(|row| Reverse((row.item.key(sort), row.repository.id)));
+        items.sort_unstable_by(|left, right| {
+            direction.compare(
+                (left.item.key(), left.repository.id),
+                (right.item.key(), right.repository.id),
+            )
+        });
         items.truncate(limit + 1);
     }
     let filter_snapshot = if filter_snapshots.is_empty() {
@@ -442,7 +451,7 @@ async fn page(
             .last()
             .map(|row| {
                 Position {
-                    time: row.item.key(sort).0,
+                    value: row.item.sort_value,
                     number: row.item.number,
                     kind: row.item.kind,
                     repository: row.repository.id,

@@ -28,12 +28,46 @@ pub(crate) enum Sort {
     Relevance,
 }
 
+impl Sort {
+    pub(crate) fn is_workspace_sort(self) -> bool {
+        matches!(
+            self,
+            Self::Created | Self::Updated | Self::Comments | Self::Reactions
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Direction {
     Asc,
     #[default]
     Desc,
+}
+
+impl Direction {
+    fn sql(self) -> &'static str {
+        match self {
+            Self::Asc => "ASC",
+            Self::Desc => "DESC",
+        }
+    }
+
+    fn seek(self, inclusive: bool) -> &'static str {
+        match (self, inclusive) {
+            (Self::Asc, false) => ">",
+            (Self::Asc, true) => ">=",
+            (Self::Desc, false) => "<",
+            (Self::Desc, true) => "<=",
+        }
+    }
+
+    pub(crate) fn compare<T: Ord>(self, left: T, right: T) -> std::cmp::Ordering {
+        match self {
+            Self::Asc => left.cmp(&right),
+            Self::Desc => right.cmp(&left),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -483,21 +517,14 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
             ))?,
     };
     let order = sort_expression(input.sort, &query.expression, &mut bindings);
-    let direction = match input.direction {
-        Direction::Asc => "ASC",
-        Direction::Desc => "DESC",
-    };
+    let direction = input.direction.sql();
     // Issues and PRs allocate numbers independently. The kind breaks equal
     // number/sort ties so crossing a page boundary cannot skip either subject.
     let seek = if let Some(cursor) = cursor {
         let key = bindings.bind(cursor.key.sql()?);
         let number = bindings.bind(integer(cursor.subject.number)?);
         let kind = bindings.bind(SqlValue::Integer(kind(cursor.subject.kind)));
-        let operator = if input.direction == Direction::Asc {
-            ">"
-        } else {
-            "<"
-        };
+        let operator = input.direction.seek(false);
         format!(
             "(sort_key {operator} {key} OR (sort_key = {key} AND (number {operator} {number} OR (number = {number} AND kind {operator} {kind}))))"
         )

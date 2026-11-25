@@ -2,11 +2,31 @@ use super::*;
 use crate::test_support::http::Harness;
 use reqwest::{Method, header};
 use serde_json::{Value, json};
+use std::cmp::Reverse;
 
 const ENDPOINT: &str = "/api/personal-work";
 const SEARCH: &str = "/api/discussion-search";
 
 async fn issue(h: &Harness, repository: &str, cookie: &str, title: &str) -> Value {
+    write(
+        h,
+        repository,
+        cookie,
+        Method::POST,
+        "issues",
+        json!({"request_id":Uuid::now_v7(),"title":title,"body":""}),
+    )
+    .await
+}
+
+async fn write(
+    h: &Harness,
+    repository: &str,
+    cookie: &str,
+    method: Method,
+    path: &str,
+    body: Value,
+) -> Value {
     let session = h.json("/api/session", cookie).await;
     let repo = h
         .server
@@ -14,12 +34,15 @@ async fn issue(h: &Harness, repository: &str, cookie: &str, title: &str) -> Valu
         .get(&("team".into(), repository.into()))
         .unwrap();
     h.http
-        .post(format!("{}/api/repos/team/{repository}/issues", h.origin))
+        .request(
+            method,
+            format!("{}/api/repos/team/{repository}/{path}", h.origin),
+        )
         .header(header::COOKIE, cookie)
         .header(header::ORIGIN, &h.origin)
         .header("x-csrf-token", session["csrf"].as_str().unwrap())
         .header("x-crab-repository-id", repo.id.to_string())
-        .json(&json!({"request_id":Uuid::now_v7(),"title":title,"body":""}))
+        .json(&body)
         .send()
         .await
         .unwrap()
@@ -239,6 +262,90 @@ async fn workspace_discussion_search_combines_types_and_rechecks_repository_scop
         json!([])
     );
     assert_eq!(get(&h, &query, "").await.status(), StatusCode::UNAUTHORIZED);
+
+    write(
+        &h,
+        "library",
+        &alice,
+        Method::POST,
+        "issues/1/comments",
+        json!({"request_id":Uuid::now_v7(),"body":"Review the checklist"}),
+    )
+    .await;
+    let mut issue_reactions = Vec::new();
+    for (repository, title) in [
+        ("private", "Release guide"),
+        ("library", "Release checklist"),
+    ] {
+        write(
+            &h,
+            repository,
+            &alice,
+            Method::PUT,
+            "reactions/issues/1",
+            json!({"kind":"heart","active":true}),
+        )
+        .await;
+        let repo = h
+            .server
+            .repositories
+            .get(&("team".into(), repository.into()))
+            .unwrap();
+        issue_reactions.push((repo.id, (title, 1)));
+    }
+    issue_reactions.sort_unstable_by_key(|(id, _)| Reverse(*id));
+    let most_reactions = [
+        issue_reactions[0].1,
+        issue_reactions[1].1,
+        ("Release pipeline", 0),
+    ];
+    let most_comments = [
+        ("Release checklist", 1),
+        ("Release pipeline", 0),
+        ("Release guide", 0),
+    ];
+    let mut comment_cursor = None;
+    for (sort, descending) in [("comments", most_comments), ("reactions", most_reactions)] {
+        for direction in ["asc", "desc"] {
+            let route = format!("{SEARCH}?q=release&sort={sort}&direction={direction}&limit=1");
+            let mut expected = descending;
+            if direction == "asc" {
+                expected.reverse();
+            }
+            let mut continuation = route.clone();
+            for (offset, (title, count)) in expected.into_iter().enumerate() {
+                let result = h.json(&continuation, &bob).await;
+                assert_eq!(result["items"].as_array().unwrap().len(), 1);
+                assert_eq!(result["items"][0]["title"], title);
+                assert_eq!(result["items"][0]["sort_value"], count);
+                if offset == 2 {
+                    assert_eq!(result["next"], Value::Null);
+                } else {
+                    let cursor = result["next"].as_str().unwrap();
+                    continuation = format!("{route}&after={cursor}");
+                    if offset == 0 && sort == "comments" && direction == "asc" {
+                        let reverse = continuation.replace("direction=asc", "direction=desc");
+                        assert_eq!(get(&h, &reverse, &bob).await.status(), StatusCode::CONFLICT);
+                        comment_cursor = Some(continuation.clone());
+                    }
+                }
+            }
+        }
+    }
+    write(
+        &h,
+        "private",
+        &alice,
+        Method::POST,
+        "issues/1/comments",
+        json!({"request_id":Uuid::now_v7(),"body":"A new comment moves this issue"}),
+    )
+    .await;
+    assert_eq!(
+        get(&h, &comment_cursor.unwrap(), &bob).await.status(),
+        StatusCode::CONFLICT
+    );
+
     revoke(&h, "library").await;
     assert_eq!(
         get(&h, &continuation.unwrap(), &bob).await.status(),
@@ -260,6 +367,15 @@ async fn browser_opens_personal_work_from_multiple_repositories() {
     let alice = h.login().await;
     issue(&h, "private", &alice, "Fix the Private docs").await;
     issue(&h, "library", &alice, "Update the Library guide").await;
+    write(
+        &h,
+        "library",
+        &alice,
+        Method::POST,
+        "issues/1/comments",
+        json!({"request_id":Uuid::now_v7(),"body":"Review the guide"}),
+    )
+    .await;
     let browser = Browser::new("my-work");
     browser.run(&["open", &h.origin]).await;
     browser.sign_in().await;
@@ -294,12 +410,28 @@ async fn browser_opens_personal_work_from_multiple_repositories() {
         .await;
     browser.run(&["wait", "#discussion-search-terms"]).await;
     browser
-        .run(&["fill", "#discussion-search-terms", "Library"])
+        .run(&["fill", "#discussion-search-terms", "is:open"])
         .await;
-    browser.run(&["press", "Enter"]).await;
+    browser
+        .choose_select("#discussion-search-sort", "comments")
+        .await;
+    browser
+        .run(&[
+            "find", "role", "button", "click", "--name", "Search", "--exact",
+        ])
+        .await;
     browser
         .run(&["wait", "--text", "Update the Library guide"])
         .await;
+    let first = browser
+        .run(&[
+            "get",
+            "text",
+            "ul[aria-label='Matching work'] > li:first-child",
+        ])
+        .await;
+    assert!(first.contains("Update the Library guide"));
+    assert!(first.contains("1 comment"));
     browser.run(&["reload"]).await;
     browser
         .run(&["wait", "--text", "Update the Library guide"])
