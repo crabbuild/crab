@@ -351,6 +351,8 @@ async fn public_visibility_grants_anonymous_code_and_discussion_reads_until_revo
     *h.provider.mode.lock().await = "outsider".into();
     let visitor = h.login().await;
     assert_eq!(h.json(&workspace, &visitor).await["items"], json!([]));
+    let check_search = format!("/api/discussion-search?q=status%3Apending&scope={owner}%2Flibrary");
+    assert_eq!(h.json(&check_search, &visitor).await["items"], json!([]));
     assert_eq!(read(&issue_path).await["can_edit"], false);
     assert!(
         read(&format!("{issue_path}/conversation")).await["items"]

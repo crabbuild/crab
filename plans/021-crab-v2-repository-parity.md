@@ -219,6 +219,10 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
   permissions remain open.
 - Repository and workspace discussion search support exact target branch and
   source branch prefix filters. Repository search suggests both qualifiers.
+- Repository and workspace discussion search filter pending, successful, and
+  failed checks using the same exact-commit totals shown in PR lists. The
+  filter includes live fork heads and completed merges. CI and source changes
+  invalidate continuation cursors.
 - CODEOWNERS evaluates the base-commit policy against the merge-base diff.
   The UI shows owner review coverage, and branch protection rechecks required
   approvals before merge publication. Ready PR creation and transitions out

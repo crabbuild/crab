@@ -32,6 +32,8 @@ pub(crate) struct Rollup {
 pub(crate) struct Input {
     pub heads: Vec<Head>,
     pub source_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_revision: Option<u64>,
 }
 pub(crate) struct GetRollups;
 impl Read for GetRollups {
@@ -57,6 +59,11 @@ impl Read for GetRollups {
             ));
         }
         search::index::ensure_ready(context)?;
+        if let Some(expected) = input.check_revision {
+            if summary::revision(context)? != expected {
+                return Ok(None);
+            }
+        }
         let mut commits = BTreeMap::<String, Checks>::new();
         let mut items = Vec::with_capacity(input.heads.len());
         let epoch = input
@@ -86,11 +93,14 @@ impl Read for GetRollups {
             // Filtered lists retain the search's immutable ref snapshot. A later
             // Git lookup could display rollups that no longer satisfy the filter.
             let selected = if let Some(epoch) = epoch {
-                let rows=context.query("SELECT lower(hex(r.target_oid)) FROM discussion_index_pull_sources s JOIN git_projection_refs r ON r.name=s.head_ref AND r.epoch_id=? WHERE s.document=?", &[integer(epoch)?,integer(head.number*2+1)?])?;
-                rows.rows
-                    .first()
-                    .map(|row| result_text(row, 0))
-                    .transpose()?
+                let rows=context.query("SELECT CASE WHEN instr(s.head_ref,X'3a')=37 THEN ? ELSE NULLIF(lower(hex(r.target_oid)),'') END
+                    FROM discussion_index_pull_sources s LEFT JOIN git_projection_refs r ON r.name=s.head_ref AND r.epoch_id=? WHERE s.document=?",
+                    &[head.oid.map_or(SqlValue::Null,SqlValue::Text),integer(epoch)?,integer(head.number*2+1)?])?;
+                match rows.rows.first().and_then(|row| row.first()) {
+                    Some(SqlValue::Text(oid)) => Some(oid.clone()),
+                    Some(SqlValue::Null) | None => None,
+                    _ => return Err(crate::cells::Error::Invalid("Pull rollup head is invalid")),
+                }
             } else {
                 head.oid
             };

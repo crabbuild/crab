@@ -13,6 +13,7 @@ use axum::{
 use std::sync::Arc;
 mod assignees;
 mod authors;
+mod check_status;
 mod composer;
 pub(super) mod issue_types;
 mod people;
@@ -25,7 +26,6 @@ pub(super) async fn resolve_people(
     repo: &crate::repository::Repository,
     input: &mut crate::cells::repository::SearchInput,
 ) -> Result<Option<review_teams::Bound>> {
-    input.public_reader = principal.is_public_reader(repo.id);
     bind_people(server, principal, input).await?;
     bind_repository(server, principal, repo, input).await
 }
@@ -45,7 +45,22 @@ pub(super) async fn bind_repository(
     repo: &crate::repository::Repository,
     input: &mut crate::cells::repository::SearchInput,
 ) -> Result<Option<review_teams::Bound>> {
-    reviews::bind_source(server, principal, repo, input).await?;
+    use crate::cells::repository::search::Query;
+    input.public_reader = principal.is_public_reader(repo.id);
+    let query = Query::parse(input.query.as_deref()).map_err(app::Error::Invalid)?;
+    if (query.needs_review_source() || query.uses_check_status())
+        && principal.is_public_reader(repo.id)
+    {
+        return Err(app::Error::Invalid(
+            "Review and check filters require repository access",
+        ));
+    }
+    if query.needs_review_source() {
+        reviews::bind_source(server, principal, repo, input).await?;
+    }
+    if query.uses_check_status() {
+        check_status::bind(server, repo, input).await?;
+    }
     review_teams::bind(server, principal, repo, input).await
 }
 

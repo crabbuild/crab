@@ -500,7 +500,7 @@ use storage::{
     pull_child_digest, review_from_row, update_pull_row,
 };
 
-use operations::validate_oid;
+pub(super) use operations::validate_oid;
 
 pub(super) mod review_threads;
 

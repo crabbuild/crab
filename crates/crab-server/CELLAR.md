@@ -752,6 +752,8 @@ on existing repositories. A ready format-16 repository keeps its discussion
 rows and backfills summaries in bounded commit batches. CI reports can still
 commit while the backfill runs. Fresh reports and their summary commit together,
 including reports whose commit sorts before the backfill cursor.
+The summary revision advances when totals change and binds check-status search
+continuations to their CI results.
 
 ## Team review search preparation
 

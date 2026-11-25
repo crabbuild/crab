@@ -4704,6 +4704,24 @@ ledgers. Transport receipts retain their normal bounded expiry. Serving never
 installs this relation. Upgrade all peers and embedded UI together
 for the changed private search/rollup input contract.
 
+### Pull request check status filters
+
+Repository pull request and discussion lists, and workspace discussion search,
+accept `status:pending`, `status:success`, and `status:failure` in ordinary search
+expressions. The repository search box suggests each value. Failure takes
+precedence over pending. A known head with no reports counts as pending.
+Successful, neutral, and skipped reports count as completed without failure.
+An unmerged PR whose branch disappeared has no current result. Merged PRs
+retain the result of their recorded source commit.
+
+The filter and list rollup use the same per-commit CI counts. Local heads bind
+to the verified Git ref projection. Private fork branches are read from one
+pinned ref view per upstream-authorized fork. Fork lookups are concurrent and
+the captured head map is limited to 1 MiB by the Cell request budget. An
+oversized snapshot returns a request error.
+Changes to the captured heads or CI summaries invalidate page continuations.
+Workspace status search includes repositories with an active repository grant.
+
 ### Dismiss a pull request review
 
 PUT `/api/repos/{owner}/{name}/pulls/{number}/reviews/{review}/dismissals`

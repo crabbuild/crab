@@ -147,6 +147,8 @@ struct Position {
     number: u64,
     kind: SubjectKind,
     repository: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    check_snapshot: Option<[u8; 32]>,
 }
 
 impl Position {
@@ -176,7 +178,7 @@ impl Position {
 }
 
 struct Scope {
-    repositories: Vec<Arc<Repository>>,
+    repositories: Vec<(Arc<Repository>, Principal)>,
     teams: BTreeMap<Uuid, Vec<Uuid>>,
     key: [u8; 32],
 }
@@ -187,21 +189,25 @@ async fn scope(
     account: &IdentityKey,
     request: &Request<'_>,
 ) -> Result<Scope> {
+    let query = crate::cells::repository::search::Query::parse(request.search.query.as_deref())
+        .map_err(Error::Invalid)?;
+    let needs_member = query.uses_check_status() || query.needs_review_source();
     let mut repositories: Vec<_> = catalog::visible_matching(server, principal, None, |repo| {
         request.selection.includes(repo)
     })
     .await?
     .into_iter()
-    .map(|row| row.repository)
+    .filter(|row| !needs_member || !row.principal.is_public_reader(row.repository.id))
+    .map(|row| (row.repository, row.principal))
     .collect();
-    repositories.sort_unstable_by_key(|repo| repo.id);
+    repositories.sort_unstable_by_key(|(repo, _)| repo.id);
     let teams = if request.personal_review {
         access::organization_grants(
             server,
             principal,
             repositories
                 .iter()
-                .filter_map(|repo| repo.organization.map(|id| (id, true)))
+                .filter_map(|(repo, _)| repo.organization.map(|id| (id, true)))
                 .collect(),
         )
         .await?
@@ -221,8 +227,9 @@ async fn scope(
         &request.search,
         &teams,
     ))?);
-    for repo in &repositories {
+    for (repo, reader) in &repositories {
         digest.update(repo.id.as_bytes());
+        digest.update(&[u8::from(reader.is_public_reader(repo.id))]);
         digest.update(&repo.ownership_epoch.to_le_bytes());
         digest.update(repo.config.owner.as_bytes());
         digest.update(b"\0");
@@ -339,7 +346,7 @@ async fn read(
     scope: &Scope,
     repo: &Repository,
     position: Option<Position>,
-) -> Result<Vec<work::Item>> {
+) -> Result<work::Page> {
     let cell = app::repository_cell(server, repo)?;
     let mut search = request.search.clone();
     let teams = if request.personal_review {
@@ -392,16 +399,20 @@ async fn page(
         .transpose()?;
     let snapshot = &initial;
     let mut pages = stream::iter(initial.repositories.iter().cloned())
-        .map(|repo: Arc<Repository>| async move {
-            let items = read(server, principal, request, snapshot, &repo, position).await?;
+        .map(|(repo, reader): (Arc<Repository>, Principal)| async move {
+            let items = read(server, &reader, request, snapshot, &repo, position).await?;
             Ok::<_, Error>((repo, items))
         })
         .buffer_unordered(CONCURRENT_REPOSITORIES);
     let mut items = Vec::new();
     let limit = usize::from(request.search.limit);
     let sort = request.search.sort;
-    while let Some((repo, rows)) = pages.try_next().await? {
-        items.extend(rows.into_iter().map(|item| Row {
+    let mut check_snapshots = BTreeMap::new();
+    while let Some((repo, page)) = pages.try_next().await? {
+        if let Some(snapshot) = page.check_snapshot {
+            check_snapshots.insert(repo.id, snapshot);
+        }
+        items.extend(page.items.into_iter().map(|item| Row {
             repository: RepositoryLink {
                 id: repo.id,
                 owner: repo.config.owner.clone(),
@@ -411,6 +422,14 @@ async fn page(
         }));
         items.sort_unstable_by_key(|row| Reverse((row.item.key(sort), row.repository.id)));
         items.truncate(limit + 1);
+    }
+    let check_snapshot = if check_snapshots.is_empty() {
+        None
+    } else {
+        Some(*blake3::hash(&serde_json::to_vec(&check_snapshots)?).as_bytes())
+    };
+    if position.is_some_and(|position| position.check_snapshot != check_snapshot) {
+        return Err(Error::PageChanged);
     }
     let current = scope(server, principal, account, request).await?;
     app::account(principal)?;
@@ -427,6 +446,7 @@ async fn page(
                     number: row.item.number,
                     kind: row.item.kind,
                     repository: row.repository.id,
+                    check_snapshot,
                 }
                 .encode(&initial.key)
             })

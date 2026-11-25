@@ -6,3 +6,10 @@ CREATE TABLE IF NOT EXISTS repository_check_rollups (
     pending INTEGER NOT NULL CHECK (pending >= 0),
     failed INTEGER NOT NULL CHECK (failed >= 0)
 ) STRICT, WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS repository_check_rollup_revision (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    revision INTEGER NOT NULL CHECK (revision BETWEEN 0 AND 9007199254740991)
+) STRICT;
+
+INSERT OR IGNORE INTO repository_check_rollup_revision(singleton, revision) VALUES (1, 0);

@@ -119,7 +119,7 @@ pub(super) async fn head_up_to_date(
     head_contains_base(&view, &pull.head_ref, base_oid).await
 }
 
-pub(super) fn fork_repository(
+pub(in crate::api) fn fork_repository(
     server: &Server,
     upstream: &Repository,
     fork: Uuid,

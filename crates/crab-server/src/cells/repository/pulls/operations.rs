@@ -527,7 +527,7 @@ pub(super) fn validate_ref(value: &str) -> crate::cells::Result<()> {
     Ok(())
 }
 
-pub(super) fn validate_oid(value: &str) -> crate::cells::Result<()> {
+pub(in crate::cells::repository) fn validate_oid(value: &str) -> crate::cells::Result<()> {
     if value.len() != 40
         || !value
             .bytes()

@@ -34,6 +34,13 @@ pub(crate) struct Item {
     pub updated_at: u64,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Page {
+    pub items: Vec<Item>,
+    pub check_snapshot: Option<[u8; 32]>,
+}
+
 impl Item {
     pub(crate) fn key(&self, sort: Sort) -> (u64, u64, bool) {
         let time = if sort == Sort::Updated {
@@ -51,7 +58,7 @@ impl Read for ListWorkspaceWork {
     const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 455;
     type Input = Input;
-    type Output = Vec<Item>;
+    type Output = Page;
 
     fn execute(context: &mut Transaction<'_>, input: Input) -> crate::cells::Result<Self::Output> {
         input
@@ -71,6 +78,7 @@ impl Read for ListWorkspaceWork {
             query,
             archived,
             review,
+            checks,
             ..
         } = criteria(context, &input.search, input.kind)?;
         let mut items = Vec::new();
@@ -82,6 +90,7 @@ impl Read for ListWorkspaceWork {
             let mut bindings = Bindings::new(
                 &input.search,
                 review.as_ref(),
+                checks.as_ref(),
                 archived.unwrap_or(false),
                 context.now_ms(),
             )?;
@@ -108,12 +117,13 @@ impl Read for ListWorkspaceWork {
             };
             let rows = context.query(
                 &format!(
-                    "SELECT work.number, item.title, work.state, work.draft,
+                    "{} SELECT work.number, item.title, work.state, work.draft,
                         work.created_at_ms, work.updated_at_ms
                      FROM (SELECT d.number, d.state, d.draft, d.created_at_ms, d.updated_at_ms
-                           FROM discussion_index d WHERE {by_kind} AND ({predicate}) AND {boundary}
+                           FROM discussion_index d {} WHERE {by_kind} AND ({predicate}) AND {boundary}
                            ORDER BY {column} DESC, d.number DESC LIMIT {limit}) work
-                     JOIN {table} item ON item.number = work.number"
+                     JOIN {table} item ON item.number = work.number",
+                    bindings.check_cte, bindings.check_joins
                 ),
                 &bindings.values,
             )?;
@@ -137,6 +147,15 @@ impl Read for ListWorkspaceWork {
         }
         items.sort_unstable_by_key(|item| Reverse(item.key(input.search.sort)));
         items.truncate(usize::from(input.search.limit) + 1);
-        Ok(items)
+        let check_snapshot = checks
+            .map(|checks| {
+                serde_json::to_vec(&(&input.search.check_context, checks))
+                    .map(|data| *blake3::hash(&data).as_bytes())
+            })
+            .transpose()?;
+        Ok(Page {
+            items,
+            check_snapshot,
+        })
     }
 }

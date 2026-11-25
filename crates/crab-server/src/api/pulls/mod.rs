@@ -37,7 +37,7 @@ pub(crate) use candidate::authorize_merge_candidate;
 mod codeowners;
 pub(crate) use branch_update::authorize_branch_update;
 pub(super) mod comments;
-mod git;
+pub(super) mod git;
 mod merged_comparison;
 pub(super) use git::review_head;
 mod merge;
@@ -855,6 +855,7 @@ async fn list(
         .review_context
         .as_ref()
         .and_then(|value| value.source_token.clone());
+    let check_context = input.check_context.clone();
     let page = app::query_output(
         routed
             .client
@@ -864,7 +865,14 @@ async fn list(
     let rollups = if principal.is_public_reader(repo.id) {
         Default::default()
     } else {
-        rollups::load(&server, repo, review_source.as_deref(), page.items.iter()).await?
+        rollups::load(
+            &server,
+            repo,
+            review_source.as_deref(),
+            check_context.as_ref().zip(page.check_revision),
+            page.items.iter(),
+        )
+        .await?
     };
     let authors = super::profiles::attribution::Authors::load(
         &server,
@@ -880,6 +888,10 @@ async fn list(
         page.items.iter().flat_map(|pull| pull.assignees.iter()),
     )
     .await?;
+    // Search counts and rows must have the same visibility at publication.
+    if assignees.principal.is_public_reader(repo.id) != principal.is_public_reader(repo.id) {
+        return Err(Error::PageChanged);
+    }
     let pulls = &page.items;
     let items = pulls
         .iter()

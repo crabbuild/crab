@@ -64,6 +64,7 @@ async fn page(cell: &RepositoryCell, oid: Option<&str>) -> Rollup {
                     oid: oid.map(str::to_owned),
                 }],
                 source_token: None,
+                check_revision: None,
             },
         )
         .await
@@ -209,7 +210,9 @@ impl Mutation for BeforeCommitSummaries {
     type Output = ();
 
     fn execute(context: &mut Transaction<'_>, (): ()) -> crate::cells::Result<MutationResult<()>> {
-        context.install_schema("DROP TABLE repository_check_rollups;")?;
+        context.install_schema(
+            "DROP TABLE repository_check_rollups; DROP TABLE repository_check_rollup_revision;",
+        )?;
         context.delete_document("ci/v1/check-rollups-installed")?;
         let mut state: serde_json::Value = context.document("discussion-search/v1/state")?.unwrap();
         state["format"] = serde_json::json!(16);
@@ -357,6 +360,7 @@ async fn decisions_and_request_counters_follow_fulfillment_cancellation_and_sour
                     oid: Some("b".repeat(40)),
                 }],
                 source_token: None,
+                check_revision: None,
             },
         )
         .await
@@ -444,7 +448,8 @@ async fn format_ten_preparation_rebuilds_request_counts_and_is_repeatable_withou
                                 version: before.as_ref().unwrap().version,
                                 oid: Some("b".repeat(40))
                             }],
-                            source_token: None
+                            source_token: None,
+                            check_revision: None,
                         }
                     )
                     .await

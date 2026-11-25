@@ -49,6 +49,19 @@ pub(in crate::cells::repository) fn read(
     })
 }
 
+pub(in crate::cells::repository) fn revision(
+    context: &Transaction<'_>,
+) -> crate::cells::Result<u64> {
+    let rows = context.query(
+        "SELECT revision FROM repository_check_rollup_revision WHERE singleton=1",
+        &[],
+    )?;
+    let row = rows.rows.first().ok_or(crate::cells::Error::Invalid(
+        "Check rollup revision is missing",
+    ))?;
+    result_u64_from_row(row, 0)
+}
+
 pub(in crate::cells::repository) fn refresh(
     context: &mut Transaction<'_>,
     oid: &str,
@@ -97,10 +110,12 @@ pub(in crate::cells::repository) fn backfill(
 
 fn write(context: &mut Transaction<'_>, oid: &str) -> crate::cells::Result<()> {
     let counts = reports(context, oid)?;
-    context.query(
+    let result = context.query(
         "INSERT INTO repository_check_rollups(oid, success, neutral, skipped, pending, failed)
          VALUES (?,?,?,?,?,?) ON CONFLICT(oid) DO UPDATE SET success=excluded.success,
-         neutral=excluded.neutral, skipped=excluded.skipped, pending=excluded.pending, failed=excluded.failed",
+         neutral=excluded.neutral, skipped=excluded.skipped, pending=excluded.pending, failed=excluded.failed
+         WHERE (success, neutral, skipped, pending, failed) <>
+               (excluded.success, excluded.neutral, excluded.skipped, excluded.pending, excluded.failed)",
         &[
             SqlValue::Text(oid.into()),
             integer(counts.success)?,
@@ -110,6 +125,12 @@ fn write(context: &mut Transaction<'_>, oid: &str) -> crate::cells::Result<()> {
             integer(counts.failed)?,
         ],
     )?;
+    if result.rows_affected != 0 {
+        context.query(
+            "UPDATE repository_check_rollup_revision SET revision=revision+1 WHERE singleton=1",
+            &[],
+        )?;
+    }
     Ok(())
 }
 

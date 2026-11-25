@@ -307,6 +307,7 @@ async fn source_changes_invalidate_cursors_and_rollups_retain_the_filtered_snaps
                 oid: Some(c.clone()),
             }],
             source_token: Some(first.clone()),
+            check_revision: None,
         },
     )
     .await
@@ -539,6 +540,7 @@ async fn merged_source_heads_survive_branch_deletion_and_explicit_bounded_prepar
                 oid: None,
             }],
             source_token: Some(token),
+            check_revision: None,
         },
     )
     .await

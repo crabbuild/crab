@@ -105,7 +105,7 @@ pub(crate) fn ensure_ready(context: &Transaction<'_>) -> crate::cells::Result<Uu
     Ok(state.generation)
 }
 
-fn revision(context: &Transaction<'_>) -> crate::cells::Result<u64> {
+pub(super) fn revision(context: &Transaction<'_>) -> crate::cells::Result<u64> {
     let rows = context.sql(&SqlBatch {
         statements: vec![statement(
             "SELECT revision FROM discussion_index_revision WHERE singleton = 1",

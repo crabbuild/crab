@@ -440,6 +440,9 @@ pub(in crate::cells) fn dispatch_read(
         search::reviews::status::GetSourceState::ID => {
             invoke_read::<search::reviews::status::GetSourceState>(context, input)
         }
+        search::check_status::ListForkRefs::ID => {
+            invoke_read::<search::check_status::ListForkRefs>(context, input)
+        }
         review_dismissals::GetReviewState::ID => {
             invoke_read::<review_dismissals::GetReviewState>(context, input)
         }

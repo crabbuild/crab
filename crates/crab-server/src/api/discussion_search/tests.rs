@@ -2,9 +2,11 @@ use crate::test_support::http::Harness;
 use axum::http::{StatusCode, header};
 use serde_json::{Value, json};
 
+mod check_status;
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Chromium and the built embedded UI"]
-async fn browser_filters_pull_requests_by_target_and_source_branches() {
+async fn browser_filters_pull_requests_by_branch_and_check_status() {
     use crate::test_support::{git, http::browser::Browser};
     use reqwest::Method;
 
@@ -28,7 +30,7 @@ async fn browser_filters_pull_requests_by_target_and_source_branches() {
     remote.set_password(token["token"].as_str()).unwrap();
     let checkout = tempfile::tempdir().unwrap();
     let path = checkout.path();
-    git::push_review_branches(path, remote.as_str()).await;
+    let head = git::push_review_branches(path, remote.as_str()).await;
     git::success(
         path,
         &[
@@ -56,6 +58,22 @@ async fn browser_filters_pull_requests_by_target_and_source_branches() {
         .error_for_status()
         .unwrap();
     }
+    h.write(
+        Method::POST,
+        &format!("/api/repos/team/private/statuses/{head}"),
+        &alice,
+        json!({"request_id":uuid::Uuid::now_v7(),"context":"ci/build","state":"success"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    check_status::ready_search(
+        &h,
+        &alice,
+        "/api/repos/team/private/pulls",
+        "status:success",
+    )
+    .await;
 
     let browser = Browser::new("branch-filter");
     browser
@@ -80,10 +98,19 @@ async fn browser_filters_pull_requests_by_target_and_source_branches() {
         "is:open base:"
     );
     browser
-        .run(&["type", search, "release/2.0 head:backport/"])
+        .run(&[
+            "fill",
+            search,
+            "is:open base:release/2.0 head:backport/ status:su",
+        ])
         .await;
+    browser
+        .run(&["wait", "--text", "Checks completed without failure"])
+        .await;
+    browser.run(&["press", "ArrowDown"]).await;
     browser.run(&["press", "Enter"]).await;
-    let filtered = r#"new URL(location.href).searchParams.get('q') === 'is:open base:release/2.0 head:backport/' &&
+    browser.run(&["press", "Enter"]).await;
+    let filtered = r#"new URL(location.href).searchParams.get('q') === 'is:open base:release/2.0 head:backport/ status:success' &&
         document.querySelector('.issue-list a[href="/team/private/pull/2"]') !== null &&
         document.querySelector('.issue-list a[href="/team/private/pull/1"]') === null &&
         document.querySelector('nav[aria-label="Pull request state"] .discussion-state-count')?.textContent === '1'"#;

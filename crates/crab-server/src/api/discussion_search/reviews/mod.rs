@@ -1,7 +1,6 @@
 use crate::{
     app::{self, Result},
     auth::Principal,
-    cells::repository::search::Query,
     server::Server,
 };
 use axum::{
@@ -18,23 +17,39 @@ pub(super) async fn bind_source(
     repo: &crate::repository::Repository,
     input: &mut crate::cells::repository::SearchInput,
 ) -> Result<()> {
-    use crate::cells::repository::search::reviews::status::{Context, GetSourceState};
-    let query = Query::parse(input.query.as_deref()).map_err(app::Error::Invalid)?;
-    if !query.needs_review_source() {
-        return Ok(());
-    }
-    if principal.is_public_reader(repo.id) {
-        return Err(app::Error::Invalid(
-            "Review and check filters require repository access",
-        ));
-    }
+    use crate::cells::repository::search::reviews::status::Context;
+    let (source_token, default_ref) = live_source(server, repo).await?;
+    input.review_context = Some(Context {
+        source_token,
+        default_ref,
+        inherited_rulesets: crate::repository::settings::inherited_rulesets(server, repo).await?,
+        reviewers: app::membership(server, principal, repo)
+            .await?
+            .merge_reviewers(server)
+            .await?,
+        configured_rules: repo
+            .config
+            .protected_branches
+            .iter()
+            .cloned()
+            .map(crate::repository::settings::protection_record)
+            .collect(),
+    });
+    Ok(())
+}
+
+pub(super) async fn live_source(
+    server: &Server,
+    repo: &crate::repository::Repository,
+) -> Result<(Option<String>, String)> {
+    use crate::cells::repository::search::reviews::status::GetSourceState;
     let cell = app::repository_cell(server, repo)?;
     let state = app::query_output(
         cell.client
             .query::<GetSourceState>(&cell.target, None, ())
             .await,
     )?;
-    let (source_token, default_ref) = if let Some(state) = state {
+    Ok(if let Some(state) = state {
         let source =
             crate::repository::projection::current_source(repo, server, &server.cancellation)
                 .await?;
@@ -52,25 +67,7 @@ pub(super) async fn bind_source(
         )
     } else {
         (None, String::new())
-    };
-    input.review_context = Some(Context {
-        source_token,
-        default_ref,
-        inherited_rulesets: crate::repository::settings::inherited_rulesets(server, repo).await?,
-
-        reviewers: app::membership(server, principal, repo)
-            .await?
-            .merge_reviewers(server)
-            .await?,
-        configured_rules: repo
-            .config
-            .protected_branches
-            .iter()
-            .cloned()
-            .map(crate::repository::settings::protection_record)
-            .collect(),
-    });
-    Ok(())
+    })
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -85,7 +82,8 @@ pub(super) async fn menu(
     QueryParameters(input): QueryParameters<MenuInput>,
 ) -> Result<Json<crate::cells::repository::search::reviews::status::Menu>> {
     let repo = app::repository(&server, &principal, &key)?;
-    let query = Query::parse(input.query.as_deref()).map_err(app::Error::Invalid)?;
+    let query = crate::cells::repository::search::Query::parse(input.query.as_deref())
+        .map_err(app::Error::Invalid)?;
     let menu = query.review_menu();
     app::membership(&server, &principal, &repo).await?;
     Ok(Json(menu))

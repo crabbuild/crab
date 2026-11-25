@@ -132,6 +132,7 @@ async fn list(
         .review_context
         .as_ref()
         .and_then(|value| value.source_token.clone());
+    let check_context = input.check_context.clone();
     let page = crate::app::query_output(
         routed
             .client
@@ -145,6 +146,7 @@ async fn list(
             &server,
             &repo,
             review_source.as_deref(),
+            check_context.as_ref().zip(page.check_revision),
             page.items.iter().filter_map(|item| match item {
                 DiscussionSummary::Pull(pull) => Some(pull),
                 DiscussionSummary::Issue(_) => None,
@@ -184,6 +186,10 @@ async fn list(
         }),
     )
     .await?;
+    // Match counts can disclose check and fork data even when rows are redacted.
+    if assignees.principal.is_public_reader(repo.id) != principal.is_public_reader(repo.id) {
+        return Err(Error::PageChanged);
+    }
     let items = page
         .items
         .iter()
