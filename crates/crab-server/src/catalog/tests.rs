@@ -196,7 +196,7 @@ async fn pending_audit_survives_crash_and_later_mutation_keeps_chain() {
         .await
         .unwrap();
     let current: MembershipAuditEvent = serde_json::from_slice(&body).unwrap();
-    assert_eq!(current.repository_id, record.id);
+    assert_eq!(current.repository_id, Some(record.id));
     let previous = current.previous.unwrap();
     let (body, _) = catalog
         .root
@@ -821,10 +821,14 @@ async fn organization_audit_retains_each_side_of_a_transfer_and_survives_root_re
         .await
         .unwrap();
     assert_eq!(
-        (outgoing.action, outgoing.name.as_str(), outgoing.previous),
+        (
+            outgoing.action,
+            outgoing.repository.as_ref().map(|(_, name)| name.as_str()),
+            outgoing.previous
+        ),
         (
             audit::Action::TransferredOut,
-            "project",
+            Some("project"),
             Some(former_history)
         )
     );
@@ -833,8 +837,16 @@ async fn organization_audit_retains_each_side_of_a_transfer_and_survives_root_re
         .await
         .unwrap();
     assert_eq!(
-        (incoming.action, incoming.name.as_str(), incoming.previous),
-        (audit::Action::TransferredIn, "renamed-on-transfer", None)
+        (
+            incoming.action,
+            incoming.repository.as_ref().map(|(_, name)| name.as_str()),
+            incoming.previous
+        ),
+        (
+            audit::Action::TransferredIn,
+            Some("renamed-on-transfer"),
+            None
+        )
     );
     let old = restored
         .organization_audit_entry(&snapshot, former, former_history)

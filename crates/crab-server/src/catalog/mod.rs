@@ -1,4 +1,6 @@
 pub(crate) mod audit;
+pub(crate) mod collaborators;
+pub(crate) mod conversion;
 pub(crate) mod deletion;
 pub(crate) mod description;
 pub(crate) mod forking;
@@ -145,6 +147,8 @@ pub struct CatalogDocument {
     organization_audit_heads: BTreeMap<Uuid, audit::Position>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_membership_audit: Option<MembershipAuditEvent>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) pending_conversions: BTreeMap<Uuid, crate::cells::organization::Conversion>,
 }
 
 /// Revision-bound replacement of direct members and OIDC group grants.
@@ -190,7 +194,8 @@ pub struct MembershipSnapshot {
 #[serde(deny_unknown_fields)]
 pub struct MembershipAuditEvent {
     pub id: Uuid,
-    pub repository_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_id: Option<Uuid>,
     pub actor: MembershipActor,
     pub previous_members_digest: String,
     pub new_members_digest: String,
@@ -200,6 +205,8 @@ pub struct MembershipAuditEvent {
     pub previous: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     organizations: Vec<audit::Scope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    outside_grants: Option<audit::OutsideGrantChange>,
 }
 
 impl Default for CatalogDocument {
@@ -212,6 +219,7 @@ impl Default for CatalogDocument {
             membership_audit_head: None,
             organization_audit_heads: BTreeMap::new(),
             pending_membership_audit: None,
+            pending_conversions: BTreeMap::new(),
         }
     }
 }
@@ -232,6 +240,10 @@ impl CatalogDocument {
     fn validate(&self, root: &StorageRoot) -> Result<(), CatalogError> {
         if self.schema_version != SCHEMA_VERSION
             || self.repositories.len() + self.deleted_repositories.len() > MAX_REPOSITORIES
+            || self
+                .pending_conversions
+                .iter()
+                .any(|(organization, pending)| organization.is_nil() || !pending.valid())
         {
             return Err(CatalogError::Invalid(
                 "unsupported schema or repository count",
@@ -245,16 +257,7 @@ impl CatalogDocument {
             {
                 return Err(CatalogError::Invalid("membership audit event is invalid"));
             }
-            let record = self
-                .repositories
-                .iter()
-                .find(|record| record.id == event.repository_id)
-                .or_else(|| {
-                    self.deleted_repository(event.repository_id)
-                        .map(|deleted| &deleted.repository)
-                })
-                .ok_or(CatalogError::Invalid("audit repository is missing"))?;
-            if record.membership_digest()? != event.new_members_digest {
+            if event.digest(self)? != event.new_members_digest {
                 return Err(CatalogError::Invalid(
                     "membership audit digest does not match",
                 ));
@@ -910,7 +913,8 @@ impl CatalogStore {
             .ok_or(CatalogError::Invalid("catalog version overflowed"))?;
         document.queue_membership_audit(MembershipAuditEvent {
             id: Uuid::now_v7(),
-            repository_id: updated.id,
+            outside_grants: None,
+            repository_id: Some(updated.id),
             actor,
             previous_members_digest: previous_digest,
             new_members_digest: new_digest,
@@ -1107,7 +1111,8 @@ impl CatalogStore {
             if !record.members.is_empty() || record.organization.is_some() {
                 document.queue_membership_audit(MembershipAuditEvent {
                     id: Uuid::now_v7(),
-                    repository_id: record.id,
+                    outside_grants: None,
+                    repository_id: Some(record.id),
                     actor: match &mode {
                         InsertMode::Reserved(actor) => actor.clone(),
                         _ => MembershipActor {

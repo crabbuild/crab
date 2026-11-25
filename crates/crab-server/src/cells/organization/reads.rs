@@ -183,6 +183,40 @@ impl Read for FindMembers {
     }
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MemberBatch {
+    pub actor: Uuid,
+    pub version: u64,
+    pub candidates: Vec<Uuid>,
+}
+
+pub(crate) struct ActiveMembers;
+impl Read for ActiveMembers {
+    const CLASS: &'static str = CLASS;
+    const ID: u32 = 91;
+    type Input = MemberBatch;
+    type Output = Option<Vec<Uuid>>;
+
+    fn execute(context: &mut Transaction<'_>, input: MemberBatch) -> Result<Self::Output> {
+        if input.candidates.len() > 100 {
+            return Err(Error::Invalid(
+                "Organization member checks support at most 100 actors",
+            ));
+        }
+        if !record(context)?.is_some_and(|organization| organization.version == input.version) {
+            return Ok(None);
+        }
+        let mut active = Vec::new();
+        for id in input.candidates {
+            if member(context, id)?.is_some_and(|entry| entry.active) {
+                active.push(id);
+            }
+        }
+        Ok(Some(active))
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ActivityQuery {

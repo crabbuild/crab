@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
+use tokio_util::sync::CancellationToken;
 
 use axum::{
     Extension, Json, Router,
@@ -21,11 +22,14 @@ use crate::{
             GetOrganization, MemberChange, Role,
         },
     },
+    repository::settings::{RulesetScope, with_ruleset_lease},
     server::Server,
 };
 
 pub(super) mod audit;
 pub(super) mod automation;
+pub(super) mod collaborators;
+pub(super) mod conversions;
 mod discovery;
 pub(super) mod invitations;
 pub(super) mod issue_types;
@@ -77,6 +81,8 @@ mod tests;
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .merge(invitations::routes())
+        .merge(collaborators::routes())
+        .merge(conversions::routes())
         .merge(audit::routes())
         .merge(automation::routes())
         .merge(repository_access::routes())
@@ -240,7 +246,7 @@ async fn save_member(
 ) -> Result<Json<Value>> {
     change_member(
         &server,
-        &principal,
+        principal,
         id,
         member,
         input.version,
@@ -254,34 +260,71 @@ async fn remove_member(
     Path((id, member)): Path<(Uuid, Uuid)>,
     Json(input): Json<Version>,
 ) -> Result<Json<Value>> {
-    change_member(&server, &principal, id, member, input.version, None).await
+    change_member(&server, principal, id, member, input.version, None).await
 }
 async fn change_member(
-    server: &Server,
-    principal: &Principal,
+    server: &Arc<Server>,
+    principal: Principal,
     id: Uuid,
     member: Uuid,
     version: u64,
     role: Option<Role>,
 ) -> Result<Json<Value>> {
-    let actor = actor(server, principal).await?;
+    let actor = actor(server, &principal).await?;
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
-    app::account(principal)?;
-    let value = app::command_output(
-        cells
-            .command::<ChangeMember>(
-                target(id)?,
-                app::mutation_identity()?,
-                MemberChange {
-                    actor,
-                    member,
-                    version,
-                    role,
+    let address = target(id)?;
+    let value = membership_change(server, id, move |_| async move {
+        app::account(&principal)?;
+        app::command_output(
+            cells
+                .command::<ChangeMember>(
+                    address,
+                    app::mutation_identity()?,
+                    MemberChange {
+                        actor,
+                        member,
+                        version,
+                        role,
+                    },
+                )
+                .await,
+        )
+    })
+    .await?;
+    Ok(Json(serde_json::to_value(applied(value)?)?))
+}
+
+async fn membership_change<T, F, Fut>(server: &Arc<Server>, id: Uuid, work: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(CancellationToken) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<T>> + Send,
+{
+    // Membership and team writers share the gate with catalog-backed grants.
+    // Settle a durable conversion before changing its member incarnation.
+    let worker = Arc::clone(server);
+    server
+        .receives
+        .spawn(async move {
+            with_ruleset_lease(
+                &worker,
+                RulesetScope::Organization(id),
+                &worker.cancellation,
+                |cancel| async {
+                    if cancel.is_cancelled() {
+                        return Err(Error::MergeBusy);
+                    }
+                    conversions::recover_locked(&worker, id).await?;
+                    if cancel.is_cancelled() {
+                        return Err(Error::MergeBusy);
+                    }
+                    work(cancel).await
                 },
             )
-            .await,
-    )?;
-    Ok(Json(serde_json::to_value(applied(value)?)?))
+            .await
+        })
+        .await
+        .map_err(|_| Error::MergeBusy)?
 }
 fn target(id: Uuid) -> Result<Address> {
     if id.is_nil() {

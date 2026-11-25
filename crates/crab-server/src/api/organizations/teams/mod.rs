@@ -466,7 +466,7 @@ enum Submission {
     Cancel,
 }
 async fn save(
-    server: &Server,
+    server: &Arc<Server>,
     principal: &Principal,
     id: Uuid,
     input: ChangeRequest,
@@ -486,19 +486,26 @@ async fn save(
         request_id,
         command: input.command,
     };
-    let result = match submission {
+    let address = target(id)?;
+    let outcome = match submission {
         Submission::Apply => {
-            cells
-                .command::<native::Change>(target(id)?, app::mutation_identity()?, request)
-                .await
+            let principal = principal.clone();
+            super::membership_change(server, id, move |_| async move {
+                app::account(&principal)?;
+                app::command_output(
+                    cells
+                        .command::<native::Change>(address, app::mutation_identity()?, request)
+                        .await,
+                )
+            })
+            .await?
         }
-        Submission::Cancel => {
+        Submission::Cancel => app::command_output(
             cells
-                .command::<native::Cancel>(target(id)?, app::mutation_identity()?, request)
-                .await
-        }
+                .command::<native::Cancel>(address, app::mutation_identity()?, request)
+                .await,
+        )?,
     };
-    let outcome = app::command_output(result)?;
     let error = match outcome {
         native::Outcome::Applied { id } => {
             return Ok((

@@ -117,7 +117,8 @@ impl CatalogDocument {
         self.version = self.version.checked_add(1).ok_or(CatalogError::Conflict)?;
         self.queue_membership_audit(MembershipAuditEvent {
             id: Uuid::now_v7(),
-            repository_id: record.id,
+            outside_grants: None,
+            repository_id: Some(record.id),
             actor,
             previous_members_digest: previous,
             new_members_digest: record.membership_digest()?,

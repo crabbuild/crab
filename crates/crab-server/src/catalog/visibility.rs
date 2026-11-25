@@ -101,7 +101,8 @@ impl CatalogStore {
         let digest = root.membership_digest()?;
         document.queue_membership_audit(MembershipAuditEvent {
             id: Uuid::now_v7(),
-            repository_id: repository,
+            outside_grants: None,
+            repository_id: Some(repository),
             actor,
             previous_members_digest: digest.clone(),
             new_members_digest: digest,

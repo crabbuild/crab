@@ -114,6 +114,17 @@ disclosure and email eligibility. Discovery starts with fresh organization
 state. `cells/organization/repository_policy.rs` owns repository creation and
 baseline access policy. Git publication and policy writes share the existing
 organization ruleset lease.
+`api/organizations/collaborators.rs` groups direct catalog grants for owners
+and checks them against current Organization Cell membership. It rechecks both
+snapshots before returning a page. Repository access edits still use the
+revision-guarded repository membership route.
+Bulk outside revocation uses `catalog/collaborators.rs` for a single CAS across
+live and deleted repositories and the audit outbox. Organization membership
+changes and invitation acceptance share its organization policy lease.
+`catalog/conversion.rs` commits retained team grants and the recovery record
+together. `api/organizations/conversions.rs` finalizes the matching member
+incarnation under the same lease. Team commands and identity provider group
+projection use that lease so the conversion captures current team roles.
 `cells/repository/integrations.rs` owns GitHub Actions connections, delivery
 receipts, bounded accepted-delivery history, and workflow attempt ordering. It
 reads active providers and their exact-commit results from one snapshot for merge

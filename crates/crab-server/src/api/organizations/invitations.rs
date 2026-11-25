@@ -149,19 +149,24 @@ async fn decide(
 ) -> Result<Json<organization::Invitation>> {
     let actor = actor(&server, &principal).await?;
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
-    let result = app::command_output(
-        cells
-            .command::<DecideInvitation>(
-                target(id)?,
-                app::mutation_identity()?,
-                Decision {
-                    actor,
-                    version: input.version,
-                    accept: input.accept,
-                },
-            )
-            .await,
-    )?;
+    let address = target(id)?;
+    let result = super::membership_change(&server, id, move |_| async move {
+        app::account(&principal)?;
+        app::command_output(
+            cells
+                .command::<DecideInvitation>(
+                    address,
+                    app::mutation_identity()?,
+                    Decision {
+                        actor,
+                        version: input.version,
+                        accept: input.accept,
+                    },
+                )
+                .await,
+        )
+    })
+    .await?;
     Ok(Json(applied(result)?))
 }
 async fn list(
