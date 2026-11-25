@@ -185,8 +185,15 @@ export function PullDetail({
       </section>
     );
   const reviewRevision = `${data.version}:${data.head_oid}`;
-  const { approvals, changes_requested: changesRequested } =
-    data.merge_requirements;
+  const reviewers = !publicReader && (
+    <Reviewers
+      repo={repo}
+      pull={number}
+      csrf={csrf}
+      onSaved={refresh}
+      revision={`${reviewRevision}:${data.merge_requirements.approvals}:${data.merge_requirements.changes_requested}:${data.can_manage}:${epoch}`}
+    />
+  );
   return (
     <section className="pulls-page pull-detail">
       <RequestWidget timing={pull.timing} label="Pull request">
@@ -455,17 +462,7 @@ export function PullDetail({
                     csrf={csrf}
                     onSaved={refresh}
                     allowIssueClosure={data.state !== "merged"}
-                    reviewers={
-                      !publicReader && (
-                        <Reviewers
-                          repo={repo}
-                          pull={number}
-                          csrf={csrf}
-                          onSaved={refresh}
-                          revision={`${reviewRevision}:${approvals}:${changesRequested}:${data.can_manage}:${epoch}`}
-                        />
-                      )
-                    }
+                    reviewers={reviewers}
                   />
                 </div>
               </div>

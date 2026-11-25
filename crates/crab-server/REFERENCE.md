@@ -3431,6 +3431,9 @@ branch names with their original case. Repository search suggests both
 qualifiers; they also work in workspace search, grouped conditions, and
 exclusions. A merged pull request remains searchable by its recorded branch
 names after the source branch is deleted.
+Public readers can filter by visible local source and target branches. A
+fork source name that is hidden on the PR cannot match a source branch filter
+or contribute to its counts.
 
 For organization repositories, open **Types** above the issue list or add
 `type:"Incident report"` to the search. Names match case-insensitively. Use

@@ -51,6 +51,8 @@ pub(crate) struct SearchInput {
     pub review_teams: super::super::reviews::teams::Bindings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue_types: Option<super::super::issue_types::Binding>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub public_reader: bool,
 }
 impl Default for SearchInput {
     fn default() -> Self {
@@ -65,6 +67,7 @@ impl Default for SearchInput {
             review_context: None,
             review_teams: Default::default(),
             issue_types: None,
+            public_reader: false,
         }
     }
 }
@@ -196,6 +199,7 @@ struct Bindings<'a> {
     review: Option<super::super::reviews::status::Bound>,
     review_teams: &'a super::super::reviews::teams::Bindings,
     issue_types: &'a Option<super::super::issue_types::Binding>,
+    public_reader: bool,
     archived: bool,
     now_ms: i64,
 }
@@ -213,6 +217,7 @@ impl<'a> Bindings<'a> {
             values: Vec::new(),
             review_teams: &input.review_teams,
             issue_types: &input.issue_types,
+            public_reader: input.public_reader,
             archived,
             now_ms,
         };
@@ -356,6 +361,7 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         &input.review_teams,
         &input.issue_types,
         review.as_ref().map(|prepared| &prepared.approvals),
+        input.public_reader,
     ))?)
     .to_hex()
     .to_string();
@@ -643,6 +649,12 @@ fn scoped_expression(
             Term::BaseBranch(branch) => {
                 let reference = bindings.text(&format!("refs/heads/{branch}"));
                 format!("d.kind = 1 AND EXISTS (SELECT 1 FROM repository_pulls p WHERE p.number = d.number AND p.base_ref = {reference})")
+            }
+            Term::HeadBranch(prefix) if bindings.public_reader => {
+                // Public rows omit fork heads. The projected name begins with
+                // the fork UUID for those rows, so only local heads can match.
+                let reference = bindings.bind(SqlValue::Blob(format!("refs/heads/{prefix}").into_bytes()));
+                format!("d.kind = 1 AND EXISTS (SELECT 1 FROM discussion_index_pull_sources p WHERE p.document = d.rowid AND instr(p.head_ref, {reference}) = 1)")
             }
             Term::HeadBranch(prefix) => {
                 let reference = bindings.text(&format!("refs/heads/{prefix}"));

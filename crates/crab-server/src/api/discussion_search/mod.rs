@@ -25,6 +25,7 @@ pub(super) async fn resolve_people(
     repo: &crate::repository::Repository,
     input: &mut crate::cells::repository::SearchInput,
 ) -> Result<Option<review_teams::Bound>> {
+    input.public_reader = principal.is_public_reader(repo.id);
     bind_people(server, principal, input).await?;
     bind_repository(server, principal, repo, input).await
 }
@@ -221,11 +222,7 @@ impl ListParameters {
             query: app::search_query(self.q.as_deref().or(Some(default_query)))?,
             sort: self.sort.unwrap_or_default(),
             direction: self.direction.unwrap_or_default(),
-            people: Vec::new(),
-            assignees: Vec::new(),
-            review_context: None,
-            review_teams: Default::default(),
-            issue_types: None,
+            ..Default::default()
         };
         input.validate().map_err(app::Error::Invalid)?;
         Ok(input)
