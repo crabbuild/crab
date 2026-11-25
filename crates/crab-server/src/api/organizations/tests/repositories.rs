@@ -5,6 +5,7 @@ use crate::{
     test_support::git,
 };
 
+mod external_forks;
 mod fork_merges;
 mod personal_forks;
 mod sync;

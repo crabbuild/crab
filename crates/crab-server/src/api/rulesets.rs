@@ -77,10 +77,10 @@ async fn bypass_options(server: &Server, grant: &app::Membership) -> Result<Bypa
         Address,
         organization::teams::repository_access::{CodeOwnerTeamQuery, CodeOwnerTeams},
     };
-    let Some(organization) = grant.organization else {
+    let Some(organization) = grant.fork_destination.or(grant.organization) else {
         return Ok(BypassOptions::default());
     };
-    let teams = if grant.teams.is_empty() {
+    let teams = if grant.fork_destination.is_some() || grant.teams.is_empty() {
         Vec::new()
     } else {
         let cells = server.cells().ok_or(Error::CellUnavailable)?;

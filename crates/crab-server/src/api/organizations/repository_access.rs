@@ -188,7 +188,8 @@ async fn list(
             .map(|index| index + 1)
             .ok_or(Error::PageChanged)
     })?;
-    let source_records: HashMap<_, _> = repositories.iter().map(|r| (r.id, *r)).collect();
+    let source_records: HashMap<_, _> = document.repositories.iter().map(|r| (r.id, r)).collect();
+    let mut source_grants = HashMap::new();
     let mut current_page = repositories.into_iter().skip(start);
     let mut items = Vec::with_capacity(limit);
     for repo in current_page.by_ref().take(limit) {
@@ -198,6 +199,53 @@ async fn list(
                     .and_then(|id| source_records.get(&id).copied()),
             )
             .map_err(app::repository_access_error)?;
+        if repo.external_fork_destination(source).is_some() {
+            let organization = source.organization.as_ref().ok_or(Error::NotFound)?;
+            let organization_owner = known_provider && roles.owner;
+            let (access, baseline) = if organization_owner {
+                (Some(RepositoryAccess::Admin), None)
+            } else if known_provider {
+                let grant = match source_grants.entry(organization.id) {
+                    std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(entry) => entry.insert(
+                        crate::repository::access::organization_grant(
+                            &cells,
+                            organization.id,
+                            member,
+                            true,
+                        )
+                        .await?,
+                    ),
+                };
+                let baseline = (grant.member && !grant.owner)
+                    .then(|| repo.baseline().resolve(grant.baseline))
+                    .flatten();
+                let access = crate::repository::access::organization_access_with_owner(
+                    grant,
+                    &organization.teams,
+                    repo.baseline(),
+                    RepositoryAccess::Read,
+                );
+                (access, baseline)
+            } else {
+                (None, None)
+            };
+            // A destination administrator can inspect the fork's effective
+            // role. The upstream name and team roster need source access.
+            items.push(AccessRepository {
+                id: repo.id,
+                owner: repo.owner.clone(),
+                name: repo.name.clone(),
+                access,
+                direct: None,
+                teams: Vec::new(),
+                organization_owner,
+                baseline,
+                sso_group_ceiling: None,
+                inherited_from: None,
+            });
+            continue;
+        }
         let direct = RepositoryMember::access_for(&source.members, &identity.subject)
             .filter(|_| known_provider);
         let organization_owner = known_provider && roles.owner;
@@ -252,6 +300,13 @@ async fn list(
     // rechecks the caller and member after crossing Catalog and Directory.
     if selection().await? != roles {
         return Err(Error::PageChanged);
+    }
+    for (source, original) in source_grants {
+        if crate::repository::access::organization_grant(&cells, source, member, true).await?
+            != original
+        {
+            return Err(Error::PageChanged);
+        }
     }
     app::account(&principal)?;
     Ok(read_admission::retain(

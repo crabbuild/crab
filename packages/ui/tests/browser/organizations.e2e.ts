@@ -307,6 +307,14 @@ test("organization owners save repository policy from settings", async ({
   });
   await basePermissions.click();
   await page.getByRole("option", { name: "Admin", exact: true }).click();
+  await page
+    .getByRole("checkbox", { name: "Allow forking of private repositories" })
+    .check();
+  await page
+    .getByRole("checkbox", {
+      name: "Allow private forks in other organizations",
+    })
+    .check();
   const savePolicy = page.getByRole("button", {
     name: "Save repository policy",
   });
@@ -331,7 +339,8 @@ test("organization owners save repository policy from settings", async ({
     member_creation_visibility: "any",
     member_transfer: true,
     member_deletion: true,
-    private_forks: false,
+    private_forks: true,
+    external_forks: true,
     member_visibility: false,
     baseline: "admin",
     default_branch: "trunk",

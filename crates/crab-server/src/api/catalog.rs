@@ -141,8 +141,9 @@ pub(super) async fn list(
             "public_read_only": public_reader,
             "can_maintain": current.can_maintain(repository.id),
             "fork": repository.forked_from.is_some(),
-            "can_fork": (principal.is_user() || principal.is_local()) && forking.is_some_and(|(enabled, policy)| enabled && policy.allowed),
-            "can_fork_to_organization": organization_owner && forking.is_some_and(|(enabled, policy)| enabled && policy.allowed),
+            "can_fork": (principal.is_user() || principal.is_local()) && forking.is_some_and(|(enabled, _, policy)| enabled && policy.allowed),
+            "can_fork_to_organization": organization_owner && forking.is_some_and(|(enabled, _, policy)| enabled && policy.allowed),
+            "can_fork_to_other_organizations": forking.is_some_and(|(enabled, external, policy)| enabled && external && policy.allowed),
             "protection_version": protections.version,
             "protected_branches": protections.rules,
             "archive_version": lifecycle.version,
@@ -152,7 +153,7 @@ pub(super) async fn list(
             view["organization_id"] = json!(organization);
         }
         if current.can_admin(repository.id)
-            && let Some((organization_allows, policy)) = forking
+            && let Some((organization_allows, _, policy)) = forking
         {
             view["forking"] = json!({
                 "organization_allows": organization_allows,
@@ -228,7 +229,7 @@ pub(super) struct VisibleRepository {
     pub(super) team_access_inherited: bool,
     pub(super) principal: Principal,
     pub(super) organization_owner: bool,
-    forking: Option<(bool, crate::catalog::forking::Forking)>,
+    forking: Option<(bool, bool, crate::catalog::forking::Forking)>,
     pub(super) visibility: crate::catalog::visibility::Visibility,
 }
 
@@ -291,17 +292,16 @@ pub(super) async fn visible_matching(
         && !principal.is_anonymous()
     {
         for repo in &selected {
-            if let Some(record) = grants.get(&repo.id)
-                && let Some(organization) = record.organization_id()
-            {
+            if let Some(record) = grants.get(&repo.id) {
                 let source = record
                     .access_record(record.forked_from.and_then(|id| grants.get(&id).copied()))
                     .map_err(|error| app::Error::Membership(Box::new(error)))?;
-                let include = organizations.entry(organization).or_insert(false);
-                *include |= source
-                    .organization
-                    .as_ref()
-                    .is_some_and(|access| !access.teams.is_empty());
+                if let Some(access) = &source.organization {
+                    *organizations.entry(access.id).or_insert(false) |= !access.teams.is_empty();
+                }
+                if let Some(destination) = record.external_fork_destination(source) {
+                    organizations.entry(destination).or_insert(false);
+                }
             }
         }
     }
@@ -317,7 +317,7 @@ pub(super) async fn visible_matching(
         let mut team_access_inherited = false;
         let current = if local_listing && repository.organization.is_none() {
             principal.clone()
-        } else if let Some(grants) = &grants {
+        } else if let (Some(grants), Some(document)) = (&grants, &document) {
             let Some(record) = record.filter(|record| {
                 record.owner == repository.config.owner
                     && record.name == repository.config.name
@@ -331,6 +331,7 @@ pub(super) async fn visible_matching(
                 .access_record(record.forked_from.and_then(|id| grants.get(&id).copied()))
                 .map_err(|error| app::Error::Membership(Box::new(error)))?;
             if let Some((team, ancestors)) = team
+                && record.external_fork_destination(source).is_none()
                 && let Some(access) = &source.organization
             {
                 let direct = access.teams.iter().find(|grant| grant.team == team);
@@ -344,26 +345,20 @@ pub(super) async fn visible_matching(
                 team_access = direct.max(inherited);
                 team_access_inherited = inherited > direct;
             }
+            let snapshot = record.access_snapshot(document.version, source);
+            let inherited = crate::repository::access::snapshot_organization_access(
+                &snapshot,
+                &organization_grants,
+            );
             let mut config = repository.config.clone();
-            config.members = source.members.clone();
-            config.groups = source.groups.clone();
+            config.members = snapshot.members;
+            config.groups = snapshot.groups;
             principal
                 .with_catalog_membership(
                     repository.id,
                     &config,
                     issuer,
-                    record
-                        .organization_id()
-                        .and_then(|id| organization_grants.get(&id))
-                        .and_then(|grant| {
-                            source.organization.as_ref().and_then(|access| {
-                                crate::repository::access::organization_access(
-                                    grant,
-                                    &access.teams,
-                                    record.baseline(),
-                                )
-                            })
-                        }),
+                    inherited,
                     record.name_version() > 0,
                     record.fork_owner.as_ref(),
                 )
@@ -387,6 +382,7 @@ pub(super) async fn visible_matching(
             .map(|record| {
                 (
                     organization.is_some_and(|grant| grant.private_forks),
+                    organization.is_some_and(|grant| grant.external_forks),
                     record.forking,
                 )
             });

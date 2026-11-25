@@ -60,8 +60,7 @@ pub(super) async fn list(
     // Resolve the fork network against one catalog snapshot and batched
     // organization grants. The composer independently rechecks on submission.
     let visible = crate::api::catalog::visible_matching(&server, &reader, None, |repo| {
-        repo.organization == upstream.organization
-            && repo.forked_from == Some(upstream.id)
+        repo.forked_from == Some(upstream.id)
             && (query.is_empty()
                 || format!("{}/{}", repo.config.owner, repo.config.name)
                     .to_lowercase()

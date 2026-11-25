@@ -29,6 +29,8 @@ pub(crate) struct Policy {
     pub member_deletion: bool,
     #[serde(default)]
     pub private_forks: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub external_forks: bool,
     #[serde(default)]
     pub member_visibility: bool,
     pub baseline: Option<RepositoryAccess>,
@@ -45,6 +47,7 @@ impl Default for Policy {
             member_transfer: false,
             member_deletion: false,
             private_forks: false,
+            external_forks: false,
             member_visibility: false,
             baseline: None,
             default_branch: default_repository_branch(),
@@ -54,6 +57,9 @@ impl Default for Policy {
 
 impl Policy {
     pub(crate) fn validate(&self) -> std::result::Result<(), &'static str> {
+        if self.external_forks && !self.private_forks {
+            return Err("Enable private forks before allowing forks into other organizations");
+        }
         if !matches!(
             self.baseline,
             None | Some(RepositoryAccess::Read | RepositoryAccess::Write | RepositoryAccess::Admin)

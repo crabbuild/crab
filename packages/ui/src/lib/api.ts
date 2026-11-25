@@ -41,6 +41,7 @@ export interface Repository {
   forked_from?: { id: string; owner: string; name: string };
   can_fork?: boolean;
   can_fork_to_organization?: boolean;
+  can_fork_to_other_organizations?: boolean;
   visibility?: RepositoryVisibility;
   public_read_only?: boolean;
   can_configure_visibility?: boolean;
@@ -369,6 +370,7 @@ export function startRepositoryFork(
     request_id: string;
     name: string;
     destination: "personal" | "organization";
+    organization?: string;
     description?: string;
     default_branch_only: boolean;
     properties?: PropertyOverrides;

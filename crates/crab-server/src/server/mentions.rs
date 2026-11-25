@@ -86,6 +86,15 @@ pub(super) async fn recipient_has_grant(
             return Ok(true);
         }
     }
+    if let Some(destination) = grants.fork_destination {
+        let cells = server.cells().ok_or(Error::CellUnavailable)?;
+        if access::organization_grant(&cells, destination, actor, false)
+            .await?
+            .owner
+        {
+            return Ok(true);
+        }
+    }
     Ok(auth.is_oidc()
         && !grants.groups.is_empty()
         && auth
@@ -715,6 +724,24 @@ pub(crate) async fn drain_repository(server: &Server, repo: &Repository) -> Resu
                         access.id,
                         &access.teams,
                         snapshot.baseline,
+                        if snapshot.fork_destination.is_some() {
+                            crate::RepositoryAccess::Read
+                        } else {
+                            crate::RepositoryAccess::Admin
+                        },
+                        None,
+                    )
+                    .await?,
+                );
+            }
+            if let Some(destination) = snapshot.fork_destination {
+                members.extend(
+                    crate::repository::access::organization_members(
+                        server,
+                        destination,
+                        &[],
+                        crate::catalog::RepositoryBaseline::None,
+                        crate::RepositoryAccess::Admin,
                         None,
                     )
                     .await?,

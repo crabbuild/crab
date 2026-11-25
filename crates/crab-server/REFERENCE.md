@@ -779,15 +779,16 @@ organization creation path.
 
 Organization owners can read and update `/api/organizations/{id}/repository-policy`
 and configure it in **Settings → Member privileges**. Updates carry the saved
-`version`, `member_creation`, `member_transfer`, `member_deletion`, `private_forks`, `baseline`
+`version`, `member_creation`, `member_transfer`, `member_deletion`, `private_forks`,
+`external_forks`, `baseline`
 (`null`, `read`, `write`, or `admin`), and `default_branch` (a short Git branch name).
 By default only owners can create, transfer, or delete repositories, and
 members have no base access. Owners review changes to base repository permissions
 before saving them in the browser. Current organization members receive those
-permissions in existing and new repositories. Private forks and detached
-organization forks retain the base permission captured when they were
-published. Outside collaborators keep their repository grants. The highest
-applicable organization, repository, and group role applies subject to
+permissions in existing and new repositories. Attached private forks and forks
+detached within the same organization retain the base permission captured when
+they were published. Outside collaborators keep their repository grants. The
+highest applicable organization, repository, and group role applies subject to
 credential limits. The People repository
 access inspector shows the baseline separately.
 
@@ -832,10 +833,11 @@ Changing back to private removes public access on subsequent requests. Copies
 already downloaded remain available to their recipients.
 
 Publishing a repository detaches its existing private forks in the same
-catalog update. They keep their private visibility and current repository
-grants. A detached organization fork keeps its captured base permission until
-it changes ownership. A detached personal fork belongs to its individual
-owner. Pending fork jobs must settle before the repository can become public.
+catalog update. A fork in the same organization keeps its repository grants
+and captured base permission. A fork in another organization keeps its
+destination owner and loses inherited upstream grants. A detached personal
+fork belongs to its individual owner. All detached forks stay private.
+Pending fork jobs must settle before the repository can become public.
 
 `GET /api/repositories/{id}/visibility` returns the current setting and
 eligibility. Send `version`, `value` (`public` or `private`), and the exact
@@ -1115,14 +1117,16 @@ sets `fork: true` for an attached fork and includes `forked_from` only when the
 viewer can read the source. You can clone the fork and push independent
 changes with its own repository-scoped Git token.
 
-Organization forks inherit current source members, OIDC groups, and organization
-team grants. Personal forks are listed under the account's personal repositories.
+Forks owned by the upstream organization inherit current source members, OIDC
+groups, and organization team grants. Personal forks are listed under the
+account's personal repositories.
 They inherit source organization and group access. The fork owner has at least
 Write access while they have a qualifying fork grant. Direct grants to other
 individual collaborators apply to the source repository. The upstream
-organization's rulesets govern private forks, including initial Git publication.
+organization's rulesets govern its same-organization and personal forks,
+including initial Git publication.
 
-Both private fork destinations capture the source repository's effective base
+Private forks capture the source repository's effective base
 permission when the fork becomes available. The captured permission applies to
 current organization members. Forks published before this field existed have
 no captured base permission. Current team and individually applicable grants
@@ -1138,16 +1142,33 @@ those archived forks. Shared organization forks stay available through current
 source grants. Making an upstream repository public detaches its existing
 personal forks as private repositories owned by their individual accounts.
 
+An organization owner can enable **Allow private forks in other organizations**
+in **Settings → Member privileges**. The upstream repository must also permit
+private forks, and the creator must have current upstream read access and own
+the destination organization. The destination owns the fork, can administer
+it, and applies its branch and tag rulesets. Upstream organization owners have
+Read access. Other upstream members retain their applicable team and captured
+base permissions. Individual upstream grants and OIDC group grants do not
+carry over, and the destination's base permission does not grant read access
+to an attached fork. Removing upstream access from the creator leaves the
+destination-owned fork available. Publishing the source detaches the fork as
+a private repository in its destination and ends inherited upstream grants.
+
 `POST /api/repos/{owner}/{name}/forks` accepts `{request_id, name, destination,
-description?, default_branch_only?}` and requires the source repository ID
-header and browser CSRF token. Set `default_branch_only` to `true` to copy the
-default branch and its history. Omitting it copies all advertised refs. A
-retry or resume uses the original description and branch selection.
+organization?, description?, default_branch_only?, properties?}` and requires
+the source repository ID header and browser CSRF token. Set `default_branch_only`
+to `true` to copy the default branch and its history. Omitting it copies all
+advertised refs. A retry or resume uses the original description and branch
+selection.
 `destination` is `personal` or `organization` and defaults to `organization`.
+With an organization destination, `organization` may specify the destination
+UUID. Omitting it uses the upstream organization. When the upstream policy
+allows this choice, the fork form lists organizations you own.
 Personal forks use the caller's `/api/imports/git/{id}` status and resume routes.
-Organization forks use the organization import routes and require a current
-owner. Jobs verify the pinned refs and current source access and policies
-before making the fork visible.
+Organization forks use the destination organization import routes and require
+a current destination owner. Viewing or resuming an external fork job also
+requires current upstream read access. Jobs verify the pinned refs, source
+access, and policies before making the fork visible.
 **View forks** on the upstream repository or a fork opens the upstream
 repository's **Forks** page. It lists readable direct forks, newest first, with
 search, archive filters, and sorting. `GET /api/repos/{owner}/{name}/forks`

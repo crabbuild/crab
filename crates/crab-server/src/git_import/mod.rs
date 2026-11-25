@@ -358,6 +358,8 @@ enum ImportError {
     Ruleset,
     #[error("the organization or repository does not allow private forks")]
     ForkingDisabled,
+    #[error("the source organization does not allow forks into other organizations")]
+    ExternalForkingDisabled,
     #[error("the organization import authority is unavailable")]
     Organization(#[source] Box<app::Error>),
     #[error("the import queue is busy")]
@@ -421,6 +423,11 @@ impl IntoResponse for ImportError {
                 "repository_forking_restricted",
                 "The organization or source repository does not allow private forks",
             ),
+            Self::ExternalForkingDisabled => (
+                StatusCode::FORBIDDEN,
+                "external_forking_restricted",
+                "The source organization does not allow forks into other organizations",
+            ),
             Self::Busy | Self::Staging(crate::local_disk::Error::Busy(_)) => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "import_busy",
@@ -477,6 +484,7 @@ impl IntoResponse for ImportError {
                 | Self::Conflict
                 | Self::Ruleset
                 | Self::ForkingDisabled
+                | Self::ExternalForkingDisabled
         ) {
             tracing::error!(error = ?self, "Git import request failed");
         }
@@ -544,6 +552,7 @@ struct ForkRequest {
     default_branch_only: bool,
     #[serde(default)]
     destination: ForkDestination,
+    organization: Option<Uuid>,
     #[serde(default)]
     properties: BTreeMap<Uuid, PropertyValue>,
 }
@@ -564,30 +573,35 @@ async fn start_fork(
 ) -> Result<(StatusCode, Json<jobs::Status>), ImportError> {
     let context = server.git_import.as_ref().ok_or(ImportError::Unavailable)?;
     let source = app::repository(&server, &principal, &key).map_err(ImportError::organization)?;
-    let organization = source
+    let source_organization = source
         .organization
         .filter(|_| source.forked_from.is_none())
         .ok_or(ImportError::NotFound)?;
     let personal = input.destination == ForkDestination::Personal;
+    if personal && input.organization.is_some() {
+        return Err(ImportError::Invalid("Choose one fork destination"));
+    }
     if personal && !input.properties.is_empty() {
         return Err(ImportError::Invalid(
             "Repository properties require an organization destination",
         ));
     }
-    let account =
-        ImportAccount::resolve(&server, &principal, (!personal).then_some(organization)).await?;
+    let organization = (!personal).then_some(input.organization.unwrap_or(source_organization));
+    let account = ImportAccount::resolve(&server, &principal, organization).await?;
     let name = source::identifier(input.name, "name")?;
-    if !personal && name.eq_ignore_ascii_case(&source.config.name) {
+    if organization == Some(source_organization) && name.eq_ignore_ascii_case(&source.config.name) {
         return Err(ImportError::Invalid("Choose a different name for the fork"));
     }
     let request = ValidatedImport {
         source: format!("{}/{}", source.config.owner, source.config.name),
         fork_source: Some(source.id),
         default_branch_only: input.default_branch_only,
-        owner: if personal {
-            crate::catalog::personal_namespace(&account.identity.issuer, &account.identity.subject)
-        } else {
-            source.config.owner.clone()
+        owner: match organization {
+            Some(id) => crate::catalog::organization_namespace(id),
+            None => crate::catalog::personal_namespace(
+                &account.identity.issuer,
+                &account.identity.subject,
+            ),
         },
         name,
         description: source::description(&input.description)?,
@@ -672,6 +686,7 @@ async fn resume(
         .await?;
     let Some(request) = request else {
         account.check(&server).await?;
+        require_external_job_source(&server, &account, &status).await?;
         return Ok((StatusCode::ACCEPTED, Json(status)));
     };
     account.namespace(&request.owner, request.visibility)?;
@@ -731,8 +746,30 @@ async fn status(
     let id = path.id.ok_or(ImportError::NotFound)?;
     let status = account.jobs(catalog.root()).status(id).await?;
     account.check(&server).await?;
+    require_external_job_source(&server, &account, &status).await?;
     app::account(&principal).map_err(|_| ImportError::NotFound)?;
     Ok(Json(status))
+}
+
+async fn require_external_job_source(
+    server: &Server,
+    account: &ImportAccount,
+    status: &jobs::Status,
+) -> Result<(), ImportError> {
+    let (Some(owner), Some(source)) = (account.organization, status.fork_source) else {
+        return Ok(());
+    };
+    let upstream = server
+        .repositories
+        .by_id(source)
+        .ok_or(ImportError::NotFound)?;
+    if upstream.organization != Some(owner.id) {
+        // Shared destination job status contains the upstream repository's address.
+        app::catalog_membership(server, &account.principal, &upstream)
+            .await
+            .map_err(ImportError::organization)?;
+    }
+    Ok(())
 }
 
 fn encode_path_segment(value: &str) -> String {

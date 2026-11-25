@@ -84,7 +84,7 @@ pub(super) struct Status {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(super) properties: BTreeMap<Uuid, PropertyValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    fork_source: Option<Uuid>,
+    pub(super) fork_source: Option<Uuid>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     default_branch_only: bool,
     state: State,

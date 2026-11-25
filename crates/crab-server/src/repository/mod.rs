@@ -99,7 +99,10 @@ impl Repository {
             .repositories
             .by_id(self.forked_from?)
             .filter(|source| {
-                source.organization == Some(organization) && source.forked_from.is_none()
+                source.organization.is_some()
+                    && source.forked_from.is_none()
+                    && (source.organization == Some(organization)
+                        || self.owning_organization().is_some())
             })
     }
 

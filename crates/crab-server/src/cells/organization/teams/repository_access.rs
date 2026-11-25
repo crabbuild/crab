@@ -12,7 +12,7 @@ pub(crate) struct RepositoryActor {
     pub include_teams: bool,
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ActorTeams {
     pub owner: bool,
@@ -23,6 +23,8 @@ pub(crate) struct ActorTeams {
     pub member_deletion: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub private_forks: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub external_forks: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub member_visibility: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -46,6 +48,7 @@ impl Read for RepositoryTeamsForActor {
         else {
             return Ok(ActorTeams {
                 private_forks: policy.private_forks,
+                external_forks: policy.external_forks,
                 member_visibility: policy.member_visibility,
                 baseline: policy.baseline,
                 ..ActorTeams::default()
@@ -58,6 +61,7 @@ impl Read for RepositoryTeamsForActor {
             member_transfer: policy.member_transfer,
             member_deletion: policy.member_deletion,
             private_forks: policy.private_forks,
+            external_forks: policy.external_forks,
             member_visibility: policy.member_visibility,
             baseline: policy.baseline,
             ..Default::default()
