@@ -1,9 +1,14 @@
-import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { FieldSelect } from "@/components/ui/field-select";
-import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
+import {
+  Field,
+  FieldContent,
+  FieldDescription,
+  FieldLabel,
+} from "@/components/ui/field";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import {
@@ -115,6 +120,7 @@ export function GitImport({
     : "";
   const [name, setName] = useState(defaultName);
   const [description, setDescription] = useState("");
+  const [defaultBranchOnly, setDefaultBranchOnly] = useState(true);
   const [visibility, setVisibility] = useState<RepositoryVisibility>("private");
   const [properties, setProperties] = useState<PropertyOverrides>({});
   const incomplete = needsExplicitPropertyValues(definitions, properties);
@@ -209,6 +215,7 @@ export function GitImport({
     setOwner(defaultOwner);
     setName(defaultName);
     setDescription("");
+    setDefaultBranchOnly(true);
     setVisibility("private");
     setProperties({});
     setToken("");
@@ -274,7 +281,11 @@ export function GitImport({
         ? { properties }
         : {}),
     };
-    const intent = JSON.stringify([fields, fork ? forkDestination : null]);
+    const forkOptions = {
+      destination: forkDestination,
+      default_branch_only: defaultBranchOnly,
+    };
+    const intent = JSON.stringify([fields, fork && forkOptions]);
     const request_id =
       attempt?.intent === intent && !job ? attempt.id : crypto.randomUUID();
     setAttempt({ id: request_id, intent });
@@ -286,7 +297,8 @@ export function GitImport({
             {
               request_id,
               name: fields.name,
-              destination: forkDestination,
+              description: fields.description,
+              ...forkOptions,
               ...(fields.properties ? { properties: fields.properties } : {}),
             },
             csrf,
@@ -496,19 +508,43 @@ export function GitImport({
               </FieldDescription>
             </Field>
           )}
-          {!forkJob && !job && (
+          {!job && (
             <label className="git-import-description">
-              Description <span className="muted">(optional)</span>
-              <Textarea
+              <span>
+                Description <span className="muted">(optional)</span>
+              </span>
+              <Input
                 value={description}
                 onChange={(event) => setDescription(event.target.value)}
                 placeholder="What should people know about this repository?"
-                rows={2}
                 disabled={running || submitting}
               />
             </label>
           )}
         </div>
+        {forkJob && (
+          <Field orientation="horizontal">
+            <Checkbox
+              id="fork-default-branch-only"
+              aria-describedby="fork-default-branch-only-help"
+              checked={
+                job ? (job.default_branch_only ?? false) : defaultBranchOnly
+              }
+              disabled={fixedDestination}
+              onCheckedChange={(checked) =>
+                setDefaultBranchOnly(checked === true)
+              }
+            />
+            <FieldContent>
+              <FieldLabel htmlFor="fork-default-branch-only">
+                Copy only the default branch
+              </FieldLabel>
+              <FieldDescription id="fork-default-branch-only-help">
+                Clear this option to copy all branches and tags.
+              </FieldDescription>
+            </FieldContent>
+          </Field>
+        )}
         {!job && (
           <RepositoryPropertyFields
             definitions={definitions}

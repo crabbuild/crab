@@ -55,6 +55,9 @@ pub(super) async fn copy(
         {
             return Err(ReceiveError::Forbidden);
         }
+        if destination.forked_from == Some(source.id) && principal.import_grant().is_none() {
+            app::require_related_read(server, principal, destination, source).await?;
+        }
         // Use the same verified stream and SHA-256 publisher as native
         // transfers. An already verified destination skips the source read.
         let download = stream::once(async {

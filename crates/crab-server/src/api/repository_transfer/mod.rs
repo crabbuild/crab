@@ -15,6 +15,7 @@ use crate::{
     auth::Principal,
     catalog::{
         CatalogDocument, CatalogError, CatalogRecord, CatalogStore, MembershipActor,
+        RepositoryBaseline,
         transfer::{Decision, Offer, Proposal, Recipient, State as OfferState},
     },
     cells::{
@@ -177,7 +178,14 @@ async fn source_access(
     record: &CatalogRecord,
     actor: &MembershipActor,
 ) -> Result<SourceAccess> {
-    management_access(server, record, actor, Management::Transfer).await
+    management_access(
+        server,
+        record,
+        record.baseline(),
+        actor,
+        Management::Transfer,
+    )
+    .await
 }
 
 pub(super) enum Management {
@@ -189,6 +197,7 @@ pub(super) enum Management {
 pub(super) async fn management_access(
     server: &Server,
     record: &CatalogRecord,
+    baseline: RepositoryBaseline,
     actor: &MembershipActor,
     operation: Management,
 ) -> Result<SourceAccess> {
@@ -211,7 +220,7 @@ pub(super) async fn management_access(
         .await?
         .remove(&organization.id)
         .unwrap_or_default();
-        let admin = access::organization_access(&grant, &organization.teams)
+        let admin = access::organization_access(&grant, &organization.teams, baseline)
             == Some(RepositoryAccess::Admin);
         let members_allowed = match operation {
             Management::Transfer => grant.member_transfer,

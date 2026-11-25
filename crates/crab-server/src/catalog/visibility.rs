@@ -85,6 +85,7 @@ impl CatalogStore {
                     ));
                 }
                 fork.forked_from = None;
+                fork.fork_baseline = None;
                 fork.record_metadata_update(now_ms);
                 if let Some(owner) = fork.fork_owner.take() {
                     fork.members = vec![crate::RepositoryMember {

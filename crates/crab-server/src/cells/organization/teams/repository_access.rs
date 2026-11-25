@@ -1,6 +1,6 @@
 use super::*;
 use crate::RepositoryAccess;
-use crate::catalog::MAX_TEAM_GRANTS;
+use crate::catalog::{MAX_TEAM_GRANTS, RepositoryBaseline};
 use std::collections::BTreeMap;
 
 pub(crate) const MAX_TEAM_ACCESS_ROWS: usize = 4096;
@@ -16,6 +16,7 @@ pub(crate) struct RepositoryActor {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ActorTeams {
     pub owner: bool,
+    pub member: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub member_transfer: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -46,12 +47,14 @@ impl Read for RepositoryTeamsForActor {
             return Ok(ActorTeams {
                 private_forks: policy.private_forks,
                 member_visibility: policy.member_visibility,
+                baseline: policy.baseline,
                 ..ActorTeams::default()
             });
         };
         let owner = organization.role == OrganizationRole::Owner;
         let mut grant = ActorTeams {
             owner,
+            member: true,
             member_transfer: policy.member_transfer,
             member_deletion: policy.member_deletion,
             private_forks: policy.private_forks,
@@ -263,18 +266,25 @@ pub(crate) struct RepositoryRoster {
 }
 
 pub(crate) struct RepositoryTeamRoster;
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RepositoryRosterQuery {
+    pub(crate) teams: Vec<Uuid>,
+    pub(crate) baseline: RepositoryBaseline,
+}
+
 impl Read for RepositoryTeamRoster {
     const CLASS: &'static str = super::super::CLASS;
     const ID: u32 = 43;
-    type Input = Vec<Uuid>;
+    type Input = RepositoryRosterQuery;
     type Output = RepositoryRoster;
 
-    fn execute(context: &mut Transaction<'_>, teams: Self::Input) -> Result<Self::Output> {
+    fn execute(context: &mut Transaction<'_>, query: Self::Input) -> Result<Self::Output> {
         let owners = super::super::repositories::Owners::execute(context, ())?;
-        let members = team_members(context, teams)?;
-        let baseline = if let Some(access) =
-            super::super::repository_policy::load(context)?.baseline
-        {
+        let members = team_members(context, query.teams)?;
+        let policy = super::super::repository_policy::load(context)?;
+        let baseline = if let Some(access) = query.baseline.resolve(policy.baseline) {
             let rows = context.query(
                 "SELECT actor FROM organization_members WHERE active=1 AND role='member' ORDER BY actor LIMIT ?",
                 &[SqlValue::Integer((MAX_TEAM_ACCESS_ROWS + 1) as i64)],

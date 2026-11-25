@@ -1013,6 +1013,7 @@ pub(crate) struct Membership {
     pub groups: Vec<crate::RepositoryGroup>,
     pub principal: Principal,
     pub organization: Option<uuid::Uuid>,
+    baseline: crate::catalog::RepositoryBaseline,
     pub(crate) teams: Vec<crate::catalog::TeamGrant>,
     pub(crate) review_teams: Vec<uuid::Uuid>,
     organization_owner: bool,
@@ -1049,6 +1050,7 @@ impl Membership {
                 server,
                 organization,
                 &self.teams,
+                self.baseline,
                 Some(&self.principal),
             )
             .await?
@@ -1181,6 +1183,7 @@ pub(crate) async fn membership(
             groups: Vec::new(),
             principal: principal.clone(),
             organization: repo.organization,
+            baseline: Default::default(),
             teams: Vec::new(),
             review_teams: Vec::new(),
             organization_owner,
@@ -1241,6 +1244,20 @@ pub(crate) async fn membership_snapshot(
     membership_for_config(server, principal, &repo.config, snapshot).await
 }
 
+pub(crate) async fn require_related_read(
+    server: &Server,
+    principal: &Principal,
+    origin: &Repository,
+    related: &Repository,
+) -> Result<()> {
+    let current = membership(server, principal, origin).await?;
+    let reader = current
+        .principal
+        .related_read(origin.id, related.id)
+        .ok_or(Error::NotFound)?;
+    membership(server, &reader, related).await.map(drop)
+}
+
 pub(crate) async fn membership_for_config(
     server: &Server,
     principal: &Principal,
@@ -1254,6 +1271,7 @@ pub(crate) async fn membership_for_config(
             groups: snapshot.groups,
             principal: principal.clone(),
             organization: None,
+            baseline: snapshot.baseline,
             teams: Vec::new(),
             review_teams: Vec::new(),
             organization_owner: false,
@@ -1283,9 +1301,9 @@ pub(crate) async fn membership_for_config(
     let mut config = config.clone();
     config.members = snapshot.members;
     config.groups = snapshot.groups;
-    let inherited = grant
-        .as_ref()
-        .and_then(|grant| crate::repository::access::organization_access(grant, &teams));
+    let inherited = grant.as_ref().and_then(|grant| {
+        crate::repository::access::organization_access(grant, &teams, snapshot.baseline)
+    });
     let principal = if let Some(credential) = principal.automation_credential() {
         credential
             .authorize(
@@ -1320,6 +1338,7 @@ pub(crate) async fn membership_for_config(
         groups: config.groups,
         principal,
         organization,
+        baseline: snapshot.baseline,
         teams,
         review_teams,
         organization_owner: grant.owner,

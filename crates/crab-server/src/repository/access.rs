@@ -10,7 +10,7 @@ use crate::{
     RepositoryAccess, RepositoryMember,
     app::{self, Error, Result},
     auth::Principal,
-    catalog::{RepositoryApplicationState, TeamGrant},
+    catalog::{RepositoryApplicationState, RepositoryBaseline, TeamGrant},
     cells::{
         Address, CellClient,
         directory::{
@@ -21,8 +21,9 @@ use crate::{
             discovery::{GetLanding, Landing},
             teams::{
                 repository_access::{
-                    ActorTeams, RepositoryActor, RepositoryTeamNames, RepositoryTeamQuery,
-                    RepositoryTeamRoster, RepositoryTeamsForActor, VisibleRepositoryTeams,
+                    ActorTeams, RepositoryActor, RepositoryRosterQuery, RepositoryTeamNames,
+                    RepositoryTeamQuery, RepositoryTeamRoster, RepositoryTeamsForActor,
+                    VisibleRepositoryTeams,
                 },
                 review_routing::{Algorithm, ReviewRoster},
             },
@@ -87,15 +88,20 @@ pub(crate) async fn organization_landing(
 pub(crate) fn organization_access(
     grant: &ActorTeams,
     teams: &[TeamGrant],
+    baseline: RepositoryBaseline,
 ) -> Option<RepositoryAccess> {
     if grant.owner {
         return Some(RepositoryAccess::Admin);
     }
+    let baseline = grant
+        .member
+        .then(|| baseline.resolve(grant.baseline))
+        .flatten();
     teams
         .iter()
         .filter(|team| grant.teams.binary_search(&team.team).is_ok())
         .map(|team| team.access)
-        .chain(grant.baseline)
+        .chain(baseline)
         .max()
 }
 
@@ -192,6 +198,7 @@ pub(crate) async fn organization_members(
     server: &Server,
     organization: Uuid,
     teams: &[TeamGrant],
+    baseline: RepositoryBaseline,
     principal: Option<&Principal>,
 ) -> Result<Vec<RepositoryMember>> {
     let issuer = server.auth.as_ref().ok_or(Error::NotFound)?.issuer();
@@ -201,7 +208,10 @@ pub(crate) async fn organization_members(
             .query::<RepositoryTeamRoster>(
                 Address::Organization(organization),
                 None,
-                teams.iter().map(|grant| grant.team).collect(),
+                RepositoryRosterQuery {
+                    teams: teams.iter().map(|grant| grant.team).collect(),
+                    baseline,
+                },
             )
             .await,
     )?;

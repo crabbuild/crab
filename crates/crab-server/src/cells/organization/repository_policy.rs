@@ -53,6 +53,19 @@ impl Default for Policy {
 }
 
 impl Policy {
+    pub(crate) fn validate(&self) -> std::result::Result<(), &'static str> {
+        if !matches!(
+            self.baseline,
+            None | Some(RepositoryAccess::Read | RepositoryAccess::Write | RepositoryAccess::Admin)
+        ) {
+            return Err("Choose None, Read, Write, or Admin base permissions");
+        }
+        if !valid_repository_branch(&self.default_branch) {
+            return Err("Enter a valid short Git branch name");
+        }
+        Ok(())
+    }
+
     pub(crate) fn can_create(&self, role: Role) -> bool {
         role == Role::Owner || self.member_creation
     }
@@ -104,17 +117,7 @@ impl Mutation for Set {
         context: &mut Transaction<'_>,
         Update { actor, mut policy }: Update,
     ) -> Result<MutationResult<Self::Output>> {
-        if !matches!(
-            policy.baseline,
-            None | Some(RepositoryAccess::Read | RepositoryAccess::Write)
-        ) {
-            return Err(Error::Invalid(
-                "Choose None, Read, or Write baseline access",
-            ));
-        }
-        if !valid_repository_branch(&policy.default_branch) {
-            return Err(Error::Invalid("Enter a valid short Git branch name"));
-        }
+        policy.validate().map_err(Error::Invalid)?;
         let current = load(context)?;
         if current.version != policy.version {
             return Ok(MutationResult::Rejected(None));

@@ -43,6 +43,7 @@ async fn resumes_published_git_snapshot_after_worker_loss() {
     let repository_id = jobs.repository_id(id);
     let request = ValidatedImport {
         fork_source: None,
+        default_branch_only: false,
         source: "https://127.0.0.1:1/offline-source.git".into(),
         owner: "team".into(),
         name: "imported".into(),
@@ -659,7 +660,23 @@ async fn private_fork_resumes_after_missing_historical_lfs_payload_is_restored()
     run_git(path, &["commit", "-m", "Add large file"]).await;
     run_git(path, &["rm", "asset.bin"]).await;
     run_git(path, &["commit", "-m", "Remove large file from tip"]).await;
-    run_git(path, &["push", remote.as_str(), "main"]).await;
+    run_git(path, &["tag", "release"]).await;
+    run_git(path, &["checkout", "-b", "feature"]).await;
+    std::fs::write(path.join("feature.txt"), "Upstream branch only\n").unwrap();
+    run_git(path, &["add", "feature.txt"]).await;
+    run_git(path, &["commit", "-m", "Add feature content"]).await;
+    run_git(path, &["checkout", "main"]).await;
+    run_git(
+        path,
+        &[
+            "push",
+            remote.as_str(),
+            "main",
+            "feature",
+            "refs/tags/release",
+        ],
+    )
+    .await;
     let source_lfs = crab_lfs::LfsObjectStore::new(source.store.clone(), &source.config.prefix);
     source_lfs.delete(&pointer.oid).await.unwrap();
 
@@ -698,13 +715,23 @@ async fn private_fork_resumes_after_missing_historical_lfs_payload_is_restored()
             .status(),
         StatusCode::BAD_REQUEST
     );
-    let response =
-        fork_request(json!({"request_id":id,"name":"fork","properties":{(&property):false}})).await;
+    let input = json!({
+        "request_id":id,"name":"fork","properties":{(&property):false},
+        "description":"Work on release tooling","default_branch_only":true,
+    });
+    let response = fork_request(input.clone()).await;
     assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let mut different_scope = input;
+    different_scope["default_branch_only"] = json!(false);
+    assert_eq!(
+        fork_request(different_scope).await.status(),
+        StatusCode::CONFLICT
+    );
     let status = format!("{org}/repositories/imports/git/{id}");
     wait_for_state(&h, &alice, &status, "failed").await;
     let failed = h.json(&status, &alice).await;
     assert_eq!(failed["resumable"], true);
+    assert_eq!(failed["default_branch_only"], true);
     assert!(
         failed["message"]
             .as_str()
@@ -730,6 +757,56 @@ async fn private_fork_resumes_after_missing_historical_lfs_payload_is_restored()
         .error_for_status()
         .unwrap();
     wait_for_state(&h, &alice, &status, "succeeded").await;
+    let refs = h
+        .json(&format!("/api/repos/{owner}/fork/refs"), &alice)
+        .await;
+    let refs = refs["refs"].as_array().unwrap();
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0]["name"], "refs/heads/main");
+    let fork = h
+        .json(&format!("/api/repos?owner={owner}&name=fork"), &alice)
+        .await;
+    assert_eq!(
+        fork["repositories"][0]["description"],
+        "Work on release tooling"
+    );
+    let sync = format!("/api/repos/{owner}/fork/fork-sync");
+    let preview = format!("{sync}?branch=refs%2Fheads%2Ffeature");
+    let upstream = h.json(&preview, &alice).await;
+    assert_eq!(upstream["state"], "fork_missing");
+    assert!(upstream["fork_oid"].is_null());
+    let copy = async |commit: &serde_json::Value, request_id: Uuid| {
+        h.http
+            .post(format!("{}{sync}", h.origin))
+            .header("cookie", &alice)
+            .header("origin", &h.origin)
+            .header("x-csrf-token", session["csrf"].as_str().unwrap())
+            .header("x-crab-repository-id", fork["repositories"][0]["id"].as_str().unwrap())
+            .json(&json!({"branch":"refs/heads/feature","fork_oid":null,"upstream_oid":commit,"request_id":request_id}))
+            .send().await.unwrap()
+    };
+    assert_eq!(
+        copy(&refs[0]["oid"], Uuid::now_v7()).await.status(),
+        StatusCode::CONFLICT
+    );
+    let copy_id = Uuid::now_v7();
+    for _ in 0..2 {
+        let copied = copy(&upstream["upstream_oid"], copy_id)
+            .await
+            .error_for_status()
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(copied["commit"], upstream["upstream_oid"]);
+    }
+    assert_eq!(h.json(&preview, &alice).await["state"], "up_to_date");
+    assert_eq!(
+        copy(&upstream["upstream_oid"], Uuid::now_v7())
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
     assert_eq!(
         h.json(&format!("/api/repos/{owner}/fork/properties"), &alice)
             .await["values"]["overrides"][&property],
@@ -746,6 +823,14 @@ async fn private_fork_resumes_after_missing_historical_lfs_payload_is_restored()
         .unwrap();
     let fork_url = format!("{}/git/{owner}/fork.git", h.origin);
     let fork_secret = fork_token["token"].as_str().unwrap();
+    let mut fork_remote = url::Url::parse(&fork_url).unwrap();
+    fork_remote.set_username("crab").unwrap();
+    fork_remote.set_password(Some(fork_secret)).unwrap();
+    run_git(path, &["fetch", fork_remote.as_str(), "feature"]).await;
+    assert_eq!(
+        run_git(path, &["show", "FETCH_HEAD:feature.txt"]).await,
+        "Upstream branch only"
+    );
     let batch: serde_json::Value = h
         .http
         .post(format!("{fork_url}/info/lfs/objects/batch"))

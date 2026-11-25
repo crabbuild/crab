@@ -374,9 +374,7 @@ pub(crate) async fn read(
             let Some(source) = entry.fork_source(&server).filter(|source| source.id == id) else {
                 return Ok(crate::app::Error::NotFound.into_response());
             };
-            // The fork's durable membership already resolves the upstream ACL.
-            // Keep the principal scoped to this fork while using its lineage.
-            if let Err(error) = crate::app::membership(&server, &principal, &entry).await {
+            if let Err(error) = crate::app::require_related_read(&server, &principal, &entry, &source).await {
                 return Ok(error.into_response());
             }
             Some(source)
@@ -452,15 +450,15 @@ pub(crate) async fn read(
         };
         let timer = Instant::now();
         let payload = if let Some(source) = upstream {
-            let source = source.revalidate(&server, &cancellation).await?;
+            let opened_source = source.revalidate(&server, &cancellation).await?;
             let comparison = if matches!(action, Action::Commits) {
-                query::fork_commits(repository, &source.git, &params, &page, &cancellation).await
+                query::fork_commits(repository, &opened_source.git, &params, &page, &cancellation).await
                     .map(|page| json!({"items":page.items.iter().map(commit_json).collect::<Vec<_>>(),
                         "next":page.next.map(|cursor| encode_cursor(&server.cursor_key, entry.id, cursor))}))
             } else {
-                query::fork_comparison(repository, &source.git, &params, &cancellation).await
+                query::fork_comparison(repository, &opened_source.git, &params, &cancellation).await
             };
-            if let Err(error) = crate::app::membership(&server, &principal, &entry).await {
+            if let Err(error) = crate::app::require_related_read(&server, &principal, &entry, &source).await {
                 return Ok(error.into_response());
             }
             comparison.map(Payload::Json)

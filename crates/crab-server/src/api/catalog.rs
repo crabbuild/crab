@@ -345,7 +345,11 @@ pub(super) async fn visible_matching(
                         .and_then(|id| organization_grants.get(&id))
                         .and_then(|grant| {
                             source.organization.as_ref().and_then(|access| {
-                                crate::repository::access::organization_access(grant, &access.teams)
+                                crate::repository::access::organization_access(
+                                    grant,
+                                    &access.teams,
+                                    record.baseline(),
+                                )
                             })
                         }),
                     record.name_version() > 0,

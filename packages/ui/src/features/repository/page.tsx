@@ -834,7 +834,9 @@ export function RepositoryPage({
                     repo={repo}
                     refs={data}
                     type={view === "branches" ? "branches" : "tags"}
+                    csrf={csrf}
                     onDeleteBranch={canWrite ? deleteBranch : undefined}
+                    onBranchCopied={canWrite ? refs.retry : undefined}
                   />
                 </Suspense>
               ) : !data.refs.length ? (

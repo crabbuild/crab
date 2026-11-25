@@ -529,6 +529,10 @@ struct ForkRequest {
     request_id: Uuid,
     name: String,
     #[serde(default)]
+    description: String,
+    #[serde(default)]
+    default_branch_only: bool,
+    #[serde(default)]
     destination: ForkDestination,
     #[serde(default)]
     properties: BTreeMap<Uuid, PropertyValue>,
@@ -569,13 +573,14 @@ async fn start_fork(
     let request = ValidatedImport {
         source: format!("{}/{}", source.config.owner, source.config.name),
         fork_source: Some(source.id),
+        default_branch_only: input.default_branch_only,
         owner: if personal {
             crate::catalog::personal_namespace(&account.identity.issuer, &account.identity.subject)
         } else {
             source.config.owner.clone()
         },
         name,
-        description: String::new(),
+        description: source::description(&input.description)?,
         visibility: Visibility::Private,
         properties: input.properties,
         token: None,

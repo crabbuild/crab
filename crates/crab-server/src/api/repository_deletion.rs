@@ -127,7 +127,7 @@ async fn access(
         .forked_from
         .and_then(|id| document.repository_by_id(id));
     let source = record.access_record(upstream).map_err(catalog_error)?;
-    match management_access(server, source, actor, Management::Delete).await? {
+    match management_access(server, source, record.baseline(), actor, Management::Delete).await? {
         SourceAccess::None => Err(Error::NotFound),
         access => Ok(access),
     }

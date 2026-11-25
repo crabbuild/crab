@@ -83,6 +83,9 @@ async fn availability(
 ) -> Result<Json<Value>> {
     let source = app::repository(&server, &principal, &(owner, name))?;
     let upstream = discussion(&server, &source, route.upstream)?;
+    if upstream.id != source.id {
+        app::require_related_read(&server, &principal, &source, &upstream).await?;
+    }
     let pull = associated_pull(&server, &upstream, &source, app::number(number)?).await?;
     let current = app::membership(&server, &principal, &source).await?;
     if !current.principal.can_write(source.id) {
@@ -101,6 +104,9 @@ async fn availability(
         false
     };
     let branch = check_availability(&server, &current, &source, &pull).await?;
+    if upstream.id != source.id {
+        app::require_related_read(&server, &principal, &source, &upstream).await?;
+    }
     let current = app::membership(&server, &principal, &source).await?;
     if !current.principal.can_write(source.id) {
         return Ok(Json(json!({ "branch": null })));
@@ -240,6 +246,9 @@ async fn edit(
 ) -> Result<impl IntoResponse> {
     let source = app::repository(&server, &principal, &(owner, name))?;
     let upstream = discussion(&server, &source, route.upstream)?;
+    if upstream.id != source.id {
+        app::require_related_read(&server, &principal, &source, &upstream).await?;
+    }
     let number = app::number(number)?;
     let pull = associated_pull(&server, &upstream, &source, number).await?;
     let head = saved_head(&pull).ok_or(Error::PullBranchChanged)?;
@@ -346,6 +355,9 @@ pub(crate) async fn authorize_pull_branch(
         || edit.source.ownership_epoch != source.ownership_epoch
     {
         return Err(ReceiveError::NotFound);
+    }
+    if edit.upstream.id != source.id && matches!(edit.binding, PullBranchBinding::Manual { .. }) {
+        app::require_related_read(server, principal, source, &edit.upstream).await?;
     }
     let pull = associated_pull(server, &edit.upstream, source, edit.pull).await?;
     let bound = match &edit.binding {

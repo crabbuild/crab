@@ -84,8 +84,16 @@ async fn personal_fork_is_retired_on_removal_and_restored_only_with_previous_acc
     let local = tempfile::tempdir().unwrap();
     let head = git::push_review_branches(local.path(), git_url.as_str()).await;
 
-    crate::test_support::http::organizations::set_private_forks(&h, organization, &alice, true)
-        .await;
+    let policy = format!("{org}/repository-policy");
+    h.write(
+        Method::PUT,
+        &policy,
+        &alice,
+        json!({"version":0,"member_creation":false,"private_forks":true,"baseline":"read"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
     let upstream = h
         .json(&format!("/api/repos?owner={owner}&name=library"), &bob)
         .await;
@@ -131,10 +139,25 @@ async fn personal_fork_is_retired_on_removal_and_restored_only_with_previous_acc
     assert_eq!(fork["owner"], namespace);
     assert_eq!(fork["fork"], true);
     let fork_id = fork["id"].clone();
+    h.write(
+        Method::PUT,
+        &policy,
+        &alice,
+        json!({"version":1,"member_creation":false,"private_forks":true,"baseline":"admin"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let fork_access = catalog.membership(&namespace, "library").await.unwrap();
+    assert_eq!(
+        fork_access.baseline,
+        crate::catalog::RepositoryBaseline::PrivateFork(Some(crate::RepositoryAccess::Read))
+    );
     let detail = h
         .json(&format!("/api/repos?owner={namespace}&name=library"), &bob)
         .await;
     assert_eq!(detail["repositories"][0]["access"], "write");
+    assert_eq!(detail["repositories"][0]["can_admin"], false);
     let visible = h
         .json(&format!("/api/repos?organization={organization}"), &alice)
         .await;
@@ -174,6 +197,58 @@ async fn personal_fork_is_retired_on_removal_and_restored_only_with_previous_acc
             .iter()
             .any(|entry| entry["oid"] == head)
     );
+    h.write(
+        Method::PUT,
+        &policy,
+        &alice,
+        json!({"version":2,"member_creation":false,"private_forks":true,"baseline":null}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    catalog
+        .set_members(owner, "library", vec![], true)
+        .await
+        .unwrap();
+    assert_eq!(check_fork(&bob).await.status(), StatusCode::OK);
+    let primary = "refs%2Fheads%2Fmain";
+    for path in [
+        format!("{fork_route}/fork-sync?branch={primary}"),
+        format!("{fork_route}/changes?rev={primary}&base={primary}&merge_base=true&upstream={id}"),
+    ] {
+        let response = h
+            .http
+            .get(format!("{}{path}", h.origin))
+            .header(header::COOKIE, &bob)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+    let fork = Uuid::parse_str(fork_id.as_str().unwrap()).unwrap();
+    let main = fork_refs["refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "refs/heads/main")
+        .unwrap();
+    assert_eq!(
+        repository_write(
+            &h,
+            Method::POST,
+            &format!("{fork_route}/fork-sync"),
+            &bob,
+            fork,
+            json!({"branch":"refs/heads/main","fork_oid":main["oid"],"upstream_oid":main["oid"]}),
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    catalog
+        .set_members(owner, "library", vec![read.clone()], true)
+        .await
+        .unwrap();
     let remove = async |version| {
         h.write(
             Method::DELETE,

@@ -33,17 +33,7 @@ async fn save(
     Path(id): Path<Uuid>,
     Json(policy): Json<Policy>,
 ) -> Result<Json<Policy>> {
-    if !matches!(
-        policy.baseline,
-        None | Some(crate::RepositoryAccess::Read | crate::RepositoryAccess::Write)
-    ) {
-        return Err(Error::Invalid(
-            "Choose None, Read, or Write baseline access",
-        ));
-    }
-    if !crate::config::valid_repository_branch(&policy.default_branch) {
-        return Err(Error::Invalid("Enter a valid short Git branch name"));
-    }
+    policy.validate().map_err(Error::Invalid)?;
     let actor = actor(&server, &principal).await?;
     let address = target(id)?;
     let worker = Arc::clone(&server);

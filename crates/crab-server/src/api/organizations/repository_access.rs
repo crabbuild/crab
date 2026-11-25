@@ -201,7 +201,10 @@ async fn list(
         let direct = RepositoryMember::access_for(&source.members, &identity.subject)
             .filter(|_| known_provider);
         let organization_owner = known_provider && roles.owner;
-        let baseline = roles.baseline.filter(|_| known_provider);
+        let baseline = repo
+            .baseline()
+            .resolve(roles.baseline)
+            .filter(|_| known_provider);
         let teams: Vec<_> = source
             .organization
             .iter()
