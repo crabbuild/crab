@@ -247,12 +247,14 @@ impl CdnPolicy {
                         full_bytes: 8 * 1024 * 1024,
                         ranged_object_bytes: u64::MAX,
                         range_bytes: 8 * 1024 * 1024,
-                        // A cold xorb can queue several R2 range fills and need
-                        // time for a verified native restart under the same deadline.
-                        timeout: Duration::from_secs(if family == CdnReadFamily::Xorb {
-                            30
-                        } else {
-                            5
+                        // Batched payload reads can queue several cold R2 fills
+                        // and restart at the origin under the same deadline.
+                        timeout: Duration::from_secs(match family {
+                            CdnReadFamily::Git
+                            | CdnReadFamily::Capsule
+                            | CdnReadFamily::Lfs
+                            | CdnReadFamily::Xorb => 30,
+                            CdnReadFamily::ChunkPage | CdnReadFamily::Shard => 5,
                         }),
                     },
                     None if fixture_build => ReadLimits::FIXTURE,
@@ -283,7 +285,13 @@ mod tests {
         for (family, limit) in limits {
             assert!(limit.admits(16 * 1024 * 1024, Some(8 * 1024 * 1024)));
             assert!(!limit.admits(16 * 1024 * 1024, None));
-            let expected_seconds = if family == CdnReadFamily::Xorb { 30 } else { 5 };
+            let expected_seconds = match family {
+                CdnReadFamily::Git
+                | CdnReadFamily::Capsule
+                | CdnReadFamily::Lfs
+                | CdnReadFamily::Xorb => 30,
+                CdnReadFamily::ChunkPage | CdnReadFamily::Shard => 5,
+            };
             assert_eq!(
                 limit.timeout,
                 Duration::from_secs(expected_seconds),
