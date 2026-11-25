@@ -249,7 +249,8 @@ async fn organization_import_requires_current_ownership_and_resumes_under_anothe
         &format!("{root}/repository-properties"),
         &alice,
         json!({"expected_version":0,"definitions":[
-            {"id":property,"name":"regulated","description":"","kind":"boolean","options":[],"default":true}
+            {"id":property,"name":"regulated","description":"","kind":"boolean","options":[],"default":true,
+                "required":true,"require_explicit_values":true}
         ]}),
     )
     .await
@@ -279,6 +280,14 @@ async fn organization_import_requires_current_ownership_and_resumes_under_anothe
     invalid["properties"][property.to_string()] = json!("false");
     assert_eq!(
         h.write(reqwest::Method::POST, &endpoint, &alice, invalid)
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let mut missing = body.clone();
+    missing["properties"] = json!({});
+    assert_eq!(
+        h.write(reqwest::Method::POST, &endpoint, &alice, missing)
             .await
             .status(),
         StatusCode::BAD_REQUEST
@@ -656,17 +665,41 @@ async fn private_fork_resumes_after_missing_historical_lfs_payload_is_restored()
 
     let id = Uuid::now_v7();
     let session = h.json("/api/session", &alice).await;
-    let response = h
-        .http
-        .post(format!("{}/api/repos/{owner}/upstream/forks", h.origin))
-        .header("cookie", &alice)
-        .header("origin", &h.origin)
-        .header("x-csrf-token", session["csrf"].as_str().unwrap())
-        .header("x-crab-repository-id", source.id.to_string())
-        .json(&json!({"request_id":id,"name":"fork"}))
-        .send()
-        .await
-        .unwrap();
+    let property = Uuid::now_v7().to_string();
+    h.write(
+        Method::PUT,
+        &format!("{org}/repository-properties"),
+        &alice,
+        json!({
+            "expected_version":0,"definitions":[{
+                "id":property,"name":"regulated","description":"","kind":"boolean","options":[],
+                "default":true,"required":true,"require_explicit_values":true,
+            }]
+        }),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let fork_request = async |body: serde_json::Value| {
+        h.http
+            .post(format!("{}/api/repos/{owner}/upstream/forks", h.origin))
+            .header("cookie", &alice)
+            .header("origin", &h.origin)
+            .header("x-csrf-token", session["csrf"].as_str().unwrap())
+            .header("x-crab-repository-id", source.id.to_string())
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+    };
+    assert_eq!(
+        fork_request(json!({"request_id":id,"name":"fork"}))
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let response =
+        fork_request(json!({"request_id":id,"name":"fork","properties":{(&property):false}})).await;
     assert_eq!(response.status(), StatusCode::ACCEPTED);
     let status = format!("{org}/repositories/imports/git/{id}");
     wait_for_state(&h, &alice, &status, "failed").await;
@@ -697,6 +730,11 @@ async fn private_fork_resumes_after_missing_historical_lfs_payload_is_restored()
         .error_for_status()
         .unwrap();
     wait_for_state(&h, &alice, &status, "succeeded").await;
+    assert_eq!(
+        h.json(&format!("/api/repos/{owner}/fork/properties"), &alice)
+            .await["values"]["overrides"][&property],
+        false
+    );
     // The fork must serve its verified copy without asking the source for data.
     source_lfs.delete(&pointer.oid).await.unwrap();
     let fork_token: serde_json::Value = token("fork", "read")

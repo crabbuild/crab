@@ -82,7 +82,8 @@ test("organization repository creation recovers its owner-scoped request after r
                 kind: "text",
                 options: [],
                 default: "Shared",
-                required: false,
+                required: true,
+                require_explicit_values: true,
                 values_editable_by: "organization",
               },
             ],
@@ -157,8 +158,11 @@ test("organization repository creation recovers its owner-scoped request after r
   await page.getByRole("radio", { name: "Public" }).click();
   await expect(page.getByLabel("service_area")).toHaveAttribute(
     "placeholder",
-    "Inherit default (Shared)",
+    "Choose a value",
   );
+  await expect(
+    page.getByRole("button", { name: "Create repository", exact: true }),
+  ).toBeDisabled();
   await page.getByLabel("service_area").fill("Tools");
   await page
     .getByRole("button", { name: "Create repository", exact: true })
@@ -292,7 +296,8 @@ test("a current organization owner can resume a shared import", async ({
               kind: "text",
               options: [],
               default: "Shared",
-              required: false,
+              required: true,
+              require_explicit_values: true,
               values_editable_by: "organization",
             },
           ],
@@ -383,6 +388,9 @@ test("a current organization owner can resume a shared import", async ({
   ).toBe(true);
   await page.getByLabel("Git source").fill(source);
   await page.getByLabel("Source token").fill("initial-token");
+  await expect(
+    page.getByRole("button", { name: "Start import" }),
+  ).toBeDisabled();
   await page.getByLabel("service_area").fill("Tools");
   const visibility = page
     .getByRole("region", { name: "Bring a repository from Git" })

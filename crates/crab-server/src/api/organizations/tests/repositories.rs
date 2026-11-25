@@ -56,8 +56,8 @@ async fn repository_creation_visibility_restricts_members_and_binds_the_reservat
     let delegated = Uuid::now_v7();
     h.write(Method::PUT, &format!("{root}/repository-properties"), &alice, json!({
         "expected_version":0,"definitions":[
-            {"id":locked,"name":"locked","description":"","kind":"boolean","options":[],"default":true},
-            {"id":delegated,"name":"delegated","description":"","kind":"boolean","options":[],"default":true,"values_editable_by":"repository"},
+            {"id":locked,"name":"locked","description":"","kind":"boolean","options":[],"default":true,"required":true,"require_explicit_values":true},
+            {"id":delegated,"name":"delegated","description":"","kind":"boolean","options":[],"default":true,"required":true,"require_explicit_values":true,"values_editable_by":"repository"},
         ],
     })).await.error_for_status().unwrap();
     let member_options = h.json(&creation, &bob).await;
@@ -77,6 +77,7 @@ async fn repository_creation_visibility_restricts_members_and_binds_the_reservat
         })
     };
     for properties in [
+        json!({}),
         json!({(locked.to_string()):false}),
         json!({(delegated.to_string()):"false"}),
     ] {
@@ -105,7 +106,8 @@ async fn repository_creation_visibility_restricts_members_and_binds_the_reservat
         Method::POST,
         &creation,
         &alice,
-        json!({"request_id":Uuid::now_v7(),"name":"closed-library","description":"","visibility":"private"}),
+        json!({"request_id":Uuid::now_v7(),"name":"closed-library","description":"","visibility":"private",
+            "properties":{(locked.to_string()):true,(delegated.to_string()):true}}),
     )
     .await
     .error_for_status()

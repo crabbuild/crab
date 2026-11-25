@@ -116,10 +116,9 @@ impl Mutation for AuthorizeCreation {
                     .unwrap_or_else(default_repository_branch),
             )
         } else {
-            if !input.properties.is_empty()
-                && !properties::validate_creation_values(context, current.role, &input.properties)?
-            {
-                return Ok(MutationResult::Rejected(CreationOutcome::InvalidProperties));
+            let fields = properties::creation_fields(context, current.role)?;
+            if let Err(error) = properties::validate_initial_values(&fields, &input.properties) {
+                return Ok(MutationResult::Rejected(CreationOutcome::Properties(error)));
             }
             let member_creating = current.role == Role::Member;
             context.put_document(&key, &digest)?;
@@ -148,7 +147,7 @@ pub(crate) enum CreationOutcome {
     },
     Conflict,
     VisibilityRestricted,
-    InvalidProperties,
+    Properties(properties::ValueError),
 }
 
 pub(crate) struct InitializeCreationProperties;
@@ -170,6 +169,7 @@ impl Mutation for InitializeCreationProperties {
         let repository = properties::Repository {
             id: browser_repository_id(&owner, input.request_id),
             ownership_epoch: 0,
+            property_seed: None,
         };
         properties::initialize_values(context, input.actor, repository, input.properties)?;
         Ok(MutationResult::Success(Authorized::Accepted))

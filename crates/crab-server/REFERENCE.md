@@ -1388,6 +1388,13 @@ A default applies to repositories with no override, including new repositories.
 To require a property for all repositories, specify a default of the property's
 type. Repositories inherit that default until an override is set. Clearing the
 override restores inheritance.
+Enable **Require an explicit value** on a required property to require a choice
+from people who can set it. This applies to new repositories, organization
+Git imports and forks, transfer acceptance, and single-repository property
+saves. A bulk edit can leave an explicit property alone or set an override.
+Existing repositories with no override continue to inherit the default.
+Previously accepted creation requests and import jobs retain their saved
+choices on retry.
 The **New repository** dialog shows creation-time property fields. Organization
 owners can set all fields. Members can set fields delegated to repository
 administrators. The organization creation options endpoint returns the eligible
@@ -1418,7 +1425,11 @@ Upgrade serving peers together because native ruleset lookups now include the
 repository type. Property changes and Git publication share the organization
 policy lease. Imports hold that lease while rechecking creation restrictions and
 publishing the catalog entry. A repository transfer starts a new set of explicit
-overrides under the destination's property definitions.
+overrides under the destination's property definitions. When a destination
+organization owner reviews an incoming transfer, the offer response includes
+the available `properties`. Send a `properties` object keyed by definition UUID
+when accepting. The values become visible with the new ownership. Replay the
+same values to recover a lost acceptance response.
 Organization audit events record changes to definitions and repository values.
 
 Use `GET /api/organizations/{id}/repository-properties` for the versioned
@@ -1431,6 +1442,8 @@ use `values_editable_by` with `organization` as the default and `repository` to
 allow repository administrators. A repository administrator's save must retain
 the current overrides for organization-managed properties.
 Required definitions use `required: true` and must have a valid `default`.
+Set `require_explicit_values: true` on a required definition to enforce an
+explicit selection.
 Public-only readers receive `{properties:[{name,value}]}` with the effective
 values of set properties. The organization schema and editing controls require
 their respective signed-in access.
@@ -1446,11 +1459,13 @@ keep their type and allow existing select values to remain valid.
 ### Filter organization repositories by property
 
 Open the organization's **Repositories** tab and choose **Filter by property**
-to add a qualifier to the search. Use `props.NAME:VALUE` to type one directly,
-such as `props.regulated:false` or `props.location:"US East"`. Prefix a qualifier
-with `-` to exclude repositories with that value. Combine qualifiers with name
-or description terms. Every qualifier must match. Property names and boolean
-values ignore case. Text and choice values match exactly. A multi-select
+to add a qualifier to the search. Start typing `prop` in the search box to
+choose a property and a suggested value. Use the arrow keys and Enter to
+insert a suggestion, then submit the search. You can also type a qualifier
+directly, such as `props.regulated:false` or `props.location:"US East"`. Prefix
+a qualifier with `-` to exclude repositories with that value. Combine qualifiers
+with name or description terms. Every qualifier must match. Property names and
+boolean values ignore case. Text and choice values match exactly. A multi-select
 qualifier matches one selected option. Defaults apply when no override exists.
 
 Use `GET /api/repos?organization={id}&q={query}` to run the search. The scope is

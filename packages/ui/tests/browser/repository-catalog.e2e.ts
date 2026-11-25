@@ -76,6 +76,12 @@ test("repository search pages on the server and restores a stale continuation", 
     const after = searchParams.get("after");
     if (searchParams.get("organization")) {
       expect(searchParams.get("organization")).toBe(organization);
+      if (q === 'project -props.region:"EU West" archived:true') {
+        expect(after).toBeNull();
+        return route.fulfill({
+          json: { repositories: [repo("other-region", true)], next: null },
+        });
+      }
       if (q === 'project props.region:"US East"') {
         return route.fulfill({
           json: after
@@ -211,6 +217,46 @@ test("repository search pages on the server and restores a stale continuation", 
   await expect(page.getByRole("link", { name: "org-project" })).toBeVisible();
   expect(requests.at(-1)?.get("q")).toBe("project");
   expect(requests.at(-1)?.get("organization")).toBe(organization);
+  const organizationSearch = page.getByRole("combobox", {
+    name: "Search repositories",
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect
+    .poll(() =>
+      organizationSearch.evaluate(
+        (input) => input.getBoundingClientRect().width,
+      ),
+    )
+    .toBeGreaterThan(280);
+  await organizationSearch.fill("project prop");
+  await expect(
+    page.getByRole("option", { name: "props.region:" }),
+  ).toBeVisible();
+  await organizationSearch.press("Escape");
+  await expect(page.getByRole("listbox")).toHaveCount(0);
+  await expect(organizationSearch).toHaveValue("project prop");
+  await organizationSearch.fill("project -props.reg archived:true");
+  for (const _ of " archived:true") {
+    await organizationSearch.press("ArrowLeft");
+  }
+  await expect(
+    page.getByRole("option", { name: "-props.region:" }),
+  ).toBeVisible();
+  await expectNoAccessibilityViolations(page);
+  await organizationSearch.press("ArrowDown");
+  await organizationSearch.press("Enter");
+  await expect(organizationSearch).toHaveValue(
+    "project -props.region: archived:true",
+  );
+  await page.getByRole("option", { name: '-props.region:"EU West"' }).click();
+  await expect(organizationSearch).toHaveValue(
+    'project -props.region:"EU West" archived:true',
+  );
+  await organizationSearch.press("Enter");
+  await expect(page.getByRole("link", { name: "other-region" })).toBeVisible();
+  await organizationSearch.fill("project");
+  await organizationSearch.press("Enter");
+  await expect(page.getByRole("link", { name: "org-project" })).toBeVisible();
   await page.getByRole("button", { name: "Filter by property" }).click();
   await chooseSelectOption(
     page.getByRole("combobox", { name: "Property", exact: true }),
@@ -230,7 +276,9 @@ test("repository search pages on the server and restores a stale continuation", 
   await expect(
     page.getByRole("link", { name: "org-matching-project" }),
   ).toBeVisible();
-  await expect(search).toHaveValue('project props.region:"US East"');
+  await expect(organizationSearch).toHaveValue(
+    'project props.region:"US East"',
+  );
   await page.reload();
   await expect(
     page.getByRole("link", { name: "org-matching-project" }),
@@ -240,14 +288,14 @@ test("repository search pages on the server and restores a stale continuation", 
     page.getByRole("combobox", { name: "Archive status" }),
     "true",
   );
-  await expect(search).toHaveValue(
+  await expect(organizationSearch).toHaveValue(
     'project props.region:"US East" archived:true',
   );
   await chooseSelectOption(
     page.getByRole("combobox", { name: "Fork status" }),
     "only",
   );
-  await expect(search).toHaveValue(
+  await expect(organizationSearch).toHaveValue(
     'project props.region:"US East" archived:true fork:only',
   );
   await expect(
@@ -270,7 +318,7 @@ test("repository search pages on the server and restores a stale continuation", 
   await expect(
     page.getByRole("link", { name: "archive-newest" }),
   ).toBeVisible();
-  await expect(search).toHaveValue(
+  await expect(organizationSearch).toHaveValue(
     'project props.region:"US East" archived:true fork:only is:public sort:created-desc',
   );
   await expect(
@@ -289,7 +337,7 @@ test("repository search pages on the server and restores a stale continuation", 
   await expect(
     page.getByRole("link", { name: "archive-updated" }),
   ).toBeVisible();
-  await expect(search).toHaveValue(
+  await expect(organizationSearch).toHaveValue(
     'project props.region:"US East" archived:true fork:only is:public sort:updated-desc',
   );
   await expect(

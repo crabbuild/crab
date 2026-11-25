@@ -430,6 +430,7 @@ pub(in crate::cells) fn authorize(
             | properties::SetSchema::ID
             | properties::SetSelection::ID
             | properties::InitializeImportValues::ID
+            | properties::PrepareTransferValues::ID
             | issue_types::Replace::ID
             | automation::Change::ID,
             true,
@@ -632,6 +633,9 @@ pub(in crate::cells) fn dispatch_mutation(
         properties::SetValues::ID => invoke_mutation::<properties::SetValues>(context, input),
         properties::InitializeImportValues::ID => {
             invoke_mutation::<properties::InitializeImportValues>(context, input)
+        }
+        properties::PrepareTransferValues::ID => {
+            invoke_mutation::<properties::PrepareTransferValues>(context, input)
         }
         properties::SetSelection::ID => invoke_mutation::<properties::SetSelection>(context, input),
         automation::Change::ID => invoke_mutation::<automation::Change>(context, input),

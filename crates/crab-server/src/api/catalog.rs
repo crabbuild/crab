@@ -525,11 +525,7 @@ async fn create_organization(
                     "This organization does not allow you to create repositories with that visibility",
                 ));
             }
-            CreationOutcome::InvalidProperties => {
-                return Err(app::Error::Invalid(
-                    "Choose valid values for properties you can set on this repository",
-                ));
-            }
+            CreationOutcome::Properties(error) => return Err(app::Error::Invalid(error.message())),
         };
         // Policy and membership writes share this lease. Bind the
         // decision to the durable reservation before allowing a change.

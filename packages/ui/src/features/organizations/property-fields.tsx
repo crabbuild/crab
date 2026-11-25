@@ -24,6 +24,7 @@ export interface PropertyDefinition {
   options: string[];
   default: PropertyValue | null;
   required: boolean;
+  require_explicit_values: boolean;
   values_editable_by: "organization" | "repository";
 }
 
@@ -41,6 +42,16 @@ export const control =
 
 export function display(value: PropertyValue) {
   return Array.isArray(value) ? value.join(", ") : String(value);
+}
+
+export function needsExplicitPropertyValues(
+  definitions: PropertyDefinition[],
+  values: PropertyOverrides,
+) {
+  return definitions.some(
+    (definition) =>
+      definition.require_explicit_values && values[definition.id] == null,
+  );
 }
 
 export function RepositoryPropertyFields({
@@ -63,6 +74,7 @@ export function RepositoryPropertyFields({
           <PropertyInput
             definition={definition}
             label={definition.name}
+            required={definition.require_explicit_values}
             value={values[definition.id] ?? null}
             unset={
               definition.default === null
@@ -91,18 +103,22 @@ export function PropertyInput({
   value,
   unset,
   onChange,
+  required = false,
 }: {
   label: string;
   definition: PropertyDefinition;
   value: PropertyValue | null;
   unset: string;
   onChange: (value: PropertyValue | null) => void;
+  required?: boolean;
 }) {
+  const caption = required ? `${label} (required)` : label;
+  const placeholder = required ? "Choose a value" : unset;
   if (definition.kind === "multi_select") {
     const selected = Array.isArray(value) ? value : [];
     return (
       <fieldset className="grid gap-1 rounded-md border p-3">
-        <legend className="font-medium">{label}</legend>
+        <legend className="font-medium">{caption}</legend>
         {definition.options.map((option) => (
           <label className="flex items-center gap-2" key={option}>
             <Checkbox
@@ -119,7 +135,7 @@ export function PropertyInput({
           </label>
         ))}
         {!selected.length && (
-          <span className="text-sm text-muted-foreground">{unset}</span>
+          <span className="text-sm text-muted-foreground">{placeholder}</span>
         )}
       </fieldset>
     );
@@ -127,10 +143,11 @@ export function PropertyInput({
   if (definition.kind === "text") {
     return (
       <label className="grid gap-1">
-        {label}
+        {caption}
         <Input
           value={typeof value === "string" ? value : ""}
-          placeholder={unset}
+          aria-required={required || undefined}
+          placeholder={placeholder}
           maxLength={75}
           onChange={(event) => onChange(event.target.value || null)}
         />
@@ -139,10 +156,11 @@ export function PropertyInput({
   }
   return (
     <label className="grid gap-1">
-      {label}
+      {caption}
       <FieldSelect
         className="w-full"
         value={value === null ? "" : display(value)}
+        aria-required={required || undefined}
         onValueChange={(nextValue) => {
           const next = nextValue;
           onChange(
@@ -154,7 +172,7 @@ export function PropertyInput({
           );
         }}
         options={[
-          { value: "", label: unset },
+          { value: "", label: placeholder },
           ...(definition.kind === "boolean"
             ? ["true", "false"]
             : definition.options

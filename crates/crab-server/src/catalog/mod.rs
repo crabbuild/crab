@@ -75,6 +75,8 @@ pub struct CatalogRecord {
     pub placement_generation: u64,
     #[serde(default, skip_serializing_if = "ownership_epoch_is_initial")]
     pub(crate) ownership_epoch: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) property_seed: Option<Uuid>,
     pub application: RepositoryApplicationState,
     // The creation request matches the original description on replay.
     pub description: String,
@@ -314,6 +316,7 @@ impl CatalogDocument {
             if record.placement_generation == 0
                 || !record.timestamps_valid()
                 || record.ownership_epoch > record.name_version()
+                || !record.property_seed_valid()
                 || (record.visibility.value.is_public()
                     && record.application != RepositoryApplicationState::CellReady)
                 || !names.insert((record.owner.to_lowercase(), record.name.to_lowercase()))
@@ -507,6 +510,12 @@ fn membership_digest(
 }
 
 impl CatalogRecord {
+    fn property_seed_valid(&self) -> bool {
+        self.property_seed.is_none_or(|seed| {
+            !seed.is_nil() && self.ownership_epoch != 0 && self.organization_id().is_some()
+        })
+    }
+
     fn timestamps_valid(&self) -> bool {
         self.created_at_ms
             .is_none_or(|time| time <= crate::app::MAX_NUMBER)
@@ -689,6 +698,7 @@ impl CatalogStore {
             prefix,
             placement_generation: 1,
             ownership_epoch: 0,
+            property_seed: None,
             application: RepositoryApplicationState::EmptyCellPending,
             description,
             description_edit: None,
@@ -739,6 +749,7 @@ impl CatalogStore {
                 prefix: format!("browser-repositories/{id}"),
                 placement_generation: 1,
                 ownership_epoch: 0,
+                property_seed: None,
                 application: RepositoryApplicationState::EmptyCellPending,
                 description: input.description,
                 description_edit: None,
@@ -799,6 +810,7 @@ impl CatalogStore {
                 prefix: format!("git-imports/{id}"),
                 placement_generation: 1,
                 ownership_epoch: 0,
+                property_seed: None,
                 application: RepositoryApplicationState::GitImportPending,
                 description,
                 description_edit: None,
@@ -862,6 +874,7 @@ impl CatalogStore {
             prefix,
             placement_generation: 1,
             ownership_epoch: 0,
+            property_seed: None,
             application: RepositoryApplicationState::EmptyCellPending,
             description,
             description_edit: None,

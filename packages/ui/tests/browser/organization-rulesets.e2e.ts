@@ -107,6 +107,7 @@ test("owners target repositories and repository admins see inherited rules as re
           kind: "boolean",
           default: true,
           required: true,
+          require_explicit_values: true,
           options: [],
           values_editable_by: "repository",
         });
@@ -257,6 +258,9 @@ test("owners target repositories and repository admins see inherited rules as re
   ).toBeDisabled();
   await chooseSelectOption(page.getByLabel("Default value"), "true");
   await page
+    .getByRole("checkbox", { name: "Require an explicit value" })
+    .check();
+  await page
     .getByRole("checkbox", { name: /Allow repository administrators/ })
     .check();
   await page.getByRole("button", { name: "Save property" }).click();
@@ -272,7 +276,7 @@ test("owners target repositories and repository admins see inherited rules as re
   });
   await chooseSelectOption(action, "set");
   await chooseSelectOption(
-    page.getByRole("combobox", { name: "regulated", exact: true }),
+    page.getByRole("combobox", { name: "regulated (required)", exact: true }),
     "true",
   );
   await expectNoAccessibilityViolations(page);
@@ -355,7 +359,7 @@ test("owners target repositories and repository admins see inherited rules as re
     .getByRole("button", { name: "Edit properties", exact: true })
     .click();
   await chooseSelectOption(
-    page.getByRole("combobox", { name: "regulated", exact: true }),
+    page.getByRole("combobox", { name: "regulated (required)", exact: true }),
     "false",
   );
   await expectNoAccessibilityViolations(page);

@@ -347,6 +347,7 @@ export function startRepositoryFork(
     request_id: string;
     name: string;
     destination: "personal" | "organization";
+    properties?: PropertyOverrides;
   },
   csrf: string,
 ): Promise<GitImportJob> {
