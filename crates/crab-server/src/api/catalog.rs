@@ -8,7 +8,7 @@ use axum::{
     routing::get,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::catalog_browse::{self, Scope, Search};
@@ -132,13 +132,14 @@ pub(super) async fn list(
                 && (repository.organization.is_some() || crate::catalog::is_personal_namespace(&repository.config.owner)),
             "public_read_only": public_reader,
             "can_maintain": current.can_maintain(repository.id),
-            "can_fork": organization_owner && forking.is_some_and(|(enabled, policy)| enabled && policy.allowed),
+            "can_fork": (principal.is_user() || principal.is_local()) && forking.is_some_and(|(enabled, policy)| enabled && policy.allowed),
+            "can_fork_to_organization": organization_owner && forking.is_some_and(|(enabled, policy)| enabled && policy.allowed),
             "protection_version": protections.version,
             "protected_branches": protections.rules,
             "archive_version": lifecycle.version,
             "archived": lifecycle.archived,
         });
-        if let Some(organization) = repository.organization {
+        if let Some(organization) = repository.owning_organization() {
             view["organization_id"] = json!(organization);
         }
         if current.can_admin(repository.id)
@@ -163,13 +164,13 @@ pub(super) async fn list(
         }
         repositories.push(view);
     }
-    if !principal.is_local()
-        && repositories.iter().any(|repo| {
-            repo.get("organization_id").is_some()
-                || repo.get("topics").is_some()
-                || repo.get("visibility") == Some(&json!("public"))
-        })
-    {
+    let needs_recheck = |repo: &Value| {
+        repo.get("organization_id").is_some()
+            || repo.get("forked_from").is_some()
+            || repo.get("topics").is_some()
+            || repo["visibility"] == "public"
+    };
+    if !principal.is_local() && repositories.iter().any(needs_recheck) {
         // Recheck access and topics after potentially slow settings reads.
         let current: std::collections::HashMap<_, _> =
             visible(&server, &principal, address, selection.organization)
@@ -178,16 +179,14 @@ pub(super) async fn list(
                 .map(|visible| (visible.repository.id.to_string(), visible))
                 .collect();
         repositories.retain_mut(|repo| {
-            if repo.get("organization_id").is_none()
-                && repo.get("topics").is_none()
-                && repo.get("visibility") != Some(&json!("public"))
-            {
+            if !needs_recheck(repo) {
                 return true;
             }
             let Some(visible) = repo["id"].as_str().and_then(|id| current.get(id)) else {
                 return false;
             };
             if repo["public_read_only"] != visible.principal.is_public_reader(visible.repository.id)
+                || repo.get("forked_from").is_some() != visible.repository.forked_from.is_some()
             {
                 return false;
             }
@@ -224,7 +223,7 @@ pub(super) async fn visible(
     visible_matching(server, principal, None, |repository| {
         selection.is_none_or(|(owner, name)| {
             owner == repository.config.owner && name == repository.config.name
-        }) && organization.is_none_or(|id| repository.organization == Some(id))
+        }) && organization.is_none_or(|id| repository.owning_organization() == Some(id))
     })
     .await
 }
@@ -336,6 +335,7 @@ pub(super) async fn visible_matching(
                             })
                         }),
                     record.name_version() > 0,
+                    record.fork_owner.as_ref(),
                 )
                 .with_public_visibility(record.id, record.visibility.value.is_public())
         } else {

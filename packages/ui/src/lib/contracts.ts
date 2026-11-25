@@ -83,10 +83,13 @@ export type Organization = { id: string, name: string, description: string, vers
 export type InvitationState = "pending" | "accepted" | "declined" | "cancelled" | "expired";
 
 // prettier-ignore
-export type Invitation = { recipient: string, role: OrganizationRole, version: number, member_version: number, state: InvitationState, created_at_ms: number, expires_at_ms: number, };
+export type Invitation = { recipient: string, role: OrganizationRole, version: number, member_version: number, state: InvitationState, created_at_ms: number, expires_at_ms: number, reinstates?: boolean, };
 
 // prettier-ignore
-export type InvitationView = { organization: Organization | null, invitation: Invitation | null, };
+export type Reinstatement = { version: number, role: OrganizationRole, };
+
+// prettier-ignore
+export type InvitationView = { organization: Organization | null, invitation: Invitation | null, reinstatement?: Reinstatement, };
 
 // prettier-ignore
 export type OrganizationView = { organization: Organization, actor: string, role: OrganizationRole, can_create: boolean, };

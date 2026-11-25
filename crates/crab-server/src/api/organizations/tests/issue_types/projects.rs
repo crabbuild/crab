@@ -110,6 +110,7 @@ async fn project_issue_type_fields_follow_source_permissions_and_assignment() {
                 recipient: bob,
                 version: 0,
                 role: Role::Member,
+                reinstate_version: None,
             },
         )
         .await

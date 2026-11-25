@@ -182,10 +182,14 @@ fn replace_roster(context: &Transaction<'_>, team: Uuid, members: &[Uuid]) -> Re
     let args = [blob(team), SqlValue::Text(serde_json::to_string(&people)?)];
     // Synced accounts are existing organization members. Store their current
     // membership epoch so leaving the organization invalidates all team grants.
+    // Clear dormant edges on sync and unlink so reinstatement cannot turn a
+    // provider-managed roster into manual permissions after the binding ends.
     let removed = context.query(
         "UPDATE organization_team_members SET role=NULL,version=version+1
          WHERE team=?1 AND role IS NOT NULL
-           AND lower(hex(actor)) NOT IN (SELECT value FROM json_each(?2))",
+           AND (lower(hex(actor)) NOT IN (SELECT value FROM json_each(?2))
+             OR NOT EXISTS (SELECT 1 FROM organization_members m
+                            WHERE m.actor=organization_team_members.actor AND m.active=1))",
         &args,
     )?;
     let updated = context.query(

@@ -2,6 +2,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { Button } from "@/components/ui/button";
+import { FieldSelect } from "@/components/ui/field-select";
+import { Field, FieldLabel } from "@/components/ui/field";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import {
@@ -44,7 +46,7 @@ export function GitImport({
   defaultOwner?: string;
   personal?: boolean;
   organization?: { id: string; name: string; requestedJob?: string };
-  fork?: Pick<Repository, "id" | "owner" | "name">;
+  fork?: Pick<Repository, "id" | "owner" | "name" | "can_fork_to_organization">;
   onImported: (repository: ImportedRepository) => void;
 }) {
   const organizationId = organization?.id;
@@ -58,7 +60,7 @@ export function GitImport({
       : personal
         ? `crab:git-import:personal:${account}`
         : `crab:git-import:${account}`;
-  const [jobId, setJobId] = useState<string>(() => {
+  const [savedJob] = useState(() => {
     if (organization?.requestedJob) return organization.requestedJob;
     try {
       return sessionStorage.getItem(storageKey) ?? "";
@@ -66,13 +68,32 @@ export function GitImport({
       return "";
     }
   });
+  const [jobId, setJobId] = useState(savedJob.replace(/^personal:/, ""));
+  const defaultForkDestination = fork?.can_fork_to_organization
+    ? "organization"
+    : "personal";
+  const [forkDestination, setForkDestination] = useState<
+    "personal" | "organization"
+  >(
+    savedJob.startsWith("personal:")
+      ? "personal"
+      : savedJob && fork
+        ? "organization"
+        : defaultForkDestination,
+  );
+  const jobOrganization =
+    fork && forkDestination === "personal" ? undefined : organizationId;
   const [open, setOpen] = useState(!!jobId);
   const personalDestination = useRequest<{ owner: string }>(
     personal && open ? "/api/repos/creation" : null,
   );
   const [source, setSource] = useState("");
   const [owner, setOwner] = useState(defaultOwner);
-  const defaultName = fork ? `${fork.name}-fork` : "";
+  const defaultName = fork
+    ? forkDestination === "personal"
+      ? fork.name
+      : `${fork.name}-fork`
+    : "";
   const [name, setName] = useState(defaultName);
   const [description, setDescription] = useState("");
   const [token, setToken] = useState("");
@@ -89,7 +110,11 @@ export function GitImport({
   function remember(id: string) {
     setJobId(id);
     try {
-      if (id) sessionStorage.setItem(storageKey, id);
+      if (id)
+        sessionStorage.setItem(
+          storageKey,
+          fork && forkDestination === "personal" ? `personal:${id}` : id,
+        );
       else sessionStorage.removeItem(storageKey);
     } catch {
       // The active page can still show status when browser storage is disabled.
@@ -106,7 +131,7 @@ export function GitImport({
     const controller = new AbortController();
     const timer = window.setTimeout(
       () => {
-        void gitImportStatus(jobId, controller.signal, organizationId)
+        void gitImportStatus(jobId, controller.signal, jobOrganization)
           .then((next) => {
             setError(undefined);
             setJob(next);
@@ -130,7 +155,7 @@ export function GitImport({
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [job, jobId, operation, organizationId, statusCheck, submitting]);
+  }, [job, jobId, operation, jobOrganization, statusCheck, submitting]);
 
   useEffect(() => {
     if (
@@ -175,7 +200,7 @@ export function GitImport({
             job.id,
             token || undefined,
             csrf,
-            organizationId,
+            jobOrganization,
           ),
         );
       } catch (failure) {
@@ -201,7 +226,7 @@ export function GitImport({
     const destination = personal
       ? personalDestination.data?.owner
       : owner.trim();
-    if ((!organizationId && !destination) || !repositoryName) {
+    if ((!fork && !organizationId && !destination) || !repositoryName) {
       setError("Choose the Crab owner and repository name.");
       return;
     }
@@ -214,7 +239,7 @@ export function GitImport({
       name: repositoryName.trim(),
       description: description.trim() || undefined,
     };
-    const intent = JSON.stringify(fields);
+    const intent = JSON.stringify([fields, fork ? forkDestination : null]);
     const request_id =
       attempt?.intent === intent && !job ? attempt.id : crypto.randomUUID();
     setAttempt({ id: request_id, intent });
@@ -223,7 +248,7 @@ export function GitImport({
       const next = fork
         ? await startRepositoryFork(
             fork,
-            { request_id, name: fields.name },
+            { request_id, name: fields.name, destination: forkDestination },
             csrf,
           )
         : await startGitImport(
@@ -278,7 +303,7 @@ export function GitImport({
           </h2>
           <p className="muted">
             {forkJob ? (
-              "The fork stays in this organization and inherits access from the source repository."
+              "The fork stays private and uses the source repository’s access and rules."
             ) : (
               <>
                 Crab copies Git history and refs from an allowed Git host into
@@ -302,6 +327,32 @@ export function GitImport({
       </header>
       <form className="git-import-form" onSubmit={submit}>
         <div className="git-import-grid">
+          {fork && (
+            <Field>
+              <FieldLabel htmlFor="fork-owner">Owner</FieldLabel>
+              <FieldSelect
+                id="fork-owner"
+                label="Fork owner"
+                value={forkDestination}
+                disabled={fixedDestination || !!jobId}
+                options={{
+                  personal: "Personal",
+                  ...(fork.can_fork_to_organization
+                    ? { organization: organization?.name ?? fork.owner }
+                    : {}),
+                }}
+                onValueChange={(value) => {
+                  const next =
+                    value === "organization" ? "organization" : "personal";
+                  setForkDestination(next);
+                  if (!nameEdited)
+                    setName(
+                      next === "personal" ? fork.name : `${fork.name}-fork`,
+                    );
+                }}
+              />
+            </Field>
+          )}
           {!forkJob && (
             <label>
               Git source
@@ -426,9 +477,10 @@ export function GitImport({
             )}
             <span>{job.message}</span>
             <code>
-              {organization?.name ?? job.owner}/{job.name}
+              {jobOrganization ? (organization?.name ?? job.owner) : job.owner}/
+              {job.name}
             </code>
-            {organizationPage && !importedHref && (
+            {jobOrganization && organizationPage && !importedHref && (
               <Link
                 href={`${organizationPage}&import=${encodeURIComponent(job.id)}`}
                 className="git-import-result"

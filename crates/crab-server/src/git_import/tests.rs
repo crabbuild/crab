@@ -91,6 +91,7 @@ async fn resumes_published_git_snapshot_after_worker_loss() {
         Arc::clone(&job),
         snapshot.clone(),
         None,
+        None,
     );
     let request_for = |url: &str| {
         axum::extract::Request::builder()
@@ -125,6 +126,7 @@ async fn resumes_published_git_snapshot_after_worker_loss() {
         private,
         &mirror,
         &cancellation,
+        None,
         None,
     )
     .await
@@ -320,6 +322,7 @@ async fn organization_import_requires_current_ownership_and_resumes_under_anothe
         &mirror,
         &cancellation,
         Some(alice_owner),
+        None,
     )
     .await
     .unwrap();
@@ -341,6 +344,7 @@ async fn organization_import_requires_current_ownership_and_resumes_under_anothe
             &writer,
             repository_id,
             Some(alice_owner),
+            None,
             &snapshot
         )
         .await,
@@ -394,6 +398,7 @@ async fn organization_import_requires_current_ownership_and_resumes_under_anothe
             &writer,
             repository_id,
             Some(bob_owner),
+            None,
             &snapshot
         )
         .await,

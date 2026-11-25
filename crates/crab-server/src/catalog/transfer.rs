@@ -142,6 +142,12 @@ impl CatalogDocument {
     }
 
     fn allow_transfer(&self, record: &CatalogRecord) -> Result<(), CatalogError> {
+        if record
+            .organization_id()
+            .is_some_and(|id| self.pending_membership_changes.contains_key(&id))
+        {
+            return Err(CatalogError::Conflict);
+        }
         if record.forked_from.is_some()
             || self
                 .repositories
@@ -267,6 +273,13 @@ impl CatalogStore {
                 return Err(CatalogError::Conflict);
             }
             let namespace = offer.recipient.namespace();
+            if let Recipient::Organization { id } = offer.recipient
+                && document.pending_membership_changes.contains_key(&id)
+            {
+                // A transfer brings direct grants into the destination. It
+                // must not land between the departing member's two commits.
+                return Err(CatalogError::Conflict);
+            }
             if let Recipient::Organization { id } = offer.recipient
                 && document.repositories.iter().any(|record| {
                     record.owner.eq_ignore_ascii_case(&namespace)

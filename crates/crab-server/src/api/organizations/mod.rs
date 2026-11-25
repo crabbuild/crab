@@ -29,10 +29,10 @@ use crate::{
 pub(super) mod audit;
 pub(super) mod automation;
 pub(super) mod collaborators;
-pub(super) mod conversions;
 mod discovery;
 pub(super) mod invitations;
 pub(super) mod issue_types;
+pub(super) mod membership_changes;
 mod people;
 mod projects;
 pub(super) mod properties;
@@ -82,7 +82,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .merge(invitations::routes())
         .merge(collaborators::routes())
-        .merge(conversions::routes())
+        .merge(membership_changes::routes())
         .merge(audit::routes())
         .merge(automation::routes())
         .merge(repository_access::routes())
@@ -260,7 +260,23 @@ async fn remove_member(
     Path((id, member)): Path<(Uuid, Uuid)>,
     Json(input): Json<Version>,
 ) -> Result<Json<Value>> {
-    change_member(&server, principal, id, member, input.version, None).await
+    let removed = membership_changes::depart(
+        &server,
+        principal,
+        id,
+        vec![organization::DepartureMember {
+            actor: member,
+            version: input.version,
+        }],
+        organization::DepartureMode::Remove,
+    )
+    .await?;
+    let [member] = removed.as_slice() else {
+        return Err(Error::CellContract(
+            "Expected one removed organization member",
+        ));
+    };
+    Ok(Json(serde_json::to_value(member)?))
 }
 async fn change_member(
     server: &Arc<Server>,
@@ -301,7 +317,7 @@ where
     Fut: Future<Output = Result<T>> + Send,
 {
     // Membership and team writers share the gate with catalog-backed grants.
-    // Settle a durable conversion before changing its member incarnation.
+    // Settle a durable access change before changing the member incarnation.
     let worker = Arc::clone(server);
     server
         .receives
@@ -314,7 +330,7 @@ where
                     if cancel.is_cancelled() {
                         return Err(Error::MergeBusy);
                     }
-                    conversions::recover_locked(&worker, id).await?;
+                    membership_changes::recover_locked(&worker, id).await?;
                     if cancel.is_cancelled() {
                         return Err(Error::MergeBusy);
                     }

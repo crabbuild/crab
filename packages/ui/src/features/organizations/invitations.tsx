@@ -180,8 +180,8 @@ export function InviteDialog({
           <DialogTitle>Invite a member</DialogTitle>
           <DialogDescription>
             {recipient
-              ? "Choose an organization role for this collaborator."
-              : "Choose a registered username and the role they should have in this organization."}
+              ? "Choose how this collaborator should join the organization."
+              : "Choose a registered username and set their organization access."}
           </DialogDescription>
         </DialogHeader>
         {open && (
@@ -222,16 +222,30 @@ function InviteForm({
     selected ? `${endpoint}/invitations/${selected.id}` : null,
   );
   const [role, setRole] = useState<OrganizationRole>("member");
+  const [access, setAccess] = useState<string>();
+  const previous = current.data?.invitation;
+  const pending = previous?.state === "pending" && previous.reinstates;
+  const reinstatement =
+    current.data?.reinstatement ??
+    (pending && previous
+      ? { role: previous.role, version: previous.member_version }
+      : undefined);
+  const restore = (access ?? (pending ? "restore" : "fresh")) === "restore";
   const mutation = useMutation(csrf, null);
   return (
     <form
       onSubmit={(event) => {
         event.preventDefault();
-        if (!selected || !current.data) return;
+        if (!selected || !current.data || (restore && !reinstatement)) return;
         void mutation
           .run(`${endpoint}/invitations/${selected.id}`, "PUT", {
             version: current.data.invitation?.version ?? 0,
-            role,
+            ...(restore && reinstatement
+              ? {
+                  role: reinstatement.role,
+                  reinstate_version: reinstatement.version,
+                }
+              : { role }),
           })
           .then((value) => {
             if (value) onInvited();
@@ -251,6 +265,7 @@ function InviteForm({
             onChange={(event) => {
               setSearch(event.target.value);
               setSelected(undefined);
+              setAccess(undefined);
             }}
           />
           {!selected && query && (
@@ -298,20 +313,49 @@ function InviteForm({
             </p>
           )}
         </Field>
-        <Field>
-          <FieldLabel htmlFor="invitation-role">Organization role</FieldLabel>
-          <FieldSelect
-            id="invitation-role"
-            label="Organization role"
-            value={role}
-            disabled={mutation.pending}
-            onValueChange={(role) => setRole(role as OrganizationRole)}
-            options={{ member: "Member", owner: "Owner" }}
-          />
-          <p className="text-sm text-muted-foreground">
-            Owners can manage members and organization settings.
-          </p>
-        </Field>
+        {(reinstatement || restore) && (
+          <Field>
+            <FieldLabel htmlFor="invitation-access">Previous access</FieldLabel>
+            <FieldSelect
+              id="invitation-access"
+              label="Previous access"
+              value={restore ? "restore" : "fresh"}
+              disabled={current.loading || mutation.pending}
+              onValueChange={setAccess}
+              options={[
+                { value: "fresh", label: "Start fresh" },
+                {
+                  value: "restore",
+                  label: "Restore previous access",
+                  disabled: !reinstatement,
+                },
+              ]}
+            />
+            {restore && (
+              <p className="text-sm text-muted-foreground">
+                {reinstatement
+                  ? `Rejoin as ${reinstatement.role === "owner" ? "an owner" : "a member"} and restore eligible team and repository access upon acceptance.`
+                  : "Previous access can no longer be restored. Choose Start fresh to send an invitation."}
+              </p>
+            )}
+          </Field>
+        )}
+        {!restore && (
+          <Field>
+            <FieldLabel htmlFor="invitation-role">Organization role</FieldLabel>
+            <FieldSelect
+              id="invitation-role"
+              label="Organization role"
+              value={role}
+              disabled={mutation.pending}
+              onValueChange={(role) => setRole(role as OrganizationRole)}
+              options={{ member: "Member", owner: "Owner" }}
+            />
+            <p className="text-sm text-muted-foreground">
+              Owners can manage members and organization settings.
+            </p>
+          </Field>
+        )}
         {selected && current.error && <MutationError error={current.error} />}
         <MutationError error={mutation.error} />
         {mutation.error && (
@@ -322,10 +366,20 @@ function InviteForm({
         <Button
           type="submit"
           disabled={
-            !selected || !current.data || current.loading || mutation.pending
+            !selected ||
+            !current.data ||
+            current.loading ||
+            mutation.pending ||
+            (restore && !reinstatement)
           }
         >
-          {mutation.pending ? "Inviting…" : "Create invitation"}
+          {mutation.pending
+            ? "Inviting…"
+            : restore
+              ? "Invite and reinstate"
+              : reinstatement
+                ? "Invite and start fresh"
+                : "Create invitation"}
         </Button>
       </FieldGroup>
     </form>
@@ -350,7 +404,13 @@ function OfferRow({
       cancel ? "DELETE" : "PUT",
       cancel
         ? { version: value.version }
-        : { version: value.version, role: value.role },
+        : {
+            version: value.version,
+            role: value.role,
+            reinstate_version: value.reinstates
+              ? value.member_version
+              : undefined,
+          },
     );
     if (result) onChanged();
   }
@@ -364,6 +424,7 @@ function OfferRow({
           <p className="mt-1 break-all text-sm text-muted-foreground">
             {item.profile ? `@${item.profile.handle}` : value.recipient} ·{" "}
             {value.role} · <span className="capitalize">{value.state}</span>
+            {value.reinstates && <> · Reinstatement</>}
             {value.state === "pending" && (
               <> · Expires {timestamp(value.expires_at_ms)}</>
             )}
@@ -430,6 +491,12 @@ export function OrganizationInvitation({
                       This invitation expires{" "}
                       {timestamp(invitation.expires_at_ms)}.
                     </p>
+                    {invitation.reinstates && (
+                      <p>
+                        Accepting restores your eligible team and repository
+                        access.
+                      </p>
+                    )}
                     <div className="flex flex-wrap gap-2">
                       <Button
                         disabled={mutation.pending}

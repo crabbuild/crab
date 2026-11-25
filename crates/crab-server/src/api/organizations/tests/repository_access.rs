@@ -2,6 +2,7 @@ use super::{repositories::repository_write, *};
 use crate::test_support::http::{browser::Browser, organizations::bootstrap};
 
 mod conversion;
+mod reinstatement;
 
 pub(super) struct AccessFixture {
     pub(super) h: Harness,
@@ -275,11 +276,12 @@ async fn owner_finds_outside_collaborators_and_revokes_a_repository_grant() {
     )
     .await;
     let membership = f.h.json(&member, &f.alice).await;
+    f.remove_team_member().await;
     f.h.write(
-        Method::DELETE,
-        &member,
+        Method::POST,
+        &format!("{}/members/conversion", f.org),
         &f.alice,
-        json!({"version":membership["member"]["version"]}),
+        json!({"members":[{"actor":f.member,"version":membership["member"]["version"]}]}),
     )
     .await
     .error_for_status()
@@ -486,12 +488,13 @@ async fn bulk_outside_removal_revokes_all_selected_sources_and_survives_restore(
     assert_eq!(denied.status(), StatusCode::NOT_FOUND);
     let member = format!("{}/members/{}", f.org, f.member);
     let membership = f.h.json(&member, &f.alice).await;
+    f.remove_team_member().await;
     f.h.write(
-        Method::DELETE,
-        &member,
+        Method::POST,
+        &format!("{}/members/conversion", f.org),
         &f.alice,
         json!({
-            "version":membership["member"]["version"],
+            "members":[{"actor":f.member,"version":membership["member"]["version"]}],
         }),
     )
     .await

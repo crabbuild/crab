@@ -112,20 +112,36 @@ impl From<organization::Event> for RawEvent {
                 );
                 AuditAction::OrganizationEdited
             }
-            Action::Membership { member, role, .. } => {
+            Action::Membership {
+                member,
+                role,
+                cancelled_invitations,
+                ..
+            } => {
                 event.account = Some(member);
-                event.detail = Some(role.map_or("Removed", member_role).into());
+                event.detail = Some(membership_detail(
+                    role.map_or("Removed", member_role),
+                    cancelled_invitations,
+                ));
                 AuditAction::OrganizationMembership
             }
-            Action::MemberConverted { member, .. } => {
+            Action::MemberConverted {
+                member,
+                cancelled_invitations,
+                ..
+            } => {
                 event.account = Some(member);
-                event.detail = Some("Converted to outside collaborator".into());
+                event.detail = Some(membership_detail(
+                    "Converted to outside collaborator",
+                    cancelled_invitations,
+                ));
                 AuditAction::OrganizationMembership
             }
             Action::Invitation {
                 recipient,
                 role,
                 state,
+                reinstates,
                 ..
             } => {
                 use organization::InvitationState;
@@ -137,7 +153,8 @@ impl From<organization::Event> for RawEvent {
                     InvitationState::Cancelled => "Cancelled",
                     InvitationState::Expired => "Expired",
                 };
-                event.detail = Some(format!("{state} · {}", member_role(role)));
+                let kind = if reinstates { " · Reinstatement" } else { "" };
+                event.detail = Some(format!("{state} · {}{kind}", member_role(role)));
                 AuditAction::OrganizationInvitation
             }
             Action::RulesetsChanged { version } => {
@@ -227,6 +244,13 @@ impl From<organization::Event> for RawEvent {
     }
 }
 
+fn membership_detail(action: &str, cancelled: u64) -> String {
+    match cancelled {
+        0 => action.to_owned(),
+        1 => format!("{action} · 1 invitation cancelled"),
+        _ => format!("{action} · {cancelled} invitations cancelled"),
+    }
+}
 fn member_role(role: organization::Role) -> &'static str {
     match role {
         organization::Role::Member => "Member",
@@ -246,6 +270,9 @@ impl From<audit::Entry> for RawEvent {
             audit::Action::VisibilityChanged => AuditAction::RepositoryVisibilityChanged,
             audit::Action::OutsideCollaboratorsRemoved => AuditAction::OutsideCollaboratorsRemoved,
             audit::Action::CollaboratorGrantsRetained => AuditAction::CollaboratorGrantsRetained,
+            audit::Action::MemberGrantsRevoked | audit::Action::MemberGrantsRestored => {
+                AuditAction::OrganizationMembership
+            }
         };
         let operator = entry.actor.issuer == "urn:crab:local";
         Self {
@@ -266,10 +293,20 @@ impl From<audit::Entry> for RawEvent {
                 repository: entry
                     .repository
                     .map(|(id, name)| AuditRepository { id, name }),
-                detail: entry.outside_grants.map(|removal| {
+                detail: entry.outside_grants.map(|change| {
+                    let description = match entry.action {
+                        audit::Action::MemberGrantsRevoked => "Direct grants revoked",
+                        audit::Action::MemberGrantsRestored => "Direct grants restored",
+                        _ => {
+                            return format!(
+                                "{} collaborators · {} grants · {} repositories",
+                                change.collaborators, change.grants, change.repositories,
+                            );
+                        }
+                    };
                     format!(
-                        "{} collaborators · {} grants · {} repositories",
-                        removal.collaborators, removal.grants, removal.repositories,
+                        "{description} · {} grants · {} repositories",
+                        change.grants, change.repositories
                     )
                 }),
             },
