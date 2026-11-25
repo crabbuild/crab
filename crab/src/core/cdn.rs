@@ -1,18 +1,24 @@
 //! Operator-owned CDN bindings and fixture read guards.
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crab_auth::crab_auth_client::CdnViewerDeployment;
 use crab_storage::{
     StorageProviderKind, Store,
-    cdn::{CdnAccess, CdnConsumer, CdnProfile, CdnPublicationFile, CdnRoute, CdnTransport},
+    cdn::{
+        CdnAccess, CdnConsumer, CdnProfile, CdnPublicationFile, CdnRoute, CdnTransport,
+        r2_origin_bucket,
+    },
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::core::config::{AuthConfig, AuthProvider};
 use crate::core::error::{CrabError, Result};
+
+mod cloudflare;
 
 const QUALIFICATION_TARGET_ENV: &str = "CRAB_INTERNAL_CDN_QUALIFICATION_TARGET";
 
@@ -258,6 +264,7 @@ pub struct CdnBinding {
     base_url: String,
     #[serde(default)]
     access: Access,
+    viewer_token_file: Option<PathBuf>,
     #[serde(skip)]
     trusted_issuer: Option<AuthConfig>,
 }
@@ -273,10 +280,9 @@ enum Access {
 impl CdnBinding {
     pub(crate) fn bind_trusted_issuer(entries: &mut [Self], auth: &AuthConfig) {
         if auth.provider == AuthProvider::CrabAuth {
-            for binding in entries
-                .iter_mut()
-                .filter(|binding| binding.access == Access::Private)
-            {
+            for binding in entries.iter_mut().filter(|binding| {
+                binding.access == Access::Private && binding.viewer_token_file.is_none()
+            }) {
                 binding.trusted_issuer = Some(auth.clone());
             }
         }
@@ -315,28 +321,16 @@ impl CdnBinding {
         let mut seen = BTreeSet::new();
         let mut viewer_routes = BTreeSet::new();
         for entry in entries {
-            let deployment =
-                CdnViewerDeployment::new(&entry.origin, &entry.repo_prefix, &entry.base_url)
-                    .and_then(|deployment| {
-                        deployment.with_approval(entry.approval_sha256.as_deref())
-                    })
-                    .map_err(|_| {
-                        config_error("invalid native origin, repository prefix or HTTPS base")
-                    })?;
-            match (entry.access, entry.export_origin.as_deref()) {
-                (Access::Public, Some(export)) if entry.approval_sha256.is_none() => {
-                    deployment.validate_public_export(export)?;
+            if r2_origin_bucket(&entry.origin).is_some() {
+                entry.validate_r2()?;
+            } else {
+                if entry.viewer_token_file.is_some() {
+                    return Err(config_error(
+                        "viewer_token_file requires a private Cloudflare R2 binding",
+                    ));
                 }
-                (Access::Private, None) => {
-                    if entry.publication.is_some() {
-                        return Err(config_error(
-                            "only public CDN bindings can use a publication receipt",
-                        ));
-                    }
-                }
-                _ => return Err(config_error("public CDN requires export_origin")),
+                entry.validate_provider_binding()?;
             }
-            entry.base_url = deployment.base_url;
             if !seen.insert((&entry.origin, &entry.repo_prefix)) {
                 return Err(config_error("duplicate origin and repository prefix"));
             }
@@ -347,6 +341,27 @@ impl CdnBinding {
         Ok(())
     }
 
+    fn validate_provider_binding(&mut self) -> Result<()> {
+        let deployment = CdnViewerDeployment::new(&self.origin, &self.repo_prefix, &self.base_url)
+            .and_then(|deployment| deployment.with_approval(self.approval_sha256.as_deref()))
+            .map_err(|_| config_error("invalid native origin, repository prefix or HTTPS base"))?;
+        match (self.access, self.export_origin.as_deref()) {
+            (Access::Public, Some(export)) if self.approval_sha256.is_none() => {
+                deployment.validate_public_export(export)?;
+            }
+            (Access::Private, None) => {
+                if self.publication.is_some() {
+                    return Err(config_error(
+                        "only public CDN bindings can use a publication receipt",
+                    ));
+                }
+            }
+            _ => return Err(config_error("public CDN requires export_origin")),
+        }
+        self.base_url = deployment.base_url;
+        Ok(())
+    }
+
     pub(crate) fn private_request<'a>(
         entries: &'a [Self],
         bucket: &str,
@@ -354,6 +369,7 @@ impl CdnBinding {
     ) -> Result<Option<(Vec<CdnViewerDeployment>, &'a AuthConfig)>> {
         let candidates = entries.iter().filter(|binding| {
             binding.access == Access::Private
+                && binding.viewer_token_file.is_none()
                 && binding.repo_prefix == prefix
                 && binding
                     .origin_target()
@@ -371,13 +387,25 @@ impl CdnBinding {
         Ok(Some((deployments, issuer)))
     }
 
-    pub(crate) async fn attach_public(
+    pub(crate) async fn attach_direct(
         entries: &[Self],
         store: Store,
         prefix: &str,
         timeout: Duration,
         consumer: CdnConsumer,
     ) -> Result<Store> {
+        if let Some((binding, token_file)) = entries.iter().find_map(|binding| {
+            binding
+                .viewer_token_file
+                .as_ref()
+                .filter(|_| {
+                    binding.repo_prefix == prefix
+                        && store.native_cdn_origin() == Some(binding.origin.as_str())
+                })
+                .map(|token_file| (binding, token_file))
+        }) {
+            return binding.attach_r2(store, token_file, timeout, consumer);
+        }
         let Some(binding) = Self::for_selected_origin(entries, &store, prefix, Access::Public)?
         else {
             return Ok(store);
@@ -800,7 +828,7 @@ mod tests {
             ))
             .with_target_identity([1; 32]);
         assert!(
-            CdnBinding::attach_public(
+            CdnBinding::attach_direct(
                 &entries,
                 store,
                 "org/demo",
@@ -855,7 +883,7 @@ mod tests {
             ))
             .with_native_cdn_origin(Some(origin.into()))
             .with_target_identity([1; 32]);
-        let routed = CdnBinding::attach_public(
+        let routed = CdnBinding::attach_direct(
             &entries,
             store,
             prefix,

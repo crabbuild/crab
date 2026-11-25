@@ -170,7 +170,7 @@ impl OperatorCdn {
                 validate_issuer(&config)?;
                 if deployment.approval_sha256().is_none()
                     || !(CdnPolicy {
-                        provider: origin.bucket_identity().cloud,
+                        edge: origin.bucket_identity().cloud.into(),
                         consumer,
                         profile: CdnProfile::Direct,
                         visibility: CdnVisibility::Private,

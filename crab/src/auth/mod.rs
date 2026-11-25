@@ -429,7 +429,7 @@ async fn build_store_for_url(
             let allow_viewer_grants = deployments.iter().all(|deployment| {
                 deployment.storage_provider().is_some_and(|provider| {
                     CdnPolicy {
-                        provider,
+                        edge: provider.into(),
                         consumer,
                         profile: CdnProfile::Direct,
                         visibility: CdnVisibility::Private,
@@ -556,7 +556,7 @@ async fn build_store_for_url(
         .into_storage()
         .with_native_cdn_authority(built.native_cdn_origin);
     if read {
-        store = CdnBinding::attach_public(
+        store = CdnBinding::attach_direct(
             &config.cdn,
             store,
             &url.repo_path,

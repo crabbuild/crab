@@ -6,8 +6,9 @@ use object_store::aws::{AwsAuthorizer, AwsCredentialProvider};
 use object_store::client::{HttpRequest, HttpRequestBody};
 use object_store::gcp::GcpCredentialProvider;
 
-use crate::{Result, StorageError};
+use crate::{Result, StorageError, StorageProviderKind};
 
+use super::CdnEdge;
 use super::publication::Placement;
 
 /// Provides a sensitive authorization header for Azure Resource Manager requests.
@@ -24,6 +25,28 @@ pub struct NativeCdnOrigin {
     pub(crate) authority: NativeAuthority,
 }
 
+/// Return the bucket in a canonical, account-bound Cloudflare R2 origin URL.
+#[must_use]
+pub fn r2_origin_bucket(origin: &str) -> Option<&str> {
+    let (host, bucket) = origin.strip_prefix("https://")?.split_once('/')?;
+    let account = host.strip_suffix(".r2.cloudflarestorage.com")?;
+    let account = account
+        .strip_suffix(".eu")
+        .or_else(|| account.strip_suffix(".fedramp"))
+        .unwrap_or(account);
+    (account.len() == 32
+        && account
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        && (3..=63).contains(&bucket.len())
+        && !bucket.starts_with('-')
+        && !bucket.ends_with('-')
+        && bucket
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'))
+    .then_some(bucket)
+}
+
 #[derive(Clone)]
 pub(crate) enum NativeAuthority {
     S3 {
@@ -32,11 +55,20 @@ pub(crate) enum NativeAuthority {
     },
     Gcs(GcpCredentialProvider),
     Azure,
+    R2,
     #[cfg(any(test, feature = "test-support"))]
     Fixture,
 }
 
 impl NativeCdnOrigin {
+    pub(crate) fn edge(&self, provider: StorageProviderKind) -> CdnEdge {
+        if matches!(self.authority, NativeAuthority::R2) {
+            CdnEdge::Cloudflare
+        } else {
+            provider.into()
+        }
+    }
+
     /// Return the canonical provider origin without credentials.
     #[must_use]
     pub fn address(&self) -> &str {
@@ -119,6 +151,7 @@ impl NativeCdnOrigin {
                     authorization.set_sensitive(true);
                     verify_azure_placement(&client, &self.address, placement, authorization).await
                 }
+                NativeAuthority::R2 => Err(mismatch()),
                 #[cfg(any(test, feature = "test-support"))]
                 NativeAuthority::Fixture => Ok(()),
             }

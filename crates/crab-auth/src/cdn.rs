@@ -206,6 +206,13 @@ fn scoped_directory<'a>(prefix: &'a str, root: &str) -> Option<&'a str> {
         .strip_suffix('/')
 }
 
+/// Normalize a trusted CDN base after validating it and the repository prefix.
+#[must_use]
+pub fn canonical_viewer_base<'a>(prefix: &str, base: &'a str) -> Option<&'a str> {
+    let base = base.trim_end_matches('/');
+    (canonical_prefix(prefix) && canonical_https_base(base)).then_some(base)
+}
+
 pub(crate) fn canonical_prefix(path: &str) -> bool {
     !path.is_empty()
         && path.len() <= 1024

@@ -8,8 +8,8 @@ use std::{
 use reqwest::{RequestBuilder, Response, header};
 use sha2::{Digest as _, Sha256, digest::Output};
 
-use super::{CdnConsumer, CdnPolicy, CdnReadFamily};
-use crate::{StorageProviderKind, Store, StoreLayout};
+use super::{CdnConsumer, CdnEdge, CdnPolicy, CdnReadFamily};
+use crate::{Store, StoreLayout};
 
 const TARGET: &str = "crab_storage::cdn::transfer";
 const GCS_VIEWER_LOG_TARGET: &str = "crab_storage::cdn::gcs_viewer_log";
@@ -36,7 +36,7 @@ pub fn is_read_evidence_target(target: &str) -> bool {
 
 pub(crate) fn observe_origin_only_read(policy: CdnPolicy, family: CdnReadFamily) {
     tracing::debug!(target: TARGET, parent: None,
-        provider = provider_label(policy.provider),
+        provider = provider_label(policy.edge),
         consumer = policy.consumer.label(),
         access = policy.visibility.label(),
         profile = policy.profile.label(),
@@ -180,7 +180,7 @@ impl PublicTransitionObservation {
             target: PUBLIC_TRANSITION_TARGET,
             parent: None,
             tracing::Level::DEBUG,
-            provider = provider_label(policy.provider),
+            provider = provider_label(policy.edge),
             consumer = policy.consumer.label(),
             access = policy.visibility.label(),
             profile = policy.profile.label(),
@@ -287,7 +287,7 @@ impl PayloadObservation {
 
     pub(crate) fn record_capsule_control(self, source: &'static str, key: blake3::Hash) {
         tracing::debug!(target: TARGET, parent: None,
-            provider = provider_label(self.policy.provider),
+            provider = provider_label(self.policy.edge),
             consumer = self.policy.consumer.label(),
             access = self.policy.visibility.label(),
             profile = self.policy.profile.label(),
@@ -327,7 +327,7 @@ impl PayloadObservation {
             target: TARGET,
             parent: None,
             tracing::Level::DEBUG,
-            provider = provider_label(self.policy.provider),
+            provider = provider_label(self.policy.edge),
             consumer = self.policy.consumer.label(),
             access = self.policy.visibility.label(),
             profile = self.policy.profile.label(),
@@ -380,7 +380,7 @@ impl Transfer {
     }
 
     pub(super) fn prepare_request(&mut self, request: RequestBuilder) -> RequestBuilder {
-        if self.policy.provider != StorageProviderKind::Gcs
+        if self.policy.edge != CdnEdge::CloudCdn
             || !tracing::enabled!(target: GCS_VIEWER_LOG_TARGET, tracing::Level::TRACE)
         {
             return request;
@@ -394,13 +394,12 @@ impl Transfer {
 
     pub(super) fn response(&mut self, response: &Response) {
         self.status = response.status().as_u16();
-        if self.policy.provider != StorageProviderKind::Gcs {
-            self.request_id = viewer_request_id(self.policy.provider, response.headers());
+        if self.policy.edge != CdnEdge::CloudCdn {
+            self.request_id = viewer_request_id(self.policy.edge, response.headers());
         }
-        let header = if self.policy.provider == StorageProviderKind::Gcs {
-            "x-crab-cdn-cache"
-        } else {
-            "x-cache"
+        let header = match self.policy.edge {
+            CdnEdge::CloudCdn | CdnEdge::Cloudflare => "x-crab-cdn-cache",
+            _ => "x-cache",
         };
         let values = response.headers().get_all(header);
         let mut values = values.iter();
@@ -408,7 +407,7 @@ impl Transfer {
             && values.next().is_none()
             && let Ok(value) = value.to_str()
         {
-            self.cache = cache_status(self.policy.provider, self.size, value);
+            self.cache = cache_status(self.policy.edge, self.size, value);
         }
     }
 
@@ -429,7 +428,7 @@ impl Drop for Transfer {
             target: TARGET,
             parent: None,
             tracing::Level::DEBUG,
-            provider = provider_label(self.policy.provider),
+            provider = provider_label(self.policy.edge),
             consumer = self.policy.consumer.label(),
             access = self.policy.visibility.label(),
             profile = self.policy.profile.label(),
@@ -450,12 +449,13 @@ impl Drop for Transfer {
 }
 
 fn viewer_request_id(
-    provider: StorageProviderKind,
+    provider: CdnEdge,
     headers: &reqwest::header::HeaderMap,
 ) -> Option<Output<Sha256>> {
     let header = match provider {
-        StorageProviderKind::S3 => "x-amz-cf-id",
-        StorageProviderKind::Azure => "x-azure-ref",
+        CdnEdge::CloudFront => "x-amz-cf-id",
+        CdnEdge::FrontDoor => "x-azure-ref",
+        CdnEdge::Cloudflare => "cf-ray",
         _ => return None,
     };
     let values = headers.get_all(header);
@@ -467,29 +467,28 @@ fn viewer_request_id(
     .then(|| Sha256::digest(value))
 }
 
-fn provider_label(provider: StorageProviderKind) -> &'static str {
+fn provider_label(provider: CdnEdge) -> &'static str {
     match provider {
-        StorageProviderKind::S3 => "s3",
-        StorageProviderKind::Gcs => "gcs",
-        StorageProviderKind::Azure => "azure",
-        StorageProviderKind::Local => "local",
+        CdnEdge::CloudFront => "s3",
+        CdnEdge::CloudCdn => "gcs",
+        CdnEdge::FrontDoor => "azure",
+        CdnEdge::Local => "local",
+        CdnEdge::Cloudflare => "cloudflare",
     }
 }
 
-fn cache_status(provider: StorageProviderKind, object_size: u64, value: &str) -> &'static str {
+fn cache_status(provider: CdnEdge, object_size: u64, value: &str) -> &'static str {
     // Front Door's header describes only the first chunk, documented as 8 MB.
-    if provider == StorageProviderKind::Azure && object_size > 8_000_000 {
+    if provider == CdnEdge::FrontDoor && object_size > 8_000_000 {
         return "unknown";
     }
     match (provider, value) {
-        (StorageProviderKind::S3, "Hit from cloudfront") | (StorageProviderKind::Gcs, "hit") => {
-            "hit"
-        }
-        (StorageProviderKind::S3, "Miss from cloudfront") | (StorageProviderKind::Gcs, "miss") => {
-            "miss"
-        }
-        (StorageProviderKind::Azure, "TCP_HIT" | "TCP_REMOTE_HIT") => "hit",
-        (StorageProviderKind::Azure, "TCP_MISS") => "miss",
+        (CdnEdge::CloudFront, "Hit from cloudfront") | (CdnEdge::CloudCdn, "hit") => "hit",
+        (CdnEdge::CloudFront, "Miss from cloudfront") | (CdnEdge::CloudCdn, "miss") => "miss",
+        (CdnEdge::FrontDoor, "TCP_HIT" | "TCP_REMOTE_HIT") => "hit",
+        (CdnEdge::FrontDoor, "TCP_MISS") => "miss",
+        (CdnEdge::Cloudflare, "HIT") => "hit",
+        (CdnEdge::Cloudflare, "MISS") => "miss",
         _ => "unknown",
     }
 }
@@ -527,42 +526,36 @@ mod tests {
         use reqwest::header::{HeaderMap, HeaderValue};
 
         let mut headers = HeaderMap::new();
-        assert_eq!(viewer_request_id(StorageProviderKind::S3, &headers), None,);
+        assert_eq!(viewer_request_id(CdnEdge::CloudFront, &headers), None,);
         headers.insert("x-amz-cf-id", HeaderValue::from_static("opaque-example=="));
         headers.insert("x-azure-ref", HeaderValue::from_static("opaque-azure-ref"));
         assert_eq!(
-            viewer_request_id(StorageProviderKind::S3, &headers),
+            viewer_request_id(CdnEdge::CloudFront, &headers),
             Some(Sha256::digest("opaque-example=="))
         );
         assert_eq!(
-            viewer_request_id(StorageProviderKind::Azure, &headers),
+            viewer_request_id(CdnEdge::FrontDoor, &headers),
             Some(Sha256::digest("opaque-azure-ref"))
         );
-        assert!(viewer_request_id(StorageProviderKind::Local, &headers).is_none());
+        assert!(viewer_request_id(CdnEdge::Local, &headers).is_none());
         headers.append("x-amz-cf-id", HeaderValue::from_static("other"));
-        assert!(viewer_request_id(StorageProviderKind::S3, &headers).is_none());
+        assert!(viewer_request_id(CdnEdge::CloudFront, &headers).is_none());
         headers.insert("x-azure-ref", HeaderValue::from_static("opaque example"));
-        assert!(viewer_request_id(StorageProviderKind::Azure, &headers).is_none());
+        assert!(viewer_request_id(CdnEdge::FrontDoor, &headers).is_none());
     }
 
     #[test]
     fn cache_status_is_specific_to_the_provider_and_complete_representation() {
         assert_eq!(
-            cache_status(StorageProviderKind::S3, 6, "Hit from cloudfront"),
+            cache_status(CdnEdge::CloudFront, 6, "Hit from cloudfront"),
             "hit"
         );
-        assert_eq!(cache_status(StorageProviderKind::S3, 6, "hit"), "unknown");
+        assert_eq!(cache_status(CdnEdge::CloudFront, 6, "hit"), "unknown");
+        assert_eq!(cache_status(CdnEdge::CloudCdn, 6, "revalidated"), "unknown");
+        assert_eq!(cache_status(CdnEdge::CloudCdn, 6, "miss"), "miss");
+        assert_eq!(cache_status(CdnEdge::FrontDoor, 6, "TCP_REMOTE_HIT"), "hit");
         assert_eq!(
-            cache_status(StorageProviderKind::Gcs, 6, "revalidated"),
-            "unknown"
-        );
-        assert_eq!(cache_status(StorageProviderKind::Gcs, 6, "miss"), "miss");
-        assert_eq!(
-            cache_status(StorageProviderKind::Azure, 6, "TCP_REMOTE_HIT"),
-            "hit"
-        );
-        assert_eq!(
-            cache_status(StorageProviderKind::Azure, 8_000_001, "TCP_HIT"),
+            cache_status(CdnEdge::FrontDoor, 8_000_001, "TCP_HIT"),
             "unknown"
         );
     }

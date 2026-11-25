@@ -67,7 +67,7 @@ impl Checkout {
         let store = if let Some(issuer) = self.binding.issuer {
             let viewer_enabled = deployment.storage_provider().is_some_and(|provider| {
                 CdnPolicy {
-                    provider,
+                    edge: provider.into(),
                     consumer,
                     profile: CdnProfile::Direct,
                     visibility: CdnVisibility::Private,

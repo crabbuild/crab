@@ -127,6 +127,9 @@ threshold, positive request metrics, and absence of credential field names.
 
 ## CDN release evidence
 
+For a private R2 repository, the [Cloudflare Worker guide](../../deploy/cdn/cloudflare/README.md)
+describes direct CLI qualification on a dedicated bucket.
+
 Keep the native `report.json`, the `cdn-report.json` supplement, and a
 `traces/` directory together for each CDN release row. A row names the edge
 provider, access mode, consumer, read family, direct or managed profile, and
