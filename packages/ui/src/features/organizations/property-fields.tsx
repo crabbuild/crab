@@ -1,8 +1,15 @@
 import { Checkbox } from "@/components/ui/checkbox";
 import { FieldSelect } from "@/components/ui/field-select";
+import {
+  Field,
+  FieldDescription,
+  FieldLegend,
+  FieldSet,
+} from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 
 export type PropertyValue = boolean | string | string[];
+export type PropertyOverrides = Record<string, PropertyValue>;
 export type PropertyKind =
   | "text"
   | "boolean"
@@ -34,6 +41,48 @@ export const control =
 
 export function display(value: PropertyValue) {
   return Array.isArray(value) ? value.join(", ") : String(value);
+}
+
+export function RepositoryPropertyFields({
+  definitions,
+  values,
+  onChange,
+  disabled,
+}: {
+  definitions: PropertyDefinition[];
+  values: PropertyOverrides;
+  onChange: (values: PropertyOverrides) => void;
+  disabled?: boolean;
+}) {
+  if (definitions.length === 0) return null;
+  return (
+    <FieldSet className="min-w-0" disabled={disabled}>
+      <FieldLegend variant="label">Repository properties</FieldLegend>
+      {definitions.map((definition) => (
+        <Field key={definition.id} className="min-w-0 wrap-anywhere">
+          <PropertyInput
+            definition={definition}
+            label={definition.name}
+            value={values[definition.id] ?? null}
+            unset={
+              definition.default === null
+                ? "No value"
+                : `Inherit default (${display(definition.default)})`
+            }
+            onChange={(value) => {
+              const next = { ...values };
+              if (value === null) delete next[definition.id];
+              else next[definition.id] = value;
+              onChange(next);
+            }}
+          />
+          {definition.description && (
+            <FieldDescription>{definition.description}</FieldDescription>
+          )}
+        </Field>
+      ))}
+    </FieldSet>
+  );
 }
 
 export function PropertyInput({

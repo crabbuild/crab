@@ -486,7 +486,7 @@ pub(crate) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .route("/api/imports/git/{id}/resume", post(resume))
         .route(
             "/api/organizations/{organization}/repositories/imports/git",
-            post(start),
+            post(start).layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
         )
         .route(
             "/api/organizations/{organization}/repositories/imports/git/{id}",
@@ -567,6 +567,7 @@ async fn start_fork(
         name,
         description: String::new(),
         visibility: Visibility::Private,
+        properties: Default::default(),
         token: None,
     };
     submit(&server, context, account, input.request_id, request).await
@@ -588,6 +589,13 @@ async fn submit(
     if let Some(status) = jobs.replay(id, &request).await? {
         account.check(server).await?;
         return Ok((StatusCode::ACCEPTED, Json(status)));
+    }
+    if let Some(owner) = account.organization
+        && !request.properties.is_empty()
+    {
+        owner
+            .validate_properties(server, &request.properties)
+            .await?;
     }
     account
         .fork_source(server, &catalog, request.fork_source)

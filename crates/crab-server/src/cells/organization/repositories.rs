@@ -1,10 +1,11 @@
 use super::*;
 use crate::{
-    catalog::visibility::Visibility,
+    catalog::{browser_repository_id, organization_namespace, visibility::Visibility},
     config::{DEFAULT_REPOSITORY_BRANCH, default_repository_branch},
 };
+use std::collections::BTreeMap;
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Creation {
     pub actor: Uuid,
@@ -12,6 +13,58 @@ pub(crate) struct Creation {
     pub name: String,
     pub description: String,
     pub visibility: Visibility,
+    pub properties: BTreeMap<Uuid, properties::PropertyValue>,
+}
+
+impl Creation {
+    fn key(&self) -> String {
+        format!("organization/v1/repository-creations/{}", self.request_id)
+    }
+
+    fn digest(&self) -> Result<[u8; 32]> {
+        let mut digest = blake3::Hasher::new();
+        digest.update(&serde_json::to_vec(&(
+            self.actor,
+            &self.name,
+            &self.description,
+        ))?);
+        if self.visibility.is_public() {
+            digest.update(b"\0public");
+        }
+        if !self.properties.is_empty() {
+            digest.update(b"\0properties");
+            digest.update(&serde_json::to_vec(&self.properties)?);
+        }
+        Ok(*digest.finalize().as_bytes())
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct CreationOptions {
+    pub owner: String,
+    pub default_branch: String,
+    pub visibilities: Vec<Visibility>,
+    pub properties: Vec<properties::Definition>,
+}
+
+pub(crate) struct GetCreationOptions;
+impl Read for GetCreationOptions {
+    const CLASS: &'static str = CLASS;
+    const ID: u32 = 98;
+    type Input = Caller;
+    type Output = CreationOptions;
+
+    fn execute(context: &mut Transaction<'_>, input: Caller) -> Result<Self::Output> {
+        let current = member(context, input.actor)?.ok_or(Error::AccessDenied)?;
+        let organization = record(context)?.ok_or(Error::NotInitialized)?;
+        let policy = repository_policy::load(context)?;
+        Ok(CreationOptions {
+            owner: organization_namespace(organization.id),
+            visibilities: policy.creation_visibilities(current.role).to_vec(),
+            default_branch: policy.default_branch,
+            properties: properties::creation_fields(context, current.role)?,
+        })
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -44,47 +97,42 @@ impl Mutation for AuthorizeCreation {
                 CreationOutcome::VisibilityRestricted,
             ));
         }
-        let key = format!("organization/v1/repository-creations/{}", input.request_id);
-        let mut digest = blake3::Hasher::new();
-        digest.update(&serde_json::to_vec(&(
-            input.actor,
-            input.name,
-            input.description,
-        ))?);
-        // Private is the original request domain. A public reservation must
-        // have a different digest even if all other fields match.
-        if input.visibility.is_public() {
-            digest.update(b"\0public");
-        }
-        let digest = *digest.finalize().as_bytes();
+        let key = input.key();
+        let digest = input.digest()?;
         // Keep the original ticket digest. A later promotion must not change
         // which direct grant an already authorized reservation carries.
         let creator = format!("{key}/member-creator");
         let branch = format!("{key}/default-branch");
-        let (grant_creator, default_branch) =
-            if let Some(existing) = context.document::<[u8; 32]>(&key)? {
-                if existing != digest {
-                    return Ok(MutationResult::Rejected(CreationOutcome::Conflict));
-                }
-                (
-                    context.document::<bool>(&creator)?.unwrap_or(false),
-                    context
-                        .document::<String>(&branch)?
-                        .unwrap_or_else(default_repository_branch),
-                )
-            } else {
-                let member_creating = current.role == Role::Member;
-                context.put_document(&key, &digest)?;
-                if member_creating {
-                    context.put_document(&creator, &true)?;
-                }
-                // The authorized branch must survive retries across policy changes.
-                let default_branch = policy.default_branch;
-                if default_branch != DEFAULT_REPOSITORY_BRANCH {
-                    context.put_document(&branch, &default_branch)?;
-                }
-                (member_creating, default_branch)
-            };
+        let (grant_creator, default_branch) = if let Some(existing) =
+            context.document::<[u8; 32]>(&key)?
+        {
+            if existing != digest {
+                return Ok(MutationResult::Rejected(CreationOutcome::Conflict));
+            }
+            (
+                context.document::<bool>(&creator)?.unwrap_or(false),
+                context
+                    .document::<String>(&branch)?
+                    .unwrap_or_else(default_repository_branch),
+            )
+        } else {
+            if !input.properties.is_empty()
+                && !properties::validate_creation_values(context, current.role, &input.properties)?
+            {
+                return Ok(MutationResult::Rejected(CreationOutcome::InvalidProperties));
+            }
+            let member_creating = current.role == Role::Member;
+            context.put_document(&key, &digest)?;
+            if member_creating {
+                context.put_document(&creator, &true)?;
+            }
+            // The authorized branch must survive retries across policy changes.
+            let default_branch = policy.default_branch;
+            if default_branch != DEFAULT_REPOSITORY_BRANCH {
+                context.put_document(&branch, &default_branch)?;
+            }
+            (member_creating, default_branch)
+        };
         Ok(MutationResult::Success(CreationOutcome::Accepted {
             grant_creator,
             default_branch,
@@ -100,6 +148,32 @@ pub(crate) enum CreationOutcome {
     },
     Conflict,
     VisibilityRestricted,
+    InvalidProperties,
+}
+
+pub(crate) struct InitializeCreationProperties;
+impl Mutation for InitializeCreationProperties {
+    const CLASS: &'static str = CLASS;
+    const ID: u32 = 98;
+    type Input = Creation;
+    type Output = Authorized;
+
+    fn execute(
+        context: &mut Transaction<'_>,
+        input: Creation,
+    ) -> Result<MutationResult<Authorized>> {
+        if context.document::<[u8; 32]>(&input.key())? != Some(input.digest()?) {
+            return Ok(MutationResult::Rejected(Authorized::Conflict));
+        }
+        let organization = record(context)?.ok_or(Error::NotInitialized)?;
+        let owner = organization_namespace(organization.id);
+        let repository = properties::Repository {
+            id: browser_repository_id(&owner, input.request_id),
+            ownership_epoch: 0,
+        };
+        properties::initialize_values(context, input.actor, repository, input.properties)?;
+        Ok(MutationResult::Success(Authorized::Accepted))
+    }
 }
 
 #[derive(Deserialize, Serialize)]

@@ -1,14 +1,11 @@
 use super::reads::View;
 use super::*;
-use crate::catalog::visibility::Visibility;
 
 #[derive(Deserialize, Serialize)]
 pub(crate) enum Landing {
     Member {
         view: View,
         can_create: bool,
-        creation_visibilities: Vec<Visibility>,
-        default_branch: String,
     },
     Invitation {
         organization: Organization,
@@ -34,8 +31,6 @@ impl Read for GetLanding {
             return Ok(record(context)?.map(|organization| Landing::Member {
                 view: View { organization, role },
                 can_create,
-                creation_visibilities: policy.creation_visibilities(role).to_vec(),
-                default_branch: policy.default_branch,
             }));
         }
         let view = GetInvitation::execute(

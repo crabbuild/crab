@@ -1020,6 +1020,11 @@ destination. Resuming preserves that choice and accepts a replacement source
 token. Public visibility takes effect in the catalog when the verified Git
 snapshot and Repository Cell are ready.
 
+Organization imports also accept `properties` keyed by property definition
+UUID. The job stores and returns the chosen values to organization owners.
+Resuming reuses the saved values. Crab applies them before receiving Git refs
+so property-targeted rulesets see the destination's values throughout import.
+
 Crab checks organization authority at reservation, during native Git
 publication, and at the decision to expose the repository. The final decision
 is recorded in the organization Cell for the exact prepared repository and
@@ -1383,6 +1388,12 @@ A default applies to repositories with no override, including new repositories.
 To require a property for all repositories, specify a default of the property's
 type. Repositories inherit that default until an override is set. Clearing the
 override restores inheritance.
+The **New repository** dialog shows creation-time property fields. Organization
+owners can set all fields. Members can set fields delegated to repository
+administrators. The organization creation options endpoint returns the eligible
+`properties`. The creation request accepts initial values in a `properties`
+object keyed by definition UUID. The exact request binds these values and
+saves them before catalog publication.
 One save applies the entire selection. A stale selection prevents every write
 in the batch. Retry a lost response with the same submission to recover the
 original receipt. Open the repository's **Properties** tab to view its effective

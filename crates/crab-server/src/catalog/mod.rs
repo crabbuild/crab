@@ -622,6 +622,17 @@ pub(crate) struct BrowserCreation {
     pub(crate) description: String,
     #[serde(default)]
     pub(crate) visibility: visibility::Visibility,
+    #[serde(default)]
+    pub(crate) properties: BTreeMap<Uuid, crate::cells::organization::properties::PropertyValue>,
+}
+
+pub(crate) fn browser_repository_id(owner: &str, request_id: Uuid) -> Uuid {
+    let mut hash = blake3::Hasher::new_derive_key("crab browser repository creation v1");
+    hash.update(owner.as_bytes());
+    hash.update(request_id.as_bytes());
+    let mut id = [0; 16];
+    id.copy_from_slice(&hash.finalize().as_bytes()[..16]);
+    uuid::Builder::from_custom_bytes(id).into_uuid()
 }
 
 pub(crate) struct GitImportReservation {
@@ -714,12 +725,7 @@ impl CatalogStore {
             ));
         }
         let (owner, organization) = namespace.catalog_owner(&[])?;
-        let mut hash = blake3::Hasher::new_derive_key("crab browser repository creation v1");
-        hash.update(owner.as_bytes());
-        hash.update(input.request_id.as_bytes());
-        let mut id = [0; 16];
-        id.copy_from_slice(&hash.finalize().as_bytes()[..16]);
-        let id = uuid::Builder::from_custom_bytes(id).into_uuid();
+        let id = browser_repository_id(&owner, input.request_id);
         self.insert_with_mode(
             CatalogRecord {
                 id,

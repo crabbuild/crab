@@ -27,6 +27,12 @@ import {
 } from "@/lib/api";
 import { parseGitRepository } from "./source";
 import { Link } from "@/components/navigation/link";
+import {
+  display,
+  RepositoryPropertyFields,
+  type PropertyDefinition,
+  type PropertyOverrides,
+} from "@/features/organizations/property-fields";
 
 interface ImportedRepository {
   owner: string;
@@ -91,6 +97,14 @@ export function GitImport({
     owner: string;
     visibilities: RepositoryVisibility[];
   }>(personal && open ? "/api/repos/creation" : null);
+  const organizationDestination = useRequest<{
+    properties: PropertyDefinition[];
+  }>(
+    organizationId && open && !fork
+      ? `/api/organizations/${encodeURIComponent(organizationId)}/repositories/creation`
+      : null,
+  );
+  const definitions = organizationDestination.data?.properties ?? [];
   const [source, setSource] = useState("");
   const [owner, setOwner] = useState(defaultOwner);
   const defaultName = fork
@@ -101,6 +115,7 @@ export function GitImport({
   const [name, setName] = useState(defaultName);
   const [description, setDescription] = useState("");
   const [visibility, setVisibility] = useState<RepositoryVisibility>("private");
+  const [properties, setProperties] = useState<PropertyOverrides>({});
   const [token, setToken] = useState("");
   const [nameEdited, setNameEdited] = useState(false);
   const [job, setJob] = useState<GitImportJob>();
@@ -193,6 +208,7 @@ export function GitImport({
     setName(defaultName);
     setDescription("");
     setVisibility("private");
+    setProperties({});
     setToken("");
     setNameEdited(false);
     setJob(undefined);
@@ -227,6 +243,7 @@ export function GitImport({
       return;
     }
     if (job) return;
+    if (organizationId && !fork && !organizationDestination.data) return;
     const sourceValue = source.trim();
     const parsedName = parseGitRepository(sourceValue);
     const repositoryName = name.trim() || parsedName;
@@ -250,6 +267,7 @@ export function GitImport({
       name: repositoryName.trim(),
       description: description.trim() || undefined,
       visibility,
+      ...(Object.keys(properties).length ? { properties } : {}),
     };
     const intent = JSON.stringify([fields, fork ? forkDestination : null]);
     const request_id =
@@ -305,6 +323,10 @@ export function GitImport({
     ? `/${encodeURIComponent(job.repository.owner)}/${encodeURIComponent(job.repository.name)}`
     : undefined;
   const fixedDestination = !!job || running || submitting;
+  const savedProperties = definitions.flatMap(({ id, name }) => {
+    const value = job?.properties?.[id];
+    return value === undefined ? [] : [{ id, name, value }];
+  });
   return (
     <section className="panel git-import" aria-labelledby="git-import-title">
       <header className="git-import-header">
@@ -476,6 +498,24 @@ export function GitImport({
             </label>
           )}
         </div>
+        {!job && (
+          <RepositoryPropertyFields
+            definitions={definitions}
+            values={properties}
+            onChange={setProperties}
+            disabled={fixedDestination}
+          />
+        )}
+        {savedProperties.length > 0 && (
+          <dl className="grid gap-2 rounded-md border p-3 text-sm wrap-anywhere">
+            {savedProperties.map(({ id, name, value }) => (
+              <div key={id} className="grid gap-0.5">
+                <dt className="font-medium">{name}</dt>
+                <dd>{display(value)}</dd>
+              </div>
+            ))}
+          </dl>
+        )}
         {personalDestination.error && !job && (
           <div className="git-import-feedback error" role="alert">
             <span>{personalDestination.error}</span>
@@ -486,6 +526,19 @@ export function GitImport({
               onClick={personalDestination.retry}
             >
               Retry namespace lookup
+            </Button>
+          </div>
+        )}
+        {organizationDestination.error && !job && (
+          <div className="git-import-feedback error" role="alert">
+            <span>{organizationDestination.error}</span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={organizationDestination.retry}
+            >
+              Reload repository properties
             </Button>
           </div>
         )}
@@ -553,6 +606,10 @@ export function GitImport({
               disabled={
                 running ||
                 submitting ||
+                (!!organizationId &&
+                  !fork &&
+                  !job &&
+                  !organizationDestination.data) ||
                 (personal && !job && !personalDestination.data)
               }
             >

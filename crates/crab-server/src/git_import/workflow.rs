@@ -170,6 +170,11 @@ async fn import_repository(
             .snapshot()
             .await
             .ok_or(ImportError::DestinationChanged)?;
+        if let Some(owner) = organization {
+            owner
+                .initialize_properties(server, job, record.id, &request.properties)
+                .await?;
+        }
         let repository = open_destination(&catalog, record, &snapshot).await?;
         let view = repository
             .open_ref_view()
@@ -304,6 +309,13 @@ async fn import_repository(
         )
         .await
         .map_err(ImportError::Catalog)?;
+    if record.application == RepositoryApplicationState::GitImportPending
+        && let Some(owner) = organization
+    {
+        owner
+            .initialize_properties(server, job, record.id, &request.properties)
+            .await?;
+    }
     let repository = open_destination(&catalog, &record, &snapshot).await?;
     let publication = if request.fork_source.is_some() {
         "Publishing Git history and large files"

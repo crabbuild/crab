@@ -48,6 +48,7 @@ async fn resumes_published_git_snapshot_after_worker_loss() {
         name: "imported".into(),
         description: "Imported repository".into(),
         visibility: Visibility::Private,
+        properties: Default::default(),
         token: None,
     };
     let job = Arc::new(jobs.create(id, &request).await.unwrap().unwrap());
@@ -242,7 +243,20 @@ async fn organization_import_requires_current_ownership_and_resumes_under_anothe
     let path = format!("{endpoint}/{id}");
     let resume_path = format!("{path}/resume");
     let destination = crate::catalog::organization_namespace(organization);
-    let body = json!({"request_id": id, "source": "https://127.0.0.1:1/offline-source.git", "name": "imported", "visibility":"public"});
+    let property = Uuid::now_v7();
+    h.write(
+        reqwest::Method::PUT,
+        &format!("{root}/repository-properties"),
+        &alice,
+        json!({"expected_version":0,"definitions":[
+            {"id":property,"name":"regulated","description":"","kind":"boolean","options":[],"default":true}
+        ]}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let properties = json!({(property.to_string()):false});
+    let body = json!({"request_id": id, "source": "https://127.0.0.1:1/offline-source.git", "name": "imported", "visibility":"public","properties":properties});
     let forbidden = h
         .write(reqwest::Method::POST, &endpoint, &bob, body.clone())
         .await;
@@ -261,6 +275,14 @@ async fn organization_import_requires_current_ownership_and_resumes_under_anothe
             .status(),
         StatusCode::BAD_REQUEST
     );
+    let mut invalid = body.clone();
+    invalid["properties"][property.to_string()] = json!("false");
+    assert_eq!(
+        h.write(reqwest::Method::POST, &endpoint, &alice, invalid)
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
     let start = h
         .write(reqwest::Method::POST, &endpoint, &alice, body.clone())
         .await;
@@ -269,8 +291,17 @@ async fn organization_import_requires_current_ownership_and_resumes_under_anothe
     assert_eq!(queued["id"], json!(id));
     assert_eq!(queued["owner"], json!(destination));
     assert_eq!(queued["visibility"], "public");
-    let mut changed = body;
+    assert_eq!(queued["properties"], properties);
+    let mut changed = body.clone();
     changed["visibility"] = json!("private");
+    assert_eq!(
+        h.write(reqwest::Method::POST, &endpoint, &alice, changed)
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    let mut changed = body;
+    changed["properties"][property.to_string()] = json!(true);
     assert_eq!(
         h.write(reqwest::Method::POST, &endpoint, &alice, changed)
             .await
@@ -306,6 +337,10 @@ async fn organization_import_requires_current_ownership_and_resumes_under_anothe
         .unwrap();
     let request = request.unwrap();
     assert_eq!(request.visibility, Visibility::Public);
+    assert_eq!(
+        serde_json::to_value(&request.properties).unwrap(),
+        properties
+    );
     let writer = Arc::new(scope.claim(id, &request).await.unwrap().unwrap());
     let alice_owner = import_owner(&h, &alice, organization).await;
     let source = fixture_mirror().await;
@@ -334,6 +369,10 @@ async fn organization_import_requires_current_ownership_and_resumes_under_anothe
             },
             Vec::new(),
         )
+        .await
+        .unwrap();
+    alice_owner
+        .initialize_properties(&h.server, &writer, repository_id, &request.properties)
         .await
         .unwrap();
     let repository = open_destination(&catalog, &record, &snapshot)
@@ -396,18 +435,6 @@ async fn organization_import_requires_current_ownership_and_resumes_under_anothe
         json!([])
     );
     let policy = format!("{root}/rulesets");
-    let property = Uuid::now_v7();
-    h.write(
-        Method::PUT,
-        &format!("{root}/repository-properties"),
-        &bob,
-        json!({"expected_version":0,"definitions":[
-            {"id":property,"name":"regulated","description":"","kind":"boolean","options":[],"default":true}
-        ]}),
-    )
-    .await
-    .error_for_status()
-    .unwrap();
     let rule = json!({
         "id":Uuid::now_v7(),"name":"Block imported branch creation","target":"branch","enforcement":"active",
         "include":["~ALL"],"exclude":[],"restrict_creations":true,"restrict_deletions":false,
@@ -420,7 +447,7 @@ async fn organization_import_requires_current_ownership_and_resumes_under_anothe
         &bob,
         json!({"expected_version":0,"rulesets":[
             {"ruleset":rule,"repositories":{"kind":"properties","conditions":[
-                {"property":property,"value":true},
+                {"property":property,"value":false},
                 {"system":"fork","value":false},
                 {"system":"name","value":"import*"}
             ]}}
@@ -480,7 +507,9 @@ async fn organization_import_requires_current_ownership_and_resumes_under_anothe
         )
         .await;
     assert_eq!(wrong_scope.status(), StatusCode::NOT_FOUND);
-    assert_eq!(h.json(&path, &bob).await["state"], "interrupted");
+    let interrupted = h.json(&path, &bob).await;
+    assert_eq!(interrupted["state"], "interrupted");
+    assert_eq!(interrupted["properties"], properties);
     let resumed = h.write(Method::POST, &resume_path, &bob, json!({})).await;
     assert_eq!(resumed.status(), StatusCode::ACCEPTED);
     wait_for_state(&h, &bob, &path, "succeeded").await;
@@ -495,6 +524,24 @@ async fn organization_import_requires_current_ownership_and_resumes_under_anothe
     );
     assert_eq!(listed["repositories"][0]["can_admin"], json!(true));
     assert_eq!(public().await[0]["id"], json!(repository_id));
+    let published = h
+        .http
+        .get(format!(
+            "{}/api/repos/{destination}/imported/properties",
+            h.origin
+        ))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(
+        published,
+        json!({"properties":[{"name":"regulated","value":false}]})
+    );
     let imported = h.server.repositories.by_id(repository_id).unwrap();
     assert!(imported.config.members.is_empty());
     let view = imported.open_ref_view().await.unwrap();
