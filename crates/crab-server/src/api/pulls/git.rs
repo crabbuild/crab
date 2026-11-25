@@ -135,6 +135,28 @@ pub(in crate::api) fn fork_repository(
         .ok_or(Error::NotFound)
 }
 
+pub(super) async fn require_fork_writer(
+    server: &Server,
+    upstream: &Repository,
+    upstream_reader: &crate::auth::Principal,
+    fork: &Repository,
+) -> Result<()> {
+    let writer = upstream_reader
+        .related_read(upstream.id, fork.id)
+        .ok_or(Error::Forbidden)?;
+    // Resolve the source grant independently. A fork owner can propose a
+    // change with upstream Read while all direct upstream writes stay blocked.
+    if upstream_reader.is_public_reader(upstream.id)
+        || !crate::app::membership(server, &writer, fork)
+            .await?
+            .principal
+            .can_write(fork.id)
+    {
+        return Err(Error::Forbidden);
+    }
+    Ok(())
+}
+
 pub(in crate::api) async fn review_head(
     server: &Server,
     upstream: &Repository,

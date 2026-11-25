@@ -142,10 +142,10 @@ async fn available(
         return Ok(false);
     };
     Ok(grant.principal.can_write(repo.id)
-        && app::membership(server, &reader, upstream)
+        && !app::membership(server, &reader, upstream)
             .await?
             .principal
-            .can_write(upstream.id))
+            .is_public_reader(upstream.id))
 }
 
 fn metadata(source: crab_metadata::error::MetadataError) -> Error {

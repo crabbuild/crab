@@ -87,8 +87,9 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
   receipt recovery. Divergence is surfaced without changing either branch.
 - Fork readers can compare a selected branch against an upstream branch in the
   browser. Changed files use the common Git ancestor and identify both captured
-  tips. Writers can create upstream pull requests from that comparison, review
-  the fork's exact commit, report scoped Crab checks upstream, and publish
+  tips. Contributors with Write access to the fork and Read access upstream can
+  open a pull request from that comparison or a recent push to the fork. Teams
+  can review the exact fork commit, report scoped Crab checks upstream, and publish
   merge commits, squash, rebase, or fast-forward through the upstream's merge
   policy. Writers can apply review suggestions to the fork branch, with one
   commit, an editable message, and credit for suggestion authors. The Checks

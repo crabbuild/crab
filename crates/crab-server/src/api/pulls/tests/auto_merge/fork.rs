@@ -1,9 +1,19 @@
 use super::*;
-use crate::test_support::http::organizations;
+use crate::test_support::http::{browser::Browser, organizations};
 use std::sync::atomic::Ordering;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn fork_auto_merge_requires_every_push_to_be_attributed_to_an_upstream_writer() {
+    exercise(None).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Chromium and the built embedded UI"]
+async fn native_browser_read_only_contributor_opens_a_pull_from_their_fork() {
+    exercise(Some(Browser::new("fork-contribution"))).await;
+}
+
+async fn exercise(browser: Option<Browser>) {
     let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
     let h = Harness::new_with_store_and_prefix(false, false, store, "fork-auto-merge").await;
     h.initialize_directory().await;
@@ -52,10 +62,9 @@ async fn fork_auto_merge_requires_every_push_to_be_attributed_to_an_upstream_wri
     let owner = repo["owner"].as_str().unwrap();
     let id = repo["id"].as_str().unwrap();
     let root = format!("/api/repos/{owner}/upstream");
-    let write = async |method: Method, path: &str, cookie: &str, body: Value| {
+    let send = async |method: Method, path: &str, cookie: &str, body: Value| {
         let session = h.json("/api/session", cookie).await;
-        let response = h
-            .http
+        h.http
             .request(method, format!("{}{root}{path}", h.origin))
             .header("cookie", cookie)
             .header("origin", &h.origin)
@@ -64,7 +73,10 @@ async fn fork_auto_merge_requires_every_push_to_be_attributed_to_an_upstream_wri
             .json(&body)
             .send()
             .await
-            .unwrap();
+            .unwrap()
+    };
+    let write = async |method: Method, path: &str, cookie: &str, body: Value| {
+        let response = send(method, path, cookie, body).await;
         let status = response.status();
         let body = response.text().await.unwrap();
         assert!(status.is_success(), "{path}: {status} {body}");
@@ -113,50 +125,152 @@ async fn fork_auto_merge_requires_every_push_to_be_attributed_to_an_upstream_wri
     let upstream = remote(owner, &alice).await;
     let local = tempfile::tempdir().unwrap();
     let path = local.path();
-    let inspected = git::push_review_branches(path, upstream.as_str()).await;
+    let initial_head = git::push_review_branches(path, upstream.as_str()).await;
     let base = git::success(path, &["rev-parse", "main"]).await;
-    let fork_request = Uuid::now_v7();
-    write(
-        Method::POST,
-        "/forks",
-        &bob,
-        json!({
-            "request_id":fork_request,"name":"upstream","destination":"personal",
-        }),
-    )
-    .await;
-    let fork = tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            let status = h
-                .json(&format!("/api/imports/git/{fork_request}"), &bob)
-                .await;
-            match status["state"].as_str() {
-                Some("succeeded") => break status["repository"].clone(),
-                Some("queued" | "running") => tokio::time::sleep(Duration::from_millis(100)).await,
-                _ => panic!("Fork did not complete: {status}"),
+    let create_fork = async |cookie: &str| {
+        let request = Uuid::now_v7();
+        write(
+            Method::POST,
+            "/forks",
+            cookie,
+            json!({
+                "request_id":request,"name":"upstream","destination":"personal",
+            }),
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let status = h.json(&format!("/api/imports/git/{request}"), cookie).await;
+                match status["state"].as_str() {
+                    Some("succeeded") => {
+                        break status["repository"]["owner"].as_str().unwrap().to_owned();
+                    }
+                    Some("queued" | "running") => {
+                        tokio::time::sleep(Duration::from_millis(100)).await
+                    }
+                    _ => panic!("Fork did not complete: {status}"),
+                }
             }
-        }
-    })
-    .await
-    .unwrap();
-    let fork_owner = fork["owner"].as_str().unwrap();
+        })
+        .await
+        .unwrap()
+    };
+    let fork_owner = create_fork(&bob).await;
     let fork_id = h
         .server
         .repositories
         .get(&(fork_owner.to_owned(), "upstream".into()))
         .unwrap()
         .id;
-    write(
-        Method::POST,
-        "/pulls",
-        &alice,
+    let commit =
+        async |message: &str| git::success(path, &["commit", "--allow-empty", "-m", message]).await;
+    let bob_remote = remote(&fork_owner, &bob).await;
+    commit("Prepare a contribution from the personal fork").await;
+    git::success(path, &["push", bob_remote.as_str(), "feature"]).await;
+    let inspected = git::success(path, &["rev-parse", "feature"]).await;
+    let recent = h
+        .json(
+            &format!("/api/repos/{fork_owner}/upstream/pulls/recent-pushes"),
+            &bob,
+        )
+        .await;
+    assert_eq!(
+        recent["items"],
+        json!([{"name":"refs/heads/feature","oid":inspected}])
+    );
+    let request = |head: &str| {
         json!({
-            "request_id":Uuid::now_v7(),"title":"Fork change", "body":"",
-            "base_ref":"refs/heads/main","head_ref":"refs/heads/feature","head_repository":fork_id,
-            "expected":{"base_oid":base,"head_oid":inspected},
-        }),
-    )
-    .await;
+                "request_id":Uuid::now_v7(),"title":"Fork change", "body":"",
+                "base_ref":"refs/heads/main","head_ref":"refs/heads/feature","head_repository":fork_id,
+                "expected":{"base_oid":base,"head_oid":head},
+        })
+    };
+    if let Some(browser) = &browser {
+        browser
+            .run(&["open", &format!("{}/{fork_owner}/upstream", h.origin)])
+            .await;
+        browser.sign_in().await;
+        browser
+            .run(&["wait", "--text", "You recently pushed"])
+            .await;
+        browser
+            .run(&[
+                "find",
+                "role",
+                "link",
+                "click",
+                "--name",
+                "Compare & pull request for feature",
+                "--exact",
+            ])
+            .await;
+        browser.run(&["wait", "#discussion-title"]).await;
+        browser
+            .run(&["fill", "#discussion-title", "Fork change"])
+            .await;
+        browser
+            .run(&[
+                "find",
+                "role",
+                "button",
+                "click",
+                "--name",
+                "Create pull request",
+                "--exact",
+            ])
+            .await;
+        browser
+            .run(&["wait", "--fn", "location.pathname.endsWith('/pull/1')"])
+            .await;
+    } else {
+        let mut unrelated = request(&inspected);
+        unrelated["head_repository"] = json!(
+            h.server
+                .repositories
+                .values()
+                .iter()
+                .find(|repo| repo.config.owner == "team")
+                .unwrap()
+                .id
+        );
+        assert_eq!(
+            send(Method::POST, "/pulls", &bob, unrelated).await.status(),
+            StatusCode::NOT_FOUND
+        );
+        let other_owner = create_fork(&alice).await;
+        let other_fork = h
+            .server
+            .repositories
+            .get(&(other_owner, "upstream".into()))
+            .unwrap();
+        let mut unowned = request(&initial_head);
+        unowned["head_repository"] = json!(other_fork.id);
+        assert!(matches!(
+            send(Method::POST, "/pulls", &bob, unowned).await.status(),
+            StatusCode::FORBIDDEN | StatusCode::NOT_FOUND
+        ));
+        assert_eq!(
+            send(Method::POST, "/pulls", &bob, request(&initial_head))
+                .await
+                .status(),
+            StatusCode::CONFLICT
+        );
+        let reviewed = request(&inspected);
+        let first = write(Method::POST, "/pulls", &bob, reviewed.clone()).await;
+        let replayed = write(Method::POST, "/pulls", &bob, reviewed).await;
+        assert_eq!(first["number"], replayed["number"]);
+    }
+    let pull = h.json(&format!("{root}/pulls/1"), &bob).await;
+    assert_eq!(pull["author"]["name"], "Bob");
+    assert_eq!(pull["head_repository"]["id"], json!(fork_id));
+    assert_eq!(pull["original_head_oid"], inspected);
+    assert_eq!(pull["can_edit"], true);
+    assert_eq!(pull["can_merge"], false);
+    if let Some(browser) = browser {
+        drop(browser);
+        h.close().await;
+        return;
+    }
     let auto = format!("{root}/pulls/1/auto-merge");
     let schedule = async || {
         let pull = h.json(&format!("{root}/pulls/1"), &alice).await;
@@ -165,14 +279,11 @@ async fn fork_auto_merge_requires_every_push_to_be_attributed_to_an_upstream_wri
             "head_oid":pull["head_oid"],"method":"merge_commit","message":"Merge tested changes",
         })).await
     };
-    let forge_commit =
-        async |message: &str| git::success(path, &["commit", "--allow-empty", "-m", message]).await;
-    let bob_remote = remote(fork_owner, &bob).await;
     schedule().await;
-    forge_commit("Fork owner with upstream Read access").await;
+    commit("Fork owner with upstream Read access").await;
     git::success(path, &["push", bob_remote.as_str(), "feature"]).await;
     set_bob_access("write").await;
-    forge_commit("Same account after upstream Write grant").await;
+    commit("Same account after upstream Write grant").await;
     git::success(path, &["push", bob_remote.as_str(), "feature"]).await;
     let worker = tokio::spawn(crate::api::auto_merge::run(Arc::clone(&h.server)));
     let await_state = async |stopped: Value, head: Option<&str>| {
@@ -192,7 +303,7 @@ async fn fork_auto_merge_requires_every_push_to_be_attributed_to_an_upstream_wri
     };
     await_state(json!("head_changed"), None).await;
     let armed = schedule().await;
-    forge_commit("Verified update despite a lost reply").await;
+    commit("Verified update despite a lost reply").await;
     let head = git::success(path, &["rev-parse", "feature"]).await;
     h.drop_next_git_push_reply.store(true, Ordering::SeqCst);
     let _reply = git::git(path, &["push", bob_remote.as_str(), "feature"]).await;

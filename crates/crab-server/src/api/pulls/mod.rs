@@ -955,16 +955,9 @@ async fn create(
         return Err(Error::Invalid("Base and head branches must differ"));
     }
     if let Some(fork) = input.head_repository {
-        git::fork_repository(&server, &repo, fork)?;
-        // Private same-organization forks inherit the upstream grant. Keep
-        // the browser credential bound to the upstream collaboration route.
-        if !app::membership(&server, &principal, &repo)
-            .await?
-            .principal
-            .can_write(repo.id)
-        {
-            return Err(Error::Forbidden);
-        }
+        let fork = git::fork_repository(&server, &repo, fork)?;
+        let grant = app::membership(&server, &principal, &repo).await?;
+        git::require_fork_writer(&server, &repo, &grant.principal, &fork).await?;
         if input.expected.is_none() {
             return Err(Error::Invalid(
                 "Inspect the fork comparison before opening a pull request",
@@ -1127,7 +1120,7 @@ async fn create_at_comparison(
     server: &Arc<Server>,
     principal: &Principal,
     repo: &Arc<Repository>,
-    input: NewPullRequest,
+    mut input: NewPullRequest,
 ) -> Result<PullRequest> {
     use crate::cells::repository::collaboration::links::branches::promotion::Prepare;
 
@@ -1192,17 +1185,12 @@ async fn create_at_comparison(
                             || refs.get(&input.head_ref) != Some(&input.head_oid)
                     }
                 };
-                let grant = app::membership(worker, &principal, repo).await?;
-                if fork.is_some() && !grant.principal.can_write(repo.id) {
-                    return Err(Error::Forbidden);
-                }
                 if cancel.is_cancelled() {
                     return Err(Error::MergeBusy);
                 }
-                if stale
-                    || repo.organization.is_none()
-                    || !input.head_ref.starts_with("refs/heads/")
-                {
+                if repo.organization.is_none() || (stale && fork.is_none()) {
+                    let grant = app::membership(worker, &principal, repo).await?;
+                    input.metadata.can_triage &= grant.principal.can_triage(repo.id);
                     return storage::create_pull(worker, repo, input, stale, None).await;
                 }
                 settings::with_ownership_lease(worker, repo, |policy| async move {
@@ -1210,8 +1198,12 @@ async fn create_at_comparison(
                         return Err(Error::MergeBusy);
                     }
                     let grant = app::membership(worker, &principal, repo).await?;
-                    if fork.is_some() && !grant.principal.can_write(repo.id) {
-                        return Err(Error::Forbidden);
+                    if let Some(fork) = fork {
+                        git::require_fork_writer(worker, repo, &grant.principal, fork).await?;
+                    }
+                    input.metadata.can_triage &= grant.principal.can_triage(repo.id);
+                    if stale {
+                        return storage::create_pull(worker, repo, input, true, None).await;
                     }
                     let branch = crate::cells::repository::collaboration::links::branches::Branch {
                         repository: input.head_repository.unwrap_or(repo.id),

@@ -104,7 +104,7 @@ export function NewPull({
   const headRepo = fork?.repo ?? repo;
   const canCreate =
     !fork ||
-    (headRepo.access === "write" && repo.access === "write" && !repo.archived);
+    (headRepo.access === "write" && !repo.public_read_only && !repo.archived);
   const comparable = Boolean(base && head && (fork || base !== head));
   const comparison = usePullComparison(headRepo, base, head, fork && repo.id);
   const preview = comparison.data;
@@ -389,7 +389,16 @@ export function NewPull({
               </CreationForm>
             </>
           )}
-          {!fork && preview && !canSubmit && (
+          {fork && !canCreate && (
+            <p className="notice" role="status">
+              {repo.archived
+                ? "The upstream repository is archived."
+                : repo.public_read_only
+                  ? "Repository access is required to open a pull request."
+                  : "Write access to the fork is required to open a pull request."}
+            </p>
+          )}
+          {preview && !canSubmit && (
             <p className="notice" role="status">
               The head branch has no commits to propose.
             </p>

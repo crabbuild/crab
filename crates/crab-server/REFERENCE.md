@@ -1146,9 +1146,11 @@ rules. The response identifies the ancestor as `base`, the upstream tip as
 and `commit` in the fork. Both `changes` and `commits` also accept exact
 commit IDs in `base` and `rev` for a repeatable comparison.
 
-Writers can open a regular or draft pull request in the upstream repository
-from the same comparison. The request stores the fork UUID, branch name and
-both inspected commit IDs. The upstream owns the conversation, reviews,
+Contributors can open a regular or draft pull request from the comparison
+with Write access to the fork and Read access upstream. A recent push to a
+personal fork offers **Compare & pull request**. Crab rechecks both grants
+and the inspected tips at creation. The request stores the fork UUID, branch
+name and both inspected commit IDs. The upstream owns the conversation, reviews,
 CODEOWNERS and merge requirements. Files and commits are read from the fork.
 The base and head may have the same branch name. API clients post to the
 upstream `pulls` route with `head_repository` set to the fork UUID, and supply
