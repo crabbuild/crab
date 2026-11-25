@@ -143,12 +143,16 @@ struct ListParams {
     limit: Option<usize>,
     before: Option<u64>,
     pull: Option<u64>,
+    #[serde(default)]
+    scans_only: bool,
 }
 
 #[derive(Deserialize)]
 struct DetailScope {
     pull: Option<u64>,
     baseline: Option<String>,
+    #[serde(default)]
+    scans_only: bool,
 }
 
 pub(crate) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
@@ -419,6 +423,7 @@ async fn list(
                     before: params.before,
                     limit: u8::try_from(limit)
                         .map_err(|_| Error::CellContract("check page limit overflowed"))?,
+                    scans_only: params.scans_only,
                 },
             )
             .await,
@@ -481,6 +486,9 @@ async fn detail(
             .await,
     )?
     .ok_or(Error::CheckNotFound)?;
+    if scope.scans_only && detail.scan.is_none() {
+        return Err(Error::CheckNotFound);
+    }
     let scan_comparison = if let Some((sha, reachable)) = baseline.filter(|_| detail.scan.is_some())
     {
         app::membership(&server, &principal, repo).await?;

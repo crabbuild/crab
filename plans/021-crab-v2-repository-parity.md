@@ -312,7 +312,8 @@ criticality and adoption dependencies.
 
 Repository-scoped SARIF uploads now create exact-commit check runs with
 visible findings, source-line links, and required-check enforcement. PR Checks
-compare fingerprinted findings against the exact base scan. Alert history
+compare fingerprinted findings against the exact base scan. Repository
+Security browses scans by branch and commit. Per-finding lifecycle history
 and audited policy exceptions remain separate delivery work.
 
 | Priority | Remaining delivery | Acceptance evidence |

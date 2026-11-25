@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use url::Url;
 
 use super::*;
+mod history;
 
 const MAX_UPLOAD_BYTES: usize = 1024 * 1024;
 
@@ -10,6 +11,7 @@ pub(super) fn routes() -> Router<Arc<Server>> {
     Router::new()
         .route("/api/repos/{owner}/{name}/check-runs/sarif", post(upload))
         .layer(axum::extract::DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
+        .merge(history::routes())
 }
 
 #[derive(Deserialize)]

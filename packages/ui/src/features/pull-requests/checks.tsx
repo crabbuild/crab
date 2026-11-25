@@ -146,24 +146,28 @@ export function CheckRuns({
   githubActionsRef,
   candidate = false,
   live = false,
+  scanHref,
 }: {
   repo: Repository;
-  pull: number;
   oid: string;
-  baseOid: string;
+  baseOid?: string;
   selected?: number;
   before?: number;
   scopeToPull?: boolean;
   githubActionsRef?: string | null;
   candidate?: boolean;
   live?: boolean;
-}) {
-  const scope = scopeToPull ? String(pull) : undefined;
+} & (
+  | { pull: number; scanHref?: never }
+  | { pull?: never; scanHref: (filters?: Record<string, string>) => string }
+)) {
+  const scope = scopeToPull && pull !== undefined ? String(pull) : undefined;
   const page = useRequest<CheckPage>(
     endpoint(repo, `commits/${oid}/check-runs`, {
       limit: "50",
       before: before ? String(before) : undefined,
       pull: scope,
+      scans_only: scanHref ? "true" : undefined,
     }),
     repo.id,
     undefined,
@@ -185,6 +189,7 @@ export function CheckRuns({
       ? endpoint(repo, `commits/${oid}/check-runs/${active}`, {
           pull: scope,
           baseline,
+          scans_only: scanHref ? "true" : undefined,
         })
       : null,
     repo.id,
@@ -196,20 +201,22 @@ export function CheckRuns({
         }
       : undefined,
   );
-  const checkHref = (filters: Record<string, string> = {}) =>
-    repoHref(repo, {
-      view: "pulls",
-      pull: String(pull),
-      pull_tab: "checks",
-      candidate: candidate ? "1" : undefined,
-      ...filters,
-    });
+  const checkHref =
+    scanHref ??
+    ((filters: Record<string, string> = {}) =>
+      repoHref(repo, {
+        view: "pulls",
+        pull: String(pull),
+        pull_tab: "checks",
+        candidate: candidate ? "1" : undefined,
+        ...filters,
+      }));
   return (
     <section
       className={
         githubActionsRef ? "check-runs grid-rows-[auto_1fr]" : "check-runs"
       }
-      aria-label="Checks"
+      aria-label={scanHref ? "Scan reports" : "Checks"}
     >
       {githubActionsRef && (
         <MirrorRefspec key={oid} refspec={`${oid}:${githubActionsRef}`} />
@@ -218,9 +225,14 @@ export function CheckRuns({
         {(data) =>
           data.items.length ? (
             <>
-              <aside className="check-run-list" aria-label="Check runs">
+              <aside
+                className="check-run-list"
+                aria-label={scanHref ? "Reports for this commit" : "Check runs"}
+              >
                 <header>
-                  <strong>All checks</strong>
+                  <strong>
+                    {scanHref ? "Reports for this commit" : "All checks"}
+                  </strong>
                   <code>{short(data.sha)}</code>
                 </header>
                 <nav>
@@ -244,12 +256,16 @@ export function CheckRuns({
                 </nav>
                 {(before || data.next) && (
                   <footer>
-                    {before && <Link href={checkHref()}>Newest checks</Link>}
+                    {before && (
+                      <Link href={checkHref()}>
+                        {scanHref ? "Newest reports" : "Newest checks"}
+                      </Link>
+                    )}
                     {data.next && (
                       <Link
                         href={checkHref({ check_before: String(data.next) })}
                       >
-                        Older checks
+                        {scanHref ? "Older reports" : "Older checks"}
                       </Link>
                     )}
                   </footer>
@@ -269,8 +285,14 @@ export function CheckRuns({
           ) : (
             <div className="notice check-empty">
               <ClockIcon size={32} />
-              <h3>No checks have been reported</h3>
-              <p>CI check runs for this commit will appear here.</p>
+              <h3>
+                {scanHref
+                  ? "No scan reports for this commit"
+                  : "No checks have been reported"}
+              </h3>
+              {!scanHref && (
+                <p>CI check runs for this commit will appear here.</p>
+              )}
             </div>
           )
         }

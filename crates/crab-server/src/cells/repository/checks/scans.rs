@@ -5,6 +5,7 @@ use super::*;
 
 const ROOT: &str = "collaboration/v1/check-scans";
 pub(crate) const CHECK_PREFIX: &str = "Code scanning / ";
+pub(crate) const HISTORY_PAGE_LIMIT: usize = 50;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -73,18 +74,85 @@ fn latest_key(head: &CheckRunRecord, oid: &str) -> String {
     format!("{ROOT}/latest/{}/{oid}", digest.finalize().to_hex())
 }
 
+fn commit_key(oid: &str) -> String {
+    format!("{ROOT}/commits/{oid}")
+}
+
+fn report_numbers(context: &Transaction<'_>, oid: &str) -> crate::cells::Result<Vec<u64>> {
+    Ok(context.document(&commit_key(oid))?.unwrap_or_default())
+}
+
 pub(super) fn save(
     context: &Transaction<'_>,
     run: &CheckRunRecord,
     scan: &Scan,
 ) -> crate::cells::Result<()> {
     // The report and latest pointer share the immutable check and its receipt.
+    let mut reports = report_numbers(context, &run.oid)?;
+    reports.push(run.number);
     context.put_document(&report_key(run.number), scan)?;
-    context.put_document(&latest_key(run, &run.oid), &run.number)
+    context.put_document(&latest_key(run, &run.oid), &run.number)?;
+    context.put_document(&commit_key(&run.oid), &reports)
 }
 
 pub(super) fn load(context: &Transaction<'_>, number: u64) -> crate::cells::Result<Option<Scan>> {
     context.document(&report_key(number))
+}
+
+pub(crate) struct CountByCommit;
+
+impl Read for CountByCommit {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
+    const ID: u32 = 479;
+    type Input = Vec<String>;
+    type Output = Vec<usize>;
+
+    fn execute(
+        context: &mut Transaction<'_>,
+        commits: Vec<String>,
+    ) -> crate::cells::Result<Vec<usize>> {
+        // The first entry is the branch tip, which can be outside this history page.
+        if commits.len() > HISTORY_PAGE_LIMIT + 1 {
+            return Err(crate::cells::Error::Invalid(
+                "Scan history page is too large",
+            ));
+        }
+        commits
+            .iter()
+            .map(|oid| {
+                validate_oid(oid)?;
+                Ok(report_numbers(context, oid)?.len())
+            })
+            .collect()
+    }
+}
+
+pub(super) fn page(
+    context: &Transaction<'_>,
+    oid: &str,
+    before: u64,
+    limit: usize,
+) -> crate::cells::Result<Vec<CheckRunRecord>> {
+    let reports = report_numbers(context, oid)?;
+    let end = reports.partition_point(|number| *number < before);
+    let reports = &reports[end.saturating_sub(limit)..end];
+    if reports.is_empty() {
+        return Ok(vec![]);
+    }
+    let result = context.query(
+        "SELECT run_number, create_request_id, author_issuer, author_subject, author_name, oid, name, status, conclusion, details_url, output_title, version, started_at_ms, completed_at_ms, created_at_ms, updated_at_ms FROM repository_check_run_versions WHERE run_number IN (SELECT value FROM json_each(?)) AND oid = ? AND version = 1 ORDER BY run_number DESC",
+        &[SqlValue::Text(serde_json::to_string(reports)?), SqlValue::Text(oid.to_owned())],
+    )?;
+    if result.rows.len() != reports.len() {
+        return Err(crate::cells::Error::Invalid(
+            "Scan history has a missing check report",
+        ));
+    }
+    result
+        .rows
+        .iter()
+        .map(|row| check_run_from_row(row))
+        .collect()
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -12,6 +12,8 @@ struct Fixture {
     alice: String,
     token: String,
     head: String,
+    source: tempfile::TempDir,
+    remote: Url,
 }
 
 impl Fixture {
@@ -51,6 +53,8 @@ impl Fixture {
             alice,
             token,
             head,
+            source,
+            remote,
         }
     }
 
@@ -269,6 +273,159 @@ async fn native_browser_shows_sarif_findings_and_opens_the_scanned_line() {
     let location = format!(
         "location.pathname === {} && location.hash === '#L2'",
         json!(pinned)
+    );
+    browser.run(&["wait", "--fn", &location]).await;
+    f.h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scan_history_follows_branch_ancestry_and_rejects_a_moved_tip() {
+    let f = Fixture::new().await;
+    let pull = f.h.json(&format!("{ROOT}/1"), &f.alice).await;
+    let base = pull["base_oid"].as_str().unwrap();
+    assert_eq!(
+        f.upload(report(base, finding())).await.0,
+        StatusCode::CREATED
+    );
+    let first = f.upload(report(&f.head, finding())).await;
+    assert_eq!(first.0, StatusCode::CREATED);
+    let second = f.upload(report(&f.head, json!([]))).await;
+    assert_eq!(second.0, StatusCode::CREATED);
+    let (status, ordinary) = report_check(
+        &f.h, &f.token, Method::POST, "/api/repos/team/private/check-runs",
+        json!({
+            "request_id":Uuid::now_v7(),"head_sha":f.head,"name":"Code scanning / indistinguishable title",
+            "status":"completed","conclusion":"success","details_url":null,
+            "output":{"title":"Code scanning results","summary":"An ordinary check run."}
+        }),
+    ).await;
+    assert_eq!(status, StatusCode::CREATED, "{ordinary}");
+
+    let route = "/api/repos/team/private/code-scanning/history";
+    let main = f.h.json(route, &f.alice).await;
+    assert_eq!(main["branch"], "refs/heads/main");
+    assert_eq!(main["tip"], base);
+    assert_eq!(main["items"].as_array().unwrap().len(), 1);
+    assert_eq!(main["items"][0]["oid"], base);
+    let feature = format!("{route}?branch=refs%2Fheads%2Ffeature&limit=1");
+    let page = f.h.json(&feature, &f.alice).await;
+    assert_eq!(page["tip"], f.head);
+    assert_eq!(page["tip_reports"], 2);
+    assert_eq!(page["items"][0]["reports"], 2);
+    let cursor = page["next"].as_str().unwrap();
+    let continued = format!("{feature}&cursor={cursor}");
+    let older = f.h.json(&continued, &f.alice).await;
+    assert_eq!(older["tip_reports"], 2);
+    assert_eq!(older["items"][0]["oid"], base);
+    let status = async |url: &str, cookie: &str| {
+        f.h.http
+            .get(format!("{}{url}", f.h.origin))
+            .header(header::COOKIE, cookie)
+            .send()
+            .await
+            .unwrap()
+            .status()
+    };
+    assert_eq!(
+        status(
+            &format!("{route}?branch=refs%2Fheads%2Fmain&cursor={cursor}"),
+            &f.alice
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+    *f.h.provider.mode.lock().await = "outsider".into();
+    let outsider = f.h.login().await;
+    assert_eq!(status(route, &outsider).await, StatusCode::NOT_FOUND);
+
+    let runs = format!("/api/repos/team/private/commits/{}/check-runs", f.head);
+    let listed =
+        f.h.json(&format!("{runs}?scans_only=true&limit=1"), &f.alice)
+            .await;
+    assert_eq!(listed["items"][0]["id"], second.1["id"]);
+    let older_scan =
+        f.h.json(
+            &format!("{runs}?scans_only=true&limit=1&before={}", listed["next"]),
+            &f.alice,
+        )
+        .await;
+    assert_eq!(older_scan["items"][0]["id"], first.1["id"]);
+    assert!(older_scan["next"].is_null());
+    assert_eq!(
+        status(
+            &format!("{runs}/{}?scans_only=true", ordinary["id"]),
+            &f.alice
+        )
+        .await,
+        StatusCode::NOT_FOUND
+    );
+
+    git::success(
+        f.source.path(),
+        &["commit", "--allow-empty", "-m", "Unscanned branch tip"],
+    )
+    .await;
+    git::success(
+        f.source.path(),
+        &["push", f.remote.as_str(), "HEAD:refs/heads/feature"],
+    )
+    .await;
+    assert_eq!(status(&continued, &f.alice).await, StatusCode::CONFLICT);
+    let moved = f.h.json(&feature, &f.alice).await;
+    assert_eq!(moved["tip_reports"], 0);
+    assert_eq!(moved["items"], json!([]));
+    let older =
+        f.h.json(
+            &format!("{feature}&cursor={}", moved["next"].as_str().unwrap()),
+            &f.alice,
+        )
+        .await;
+    assert_eq!(older["items"][0]["oid"], f.head);
+    f.h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Chromium and the built embedded UI"]
+async fn native_browser_opens_scan_history_from_repository_security() {
+    let f = Fixture::new().await;
+    let pull = f.h.json(&format!("{ROOT}/1"), &f.alice).await;
+    let base = pull["base_oid"].as_str().unwrap();
+    let mut on_main = report(base, finding());
+    on_main["category"] = json!("main audit");
+    assert_eq!(f.upload(on_main).await.0, StatusCode::CREATED);
+    let mut on_feature = report(&f.head, mixed_findings());
+    on_feature["category"] = json!("feature audit");
+    assert_eq!(f.upload(on_feature).await.0, StatusCode::CREATED);
+
+    let browser = Browser::new("security-history");
+    browser
+        .run(&["open", &format!("{}/team/private", f.h.origin)])
+        .await;
+    browser.sign_in().await;
+    browser.run(&["wait", "--text", "Security"]).await;
+    browser
+        .run(&[
+            "find", "role", "link", "click", "--name", "Security", "--exact",
+        ])
+        .await;
+    browser
+        .run(&["wait", "--text", "Code scanning / main audit"])
+        .await;
+    browser
+        .choose_select("#scan-branch", "refs/heads/feature")
+        .await;
+    browser
+        .run(&["wait", "--text", "Code scanning / feature audit"])
+        .await;
+    browser.run(&["wait", "--text", "Error · AUDIT-2"]).await;
+    let older = format!("[aria-label='Scanned commits'] a[href*='scan_commit={base}']");
+    browser.run(&["wait", &older]).await;
+    browser.run(&["click", &older]).await;
+    browser
+        .run(&["wait", "--text", "Code scanning / main audit"])
+        .await;
+    let location = format!(
+        "document.querySelector('[aria-label=Annotations] a')?.getAttribute('href')?.includes('/blob/{base}/README.md')"
     );
     browser.run(&["wait", "--fn", &location]).await;
     f.h.close().await;

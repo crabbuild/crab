@@ -142,6 +142,7 @@ fn reports(context: &mut Transaction<'_>, oid: &str) -> crate::cells::Result<Che
             oid: oid.into(),
             before: None,
             limit: MAX_CHECK_RUNS_PER_COMMIT as u8,
+            scans_only: false,
         },
     )?;
     let mut counts = Checks::default();

@@ -562,6 +562,9 @@ pub(in crate::cells) fn dispatch_read(
         }
         <ListCheckRuns as Read>::ID => invoke_read::<ListCheckRuns>(context, input),
         <GetCheckRun as Read>::ID => invoke_read::<GetCheckRun>(context, input),
+        <check_scans::CountByCommit as Read>::ID => {
+            invoke_read::<check_scans::CountByCommit>(context, input)
+        }
         <GetCheckCreateSubmission as Read>::ID => {
             invoke_read::<GetCheckCreateSubmission>(context, input)
         }

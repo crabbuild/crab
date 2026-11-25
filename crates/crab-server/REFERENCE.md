@@ -5577,6 +5577,25 @@ unclassified. The comparison shows counts for every finding and labels
 source annotations. Required checks still use the conclusion of the scan for
 the exact commit being evaluated.
 
+### Browse repository scan history
+
+Open **Security** to choose a branch and inspect its scan reports outside a
+pull request. The branch tip shows its own report count. Older results are
+displayed with their scanned commit and link to the source at that commit.
+
+`GET /api/repos/{owner}/{name}/code-scanning/history` requires repository
+membership. It defaults to the default branch and accepts `branch` as a full
+`refs/heads/...` name. The server examines up to 30 first-parent commits
+by default (`limit` accepts 1–50). Each page includes the exact branch tip,
+its report count, scanned commits in that window, and a `next` cursor when
+more commits exist. A page can have zero reports and still have older commits.
+The cursor binds to the repository, branch, and tip. A branch move invalidates
+the cursor. Start at the latest commits to refresh the view.
+
+Add `scans_only=true` to commit check lists or individual check reads to
+select reports ingested through SARIF. The detail keeps the original report
+output and exact commit.
+
 ### Send repository webhooks
 
 Add up to 20 distinct approved receivers per repository UUID in the server configuration. Set

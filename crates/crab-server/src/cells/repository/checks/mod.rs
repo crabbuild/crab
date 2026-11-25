@@ -137,6 +137,8 @@ pub(crate) struct ListCheckRunsInput {
     pub oid: String,
     pub before: Option<u64>,
     pub limit: u8,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scans_only: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -384,7 +386,10 @@ impl Read for ListCheckRuns {
             ));
         }
         let before = input.before.unwrap_or(MAX_NUMBER + 1);
-        let result = context.sql(&SqlBatch {
+        let mut runs = if input.scans_only {
+            scans::page(context, &input.oid, before, usize::from(input.limit) + 1)?
+        } else {
+            let result = context.sql(&SqlBatch {
             statements: vec![statement(
                 "SELECT run_number, create_request_id, author_issuer, author_subject, author_name, oid, name, status, conclusion, details_url, output_title, version, started_at_ms, completed_at_ms, created_at_ms, updated_at_ms FROM repository_check_run_versions AS current WHERE oid = ? AND run_number < ? AND NOT EXISTS (SELECT 1 FROM repository_check_run_versions AS newer WHERE newer.run_number = current.run_number AND newer.version > current.version) ORDER BY run_number DESC LIMIT ?",
                 vec![
@@ -394,11 +399,12 @@ impl Read for ListCheckRuns {
                 ],
             )],
         })?;
-        let mut runs = result[0]
-            .rows
-            .iter()
-            .map(|row| check_run_from_row(row))
-            .collect::<crate::cells::Result<Vec<_>>>()?;
+            result[0]
+                .rows
+                .iter()
+                .map(|row| check_run_from_row(row))
+                .collect::<crate::cells::Result<Vec<_>>>()?
+        };
         let next = (runs.len() > usize::from(input.limit))
             .then(|| runs[usize::from(input.limit) - 1].number);
         runs.truncate(usize::from(input.limit));

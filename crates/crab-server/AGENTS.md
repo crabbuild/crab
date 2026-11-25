@@ -13,6 +13,8 @@ evaluate the resulting conclusion through the existing provider policy.
 `cells/repository/checks/scans.rs` owns code-scanning evidence and the latest
 report index by author, category, and commit. Evidence and its pointer commit
 with the immutable check. Comparisons are read-only and bind two exact SHAs.
+`api/checks/sarif/history.rs` binds scan discovery to a verified first-parent
+branch window and joins report counts through the Repository Cell.
 
 ## Read first
 
