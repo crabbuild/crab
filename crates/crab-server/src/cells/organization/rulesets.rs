@@ -375,6 +375,8 @@ pub(crate) struct Repository {
     pub id: Uuid,
     pub name: String,
     pub ownership_epoch: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub property_seed: Option<Uuid>,
     pub fork: bool,
 }
 
@@ -399,6 +401,7 @@ impl Read for Applicable {
                 properties::Repository {
                     id: repository.id,
                     ownership_epoch: repository.ownership_epoch,
+                    property_seed: repository.property_seed,
                 },
             )?
         } else {

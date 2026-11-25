@@ -25,6 +25,7 @@ import { Input } from "@/components/ui/input";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import {
   RepositoryPropertyFields,
+  needsExplicitPropertyValues,
   type PropertyDefinition,
   type PropertyOverrides,
 } from "@/features/organizations/property-fields";
@@ -103,30 +104,30 @@ function RepositoryForm({
   const hasUnavailable =
     propertyIds.length > Object.keys(availableProperties).length;
   const available = destination.visibilities.includes(visibility);
+  const fields = {
+    name: name.trim(),
+    description: description.trim(),
+    visibility,
+  };
+  const savedProperties = attempt?.properties ?? {};
+  const retry =
+    attempt?.name === fields.name &&
+    attempt.description === fields.description &&
+    attempt.visibility === visibility &&
+    propertyIds.length === Object.keys(savedProperties).length &&
+    propertyIds.every(
+      (id) =>
+        JSON.stringify(properties[id]) === JSON.stringify(savedProperties[id]),
+    );
+  const incomplete =
+    !retry && needsExplicitPropertyValues(definitions, availableProperties);
   const mutation = useMutation(csrf, null);
   return (
     <form
       onSubmit={async (event) => {
         event.preventDefault();
-        if (!name.trim() || !available || mutation.pending) return;
-        const fields = {
-          name: name.trim(),
-          description: description.trim(),
-          visibility,
-        };
-        const savedProperties = attempt?.properties ?? {};
-        const sameProperties =
-          propertyIds.length === Object.keys(savedProperties).length &&
-          propertyIds.every(
-            (id) =>
-              JSON.stringify(properties[id]) ===
-              JSON.stringify(savedProperties[id]),
-          );
-        const retry =
-          attempt?.name === fields.name &&
-          attempt.description === fields.description &&
-          attempt.visibility === visibility &&
-          sameProperties;
+        if (!fields.name || !available || incomplete || mutation.pending)
+          return;
         const next = retry
           ? attempt
           : {
@@ -250,7 +251,9 @@ function RepositoryForm({
         <div className="flex justify-end">
           <Button
             type="submit"
-            disabled={!name.trim() || !available || mutation.pending}
+            disabled={
+              !fields.name || !available || incomplete || mutation.pending
+            }
           >
             {mutation.pending ? "Creating…" : "Create repository"}
           </Button>

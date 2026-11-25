@@ -30,6 +30,7 @@ import { Link } from "@/components/navigation/link";
 import {
   display,
   RepositoryPropertyFields,
+  needsExplicitPropertyValues,
   type PropertyDefinition,
   type PropertyOverrides,
 } from "@/features/organizations/property-fields";
@@ -100,8 +101,8 @@ export function GitImport({
   const organizationDestination = useRequest<{
     properties: PropertyDefinition[];
   }>(
-    organizationId && open && !fork
-      ? `/api/organizations/${encodeURIComponent(organizationId)}/repositories/creation`
+    jobOrganization && open
+      ? `/api/organizations/${encodeURIComponent(jobOrganization)}/repositories/creation`
       : null,
   );
   const definitions = organizationDestination.data?.properties ?? [];
@@ -116,6 +117,7 @@ export function GitImport({
   const [description, setDescription] = useState("");
   const [visibility, setVisibility] = useState<RepositoryVisibility>("private");
   const [properties, setProperties] = useState<PropertyOverrides>({});
+  const incomplete = needsExplicitPropertyValues(definitions, properties);
   const [token, setToken] = useState("");
   const [nameEdited, setNameEdited] = useState(false);
   const [job, setJob] = useState<GitImportJob>();
@@ -243,7 +245,8 @@ export function GitImport({
       return;
     }
     if (job) return;
-    if (organizationId && !fork && !organizationDestination.data) return;
+    if (jobOrganization && (!organizationDestination.data || incomplete))
+      return;
     const sourceValue = source.trim();
     const parsedName = parseGitRepository(sourceValue);
     const repositoryName = name.trim() || parsedName;
@@ -267,7 +270,9 @@ export function GitImport({
       name: repositoryName.trim(),
       description: description.trim() || undefined,
       visibility,
-      ...(Object.keys(properties).length ? { properties } : {}),
+      ...(jobOrganization && Object.keys(properties).length
+        ? { properties }
+        : {}),
     };
     const intent = JSON.stringify([fields, fork ? forkDestination : null]);
     const request_id =
@@ -278,7 +283,12 @@ export function GitImport({
       const next = fork
         ? await startRepositoryFork(
             fork,
-            { request_id, name: fields.name, destination: forkDestination },
+            {
+              request_id,
+              name: fields.name,
+              destination: forkDestination,
+              ...(fields.properties ? { properties: fields.properties } : {}),
+            },
             csrf,
           )
         : await startGitImport(
@@ -379,6 +389,7 @@ export function GitImport({
                   const next =
                     value === "organization" ? "organization" : "personal";
                   setForkDestination(next);
+                  setProperties({});
                   if (!nameEdited)
                     setName(
                       next === "personal" ? fork.name : `${fork.name}-fork`,
@@ -606,10 +617,9 @@ export function GitImport({
               disabled={
                 running ||
                 submitting ||
-                (!!organizationId &&
-                  !fork &&
+                (!!jobOrganization &&
                   !job &&
-                  !organizationDestination.data) ||
+                  (!organizationDestination.data || incomplete)) ||
                 (personal && !job && !personalDestination.data)
               }
             >

@@ -1,5 +1,6 @@
 import { FieldSelect } from "@/components/ui/field-select";
 import { useState } from "react";
+import { catalogTerms } from "./catalog-search";
 
 const sorting = [
   ["", "Best match"],
@@ -46,10 +47,6 @@ const filters = [
   },
 ] as const;
 
-function terms(query: string) {
-  return query.match(/(?:[^\s"]|"[^"]*(?:"|$))+/g) ?? [];
-}
-
 function selected(
   key: (typeof filters)[number]["key"],
   term: string | undefined,
@@ -84,7 +81,7 @@ export function RepositoryStateFilters({
   apply: (query: string) => boolean;
 }) {
   const [tooLong, setTooLong] = useState(false);
-  const queryTerms = terms(query);
+  const queryTerms = Array.from(catalogTerms(query), ([term]) => term);
   return (
     <div className="flex flex-wrap items-center gap-2">
       {filters
@@ -100,9 +97,10 @@ export function RepositoryStateFilters({
                 queryTerms.find((term) => qualifier.test(term)),
               )}
               onValueChange={(nextValue) => {
-                const next = terms(draft()).filter(
-                  (term) => !qualifier.test(term),
-                );
+                const next = Array.from(
+                  catalogTerms(draft()),
+                  ([term]) => term,
+                ).filter((term) => !qualifier.test(term));
                 if (nextValue) next.push(`${key}:${nextValue}`);
                 setTooLong(!apply(next.join(" ")));
               }}

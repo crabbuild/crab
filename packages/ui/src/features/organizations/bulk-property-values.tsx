@@ -24,7 +24,7 @@ type Edit = { kind: "set"; value: PropertyValue | null } | { kind: "default" };
 interface SelectionView {
   schema: PropertySchema;
   repositories: {
-    repository: { id: string; ownership_epoch: number };
+    repository: { id: string; ownership_epoch: number; property_seed?: string };
     version: number;
   }[];
   effective: Record<string, CurrentValue>;
@@ -355,7 +355,9 @@ function SelectionEditor({
                   options={[
                     { value: "keep", label: "Keep current values" },
                     { value: "set", label: "Set override" },
-                    { value: "default", label: "Use default" },
+                    ...(definition.require_explicit_values
+                      ? []
+                      : [{ value: "default", label: "Use default" }]),
                   ]}
                 />
               </label>
@@ -363,6 +365,7 @@ function SelectionEditor({
                 <PropertyInput
                   label={definition.name}
                   definition={definition}
+                  required={definition.require_explicit_values}
                   value={edit.value}
                   unset="Choose a value"
                   onChange={(value) =>

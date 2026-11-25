@@ -169,6 +169,80 @@ test("an administrator creates an offer that the recipient can find and confirm"
   ).toBeVisible();
 });
 
+test("an organization owner sets destination properties when accepting", async ({
+  page,
+}) => {
+  const id = "01900000-0000-7000-8000-000000000050";
+  const repository = "01900000-0000-7000-8000-000000000051";
+  const property = "01900000-0000-7000-8000-000000000052";
+  const offer = {
+    id,
+    repository,
+    from: { owner: "team", name: "project" },
+    to: { owner: "org-receiver", name: "project" },
+    recipient: "Crab Data",
+    expires_at_ms: Date.now() + 86_400_000,
+    state: "pending",
+    can_accept: true,
+    can_cancel: false,
+  };
+  await page.route("**/api/session", (route) =>
+    route.fulfill({
+      json: {
+        authenticated: true,
+        csrf: "fixture-csrf",
+        mode: "oidc",
+        user: { issuer: "fixture", subject: "alex", name: "Alex" },
+      },
+    }),
+  );
+  await page.route("**/api/notifications/unread", (route) =>
+    route.fulfill({ json: { unread: false, pending_transfers: false } }),
+  );
+  await page.route(`**/api/repository-transfers/${id}`, (route) => {
+    if (route.request().method() === "PUT") {
+      expect(route.request().postDataJSON()).toEqual({
+        decision: "accept",
+        properties: { [property]: "Platform" },
+      });
+      return route.fulfill({
+        json: { ...offer, state: "accepted", can_accept: false },
+      });
+    }
+    return route.fulfill({
+      json: {
+        ...offer,
+        properties: [
+          {
+            id: property,
+            name: "service_area",
+            description: "Responsible group",
+            kind: "text",
+            options: [],
+            default: "Shared",
+            required: true,
+            require_explicit_values: true,
+            values_editable_by: "organization",
+          },
+        ],
+      },
+    });
+  });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`/-/repository-transfers/${id}`);
+  const field = page.getByLabel("service_area");
+  await expect(field).toHaveAttribute("placeholder", "Choose a value");
+  await expectNoAccessibilityViolations(page);
+  await page.getByLabel("Type project to accept ownership.").fill("project");
+  await expect(
+    page.getByRole("button", { name: "Accept transfer" }),
+  ).toBeDisabled();
+  await field.fill("Platform");
+  await page.getByRole("button", { name: "Accept transfer" }).click();
+  await expect(page.getByText("Transfer accepted")).toBeVisible();
+});
+
 for (const method of ["directory", "link"] as const) {
   test(`an organization transfer uses the stable destination ID from the ${method}`, async ({
     page,

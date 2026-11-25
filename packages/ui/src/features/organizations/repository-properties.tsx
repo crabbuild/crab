@@ -20,6 +20,7 @@ import {
   PropertyInput,
   control,
   display,
+  needsExplicitPropertyValues,
   propertySchemaPath,
   type PropertyDefinition,
   type PropertyKind,
@@ -121,7 +122,9 @@ function Definitions({
             <strong>{definition.name}</strong>
             <p className="text-sm text-muted-foreground">
               {kinds[definition.kind]}
-              {definition.required && " · Required"}
+              {definition.require_explicit_values
+                ? " · Explicit value required"
+                : definition.required && " · Required"}
               {definition.values_editable_by === "repository" &&
                 " · Repository administrators can edit values"}
               {definition.description && ` · ${definition.description}`}
@@ -151,6 +154,7 @@ function Definitions({
               options: [],
               default: null,
               required: false,
+              require_explicit_values: false,
               values_editable_by: "organization",
             })
           }
@@ -256,7 +260,12 @@ function Definitions({
               checked={draft.required}
               aria-describedby="require-repository-property-help"
               onCheckedChange={(checked) =>
-                setDraft({ ...draft, required: checked === true })
+                setDraft({
+                  ...draft,
+                  required: checked === true,
+                  require_explicit_values:
+                    checked === true && draft.require_explicit_values,
+                })
               }
             />
             <FieldContent>
@@ -268,6 +277,31 @@ function Definitions({
               </FieldDescription>
             </FieldContent>
           </Field>
+          {draft.required && (
+            <Field orientation="horizontal">
+              <Checkbox
+                id="require-explicit-property-value"
+                checked={draft.require_explicit_values}
+                aria-describedby="require-explicit-property-value-help"
+                onCheckedChange={(checked) =>
+                  setDraft({
+                    ...draft,
+                    require_explicit_values: checked === true,
+                  })
+                }
+              />
+              <FieldContent>
+                <FieldLabel htmlFor="require-explicit-property-value">
+                  Require an explicit value
+                </FieldLabel>
+                <FieldDescription id="require-explicit-property-value-help">
+                  People who can set this property must choose a value when
+                  creating a repository, accepting a transfer, or editing
+                  property values.
+                </FieldDescription>
+              </FieldContent>
+            </Field>
+          )}
           <PropertyInput
             label="Default value"
             definition={draft}
@@ -419,6 +453,11 @@ function RepositoryValues({
   const [saved, setSaved] = useState(false);
   const mutation = useMutation(csrf, repo);
   const writable = new Set(editable);
+  const writableDefinitions = schema.definitions.filter(({ id }) =>
+    writable.has(id),
+  );
+  const missing =
+    draft && needsExplicitPropertyValues(writableDefinitions, draft);
   const changed =
     draft &&
     editable.some(
@@ -427,7 +466,7 @@ function RepositoryValues({
     );
 
   async function save() {
-    if (!draft || !changed) return;
+    if (!draft || !changed || missing) return;
     const result = await mutation.run<PropertyView>(path, "PUT", {
       schema_version: schema.version,
       expected_version: values.version,
@@ -459,34 +498,35 @@ function RepositoryValues({
             className="grid gap-3"
             disabled={mutation.pending || mutation.conflict}
           >
-            {schema.definitions
-              .filter(({ id }) => writable.has(id))
-              .map((definition) => (
-                <PropertyInput
-                  key={definition.id}
-                  label={definition.name}
-                  definition={definition}
-                  value={draft[definition.id] ?? null}
-                  unset={
-                    definition.default === null
-                      ? "Unset"
-                      : `Default · ${display(definition.default)}`
-                  }
-                  onChange={(value) =>
-                    setDraft((current) => {
-                      const next = { ...current };
-                      if (value === null) delete next[definition.id];
-                      else next[definition.id] = value;
-                      return next;
-                    })
-                  }
-                />
-              ))}
+            {writableDefinitions.map((definition) => (
+              <PropertyInput
+                key={definition.id}
+                label={definition.name}
+                definition={definition}
+                required={definition.require_explicit_values}
+                value={draft[definition.id] ?? null}
+                unset={
+                  definition.default === null
+                    ? "Unset"
+                    : `Default · ${display(definition.default)}`
+                }
+                onChange={(value) =>
+                  setDraft((current) => {
+                    const next = { ...current };
+                    if (value === null) delete next[definition.id];
+                    else next[definition.id] = value;
+                    return next;
+                  })
+                }
+              />
+            ))}
           </fieldset>
           <div className="flex flex-wrap gap-2">
             <Button
               type="submit"
-              disabled={!changed || mutation.pending || mutation.conflict}
+              disabled={
+                !changed || !!missing || mutation.pending || mutation.conflict
+              }
             >
               Save property values
             </Button>

@@ -6,12 +6,12 @@ import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { navigate, useRequest, type Repository } from "@/lib/api";
 import type { RepositoryAccess } from "@/lib/contracts";
 import { repositoryRoleLabels } from "@/lib/repository-roles";
 import { repoHref } from "@/lib/repository-route";
 import { RepositoryPropertyFilters } from "./catalog-property-filters";
+import { CatalogSearchInput, catalogQueryLimit } from "./catalog-search";
 import { RepositoryStateFilters } from "./catalog-state-filters";
 import { TopicLinks } from "./topic-links";
 
@@ -91,7 +91,7 @@ export function BrowseRepositories({ url, scope }: { url: URL; scope: Scope }) {
 
   const draft = () => searchInput.current?.value.trim() ?? query;
   function apply(search: string) {
-    if (search.length > 200) return false;
+    if (search.length > catalogQueryLimit) return false;
     navigate(href(search));
     return true;
   }
@@ -112,20 +112,11 @@ export function BrowseRepositories({ url, scope }: { url: URL; scope: Scope }) {
           else navigate(destination);
         }}
       >
-        <Input
+        <CatalogSearchInput
           key={query}
-          ref={searchInput}
-          type="search"
-          className="min-w-36 max-w-md flex-1"
-          name="q"
-          aria-label="Search repositories"
-          placeholder={
-            organization
-              ? "Search names or use topic: and props. filters"
-              : "Search names, descriptions, or topic:name"
-          }
-          maxLength={200}
-          defaultValue={query}
+          input={searchInput}
+          query={query}
+          organization={organization}
         />
         <Button type="submit" size="sm">
           Search

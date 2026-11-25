@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use axum::{
     Extension, Json, Router,
@@ -20,7 +20,14 @@ use crate::{
     cells::{
         Address,
         directory::{IdentityKey, ResolveHandles},
-        organization::{Role, discovery::Landing},
+        organization::{
+            Caller, Role,
+            discovery::Landing,
+            properties::{
+                Definition, GetSchema, PrepareTransferValues, PropertyValue,
+                Repository as PropertyRepository, TransferValues, transfer_seed,
+            },
+        },
     },
     repository::{access, settings},
     server::Server,
@@ -32,7 +39,12 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
             "/api/repositories/{repository}/transfer",
             get(current).post(propose),
         )
-        .route("/api/repository-transfers/{id}", get(read).put(decide))
+        .route(
+            "/api/repository-transfers/{id}",
+            get(read)
+                .put(decide)
+                .layer(DefaultBodyLimit::max(128 * 1024)),
+        )
         .route("/api/repository-transfers/incoming", get(incoming::list))
         .layer(DefaultBodyLimit::max(2_048))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
@@ -73,6 +85,8 @@ struct View {
     expires_at_ms: i64,
     can_accept: bool,
     can_cancel: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    properties: Option<Vec<Definition>>,
 }
 
 impl View {
@@ -100,6 +114,7 @@ impl View {
             expires_at_ms: offer.expires_at_ms,
             can_accept: recipient && available,
             can_cancel: source && available,
+            properties: None,
         }
     }
 }
@@ -438,7 +453,20 @@ async fn read(
     if !recipient && !source && actor != offer.requester {
         return Err(Error::NotFound);
     }
-    Ok(Json(View::new(record, offer, now()?, source, recipient)))
+    let mut view = View::new(record, offer, now()?, source, recipient);
+    if view.can_accept
+        && let Recipient::Organization { id } = offer.recipient
+    {
+        let actor = super::organizations::actor(&server, &principal).await?;
+        let cells = server.cells().ok_or(Error::CellUnavailable)?;
+        let schema = cells
+            .query::<GetSchema>(Address::Organization(id), None, Caller { actor })
+            .await
+            .map_err(super::organizations::read_error)?
+            .output;
+        view.properties = Some(schema.definitions);
+    }
+    Ok(Json(view))
 }
 
 #[derive(Deserialize)]
@@ -453,6 +481,8 @@ enum Choice {
 #[serde(deny_unknown_fields)]
 struct Resolve {
     decision: Choice,
+    #[serde(default)]
+    properties: BTreeMap<Uuid, PropertyValue>,
 }
 
 async fn decide(
@@ -474,6 +504,11 @@ async fn decide(
     if !permitted {
         return Err(Error::NotFound);
     }
+    if !input.properties.is_empty() && !matches!(input.decision, Choice::Accept) {
+        return Err(Error::Invalid(
+            "Set repository properties when accepting a transfer",
+        ));
+    }
     let now = now()?;
     let published = match input.decision {
         Choice::Cancel => catalog
@@ -486,7 +521,13 @@ async fn decide(
             .map_err(catalog_error)?,
         Choice::Accept => {
             accept(
-                &server, &principal, actor, &catalog, &document, record, offer,
+                &server,
+                &principal,
+                actor,
+                &catalog,
+                &document,
+                id,
+                input.properties,
             )
             .await?
         }
@@ -508,10 +549,24 @@ async fn accept(
     actor: MembershipActor,
     catalog: &CatalogStore,
     document: &CatalogDocument,
-    record: &CatalogRecord,
-    offer: &Offer,
+    id: Uuid,
+    properties: BTreeMap<Uuid, PropertyValue>,
 ) -> Result<CatalogDocument> {
+    let (record, offer) = document.transfer(id).ok_or(Error::NotFound)?;
+    let destination = match &offer.recipient {
+        Recipient::Organization { id } => Some(*id),
+        Recipient::Account { .. } => None,
+    };
+    if destination.is_none() && !properties.is_empty() {
+        return Err(Error::Invalid(
+            "Repository properties require an organization destination",
+        ));
+    }
+    let property_seed = transfer_seed(id, &properties)?;
     if offer.state == OfferState::Accepted {
+        if record.property_seed != property_seed {
+            return Err(Error::PageChanged);
+        }
         return Ok(document.clone());
     }
     if !offer.available(record, now()?) {
@@ -519,10 +574,6 @@ async fn accept(
     }
     let active = source_repository(server, document, record).await?;
     let source = active.as_ref();
-    let destination = match &offer.recipient {
-        Recipient::Organization { id } => Some(*id),
-        Recipient::Account { .. } => None,
-    };
     // Both policies must stay current through publication. Existing source
     // publications also finish under the former ownership before this switch.
     settings::with_transfer_ownership_leases(server, source, destination, |cancel| async move {
@@ -553,6 +604,49 @@ async fn accept(
             ));
         }
         let signed = app::actor(principal)?;
+        if let Some(destination) = destination {
+            if catalog
+                .load_snapshot()
+                .await
+                .map_err(catalog_error)?
+                .0
+                .version
+                != document.version
+            {
+                return Err(Error::PageChanged);
+            }
+            let owner = access::actor_id(server, key(&actor))
+                .await?
+                .ok_or(Error::NotFound)?;
+            let cells = server.cells().ok_or(Error::CellUnavailable)?;
+            cells
+                .command::<PrepareTransferValues>(
+                    Address::Organization(destination),
+                    app::mutation_identity()?,
+                    TransferValues {
+                        actor: owner,
+                        offer: id,
+                        repository: PropertyRepository {
+                            id: record.id,
+                            ownership_epoch: record
+                                .name_version()
+                                .checked_add(1)
+                                .ok_or(Error::PageChanged)?,
+                            property_seed,
+                        },
+                        overrides: properties,
+                    },
+                )
+                .await
+                .map_err(super::organizations::read_error)?
+                .output
+                .map_err(|error| Error::Invalid(error.message()))?;
+            if cancel.is_cancelled() {
+                return Err(Error::TransferPublication(
+                    crab_remote::publication::Error::Cancelled,
+                ));
+            }
+        }
         catalog
             .decide_transfer(
                 document.version,
@@ -560,6 +654,7 @@ async fn accept(
                 Decision::Accept {
                     actor,
                     display_name: signed.name,
+                    property_seed,
                 },
                 now()?,
             )

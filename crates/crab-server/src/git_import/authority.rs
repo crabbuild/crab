@@ -8,7 +8,9 @@ use crate::{
         Address,
         organization::{
             Caller, Role,
-            properties::{ImportValues, InitializeImportValues, PropertyValue},
+            properties::{
+                ImportValues, InitializeImportValues, PropertyValue, validate_initial_values,
+            },
             repositories::{
                 AuthorizeImportPublication, Authorized, GetCreationOptions, ImportPublication,
             },
@@ -247,18 +249,8 @@ impl OrganizationOwner {
             .await
             .map_err(import_cell_error)?
             .output;
-        if !properties.iter().all(|(id, value)| {
-            options
-                .properties
-                .iter()
-                .find(|field| field.id == *id)
-                .is_some_and(|field| field.accepts(value))
-        }) {
-            return Err(ImportError::Invalid(
-                "Choose valid values for this organization's repository properties",
-            ));
-        }
-        Ok(())
+        validate_initial_values(&options.properties, properties)
+            .map_err(|error| ImportError::Invalid(error.message()))
     }
 
     pub(super) async fn initialize_properties(

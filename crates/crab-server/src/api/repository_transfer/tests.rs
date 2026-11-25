@@ -275,6 +275,19 @@ async fn organization_transfer_rechecks_source_and_destination_authority() {
     let alice = h.login().await;
     let bob = member(&h).await;
     let root = format!("/api/organizations/{organization}");
+    let property = Uuid::now_v7().to_string();
+    h.write(
+        Method::PUT,
+        &format!("{root}/repository-properties"),
+        &alice,
+        json!({"expected_version":0,"definitions":[{
+            "id":property,"name":"regulated","description":"","kind":"boolean","options":[],"default":false,
+            "required":true,"require_explicit_values":true
+        }]}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
     h.write(
         Method::PUT,
         &format!("{root}/invitations/{bob_id}"),
@@ -297,6 +310,7 @@ async fn organization_transfer_rechecks_source_and_destination_authority() {
     let target = json!({"kind":"organization","id":organization});
     let (path, _) = propose(&h, &alice, id, target.clone(), "moved").await;
     assert_eq!(h.json(&path, &alice).await["recipient"], "Crab engineering");
+    assert_eq!(h.json(&path, &alice).await["properties"][0]["id"], property);
     assert_eq!(get(&h, &path, &bob).await.status(), StatusCode::NOT_FOUND);
     assert_eq!(h.json(INCOMING, &bob).await["items"], json!([]));
     assert_eq!(
@@ -311,6 +325,27 @@ async fn organization_transfer_rechecks_source_and_destination_authority() {
         StatusCode::NOT_FOUND
     );
     let catalog = h.server.catalog().unwrap();
+    h.write(
+        Method::POST,
+        &format!("{root}/repositories/creation"),
+        &alice,
+        json!({"request_id":Uuid::now_v7(),"name":"moved","description":"",
+            "properties":{(&property):false}}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert_eq!(
+        h.write(
+            Method::PUT,
+            &path,
+            &alice,
+            json!({"decision":"accept","properties":{(&property):false}})
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
     catalog
         .set_members(
             "team",
@@ -392,6 +427,7 @@ async fn organization_transfer_rechecks_source_and_destination_authority() {
     );
 
     let (path, _) = propose(&h, &bob, id, target, "private").await;
+    assert!(h.json(&path, &bob).await.get("properties").is_none());
     h.write(
         Method::PUT,
         &policy,
@@ -424,8 +460,26 @@ async fn organization_transfer_rechecks_source_and_destination_authority() {
     .await
     .error_for_status()
     .unwrap();
+    assert_eq!(
+        h.write(Method::PUT, &path, &alice, json!({"decision":"accept"}))
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        h.write(
+            Method::PUT,
+            &path,
+            &alice,
+            json!({"decision":"accept","properties":{(&property):"true"}})
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let choice = json!({"decision":"accept","properties":{(&property):true}});
     let accepted: Value = h
-        .write(Method::PUT, &path, &alice, json!({"decision":"accept"}))
+        .write(Method::PUT, &path, &alice, choice.clone())
         .await
         .error_for_status()
         .unwrap()
@@ -445,6 +499,55 @@ async fn organization_transfer_rechecks_source_and_destination_authority() {
     assert_eq!(
         h.json(&lookup, &bob).await["repositories"][0]["can_admin"],
         true
+    );
+    let values = format!("/api/repos/{}/private/properties", active.config.owner);
+    assert_eq!(
+        h.json(&values, &alice).await["values"]["overrides"][&property],
+        true
+    );
+    let filtered = h
+        .json(
+            &format!("/api/repos?organization={organization}&q=props.regulated%3Atrue"),
+            &alice,
+        )
+        .await;
+    assert_eq!(filtered["repositories"].as_array().unwrap().len(), 1);
+    assert_eq!(filtered["repositories"][0]["id"], json!(id));
+    let ruleset = Uuid::now_v7();
+    h.write(Method::PUT, &format!("{root}/rulesets"), &alice, json!({
+        "expected_version":0,"rulesets":[{
+            "ruleset":{"id":ruleset,"name":"Protect regulated branches","target":"branch",
+                "enforcement":"active","include":["~ALL"],"exclude":[],"restrict_creations":true,
+                "restrict_deletions":false,"require_pull_request":false,"required_approvals":0,
+                "required_code_owner_reviews":false,"required_checks":[],"required_integrations":[]},
+            "repositories":{"kind":"properties","conditions":[{"property":property,"value":true}]}
+        }]
+    })).await.error_for_status().unwrap();
+    let rules = format!("/api/repos/{}/private/rulesets", active.config.owner);
+    assert_eq!(
+        h.json(&rules, &alice).await["inherited"]["rulesets"][0]["id"],
+        json!(ruleset)
+    );
+    assert_eq!(
+        h.write(Method::PUT, &path, &alice, choice)
+            .await
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()["state"],
+        "accepted"
+    );
+    assert_eq!(
+        h.write(
+            Method::PUT,
+            &path,
+            &alice,
+            json!({"decision":"accept","properties":{(&property):false}})
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
     );
     h.close().await;
 }

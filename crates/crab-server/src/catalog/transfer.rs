@@ -72,6 +72,7 @@ pub(crate) enum Decision {
     Accept {
         actor: MembershipActor,
         display_name: String,
+        property_seed: Option<Uuid>,
     },
     Cancel,
     Decline,
@@ -251,6 +252,11 @@ impl CatalogStore {
             Decision::Decline => State::Declined,
         };
         if offer.state == state {
+            if let Decision::Accept { property_seed, .. } = decision
+                && record.property_seed != property_seed
+            {
+                return Err(CatalogError::Conflict);
+            }
             return Ok(document);
         }
         if !offer.available(record, now_ms) {
@@ -260,6 +266,7 @@ impl CatalogStore {
         if let Decision::Accept {
             actor,
             display_name,
+            property_seed,
         } = decision
         {
             document.allow_transfer(record)?;
@@ -295,6 +302,7 @@ impl CatalogStore {
             // A later return to the same organization cannot revive an old
             // automation grant. Ordinary renames retain their ownership epoch.
             new.ownership_epoch = new.name_version();
+            new.property_seed = property_seed;
             new.organization = match offer.recipient {
                 Recipient::Organization { id } => Some(OrganizationAccess {
                     id,
