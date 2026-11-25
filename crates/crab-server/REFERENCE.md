@@ -3534,6 +3534,16 @@ state counts, sorting and query-bound cursors use the same native predicate.
 No new schema/preparation is required: domain mutations already update these
 metrics in the discussion index transaction. Completion offers numeric examples.
 
+Date qualifiers `created`, `updated`, `closed`, and `merged` work in repository
+and workspace search. Compare with `>`, `>=`, `<`, or `<=`, or use an inclusive
+range such as `merged:2025-01-01..2025-01-31`. Use `*` for one open end.
+Calendar days are in UTC. RFC 3339 timestamps accept a UTC offset and up to
+millisecond precision. For example, `updated:>=2025-01-15T09:30:00-05:00`
+uses 14:30 UTC as its lower bound. An exact second includes its stored
+milliseconds. `closed:` reads the current close timestamp, including merged
+PRs. Reopening clears that timestamp. `merged:` reads the recorded merge
+completion time. Unavailable dates match no positive date filter.
+
 Author usernames match current Directory handles case-insensitively; `@me`
 binds the authenticated qualified account even without a public profile.
 Unknown handles match no records; exclusion, AND/OR and grouping retain their
@@ -5396,8 +5406,9 @@ It accepts optional `kind=issue|pull`, `sort=created|updated|comments|reactions`
 Crab merges bounded pages from each readable repository's discussion index.
 The account, search parameters, and readable scope bind the cursor. Current
 repository access is checked again before results are returned. A changed
-scope returns HTTP 409. For comment and reaction sorts, an index revision
-change also returns HTTP 409. Open **First page** to refresh the results.
+scope returns HTTP 409. For date filters and comment or reaction sorts, an
+index revision change also returns HTTP 409. Open **First page** to refresh
+the results.
 An unavailable repository index returns its normal preparation error so an
 incomplete search can be retried.
 

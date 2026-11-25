@@ -233,6 +233,7 @@ struct Candidate {
 
 struct Bindings<'a> {
     values: Vec<SqlValue>,
+    subject_kind: Option<SubjectKind>,
     people: &'a [super::super::people::Binding],
     assignees: &'a [super::super::assignees::Binding],
     review: Option<super::super::reviews::status::Bound>,
@@ -244,13 +245,19 @@ struct Bindings<'a> {
     now_ms: i64,
 }
 impl<'a> Bindings<'a> {
-    fn new(input: &'a SearchInput, criteria: &Criteria, now_ms: i64) -> crate::cells::Result<Self> {
+    fn new(
+        input: &'a SearchInput,
+        criteria: &Criteria,
+        now_ms: i64,
+        subject_kind: Option<SubjectKind>,
+    ) -> crate::cells::Result<Self> {
         let mut values = Self {
             people: &input.people,
             assignees: &input.assignees,
             review: None,
             heads: None,
             values: Vec::new(),
+            subject_kind,
             review_teams: &input.review_teams,
             issue_types: &input.issue_types,
             public_reader: input.public_reader,
@@ -377,6 +384,9 @@ fn criteria(
     if subject_kind != Some(SubjectKind::Pull) || query.needs_lifecycle() {
         super::super::super::issues::lifecycle::ensure_ready(context)?;
     }
+    if subject_kind != Some(SubjectKind::Issue) && query.needs_pull_lifecycle() {
+        super::super::super::pulls::lifecycle::ensure_ready(context)?;
+    }
     query
         .validate_people(&input.people)
         .map_err(crate::cells::Error::Invalid)?;
@@ -461,7 +471,7 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
     }) {
         return Err(crate::cells::Error::StaleSearch);
     }
-    let mut bindings = Bindings::new(&input, &criteria, context.now_ms())?;
+    let mut bindings = Bindings::new(&input, &criteria, context.now_ms(), subject_kind)?;
     let kind_clause = kind_filter(subject_kind, &mut bindings);
     // Each counter describes its navigation query, even when the current query
     // selects only closed work. Rows and both targets share this native snapshot.
@@ -499,7 +509,7 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         .ok_or(crate::cells::Error::Invalid(
             "discussion count exceeds its range",
         ))?;
-    let mut bindings = Bindings::new(&input, &criteria, context.now_ms())?;
+    let mut bindings = Bindings::new(&input, &criteria, context.now_ms(), subject_kind)?;
     let kind_clause = kind_filter(subject_kind, &mut bindings);
     let predicate = expression(&query.expression, &mut bindings)?;
     let filter = format!("{kind_clause} AND ({predicate})");
@@ -687,6 +697,7 @@ fn scoped_expression(
         }
         Expression::Term { value: term, .. } => match term {
             Term::Count(filter) => filter.sql(|value| bindings.bind(SqlValue::Integer(value))),
+            Term::Date(filter) => filter.sql(bindings.subject_kind, |value| bindings.bind(SqlValue::Integer(value))),
             Term::Text(value) => text::predicate(value, fields, |value| bindings.text(value)),
             Term::Label(names) => {
                 let values = names.iter().map(|name|bindings.text(name)).collect::<Vec<_>>().join(",");

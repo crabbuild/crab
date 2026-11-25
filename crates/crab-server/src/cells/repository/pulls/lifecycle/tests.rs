@@ -211,6 +211,26 @@ async fn merge_completion_is_independent_of_reservation_edits_and_replay() {
     let edited = change(&cell, &done, None).await;
     write::<TransitionPullMerge>(&cell, complete).await;
     assert_eq!(metadata(&cell, 1).await, expected);
+    let merged =
+        time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(done.updated_at_ms) * 1_000_000)
+            .unwrap()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+    for (query, matching) in [
+        (format!("merged:{merged} closed:{merged}"), 1),
+        ("merged:1970-01-01".into(), 0),
+        (format!("-merged:{merged}"), 0),
+    ] {
+        let result = read::<crate::cells::repository::ListDiscussions>(
+            &cell,
+            crate::cells::repository::SearchInput {
+                query: Some(query),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(result.matching, matching);
+    }
     assert_eq!(read::<GetPull>(&cell, 1).await.unwrap(), edited);
     assert_eq!(
         history(&cell, 1)

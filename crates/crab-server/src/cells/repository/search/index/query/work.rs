@@ -72,7 +72,8 @@ impl Read for ListWorkspaceWork {
             if input.kind.is_some_and(|selected| selected != kind) {
                 continue;
             }
-            let mut bindings = Bindings::new(&input.search, &criteria, context.now_ms())?;
+            let mut bindings =
+                Bindings::new(&input.search, &criteria, context.now_ms(), Some(kind))?;
             let by_kind = kind_filter(Some(kind), &mut bindings);
             let predicate = expression(&criteria.query.expression, &mut bindings)?;
             let column =
@@ -136,10 +137,11 @@ impl Read for ListWorkspaceWork {
         items.truncate(usize::from(input.search.limit) + 1);
         let filter_snapshot = if criteria.query.needs_pull_heads()
             || criteria.query.uses_review_teams()
+            || criteria.query.has_dates()
             || matches!(input.search.sort, Sort::Comments | Sort::Reactions)
         {
             // Workspace continuations merge repository pages. A team roster
-            // or changed engagement count can move the page boundary.
+            // or a change to discussion dates or counts can move the boundary.
             let data = serde_json::to_vec(&(
                 generation,
                 revision(context)?,

@@ -54,6 +54,19 @@ fn completion_rejects_invalid_utf16_cursors_and_control_characters() {
 }
 
 #[test]
+fn date_qualifiers_complete_from_their_prefix() {
+    for (prefix, expected) in [
+        ("cre", "created:"),
+        ("upd", "updated:"),
+        ("-clo", "-closed:"),
+        ("mer", "merged:"),
+    ] {
+        let result = complete(&input(prefix, prefix.len()));
+        assert_eq!(result.items[0].value, expected);
+    }
+}
+
+#[test]
 fn suggestions_discover_both_discussion_kinds_and_report_syntax_errors() {
     let result = complete(&input("", 0));
     for expected in ["is:issue", "is:pr", "draft:true", "is:merged"] {

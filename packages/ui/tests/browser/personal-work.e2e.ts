@@ -92,6 +92,7 @@ test("workspace search shares its query, sort, and scope across pages", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
+  const expression = "release is:open updated:>=2025-01-01";
   const id = "00000000-0000-4000-8000-00000000000a";
   await page.route(
     (url) => url.pathname === "/api/session",
@@ -104,6 +105,7 @@ test("workspace search shares its query, sort, and scope across pages", async ({
     (url) => url.pathname === "/api/discussion-search",
     (route) => {
       const query = new URL(route.request().url()).searchParams;
+      expect(query.get("q")).toBe(expression);
       const issue = {
         repository: { id, owner: "team", name: "service" },
         kind: "issue",
@@ -134,12 +136,16 @@ test("workspace search shares its query, sort, and scope across pages", async ({
     },
   );
   await page.goto("/-/discussion-search");
-  await page.getByRole("searchbox").fill("release is:open");
+  await page.getByRole("searchbox").fill(expression);
   await page.getByLabel("Repository scope").fill("team/service");
   await chooseSelectOption(page.getByLabel("Sort"), "comments-asc");
   await page.getByRole("button", { name: "Search", exact: true }).click();
   await expect(page).toHaveURL(
-    /q=release\+is%3Aopen&scope=team%2Fservice&sort=comments&direction=asc/,
+    (url) =>
+      url.searchParams.get("q") === expression &&
+      url.searchParams.get("scope") === "team/service" &&
+      url.searchParams.get("sort") === "comments" &&
+      url.searchParams.get("direction") === "asc",
   );
   await expect(
     page.getByRole("link", { name: "Release checklist" }),
@@ -152,7 +158,7 @@ test("workspace search shares its query, sort, and scope across pages", async ({
     page.getByRole("link", { name: "Release script" }),
   ).toHaveAttribute("href", `/team/service/pull/1?repository_id=${id}`);
   await page.reload();
-  await expect(page.getByRole("searchbox")).toHaveValue("release is:open");
+  await expect(page.getByRole("searchbox")).toHaveValue(expression);
   await expect(page.getByLabel("Repository scope")).toHaveValue("team/service");
   await expect(page.getByLabel("Sort")).toHaveText("Fewest comments");
   await expect(
