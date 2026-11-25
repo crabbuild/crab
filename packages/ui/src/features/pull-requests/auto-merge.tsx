@@ -372,7 +372,9 @@ export function AutoMerge({
                 <>
                   Crab will merge head{" "}
                   <code>{short(confirmation?.head_oid ?? pull.head_oid)}</code>{" "}
-                  when the current merge requirements pass.
+                  when the current merge requirements pass. Auto-merge follows
+                  verified updates from people with Write access and checks each
+                  new head against the current requirements.
                 </>
               )}
             </DialogDescription>

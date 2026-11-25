@@ -19,12 +19,13 @@ use super::{
 use crate::{
     app::{self, Error, Result},
     auth::{Identity, Principal},
-    cells::repository::pull_auto_merge::{self as cell, Change, Job, Outcome, Stop},
+    cells::repository::pull_auto_merge::{self as cell, Change, Job, Outcome, Stop, TrackedHead},
     repository::{Repository, settings},
     server::Server,
 };
 
 mod queue;
+mod tracking;
 mod worker;
 pub(crate) use worker::run;
 
@@ -229,7 +230,7 @@ async fn view(
         "queue_timeout_minutes": settings.merge_queue_timeout_minutes,
         "can_disable": active && pull.merge_pending.is_none() && (can_write || super::same_author(&pull.author, &actor)),
         "request": state.map(|state| json!({"request_id": state.job.id, "method": state.job.method,
-            "head_oid": state.job.head_oid, "scheduled_by": state.job.actor.name, "stopped": state.stopped,
+            "head_oid": state.job.current_head_oid(), "scheduled_by": state.job.actor.name, "stopped": state.stopped,
             "queue": state.job.queue.is_some(),
             "waiting_for_queue": state.job.waiting_for_queue(), "first": state.first,
             "testing": state.ahead.is_some() && state.job.queue.and_then(|queue| queue.testing)
@@ -314,13 +315,16 @@ async fn enable(
         merge_methods::load_for_ref(&server, &repo, &pull.base_ref),
         settings::queue_policy(&server, &repo, &pull.base_ref),
     )?;
-    let git = PullGit::open(&server, &repo, pull.head_repository).await?;
+    let fork = pull
+        .head_repository
+        .map(|id| super::git::fork_repository(&server, &repo, id))
+        .transpose()?;
+    let comparison = tracking::comparison(&repo, &pull, fork.as_deref()).await?;
     if input.request_id.is_nil()
         || pull.version != input.version
-        || git
-            .tips(&pull.base_ref, &pull.head_ref)
+        || comparison
             .as_ref()
-            .is_none_or(|(base, head)| *base != input.base_oid || *head != input.head_oid)
+            .is_none_or(|refs| refs.base != input.base_oid || refs.head != input.head_oid)
         || input.base_oid == input.head_oid
     {
         return Err(Error::AutoMergeChanged);
@@ -368,6 +372,12 @@ async fn enable(
                 base_ref: pull.base_ref.clone(),
                 head_ref: pull.head_ref.clone(),
                 head_repository: pull.head_repository,
+                tracked_head: comparison.filter(|_| !input.queue).and_then(|refs| {
+                    refs.head_version.map(|version| TrackedHead {
+                        oid: refs.head,
+                        version,
+                    })
+                }),
                 head_oid: input.head_oid,
                 initial_base_oid: input.base_oid,
                 initial_version: input.version,
@@ -487,7 +497,7 @@ fn matches_attempt(state: &cell::State, pending: &PullMerge) -> bool {
                 state.order_revision,
             )
             .to_string()
-        && pending.head_oid == job.head_oid
+        && pending.head_oid == job.current_head_oid()
         && pending.method == job.method
         && pending.message == job.message
         && pending.author.issuer == job.actor.issuer
@@ -544,6 +554,7 @@ pub(super) async fn authorize(
     principal: &Principal,
     pending: &PullMerge,
     number: u64,
+    source: &Repository,
 ) -> Result<()> {
     let state = current(server, repo, number).await?;
     let active = state
@@ -565,6 +576,14 @@ pub(super) async fn authorize(
         || !principal.can_write(repo.id)
     {
         return Err(Error::AutoMergeDisabled);
+    }
+    // The receive path holds the comparison ref leases here. Checking the
+    // transaction protects a reserved merge from delete and recreate races
+    // that happen to restore the same SHA.
+    if let Some(head) = &active.job.tracked_head
+        && !tracking::unchanged(source, &active.job.head_ref, head).await?
+    {
+        return Err(Error::MergeConflict);
     }
     Ok(())
 }

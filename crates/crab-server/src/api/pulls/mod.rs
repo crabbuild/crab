@@ -677,8 +677,9 @@ pub(crate) async fn authorize_merge_publication(
     if !pending.bypass_rulesets.is_empty() {
         merge::validate_bypass_actor(pending, &app::actor(&grant.principal)?)?;
     }
+    let source = publication.head_repository.as_deref().unwrap_or(repo);
     if grant.principal.is_auto_merge() {
-        auto_merge::authorize(server, repo, &grant.principal, pending, pull.number).await?;
+        auto_merge::authorize(server, repo, &grant.principal, pending, pull.number, source).await?;
     } else {
         auto_merge::require_direct_access(server, repo, pull.number).await?;
     }
@@ -718,7 +719,6 @@ pub(crate) async fn authorize_merge_publication(
     // Save the closure before the marker so finishing a proven receipt does
     // not reinterpret it using a later HEAD or a later edit to the links.
     let on_default = repo.default_ref().await? == update.name;
-    let source = publication.head_repository.as_deref().unwrap_or(repo);
     let cleanup = head_branch::automatic::capture(
         server,
         source,

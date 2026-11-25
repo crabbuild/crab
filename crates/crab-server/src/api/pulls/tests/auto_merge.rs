@@ -12,9 +12,10 @@ const PULL: &str = "/api/repos/team/private/pulls/1";
 const AUTO: &str = "/api/repos/team/private/pulls/1/auto-merge";
 
 mod deferred;
+mod fork;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn scheduled_merge_waits_for_checks_and_disarms_after_revocation_and_head_movement() {
+async fn scheduled_merge_waits_for_the_new_head_and_disarms_after_revocation() {
     let h = Harness::new(false).await;
     let alice = h.login().await;
     let ready = format!("{REPO}/settings/merge-methods");
@@ -119,7 +120,8 @@ async fn scheduled_merge_waits_for_checks_and_disarms_after_revocation_and_head_
         .error_for_status()
         .unwrap();
     };
-    schedule(&alice, input().await).await;
+    let armed = input().await;
+    schedule(&alice, armed.clone()).await;
     git(&[
         "commit",
         "--allow-empty",
@@ -130,13 +132,26 @@ async fn scheduled_merge_waits_for_checks_and_disarms_after_revocation_and_head_
     git(&["push", remote.as_str(), "feature"]).await;
     let head = git(&["rev-parse", "HEAD"]).await;
     post_check(&first).await;
-    wait("head_changed").await;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let state = h.json(AUTO, &alice).await;
+            assert!(state["request"]["stopped"].is_null(), "{state}");
+            if state["request"]["head_oid"] == head {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let replayed = schedule(&alice, armed.clone()).await;
+    assert_eq!(replayed["request"]["request_id"], armed["request_id"]);
+    assert_eq!(replayed["request"]["head_oid"], head);
     assert_eq!(h.json(PULL, &alice).await["state"], "open");
     assert_eq!(
         h.write(Method::PUT, AUTO, &alice, canceled).await.status(),
         StatusCode::CONFLICT
     );
-    schedule(&alice, input().await).await;
     for (enabled, version) in [(false, 1), (true, 2)] {
         h.write(
             Method::PUT,

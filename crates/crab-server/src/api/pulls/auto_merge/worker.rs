@@ -200,15 +200,70 @@ async fn reconcile(
         merge::finish_locked(server, &principal, repo, number, pending, cancel).await?;
         return stop(server, repo, number, job.id, Stop::Merged).await;
     }
-    let git = match PullGit::open(server, repo, pull.head_repository).await {
-        Ok(git) => git,
+    let fork = match pull
+        .head_repository
+        .map(|id| super::super::git::fork_repository(server, repo, id))
+        .transpose()
+    {
+        Ok(fork) => fork,
         Err(Error::NotFound) => return stop(server, repo, number, job.id, Stop::HeadChanged).await,
         Err(error) => return Err(error),
     };
-    let Some((base_oid, head_oid)) = git.tips(&pull.base_ref, &pull.head_ref) else {
+    let queue_git = if job.queue.is_some() {
+        Some(PullGit::open(server, repo, pull.head_repository).await?)
+    } else {
+        None
+    };
+    let comparison = if let Some(git) = &queue_git {
+        git.tips(&pull.base_ref, &pull.head_ref)
+            .map(|(base, head)| tracking::Comparison {
+                base,
+                head,
+                head_version: None,
+            })
+    } else {
+        tracking::comparison(repo, &pull, fork.as_deref()).await?
+    };
+    let Some(tracking::Comparison {
+        base: base_oid,
+        head: head_oid,
+        head_version,
+    }) = comparison
+    else {
         return stop(server, repo, number, job.id, Stop::HeadChanged).await;
     };
-    if head_oid != job.head_oid || (job.uses_queue() && base_oid == head_oid) {
+    let tracked_version = job.tracked_head.as_ref().map(|head| &head.version);
+    if head_oid != job.current_head_oid()
+        || tracked_version.is_some_and(|version| Some(version) != head_version.as_ref())
+        || (job.uses_queue() && base_oid == head_oid)
+    {
+        if let (Some(previous), Some(visible)) = (tracked_version, head_version)
+            && tracking::follows(
+                server,
+                repo,
+                fork.as_deref().unwrap_or(repo),
+                &pull.head_ref,
+                previous.clone(),
+                visible.clone(),
+            )
+            .await?
+        {
+            return change(
+                server,
+                repo,
+                Change::Follow {
+                    pull: number,
+                    id: job.id,
+                    version: pull.version,
+                    previous: previous.clone(),
+                    head: TrackedHead {
+                        oid: head_oid,
+                        version: visible,
+                    },
+                },
+            )
+            .await;
+        }
         return stop(server, repo, number, job.id, Stop::HeadChanged).await;
     }
     if job.waiting_for_queue() {
@@ -220,7 +275,7 @@ async fn reconcile(
         }
         return enqueue_when_ready(server, repo, &principal, &pull, job, &cancel).await;
     }
-    if job.queue.is_some() {
+    if let Some(git) = queue_git {
         let Some(base) =
             super::super::candidate::prospective_base(server, repo, &git.base, &state, &base_oid)
                 .await?

@@ -27,8 +27,8 @@ pub(in crate::cells) fn dispatch_mutation(
         || id == PreparePullLifecycle::ID
         || id == review_dismissals::PrepareReviewState::ID
         || id == collaboration::submissions::preparation::Prepare::ID;
-    // Check reports update their own commit summary. They do not affect any
-    // discussion document and can commit while its index is being prepared.
+    // Check reports and Git push attribution have independent storage. They
+    // can commit while the discussion index is being prepared.
     let maintenance = maintenance
         || matches!(
             id,
@@ -36,6 +36,7 @@ pub(in crate::cells) fn dispatch_mutation(
                 | CreateCheckRun::ID
                 | UpdateCheckRun::ID
                 | integrations::Record::ID
+                | push_attribution::Record::ID
         );
     #[cfg(test)]
     let maintenance = maintenance
@@ -76,6 +77,7 @@ pub(in crate::cells) fn dispatch_mutation(
             invoke_mutation::<issues::transfer::publication::Fence>(context, input)
         }
         recent_pushes::Record::ID => invoke_mutation::<recent_pushes::Record>(context, input),
+        push_attribution::Record::ID => invoke_mutation::<push_attribution::Record>(context, input),
         #[cfg(test)]
         SeedHistoricalMerges::ID => invoke_mutation::<SeedHistoricalMerges>(context, input),
         attachments::Reserve::ID => invoke_mutation::<attachments::Reserve>(context, input),
@@ -374,6 +376,7 @@ pub(in crate::cells) fn dispatch_read(
 ) -> crate::cells::Result<serde_json::Value> {
     match id {
         recent_pushes::List::ID => invoke_read::<recent_pushes::List>(context, input),
+        push_attribution::Verify::ID => invoke_read::<push_attribution::Verify>(context, input),
         pull_branch::HasPullForPush::ID => {
             invoke_read::<pull_branch::HasPullForPush>(context, input)
         }

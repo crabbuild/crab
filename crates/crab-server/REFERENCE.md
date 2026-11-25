@@ -5054,6 +5054,22 @@ runs are active and continues to pick up reruns. The selected log refreshes when
 its run version changes and keeps its expanded steps. Hidden tabs pause these reads and catch
 up when visible again. Completed pull requests show their saved check history.
 
+### Schedule auto-merge
+
+Enable **Allow auto-merge** under **Settings → General → Pull request merge
+methods**. A writer can schedule an open pull request from its merge box. Crab
+checks the inspected base and head when saving the request. The merge box
+shows the scheduled method and the head currently waiting for requirements.
+
+Auto-merge follows branch updates when Crab can verify that every intervening
+publication came from a person with durable Write access to the target
+repository. This applies to same-repository branches and linked private forks.
+A fork owner with only Read access upstream can push to the fork, and that push
+ends the waiting request. A branch recreation, base switch, or missing push
+attribution also requires fresh confirmation. The request checks reviews and
+CI against the latest head before merging. The request survives a lost reply
+when the ref transaction committed and its attribution was saved.
+
 ### Merge a pull request through the queue
 
 Enable **Require merge queue** on an exact branch in **Settings → Branches**

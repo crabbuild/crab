@@ -69,6 +69,7 @@ pub(crate) struct Harness {
     pub(crate) http: reqwest::Client,
     pub(crate) provider: Arc<Provider>,
     pub(crate) server: Arc<Server>,
+    pub(crate) drop_next_git_push_reply: Arc<AtomicBool>,
     pub(crate) drop_next_import_reply: Arc<AtomicBool>,
     pub(crate) drop_next_fork_sync_reply: Arc<AtomicBool>,
     pub(crate) drop_next_merge_reply: Arc<AtomicBool>,
@@ -534,27 +535,31 @@ impl Harness {
             server.git_import = Some(crate::git_import::ImportContext::for_test(address));
             server
         });
+        let drop_next_git_push_reply = Arc::new(AtomicBool::new(false));
         let drop_next_import_reply = Arc::new(AtomicBool::new(false));
         let drop_next_fork_sync_reply = Arc::new(AtomicBool::new(false));
         let drop_next_merge_reply = Arc::new(AtomicBool::new(false));
         let drop_next_branch_update_reply = Arc::new(AtomicBool::new(false));
         let drop_next_suggestion_reply = Arc::new(AtomicBool::new(false));
         let app = router(Arc::clone(&server)).layer(axum::middleware::from_fn({
+            let drop_git_push = Arc::clone(&drop_next_git_push_reply);
             let drop_import = Arc::clone(&drop_next_import_reply);
             let drop_sync = Arc::clone(&drop_next_fork_sync_reply);
             let drop_merge = Arc::clone(&drop_next_merge_reply);
             let drop_branch_update = Arc::clone(&drop_next_branch_update_reply);
             let drop_suggestion = Arc::clone(&drop_next_suggestion_reply);
             move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let drop_git_push = Arc::clone(&drop_git_push);
                 let drop_import = Arc::clone(&drop_import);
                 let drop_sync = Arc::clone(&drop_sync);
                 let drop_merge = Arc::clone(&drop_merge);
                 let drop_branch_update = Arc::clone(&drop_branch_update);
                 let drop_suggestion = Arc::clone(&drop_suggestion);
                 async move {
-                    let is_import = request.method() == axum::http::Method::POST
-                        && request.uri().path().ends_with("/git-receive-pack")
-                        && request.headers().contains_key("x-crab-internal-import");
+                    let is_git_push = request.method() == axum::http::Method::POST
+                        && request.uri().path().ends_with("/git-receive-pack");
+                    let is_import =
+                        is_git_push && request.headers().contains_key("x-crab-internal-import");
                     let is_sync = request.method() == axum::http::Method::POST
                         && request.uri().path().ends_with("/fork-sync");
                     let is_merge = request.method() == axum::http::Method::POST
@@ -576,6 +581,9 @@ impl Harness {
                     }
                     if response.status().is_success()
                         && (is_import && drop_import.swap(false, Ordering::SeqCst)
+                            || is_git_push
+                                && !is_import
+                                && drop_git_push.swap(false, Ordering::SeqCst)
                             || is_sync && drop_sync.swap(false, Ordering::SeqCst))
                     {
                         response.headers_mut().remove(header::CONTENT_LENGTH);
@@ -601,6 +609,7 @@ impl Harness {
                 .unwrap(),
             provider,
             server,
+            drop_next_git_push_reply,
             drop_next_import_reply,
             drop_next_fork_sync_reply,
             drop_next_merge_reply,

@@ -119,6 +119,27 @@ impl CapsuleTransaction {
         )
     }
 
+    /// Bind a fresh attempt to a stable plan receipt key.
+    ///
+    /// Use when a caller reserves evidence for this attempt before the Git
+    /// intent is written. That evidence must never authorize a later retry.
+    pub fn for_plan_attempt(
+        base_root_digest: &str,
+        plan_id: &str,
+        edits: Vec<CapsuleRefEdit>,
+    ) -> Result<Self> {
+        validate_content_hash(plan_id, "mirror plan id", "capsule-protocol transaction")?;
+        let publication_id = blake3::hash(uuid::Uuid::now_v7().as_bytes())
+            .to_hex()
+            .to_string();
+        Self::new_inner(
+            base_root_digest,
+            publication_id,
+            Some(plan_id.to_owned()),
+            edits,
+        )
+    }
+
     fn new_inner(
         base_root_digest: &str,
         publication_id: String,
@@ -333,6 +354,26 @@ mod tests {
 
         assert_eq!(first.publication_id(), plan_id);
         assert_eq!(first.id().unwrap(), second.id().unwrap());
+    }
+
+    #[test]
+    fn reserved_attempts_have_distinct_transactions_under_the_same_plan() {
+        let root = "1".repeat(64);
+        let plan = "3".repeat(64);
+        let edit = CapsuleRefEdit::new("refs/heads/main", None, Some("2".repeat(40)), None);
+        let first = CapsuleTransaction::for_plan_attempt(&root, &plan, vec![edit.clone()]).unwrap();
+        let second =
+            CapsuleTransaction::for_plan_attempt(&root, &plan, vec![edit.clone()]).unwrap();
+        let unattributed = CapsuleTransaction::for_plan(&root, &plan, vec![edit]).unwrap();
+
+        assert_eq!(first.plan_id(), second.plan_id());
+        assert_eq!(first.plan_id(), unattributed.plan_id());
+        assert_ne!(first.id().unwrap(), second.id().unwrap());
+        assert_ne!(first.id().unwrap(), unattributed.id().unwrap());
+        assert_eq!(
+            CapsuleTransaction::decode(&first.encode().unwrap()).unwrap(),
+            first
+        );
     }
 
     #[test]

@@ -520,6 +520,7 @@ pub struct CapsuleArtifacts {
     sections: Vec<crab_metadata::capsule_protocol::CapsuleSection>,
     pointer_delta: PointerCatalog,
     origins: HashMap<crab_xet::hash::MerkleHash, crab_metadata::receipts::OriginReceipt>,
+    attempt: Option<crab_metadata::capsule_protocol::CapsuleTransaction>,
     changes_namespace: bool,
 }
 

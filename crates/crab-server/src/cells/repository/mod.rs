@@ -114,6 +114,7 @@ mod models;
 pub(crate) mod projection;
 pub(crate) mod projects;
 mod pulls;
+pub(crate) mod push_attribution;
 pub(crate) mod recent_pushes;
 mod releases;
 mod schema;

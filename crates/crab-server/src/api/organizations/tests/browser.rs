@@ -12,7 +12,7 @@ mod suggestions;
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires agent-browser and the built embedded UI; uses isolated real OIDC/native Cells"]
-async fn native_browser_schedules_auto_merge_and_checks_release_it() {
+async fn native_browser_auto_merge_follows_a_writer_and_waits_for_new_checks() {
     use crate::test_support::git::success as git;
 
     let h = Harness::new(false).await;
@@ -40,7 +40,7 @@ async fn native_browser_schedules_auto_merge_and_checks_release_it() {
     remote.set_password(token["token"].as_str()).unwrap();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path();
-    let head = crate::test_support::git::push_review_branches(path, remote.as_str()).await;
+    let inspected = crate::test_support::git::push_review_branches(path, remote.as_str()).await;
     let base = git(path, &["rev-parse", "main"]).await;
     h.write(Method::POST, &format!("{root}/pulls"), &writer,
         json!({"request_id":Uuid::now_v7(),"title":"Merge after checks","body":"Fixes: #2. `Closes #3`. Resolves #999.","base_ref":"refs/heads/main","head_ref":"refs/heads/feature"})).await.error_for_status().unwrap();
@@ -118,15 +118,36 @@ async fn native_browser_schedules_auto_merge_and_checks_release_it() {
     let worker = tokio::spawn(crate::api::auto_merge::run(std::sync::Arc::clone(
         &h.server,
     )));
-    h.write(
-        Method::POST,
-        &format!("{root}/statuses/{head}"),
-        &writer,
-        json!({"request_id":Uuid::now_v7(),"context":"ci","state":"success"}),
+    git(
+        path,
+        &[
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Advance the reviewed branch",
+        ],
     )
-    .await
-    .error_for_status()
-    .unwrap();
+    .await;
+    git(path, &["push", remote.as_str(), "feature"]).await;
+    let head = git(path, &["rev-parse", "feature"]).await;
+    let pass = async |oid: &str| {
+        h.write(
+            Method::POST,
+            &format!("{root}/statuses/{oid}"),
+            &writer,
+            json!({"request_id":Uuid::now_v7(),"context":"ci","state":"success"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    };
+    pass(&inspected).await;
+    browser.run(&["wait", "--fn", &format!("[...document.querySelectorAll('p')].some(element => element.textContent.includes('Auto-merge enabled') && element.querySelector('code')?.textContent === '{}')", &head[..7])]).await;
+    assert_eq!(
+        h.json(&format!("{root}/pulls/1"), &writer).await["state"],
+        "open"
+    );
+    pass(&head).await;
     browser
         .run(&["wait", "--text", "Pull request merged"])
         .await;

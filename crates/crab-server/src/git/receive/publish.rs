@@ -668,6 +668,7 @@ fn sends_publication_webhook(
 
 struct RefMutation<'a> {
     updates: &'a [crab_git::receive_plan::RefUpdate],
+    previous: &'a crab_read::capsule_protocol::CapsuleRepositoryView,
     publication: &'a Publication,
     stack: Option<&'a crate::api::stacked_pulls::Stack>,
     native_deletions: Option<&'a crate::api::stacked_pulls::native::Deletions>,
@@ -974,6 +975,7 @@ async fn publish_attempt(
         .flatten();
     let mut mutation = RefMutation {
         updates: &request.updates,
+        previous: &view,
         publication: &input.publication,
         stack: attempt.stack.as_ref(),
         native_deletions: attempt.native_deletions.as_ref(),
@@ -1387,7 +1389,7 @@ async fn commit_authorized(
     server: &Server,
     principal: &Principal,
     entry: &Repository,
-    artifacts: crab_remote::prepare::CapsuleArtifacts,
+    mut artifacts: crab_remote::prepare::CapsuleArtifacts,
     mutation: RefMutation<'_>,
     plan_id: Option<&str>,
     cancel: &CancellationToken,
@@ -1573,6 +1575,22 @@ async fn commit_authorized(
         // cannot erase a successful push. The browser verifies the receipt.
         super::recent_pushes::record(server, entry, &identity, plan, mutation.updates, default)
             .await;
+    }
+    if let Some(plan) = plan_id
+        && let Err(error) = Box::pin(super::push_attribution::record(
+            server,
+            entry,
+            principal,
+            &mut artifacts,
+            plan,
+            mutation.previous,
+            mutation.updates,
+        ))
+        .await
+    {
+        // Git remains writable when attribution is unavailable. Scheduled
+        // merges cannot follow a publication with missing proof.
+        tracing::warn!(repository = %entry.id, ?error, "Git push attribution was not recorded");
     }
     let outcome = artifacts
         .commit(plan_id, TTL, cancel)
