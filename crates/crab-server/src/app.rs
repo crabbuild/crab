@@ -1188,6 +1188,14 @@ pub(crate) async fn membership(
             organization_bypass_teams: Vec::new(),
         });
     }
+    catalog_membership(server, principal, repo).await
+}
+
+pub(crate) async fn catalog_membership(
+    server: &Server,
+    principal: &Principal,
+    repo: &Repository,
+) -> Result<Membership> {
     let snapshot = server
         .catalog()
         .ok_or(Error::NotFound)?
@@ -1296,6 +1304,7 @@ pub(crate) async fn membership_for_config(
                 issuer,
                 inherited,
                 snapshot.renamed,
+                snapshot.fork_owner.as_ref(),
             )
             .with_public_visibility(snapshot.repository_id, snapshot.visibility.is_public())
     };

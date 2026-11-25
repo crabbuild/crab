@@ -82,7 +82,9 @@ pub(super) async fn search(
             )
         });
         let organization = repository_action != Some(true) && filters.repository.is_none();
-        let repository = repository_action != Some(false) && filters.account.is_none();
+        let repository = (repository_action != Some(false)
+            || filters.action == Some(AuditAction::OrganizationMembership))
+            && filters.account.is_none();
         Cursor {
             organization_before: organization.then_some(organization::MAX_VERSION + 1),
             repository: repository

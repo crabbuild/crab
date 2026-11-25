@@ -45,6 +45,7 @@ impl Read for GetLanding {
         let Some(InvitationView {
             organization: Some(organization),
             invitation: Some(invitation),
+            ..
         }) = view
         else {
             return Ok(None);

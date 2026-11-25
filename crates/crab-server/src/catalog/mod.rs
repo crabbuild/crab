@@ -1,9 +1,9 @@
 pub(crate) mod audit;
 pub(crate) mod collaborators;
-pub(crate) mod conversion;
 pub(crate) mod deletion;
 pub(crate) mod description;
 pub(crate) mod forking;
+pub(crate) mod membership_changes;
 pub(crate) mod outside_removal;
 mod read;
 mod rename;
@@ -64,6 +64,8 @@ pub struct CatalogRecord {
     pub owner: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) fork_owner: Option<MembershipActor>,
     pub name: String,
     pub prefix: String,
     pub placement_generation: u64,
@@ -151,7 +153,9 @@ pub struct CatalogDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) pending_membership_audit: Option<audit::AccessAudit>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) pending_conversions: BTreeMap<Uuid, crate::cells::organization::Conversion>,
+    pub(crate) pending_membership_changes: BTreeMap<Uuid, membership_changes::Pending>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    former_repository_grants: BTreeMap<Uuid, BTreeMap<Uuid, membership_changes::FormerGrants>>,
 }
 
 /// Revision-bound replacement of direct members and OIDC group grants.
@@ -186,6 +190,8 @@ pub struct MembershipSnapshot {
     pub(crate) visibility: visibility::Visibility,
     #[serde(skip)]
     pub(crate) forked_from: Option<Uuid>,
+    #[serde(skip)]
+    pub(crate) fork_owner: Option<MembershipActor>,
     pub members: Vec<RepositoryMember>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<RepositoryGroup>,
@@ -222,7 +228,8 @@ impl Default for CatalogDocument {
             membership_audit_head: None,
             organization_audit_heads: BTreeMap::new(),
             pending_membership_audit: None,
-            pending_conversions: BTreeMap::new(),
+            pending_membership_changes: BTreeMap::new(),
+            former_repository_grants: BTreeMap::new(),
         }
     }
 }
@@ -244,9 +251,19 @@ impl CatalogDocument {
         if self.schema_version != SCHEMA_VERSION
             || self.repositories.len() + self.deleted_repositories.len() > MAX_REPOSITORIES
             || self
-                .pending_conversions
+                .pending_membership_changes
                 .iter()
                 .any(|(organization, pending)| organization.is_nil() || !pending.valid())
+            || self
+                .former_repository_grants
+                .iter()
+                .any(|(organization, members)| {
+                    organization.is_nil()
+                        || members.is_empty()
+                        || members
+                            .iter()
+                            .any(|(actor, grants)| actor.is_nil() || !grants.valid())
+                })
         {
             return Err(CatalogError::Invalid(
                 "unsupported schema or repository count",
@@ -297,6 +314,13 @@ impl CatalogDocument {
                 return Err(CatalogError::Invalid(
                     "repository IDs, names, prefixes, and placement generations must be valid and unique",
                 ));
+            }
+            if let Some(owner) = &record.fork_owner
+                && (record.forked_from.is_none()
+                    || !valid_actor(owner)
+                    || record.owner != personal_namespace(&owner.issuer, &owner.subject))
+            {
+                return Err(CatalogError::Invalid("personal fork owner is invalid"));
             }
             if record
                 .description_edit
@@ -389,6 +413,10 @@ pub(crate) fn is_organization_namespace(owner: &str) -> bool {
 pub(crate) enum BrowserNamespace {
     Personal(String),
     Organization(Uuid),
+    PersonalFork {
+        organization: Uuid,
+        owner: MembershipActor,
+    },
 }
 
 impl BrowserNamespace {
@@ -398,6 +426,16 @@ impl BrowserNamespace {
     ) -> Result<(String, Option<OrganizationAccess>), CatalogError> {
         match self {
             Self::Personal(owner) => Ok((owner, None)),
+            Self::PersonalFork {
+                organization,
+                owner,
+            } if members.is_empty() => Ok((
+                personal_namespace(&owner.issuer, &owner.subject),
+                Some(OrganizationAccess {
+                    id: organization,
+                    teams: Vec::new(),
+                }),
+            )),
             Self::Organization(id) if members.is_empty() => Ok((
                 organization_namespace(id),
                 Some(OrganizationAccess {
@@ -405,7 +443,7 @@ impl BrowserNamespace {
                     teams: Vec::new(),
                 }),
             )),
-            Self::Organization(_) => Err(CatalogError::Invalid(
+            Self::Organization(_) | Self::PersonalFork { .. } => Err(CatalogError::Invalid(
                 "organization repositories inherit their initial administrators",
             )),
         }
@@ -464,8 +502,8 @@ impl CatalogRecord {
         let Some(upstream) = self.forked_from else {
             return Ok(self);
         };
-        // A fork stays in its source organization and shares its live ACL. A
-        // reused route or another fork cannot become its authority.
+        // A fork stays under its source organization's authority. A reused
+        // route or another fork cannot become its source.
         source
             .filter(|source| {
                 source.id == upstream
@@ -489,6 +527,7 @@ impl CatalogRecord {
             name: self.name.clone(),
             visibility: self.visibility.value,
             forked_from: self.forked_from,
+            fork_owner: self.fork_owner.clone(),
             organization: source.organization.clone(),
             members: source.members.clone(),
             groups: source.groups.clone(),
@@ -585,6 +624,7 @@ impl CatalogStore {
             owner,
             organization: None,
             forked_from: None,
+            fork_owner: None,
             name,
             prefix,
             placement_generation: 1,
@@ -638,6 +678,7 @@ impl CatalogStore {
                 owner,
                 organization,
                 forked_from: None,
+                fork_owner: None,
                 name,
                 prefix: format!("browser-repositories/{id}"),
                 placement_generation: 1,
@@ -669,6 +710,17 @@ impl CatalogStore {
         members: Vec<RepositoryMember>,
         forked_from: Option<Uuid>,
     ) -> Result<CatalogRecord, CatalogError> {
+        let fork_owner = match &namespace {
+            BrowserNamespace::PersonalFork { owner, .. }
+                if forked_from.is_some() && owner == &actor =>
+            {
+                Some(owner.clone())
+            }
+            BrowserNamespace::PersonalFork { .. } => {
+                return Err(CatalogError::Invalid("personal fork authority is invalid"));
+            }
+            _ => None,
+        };
         let (owner, organization) = namespace.catalog_owner(&members)?;
         self.insert_with_mode(
             CatalogRecord {
@@ -676,6 +728,7 @@ impl CatalogStore {
                 owner,
                 organization,
                 forked_from,
+                fork_owner,
                 name,
                 prefix: format!("git-imports/{id}"),
                 placement_generation: 1,
@@ -735,6 +788,7 @@ impl CatalogStore {
             owner,
             organization: None,
             forked_from: None,
+            fork_owner: None,
             name,
             prefix,
             placement_generation: 1,
@@ -948,6 +1002,14 @@ impl CatalogStore {
         }) else {
             return Err(CatalogError::NotFound);
         };
+        // A departing owner can still resolve as an administrator until the
+        // native step commits. Block ACL edits during that journal interval.
+        if record
+            .organization_id()
+            .is_some_and(|id| document.pending_membership_changes.contains_key(&id))
+        {
+            return Err(CatalogError::Conflict);
+        }
         if record.forked_from.is_some() {
             return Err(CatalogError::Invalid(
                 "manage fork access on the source repository",
@@ -1082,6 +1144,13 @@ impl CatalogStore {
             if record.application == RepositoryApplicationState::CellReady {
                 return Ok(record.clone());
             }
+            if record.fork_owner.is_some()
+                && record
+                    .organization_id()
+                    .is_some_and(|id| document.pending_membership_changes.contains_key(&id))
+            {
+                return Err(CatalogError::Conflict);
+            }
             record.application = RepositoryApplicationState::CellReady;
             let updated = record.clone();
             document.version = document
@@ -1114,6 +1183,7 @@ impl CatalogStore {
             }) {
                 let same = existing.organization_id() == record.organization_id()
                     && existing.forked_from == record.forked_from
+                    && existing.fork_owner == record.fork_owner
                     && match &mode {
                         InsertMode::ExistingPrefix => existing.prefix == record.prefix,
                         InsertMode::Reserved(_) => {

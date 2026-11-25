@@ -13,6 +13,7 @@ mod audit;
 mod automation;
 mod codeowners;
 mod issue_types;
+mod offboarding;
 mod repositories;
 mod repository_access;
 mod review_workload;

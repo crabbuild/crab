@@ -28,7 +28,7 @@ mod members;
 mod milestones;
 mod notifications;
 mod organizations;
-pub(crate) use organizations::conversions::recover as recover_collaborator_conversion;
+pub(crate) use organizations::membership_changes::recover as recover_organization_membership_change;
 mod personal_work;
 mod profiles;
 mod projects;

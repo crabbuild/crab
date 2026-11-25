@@ -319,12 +319,19 @@ grants. Expand a person to see their roles and open the repository
 access editor, or invite a collaborator with a public profile. Select people
 and choose **Remove from all repositories** to review and revoke their direct
 grants across the organization. A submitted removal can be recovered after
-reload. From **Members**, select people to convert and keep their
-direct and team-derived repository grants while ending organization and team
-membership. **Settings** has
+reload. From **Members**, select people and use the selection
+menu to remove them from the organization or convert them to outside
+collaborators. Removal revokes direct grants. Conversion keeps direct and
+team-derived repository grants while ending organization and team membership.
+**Settings** has
 dedicated pages for the organization profile, member privileges, and repository
 governance. The **Repositories** list links people with repository Admin access
 directly to that repository's settings.
+
+When inviting a former member within 90 days of removal or conversion, choose
+**Restore previous access** to bring back their former role and eligible team
+and direct repository grants upon acceptance, or **Start fresh** to choose a
+role for their new membership and discard archived grants.
 From an organization repository, the organization name in the header links
 back to the repository list when the current viewer can open the organization.
 Repository administrators can check whether they can delete a repository in
@@ -332,6 +339,11 @@ Repository administrators can check whether they can delete a repository in
 repositories from **Settings → Deleted repositories** for 90 days.
 Organization owners can allow private forks in **Settings → Member privileges**.
 Repository admins can then control new forks from **Settings → General → Forking**.
+Readers can choose **Personal** from **Fork repository** while both policies
+allow it. Organization owners can also fork into the organization. Personal
+private forks use the source's access and rules. Member removal retires their
+personal private forks, and an accepted restoration invitation can bring back
+eligible forks.
 Owners can change repository visibility from **Settings → General → Danger Zone**.
 Signed-out visitors can find public repositories through **Browse public
 repositories** and open their code, issues, and pull requests.

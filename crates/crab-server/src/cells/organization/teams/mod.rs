@@ -17,7 +17,9 @@ pub(super) use access::{authorize, handles};
 pub(crate) use commands::{Cancel, Change, Command, Outcome, Request};
 pub use preparation::OrganizationTeamState;
 pub(crate) use preparation::{GetPreparation, Prepare, PrepareInput};
-pub(super) use preparation::{ensure_ready, initialize, membership_changed};
+pub(super) use preparation::{
+    ensure_ready, initialize, membership_changed, membership_epoch, restore_memberships,
+};
 pub(crate) use reads::{
     Candidates, Get, GetMembership, GetPolicy, List, ListInput, MemberCursor, MemberInput, Members,
     MentionMembers, MentionMembersInput, MentionRoster, Page, QueryCursor, Summary,

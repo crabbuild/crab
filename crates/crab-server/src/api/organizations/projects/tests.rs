@@ -46,6 +46,7 @@ async fn organization_saved_view_settings_are_readable_by_members_and_editable_b
                     recipient: member,
                     version: 0,
                     role: Role::Member,
+                    reinstate_version: None,
                 },
             )
             .await,
@@ -211,6 +212,7 @@ async fn bulk_project_planning_rechecks_access_to_every_source() {
                     recipient: guest,
                     version: 0,
                     role: Role::Owner,
+                    reinstate_version: None,
                 },
             )
             .await,
@@ -286,6 +288,7 @@ async fn native_browser_concurrent_project_edits_preserve_account_drafts_and_his
                 recipient: bob_actor,
                 version: 0,
                 role: Role::Owner,
+                reinstate_version: None,
             },
         )
         .await
@@ -514,6 +517,7 @@ async fn shared_work_is_live_for_repository_readers_and_redacted_for_other_organ
                     recipient: guest,
                     version: 0,
                     role: Role::Member,
+                    reinstate_version: None,
                 },
             )
             .await,

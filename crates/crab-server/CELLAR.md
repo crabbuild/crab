@@ -182,7 +182,7 @@ described below. It is not a native grant cutover.
 
 ## Organization authority
 
-Organization schema 1 lives in `cells/organization/schema.sql`. Run the private
+Organization schema 2 lives in `cells/organization/schema.sql`. Run the private
 mTLS bootstrap to initialize a fresh Directory and organization:
 
 ```sh
@@ -201,6 +201,9 @@ Different bootstrap intent conflicts.
 Neither a catalog owner string nor a public handle creates authority. Upgrade
 all peers before bootstrapping this new class; existing Repository/Directory
 schemas and identities do not change, and no rebuild is required.
+Schema 2 requires a fresh Organization Cell UUID. Its invitation rows store the
+original sender directly. Development Organization Cells from schema 1 are
+unavailable through schema 2 peers.
 
 The returned `/-/organizations/{uuid}` page has People, Teams, Invitations and profile
 settings. Public APIs accept account sessions or local operator identity, never
@@ -218,14 +221,25 @@ Owners edit/remove active memberships; the final owner cannot be removed or
 demoted. Removed memberships retain their versions. Subsequent membership is
 created only by accepting a versioned invitation. The authenticated recipient
 alone can accept/decline; cancellation or offer edits invalidate old decisions.
-Pending offers expire at seven days, may be edited without extending their
-deadline, and may be explicitly retried after expiry. They are organization-owned
-offers until cancellation/expiry, independent of the inviter's later role.
+Pending offers expire at seven days. Edits preserve the original sender and
+deadline. An explicit retry after expiry or cancellation records the owner
+sending the new offer. Removing or converting a member cancels their pending
+offers and advances their versions in the membership transaction. A role change
+while the sender remains a member leaves their pending offers active.
 Acceptance commits its offer state, membership version and audit event atomically.
 Reads do not mutate expired offers. Closed offers cannot regrant access after
 removal or disclose current organization metadata to a former member. Their
 recipient can still inspect the historical invitation status. Immutable activity entries share the command's SQL/KV transaction;
 no-ops and rejected operations append nothing.
+
+The catalog persists direct grant revocation and its membership departure
+record in one CAS. A restore invitation acceptance records a consent request
+before the native write. Recovery checks the exact accepted invitation before
+restoring archived direct grants and consuming the record. A canceled or
+edited offer clears the pending request while keeping the archived grants
+eligible for another invitation.
+Complete any in-flight collaborator conversions before deploying the new
+catalog journal format.
 
 Invitations target registered accounts. Before bootstrap or an invitation can
 commit, the Directory records a candidate edge from the account to the
