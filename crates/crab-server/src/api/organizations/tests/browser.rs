@@ -276,7 +276,7 @@ async fn native_browser_squashes_a_protected_private_fork_pull_request() {
         .run(&["wait", "--text", "This comparison has no changed files."])
         .await;
     browser
-        .run(&["select", "#fork-compare-head", "refs/heads/feature"])
+        .choose_select("#fork-compare-head", "refs/heads/feature")
         .await;
     browser.run(&["wait", "--text", "1 changed file"]).await;
     browser

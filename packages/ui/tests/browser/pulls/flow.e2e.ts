@@ -657,10 +657,25 @@ test("hide whitespace remembers the pull and can reveal a suppressed review anch
   await expect(formattingLine).toBeVisible();
 });
 
-test("selected suggestions commit together on the inspected head", async ({
+test("a selected suggestion batch recovers its original commit after reload", async ({
   page,
 }) => {
   const fixture = await mockPullRequest(page);
+  let account = "writer";
+  await page.route("**/api/session", (route) =>
+    route.fulfill({
+      json: {
+        authenticated: true,
+        mode: "oidc",
+        user: {
+          issuer: "https://accounts.example",
+          subject: account,
+          name: account,
+        },
+        csrf: "session-token",
+      },
+    }),
+  );
   fixture.threads.push({
     ...fixture.threads[0],
     number: 2,
@@ -669,21 +684,39 @@ test("selected suggestions commit together on the inspected head", async ({
     start_line: 2,
     end_line: 2,
   });
+  const oldHead = fixture.pull().head_oid;
+  const commit = "d".repeat(40);
+  let original: unknown;
   let commits = 0;
+  let attempts = 0;
   await page.route(
     (url) => url.pathname.endsWith("/pulls/1/suggestions"),
     (route) => {
-      expect(route.request().postDataJSON()).toEqual({
-        expected_head: fixture.pull().head_oid,
-        message: "Polish the reviewed files",
-        threads: [
-          { number: 1, version: 1 },
-          { number: 2, version: 1 },
-        ],
-      });
-      commits += 1;
-      for (const thread of fixture.threads) thread.outdated = true;
-      return route.fulfill({ json: { commit: "d".repeat(40) } });
+      const input: unknown = route.request().postDataJSON();
+      expect(route.request().headers()["x-crab-repository-id"]).toBe(
+        fixture.lifecycle.repositoryId,
+      );
+      attempts += 1;
+      if (attempts === 1) {
+        expect(input).toEqual({
+          request_id: expect.stringMatching(
+            /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/,
+          ),
+          expected_head: oldHead,
+          message: "Polish the reviewed files",
+          threads: [
+            { number: 1, version: 1 },
+            { number: 2, version: 1 },
+          ],
+        });
+        original = input;
+        commits += 1;
+        fixture.lifecycle.head = commit;
+        for (const thread of fixture.threads) thread.outdated = true;
+        return route.abort("failed");
+      }
+      expect(input).toEqual(original);
+      return route.fulfill({ json: { commit } });
     },
   );
   await page.goto("/team/project/pull/1/files");
@@ -704,11 +737,41 @@ test("selected suggestions commit together on the inspected head", async ({
     .getByLabel("Commit message")
     .fill("Polish the reviewed files");
   await commitDialog.getByRole("button", { name: "Commit changes" }).click();
+  await expect(
+    commitDialog.getByRole("button", { name: "Retry suggestion commit" }),
+  ).toBeEnabled();
+
+  const resume = page.getByRole("button", { name: "Resume suggestion commit" });
+  account = "another-writer";
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: /Improve the README/ }),
+  ).toBeVisible();
+  await expect(resume).toHaveCount(0);
+  expect(attempts).toBe(1);
+
+  account = "writer";
+  fixture.lifecycle.branchesAvailable = false;
+  await page.reload();
+  await expect(resume).toBeVisible();
+  await resume.click();
+  await expect(commitDialog.getByLabel("Commit message")).toHaveValue(
+    "Polish the reviewed files",
+  );
+  await commitDialog
+    .getByRole("button", { name: "Retry suggestion commit" })
+    .click();
   await expect(page.getByText("Committed suggestions in")).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Commit suggestions", exact: false }),
   ).toHaveCount(0);
   expect(commits).toBe(1);
+  expect(attempts).toBe(2);
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: /Improve the README/ }),
+  ).toBeVisible();
+  await expect(resume).toHaveCount(0);
 });
 
 test("review conversations and ambiguous merge recovery preserve the pull workflow", async ({
@@ -732,9 +795,7 @@ test("review conversations and ambiguous merge recovery preserve the pull workfl
   await expect(
     changedFiles.getByRole("treeitem", { name: "README.md", exact: true }),
   ).toHaveAttribute("aria-selected", "true");
-  await expect(
-    page.getByText("Review workspace", { exact: true }),
-  ).toBeVisible();
+  await expect(page.getByText("Review files", { exact: true })).toBeVisible();
   await expect(page.locator(".change-tree-header")).toContainText("1 file");
   await expect(page.locator(".diff-panel")).toContainText("New content");
   await expect(

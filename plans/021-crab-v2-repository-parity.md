@@ -58,6 +58,8 @@ Audited 2026-11-21 at `a12fb2931fe`, verified against `origin/crab-v2`. The defa
   and repository-scoped attachments.
 - Writers can apply selected suggestions across several files in one commit.
   The head, comment versions, file blobs, and line ranges are checked before publication.
+  The originating browser tab retains the exact request across reloads, so a
+  writer can recover its commit after a lost reply and a later head advance.
 - Browser creation provisions empty private repositories in personal and
   organization namespaces. Organization owners inherit current Admin access.
   Retrying setup recovers the same catalog UUID after a lost response.

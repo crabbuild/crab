@@ -192,6 +192,21 @@ pub(super) async fn apply_to_fork(
     assert!(!h.drop_next_suggestion_reply.load(Ordering::SeqCst));
     git(checkout, &["fetch", fork_git, "main"]).await;
     let committed = git(checkout, &["rev-parse", "FETCH_HEAD"]).await;
+    browser.run(&["reload"]).await;
+    browser
+        .run(&["wait", "--text", "Resume suggestion commit"])
+        .await;
+    browser
+        .run(&[
+            "find",
+            "role",
+            "button",
+            "click",
+            "--name",
+            "Resume suggestion commit",
+            "--exact",
+        ])
+        .await;
     browser
         .run(&[
             "find",

@@ -4417,9 +4417,11 @@ returns `{commit}`. Use a fresh UUID for a new batch. Retry the same UUID,
 expected head, selected versions, and message to recover the original commit
 after a lost response or a busy reply. Recovery requires current write access
 and uses the durable publication receipt, including after the branch advances.
-The browser keeps the original submission while the review workspace stays
-open. Close the dialog to refresh the review and choose **Resume suggestion
-commit** to retry.
+The browser saves the original request for the signed-in account and exact PR
+and destination repository in the current tab. After refreshing **Files
+changed**, choose **Resume suggestion commit** to retry, even if the original
+head has moved or its branch was deleted. The tab clears the saved request after
+confirmation, an initial definitive rejection, or dismissal.
 Crab prepares the selected comment versions and anchors in a single Repository
 Cell snapshot, then verifies current file blobs and nonoverlapping line ranges
 before building one commit against the expected head. The publication worker
@@ -4435,8 +4437,8 @@ header to that fork. The fork's recorded upstream supplies the PR and review
 records. Crab verifies that the PR names this fork and applies the fork's
 current write permissions, branch rules, and archive state to publication.
 The native Chromium qualification selects 20 suggestions across thread pages,
-recovers the original commit after a lost reply, and verifies the result and
-its parent with stock Git on the fork. It also checks the upstream ref.
+reloads after a lost reply, and recovers the original commit. Stock Git verifies
+the result and its parent on the fork and the unchanged upstream ref.
 
 `POST .../pulls/{number}/reviews` requires `request_id`, `body`, `state` and
 `commit_oid`. The latter is the exact lowercase, nonzero SHA-1 inspected by the
